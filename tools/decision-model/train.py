@@ -2,13 +2,17 @@
 rows with Unsloth's FastDecisionModel, calibrate its temperature on the
 calibration rows, and save the merged 16-bit checkpoint.
 
-    python train.py --data DIR --name NAME [--mode lora|full] [--epochs N] ...
+    python train.py --data DIR --name NAME [--family laya|d1] [--mode lora|full] [--epochs N] ...
 
 `--data` is prepare.py's output (`train.jsonl`, `calib.jsonl`). Weights load
 and train in bf16 (a normal LoRA, not QLoRA; or `--mode full`). Writes
 `runs/<name>/merged/` (the layout llama.cpp's Laya converter reads; export.py
 turns it into a GGUF) and `runs/<name>/train.json` (settings, loss, the
 calibration metrics). It prints counts and metrics only.
+
+`--family d1` trains LiquidAI's d1-3B instead (d1.py: Unsloth's
+FastDecisionModel does not load it, so plain transformers + peft, with the
+loss on the same yes/no readout llama.cpp serves).
 """
 
 import argparse
@@ -24,8 +28,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--data", type=Path, required=True)
     ap.add_argument("--name", required=True)
-    ap.add_argument("--base", default=str(WORK / "hf" / "laya"),
-                    help="a Laya checkpoint folder (rl_agent_config.json, encoder/, tokenizer/)")
+    ap.add_argument("--family", choices=["laya", "d1"], default="laya")
+    ap.add_argument("--base", default=None,
+                    help="the base checkpoint folder: Laya's (rl_agent_config.json, encoder/, "
+                         "tokenizer/; default hf/laya) or d1-3B's (default hf/d1-3B)")
     ap.add_argument("--out", type=Path, default=None, help="default runs/<name>")
     ap.add_argument("--mode", choices=["lora", "full"], default="lora")
     ap.add_argument("--r", type=int, default=32)
@@ -37,12 +43,22 @@ def main():
     ap.add_argument("--max-steps", type=int, default=-1)
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--grad-accum", type=int, default=2)
-    ap.add_argument("--max-seq-length", type=int, default=512)
+    ap.add_argument("--max-seq-length", type=int, default=None,
+                    help="default 512 for Laya, 4096 for d1 (the longest prompt must fit)")
+    ap.add_argument("--max-tokens", type=int, default=12000,
+                    help="d1: padded tokens per micro-batch (rows of a step are split by length)")
+    ap.add_argument("--lora-dropout", type=float, default=0.0)
     ap.add_argument("--seed", type=int, default=139)
     a = ap.parse_args()
     out = a.out or WORK / "runs" / a.name
     out.mkdir(parents=True, exist_ok=True)
     lr = a.lr or (1e-4 if a.mode == "lora" else 2e-5)
+    a.base = a.base or str(WORK / "hf" / ("d1-3B" if a.family == "d1" else "laya"))
+    a.max_seq_length = a.max_seq_length or (4096 if a.family == "d1" else 512)
+    if a.family == "d1":
+        import d1
+        a.lr = a.lr or (1e-4 if a.mode == "lora" else 1e-5)
+        return d1.train(a, out)
 
     # Unsloth first: it patches transformers on import.
     from unsloth import DecisionTrainer, FastDecisionModel
