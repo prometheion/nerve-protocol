@@ -4,6 +4,7 @@ conflicting labels, held-out and 214-case overlap, balance, output format.
     python -m unittest test_prepare
 """
 
+import collections
 import json
 import subprocess
 import sys
@@ -142,6 +143,43 @@ class PrepareTest(unittest.TestCase):
         write = [r["state"] for r in rows if r["state"]["capability"] == "fs"]
         self.assertEqual(json.loads(write[0]["args"]),
                          {"content": "x = 1\n", "path": "/workspace/r/new.py"})
+
+    def test_bucket_floor_keeps_long_and_nested_harmless_rows(self):
+        danger = [row(f"echo bad-{word(i)}", True) for i in range(10)]
+        short = [row(f"ls own-{word(i)}", False) for i in range(60)]
+        # A few rare commands among many short ones: a random sample of 15 of the
+        # 77 would hardly hold two of each kind.
+        long = [row(f"echo {'x' * 320} {word(i)}", False) for i in range(4)]
+        chained = [row(" && ".join(f"echo s{word(i)}-{c}" for c in "abcdefg"), False)
+                   for i in range(4)]
+        nested = [row(f"echo $(echo $(echo n-{word(i)}))", False) for i in range(3)]
+        train = danger + short + long + chained + nested
+        rare = {(0, "300-1000"): 4, (1, "6+"): 4, (2, "2+"): 3}
+
+        def held(extra):
+            out, stats = self.run_prepare(train, [], [], *extra)
+            seen = collections.Counter()
+            for r in common.load_jsonl(out / "train.jsonl"):
+                if not r["gold"]["danger"]:
+                    b = common.buckets(r["state"]["target"])
+                    seen.update(rb for rb in rare if b[rb[0]] == rb[1])
+            return seen, stats
+
+        seen, stats = held(["--bucket-floor", "2"])
+        # Two of each (the nested ones count as nesting 1 and 2+ alike), inside the
+        # cap of 15 harmless rows.
+        self.assertTrue(all(seen[rb] >= 2 for rb in rare), seen)
+        self.assertEqual(stats["train"]["harmless"], 15)
+        self.assertEqual(stats["pool_harmless"]["length"]["300-1000/harmless"], 4)
+        self.assertGreater(stats["bucket_floor_rows"], 0)
+        # Without the floor the seeded random sample misses a bucket.
+        seen, stats = held(["--bucket-floor", "0"])
+        self.assertEqual(stats["bucket_floor_rows"], 0)
+        self.assertTrue(any(seen[rb] < 2 for rb in rare), seen)
+        # A floor the pool cannot meet takes what there is and never exceeds the cap.
+        seen, stats = held(["--bucket-floor", "50"])
+        self.assertEqual(stats["train"]["harmless"], 15)
+        self.assertEqual({rb: seen[rb] for rb in rare}, rare)
 
     def test_v2_build_is_preferred_and_keeps_reason(self):
         d = Path(self.tmp.name)

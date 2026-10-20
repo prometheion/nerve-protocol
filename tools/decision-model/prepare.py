@@ -46,10 +46,16 @@ What it does, in order:
 3. Every row whose key matches a held-out row or one of the 214 evaluation
    cases is dropped.
 4. Harmless rows are capped at `--max-harmless-ratio` per dangerous row: the
-   real runs are kept first, then up to `--trajectory-ratio` trajectory rows
-   per dangerous row (no program, e.g. `python` or `grep`, above
-   `--trajectory-program-share` of them, so the sample is not all test runs),
-   then a random sample of the owner's harmless rows fills the rest.
+   real runs are kept first, then the long and nested ones (see below), then
+   up to `--trajectory-ratio` trajectory rows per dangerous row (no program,
+   e.g. `python` or `grep`, above `--trajectory-program-share` of them, so the
+   sample is not all test runs), then a random sample of the owner's harmless
+   rows fills the rest. A random sample alone keeps almost none of the rare
+   long and nested commands (a few hundred in a pool of thousands), so
+   `--bucket-floor` N keeps, for each rare bucket of `common.buckets` (300-1000
+   and over 1000 bytes, 3-5 and 6+ chain operators, nesting 1 and 2+), harmless
+   rows up to N in that bucket when the pool has them, inside the same cap.
+   Only the training rows are chosen this way; the held-out files are not.
 5. A stratified `--calib-share` of the rows goes to `calib.jsonl` (fitting the
    temperature after training), the rest to `train.jsonl`.
 6. Each held-out file is written in the eval runner's case format
@@ -246,6 +252,41 @@ def bucket_counts(items):
     return {axis: dict(sorted(c.items())) for axis, c in out.items()}
 
 
+# The buckets of `common.buckets` that a random sample of the harmless pool
+# hardly covers: long, chained or nested commands, as (axis, value).
+RARE_BUCKETS = ((0, "300-1000"), (0, ">1000"), (1, "3-5"), (1, "6+"), (2, "1"), (2, "2+"))
+BUCKET_FLOOR = 150
+
+
+def rare_buckets(row):
+    """The rare buckets a row's command falls in (none for a file action)."""
+    if row["state"]["capability"] != "exec":
+        return []
+    b = common.buckets(row["_target"])
+    return [rb for rb in RARE_BUCKETS if b[rb[0]] == rb[1]]
+
+
+def floor_rows(rng, kept, pool, floor, limit):
+    """Rows of `pool` to add to `kept` so each rare bucket holds `floor`
+    harmless commands where the pool has them, at most `limit` rows."""
+    have = collections.Counter(rb for r in kept for rb in rare_buckets(r))
+    by = collections.defaultdict(list)
+    for r in pool:
+        for rb in rare_buckets(r):
+            by[rb].append(r)
+    picked, taken = [], set()
+    for rb in RARE_BUCKETS:
+        cand = [r for r in by[rb] if id(r) not in taken]
+        rng.shuffle(cand)
+        for r in cand[:max(0, floor - have[rb])]:
+            if len(picked) >= limit:
+                return picked
+            picked.append(r)
+            taken.add(id(r))
+            have.update(rare_buckets(r))
+    return picked
+
+
 def split_stratified(rng, rows, share):
     by = collections.defaultdict(list)
     for r in rows:
@@ -288,6 +329,10 @@ def main():
     ap.add_argument("--paraphrase-share", type=float, default=0.25)
     ap.add_argument("--args-share", type=float, default=0.5)
     ap.add_argument("--max-harmless-ratio", type=float, default=1.5)
+    ap.add_argument("--bucket-floor", type=int, default=BUCKET_FLOOR,
+                    help="keep harmless commands up to this many in each rare length, "
+                         "chain-operator and nesting bucket when the pool has them (0: a "
+                         "random sample only)")
     ap.add_argument("--calib-share", type=float, default=0.1)
     ap.add_argument("--state-bytes", type=int, default=common.LAYA_STATE_BYTES,
                     help="bytes of the target and of the args in a state, as the center "
@@ -439,7 +484,16 @@ def main():
         agent = [r for r in harmless if "_program" in r]
         rest = [r for r in harmless if r["_src"] != "realruns" and "_program" not in r]
         keep = real[:cap]
-        n_agent = min(int(len(danger) * a.trajectory_ratio), cap - len(keep))
+        stats["pool_harmless"] = bucket_counts(
+            (r["state"]["capability"], r["_target"], False) for r in harmless)
+        floored = floor_rows(rng, keep, agent + rest, a.bucket_floor, cap - len(keep))
+        stats["bucket_floor_rows"] = len(floored)
+        taken = {id(r) for r in floored}
+        keep += floored
+        agent = [r for r in agent if id(r) not in taken]
+        rest = [r for r in rest if id(r) not in taken]
+        n_agent = max(0, min(int(len(danger) * a.trajectory_ratio)
+                             - sum("_program" in r for r in floored), cap - len(keep)))
         keep += sample_trajectories(rng, agent, n_agent, a.trajectory_program_share)
         rng.shuffle(rest)
         keep += rest[:max(0, cap - len(keep))]
