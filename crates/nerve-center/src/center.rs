@@ -2439,7 +2439,13 @@ impl Center {
             match bin
                 .ok_or_else(|| "the local model is not installed".to_string())
                 .and_then(|bin| {
-                    LocalServer::start(bin, model, cfg.model.local_gpu, cfg.model.timeout_ms)
+                    LocalServer::start(
+                        bin,
+                        model,
+                        cfg.model.local_gpu,
+                        checker::install::model_pin(cfg.model.local_model).batch,
+                        cfg.model.timeout_ms,
+                    )
                 }) {
                 Ok(srv) => {
                     *self.local_model.lock().unwrap() = Some(Arc::new(srv));

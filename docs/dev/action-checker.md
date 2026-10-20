@@ -171,7 +171,20 @@ The center sends:
 
 and reads `answers.danger.noul`, the probability of `true` (dangerous). The
 question is fixed by the center; the command text is only ever in `state`, so a
-crafted command cannot change the question. Errors `401`, `422`, `429`, `501`
+crafted command cannot change the question. The target and the args (the
+call's arguments as a JSON string) are bounded to the model's `state_bytes`
+each (2000 by default and for d1-3B and Kev-4B), keeping the start and the end
+of a longer one with `…` between, so what follows a long harmless prefix still
+reaches the model. A model with a short context gets a smaller bound and, if it
+is an encoder, a larger llama-server batch: Laya reads 512 tokens and takes its
+whole input in one micro-batch, so with llama-server's default micro-batch
+(512) a longer input fails with HTTP 500 (it is the batch, not the context:
+the GGUF's context is 8192), which fails closed. Its pin needs `state_bytes:
+320` (the default question's head is 143 tokens; at 320 bytes no state of
+the training data or the held-out split went over the remaining 367 tokens)
+and `batch: Some(2048)` (`-b`/`-ub`), so even an input past 512 tokens is
+answered; the evaluation runs with the same bound (`NERVE_CHECKER_STATE_BYTES`).
+Errors `401`, `422`, `429`, `501`
 (not a decision model) and `529` are treated as "no usable answer"; a
 connection or timeout error as "unreachable". Both fail closed by default.
 

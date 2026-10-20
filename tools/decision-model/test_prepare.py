@@ -146,6 +146,29 @@ class PrepareTest(unittest.TestCase):
         cases = json.loads((out / "heldout-shellsafety-v2.json").read_text())
         self.assertEqual(cases[0]["reason"], "code_a")
 
+    def test_long_commands_are_cut_to_the_state_budget_but_matched_whole(self):
+        long_cmd = "echo start " + "word " * 200 + "; echo end"
+        twin = "echo start " + "word " * 200 + "; echo other-end"  # same start and end cut
+        train = [row(long_cmd, True), row(twin, False), row("ls", False)]
+        out, stats = self.run_prepare(train, [row(twin, False)], [], "--state-bytes", "100",
+                                      "--args-share", "1")
+        # The held-out twin only blocks itself, not the row whose cut state looks alike.
+        self.assertEqual(stats["dropped"]["matches_heldout"], 1)
+        rows = common.load_jsonl(out / "train.jsonl")
+        st = [r["state"] for r in rows if r["gold"]["danger"]][0]
+        for s in (st["target"], st["args"]):
+            self.assertLessEqual(len(s.encode()), 103)
+            self.assertIn("…", s)
+        self.assertTrue(st["target"].startswith("echo start"))
+        self.assertTrue(st["target"].endswith("; echo end"))
+
+    def test_clip_ends_matches_the_center(self):
+        # The same cases as util::clip_ends' test in the center.
+        self.assertEqual(common.clip_ends("abcdefgh", 8), "abcdefgh")
+        self.assertEqual(common.clip_ends("abcdefghij", 5), "ab…hij")
+        self.assertEqual(common.clip_ends("äöüß", 5), "ä…ß")
+        self.assertEqual(common.clip_ends("äöüß", 4), "ä…ß")
+
     def test_missing_owner_files_fail(self):
         d = Path(self.tmp.name)
         res = subprocess.run([sys.executable, str(HERE / "prepare.py"), "--owner", str(d / "none"),

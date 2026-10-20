@@ -67,7 +67,7 @@ async fn the_real_cpu_build_installs_and_runs_d1() {
 
     let bin = install::server_bin(state.path()).unwrap();
     println!("llama-server at {}", bin.display());
-    let server = LocalServer::start(bin, model, false, 8000).expect("start the server");
+    let server = LocalServer::start(bin, model, false, None, 8000).expect("start the server");
     let deadline = Instant::now() + Duration::from_secs(180);
     while Instant::now() < deadline && !server.ready() {
         let s = server.status();

@@ -104,6 +104,17 @@ pub struct ModelPin {
     pub timeout_ms: u64,
     /// One plain line on speed and quality, for the UI.
     pub summary: &'static str,
+    /// How many bytes of a call's target and of its args the model sees
+    /// ([`crate::checker::state`]); a model with a short context needs fewer
+    /// so the whole prompt fits it.
+    #[serde(skip)]
+    pub state_bytes: usize,
+    /// llama-server's batch and micro-batch size (`-b`, `-ub`), when the
+    /// defaults (512 for the micro-batch) do not fit: an encoder such as Laya
+    /// takes its whole input in one micro-batch and answers HTTP 500 for a
+    /// longer one.
+    #[serde(skip)]
+    pub batch: Option<u32>,
 }
 
 /// The two models the local mode offers, the default first.
@@ -120,6 +131,8 @@ pub const MODELS: [ModelPin; 2] = [
         threshold: 0.8,
         timeout_ms: 4000,
         summary: "Faster: about 1.7 s per call on a desktop CPU. Catches about 60 % of dangerous actions and 67 % of injection attempts; refuses about 2.5 % of ordinary work.",
+        state_bytes: super::STATE_BYTES,
+        batch: None,
     },
     ModelPin {
         id: LocalModel::Kev4b,
@@ -134,6 +147,8 @@ pub const MODELS: [ModelPin; 2] = [
         // p95 was 5.2 s on the test CPU; leave room for a busy machine.
         timeout_ms: 15_000,
         summary: "Catches more: about 79 % of dangerous actions and 93 % of injection attempts, refusing about 1.7 % of ordinary work, but about 4 to 5 s per call on a desktop CPU.",
+        state_bytes: super::STATE_BYTES,
+        batch: None,
     },
 ];
 

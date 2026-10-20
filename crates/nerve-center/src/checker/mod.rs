@@ -36,7 +36,7 @@ pub use config::{
 };
 pub use model::Endpoint;
 
-use crate::util::clip;
+use crate::util::clip_ends;
 use blocklist::{Call, Rule};
 
 /// Which layer made a decision, for the audit entry.
@@ -343,7 +343,11 @@ impl Checker {
             Some(e) => e,
             None => return fail("the model is not reachable".into()),
         };
-        let state = model_state(call);
+        let state_bytes = match m.source {
+            config::ModelSource::Local => install::model_pin(m.local_model).state_bytes,
+            config::ModelSource::Endpoint => STATE_BYTES,
+        };
+        let state = model_state(call, state_bytes);
         match model::ask(endpoint, m, state).await {
             Ok(score) if score >= m.threshold => Decision::Refuse {
                 layer: Layer::Model,
@@ -397,18 +401,50 @@ pub fn taints(effect: Effect) -> bool {
     matches!(effect, Effect::Read | Effect::Sense | Effect::Execute)
 }
 
+/// How many bytes of the target and of the args the model sees, each, unless
+/// the model's pin asks for fewer ([`install::ModelPin::state_bytes`]).
+pub const STATE_BYTES: usize = 2000;
+
 /// The `state` sent to the model: the call, with args bounded. The question
 /// is fixed by the center, so only this ever carries the command text.
-fn model_state(call: &CallInfo<'_>) -> Value {
-    let args = clip(&Value::Object(call.args.clone()).to_string(), 2000);
-    json!({
-        "capability": call.cap,
-        "action": call.action,
-        "target": clip(call.target, 2000),
-        "os": call.os,
-        "tainted": call.tainted,
-        "args": args,
-    })
+fn model_state(call: &CallInfo<'_>, state_bytes: usize) -> Value {
+    let args = Value::Object(call.args.clone()).to_string();
+    state(
+        call.cap,
+        call.action,
+        call.target,
+        call.os,
+        call.tainted,
+        Some(&args),
+        state_bytes,
+    )
+}
+
+/// The model's `state` for a call: the target and the args (a JSON string)
+/// cut to `state_bytes` each. A long one keeps its start and its end, so
+/// what follows a long harmless prefix still reaches the model, and the
+/// whole prompt fits a model with a short context (Laya reads 512 tokens).
+/// Public for the evaluation runner, which must send what the center sends.
+pub fn state(
+    cap: &str,
+    action: &str,
+    target: &str,
+    os: &str,
+    tainted: bool,
+    args: Option<&str>,
+    state_bytes: usize,
+) -> Value {
+    let mut st = json!({
+        "capability": cap,
+        "action": action,
+        "target": clip_ends(target, state_bytes),
+        "os": os,
+        "tainted": tainted,
+    });
+    if let Some(args) = args {
+        st["args"] = json!(clip_ends(args, state_bytes));
+    }
+    st
 }
 
 #[cfg(test)]
@@ -433,6 +469,39 @@ mod tests {
             node_id: "n1",
             os: "linux",
             tainted: false,
+        }
+    }
+
+    /// A long call reaches the model as its start and its end, within the
+    /// budget: what follows a long harmless prefix is not cut off, and a
+    /// short-context model's whole prompt fits (issue #139, Laya's 512 tokens).
+    #[test]
+    fn the_model_state_keeps_the_start_and_end_of_a_long_call() {
+        let long = format!("echo first {} ; echo marker-last", "word ".repeat(1000));
+        let mut args = Map::new();
+        args.insert("command".into(), json!(long));
+        let c = call("exec", "run", Effect::Execute, &long, &args);
+        for budget in [STATE_BYTES, 320] {
+            let st = model_state(&c, budget);
+            let target = st["target"].as_str().unwrap();
+            let sent_args = st["args"].as_str().unwrap();
+            for s in [target, sent_args] {
+                assert!(s.len() <= budget + "…".len(), "{budget}: {} bytes", s.len());
+                assert!(s.contains("echo first"), "{budget}: start kept");
+                assert!(s.contains("…"), "{budget}: the cut is marked");
+            }
+            assert!(target.ends_with("echo marker-last"), "{budget}: end kept");
+            assert!(
+                sent_args.ends_with("echo marker-last\"}"),
+                "{budget}: end kept"
+            );
+        }
+        // A short call is sent whole.
+        let short = call("exec", "run", Effect::Execute, "make test", &args);
+        assert_eq!(model_state(&short, 320)["target"], "make test");
+        // The pinned models keep the default budget and llama-server's batch.
+        for pin in install::MODELS {
+            assert_eq!((pin.state_bytes, pin.batch), (STATE_BYTES, None));
         }
     }
 

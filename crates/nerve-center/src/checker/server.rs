@@ -76,13 +76,14 @@ impl Drop for LocalServer {
 impl LocalServer {
     /// Starts the supervisor for the installed `llama-server` at `bin` with
     /// the installed `model`, on the GPU (all layers, the Vulkan build) or the
-    /// CPU. It returns at once; the status moves from starting to ready (or
+    /// CPU, with the model pin's `batch` size if it has one. It returns at once; the status moves from starting to ready (or
     /// failed) as the server comes up. The model is already on disk (the
     /// one-click install fetched it), so there is no download at start.
     pub fn start(
         bin: PathBuf,
         model: PathBuf,
         gpu: bool,
+        batch: Option<u32>,
         timeout_ms: u64,
     ) -> Result<LocalServer, String> {
         if !bin.exists() {
@@ -90,7 +91,7 @@ impl LocalServer {
         }
         let port = free_port()?;
         let inner = Arc::new(Mutex::new(Inner::default()));
-        let args = build_args(&model, gpu, port);
+        let args = build_args(&model, gpu, batch, port);
         let timeout = Duration::from_millis(timeout_ms.max(100));
         let shutdown = Arc::new(tokio::sync::Notify::new());
         let exited = Arc::new(tokio::sync::Notify::new());
@@ -153,9 +154,10 @@ impl LocalServer {
 }
 
 /// The llama-server command line (without the program itself): the installed
-/// model file, and all layers on the GPU or none (CPU only).
-fn build_args(model: &Path, gpu: bool, port: u16) -> Vec<String> {
-    vec![
+/// model file, all layers on the GPU or none (CPU only), and the batch size
+/// the model needs (an encoder reads its whole input in one micro-batch).
+fn build_args(model: &Path, gpu: bool, batch: Option<u32>, port: u16) -> Vec<String> {
+    let mut args = vec![
         "-m".into(),
         model.to_string_lossy().into_owned(),
         "--host".into(),
@@ -165,7 +167,11 @@ fn build_args(model: &Path, gpu: bool, port: u16) -> Vec<String> {
         "-ngl".into(),
         // 999 puts every layer on the GPU; 0 keeps it on the CPU.
         if gpu { "999".into() } else { "0".into() },
-    ]
+    ];
+    if let Some(n) = batch {
+        args.extend(["-b".into(), n.to_string(), "-ub".into(), n.to_string()]);
+    }
+    args
 }
 
 /// A free loopback port: bind to port 0, read the port, and drop the
@@ -410,15 +416,20 @@ mod tests {
     #[test]
     fn cpu_and_gpu_args() {
         let model = std::path::Path::new("/s/checker/model/d1-3B-Q4_K_M.gguf");
-        let cpu = build_args(model, false, 12345);
+        let cpu = build_args(model, false, None, 12345);
         assert!(cpu.windows(2).any(|w| w == ["-ngl", "0"]));
         assert!(cpu.windows(2).any(|w| w == ["--port", "12345"]));
         assert!(
             cpu.windows(2)
                 .any(|w| w == ["-m", "/s/checker/model/d1-3B-Q4_K_M.gguf"])
         );
-        let gpu = build_args(model, true, 12345);
+        let gpu = build_args(model, true, None, 12345);
         assert!(gpu.windows(2).any(|w| w == ["-ngl", "999"]));
+        // The defaults unless the pin asks for a batch size.
+        assert!(!cpu.iter().any(|a| a == "-b" || a == "-ub"));
+        let laya = build_args(model, false, Some(2048), 12345);
+        assert!(laya.windows(2).any(|w| w == ["-b", "2048"]));
+        assert!(laya.windows(2).any(|w| w == ["-ub", "2048"]));
     }
 
     #[test]
@@ -438,7 +449,7 @@ mod tests {
         let bin = super::fake::fake_llama_server(dir.path());
         let model = dir.path().join("model.gguf");
         std::fs::write(&model, b"x").unwrap();
-        let server = LocalServer::start(bin, model, false, 5000).expect("start");
+        let server = LocalServer::start(bin, model, false, None, 5000).expect("start");
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while std::time::Instant::now() < deadline && !server.ready() {
             tokio::time::sleep(Duration::from_millis(200)).await;

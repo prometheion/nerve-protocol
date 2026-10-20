@@ -21,12 +21,16 @@
 //! 214 cases here. `NERVE_CHECKER_SCORES_OUT` writes each case's score (one
 //! JSON line: index, score, danger, kind) for the training tools' metrics. A
 //! case may carry `args`, sent in the state as the center sends a call's
-//! arguments.
+//! arguments. The state is bounded as the center bounds it
+//! (`nerve_center::checker::state`): `NERVE_CHECKER_STATE_BYTES` per target
+//! and args, default the center's 2000; a model pinned with a smaller
+//! `state_bytes` (Laya: 320) is evaluated with that.
 
 use std::time::Instant;
 
 use serde_json::json;
 
+use nerve_center::checker;
 use nerve_center::checker::config::ModelConfig;
 use nerve_center::checker::model::{self, Endpoint};
 
@@ -61,6 +65,13 @@ async fn evaluate_decision_model() {
             .expect("NERVE_CHECKER_TIMEOUT_MS is a whole number");
     }
 
+    let state_bytes = std::env::var("NERVE_CHECKER_STATE_BYTES")
+        .map(|b| {
+            b.parse()
+                .expect("NERVE_CHECKER_STATE_BYTES is a whole number")
+        })
+        .unwrap_or(checker::STATE_BYTES);
+
     let path = std::env::var("NERVE_CHECKER_EVAL_FILE").unwrap_or_else(|_| {
         concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/checker-eval.json").to_string()
     });
@@ -73,16 +84,15 @@ async fn evaluate_decision_model() {
     let mut latencies_ms: Vec<f64> = Vec::new();
     let mut failed = 0usize;
     for (i, c) in cases.iter().enumerate() {
-        let mut state = json!({
-            "capability": c.cap,
-            "action": c.action,
-            "target": c.target,
-            "os": c.os,
-            "tainted": false,
-        });
-        if let Some(args) = &c.args {
-            state["args"] = json!(args);
-        }
+        let state = checker::state(
+            &c.cap,
+            &c.action,
+            &c.target,
+            &c.os,
+            false,
+            c.args.as_deref(),
+            state_bytes,
+        );
         let started = Instant::now();
         match model::ask(&endpoint, &cfg, state).await {
             Ok(score) => {

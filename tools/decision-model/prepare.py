@@ -90,12 +90,22 @@ def key(cap, target):
     return (cap, common.canonical(target))
 
 
-def command_state(rng, command, os_name, args_share, tainted_share):
+def command_state(rng, command, os_name, args_share, tainted_share, state_bytes):
     args = None
     if rng.random() < args_share:
         args = {"command": command, "cwd": rng.choice(CWDS[os_name])}
     return common.model_state("exec", "run", command, os_name,
-                              tainted=rng.random() < tainted_share, args=args)
+                              tainted=rng.random() < tainted_share, args=args,
+                              state_bytes=state_bytes)
+
+
+def bounded(st, state_bytes):
+    """A recorded state with its target and args bounded as the center now
+    bounds them for this model."""
+    st = dict(st, target=common.clip_ends(st["target"], state_bytes))
+    if "args" in st:
+        st["args"] = common.clip_ends(st["args"], state_bytes)
+    return dict(sorted(st.items()))
 
 
 def pick_question(rng, paraphrase_share):
@@ -125,13 +135,14 @@ def owner_files(owner, which):
     return [shell, ("extra", owner / "extra-train.jsonl", owner / "extra-heldout.jsonl")]
 
 
-def trajectory_row(rng, t, args_share, tainted_share):
+def trajectory_row(rng, t, args_share, tainted_share, state_bytes):
     """A trajectory action as the center would send it: a command like the
     owner's rows, a file action with its own `args`."""
     if t["cap"] == "exec":
-        return command_state(rng, t["target"], "linux", args_share, tainted_share)
+        return command_state(rng, t["target"], "linux", args_share, tainted_share, state_bytes)
     return common.model_state(t["cap"], t["action"], t["target"], "linux",
-                              tainted=rng.random() < tainted_share, args=t.get("args"))
+                              tainted=rng.random() < tainted_share, args=t.get("args"),
+                              state_bytes=state_bytes)
 
 
 def sample_trajectories(rng, rows, n, program_share):
@@ -199,6 +210,9 @@ def main():
     ap.add_argument("--args-share", type=float, default=0.5)
     ap.add_argument("--max-harmless-ratio", type=float, default=1.5)
     ap.add_argument("--calib-share", type=float, default=0.1)
+    ap.add_argument("--state-bytes", type=int, default=common.LAYA_STATE_BYTES,
+                    help="bytes of the target and of the args in a state, as the center "
+                         "sends them to this model (Laya: 320, so the prompt fits 512 tokens)")
     ap.add_argument("--dry-heldout-share", type=float, default=0.2)
     a = ap.parse_args()
     out = a.out or WORK / "data" / ("prepared-dry" if a.dry_run else "prepared")
@@ -250,14 +264,15 @@ def main():
     # ---- training rows
     rows = []
     for r in train_cmds:
-        rows.append({"state": command_state(rng, r["command"], r["os"], a.args_share, a.tainted_share),
+        rows.append({"state": command_state(rng, r["command"], r["os"], a.args_share,
+                                            a.tainted_share, a.state_bytes),
                      "questions": pick_question(rng, a.paraphrase_share),
                      "gold": {"danger": r["danger"]},
-                     "_src": r.get("source", "owner")})
+                     "_src": r.get("source", "owner"), "_target": r["command"]})
     for st in states:
-        rows.append({"state": dict(sorted(st.items())),
+        rows.append({"state": bounded(st, a.state_bytes),
                      "questions": pick_question(rng, a.paraphrase_share),
-                     "gold": {"danger": False}, "_src": "realruns"})
+                     "gold": {"danger": False}, "_src": "realruns", "_target": st["target"]})
     for t in traj:
         # Never let an agent's action stand in as harmless when the owner's
         # files call the same command dangerous (also without a leading `cd`).
@@ -265,15 +280,17 @@ def main():
                                    or trajectories.dedup_key("exec", t["target"]) in danger_keys):
             stats["dropped"]["trajectory_matches_dangerous"] += 1
             continue
-        rows.append({"state": trajectory_row(rng, t, a.args_share, a.tainted_share),
+        rows.append({"state": trajectory_row(rng, t, a.args_share, a.tainted_share,
+                                             a.state_bytes),
                      "questions": pick_question(rng, a.paraphrase_share),
-                     "gold": {"danger": False}, "_src": t["source"],
+                     "gold": {"danger": False}, "_src": t["source"], "_target": t["target"],
                      "_program": t["program"]})
 
     # ---- near-duplicates: keep one per key, drop groups with both labels
     groups = collections.OrderedDict()
     for r in rows:
-        groups.setdefault(key(r["state"]["capability"], r["state"]["target"]), []).append(r)
+        # Keyed by the whole target: the state's may be cut to its start and end.
+        groups.setdefault(key(r["state"]["capability"], r["_target"]), []).append(r)
     kept = []
     for g in groups.values():
         labels = {r["gold"]["danger"] for r in g}
@@ -293,7 +310,7 @@ def main():
     blocked_214 = {key(c["cap"], c["target"]) for c in eval214}
     clean = []
     for r in kept:
-        k = key(r["state"]["capability"], r["state"]["target"])
+        k = key(r["state"]["capability"], r["_target"])
         if k in blocked_214:
             stats["dropped"]["matches_214_eval"] += 1
         elif k in blocked:
@@ -326,6 +343,7 @@ def main():
         for r in part:
             srcs[r.pop("_src")] += 1
             r.pop("_program", None)
+            r.pop("_target")
     # A held-out file of an earlier run (e.g. the v1 build) must not be scored again.
     for stale in out.glob("heldout-*.json"):
         stale.unlink()

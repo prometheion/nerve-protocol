@@ -28,6 +28,25 @@ pub fn random_id() -> String {
     )
 }
 
+/// `s` cut to at most `max` bytes, keeping its start and its end (at most
+/// `max / 2` bytes of the start, the rest from the end) with an ellipsis
+/// between, on character boundaries. For text whose end matters as much as
+/// its start, such as a command line.
+pub fn clip_ends(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut head = max / 2;
+    while !s.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = s.len() - (max - max / 2);
+    while !s.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!("{}…{}", &s[..head], &s[tail..])
+}
+
 /// `s` cut to at most `max` bytes on a character boundary, with an ellipsis
 /// when something was cut.
 pub fn clip(s: &str, max: usize) -> String {
@@ -55,5 +74,10 @@ mod tests {
         assert_eq!(id.matches('-').count(), 4);
         assert_eq!(clip("äöü", 3), "ä…");
         assert_eq!(clip("abc", 3), "abc");
+        assert_eq!(clip_ends("abcdefgh", 8), "abcdefgh");
+        assert_eq!(clip_ends("abcdefghij", 5), "ab…hij");
+        // Never inside a character: the head shrinks, the tail starts later.
+        assert_eq!(clip_ends("äöüß", 5), "ä…ß");
+        assert_eq!(clip_ends("äöüß", 4), "ä…ß");
     }
 }

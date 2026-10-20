@@ -13,6 +13,12 @@ builds give the same scores (the largest and mean difference per case), so the
 GPU numbers stand for the shipped build. `--device cpu` scores everything on
 the CPU build instead.
 
+The state is bounded as the center bounds it for the model (`--state-bytes`
+per target and args, keeping their start and end; Laya's 320 by default, 2000
+for d1-3B and Kev-4B), and llama-server gets the pin's batch size (`--batch`,
+2048 for Laya, whose whole input must fit one micro-batch; 0 for the
+defaults).
+
 Writes `<out>/results.json`, `<out>/results.md` (a table per case file:
 catch rate, benign refusals, injection catch where the file has injection
 cases; the CPU latency and agreement) and `<out>/scores-<file>.jsonl` (one
@@ -45,17 +51,18 @@ def free_port():
         return s.getsockname()[1]
 
 
-def start_server(gguf, port, threads, log, gpu):
+def start_server(gguf, port, threads, log, gpu, batch):
     """llama-server with the center's own arguments (checker/server.rs:
-    defaults, all layers on the GPU or none) plus the thread count the
-    design doc measured with."""
+    defaults, all layers on the GPU or none, the pin's batch size) plus the
+    thread count the design doc measured with."""
     binary = LLAMA_GPU_BIN if gpu else LLAMA_BIN
     env = dict(os.environ, LD_LIBRARY_PATH=f"{binary}:{os.environ.get('LD_LIBRARY_PATH', '')}")
     if not gpu:
         env["CUDA_VISIBLE_DEVICES"] = ""
+    batch_args = ["-b", str(batch), "-ub", str(batch)] if batch else []
     proc = subprocess.Popen(
         [str(binary / "llama-server"), "-m", str(gguf), "-ngl", "999" if gpu else "0",
-         "-t", str(threads), "--host", "127.0.0.1", "--port", str(port)],
+         "-t", str(threads), "--host", "127.0.0.1", "--port", str(port), *batch_args],
         stdout=log, stderr=subprocess.STDOUT, env=env)
     deadline = time.time() + 300
     while time.time() < deadline:
@@ -72,11 +79,12 @@ def start_server(gguf, port, threads, log, gpu):
     raise RuntimeError(f"llama-server did not come up; see {log.name}")
 
 
-def run_cases(port, case_file, scores_out, timeout_ms, log_file):
+def run_cases(port, case_file, scores_out, timeout_ms, log_file, state_bytes):
     """The repo's eval runner on one case file; returns (p50, p95, scored, failed)."""
     env = dict(os.environ, NERVE_CHECKER_ENDPOINT=f"http://127.0.0.1:{port}",
                NERVE_CHECKER_EVAL_FILE=str(case_file), NERVE_CHECKER_SCORES_OUT=str(scores_out),
-               NERVE_CHECKER_TIMEOUT_MS=str(timeout_ms))
+               NERVE_CHECKER_TIMEOUT_MS=str(timeout_ms),
+               NERVE_CHECKER_STATE_BYTES=str(state_bytes))
     res = subprocess.run(
         ["cargo", "test", "-q", "-p", "nerve-center", "--test", "checker_eval", "--",
          "--ignored", "--nocapture"],
@@ -137,9 +145,9 @@ def table(results):
 
 
 class Server:
-    def __init__(self, gguf, threads, log, gpu):
+    def __init__(self, gguf, threads, log, gpu, batch):
         self.port = free_port()
-        self.proc = start_server(gguf, self.port, threads, log, gpu)
+        self.proc = start_server(gguf, self.port, threads, log, gpu, batch)
 
     def __enter__(self):
         return self
@@ -166,6 +174,10 @@ def main():
                     help="cases of the 214 to time on the CPU build and compare (0: none)")
     ap.add_argument("--threads", type=int, default=8)
     ap.add_argument("--timeout-ms", type=int, default=15000)
+    ap.add_argument("--state-bytes", type=int, default=common.LAYA_STATE_BYTES,
+                    help="bytes of the target and of the args the model sees (center: 2000)")
+    ap.add_argument("--batch", type=int, default=2048,
+                    help="llama-server -b/-ub (0: its defaults, as for d1-3B and Kev-4B)")
     a = ap.parse_args()
     out = a.out or WORK / "runs" / a.name / "eval"
     out.mkdir(parents=True, exist_ok=True)
@@ -176,15 +188,15 @@ def main():
         files += sorted(a.prepared.glob("heldout-*.json"))
     files += a.heldout
     results = {"name": a.name, "gguf": str(a.gguf), "device": a.device, "threads": a.threads,
-               "files": {}}
+               "state_bytes": a.state_bytes, "batch": a.batch, "files": {}}
     with open(out / f"llama-server-{a.device}.log", "w") as log, \
-            Server(a.gguf, a.threads, log, gpu) as server:
+            Server(a.gguf, a.threads, log, gpu, a.batch) as server:
         for f in files:
             cases = json.loads(Path(f).read_text(encoding="utf-8"))
             label = "214" if Path(f) == common.EVAL_214 else Path(f).stem
             scores = out / f"scores-{label}.jsonl"
             p50, p95, scored, failed = run_cases(server.port, f, scores, a.timeout_ms,
-                                                 out / f"runner-{label}.log")
+                                                 out / f"runner-{label}.log", a.state_bytes)
             results["files"][label] = {
                 "file": str(f), "cases": len(cases), "scored": scored, "failed": failed,
                 "device": a.device, "p50_ms": p50, "p95_ms": p95,
@@ -198,9 +210,9 @@ def main():
         sample.write_text(json.dumps(cases, ensure_ascii=False))
         cpu_scores = out / "scores-cpu-check.jsonl"
         with open(out / "llama-server-cpu.log", "w") as log, \
-                Server(a.gguf, a.threads, log, False) as server:
+                Server(a.gguf, a.threads, log, False, a.batch) as server:
             p50, p95, scored, failed = run_cases(server.port, sample, cpu_scores, a.timeout_ms,
-                                                 out / "runner-cpu-check.log")
+                                                 out / "runner-cpu-check.log", a.state_bytes)
         check = {"cases": len(cases), "scored": scored, "failed": failed,
                  "p50_ms": p50, "p95_ms": p95, "thresholds": metrics(cpu_scores, cases)}
         if "214" in results["files"]:

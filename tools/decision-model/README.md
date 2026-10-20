@@ -98,9 +98,16 @@ at most `--trajectory-ratio` (0.5) of them per dangerous row, no program above
    score difference between the two builds. `--device cpu` scores everything
    on the CPU build.
 
-Laya reads at most 512 tokens, and `llama-server`'s default batch (which the
-center uses) refuses a longer input with HTTP 500; such a case counts as
-failed in the tables.
+Laya reads at most 512 tokens and takes its whole input in one micro-batch;
+`llama-server`'s default micro-batch (512) refuses a longer input with HTTP
+500. So the target and the args in a state are bounded to 320 bytes each,
+keeping their start and end (`common.clip_ends`, the same as the center's
+`util::clip_ends`; `prepare.py --state-bytes`, `evaluate.py --state-bytes`),
+which kept every state of the training data and the held-out split inside the
+367 tokens the default question leaves; and `evaluate.py` starts
+`llama-server` with `-b 2048 -ub 2048` (`--batch`), as a Laya pin in the center
+must (`ModelPin::state_bytes`, `ModelPin::batch`), so a longer input is still
+answered. For d1-3B and Kev-4B use `--state-bytes 2000 --batch 0`.
 
 ## One command
 

@@ -90,15 +90,39 @@ def clip(s, limit=2000):
             cut = cut[:-1]
 
 
-def model_state(cap, action, target, os_name, tainted=False, args=None):
+def clip_ends(s, limit):
+    """util::clip_ends: at most `limit` bytes of `s`, the start and the end of
+    it with an ellipsis between, cut on character boundaries (the head gets
+    `limit // 2` bytes at most, the tail the rest)."""
+    b = s.encode("utf-8")
+    if len(b) <= limit:
+        return s
+    head = limit // 2
+    while head > 0 and (b[head] & 0xC0) == 0x80:
+        head -= 1
+    tail = len(b) - (limit - limit // 2)
+    while tail < len(b) and (b[tail] & 0xC0) == 0x80:
+        tail += 1
+    return b[:head].decode("utf-8") + "…" + b[tail:].decode("utf-8")
+
+
+# The center's default bound on the target and on the args in the state, and
+# the smaller one for Laya, whose whole prompt must fit its 512 tokens
+# (checker::STATE_BYTES and the Laya pin's `state_bytes`).
+STATE_BYTES = 2000
+LAYA_STATE_BYTES = 320
+
+
+def model_state(cap, action, target, os_name, tainted=False, args=None, state_bytes=STATE_BYTES):
     """The `state` object of checker::model_state, keys in serde_json's order
     (a BTreeMap: sorted). The eval runner sends no `args`; the center sends
-    the call's arguments as a clipped JSON string."""
-    st = {"capability": cap, "action": action, "target": clip(target, 2000),
+    the call's arguments as a JSON string. Both are cut to `state_bytes`,
+    keeping their start and end."""
+    st = {"capability": cap, "action": action, "target": clip_ends(target, state_bytes),
           "os": os_name, "tainted": tainted}
     if args is not None:
-        st["args"] = clip(json.dumps(args, separators=(",", ":"), sort_keys=True,
-                                     ensure_ascii=False), 2000)
+        st["args"] = clip_ends(json.dumps(args, separators=(",", ":"), sort_keys=True,
+                                          ensure_ascii=False), state_bytes)
     return dict(sorted(st.items()))
 
 

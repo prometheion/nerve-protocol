@@ -31,7 +31,7 @@ async fn the_local_server_starts_and_gates_a_call() {
         std::env::var("NERVE_TEST_LLAMA").expect("set NERVE_TEST_LLAMA to a llama-server"),
     );
 
-    let server = LocalServer::start(llama, model, false, 8000).expect("start the server");
+    let server = LocalServer::start(llama, model, false, None, 8000).expect("start the server");
 
     // Wait up to two minutes for it to load the model and report ready.
     let deadline = Instant::now() + Duration::from_secs(120);
