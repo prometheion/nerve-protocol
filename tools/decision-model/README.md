@@ -38,6 +38,29 @@ than the checker's question (the model trained on it refused downloads, `kill`
 or `export PATH`). `prepare.py` takes the v2 files when both are there
 (`--shellsafety v1` for the first build).
 
+The third build (`WORK/data/owner/v3.1/`: `train.jsonl`, `dev.jsonl`,
+`benchmark.jsonl`, with its own README and decision log) replaces the
+shell-safety files as the main source; `prepare.py` takes it when the three
+files are there (`--shellsafety v3`, `--v3-dir`; `v2`/`v1` still work).
+Train and dev rows are `{"command", "os", "danger", "category", "source",
+"injection"}`; a row whose `category` starts with `fs-write-` is a file write
+(its `command` is the path), so it becomes an `fs.write` state (no `args`: the
+rows have no content) and every other row an `exec.run` state. The `injection`
+flag (an embedded instruction that must not move the label, in both
+directions) is carried: as a top-level key of the training rows and in the
+held-out cases. `dev.jsonl` becomes a second held-out file
+(`heldout-v3-dev.json`); `benchmark.jsonl`, 3,993 cases in the eval runner's
+format `{"cap", "action", "target", "os", "danger", "kind", "id",
+"injection"}`, is used as given (`heldout-v3-benchmark.json`, the main
+held-out file). v3.1 made the benchmark disjoint from train and dev by
+`common.canonical`, free of the 214 cases, and stratified by length, chain
+operators and nesting (see its README); a v3 benchmark without the flag still
+loads, with `injection` false. The harmless cap (`--max-harmless-ratio`, 1.5)
+is the pipeline's, not the owner's 3 per dangerous row; to keep the owner's
+balance, and not add the trajectories on top of what v3 already took from
+them, run `prepare.py --max-harmless-ratio 3 --trajectory-ratio 0` first and
+then `pipeline.py --skip-prepare`.
+
 Labelling rules (applied by the owner's script, with the checker's question in
 mind: serious, irreversible harm vs. ordinary work): shell-safety's `deny` is
 dangerous, `allow` is harmless, `ask` is dropped; `posix` is Linux,
@@ -79,8 +102,13 @@ at most `--trajectory-ratio` (0.5) of them per dangerous row, no program above
    the eval runner's case format. It drops near-duplicates (`common.canonical`),
    groups with conflicting labels, and every row whose canonical form matches a
    held-out row or one of the 214 evaluation cases; it keeps at most 1.5
-   harmless rows per dangerous one. `python3 -m unittest test_prepare` tests it
-   on placeholder rows.
+   harmless rows per dangerous one. It prints counts only: per part the labels,
+   os, capability, injection rows per label, and for the commands the buckets
+   of `common.buckets` (bytes: <80, 80-300, 300-1000, >1000; chain operators
+   `|` `&&` `||` `;`: 0, 1-2, 3-5, 6+; nesting of `$(...)`, backticks and
+   `sh -c` / `bash -c` / `powershell -Command` / `cmd /c`: 0, 1, 2+; measured on
+   the text, not a shell parser). `python3 -m unittest test_prepare` tests it
+   on placeholder rows (and the buckets and `evaluate.py`'s breakdown).
 2. `train.py`: Unsloth `FastDecisionModel` on Laya, bf16, a normal LoRA (`--mode
    lora`, default r 32) or `--mode full`; the temperature is calibrated on
    `calib.jsonl` (rows never trained on) and the merged 16-bit checkpoint goes
@@ -90,8 +118,12 @@ at most `--trajectory-ratio` (0.5) of them per dangerous row, no program above
    writes the calibrated temperatures into the GGUF).
 4. `evaluate.py`: the eval runner against `llama-server` on the 214 cases and
    each held-out file; a table per file in `WORK/runs/<name>/eval/results.md`
-   (catch %, benign refused %, injection catch % where a file has injection
-   cases, per threshold). Quality is scored on the GPU (a CUDA llama.cpp build
+   (catch %, benign refused %, per threshold; injection catch % of the
+   dangerous and injection refused % of the harmless injection cases, where a
+   file has them: a case is an injection case with `"injection": true` or the
+   kind `injection`) and, per file, a breakdown at `--breakdown-threshold`
+   (0.8; all thresholds are in `results.json`) by capability (exec / fs), os,
+   injection, and for commands by length, chain-operator and nesting bucket. Quality is scored on the GPU (a CUDA llama.cpp build
    with `/v1/systemone`, `NERVE_LLAMA_GPU_BIN`, default
    `~/Services/llama.cpp-native/build/bin`); then the 214 cases run once more on
    the shipped CPU build (b11719, 8 threads) for p50/p95 and for the largest

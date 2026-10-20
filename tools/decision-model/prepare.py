@@ -5,9 +5,18 @@ The owner builds the labelled command files himself (see the README); this
 script only reads them by path, as data. It never prints a command: its output
 is counts. Inputs, each optional except as noted:
 
+- `<owner>/v3.1/train.jsonl`, `dev.jsonl`, `benchmark.jsonl` (the third build,
+  used when the three are there, see `--shellsafety` and `--v3-dir`): train and
+  dev rows are `{"command", "os", "danger", "category", "source", "injection"}`,
+  and a row whose `category` starts with `fs-write-` is a file write (its
+  `command` is the path), so it becomes an `fs.write` state and every other row
+  an `exec.run` one. `dev.jsonl` becomes a held-out file in the eval runner's
+  format; `benchmark.jsonl` already is one (`{"cap", "action", "target", "os",
+  "danger", "kind", "id", "injection"}`) and is used as given, as the main
+  held-out file.
 - `<owner>/shellsafety-v2-train.jsonl`, `<owner>/shellsafety-v2-heldout.jsonl`
   (the second build, with shell-safety's `deny` rows split by reason code;
-  used when both are there, see `--shellsafety`) or else
+  used when both are there and there is no third build) or else
   `<owner>/shellsafety-train.jsonl`, `<owner>/shellsafety-heldout.jsonl`
   (required unless `--dry-run`), `<owner>/extra-train.jsonl`,
   `<owner>/extra-heldout.jsonl`: one `{"command", "os", "danger", "category",
@@ -22,8 +31,11 @@ is counts. Inputs, each optional except as noted:
 
 What it does, in order:
 
-1. Each training command becomes a row `{"state", "questions", "gold"}`:
-   the state the center sends for `exec.run` (`tainted` for a random 15 %,
+1. Each training command becomes a row `{"state", "questions", "gold"}`
+   (and `"injection"` when the owner's row has the flag):
+   the state the center sends for `exec.run` (or, for a third-build file
+   write, `fs.write` with the path as target and no `args`: the owner's rows
+   have no content; `tainted` for a random 15 %,
    the call's `args` as the center sends them for `--args-share` of the rows,
    since the center always sends them in production but the 214 cases do
    not), the center's question or, for 25 %, one of the paraphrases, and
@@ -41,7 +53,12 @@ What it does, in order:
 5. A stratified `--calib-share` of the rows goes to `calib.jsonl` (fitting the
    temperature after training), the rest to `train.jsonl`.
 6. Each held-out file is written in the eval runner's case format
-   (`heldout-<name>.json`, see crates/nerve-center/tests/checker_eval.rs).
+   (`heldout-<name>.json`, see crates/nerve-center/tests/checker_eval.rs),
+   with the `injection` flag where the source has it.
+
+The counts it prints cover, per part: label, os, capability, injection rows
+per label, and for the commands the buckets of `common.buckets` (bytes, chain
+operators, nesting depth).
 
 `--dry-run` uses only the real runs: a part of them becomes the held-out file
 `heldout-realruns.json`, and there is no balancing (there is nothing
@@ -86,6 +103,15 @@ def owner_rows(path):
     return out, bad
 
 
+def is_fs_write(r):
+    """A third-build file write: its `command` is the path."""
+    return str(r.get("category", "")).startswith("fs-write-")
+
+
+def row_cap(r):
+    return "fs" if is_fs_write(r) else "exec"
+
+
 def key(cap, target):
     return (cap, common.canonical(target))
 
@@ -115,24 +141,59 @@ def pick_question(rng, paraphrase_share):
 
 
 def case_from_command(r):
-    """A held-out command in the eval runner's case format."""
-    return {"cap": "exec", "action": "run", "target": common.clip(r["command"], 2000),
+    """A held-out command (or file write) in the eval runner's case format."""
+    fs = is_fs_write(r)
+    case = {"cap": "fs" if fs else "exec", "action": "write" if fs else "run",
+            "target": common.clip(r["command"], 2000),
             "os": r["os"], "danger": r["danger"],
             "kind": "dangerous" if r["danger"] else "benign",
             "category": r.get("category", ""), "reason": r.get("reason", ""),
             "source": r.get("source", "")}
+    if "injection" in r:
+        case["injection"] = bool(r["injection"])
+    return case
 
 
-def owner_files(owner, which):
-    """The owner's (name, train, held-out) files: the v2 shell-safety build when
-    `which` is v2, or auto and both v2 files are there, else the first."""
+def benchmark_cases(path):
+    """The third build's benchmark, as the eval runner reads it, used as
+    given; a row without the `injection` flag (the first v3 file) gets false.
+    Returns (cases, rows without the flag)."""
+    cases = common.load_jsonl(path)
+    missing = 0
+    for c in cases:
+        if not all(k in c for k in ("cap", "action", "target", "os", "danger", "kind")):
+            sys.exit(f"{path.name}: a row lacks one of cap, action, target, os, danger, kind")
+        if "injection" not in c:
+            c["injection"] = False
+            missing += 1
+    return cases, missing
+
+
+V3_FILES = ("train.jsonl", "dev.jsonl", "benchmark.jsonl")
+
+
+def build_of(owner, which, v3_dir):
+    """Which of the owner's builds to read: `which`, or for auto the newest
+    one whose files are all there (v3, then v2, else v1)."""
+    if which != "auto":
+        return which
+    if all((owner / v3_dir / f).exists() for f in V3_FILES):
+        return "v3"
     v2 = (owner / "shellsafety-v2-train.jsonl", owner / "shellsafety-v2-heldout.jsonl")
-    if which == "v2" or (which == "auto" and all(p.exists() for p in v2)):
-        shell = ("shellsafety-v2", *v2)
+    return "v2" if all(p.exists() for p in v2) else "v1"
+
+
+def owner_files(owner, build):
+    """The owner's (name, train, held-out) files of the v1 or v2 shell-safety
+    build (the v3 build has its own folder, see `main`), and the extra rows."""
+    if build == "v2":
+        shell = ("shellsafety-v2", owner / "shellsafety-v2-train.jsonl",
+                 owner / "shellsafety-v2-heldout.jsonl")
     else:
         shell = ("shellsafety", owner / "shellsafety-train.jsonl",
                  owner / "shellsafety-heldout.jsonl")
-    return [shell, ("extra", owner / "extra-train.jsonl", owner / "extra-heldout.jsonl")]
+    extra = ("extra", owner / "extra-train.jsonl", owner / "extra-heldout.jsonl")
+    return [extra] if build == "v3" else [shell, extra]
 
 
 def trajectory_row(rng, t, args_share, tainted_share, state_bytes):
@@ -170,6 +231,21 @@ def case_from_state(st):
     return c
 
 
+def bucket_counts(items):
+    """Per bucket of `common.buckets` (length, chain operators, nesting) and
+    label, how many of the (cap, text, danger) items fall in it; only the
+    commands (`exec`) are measured."""
+    out = {"length": collections.Counter(), "chain_ops": collections.Counter(),
+           "nesting": collections.Counter()}
+    for cap, text, danger in items:
+        if cap != "exec":
+            continue
+        label = "danger" if danger else "harmless"
+        for axis, b in zip(out, common.buckets(text)):
+            out[axis][f"{b}/{label}"] += 1
+    return {axis: dict(sorted(c.items())) for axis, c in out.items()}
+
+
 def split_stratified(rng, rows, share):
     by = collections.defaultdict(list)
     for r in rows:
@@ -195,8 +271,11 @@ def main():
     ap.add_argument("--trajectories", type=Path,
                     default=WORK / "data" / "trajectories" / "actions.jsonl",
                     help="harmless agent actions from trajectories.py (skipped if missing)")
-    ap.add_argument("--shellsafety", choices=["auto", "v1", "v2"], default="auto",
-                    help="which build of the owner's shell-safety files (auto: v2 if there)")
+    ap.add_argument("--shellsafety", choices=["auto", "v1", "v2", "v3"], default="auto",
+                    help="which build of the owner's files (auto: the newest that is there: "
+                         "v3, v2, v1)")
+    ap.add_argument("--v3-dir", default="v3.1",
+                    help="the third build's folder inside --owner (train, dev, benchmark)")
     ap.add_argument("--trajectory-ratio", type=float, default=0.5,
                     help="at most this many trajectory rows per dangerous row")
     ap.add_argument("--trajectory-program-share", type=float, default=0.15)
@@ -224,7 +303,32 @@ def main():
     train_cmds = []  # owner command rows for training
     danger_keys = set()  # every dangerous owner row, train or held-out
     if not a.dry_run:
-        for name, tr, ho in owner_files(a.owner, a.shellsafety):
+        build = build_of(a.owner, a.shellsafety, a.v3_dir)
+        stats["inputs"]["build"] = build
+        if build == "v3":
+            d = a.owner / a.v3_dir
+            missing = [f for f in V3_FILES if not (d / f).exists()]
+            if missing:
+                sys.exit(f"missing {', '.join(missing)} in {d} (or use --dry-run)")
+            rows, bad = owner_rows(d / "train.jsonl")
+            dev, bad_dev = owner_rows(d / "dev.jsonl")
+            bench, no_flag = benchmark_cases(d / "benchmark.jsonl")
+            for name, part, n_bad in (("train.jsonl", rows, bad), ("dev.jsonl", dev, bad_dev)):
+                stats["inputs"][f"{a.v3_dir}/{name}"] = {
+                    "rows": len(part), "malformed": n_bad,
+                    "danger": sum(r["danger"] for r in part),
+                    "injection": sum(bool(r.get("injection")) for r in part),
+                    "fs_write": sum(is_fs_write(r) for r in part)}
+            stats["inputs"][f"{a.v3_dir}/benchmark.jsonl"] = {
+                "rows": len(bench), "danger": sum(c["danger"] for c in bench),
+                "injection": sum(bool(c["injection"]) for c in bench),
+                "without_injection_flag": no_flag}
+            danger_keys.update(key(row_cap(r), r["command"]) for r in rows + dev if r["danger"])
+            danger_keys.update(key(c["cap"], c["target"]) for c in bench if c["danger"])
+            train_cmds.extend(rows)
+            heldout["v3-benchmark"] = bench
+            heldout["v3-dev"] = [case_from_command(r) for r in dev]
+        for name, tr, ho in owner_files(a.owner, build):
             if name.startswith("shellsafety") and not (tr.exists() and ho.exists()):
                 sys.exit(f"missing {tr} or {ho} (or use --dry-run)")
             for path, part in ((tr, "train"), (ho, "heldout")):
@@ -264,11 +368,19 @@ def main():
     # ---- training rows
     rows = []
     for r in train_cmds:
-        rows.append({"state": command_state(rng, r["command"], r["os"], a.args_share,
-                                            a.tainted_share, a.state_bytes),
-                     "questions": pick_question(rng, a.paraphrase_share),
-                     "gold": {"danger": r["danger"]},
-                     "_src": r.get("source", "owner"), "_target": r["command"]})
+        if is_fs_write(r):
+            state = common.model_state("fs", "write", r["command"], r["os"],
+                                       tainted=rng.random() < a.tainted_share,
+                                       state_bytes=a.state_bytes)
+        else:
+            state = command_state(rng, r["command"], r["os"], a.args_share,
+                                  a.tainted_share, a.state_bytes)
+        row = {"state": state, "questions": pick_question(rng, a.paraphrase_share),
+               "gold": {"danger": r["danger"]},
+               "_src": r.get("source", "owner"), "_target": r["command"]}
+        if "injection" in r:
+            row["injection"] = bool(r["injection"])
+        rows.append(row)
     for st in states:
         rows.append({"state": bounded(st, a.state_bytes),
                      "questions": pick_question(rng, a.paraphrase_share),
@@ -337,6 +449,32 @@ def main():
     rng.shuffle(final)
 
     train, calib = split_stratified(rng, final, a.calib_share)
+
+    def counts(part):
+        c = collections.Counter()
+        for r in part:
+            label = "danger" if r["gold"]["danger"] else "harmless"
+            c[label] += 1
+            c["os_" + r["state"]["os"]] += 1
+            c["cap_" + r["state"]["capability"]] += 1
+            c["tainted"] += r["state"]["tainted"]
+            c["with_args"] += "args" in r["state"]
+            c["paraphrased"] += r["questions"] != common.question()
+            if r.get("injection"):
+                c["injection_" + label] += 1
+        return dict(sorted(c.items()))
+
+    # The buckets are measured on the whole command; the state's copy may be cut.
+    stats["train"] = counts(train)
+    stats["calib"] = counts(calib)
+    stats["structure"] = {
+        "train": bucket_counts((r["state"]["capability"], r["_target"], r["gold"]["danger"])
+                               for r in train),
+        "calib": bucket_counts((r["state"]["capability"], r["_target"], r["gold"]["danger"])
+                               for r in calib),
+        "heldout": {name: bucket_counts((c["cap"], c["target"], c["danger"]) for c in cases)
+                    for name, cases in heldout.items()}}
+
     out.mkdir(parents=True, exist_ok=True)
     srcs = collections.Counter()
     for part in (train, calib):
@@ -353,22 +491,16 @@ def main():
         (out / f"heldout-{name}.json").write_text(
             json.dumps(cases, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
 
-    def counts(part):
-        c = collections.Counter()
-        for r in part:
-            c["danger" if r["gold"]["danger"] else "harmless"] += 1
-            c["os_" + r["state"]["os"]] += 1
-            c["tainted"] += r["state"]["tainted"]
-            c["with_args"] += "args" in r["state"]
-            c["paraphrased"] += r["questions"] != common.question()
-        return dict(sorted(c.items()))
-
     stats["dropped"] = dict(stats["dropped"])
-    stats["train"] = counts(train)
-    stats["calib"] = counts(calib)
     stats["sources"] = dict(srcs)
     stats["heldout"] = {
-        name: {"cases": len(cases), "danger": sum(c["danger"] for c in cases)}
+        name: {"cases": len(cases), "danger": sum(c["danger"] for c in cases),
+               "injection_danger": sum(bool(c.get("injection")) and c["danger"] for c in cases),
+               "injection_harmless": sum(bool(c.get("injection")) and not c["danger"]
+                                         for c in cases),
+               "by_cap_os_label": dict(sorted(collections.Counter(
+                   f"{c['cap']}/{c['os']}/{'danger' if c['danger'] else 'harmless'}"
+                   for c in cases).items()))}
         for name, cases in heldout.items()}
     stats["out"] = str(out)
     (out / "stats.json").write_text(json.dumps(stats, indent=1) + "\n", encoding="utf-8")

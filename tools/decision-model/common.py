@@ -189,6 +189,94 @@ def canonical(cmd):
     return s
 
 
+# ---------------------------------------------------------------- structure
+
+# How long and how nested a command is, measured on the text (bytes, chain
+# operators, nesting depth), so that the benchmark split and the results table
+# use the same buckets. A text measure, not a shell parser: a `;` inside a
+# quoted argument counts like any other.
+_CHAIN = re.compile(r"&&|\|\||\||(?<![\\;]);(?!;)")
+# `sh -c`, `bash -c`, `powershell -Command`, `cmd /c`: what follows is a nested command.
+_WRAPPER = re.compile(
+    r"""(?ix)
+      \b(?:ba|z|da|k|c)?sh(?:\.exe)?\s+(?:-[a-z]+\s+)*-[a-z]*c\s+
+    | \b(?:powershell|pwsh)(?:\.exe)?\s+(?:-\w+\s+)*-(?:command|c)\s+
+    | \bcmd(?:\.exe)?\s+(?:/\w+\s+)*/[ck]\s+
+    """
+)
+LENGTH_BUCKETS = ("<80", "80-300", "300-1000", ">1000")
+CHAIN_BUCKETS = ("0", "1-2", "3-5", "6+")
+NEST_BUCKETS = ("0", "1", "2+")
+
+
+def _nesting(text):
+    """The deepest nesting of `$(...)`, backticks and `sh -c`-style wrapper
+    bodies (a quoted string, or the rest of the text when it is unquoted)."""
+    bodies = {}
+    for m in _WRAPPER.finditer(text):
+        at = m.end()
+        bodies[at] = text[at] if at < len(text) and text[at] in "\"'" else ""
+    stack, best, i, n = [], 0, 0, len(text)
+    while i < n:
+        c = text[i]
+        top = stack[-1] if stack else None
+        if i in bodies:
+            q = bodies.pop(i)
+            stack.append(q)
+            if q:
+                i += 1
+            best = max(best, sum(1 for e in stack if e != "("))
+            continue
+        if c == "\\":
+            i += 2
+            continue
+        if top in ('"', "'") and c == top:
+            stack.pop()
+        elif c == "'":
+            # a single-quoted literal: nothing inside it is substituted
+            j = text.find("'", i + 1)
+            i = n if j < 0 else j
+        elif c == "$" and text.startswith("$(", i) and not text.startswith("$((", i):
+            stack.append("$(")
+            i += 1
+        elif c == "(":
+            stack.append("(")
+        elif c == ")":
+            if top in ("$(", "("):
+                stack.pop()
+        elif c == "`":
+            if top == "`":
+                stack.pop()
+            else:
+                stack.append("`")
+        best = max(best, sum(1 for e in stack if e != "("))
+        i += 1
+    return best
+
+
+def structure(text):
+    """(bytes, chain operators `|` `&&` `||` `;`, nesting depth) of a command."""
+    return len(text.encode("utf-8")), len(_CHAIN.findall(text)), _nesting(text)
+
+
+def length_bucket(nbytes):
+    return LENGTH_BUCKETS[(nbytes >= 80) + (nbytes >= 300) + (nbytes > 1000)]
+
+
+def chain_bucket(ops):
+    return CHAIN_BUCKETS[(ops >= 1) + (ops >= 3) + (ops >= 6)]
+
+
+def nest_bucket(depth):
+    return NEST_BUCKETS[min(depth, 2)]
+
+
+def buckets(text):
+    """The three buckets of a command: (length, chain operators, nesting)."""
+    nbytes, ops, depth = structure(text)
+    return length_bucket(nbytes), chain_bucket(ops), nest_bucket(depth)
+
+
 def load_jsonl(path):
     with open(path, encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
