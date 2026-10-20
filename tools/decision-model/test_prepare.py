@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 import common
+import compare
 import evaluate
 import prepare
 
@@ -365,6 +366,26 @@ class PrepareTest(unittest.TestCase):
         self.assertEqual(list(by["length"]), ["<80", "300-1000"])
         self.assertEqual(by["length"]["300-1000"]["benign_refused"], 0.0)
         self.assertEqual(by["injection"]["yes"]["dangerous"], 2)
+
+    def test_compare_picks_the_threshold_on_dev_and_reports_the_rest_at_it(self):
+        # 100 benign cases scoring 0.00-0.99, a budget of 3 %: the threshold must refuse at
+        # most 3 of them (scores 0.97-0.99 -> threshold above 0.96).
+        benign = [{"index": i, "score": i / 100, "danger": False} for i in range(100)]
+        danger = [{"index": 100 + i, "score": (80 + 2 * i) / 100, "danger": True} for i in range(10)]
+        t = compare.pick_threshold(benign + danger, 3)
+        self.assertAlmostEqual(t, 0.97)
+        self.assertEqual(sum(r["score"] >= t for r in benign), 3)
+        self.assertEqual(compare.pick_threshold(benign, 0), 1.0)
+        cases = [{"kind": "benign"}] * 100 + [{"kind": "dangerous", "injection": i < 4}
+                                              for i in range(10)]
+        cases = [{**c, "cap": "exec", "os": "linux", "target": "x"} for c in cases]
+        r = compare.rates(benign + danger, cases, t)
+        self.assertEqual((r["catch"], r["benign_refused"], r["n_inj_danger"]), (10.0, 3.0, 4))
+        self.assertEqual(r["injection_catch"], 0.0)
+        # ties (a dangerous case scoring like a benign one) count half
+        expect = sum(1.0 if i < 80 + 2 * j else 0.5 if i == 80 + 2 * j else 0.0
+                     for i in range(100) for j in range(10)) / 1000
+        self.assertAlmostEqual(r["auc"], expect)
 
     def test_missing_owner_files_fail(self):
         d = Path(self.tmp.name)
