@@ -15,7 +15,13 @@
 //! ```
 //!
 //! `NERVE_CHECKER_TOKEN` and `NERVE_CHECKER_MODEL` are optional (a TypeSafe
-//! endpoint takes a token and `jev-latest`).
+//! endpoint takes a token and `jev-latest`). `NERVE_CHECKER_EVAL_FILE` points
+//! at another case file of the same form (e.g. the held-out split of the
+//! decision-model training data, `tools/decision-model/`); the default is the
+//! 214 cases here. `NERVE_CHECKER_SCORES_OUT` writes each case's score (one
+//! JSON line: index, score, danger, kind) for the training tools' metrics. A
+//! case may carry `args`, sent in the state as the center sends a call's
+//! arguments.
 
 use std::time::Instant;
 
@@ -32,6 +38,10 @@ struct Case {
     os: String,
     danger: bool,
     kind: String,
+    /// The call's arguments as the center sends them (a clipped JSON
+    /// string); the 214 cases have none, as the runner sent none before.
+    #[serde(default)]
+    args: Option<String>,
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -51,25 +61,36 @@ async fn evaluate_decision_model() {
             .expect("NERVE_CHECKER_TIMEOUT_MS is a whole number");
     }
 
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/checker-eval.json");
-    let cases: Vec<Case> = serde_json::from_slice(&std::fs::read(path).expect("read the eval set"))
-        .expect("valid JSON");
+    let path = std::env::var("NERVE_CHECKER_EVAL_FILE").unwrap_or_else(|_| {
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/checker-eval.json").to_string()
+    });
+    let cases: Vec<Case> =
+        serde_json::from_slice(&std::fs::read(&path).expect("read the eval set"))
+            .expect("valid JSON");
 
     let mut scored: Vec<(f64, bool, String)> = Vec::new();
+    let mut lines = String::new();
     let mut latencies_ms: Vec<f64> = Vec::new();
     let mut failed = 0usize;
-    for c in &cases {
-        let state = json!({
+    for (i, c) in cases.iter().enumerate() {
+        let mut state = json!({
             "capability": c.cap,
             "action": c.action,
             "target": c.target,
             "os": c.os,
             "tainted": false,
         });
+        if let Some(args) = &c.args {
+            state["args"] = json!(args);
+        }
         let started = Instant::now();
         match model::ask(&endpoint, &cfg, state).await {
             Ok(score) => {
                 latencies_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+                lines.push_str(&format!(
+                    "{}\n",
+                    json!({"index": i, "score": score, "danger": c.danger, "kind": c.kind})
+                ));
                 scored.push((score, c.danger, c.kind.clone()));
             }
             Err(e) => {
@@ -77,6 +98,9 @@ async fn evaluate_decision_model() {
                 eprintln!("case {} ({}) failed: {e}", c.target, c.kind);
             }
         }
+    }
+    if let Ok(out) = std::env::var("NERVE_CHECKER_SCORES_OUT") {
+        std::fs::write(&out, &lines).expect("write the scores");
     }
     assert!(
         !scored.is_empty(),
@@ -92,7 +116,7 @@ async fn evaluate_decision_model() {
     let benign = scored.iter().filter(|(_, d, _)| !*d).count() as f64;
     let inj = scored.iter().filter(|(_, _, k)| k == "injection").count() as f64;
 
-    println!("\n=== decision-model evaluation: {url} ===");
+    println!("\n=== decision-model evaluation: {url} ({path}) ===");
     println!(
         "{} cases scored, {failed} failed; p50 {:.0} ms, p95 {:.0} ms",
         scored.len(),

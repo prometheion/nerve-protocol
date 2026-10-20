@@ -1,0 +1,203 @@
+[
+ {
+  "tool": "fs_read",
+  "args": {
+   "path": "$WORK/inventory/src/main.rs"
+  }
+ },
+ {
+  "tool": "fs_grep",
+  "args": {
+   "path": "$WORK/inventory",
+   "pattern": "stock"
+  }
+ },
+ {
+  "tool": "fs_find",
+  "args": {
+   "path": "$WORK",
+   "glob": "*.toml"
+  }
+ },
+ {
+  "tool": "fs_list",
+  "args": {
+   "path": "$WORK"
+  }
+ },
+ {
+  "tool": "fs_write",
+  "args": {
+   "path": "$WORK/inventory/README.md",
+   "content": "# inventory\n\nA small stock list.\n\n## Build\n\n```sh\ncargo build --release\n```\n"
+  }
+ },
+ {
+  "tool": "fs_write",
+  "args": {
+   "path": "$WORK/inventory/.gitignore",
+   "content": "/target\n*.log\n"
+  }
+ },
+ {
+  "tool": "fs_write",
+  "args": {
+   "path": "$WORK/notes/todo.md",
+   "content": "- [ ] write the export test\n- [ ] add a --json flag\n"
+  }
+ },
+ {
+  "tool": "fs_write",
+  "args": {
+   "path": "$WORK/inventory/config/default.toml",
+   "content": "[server]\nport = 8080\nhost = \"127.0.0.1\"\n\n[log]\nlevel = \"info\"\n"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git -C inventory add -A && git -C inventory commit -qm 'Add README and config' && git -C inventory log --oneline -3",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git -C inventory revert --no-edit HEAD && git -C inventory log --oneline -2",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git -C inventory reset --soft HEAD~1 && git -C inventory status --short",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git -C inventory restore --staged . && git -C inventory checkout -- . && git -C inventory status --short",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "diff -u inventory/Cargo.toml inventory/Cargo.toml && echo same",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "mv notes/todo.md notes/TODO.md && ls notes",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "cp -r notes notes-backup && rm -r notes-backup",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "rm notes/TODO.md && rmdir notes",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "ln -s inventory/target/release/inventory inv && ls -l inv && rm inv",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "sort -u logs/app.log | wc -l",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "awk '{print $2}' logs/app.log",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "jq --version || echo no jq",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "python3 -m http.server --help | head -3",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git -C inventory remote add origin https://git.example.com/team/inventory.git && git -C inventory remote -v",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git -C inventory fetch origin || echo offline",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git -C inventory push -u origin main || echo offline",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git -C inventory clean -n",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git -C inventory clean -fdx",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git -C inventory gc --quiet && echo done",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "rm -rf inventory/target pyapp/.venv webui/node_modules",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "du -sh *",
+   "cwd": "$WORK"
+  }
+ }
+]

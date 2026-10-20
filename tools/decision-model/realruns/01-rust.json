@@ -1,0 +1,217 @@
+[
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "cargo new inventory --vcs git",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "fs_list",
+  "args": {
+   "path": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "fs_read",
+  "args": {
+   "path": "$WORK/inventory/Cargo.toml"
+  }
+ },
+ {
+  "tool": "fs_write",
+  "args": {
+   "path": "$WORK/inventory/src/main.rs",
+   "content": "use std::collections::BTreeMap;\n\nfn main() {\n    let mut stock: BTreeMap<&str, u32> = BTreeMap::new();\n    stock.insert(\"bolts\", 120);\n    stock.insert(\"nuts\", 80);\n    for (item, n) in &stock {\n        println!(\"{item}: {n}\");\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn adds() {\n        assert_eq!(2 + 2, 4);\n    }\n}\n"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "cargo build",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "cargo run --quiet",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "cargo test",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "cargo fmt --check",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "cargo fmt",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "cargo clippy --all-targets -- -D warnings",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git status --short",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git add -A && git commit -m 'Add a stock list'",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git log --oneline -5",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git checkout -b feature/csv-export",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "fs_write",
+  "args": {
+   "path": "$WORK/inventory/src/export.rs",
+   "content": "pub fn to_csv(rows: &[(String, u32)]) -> String {\n    let mut out = String::from(\"item,count\\n\");\n    for (item, n) in rows {\n        out.push_str(&format!(\"{item},{n}\\n\"));\n    }\n    out\n}\n"
+  }
+ },
+ {
+  "tool": "fs_grep",
+  "args": {
+   "path": "$WORK/inventory/src",
+   "pattern": "fn main"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "cargo check",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git diff --stat",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git add src/export.rs && git commit -m 'Add CSV export'",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git checkout master || git checkout main",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git merge --no-ff feature/csv-export -m 'Merge CSV export'",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git branch -d feature/csv-export",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "cargo build --release",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "ls -lh target/release/inventory",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "du -sh target",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "cargo clean",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "rm -rf target",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "cargo tree --depth 1",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git tag v0.1.0 && git tag --list",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git stash list",
+   "cwd": "$WORK/inventory"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git log --graph --oneline --all | head -20",
+   "cwd": "$WORK/inventory"
+  }
+ }
+]

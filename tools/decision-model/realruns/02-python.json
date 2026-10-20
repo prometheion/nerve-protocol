@@ -1,0 +1,164 @@
+[
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "mkdir -p pyapp/src/pyapp pyapp/tests",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "fs_write",
+  "args": {
+   "path": "$WORK/pyapp/pyproject.toml",
+   "content": "[project]\nname = \"pyapp\"\nversion = \"0.1.0\"\nrequires-python = \">=3.10\"\ndependencies = []\n\n[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n"
+  }
+ },
+ {
+  "tool": "fs_write",
+  "args": {
+   "path": "$WORK/pyapp/src/pyapp/__init__.py",
+   "content": "def slugify(text: str) -> str:\n    return \"-\".join(text.lower().split())\n"
+  }
+ },
+ {
+  "tool": "fs_write",
+  "args": {
+   "path": "$WORK/pyapp/tests/test_slug.py",
+   "content": "from pyapp import slugify\n\n\ndef test_slugify():\n    assert slugify(\"Hello World\") == \"hello-world\"\n"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "python3 -m venv .venv",
+   "cwd": "$WORK/pyapp"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": ".venv/bin/pip install -q pytest",
+   "cwd": "$WORK/pyapp"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "PYTHONPATH=src .venv/bin/python -m pytest -q",
+   "cwd": "$WORK/pyapp"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "python3 -m pytest --version || true",
+   "cwd": "$WORK/pyapp"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "python3 -c 'import sys; print(sys.version)'",
+   "cwd": "$WORK/pyapp"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git init -q && git add -A && git commit -qm 'Start pyapp' && git log --oneline",
+   "cwd": "$WORK/pyapp"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "find . -name '__pycache__' -type d -prune -exec rm -rf {} +",
+   "cwd": "$WORK/pyapp"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "rm -rf .pytest_cache build dist *.egg-info",
+   "cwd": "$WORK/pyapp"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "python3 -m py_compile src/pyapp/__init__.py && echo ok",
+   "cwd": "$WORK/pyapp"
+  }
+ },
+ {
+  "tool": "fs_grep",
+  "args": {
+   "path": "$WORK/pyapp",
+   "pattern": "def ",
+   "glob": "*.py"
+  }
+ },
+ {
+  "tool": "fs_find",
+  "args": {
+   "path": "$WORK/pyapp",
+   "glob": "*.py"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "sed -i 's/version = \"0.1.0\"/version = \"0.1.1\"/' pyproject.toml && grep version pyproject.toml",
+   "cwd": "$WORK/pyapp"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git diff",
+   "cwd": "$WORK/pyapp"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "git commit -am 'Bump the version' && git log -1 --stat",
+   "cwd": "$WORK/pyapp"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "rm -rf .venv",
+   "cwd": "$WORK/pyapp"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "uv --version",
+   "cwd": "$WORK/pyapp"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "ruff --version || echo no ruff",
+   "cwd": "$WORK/pyapp"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "wc -l src/pyapp/*.py tests/*.py",
+   "cwd": "$WORK/pyapp"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "cat pyproject.toml | head -5",
+   "cwd": "$WORK/pyapp"
+  }
+ }
+]

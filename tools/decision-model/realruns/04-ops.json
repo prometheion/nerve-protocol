@@ -1,0 +1,268 @@
+[
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "mkdir -p svc",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "fs_write",
+  "args": {
+   "path": "$WORK/svc/Dockerfile",
+   "content": "FROM alpine:3.20\nRUN adduser -D app\nUSER app\nCMD [\"echo\", \"hello\"]\n"
+  }
+ },
+ {
+  "tool": "fs_write",
+  "args": {
+   "path": "$WORK/svc/compose.yaml",
+   "content": "services:\n  web:\n    build: .\n    ports:\n      - \"127.0.0.1:8080:8080\"\n"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "docker --version",
+   "cwd": "$WORK/svc"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "docker ps --format '{{.Names}}'",
+   "cwd": "$WORK/svc"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "docker images | head",
+   "cwd": "$WORK/svc"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "docker compose config",
+   "cwd": "$WORK/svc"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "docker build -t svc:dev .",
+   "cwd": "$WORK/svc"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "docker run --rm svc:dev",
+   "cwd": "$WORK/svc"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "docker image rm svc:dev",
+   "cwd": "$WORK/svc"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "docker system df",
+   "cwd": "$WORK/svc"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "uname -a",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "df -h .",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "free -m",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "uptime",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "ps aux --sort=-%mem | head -5",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "systemctl --user list-units --type=service --state=running | head",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "journalctl --user -n 20 --no-pager",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "ss -tlnp | head",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "ip -brief addr",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "cat /etc/os-release",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "whoami && id",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "env | sort | head -20",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "which git cargo node python3 docker",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "lsblk",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "nproc",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "tar czf svc.tar.gz svc && tar tzf svc.tar.gz && rm svc.tar.gz",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "curl -sI https://example.com | head -3",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "ping -c 1 127.0.0.1",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "mkdir -p logs && for i in 1 2 3; do echo \"line $i\" >> logs/app.log; done && tail -n 2 logs/app.log",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "gzip -k logs/app.log && ls logs",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "find logs -name '*.gz' -mtime +7 -delete; ls logs",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "rm -f logs/app.log.gz",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "chmod +x svc/run.sh 2>/dev/null; ls -l svc",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "fs_write",
+  "args": {
+   "path": "$WORK/svc/run.sh",
+   "content": "#!/bin/sh\nset -eu\nexec ./svc --port \"${PORT:-8080}\"\n"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "chmod 755 svc/run.sh && ls -l svc/run.sh",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "crontab -l 2>/dev/null || echo no crontab",
+   "cwd": "$WORK"
+  }
+ },
+ {
+  "tool": "exec_run",
+  "args": {
+   "command": "date -u +%FT%TZ",
+   "cwd": "$WORK"
+  }
+ }
+]
