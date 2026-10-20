@@ -30,6 +30,14 @@ deterministic script from the public dataset
 `extra-train.jsonl`, `extra-heldout.jsonl`. These scripts read them only by
 path and print counts, never rows.
 
+The second build (`shellsafety-v2-train.jsonl`, `shellsafety-v2-heldout.jsonl`,
+`reason-classes.json`) splits shell-safety's `deny` rows by their reason code:
+only the codes the owner classed as serious, irreversible harm are dangerous;
+the other `deny` rows are left out, because the first build's `deny` was wider
+than the checker's question (the model trained on it refused downloads, `kill`
+or `export PATH`). `prepare.py` takes the v2 files when both are there
+(`--shellsafety v1` for the first build).
+
 Labelling rules (applied by the owner's script, with the checker's question in
 mind: serious, irreversible harm vs. ordinary work): shell-safety's `deny` is
 dangerous, `allow` is harmless, `ask` is dropped; `posix` is Linux,
@@ -41,17 +49,30 @@ and left out when unsure.
 
 The harmless side also takes `WORK/data/realruns/states.jsonl`: ordinary agent
 work recorded by `realruns.py` through a local center and node (states exactly
-as the center sends them).
+as the center sends them), and the actions of public coding-agent
+trajectories: `trajectories.py` reads the first shard of each dataset below
+(`WORK/data/raw/swe-agent/data/`, `WORK/data/raw/swe-hero/data/`, Parquet from
+the Hugging Face repos), takes the shell commands (SWE-agent's last fenced
+block per turn, without its own editor commands; SWE-Hero's `execute_bash`)
+and the editor's file creations and views (`fs.write` with path and content,
+`fs.read`), keeps one per canonical form (a leading `cd <dir> &&` removed) and
+writes `WORK/data/trajectories/actions.jsonl`. `prepare.py` drops every one
+whose canonical form matches a dangerous row of the owner's files, and keeps
+at most `--trajectory-ratio` (0.5) of them per dangerous row, no program above
+15 % of those, inside the 1.5 harmless rows per dangerous one.
 
 | Source | Licence | Use |
 |---|---|---|
 | tomngdev/shell-safety-v1.1 (rev fee89770) | MIT | dangerous and harmless commands, Linux and Windows; its test split is held out |
 | the owner's extra rows (`extra-*.jsonl`) | the owner's | a few more pairs; their held-out file is made separately |
 | real runs (`realruns.py`, `realruns/*.json`) | this repo | harmless states as the center sends them |
+| [nebius/SWE-agent-trajectories](https://huggingface.co/datasets/nebius/SWE-agent-trajectories) (shard 0 of 12) | CC-BY-4.0 | harmless shell commands of a coding agent |
+| [nvidia/SWE-Hero-openhands-trajectories](https://huggingface.co/datasets/nvidia/SWE-Hero-openhands-trajectories) (shard 0 of 14) | CC-BY-4.0 | harmless shell commands, file writes and reads of a coding agent |
 
 ## The steps
 
-1. `prepare.py`: owner files + real runs -> `WORK/data/prepared/`:
+1. `trajectories.py` (once): the trajectory shards -> `WORK/data/trajectories/actions.jsonl`.
+   `prepare.py`: owner files + real runs + trajectories -> `WORK/data/prepared/`:
    `train.jsonl` and `calib.jsonl` (`{"state", "questions", "gold"}` rows,
    the center's state for `exec.run`, `tainted` for 15 %, the call's `args`
    for half of them, a paraphrased question for 25 %), and `heldout-*.json` in

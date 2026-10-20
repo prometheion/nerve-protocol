@@ -26,17 +26,24 @@ def row(cmd, danger, os_name="linux"):
     return {"command": cmd, "os": os_name, "danger": danger, "category": "test", "source": "test"}
 
 
+def traj_row(cmd, program="echo"):
+    return {"cap": "exec", "action": "run", "target": cmd, "os": "linux", "source": "swe-agent",
+            "program": program}
+
+
 class PrepareTest(unittest.TestCase):
-    def run_prepare(self, train, heldout, realruns, *extra):
+    def run_prepare(self, train, heldout, realruns, *extra, traj=(), build="shellsafety"):
         d = Path(self.tmp.name)
         owner = d / "owner"
-        common.write_jsonl(owner / "shellsafety-train.jsonl", train)
-        common.write_jsonl(owner / "shellsafety-heldout.jsonl", heldout)
+        common.write_jsonl(owner / f"{build}-train.jsonl", train)
+        common.write_jsonl(owner / f"{build}-heldout.jsonl", heldout)
         common.write_jsonl(d / "states.jsonl", realruns)
+        common.write_jsonl(d / "traj.jsonl", traj)
         out = d / "out"
         res = subprocess.run(
             [sys.executable, str(HERE / "prepare.py"), "--owner", str(owner), "--out", str(out),
-             "--realruns", str(d / "states.jsonl"), "--calib-share", "0", *extra],
+             "--realruns", str(d / "states.jsonl"), "--trajectories", str(d / "traj.jsonl"),
+             "--calib-share", "0", *extra],
             capture_output=True, text=True, check=True)
         return out, json.loads(res.stdout)
 
@@ -94,6 +101,50 @@ class PrepareTest(unittest.TestCase):
             self.assertIn(args["cwd"], sum(prepare.CWDS.values(), []))
         # about a quarter of the questions are paraphrased
         self.assertTrue(50 < stats["train"]["paraphrased"] < 150, stats["train"])
+
+    def test_trajectories_filtered_capped_and_spread(self):
+        danger = [row(f"echo bad-{word(i)}", True) for i in range(10)]
+        harmless = [row(f"ls own-{word(i)}", False) for i in range(20)]
+        # Agent actions: two that the owner's files call dangerous (one only
+        # without its leading cd), many test runs, a few other programs and a
+        # file write.
+        traj = [traj_row("echo bad-a"), traj_row("cd /workspace/r && ECHO bad-b")]
+        traj += [traj_row(f"python run-{word(i)}.py", "python") for i in range(30)]
+        traj += [traj_row(f"grep -n x{word(i)}", "grep") for i in range(3)]
+        traj += [{"cap": "fs", "action": "write", "target": "/workspace/r/new.py",
+                  "args": {"content": "x = 1\n", "path": "/workspace/r/new.py"},
+                  "os": "linux", "source": "swe-hero", "program": "fs"}]
+        out, stats = self.run_prepare(danger + harmless, [], [], "--trajectory-ratio", "1",
+                                      "--trajectory-program-share", "0.3", traj=traj)
+        self.assertEqual(stats["dropped"]["trajectory_matches_dangerous"], 2)
+        self.assertEqual(stats["train"], {**stats["train"], "danger": 10, "harmless": 15})
+        # 10 trajectory rows at most, no program above 3 of them, owner rows fill up to 15.
+        self.assertEqual(stats["sources"]["swe-agent"], 6)
+        self.assertEqual(stats["sources"]["swe-hero"], 1)
+        self.assertEqual(stats["sources"]["test"], 10 + 8)
+        rows = common.load_jsonl(out / "train.jsonl")
+        targets = [r["state"]["target"] for r in rows]
+        self.assertEqual(sum(t.startswith("python run-") for t in targets), 3)
+        self.assertEqual(sum(t.startswith("grep -n") for t in targets), 3)
+        write = [r["state"] for r in rows if r["state"]["capability"] == "fs"]
+        self.assertEqual(json.loads(write[0]["args"]),
+                         {"content": "x = 1\n", "path": "/workspace/r/new.py"})
+
+    def test_v2_build_is_preferred_and_keeps_reason(self):
+        d = Path(self.tmp.name)
+        common.write_jsonl(d / "owner" / "shellsafety-train.jsonl", [row("echo old", True)])
+        common.write_jsonl(d / "owner" / "shellsafety-heldout.jsonl", [row("echo old2", True)])
+        (d / "out").mkdir()
+        (d / "out" / "heldout-shellsafety.json").write_text("[]")
+        r = {**row("echo held", True), "reason": "code_a"}
+        out, stats = self.run_prepare([row("echo new", True), row("ls", False)], [r], [],
+                                      build="shellsafety-v2")
+        self.assertIn("shellsafety-v2-train.jsonl", stats["inputs"])
+        self.assertNotIn("shellsafety-train.jsonl", stats["inputs"])
+        self.assertEqual([p.name for p in out.glob("heldout-*.json")],
+                         ["heldout-shellsafety-v2.json"])
+        cases = json.loads((out / "heldout-shellsafety-v2.json").read_text())
+        self.assertEqual(cases[0]["reason"], "code_a")
 
     def test_missing_owner_files_fail(self):
         d = Path(self.tmp.name)

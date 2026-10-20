@@ -6,7 +6,8 @@
 Every step is its own script (see the README) and can be run alone; this
 only runs them in order with matching folders:
 
-- data:     data/prepared/        (data/prepared-dry/ with --dry-run)
+- data:     data/prepared/        (data/prepared-dry/ with --dry-run; trajectories.py
+            first if data/trajectories/ is not there yet)
 - model:    runs/<name>/merged/   (train.py)
 - GGUF:     runs/<name>/gguf/     (export.py)
 - results:  runs/<name>/eval/     (evaluate.py: the 214 cases + each held-out file)
@@ -48,6 +49,8 @@ def main():
     data = WORK / "data" / ("prepared-dry" if a.dry_run else "prepared")
     run_dir = WORK / "runs" / a.name
     if not a.skip_prepare:
+        if not a.dry_run and not (WORK / "data" / "trajectories" / "actions.jsonl").exists():
+            run("trajectories.py")
         run("prepare.py", "--out", data, *(["--dry-run"] if a.dry_run else ["--owner", a.owner]))
     run("train.py", "--data", data, "--name", a.name, "--out", run_dir, *extra)
     run("export.py", "--checkpoint", run_dir / "merged", "--out", run_dir / "gguf")

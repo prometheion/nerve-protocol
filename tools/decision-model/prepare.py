@@ -5,12 +5,20 @@ The owner builds the labelled command files himself (see the README); this
 script only reads them by path, as data. It never prints a command: its output
 is counts. Inputs, each optional except as noted:
 
-- `<owner>/shellsafety-train.jsonl`, `<owner>/shellsafety-heldout.jsonl`
+- `<owner>/shellsafety-v2-train.jsonl`, `<owner>/shellsafety-v2-heldout.jsonl`
+  (the second build, with shell-safety's `deny` rows split by reason code;
+  used when both are there, see `--shellsafety`) or else
+  `<owner>/shellsafety-train.jsonl`, `<owner>/shellsafety-heldout.jsonl`
   (required unless `--dry-run`), `<owner>/extra-train.jsonl`,
   `<owner>/extra-heldout.jsonl`: one `{"command", "os", "danger", "category",
-  "source"}` per line.
+  "source"}` per line, v2 rows also with `reason`. `<owner>/reason-classes.json`
+  (v2) only feeds the counts per reason class.
 - `--realruns` (default `data/realruns/states.jsonl`): states recorded by
   `realruns.py`, all ordinary work, so harmless.
+- `--trajectories` (default `data/trajectories/actions.jsonl`): actions of
+  public coding-agent trajectories extracted by `trajectories.py`, used as
+  harmless rows once every one whose canonical form matches a dangerous row
+  of the owner's files is dropped.
 
 What it does, in order:
 
@@ -19,13 +27,17 @@ What it does, in order:
    the call's `args` as the center sends them for `--args-share` of the rows,
    since the center always sends them in production but the 214 cases do
    not), the center's question or, for 25 %, one of the paraphrases, and
-   `"gold": {"danger": <bool>}`. Real-run states keep their own state.
+   `"gold": {"danger": <bool>}`. Real-run states keep their own state;
+   trajectory file actions (`fs.write`, `fs.read`) carry their `args`.
 2. Near-duplicates (same capability and `common.canonical` form) keep one row;
    a group whose rows disagree on the label is dropped whole.
 3. Every row whose key matches a held-out row or one of the 214 evaluation
    cases is dropped.
-4. Harmless rows are capped at `--max-harmless-ratio` per dangerous row (the
-   real runs are kept first, then a random sample of the rest).
+4. Harmless rows are capped at `--max-harmless-ratio` per dangerous row: the
+   real runs are kept first, then up to `--trajectory-ratio` trajectory rows
+   per dangerous row (no program, e.g. `python` or `grep`, above
+   `--trajectory-program-share` of them, so the sample is not all test runs),
+   then a random sample of the owner's harmless rows fills the rest.
 5. A stratified `--calib-share` of the rows goes to `calib.jsonl` (fitting the
    temperature after training), the rest to `train.jsonl`.
 6. Each held-out file is written in the eval runner's case format
@@ -46,6 +58,7 @@ import sys
 from pathlib import Path
 
 import common
+import trajectories
 from common import WORK
 
 # Working folders an agent's command plausibly runs in, for the `args` the
@@ -96,7 +109,45 @@ def case_from_command(r):
     return {"cap": "exec", "action": "run", "target": common.clip(r["command"], 2000),
             "os": r["os"], "danger": r["danger"],
             "kind": "dangerous" if r["danger"] else "benign",
-            "category": r.get("category", ""), "source": r.get("source", "")}
+            "category": r.get("category", ""), "reason": r.get("reason", ""),
+            "source": r.get("source", "")}
+
+
+def owner_files(owner, which):
+    """The owner's (name, train, held-out) files: the v2 shell-safety build when
+    `which` is v2, or auto and both v2 files are there, else the first."""
+    v2 = (owner / "shellsafety-v2-train.jsonl", owner / "shellsafety-v2-heldout.jsonl")
+    if which == "v2" or (which == "auto" and all(p.exists() for p in v2)):
+        shell = ("shellsafety-v2", *v2)
+    else:
+        shell = ("shellsafety", owner / "shellsafety-train.jsonl",
+                 owner / "shellsafety-heldout.jsonl")
+    return [shell, ("extra", owner / "extra-train.jsonl", owner / "extra-heldout.jsonl")]
+
+
+def trajectory_row(rng, t, args_share, tainted_share):
+    """A trajectory action as the center would send it: a command like the
+    owner's rows, a file action with its own `args`."""
+    if t["cap"] == "exec":
+        return command_state(rng, t["target"], "linux", args_share, tainted_share)
+    return common.model_state(t["cap"], t["action"], t["target"], "linux",
+                              tainted=rng.random() < tainted_share, args=t.get("args"))
+
+
+def sample_trajectories(rng, rows, n, program_share):
+    """`n` rows at most, at most `program_share` of `n` (and at least one)
+    from any one program, at random within that."""
+    by = collections.defaultdict(list)
+    for r in rows:
+        by[r["_program"]].append(r)
+    per = max(1, int(n * program_share))
+    pool = []
+    for prog in sorted(by):
+        group = by[prog][:]
+        rng.shuffle(group)
+        pool.extend(group[:per])
+    rng.shuffle(pool)
+    return pool[:n]
 
 
 def case_from_state(st):
@@ -130,6 +181,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--owner", type=Path, default=WORK / "data" / "owner")
     ap.add_argument("--realruns", type=Path, default=WORK / "data" / "realruns" / "states.jsonl")
+    ap.add_argument("--trajectories", type=Path,
+                    default=WORK / "data" / "trajectories" / "actions.jsonl",
+                    help="harmless agent actions from trajectories.py (skipped if missing)")
+    ap.add_argument("--shellsafety", choices=["auto", "v1", "v2"], default="auto",
+                    help="which build of the owner's shell-safety files (auto: v2 if there)")
+    ap.add_argument("--trajectory-ratio", type=float, default=0.5,
+                    help="at most this many trajectory rows per dangerous row")
+    ap.add_argument("--trajectory-program-share", type=float, default=0.15)
     ap.add_argument("--out", type=Path, default=None,
                     help="default data/prepared (data/prepared-dry with --dry-run)")
     ap.add_argument("--dry-run", action="store_true",
@@ -149,21 +208,35 @@ def main():
     # ---- held-out sources
     heldout = {}  # name -> list of eval cases
     train_cmds = []  # owner command rows for training
+    danger_keys = set()  # every dangerous owner row, train or held-out
     if not a.dry_run:
-        for name in ("shellsafety", "extra"):
-            tr, ho = a.owner / f"{name}-train.jsonl", a.owner / f"{name}-heldout.jsonl"
-            if name == "shellsafety" and not (tr.exists() and ho.exists()):
+        for name, tr, ho in owner_files(a.owner, a.shellsafety):
+            if name.startswith("shellsafety") and not (tr.exists() and ho.exists()):
                 sys.exit(f"missing {tr} or {ho} (or use --dry-run)")
-            if tr.exists():
-                rows, bad = owner_rows(tr)
-                stats["inputs"][tr.name] = {"rows": len(rows), "malformed": bad,
-                                            "danger": sum(r["danger"] for r in rows)}
-                train_cmds.extend(rows)
-            if ho.exists():
-                rows, bad = owner_rows(ho)
-                stats["inputs"][ho.name] = {"rows": len(rows), "malformed": bad,
-                                            "danger": sum(r["danger"] for r in rows)}
-                heldout[name] = [case_from_command(r) for r in rows]
+            for path, part in ((tr, "train"), (ho, "heldout")):
+                if not path.exists():
+                    continue
+                rows, bad = owner_rows(path)
+                stats["inputs"][path.name] = {"rows": len(rows), "malformed": bad,
+                                              "danger": sum(r["danger"] for r in rows)}
+                danger_keys.update(key("exec", r["command"]) for r in rows if r["danger"])
+                if part == "train":
+                    train_cmds.extend(rows)
+                else:
+                    heldout[name] = [case_from_command(r) for r in rows]
+        classes = a.owner / "reason-classes.json"
+        if classes.exists() and any(r.get("reason") for r in train_cmds):
+            cls = {c["reason"]: c["class"] for c in
+                   json.loads(classes.read_text(encoding="utf-8"))}
+            per = collections.Counter(
+                ("danger" if r["danger"] else "harmless") + ":" + cls.get(r.get("reason"), "none")
+                for r in train_cmds)
+            stats["inputs"]["owner_train_by_reason_class"] = dict(sorted(per.items()))
+
+    traj = []
+    if not a.dry_run and a.trajectories.exists():
+        traj = common.load_jsonl(a.trajectories)
+        stats["inputs"]["trajectories"] = {"rows": len(traj), "danger": 0}
 
     states = common.load_jsonl(a.realruns) if a.realruns.exists() else []
     stats["inputs"]["realruns"] = {"rows": len(states), "danger": 0}
@@ -185,6 +258,17 @@ def main():
         rows.append({"state": dict(sorted(st.items())),
                      "questions": pick_question(rng, a.paraphrase_share),
                      "gold": {"danger": False}, "_src": "realruns"})
+    for t in traj:
+        # Never let an agent's action stand in as harmless when the owner's
+        # files call the same command dangerous (also without a leading `cd`).
+        if t["cap"] == "exec" and (key("exec", t["target"]) in danger_keys
+                                   or trajectories.dedup_key("exec", t["target"]) in danger_keys):
+            stats["dropped"]["trajectory_matches_dangerous"] += 1
+            continue
+        rows.append({"state": trajectory_row(rng, t, a.args_share, a.tainted_share),
+                     "questions": pick_question(rng, a.paraphrase_share),
+                     "gold": {"danger": False}, "_src": t["source"],
+                     "_program": t["program"]})
 
     # ---- near-duplicates: keep one per key, drop groups with both labels
     groups = collections.OrderedDict()
@@ -222,13 +306,16 @@ def main():
     harmless = [r for r in clean if not r["gold"]["danger"]]
     if not a.dry_run:
         cap = int(len(danger) * a.max_harmless_ratio)
-        if len(harmless) > cap:
-            real = [r for r in harmless if r["_src"] == "realruns"]
-            rest = [r for r in harmless if r["_src"] != "realruns"]
-            rng.shuffle(rest)
-            keep = real[:cap] + rest[:max(0, cap - len(real))]
-            stats["dropped"]["balance"] += len(harmless) - len(keep)
-            harmless = keep
+        real = [r for r in harmless if r["_src"] == "realruns"]
+        agent = [r for r in harmless if "_program" in r]
+        rest = [r for r in harmless if r["_src"] != "realruns" and "_program" not in r]
+        keep = real[:cap]
+        n_agent = min(int(len(danger) * a.trajectory_ratio), cap - len(keep))
+        keep += sample_trajectories(rng, agent, n_agent, a.trajectory_program_share)
+        rng.shuffle(rest)
+        keep += rest[:max(0, cap - len(keep))]
+        stats["dropped"]["balance"] += len(harmless) - len(keep)
+        harmless = keep
     final = danger + harmless
     rng.shuffle(final)
 
@@ -238,6 +325,10 @@ def main():
     for part in (train, calib):
         for r in part:
             srcs[r.pop("_src")] += 1
+            r.pop("_program", None)
+    # A held-out file of an earlier run (e.g. the v1 build) must not be scored again.
+    for stale in out.glob("heldout-*.json"):
+        stale.unlink()
     common.write_jsonl(out / "train.jsonl", train)
     common.write_jsonl(out / "calib.jsonl", calib)
     for name, cases in heldout.items():
