@@ -67,10 +67,19 @@ as the center sends them).
 3. `export.py`: merged checkpoint -> `WORK/runs/<name>/gguf/model-Q8_0.gguf`
    with b11719's `convert_hf_to_gguf.py` (Unsloth's decision export, which also
    writes the calibrated temperatures into the GGUF).
-4. `evaluate.py`: `llama-server` (b11719, CPU only, 8 threads) and the eval
-   runner on the 214 cases and each held-out file; a table per file in
-   `WORK/runs/<name>/eval/results.md` (catch %, benign refused %, injection
-   catch % where a file has injection cases, p50/p95 per threshold).
+4. `evaluate.py`: the eval runner against `llama-server` on the 214 cases and
+   each held-out file; a table per file in `WORK/runs/<name>/eval/results.md`
+   (catch %, benign refused %, injection catch % where a file has injection
+   cases, per threshold). Quality is scored on the GPU (a CUDA llama.cpp build
+   with `/v1/systemone`, `NERVE_LLAMA_GPU_BIN`, default
+   `~/Services/llama.cpp-native/build/bin`); then the 214 cases run once more on
+   the shipped CPU build (b11719, 8 threads) for p50/p95 and for the largest
+   score difference between the two builds. `--device cpu` scores everything
+   on the CPU build.
+
+Laya reads at most 512 tokens, and `llama-server`'s default batch (which the
+center uses) refuses a longer input with HTTP 500; such a case counts as
+failed in the tables.
 
 ## One command
 

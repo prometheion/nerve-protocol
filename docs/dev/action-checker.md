@@ -347,6 +347,38 @@ operating point, with the latency per call:
 | Kev-4B (ggml-org) | 4B Q4_K_M | 4.0 s / 5.2 s | 0.50 | 78.5 | 1.7 | 93.3 |
 | Kev-4B | | | 0.60 | 66.7 | 0.8 | 86.7 |
 
+### Our own fine-tuned Laya (issue #139)
+
+`tools/decision-model/` fine-tunes Laya with Unsloth on labelled shell
+commands from tomngdev/shell-safety-v1.1 (MIT), a few rows of the owner's own,
+and ordinary work recorded through a local node (8 532 rows, 41 % dangerous;
+the held-out split and every near-duplicate of the 214 cases are kept out of
+training). Same 214 cases and question; the pinned b11719 CPU build on 8
+threads for the latency; quality scored on a CUDA build and checked against
+the CPU build (largest score difference per case 0.07, mean under 0.005; the
+214 rates below are the CPU build's). "Held-out" is shell-safety's own test
+split (600 commands, 210 dangerous), never trained on.
+
+| Model | p50 / p95 (CPU) | Threshold | Catch % | Benign-refused % | Injection catch % | Held-out catch / benign-refused % |
+|---|---|---|---|---|---|---|
+| Laya, untouched (Q8_0) | 0.72 s / 0.76 s | 0.60 | 16.1 | 0.0 | 0.0 | 5.7 / 0.8 |
+| Laya + LoRA r32, 2 epochs (Q8_0) | 0.73 s / 0.82 s | 0.80 | 71.0 | 5.8 | 60.0 | 90.0 / 0.5 |
+| Laya + LoRA r32, 2 epochs | | 0.85 | 64.5 | 4.1 | 60.0 | 86.7 / 0.5 |
+| Laya + LoRA r32, 2 epochs | | 0.90 | 58.1 | 3.3 | 53.3 | 85.2 / 0.3 |
+| Laya, full fine-tune, 2 epochs (Q8_0) | 0.71 s / 0.77 s | 0.90 | 90.3 | 12.4 | 93.3 | 97.1 / 0.0 |
+
+Fine-tuning makes Laya useful: the LoRA model catches about as much as d1-3B
+on the 214 at well under half its latency, but refuses more ordinary work
+(curl/wget to a URL, `kill`, `pkill`, `export PATH`, and the borderline
+`systemctl restart` and `shred` of one file). The full fine-tune follows the
+training labels more closely: 97 % on the held-out split and 93 % of the
+injection cases, but 12–20 % of the 214's benign and borderline work refused
+(also `git add`, `git commit`, `apt-get install`, `kubectl delete pod`). Both
+score well on shell-safety's own test split and worse on the 214's benign
+side, which points at the labels: shell-safety's `deny` looks wider than the
+checker's "serious, irreversible harm". The next step is the data (which of
+its `deny` reasons count as serious harm), not the training.
+
 Full sweeps are in the commit that added this file; the shape is the same for
 each: d1-3B separates ordinary work from dangerous actions cleanly (git, ls,
 cargo, npm, docker, `rm -rf ./build`/`node_modules` all score ~0.01–0.05; `rm
