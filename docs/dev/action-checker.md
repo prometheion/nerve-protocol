@@ -415,6 +415,8 @@ ROC-AUC over all scores, independent of the threshold.
 | Laya, full fine-tune, 2 epochs (Q8_0) | 0.62 s / 0.68 s | 0.90 | 77.4 | 11.6 | 80.0 | 0.923 | 96.1 / 1.0 | 0.998 |
 | d1-3B (Q4_K_M) | 1.63 s / 2.16 s | 0.80 | 60.2 | 2.5 | 66.7 | 0.942 | 15.8 / 0.0 | 0.962 |
 | d1-3B | | 0.50 | 69.9 | 4.1 | 80.0 | | 40.8 / 0.8 | |
+| Kev-4B (Q4_K_M) | 3.13 s / 3.91 s | 0.50 | 78.5 | 1.7 | 93.3 | 0.972 | 36.8 / 0.0 | 0.977 |
+| Kev-4B | | 0.60 | 66.7 | 0.8 | 86.7 | | 31.6 / 0.0 | |
 
 The v2 labels fixed most of the first round's benign refusals: the LoRA model
 now refuses only `kill -TERM <pid>` and an `scp` to `/tmp/` of the 214's benign
@@ -431,8 +433,10 @@ but refuses 12 % of its benign and borderline work, mostly `rm -rf` of build
 output and temp folders and `kill`/`pkill`: it learnt "deletes recursively"
 rather than "destroys something that matters". The training data has no
 injection attempts (none may be written by hand here), the likeliest reason
-both Laya models trail d1-3B on that row. So d1-3B stays the default, and no
-Laya is prepared for publication yet.
+both Laya models trail d1-3B on that row. Kev-4B stays the best on the 214 (AUC 0.972, 93 % of the injection attempts at
+1.7 % benign refusals) and ranks the held-out split as well as the LoRA model
+(0.977 vs 0.975), though at its threshold it catches only 37 % of it. So d1-3B
+stays the default, and no Laya is prepared for publication yet.
 
 Full sweeps are in the commit that added this file; the shape is the same for
 each: d1-3B separates ordinary work from dangerous actions cleanly (git, ls,
