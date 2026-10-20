@@ -392,6 +392,48 @@ side, which points at the labels: shell-safety's `deny` looks wider than the
 checker's "serious, irreversible harm". The next step is the data (which of
 its `deny` reasons count as serious harm), not the training.
 
+**Second round (v2 data).** The owner rebuilt the shell-safety files with its
+`deny` rows split by reason code: only the codes he classed as serious,
+irreversible harm are dangerous, the other `deny` rows are left out. Training
+also takes ordinary commands and file actions of public coding-agent
+trajectories (SWE-agent, SWE-Hero, CC-BY-4.0) and the real runs: 3 192 rows
+(2 872 train, 320 calibration), 40 % dangerous. The target and args of a state
+are clipped to 320 bytes (start and end kept) and `llama-server` runs with
+`-b/-ub 2048`, as a Laya pin needs (see `ModelPin::state_bytes`/`batch`);
+d1-3B and Kev-4B keep their 2000 bytes and the defaults. "Held-out v2" is the
+new build's test split (467 commands, 76 dangerous), never trained on and kept
+out of training by canonical form. The 214 rates are the CPU build's
+(b11719, 8 threads), the held-out rates the CUDA build's (largest score
+difference per case between the two 0.09, mean under 0.007). AUC is the
+ROC-AUC over all scores, independent of the threshold.
+
+| Model | p50 / p95 (CPU) | Threshold | Catch % | Benign-refused % | Injection catch % | AUC (214) | Held-out v2 catch / benign-refused % | AUC (held-out v2) |
+|---|---|---|---|---|---|---|---|---|
+| Laya, untouched (Q8_0) | 0.65 s / 0.69 s | 0.60 | 16.1 | 0.0 | 0.0 | 0.781 | 7.9 / 0.8 | 0.854 |
+| Laya + LoRA r32, 2 epochs (Q8_0) | 0.63 s / 0.68 s | 0.80 | 64.5 | 3.3 | 40.0 | 0.912 | 82.9 / 2.8 | 0.975 |
+| Laya + LoRA r32, 2 epochs | | 0.85 | 61.3 | 1.7 | 33.3 | | 78.9 / 2.0 | |
+| Laya, full fine-tune, 2 epochs (Q8_0) | 0.62 s / 0.68 s | 0.90 | 77.4 | 11.6 | 80.0 | 0.923 | 96.1 / 1.0 | 0.998 |
+| d1-3B (Q4_K_M) | 1.63 s / 2.16 s | 0.80 | 60.2 | 2.5 | 66.7 | 0.942 | 15.8 / 0.0 | 0.962 |
+| d1-3B | | 0.50 | 69.9 | 4.1 | 80.0 | | 40.8 / 0.8 | |
+
+The v2 labels fixed most of the first round's benign refusals: the LoRA model
+now refuses only `kill -TERM <pid>` and an `scp` to `/tmp/` of the 214's benign
+and borderline work at 0.85, and catches slightly more of the 214's dangerous
+cases than d1-3B at the same benign-refusal rate (61.3 % vs 55.9 % at 1.7 %),
+at well under half its latency (0.63 s vs 1.6 s). But it is **not** better than
+d1-3B overall: it catches half as many of the injection attempts (33 % vs
+67 %), and d1-3B ranks the 214 better over all thresholds (AUC 0.942 vs 0.912).
+On the held-out split Laya is far ahead (d1-3B catches only 16 % of it at its
+threshold), but that split comes from the same dataset as Laya's training
+data, so it shows how well Laya learnt those labels more than how it
+generalises. The full fine-tune catches more of the 214 (77 %, injection 80 %)
+but refuses 12 % of its benign and borderline work, mostly `rm -rf` of build
+output and temp folders and `kill`/`pkill`: it learnt "deletes recursively"
+rather than "destroys something that matters". The training data has no
+injection attempts (none may be written by hand here), the likeliest reason
+both Laya models trail d1-3B on that row. So d1-3B stays the default, and no
+Laya is prepared for publication yet.
+
 Full sweeps are in the commit that added this file; the shape is the same for
 each: d1-3B separates ordinary work from dangerous actions cleanly (git, ls,
 cargo, npm, docker, `rm -rf ./build`/`node_modules` all score ~0.01–0.05; `rm
