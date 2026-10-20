@@ -438,11 +438,217 @@ both Laya models trail d1-3B on that row. Kev-4B stays the best on the 214 (AUC 
 (0.977 vs 0.975), though at its threshold it catches only 37 % of it. So d1-3B
 stays the default, and no Laya is prepared for publication yet.
 
+**Third round (v3.1 data).** The owner's third data build (v3.1: 11,989 training
+rows, 3,277 of them dangerous, commands and file writes, Linux and Windows, 599
+with an injection; a 1,333-row dev split; a 3,993-row benchmark with 1,093
+dangerous and 341 injection cases, stratified by length, chain operators and
+nesting) replaces the shell-safety files. After deduplication by canonical form
+the training set has 2,921 dangerous rows plus the harmless rows below, and 10 %
+of it is held back to fit the temperature. Dev, benchmark and the 214 are never
+trained on and share no canonical form with the training rows. The
+harmless:dangerous ratio was swept, not assumed. Every run is Laya, the same
+seed (139), 2 epochs, batch 32, lr 2e-5 for the full fine-tune (1e-4, r 32 for
+LoRA), the target and args cut to 320 bytes, Q8_0 GGUF, scored on the CUDA build
+(the CPU build agrees to 0.02 on every score, below). The configurations differ in
+three knobs of `prepare.py`:
+
+- the cap on harmless rows per dangerous row (1.5, 2, 3, and "all": every harmless row
+  of the owner's file plus the floor's, 2.8 per dangerous row, since v3.1's own harmless
+  rows come to 2.7);
+- the trajectory share (`--trajectory-ratio`: 0.5 extra SWE-agent/SWE-Hero rows per
+  dangerous row, the earlier default, or 0; a ratio of 3 needs them, the owner's harmless
+  rows alone do not reach it);
+- the floor of long and nested harmless rows (`--bucket-floor`, new): a random sample of
+  the harmless pool kept 5 commands over 1,000 bytes and 22 at nesting 2+ of the pool's
+  1,255 and 32; the floor keeps up to 150 harmless rows per rare bucket (300-1000 and
+  over 1000 bytes, 3-5 and 6+ chain operators, nesting 1 and 2+) where the pool has them,
+  inside the same cap. It lifts the over-1,000-byte rows from 5 to about 145 and nearly doubles
+  the 3-5 and 6+ chains (153 to 268, 107 to 205 at 1.5:1). The pool has only 32 harmless rows at nesting 2+, so
+  there is nothing more to take there.
+
+The threshold of every run is chosen on **dev only**: the lowest at which at most 3 % of
+the benign dev cases are refused, rounded up to two decimals (`compare.py`). Runs are
+ranked on dev by the mean of the catch rate and the injection catch rate, averaged over
+benign budgets of 3, 1 and 0.5 %. That threshold is then applied unchanged to the
+benchmark and the 214. Cells are catch % / benign-refused % (/ injection catch % /
+injection refused %). 95 % half-widths of a rate are about 1 point on dev and benchmark
+(catch), 0.5 to 1 for refusals, and 7 to 9 points for the 214's catch rate, 4 to 6 for
+its refusals (one seed per configuration; the 214 holds 93 dangerous and 121 other
+cases, 15 of the dangerous ones injections). AUC is the ROC-AUC over all scores. Dev
+rank order: first row first.
+
+| Laya run | Threshold | Dev: catch / inj. catch / benign refused | Benchmark: catch / benign refused / inj. catch / inj. refused | 214: catch / benign refused / inj. catch | AUC benchmark | AUC 214 |
+|---|---|---|---|---|---|---|
+| full FT, 2.8 (all):1, traj 0, floor 150 | 0.02 | 100.0 / 100.0 / 2.2 | 99.9 / 2.0 / 100.0 / 2.5 | 82.8 / 12.4 / 73.3 | 1.000 | 0.932 |
+| full FT, 3:1, traj 0.5, floor 150 | 0.01 | 100.0 / 100.0 / 1.9 | 98.9 / 2.5 / 99.5 / 3.2 | 83.9 / 11.6 / 80.0 | 0.998 | 0.925 |
+| full FT, 1.5:1, traj 0, floor 0 | 0.03 | 100.0 / 100.0 / 1.9 | 99.7 / 1.9 / 100.0 / 6.3 | 82.8 / 16.5 / 73.3 | 1.000 | 0.925 |
+| full FT, 1.5:1, traj 0.5, floor 150 | 0.03 | 99.7 / 100.0 / 2.9 | 99.7 / 2.5 / 99.5 / 7.0 | 84.9 / 10.7 / 73.3 | 0.999 | 0.913 |
+| full FT, 1.5:1, traj 0, floor 150 | 0.03 | 99.7 / 100.0 / 2.9 | 99.4 / 3.0 / 100.0 / 3.8 | 80.6 / 16.5 / 66.7 | 0.999 | 0.905 |
+| LoRA r32, 2.8 (all):1, traj 0, floor 150 | 0.08 | 99.5 / 100.0 / 2.9 | 98.9 / 3.0 / 97.8 / 8.2 | 78.5 / 9.9 / 73.3 | 0.998 | 0.934 |
+| full FT, 2:1, traj 0, floor 150 | 0.05 | 99.7 / 100.0 / 3.0 | 99.9 / 2.9 / 100.0 / 6.3 | 82.8 / 14.9 / 80.0 | 1.000 | 0.907 |
+| LoRA r32, 3:1, traj 0.5, floor 150 | 0.09 | 100.0 / 100.0 / 3.0 | 99.0 / 3.2 / 98.4 / 8.2 | 81.7 / 11.6 / 73.3 | 0.998 | 0.925 |
+| Laya, untouched | 0.62 | 8.5 / 12.8 / 2.8 | 6.8 / 3.6 / 11.5 / 10.8 | 11.8 / 0.0 / 0.0 | 0.620 | 0.781 |
+| d1-3B (Q4_K_M) | 0.49 | 44.5 / 84.6 / 3.0 | 44.0 / 2.7 / 67.2 / 11.4 | 69.9 / 4.1 / 80.0 | 0.880 | 0.942 |
+| Kev-4B (Q4_K_M) | 0.38 | 49.2 / 76.9 / 2.9 | 44.1 / 2.3 / 59.6 / 6.3 | 82.8 / 5.0 / 93.3 | 0.907 | 0.972 |
+
+The same runs at a fixed threshold of 0.80 (d1-3B and Kev-4B at their own defaults 0.8
+and 0.5), which is how the center would use them:
+
+| Run | Threshold | Dev | Benchmark | 214 | AUC benchmark | AUC 214 |
+|---|---|---|---|---|---|---|
+| full FT, 2.8 (all):1, traj 0, floor 150 | 0.80 | 98.9 / 100.0 / 0.2 | 97.3 / 0.2 / 97.3 / 0.0 | 69.9 / 4.1 / 60.0 | 1.000 | 0.932 |
+| full FT, 3:1, traj 0.5, floor 150 | 0.80 | 98.4 / 100.0 / 0.4 | 97.1 / 0.2 / 96.2 / 0.0 | 72.0 / 5.0 / 60.0 | 0.998 | 0.925 |
+| full FT, 1.5:1, traj 0, floor 0 | 0.80 | 98.4 / 100.0 / 0.4 | 97.7 / 0.3 / 97.8 / 0.6 | 76.3 / 9.9 / 66.7 | 1.000 | 0.925 |
+| full FT, 1.5:1, traj 0.5, floor 150 | 0.80 | 98.1 / 100.0 / 0.4 | 97.0 / 0.6 / 98.4 / 0.0 | 67.7 / 4.1 / 60.0 | 0.999 | 0.913 |
+| full FT, 1.5:1, traj 0, floor 150 | 0.80 | 98.6 / 97.4 / 0.7 | 97.2 / 0.4 / 96.7 / 0.6 | 75.3 / 9.9 / 60.0 | 0.999 | 0.905 |
+| LoRA r32, 2.8 (all):1, traj 0, floor 150 | 0.80 | 95.6 / 94.9 / 0.3 | 93.4 / 0.4 / 85.2 / 0.0 | 65.6 / 3.3 / 53.3 | 0.998 | 0.934 |
+| full FT, 2:1, traj 0, floor 150 | 0.80 | 98.4 / 97.4 / 0.6 | 97.8 / 0.3 / 97.3 / 0.0 | 75.3 / 8.3 / 66.7 | 1.000 | 0.907 |
+| LoRA r32, 3:1, traj 0.5, floor 150 | 0.80 | 95.3 / 89.7 / 0.5 | 92.2 / 0.2 / 81.4 / 0.0 | 69.9 / 4.1 / 60.0 | 0.998 | 0.925 |
+| d1-3B (its default) | 0.80 | 27.5 / 53.8 / 0.9 | 28.7 / 0.9 / 45.9 / 10.1 | 60.2 / 2.5 / 66.7 | 0.880 | 0.942 |
+| Kev-4B (its default) | 0.50 | 41.5 / 66.7 / 1.9 | 34.9 / 1.2 / 49.7 / 5.1 | 79.6 / 1.7 / 93.3 | 0.907 | 0.972 |
+| Laya, untouched | 0.80 | 0.3 / 2.6 / 0.4 | 0.1 / 0.2 / 0.5 / 1.9 | 0.0 / 0.0 / 0.0 | 0.620 | 0.781 |
+
+What the sweep shows:
+
+- **Dev and benchmark cannot tell the configurations apart.** Every full fine-tune
+  catches 99 to 100 % of dev and 98.9 to 99.9 % of the benchmark at 2 to 3 % benign
+  refusals, injections included (the benchmark's dangerous long and nested commands too:
+  100 % of the 19 at 300-1000 bytes, 100 % of the 21 with 3-5 chain operators, 100 % of
+  the 12 at nesting 2+ for the chosen run). The ranking on dev (100.0 to 98.0) rests on
+  two to four cases at the stricter budgets. The **ratio is therefore not a lever** that
+  these two sets can measure; it is not a lever on the 214 either: catch and refusals of
+  all six full fine-tunes overlap within the 214's half-widths, at the dev threshold and
+  at 0.8. The 214 AUC runs from 0.905 to 0.934 with no order by ratio (1.5:1 without
+  the floor 0.925, 3:1 0.925, 2.8:1 0.932, 2:1 0.907), one seed each. The floor made no
+  measurable difference either (1.5:1 with the floor 0.905, without it 0.925 on the 214; the
+  refusals are 16.5 % in both).
+- **Dev is too easy to choose a threshold on.** Its benign rows score near 0 or near 1,
+  so the 3 % budget lands at a threshold of 0.01 to 0.09. On the 214 that threshold
+  refuses 10.7 to 16.5 % of the non-dangerous cases, and for the chosen run 9 of the
+  20 borderline cases besides 7 of 102 plainly benign ones (at 0.8: 3 and 3); at 0.80
+  the benign refusals are 3.3 to 9.9 %. A dev-chosen threshold does not carry over to the
+  214 and should not become the product default.
+- **Full fine-tune against LoRA:** at the dev threshold they are the same (the LoRA
+  thresholds are 0.08 and 0.09, the 214 AUC 0.925 and 0.934, within the half-widths). At
+  a fixed 0.80 LoRA's scores are less extreme: 85 and 81 % of the benchmark's
+  injection cases against 97 %, and 53 to 60 % against 60 % on the 214's injections. The
+  full fine-tune keeps its scores near 0 and 1, so one fixed threshold works for it, and
+  it is the chosen method.
+- **Chosen: full fine-tune, all harmless rows (2.8:1), no extra trajectories, floor
+  150.** It has the best dev rank (100.0; 100 % catch, 100 % injection catch at 3 % and
+  1 %, 99.7 % at 0.5 %). On the benchmark and the 214 it is not measurably better than
+  the other full fine-tunes except for the highest 214 AUC (0.932).
+- **The benchmark is the owner's distribution, which Laya trained on.** d1-3B and
+  Kev-4B catch 44 % of it at a 3 % benign budget (Laya 99.9 %), 5 and 18 % of its file
+  writes (Laya 99.8 %), and 59 to 67 % of the injections (Laya 100 %). The benchmark
+  shares its generators and categories with the training rows (disjoint by canonical
+  form, not by construction of the commands), so this shows that Laya learnt the owner's
+  labels and that d1-3B and Kev-4B judge a differently drawn set, not that Laya
+  generalises better. The 214 is the independent set, and there Laya is **level with
+  d1-3B and behind Kev-4B**: at about 4 % benign refusals Laya (0.80) catches 69.9 % of
+  the dangerous cases, d1-3B (0.50) 69.9 %, Kev-4B (0.5) 79.6 % at 1.7 %; the injection
+  catch is 60 % (Laya at 0.80; 73 % at its dev threshold), 80 % and 93 %; the AUC is 0.932,
+  0.942 and 0.972. d1-3B catches none of the 214's five file writes and Kev-4B three; Laya
+  all five but refuses 2 of the 6 benign ones (a half-width of ±40 points).
+
+Breakdown of the chosen run on the benchmark (3,993 cases) and the 214, with d1-3B and
+Kev-4B at their own dev-chosen thresholds (3 % budget on dev) and the chosen run also at
+0.80. Cells are catch % / benign refused %; a `-` is an empty group (the 214 has no
+command over 80 bytes and no case with 3 or more chain operators).
+
+benchmark: thresholds Laya 0.02, Laya 0.8 0.80, d1-3B 0.49, Kev-4B 0.38 
+
+| Group | Value | Dangerous / benign | Laya catch / refused | Laya 0.8 catch / refused | d1-3B catch / refused | Kev-4B catch / refused |
+|---|---|---|---|---|---|---|
+| cap | exec | 625 / 2241 | 100.0 / 2.6 | 95.7 / 0.2 | 73.1 / 3.5 | 63.7 / 3.0 |
+| cap | fs | 468 / 659 | 99.8 / 0.0 | 99.6 / 0.0 | 5.1 / 0.0 | 17.9 / 0.0 |
+| os | linux | 691 / 1820 | 99.9 / 2.3 | 97.5 / 0.3 | 45.0 / 2.3 | 40.5 / 3.1 |
+| os | windows | 402 / 1080 | 100.0 / 1.5 | 97.0 / 0.0 | 42.3 / 3.4 | 50.2 / 1.1 |
+| injection | no | 910 / 2742 | 99.9 / 2.0 | 97.4 / 0.2 | 39.3 / 2.2 | 41.0 / 2.1 |
+| injection | yes | 183 / 158 | 100.0 / 2.5 | 97.3 / 0.0 | 67.2 / 11.4 | 59.6 / 6.3 |
+| length | <80 | 392 / 1541 | 100.0 / 3.1 | 95.7 / 0.3 | 74.2 / 3.2 | 73.7 / 2.3 |
+| length | 80-300 | 214 / 441 | 100.0 / 0.9 | 96.7 / 0.0 | 70.6 / 5.9 | 49.5 / 3.9 |
+| length | 300-1000 | 19 / 230 | 100.0 / 1.7 | 84.2 / 0.4 | 78.9 / 1.3 | 15.8 / 6.1 |
+| length | >1000 | 0 / 29 | - / 6.9 | - / 0.0 | - / 0.0 | - / 3.4 |
+| chain_ops | 0 | 510 / 1709 | 100.0 / 3.2 | 96.3 / 0.3 | 74.5 / 4.0 | 69.2 / 2.5 |
+| chain_ops | 1-2 | 57 / 204 | 100.0 / 1.5 | 98.2 / 0.0 | 56.1 / 0.5 | 71.9 / 2.5 |
+| chain_ops | 3-5 | 21 / 168 | 100.0 / 0.0 | 81.0 / 0.0 | 57.1 / 3.0 | 0.0 / 3.6 |
+| chain_ops | 6+ | 37 / 160 | 100.0 / 0.0 | 91.9 / 0.0 | 89.2 / 2.5 | 10.8 / 8.8 |
+| nesting | 0 | 558 / 1868 | 100.0 / 3.0 | 96.1 / 0.3 | 71.5 / 3.6 | 65.8 / 1.9 |
+| nesting | 1 | 55 / 208 | 100.0 / 1.0 | 90.9 / 0.0 | 83.6 / 2.4 | 34.5 / 4.3 |
+| nesting | 2+ | 12 / 165 | 100.0 / 0.0 | 100.0 / 0.0 | 100.0 / 3.6 | 100.0 / 13.9 |
+
+214: thresholds Laya 0.02, Laya 0.8 0.80, d1-3B 0.49, Kev-4B 0.38 
+
+| Group | Value | Dangerous / benign | Laya catch / refused | Laya 0.8 catch / refused | d1-3B catch / refused | Kev-4B catch / refused |
+|---|---|---|---|---|---|---|
+| cap | exec | 88 / 115 | 81.8 / 10.4 | 68.2 / 2.6 | 73.9 / 4.3 | 84.1 / 5.2 |
+| cap | fs | 5 / 6 | 100.0 / 50.0 | 100.0 / 33.3 | 0.0 / 0.0 | 60.0 / 0.0 |
+| os | linux | 78 / 108 | 79.5 / 13.0 | 66.7 / 3.7 | 67.9 / 4.6 | 83.3 / 5.6 |
+| os | windows | 15 / 13 | 100.0 / 7.7 | 86.7 / 7.7 | 80.0 / 0.0 | 80.0 / 0.0 |
+| injection | no | 78 / 121 | 84.6 / 12.4 | 71.8 / 4.1 | 67.9 / 4.1 | 80.8 / 5.0 |
+| injection | yes | 15 / 0 | 73.3 / - | 60.0 / - | 80.0 / - | 93.3 / - |
+| length | <80 | 88 / 115 | 81.8 / 10.4 | 68.2 / 2.6 | 73.9 / 4.3 | 84.1 / 5.2 |
+| chain_ops | 0 | 79 / 114 | 86.1 / 9.6 | 74.7 / 2.6 | 78.5 / 4.4 | 83.5 / 5.3 |
+| chain_ops | 1-2 | 9 / 1 | 44.4 / 100.0 | 11.1 / 0.0 | 33.3 / 0.0 | 88.9 / 0.0 |
+| nesting | 0 | 84 / 115 | 81.0 / 10.4 | 66.7 / 2.6 | 72.6 / 4.3 | 83.3 / 5.2 |
+| nesting | 1 | 4 / 0 | 100.0 / - | 100.0 / - | 100.0 / - | 100.0 / - |
+
+**Latency and long inputs** (the chosen Q8_0 on the pinned CPU build b11719, 8 threads,
+the eval runner; the machine was loaded by another build, load average 12 to 14, so
+these are slower than the v2 round's 0.62 s): the 214 cases: p50 705 ms, p95 743 ms, 0
+failed. 478 long or deeply nested benchmark cases (300 bytes and over, or 3 or
+more chain operators, or nesting; 40 dangerous): 0 failed, p50 1.06 s, p95 1.34 s, 90 %
+of the dangerous ones caught and 0 of 438 benign refused at 0.80 (92.5 % and 0.2 % at 0.5);
+the CUDA build's scores for the same cases differ by at most 0.020 (mean 0.0002).
+The 100 longest of them with `args` sent too, which brings the prompt close to Laya's 512 tokens: 0
+failed, p50 1.62 s, p95 2.37 s. Clipping the target and args to 320 bytes keeps every
+state inside Laya's 512 positions (`state_bytes: 320`, `-b/-ub 2048`), so long inputs are
+answered, not refused. On a CPU at rest the typical call (short command) is about 0.65
+s; d1-3B takes 1.6 s and Kev-4B 3.1 s on the same machine.
+
+**Verdict.** Laya fine-tuned on v3.1 is a very good judge of the owner's dataset (99.9 %
+of a 3,993-case benchmark at 2 % benign refusals, long and nested commands and
+injections included) and 2.5 times faster than d1-3B, but on the independent 214 cases it
+is **level with d1-3B, not clearly better** (same catch at the same refusals, lower
+injection catch and AUC), and behind Kev-4B. Neither the harmless:dangerous ratio nor the
+floor of long harmless rows changes that; what limits the 214 score is how the model
+judges commands that the training data does not look like, not the balance. The default
+stays d1-3B. The weights and Q8_0 GGUF of the chosen run are prepared (not uploaded) for
+the owner's decision, see below; a threshold of 0.80 is the one to pin, not the
+dev-chosen one.
+
+Draft pin entry for the chosen Laya, for `install.rs` once it is published (`repo` and
+`revision` are placeholders; a new `LocalModel` variant and the UI text come with it):
+
+```rust
+ModelPin {
+    id: LocalModel::Laya,
+    name: "Nerve Laya checker (Q8_0)",
+    repo: "<owner>/<repo>",
+    revision: "<commit of the upload>",
+    file: "Laya-nerve-checker-Q8_0.gguf",
+    bytes: 449_396_384,
+    sha256: "a8baa5bea26b5d2f372200284317ba285b64b748d5afa3f15e260123a47d662f",
+    licence: "Apache-2.0",
+    threshold: 0.8,
+    timeout_ms: 5000, // p95 2.4 s for the longest calls on a loaded CPU
+    summary: "Fastest: about 0.7 s per call on a desktop CPU. Catches about 70 % of dangerous actions and 60 % of injection attempts, refusing about 4 % of ordinary work; trained on a larger set of commands and file writes.",
+    state_bytes: 320,
+    batch: Some(2048),
+},
+```
+
+Files ready to upload: `~/Services/nerve-training/runs/laya-full-all-t0/publish/`
+(`merged/` the bf16 weights in the layout the converter reads, `Laya-nerve-checker-Q8_0.gguf`,
+`SHA256SUMS`, a draft model card). Merged `model.safetensors` sha256
+`83a1c39c164e36c757372f234631ea09c099baeed3d4fe6e8d383aef7ddb1467`.
+
 Full sweeps are in the commit that added this file; the shape is the same for
 each: d1-3B separates ordinary work from dangerous actions cleanly (git, ls,
 cargo, npm, docker, `rm -rf ./build`/`node_modules` all score ~0.01–0.05; `rm
 -rf /`, `mkfs`, `chmod -R 777 /`, `dd` to a disk, `DROP DATABASE`, force-push
-`main`, `userdel root` all ~0.9+). Laya and d1-omni-600M cannot tell danger from
+`main`, `userdel root` all ~0.9+). Untouched Laya and d1-omni-600M cannot tell danger from
 ordinary work at a usable benign-refusal rate. Kev-4B is the **strongest on
 quality** — at threshold 0.5 it catches 78.5 % of the dangerous cases and 93 %
 of the injection cases at only 1.7 % benign refusals — but at **~4.0 s per call

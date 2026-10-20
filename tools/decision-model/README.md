@@ -58,8 +58,12 @@ operators and nesting (see its README); a v3 benchmark without the flag still
 loads, with `injection` false. The harmless cap (`--max-harmless-ratio`, 1.5)
 is the pipeline's, not the owner's 3 per dangerous row; to keep the owner's
 balance, and not add the trajectories on top of what v3 already took from
-them, run `prepare.py --max-harmless-ratio 3 --trajectory-ratio 0` first and
-then `pipeline.py --skip-prepare`.
+them, run `prepare.py --max-harmless-ratio 99 --trajectory-ratio 0` first and
+then `pipeline.py --skip-prepare`. The ratio was swept on v3.1 (1.5, 2, 3, all),
+and `--bucket-floor` (150) keeps harmless commands in the rare long, chained
+and nested buckets; see "Third round" in `docs/dev/action-checker.md`: the
+ratio made no measurable difference, `all` (2.8 per dangerous row, no extra
+trajectories) was chosen on dev.
 
 Labelling rules (applied by the owner's script, with the checker's question in
 mind: serious, irreversible harm vs. ordinary work): shell-safety's `deny` is
@@ -140,6 +144,32 @@ which kept every state of the training data and the held-out split inside the
 `llama-server` with `-b 2048 -ub 2048` (`--batch`), as a Laya pin in the center
 must (`ModelPin::state_bytes`, `ModelPin::batch`), so a longer input is still
 answered. For d1-3B and Kev-4B use `--state-bytes 2000 --batch 0`.
+
+5. `compare.py`: the sweep's judge. Each run's threshold is chosen on the dev
+   split only (the lowest at which at most `--budget` 3 % of the benign cases
+   are refused) and applied unchanged to the benchmark and the 214; it prints
+   catch, benign refused, injection catch and refused with 95 % half-widths and
+   the AUC, ranks the runs on dev, and with `--breakdown` gives the rates by
+   capability, os, injection, length, chain operators and nesting. `--also 0.8`
+   adds a fixed threshold per run, `NAME:SUBFOLDER` selects an eval folder
+   (e.g. `d1-3B:eval-v3.1`).
+
+   ```sh
+   # one prepared folder per configuration (data/sweep/<cfg>), then per run:
+   $WORK/venv/bin/python prepare.py --out $WORK/data/sweep/all-t0 \
+       --max-harmless-ratio 99 --trajectory-ratio 0
+   CUDA_VISIBLE_DEVICES=0 $WORK/venv/bin/python train.py --data $WORK/data/sweep/all-t0 \
+       --name laya-full-all-t0 --mode full
+   $WORK/venv/bin/python export.py --checkpoint $WORK/runs/laya-full-all-t0/merged \
+       --out $WORK/runs/laya-full-all-t0/gguf
+   $WORK/venv/bin/python evaluate.py --gguf $WORK/runs/laya-full-all-t0/gguf/model-Q8_0.gguf \
+       --name laya-full-all-t0 --prepared $WORK/data/sweep/all-t0 --cpu-check 0
+   $WORK/venv/bin/python compare.py --runs laya-full-all-t0 d1-3B:eval-v3.1 \
+       --cases $WORK/data/sweep/all-t0 --also 0.8 --breakdown
+   ```
+
+   d1-3B and Kev-4B run through `evaluate.py --state-bytes 2000 --batch 0` on
+   their pinned GGUFs (`WORK/models/`, hashes of `install.rs`).
 
 ## One command
 

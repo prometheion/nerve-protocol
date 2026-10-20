@@ -24,8 +24,8 @@ in `--cases` (the prepared folder with `heldout-v3-dev.json`,
 injection and the command's length, chain-operator and nesting buckets at that
 threshold. A run folder named like `d1-3B` or `laya-base` works the same.
 `--also T ...` adds rows at fixed thresholds for every run, and `--fixed NAME=T`
-pins one run's threshold (e.g. the product's own, d1-3B 0.8, Kev-4B 0.5). It
-prints rates only, never a case.
+pins one run's threshold, named as in --runs (e.g. the product's own,
+d1-3B 0.8, Kev-4B 0.5). It prints rates only, never a case.
 """
 
 import argparse
@@ -141,8 +141,8 @@ def main():
             continue
         t = pick_threshold(scores["dev"], a.budget)
         thresholds = [("dev-chosen", t)] + [(f"t{x:.2f}", x) for x in a.also]
-        if run in fixed:
-            thresholds.append(("fixed", fixed[run]))
+        if spec in fixed or run in fixed:
+            thresholds.append(("fixed", fixed.get(spec, fixed.get(run))))
         for how, th in thresholds:
             entry = {"threshold": th, "how": how}
             for label, rows in scores.items():
