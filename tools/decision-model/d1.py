@@ -117,8 +117,9 @@ def two_way_logits(model, ids, mask, last, yes_ids, no_ids):
     import torch
     lm, head = language_model(model)
     h = lm(input_ids=ids, attention_mask=mask).last_hidden_state
-    h = h[torch.arange(h.shape[0], device=h.device), last]
+    h = h[torch.arange(h.shape[0], device=h.device), last.to(h.device)]
     w = head.weight
+    h = h.to(w.device)
     yes = (h @ w[yes_ids].T).float().max(dim=-1).values
     no = (h @ w[no_ids].T).float().max(dim=-1).values
     return torch.stack([no, yes], dim=-1)
@@ -132,7 +133,7 @@ def evaluate_items(model, items, pad_id, yes_ids, no_ids, max_tokens, device):
     loss = correct = 0.0
     probs = [0.0] * len(items)
     order = list(range(len(items)))
-    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
         for mb in micro_batches(order, items, max_tokens):
             ids, mask, last, y = collate(mb, items, pad_id, device)
             z = two_way_logits(model, ids, mask, last, yes_ids, no_ids)
@@ -173,6 +174,8 @@ def train(a, out):
     if over_t or over_c:
         raise SystemExit("some prompts are over --max-seq-length; raise it")
 
+    if a.mode == "full":
+        return train_full(a, out, tokenizer, train_items, calib_items, yes_ids, no_ids, pad_id)
     model = AutoModelForImageTextToText.from_pretrained(
         a.base, dtype=torch.bfloat16, attn_implementation="sdpa")
     # Text only: the vision tower and projector are not trained and not needed.
@@ -183,15 +186,12 @@ def train(a, out):
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     model.enable_input_require_grads()
 
-    if a.mode == "lora":
-        from peft import LoraConfig, get_peft_model
-        target = r".*language_model.*\.(" + "|".join(LORA_TARGETS) + r")"
-        cfg = LoraConfig(r=a.r, lora_alpha=a.alpha, lora_dropout=a.lora_dropout,
-                         target_modules=target, bias="none")
-        model = get_peft_model(model, cfg)
-        trainable = [p for p in model.parameters() if p.requires_grad]
-    else:
-        raise SystemExit("full fine-tuning of d1-3B is in d1_full.py")
+    from peft import LoraConfig, get_peft_model
+    target = r".*language_model.*\.(" + "|".join(LORA_TARGETS) + r")"
+    cfg = LoraConfig(r=a.r, lora_alpha=a.alpha, lora_dropout=a.lora_dropout,
+                     target_modules=target, bias="none")
+    model = get_peft_model(model, cfg)
+    trainable = [p for p in model.parameters() if p.requires_grad]
     n_train = sum(p.numel() for p in trainable)
     print(json.dumps({"trainable_params": n_train}))
 
@@ -221,7 +221,7 @@ def train(a, out):
             loss_sum = 0.0
             for mb in micro_batches(st, train_items, a.max_tokens):
                 ids, mask, last, y = collate(mb, train_items, pad_id, device)
-                with torch.autocast("cuda", dtype=torch.bfloat16):
+                with torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
                     z = two_way_logits(model, ids, mask, last, yes_ids, no_ids)
                 loss = F.cross_entropy(z, y, reduction="sum") / len(st)
                 loss.backward()
@@ -258,6 +258,167 @@ def train(a, out):
     print(json.dumps({k: record[k] for k in ("train_items", "calib_items", "minutes",
                                              "calibration", "peak_gb")}))
     print(f"merged checkpoint: {merged}")
+
+
+def token_steps(items, max_tokens, rng):
+    """Steps of about `max_tokens` padded tokens each (one backward per step):
+    shuffle, sort chunks of 2048 rows by length, cut by the padded size, and
+    shuffle the steps."""
+    order = list(range(len(items)))
+    rng.shuffle(order)
+    steps = []
+    for c in range(0, len(order), 2048):
+        chunk = sorted(order[c:c + 2048], key=lambda i: len(items[i][0]))
+        cur = []
+        for i in chunk:
+            if cur and len(items[i][0]) * (len(cur) + 1) > max_tokens:
+                steps.append(cur)
+                cur = []
+            cur.append(i)
+        if cur:
+            steps.append(cur)
+    rng.shuffle(steps)
+    return steps
+
+
+def train_full(a, out, tokenizer, train_items, calib_items, yes_ids, no_ids, pad_id):
+    """Full fine-tuning of the language model on the two 12 GB GPUs.
+
+    The memory is the limit: 2.8B trainable parameters. Every parameter is
+    kept in fp32 (the master copy; autocast computes in bf16) with bitsandbytes'
+    8-bit AdamW states, 6 bytes per parameter, 17 GB in all; the layers are
+    split over the two GPUs (`--split` layers on the first, the rest on the
+    second, one micro-batch at a time through both). A parameter's optimizer
+    steps in a hook as soon as its gradient is complete, so no gradient is
+    held and a step is one forward and backward of `--max-tokens` padded
+    tokens (no gradient accumulation, no global clipping). Autocast runs with
+    its weight cache off: the cache would hold a bf16 copy of every weight
+    (5 GB) until the step ends.
+    """
+    import torch
+    import torch.nn.functional as F
+    from accelerate import dispatch_model
+    from transformers import AutoModelForImageTextToText
+    import bitsandbytes as bnb
+
+    rng = random.Random(a.seed)
+    torch.manual_seed(a.seed)
+    n_gpu = torch.cuda.device_count()
+    if n_gpu < 2:
+        raise SystemExit("full fine-tuning of d1-3B needs both GPUs")
+    model = AutoModelForImageTextToText.from_pretrained(
+        a.base, dtype=torch.bfloat16, attn_implementation="sdpa")
+    model.model.vision_tower = None
+    model.model.multi_modal_projector = None
+    model.config.use_cache = False
+    lm = model.model.language_model
+    n_layers = len(lm.layers)
+    device_map = {"model.language_model.embed_tokens": 0, "model.language_model.rotary_emb": 0,
+                  "model.language_model.embedding_norm": 1, "lm_head": 0}
+    for i in range(n_layers):
+        device_map[f"model.language_model.layers.{i}"] = 0 if i < a.split else 1
+    # fp32 on the GPU it lives on, one module at a time (the bf16 copy is 6 GB of RAM).
+    for name, dev in device_map.items():
+        if name == "lm_head":
+            continue
+        mod = model.get_submodule(name)
+        mod.to(device=f"cuda:{dev}", dtype=torch.float32)
+    model.lm_head.weight = lm.embed_tokens.weight
+    model = dispatch_model(model, device_map=device_map, main_device="cuda:0",
+                           force_hooks=True, skip_keys=["past_key_values"])
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    model.enable_input_require_grads()
+    model.train()
+
+    params = [p for p in model.parameters() if p.requires_grad]
+    n_train = sum(p.numel() for p in params)
+    lr = a.lr
+    opts = {p: bnb.optim.AdamW8bit([p], lr=lr, weight_decay=0.01, betas=(0.9, 0.999)) for p in params}
+
+    def step_in_backward(p):
+        opts[p].step()
+        opts[p].zero_grad(set_to_none=True)
+
+    for p in params:
+        p.register_post_accumulate_grad_hook(step_in_backward)
+    print(json.dumps({"trainable_params": n_train,
+                      "gpu_gb_after_load": [round(torch.cuda.memory_allocated(i) / 2**30, 1)
+                                            for i in range(2)]}), flush=True)
+
+    steps_per_epoch = len(token_steps(train_items, a.max_tokens, random.Random(a.seed)))
+    total = a.max_steps if a.max_steps > 0 else int(steps_per_epoch * a.epochs)
+    warm = max(1, int(0.05 * total))
+
+    def lr_at(step):
+        if step < warm:
+            return lr * (step + 1) / warm
+        return lr * 0.5 * (1 + math.cos(math.pi * (step - warm) / max(1, total - warm)))
+
+    dev0 = torch.device("cuda:0")
+    log, step, started, epoch, done = [], 0, time.time(), 0, False
+    while not done:
+        for st in token_steps(train_items, a.max_tokens, rng):
+            if step >= total:
+                done = True
+                break
+            for o in opts.values():
+                o.param_groups[0]["lr"] = lr_at(step)
+            ids, mask, last, y = collate(st, train_items, pad_id, dev0)
+            with torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
+                z = two_way_logits(model, ids, mask, last, yes_ids, no_ids)
+            loss = F.cross_entropy(z, y)
+            loss.backward()
+            step += 1
+            if step % 10 == 0 or step == total:
+                rec = {"step": step, "of": total, "loss": round(loss.item(), 4), "rows": len(st),
+                       "lr": lr_at(step - 1), "min": round((time.time() - started) / 60, 1),
+                       "mem_gb": [round(torch.cuda.max_memory_allocated(i) / 2**30, 1) for i in range(2)]}
+                log.append(rec)
+                print(json.dumps(rec), flush=True)
+        else:
+            epoch += 1
+            if calib_items:
+                m, _ = evaluate_items(model, calib_items, pad_id, yes_ids, no_ids, a.max_tokens, dev0)
+                print(json.dumps({"epoch": epoch, "calib": m}), flush=True)
+                log.append({"epoch": epoch, "calib": m})
+    minutes = (time.time() - started) / 60
+    calib, _ = evaluate_items(model, calib_items, pad_id, yes_ids, no_ids, a.max_tokens, dev0)
+    merged = out / "merged"
+    write_full(model, a.base, merged)
+    record = {"base": a.base, "family": "d1", "data": str(a.data), "mode": "full", "lr": lr,
+              "epochs": a.epochs, "max_steps": a.max_steps, "max_tokens": a.max_tokens,
+              "split": a.split, "seed": a.seed, "train_items": len(train_items),
+              "calib_items": len(calib_items), "trainable_params": n_train,
+              "optimizer": "bitsandbytes AdamW8bit, fp32 weights, step in backward",
+              "minutes": round(minutes, 1), "log": log, "calibration": calib,
+              "peak_gb": [round(torch.cuda.max_memory_allocated(i) / 2**30, 1) for i in range(2)]}
+    (out / "train.json").write_text(json.dumps(record, indent=1) + "\n")
+    print(json.dumps({k: record[k] for k in ("train_items", "calib_items", "minutes",
+                                             "calibration", "peak_gb")}))
+    print(f"merged checkpoint: {merged}")
+
+
+def write_full(model, base, merged):
+    """The trained language model under the base checkpoint's tensor names
+    (bf16), the vision tower and projector copied from the base."""
+    import torch
+    from safetensors.torch import load_file, save_file
+    merged.mkdir(parents=True, exist_ok=True)
+    state = load_file(str(Path(base) / "model.safetensors"))
+    trained = {k: v for k, v in model.state_dict().items() if k != "lm_head.weight"}
+    used = 0
+    for key in state:
+        if key in trained:
+            t = trained[key]
+            if tuple(t.shape) != tuple(state[key].shape):
+                raise SystemExit(f"shape of {key} changed")
+            state[key] = t.detach().to("cpu", torch.bfloat16)
+            used += 1
+        elif "vision_tower" not in key and "multi_modal_projector" not in key:
+            raise SystemExit(f"{key} of the base checkpoint is not in the trained model")
+    save_file(state, str(merged / "model.safetensors"), metadata={"format": "pt"})
+    copy_support_files(Path(base), merged)
+    print(json.dumps({"written_tensors": used}))
 
 
 def write_merged_lora(model, base, merged):

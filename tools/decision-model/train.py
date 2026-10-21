@@ -48,6 +48,8 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=12000,
                     help="d1: padded tokens per micro-batch (rows of a step are split by length)")
     ap.add_argument("--lora-dropout", type=float, default=0.0)
+    ap.add_argument("--split", type=int, default=15,
+                    help="d1 full fine-tuning: layers (of 30) on the first GPU, the rest on the second")
     ap.add_argument("--seed", type=int, default=139)
     a = ap.parse_args()
     out = a.out or WORK / "runs" / a.name
