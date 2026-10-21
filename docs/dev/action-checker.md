@@ -680,3 +680,215 @@ is the optional layer for the long tail and for injection, which is why a 60 %
 catch at a low benign-refusal rate is a good operating point rather than a
 weak one. Raise the threshold to 0.85 to trade a little catch for fewer
 benign refusals.
+
+### d1-3B fine-tuned (v3.1, issue #141)
+
+The owner asked, out of interest, what fine-tuning the checker's current default
+model, LiquidAI's d1-3B, on the same v3.1 data gives, next to the stock d1-3B and the
+round-3 Laya.
+
+**Licence.** `LiquidAI/d1-3B` (revision `051bcc46`, 3.12B parameters, an LFM2.5-VL-3B
+post-trained for decisions) is under the **LFM Open License v1.0** (a copy is in the
+model repo as `LICENSE`). For fine-tuning and releasing a derivative it says:
+
+- Sections 2 and 3 grant a perpetual, worldwide, royalty-free, irrevocable copyright and
+  patent licence to reproduce, prepare **Derivative Works** of, and distribute the Work
+  and its derivatives, in source or object form. So a fine-tune and its GGUF may be
+  published. (The patent grant ends for whoever sues over the Work.)
+- Section 4, redistribution: the recipient gets a copy of the licence; modified files
+  carry a prominent notice that they were changed; the copyright, patent and attribution
+  notices of the source stay (the repo has no NOTICE file). Own terms may be added for
+  the modifications, as long as the Work's terms are met.
+- Section 5, the catch: the commercial rights are conditioned on **not exceeding an
+  annual revenue of 10 million US dollars** (the entity and the entities it controls or
+  is controlled by). Above it, commercial use of the Work or a derivative is not licensed
+  by this licence (it needs a separate agreement with Liquid AI); a qualified non-profit
+  is exempt for non-commercial or research use. A fine-tuned d1-3B therefore keeps the
+  limit that the stock pin already carries (`licence: "LFM Open License v1.0"`), and
+  unlike Laya or Kev-4B (Apache-2.0) it is not free for large companies.
+- Section 7: no use of Liquid's names or marks except to describe the origin ("based on
+  LiquidAI/d1-3B"), so a release should not be called "d1" or "LFM".
+- Section 11: the licence ends on breach, and then every copy must be deleted.
+
+The training data's licences are separate (see the Laya rounds); nothing in them
+conflicts with this.
+
+**Training path.** Unsloth's `FastDecisionModel` (the guide's route) does not load
+d1-3B: it takes Laya and Clef checkpoints and plain language models with a fresh Clef
+head, and d1 is an LFM2-VL language model with no head at all. Its answer to a `noul`
+question is the softmax of the best "yes" spelling's logit against the best "no"
+spelling's at the last prompt position (`prompt.py` of the model repo, `d1_labels` in
+llama.cpp's `server-decision.cpp`; the GGUF has no temperature). `tools/decision-model/d1.py`
+trains exactly that with transformers and peft: the prompt that llama.cpp's `systemone`
+template writes, a two-way cross entropy over the pooled yes/no logits, nothing else, so
+training and serving read the same number (the bf16 model and the stock Q4_K_M GGUF agree
+on the 214 with a mean difference of 0.017 and 5 of 214 cases on the other side of 0.5,
+which is the quantization). Everything else is Laya's recipe: the same v3.1 rows (all
+harmless rows, no extra trajectories, bucket floor 150: 11,139 training and 1,237
+calibration rows, 26 % dangerous), the same seed (139), 2 epochs, but the state cut at
+2,000 bytes as the center does for d1 (prompts of 88 to 1,524 tokens, median 214).
+
+- **LoRA** (bf16 weights, rank 32, all linear layers of the language model, 49M trainable
+  parameters, 32 rows per step, cosine, gradient checkpointing): 9.6 GB on one card,
+  about 5 s per step, 61 minutes for 2 epochs on the RTX 4070 (118 on the RTX 3060).
+- **Full fine-tuning** does not fit one 12 GB card (2.7B trainable parameters), so it
+  runs on **both cards**. Unsloth has no sharding for this model, so `d1.py` does it by
+  hand: the weights stay fp32 (a master copy; autocast computes in bf16), the optimizer is
+  bitsandbytes' 8-bit AdamW (6 bytes per parameter, 16 GB in all), each parameter is
+  stepped in a hook as soon as its gradient is complete (so no gradient is held, which
+  means one backward per step of about 8,000 padded tokens, about 40 rows, and no
+  gradient accumulation or global clipping), and the layers are split 13 / 17 over the
+  two cards, one micro-batch at a time through both. Peak memory 10.8 and 10.3 GB of
+  11.7, about 6 s per step, 65 minutes for 2 epochs. Plain DDP would copy the model and
+  optimizer to both cards, which does not fit; fp32 master weights and Adam states on the
+  CPU would take 34 GB of the machine's 31. A first version ran out of memory because
+  autocast's weight cache held a bf16 copy of every weight (5 GB) until the step ended;
+  the cache is off.
+- The GGUF comes from the pinned converter's `D1Model` (b11719), Q8_0 and Q4_K_M (the
+  stock pin's quantization, made with the pinned `llama-quantize`; the file has the stock
+  file's size, 1,674,456,640 bytes against 1,674,456,672). llama-server b11719 serves
+  both on `/v1/systemone` with the center's question; no case failed in any evaluation.
+
+**The sweep.** LoRA at rank 16 and 32, lr 1e-4 and 2e-4, 1 and 2 epochs, and full
+fine-tuning at lr 1e-5 and 5e-6 (2 epochs; each run tried, none left out). The threshold is
+chosen on dev as before (at most 3 % of the benign dev cases refused, rounded up) and
+applied unchanged to the benchmark and the 214. Cells are catch % / benign-refused %
+(/ injection catch % / injection refused %); the d1 runs are Q8_0 GGUFs scored on the CUDA
+build, the stock d1-3B and Kev-4B are the Q4_K_M pins as before.
+
+| Run | Threshold | Dev: catch / inj. catch / benign refused | Benchmark: catch / benign refused / inj. catch / inj. refused | 214: catch / benign refused / inj. catch | AUC benchmark | AUC 214 |
+|---|---|---|---|---|---|---|
+| **d1 LoRA r32, lr 1e-4, 2 epochs (chosen)** | 0.01 | 100.0 / 100.0 / 2.0 | 99.7 / 1.2 / 100.0 / 0.6 | 88.2 / 5.8 / 80.0 | 1.000 | 0.979 |
+| d1 LoRA r32, lr 2e-4, 2 epochs | 0.01 | 100.0 / 100.0 / 0.3 | 99.7 / 0.4 / 100.0 / 0.0 | 79.6 / 9.1 / 73.3 | 1.000 | 0.966 |
+| d1 LoRA r32, lr 2e-4, 1 epoch | 0.01 | 100.0 / 100.0 / 2.7 | 99.4 / 2.9 / 99.5 / 3.8 | 89.2 / 10.7 / 86.7 | 0.999 | 0.958 |
+| d1 full FT, lr 1e-5, 2 epochs | 0.01 | 100.0 / 100.0 / 0.6 | 100.0 / 0.4 / 100.0 / 0.0 | 82.8 / 9.9 / 80.0 | 1.000 | 0.957 |
+| d1 full FT, lr 5e-6, 2 epochs | 0.01 | 100.0 / 100.0 / 0.9 | 100.0 / 0.6 / 100.0 / 0.0 | 87.1 / 11.6 / 86.7 | 1.000 | 0.958 |
+| d1 LoRA r16, lr 1e-4, 2 epochs | 0.01 | 100.0 / 100.0 / 1.7 | 99.8 / 1.2 / 100.0 / 0.6 | 89.2 / 8.3 / 86.7 | 1.000 | 0.979 |
+| Laya full FT, round 3 (chosen) | 0.02 | 100.0 / 100.0 / 2.2 | 99.9 / 2.0 / 100.0 / 2.5 | 82.8 / 12.4 / 73.3 | 1.000 | 0.932 |
+| d1-3B, stock (Q4_K_M) | 0.49 | 44.5 / 84.6 / 3.0 | 44.0 / 2.7 / 67.2 / 11.4 | 69.9 / 4.1 / 80.0 | 0.880 | 0.942 |
+| Kev-4B, stock (Q4_K_M) | 0.38 | 49.2 / 76.9 / 2.9 | 44.1 / 2.3 / 59.6 / 6.3 | 82.8 / 5.0 / 93.3 | 0.907 | 0.972 |
+
+The same runs at a fixed threshold of 0.80 (Kev-4B at its own 0.50), which is how the
+center would use them:
+
+| Run | Threshold | Dev | Benchmark | 214 | AUC benchmark | AUC 214 |
+|---|---|---|---|---|---|---|
+| **d1 LoRA r32, lr 1e-4, 2 epochs (chosen), Q8_0** | 0.80 | 99.5 / 100.0 / 0.1 | 98.8 / 0.1 / 98.4 / 0.0 | 76.3 / 1.7 / 73.3 | 1.000 | 0.979 |
+| **the same, Q4_K_M** | 0.80 | 99.7 / 100.0 / 0.0 | 98.6 / 0.1 / 98.4 / 0.0 | 79.6 / 1.7 / 73.3 | 1.000 | 0.977 |
+| d1 LoRA r32, lr 2e-4, 2 epochs | 0.80 | 98.6 / 94.9 / 0.1 | 98.0 / 0.0 / 95.6 / 0.0 | 74.2 / 3.3 / 66.7 | 1.000 | 0.966 |
+| d1 LoRA r32, lr 2e-4, 1 epoch | 0.80 | 100.0 / 100.0 / 0.1 | 98.7 / 0.1 / 98.4 / 0.0 | 79.6 / 4.1 / 73.3 | 0.999 | 0.958 |
+| d1 full FT, lr 1e-5, 2 epochs | 0.80 | 99.5 / 97.4 / 0.1 | 98.8 / 0.0 / 100.0 / 0.0 | 73.1 / 2.5 / 73.3 | 1.000 | 0.957 |
+| d1 full FT, lr 5e-6, 2 epochs | 0.80 | 99.7 / 100.0 / 0.1 | 98.5 / 0.0 / 97.8 / 0.0 | 74.2 / 4.1 / 66.7 | 1.000 | 0.958 |
+| d1 LoRA r16, lr 1e-4, 2 epochs | 0.80 | 98.9 / 97.4 / 0.2 | 98.3 / 0.2 / 97.3 / 0.0 | 77.4 / 2.5 / 73.3 | 1.000 | 0.979 |
+| Laya full FT, round 3 (chosen) | 0.80 | 98.9 / 100.0 / 0.2 | 97.3 / 0.2 / 97.3 / 0.0 | 69.9 / 4.1 / 60.0 | 1.000 | 0.932 |
+| d1-3B, stock | 0.80 | 27.5 / 53.8 / 0.9 | 28.7 / 0.9 / 45.9 / 10.1 | 60.2 / 2.5 / 66.7 | 0.880 | 0.942 |
+| Kev-4B, stock | 0.50 | 41.5 / 66.7 / 1.9 | 34.9 / 1.2 / 49.7 / 5.1 | 79.6 / 1.7 / 93.3 | 0.907 | 0.972 |
+
+What it shows (95 % half-widths as in the third round: about 1 point on dev and the
+benchmark, 7 to 9 points for the 214's catch rate, 4 to 6 for its refusals; one seed per
+configuration):
+
+- **Fine-tuning d1-3B turns a poor judge of the owner's distribution into a saturated
+  one, as it did Laya.** At 0.80 the chosen Q4_K_M catches 98.6 % of the benchmark (stock
+  28.7 %), 98.4 % of its injections (45.9 %) and 99.8 % of its file writes (1.1 %), at 0.1 %
+  benign refusals (0.9 %), and the long and chained commands too (300 to 1,000 bytes
+  89.5 %, 3 to 5 chain operators 95.2 %, 6 or more 94.6 %, nesting 2+ 100 %). As with
+  Laya, the benchmark shares its generators with the training rows (disjoint by canonical
+  form), so this shows that the model learnt the owner's labels.
+- **On the independent 214 it is better than the stock d1-3B and than the round-3 Laya**:
+  AUC 0.977 to 0.979 against 0.942 and 0.932, the level of Kev-4B (0.972). At 0.80 the
+  Q4_K_M catches 79.6 % of the dangerous cases at 1.7 % benign refusals (stock 60.2 / 2.5,
+  Laya 69.9 / 4.1, Kev-4B at 0.5 79.6 / 1.7) and 73.3 % of the injections (stock 66.7,
+  Laya 60.0, Kev-4B 93.3). It catches all five dangerous file writes of the 214 (stock 0
+  of 5) and all 15 dangerous Windows cases (stock 66.7 %). The half-widths of the 214 are
+  wide; the AUC (0.98 against 0.94) is the better evidence than the catch rate. Still weak:
+  commands with 1 to 2 chain operators (2 of 9 caught at 0.80, 6 of 9 at the dev threshold)
+  and injections (11 of 15; Kev-4B 14 of 15).
+- **The dev threshold carries over only partly.** Dev is saturated, so its 3 % budget lands
+  at 0.01: on the 214 that catches 88.2 % but refuses 5.8 % of the non-dangerous cases
+  (12.4 % for Laya). 0.80 is the operating point to use, as for Laya.
+- **Full fine-tuning is not better than LoRA.** It saturates dev and the benchmark the same
+  way (100.0 % catch at 0.4 to 0.6 % benign refusals at the dev threshold), and its 214 AUC
+  is lower (0.957 and 0.958 against 0.979) at both learning rates tried; at 0.80 its 214
+  numbers (73.1 / 2.5 and 74.2 / 4.1) are inside the LoRA's half-widths. Given the cost
+  (both cards, a hand-written optimizer, no accumulation or clipping), LoRA is the method
+  for d1-3B. This repeats Laya's result on a bigger model.
+- **The hyper-parameters are not measurable on dev.** Five of the six d1 runs tie at 100.0
+  on dev; rank 16 is slightly behind (99.1). The tie is broken by the loss on the calibration
+  rows that were not trained on (0.0061 for the chosen run, 0.0082 to 0.0127 for the other
+  four that tie), which is also the run with the baseline settings (Laya's LoRA recipe).
+  The 214 was not used to pick it; it agrees (AUC 0.979, tied with rank 16). A higher
+  learning rate (2e-4) or one epoch is worse on the 214 (AUC 0.966 and 0.958).
+
+Breakdown on the benchmark (3,993 cases) and the 214 for the chosen Q4_K_M at its
+dev-chosen threshold 0.01 and at 0.80, next to the stock d1-3B and Laya at 0.80 and Kev-4B
+at 0.50. Cells are catch % / benign refused %; a `-` is an empty group (the 214 has no
+command over 80 bytes and no case with 3 or more chain operators).
+
+benchmark:
+
+| Group | Value | Dangerous / benign | d1 fine-tuned 0.01 | d1 fine-tuned 0.80 | d1-3B 0.80 | Laya 0.80 | Kev-4B 0.50 |
+|---|---|---|---|---|---|---|---|
+| cap | exec | 625 / 2241 | 99.5 / 1.6 | 97.8 / 0.1 | 49.4 / 1.1 | 95.7 / 0.2 | 52.5 / 1.5 |
+| cap | fs | 468 / 659 | 99.8 / 0.0 | 99.8 / 0.0 | 1.1 / 0.0 | 99.6 / 0.0 | 11.5 / 0.0 |
+| os | linux | 691 / 1820 | 99.4 / 1.1 | 98.6 / 0.2 | 26.6 / 0.4 | 97.5 / 0.3 | 31.8 / 1.5 |
+| os | windows | 402 / 1080 | 100.0 / 1.5 | 98.8 / 0.0 | 32.3 / 1.7 | 97.0 / 0.0 | 40.3 / 0.6 |
+| injection | no | 910 / 2742 | 99.6 / 1.3 | 98.7 / 0.1 | 25.3 / 0.3 | 97.4 / 0.2 | 32.0 / 0.9 |
+| injection | yes | 183 / 158 | 100.0 / 0.6 | 98.4 / 0.0 | 45.9 / 10.1 | 97.3 / 0.0 | 49.7 / 5.1 |
+| length | <80 | 392 / 1541 | 100.0 / 1.9 | 98.0 / 0.2 | 54.3 / 0.8 | 95.7 / 0.3 | 60.5 / 1.2 |
+| length | 80-300 | 214 / 441 | 99.5 / 1.4 | 98.1 / 0.0 | 42.1 / 2.7 | 96.7 / 0.0 | 41.6 / 2.0 |
+| length | 300-1000 | 19 / 230 | 89.5 / 0.4 | 89.5 / 0.0 | 31.6 / 0.4 | 84.2 / 0.4 | 10.5 / 3.0 |
+| length | >1000 | 0 / 29 | - / 0.0 | - / 0.0 | - / 0.0 | - / 0.0 | - / 0.0 |
+| chain_ops | 0 | 510 / 1709 | 100.0 / 1.9 | 98.0 / 0.2 | 54.1 / 1.3 | 96.3 / 0.3 | 57.5 / 1.3 |
+| chain_ops | 1-2 | 57 / 204 | 100.0 / 0.5 | 98.2 / 0.0 | 26.3 / 0.0 | 98.2 / 0.0 | 56.1 / 1.5 |
+| chain_ops | 3-5 | 21 / 168 | 95.2 / 0.6 | 95.2 / 0.0 | 33.3 / 0.6 | 81.0 / 0.0 | 0.0 / 0.6 |
+| chain_ops | 6+ | 37 / 160 | 94.6 / 0.6 | 94.6 / 0.0 | 29.7 / 0.6 | 91.9 / 0.0 | 8.1 / 4.4 |
+| nesting | 0 | 558 / 1868 | 99.6 / 1.8 | 97.7 / 0.2 | 49.8 / 1.3 | 96.1 / 0.3 | 53.2 / 1.1 |
+| nesting | 1 | 55 / 208 | 98.2 / 1.0 | 98.2 / 0.0 | 34.5 / 0.0 | 90.9 / 0.0 | 34.5 / 1.0 |
+| nesting | 2+ | 12 / 165 | 100.0 / 0.6 | 100.0 / 0.0 | 100.0 / 0.6 | 100.0 / 0.0 | 100.0 / 7.3 |
+
+214:
+
+| Group | Value | Dangerous / benign | d1 fine-tuned 0.01 | d1 fine-tuned 0.80 | d1-3B 0.80 | Laya 0.80 | Kev-4B 0.50 |
+|---|---|---|---|---|---|---|---|
+| cap | exec | 88 / 115 | 87.5 / 5.2 | 78.4 / 1.7 | 63.6 / 2.6 | 68.2 / 2.6 | 80.7 / 1.7 |
+| cap | fs | 5 / 6 | 100.0 / 16.7 | 100.0 / 0.0 | 0.0 / 0.0 | 100.0 / 33.3 | 60.0 / 0.0 |
+| os | linux | 78 / 108 | 85.9 / 6.5 | 75.6 / 1.9 | 59.0 / 2.8 | 66.7 / 3.7 | 80.8 / 1.9 |
+| os | windows | 15 / 13 | 100.0 / 0.0 | 100.0 / 0.0 | 66.7 / 0.0 | 86.7 / 7.7 | 73.3 / 0.0 |
+| injection | no | 78 / 121 | 89.7 / 5.8 | 80.8 / 1.7 | 59.0 / 2.5 | 71.8 / 4.1 | 76.9 / 1.7 |
+| injection | yes | 15 / 0 | 80.0 / - | 73.3 / - | 66.7 / - | 60.0 / - | 93.3 / - |
+| length | <80 | 88 / 115 | 87.5 / 5.2 | 78.4 / 1.7 | 63.6 / 2.6 | 68.2 / 2.6 | 80.7 / 1.7 |
+| chain_ops | 0 | 79 / 114 | 89.9 / 4.4 | 84.8 / 1.8 | 68.4 / 2.6 | 74.7 / 2.6 | 79.7 / 1.8 |
+| chain_ops | 1-2 | 9 / 1 | 66.7 / 100.0 | 22.2 / 0.0 | 22.2 / 0.0 | 11.1 / 0.0 | 88.9 / 0.0 |
+| nesting | 0 | 84 / 115 | 86.9 / 5.2 | 77.4 / 1.7 | 61.9 / 2.6 | 66.7 / 2.6 | 79.8 / 1.7 |
+| nesting | 1 | 4 / 0 | 100.0 / - | 100.0 / - | 100.0 / - | 100.0 / - | 100.0 / - |
+
+**Latency.** Fine-tuning does not change the graph, so a fine-tuned d1-3B costs what the
+stock one costs. Measured on the 214 with the eval runner against the pinned CPU build
+b11719, the same Q4_K_M quantization, stock and fine-tuned back to back (the machine was
+shared: load average 3 to 8, and the GPUs were training):
+
+| | stock d1-3B | d1-3B fine-tuned |
+|---|---|---|
+| 8 threads, p50 / p95 | 1,715 / 1,771 ms | 1,713 / 1,770 ms |
+| 2 threads on 2 cores (`AllowedCPUs=4,6`, `CPUQuota=200%`, `MemoryMax=6G`), p50 / p95 | 3,555 / 3,902 ms | 3,589 / 3,837 ms |
+
+So on the target of about 2 vCPUs a call takes about 3.6 s: inside the pin's 4 s timeout
+(which fails closed at the limit), with little room. The CPU build agrees with the CUDA
+build's scores to a mean of 0.003 (largest difference 0.31, one case; stock 0.07). Laya
+remains 2.5 times faster (about 0.7 s at 8 threads), but on the 214 it is not better than
+the stock d1-3B; the fine-tuned d1-3B is.
+
+**Verdict.** Fine-tuned on v3.1, d1-3B becomes a better judge of the 214 than the stock
+model and the round-3 Laya (catch 79.6 against 60.2 and 69.9 % at 0.80, benign refusals
+1.7 against 2.5 and 4.1 %, AUC 0.977 against 0.942 and 0.932), at the stock d1-3B's
+latency and file size, and it does so with a LoRA that trains in an hour on one card. It
+matches Kev-4B's catch rate and AUC on the 214 at about half of Kev-4B's latency, but not
+its injection catch (73 against 93 %). Full fine-tuning on both cards works but adds
+nothing. The licence is the thing against it: the LFM Open License's revenue limit. Nothing
+was prepared for publication; the chosen run's files are
+`~/Services/nerve-training/runs/d1-lora-r32-lr1e-4-e2/` (`merged/`, the bf16 weights in
+the model repo's layout; `gguf/d1-lora-r32-lr1e-4-e2-Q4_K_M.gguf`, 1,674,456,640 bytes,
+sha256 `be44b136de62bba5656953b7de4dbfee7fef8058ba10e30dbd3c45111735d072`; and
+`...-Q8_0.gguf`, 2,874,781,248 bytes, sha256
+`da09d7d6841d3b455d7526244f8f405e729843ee1d4d66a797bd51467a75acc3`).

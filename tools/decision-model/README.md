@@ -1,6 +1,6 @@
 # Decision model for the action checker
 
-Scripts that fine-tune a small decision model for the center's action checker
+Scripts that fine-tune a small decision model (Laya, or LiquidAI's d1-3B) for the center's action checker
 (issue #139, design in `docs/dev/action-checker.md`), turn it into a GGUF the
 pinned llama.cpp build serves on `/v1/systemone`, and evaluate it with the
 repo's own eval runner on the CPU. Large files (datasets, checkpoints, GGUFs)
@@ -170,6 +170,38 @@ answered. For d1-3B and Kev-4B use `--state-bytes 2000 --batch 0`.
 
    d1-3B and Kev-4B run through `evaluate.py --state-bytes 2000 --batch 0` on
    their pinned GGUFs (`WORK/models/`, hashes of `install.rs`).
+
+## d1-3B (`--family d1`)
+
+d1-3B, the checker's default model, can be fine-tuned on the same prepared data
+(issue #141). Unsloth's `FastDecisionModel` does not load it (it handles Laya
+and Clef checkpoints and plain language models with a fresh Clef head; d1 has
+no head, the answer is the softmax over the best "yes" and the best "no" token
+logit at the last prompt position), so `d1.py` uses plain transformers and
+peft, with the loss on exactly that readout and the prompt llama.cpp's
+`systemone` template writes (`prompt.py` of the model repo).
+
+- Base: `LiquidAI/d1-3B` (LFM Open License v1.0, see the doc) at `WORK/hf/d1-3B`
+  (`hf download LiquidAI/d1-3B --local-dir WORK/hf/d1-3B`, 6 GB).
+- Data: the same rows as the Laya run, but with the state cut at the center's own
+  2000 bytes: `prepare.py --out WORK/data/d1/all-t0 --max-harmless-ratio 99
+  --trajectory-ratio 0 --state-bytes 2000` (the bucket floor stays at its default).
+- LoRA (bf16 weights, r 32, lr 1e-4, 2 epochs, 5 s per step of 32 rows, 9.6 GB):
+  `CUDA_VISIBLE_DEVICES=0 python train.py --family d1 --data WORK/data/d1/all-t0
+  --name NAME --mode lora`.
+- Full fine-tuning (`--mode full --lr 1e-5 --split 13 --max-tokens 8000`) needs both
+  GPUs: fp32 weights with bitsandbytes' 8-bit AdamW states stepped inside the
+  backward pass (6 bytes per parameter), the layers split over the two cards,
+  no gradient accumulation. Peak 10.8 and 10.3 GB, 6 s per step of about 40 rows;
+  set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+- `python3 -m unittest test_d1` checks the prompt (the string llama.cpp's template writes) and the batching.
+- `export.py --family d1 --checkpoint WORK/runs/NAME/merged --out WORK/runs/NAME/gguf
+  --quant q8_0 q4_k_m`: the pinned converter's `D1Model`, then `llama-quantize` for
+  `q4_k_m` (the stock pin's quantization). No temperature is written (d1 has none).
+- `evaluate.py --gguf FILE --name NAME --prepared WORK/data/d1/all-t0 --state-bytes 2000
+  --batch 0`, like the stock d1-3B. For the 2 vCPU latency: `systemd-run --user --scope
+  -p AllowedCPUs=4,6 -p CPUQuota=200% -p MemoryMax=6G -- python evaluate.py ... --device cpu
+  --threads 2 --cpu-check 0`.
 
 ## One command
 
