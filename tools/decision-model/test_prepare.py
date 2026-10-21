@@ -16,6 +16,7 @@ import common
 import compare
 import evaluate
 import prepare
+import train
 
 HERE = Path(__file__).resolve().parent
 
@@ -352,6 +353,78 @@ class PrepareTest(unittest.TestCase):
         _, s = self.run_prepare_v3([v3_row("echo only-a", True, "dz-x"), v3_row("echo only-b", False, "vcs")],
                                    [], [bench_row("echo c", True)], "--calib-share", "0")
         self.assertEqual((s["oversample"]["factor"], s["oversample"]["copies_added"]), (1.0, 0))
+
+    def test_train_head_learning_rate_options(self):
+        # The default is what Unsloth's trainer already used for the head: 1e-4 beside
+        # the encoder's 2e-5 (full) or 1e-4 (LoRA); `body` puts the head on the encoder's rate.
+        self.assertEqual(train.resolve_lrs("full", None, None), (2e-5, 1e-4))
+        self.assertEqual(train.resolve_lrs("lora", None, None), (1e-4, 1e-4))
+        self.assertEqual(train.resolve_lrs("full", None, train.head_lr_arg("body")), (2e-5, 2e-5))
+        self.assertEqual(train.resolve_lrs("full", 3e-5, train.head_lr_arg("5e-4")), (3e-5, 5e-4))
+
+    def test_train_top_layers_select_the_layers_that_train(self):
+        self.assertEqual(train.top_layer_range(28, 0), list(range(28)))
+        self.assertEqual(train.top_layer_range(28, 12), list(range(16, 28)))
+        with self.assertRaises(SystemExit):
+            train.top_layer_range(28, 29)
+        self.assertEqual(train.lora_layer_kwargs(list(range(16, 28)), 0), {})
+        self.assertEqual(train.lora_layer_kwargs([3], 1)["layers_to_transform"], [3])
+
+        class Param:
+            def __init__(self, n):
+                self.n, self.requires_grad = n, True
+
+            def numel(self):
+                return self.n
+
+            def requires_grad_(self, flag):
+                self.requires_grad = flag
+
+        class Encoder:
+            def __init__(self):
+                self.p = {"embeddings.tok_embeddings.weight": Param(10),
+                          "embeddings.norm.weight": Param(1), "final_norm.weight": Param(1)}
+                for i in range(4):
+                    self.p[f"layers.{i}.attn.Wqkv.weight"] = Param(5)
+                    self.p[f"layers.{i}.mlp.Wo.weight"] = Param(5)
+
+            def named_parameters(self):
+                return self.p.items()
+
+        enc = Encoder()
+        self.assertEqual(train.freeze_below(enc, train.top_layer_range(4, 2)), (21, 52))
+        self.assertEqual({n for n, p in enc.p.items() if p.requires_grad},
+                         {"final_norm.weight", "layers.2.attn.Wqkv.weight", "layers.2.mlp.Wo.weight",
+                          "layers.3.attn.Wqkv.weight", "layers.3.mlp.Wo.weight"})
+
+    def test_train_top_layers_on_a_real_modernbert(self):
+        try:
+            import torch  # noqa: F401
+            from peft import LoraConfig, get_peft_model
+            from transformers import ModernBertConfig, ModernBertModel
+        except ImportError:
+            self.skipTest("needs torch, transformers and peft (the training venv)")
+        cfg = ModernBertConfig(hidden_size=32, intermediate_size=64, num_hidden_layers=4,
+                               num_attention_heads=2, vocab_size=100, max_position_embeddings=64,
+                               pad_token_id=0, eos_token_id=1, bos_token_id=2, cls_token_id=2,
+                               sep_token_id=1)
+        layers = train.top_layer_range(4, 2)
+        full = ModernBertModel(cfg)
+        trainable, total = train.freeze_below(full, layers)
+        self.assertLess(trainable, total)
+        names = {n.split(".")[0] + "." + n.split(".")[1] if n.startswith("layers") else n.split(".")[0]
+                 for n, p in full.named_parameters() if p.requires_grad}
+        self.assertEqual(names, {"layers.2", "layers.3", "final_norm"})
+        # LoRA: adapters on the top layers only, on the same linear layers "all-linear" finds
+        def adapted(**kw):
+            peft = get_peft_model(ModernBertModel(cfg), LoraConfig(r=4, **kw))
+            return {n.split(".lora")[0].replace("base_model.model.", "")
+                    for n, _ in peft.named_parameters() if ".lora" in n}
+        every = adapted(target_modules="all-linear")
+        top = adapted(**train.lora_layer_kwargs(layers, 2))
+        self.assertEqual(len(every), 16)
+        self.assertEqual(top, {m for m in every if m.startswith(("layers.2.", "layers.3."))})
+        self.assertEqual(adapted(target_modules=train.LORA_TARGETS), every)
 
     def test_v3_build_is_preferred_unless_v2_is_asked_for(self):
         args = ([v3_row("echo new", True, "dz-x")], [], [bench_row("echo b", True)])
