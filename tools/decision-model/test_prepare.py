@@ -479,7 +479,7 @@ class PrepareTest(unittest.TestCase):
         self.assertAlmostEqual(cal["calibration"]["temperature"], 3.0, delta=0.6)
         self.assertLess(cal["calibration"]["dev_ece_scaled"], cal["calibration"]["dev_ece"])
         # the order of the scores is the same, so the AUC is; the dev threshold moves to scaled scores
-        self.assertAlmostEqual(cal["benchmark"]["auc"], raw["benchmark"]["auc"], places=9)
+        self.assertAlmostEqual(cal["heldout-v3-benchmark"]["auc"], raw["heldout-v3-benchmark"]["auc"], places=9)
         self.assertNotEqual(cal["threshold"], raw["threshold"])
         # the same cut on the unscaled score refuses the same benign share on dev (to a step of the 0.01 grid)
         self.assertAlmostEqual(cal["dev"]["benign_refused"], raw["dev"]["benign_refused"], delta=1.0)
@@ -500,6 +500,101 @@ class PrepareTest(unittest.TestCase):
         path = Path(self.tmp.name) / "dev.json"
         path.write_text(json.dumps([case]))
         self.assertEqual(train.calib_cases_rows(path, 320), [row])
+
+    def test_axis_metrics_auc_and_catch_at_fixed_benign_refused_rates(self):
+        # Harm axis: 10 benign scoring 0.00-0.09, 5 dangerous at 0.05 (below the top benign), 0.55-0.58 and 0.95.
+        # Injection axis: 4 benign at 0.10-0.40 and 4 dangerous at 0.2, 0.5, 0.6, 0.9.
+        cases, rows = [], []
+
+        def add(danger, score, injection=False, tier=None):
+            c = bench_row(f"echo c{word(len(cases))}", danger, injection=injection)
+            if tier:
+                c["tier"] = tier
+            rows.append({"index": len(cases), "score": score, "danger": danger})
+            cases.append(c)
+
+        for i in range(10):
+            add(False, i / 100)
+        for s_ in (0.05, 0.55, 0.56, 0.57, 0.95):
+            add(True, s_)
+        for s_ in (0.1, 0.2, 0.3, 0.4):
+            add(False, s_, True, "plain" if s_ < 0.25 else "paraphrased")
+        for s_, tier in ((0.2, "plain"), (0.5, "plain"), (0.6, "paraphrased"), (0.9, "paraphrased")):
+            add(True, s_, True, tier)
+        axes = evaluate.axis_summary(rows, cases, [10, 30, 100])
+        harm, inj = axes["harm"], axes["injection"]
+        self.assertEqual((harm["dangerous"], harm["benign"], inj["dangerous"], inj["benign"]),
+                         (5, 10, 4, 4))
+        # the harm axis: 4 dangerous cases outrank all 10 benign ones; 0.05 beats 5 and ties with 1
+        self.assertAlmostEqual(harm["auc"], (4 * 10 + 5.5) / 50, places=4)
+        # 10 % of 10 benign = 1 may be refused: the threshold is the 2nd highest benign score (0.08)
+        self.assertEqual(harm["tpr"], {"10": 80.0, "30": 80.0, "100": 100.0})
+        # 0 benign allowed at 10 % of 4: the threshold is the highest benign score (0.4)
+        self.assertEqual(inj["tpr"]["10"], 75.0)
+        self.assertEqual(inj["tpr"]["30"], 75.0)
+        # the AUC of the injection axis: 0.2 beats 1 benign (+0.5 tie with 0.2), 0.5 -> 4, 0.6 -> 4, 0.9 -> 4
+        self.assertAlmostEqual(inj["auc"], (1.5 + 4 + 4 + 4) / 16, places=4)
+        # tiers: their own AUC, and their catch at the injection axis' threshold
+        tiers = axes["tier"]
+        self.assertEqual(sorted(tiers), ["paraphrased", "plain"])
+        self.assertEqual(tiers["paraphrased"]["tpr"]["100"], 100.0)
+        self.assertEqual(tiers["paraphrased"]["at_axis_threshold"]["10"],
+                         {"catch": 100.0, "benign_refused": 0.0})
+        self.assertEqual(tiers["plain"]["at_axis_threshold"]["10"],
+                         {"catch": 50.0, "benign_refused": 0.0})
+        # no tiers in the cases, no tier table; ties never let more than the budget through
+        plain_cases = [{k: v for k, v in c.items() if k != "tier"} for c in cases]
+        self.assertNotIn("tier", evaluate.axis_summary(rows, plain_cases, [10]))
+        tied = [{"index": i, "score": 0.5, "danger": i >= 10} for i in range(20)]
+        self.assertEqual(evaluate.tpr_at_fpr(tied, 20), 0.0)
+        self.assertEqual(evaluate.tpr_at_fpr(tied, 100), 100.0)
+        self.assertIsNone(evaluate.tpr_at_fpr(tied[:10], 5))
+        # the tier is a breakdown group too
+        path = Path(self.tmp.name) / "tier-scores.jsonl"
+        common.write_jsonl(path, rows)
+        by = evaluate.breakdown(path, cases)["0.8"]
+        self.assertEqual(by["tier"]["plain"]["dangerous"], 2)
+        self.assertNotIn("tier", evaluate.breakdown(path, plain_cases)["0.8"])
+        self.assertTrue(evaluate.axis_lines(axes, [10, 30, 100]))
+
+    def test_compare_takes_dev_and_test_files_by_path_and_reports_tiers(self):
+        d = Path(self.tmp.name)
+        run = d / "work" / "runs" / "fake" / "eval"
+        rng = random.Random(3)
+        files = {}
+        for name in ("my-dev", "my-test"):
+            cases, rows = [], []
+            for i in range(300):
+                danger = i % 3 == 0
+                inj = i % 2 == 0
+                c = bench_row(f"echo c{word(i)}", danger, injection=inj)
+                if inj:
+                    c["tier"] = "plain" if i % 4 == 0 else "unicode"
+                cases.append(c)
+                rows.append({"index": i, "score": min(max(rng.gauss(0.8 if danger else 0.2, 0.15), 0), 1),
+                             "danger": danger})
+            path = d / f"{name}.json"
+            path.write_text(json.dumps(cases))
+            common.write_jsonl(run / f"scores-{name}.jsonl", rows)
+            files[name] = path
+        out = d / "cmp.md"
+        res = subprocess.run(
+            [sys.executable, str(HERE / "compare.py"), "--runs", "fake", "--dev", str(files["my-dev"]),
+             "--test", str(files["my-test"]), "--fpr", "1", "5", "--out", str(out)],
+            capture_output=True, text=True, check=True,
+            env={**os.environ, "NERVE_TRAINING_DIR": str(d / "work")})
+        got = json.loads(out.with_suffix(".json").read_text())["fake@dev-chosen"]
+        axes = got["my-test"]["axes"]
+        self.assertEqual(sorted(axes), ["harm", "injection", "tier"])
+        self.assertEqual(sorted(axes["tier"]), ["plain", "unicode"])
+        self.assertEqual(sorted(axes["harm"]["tpr"]), ["1.0", "5.0"])
+        self.assertGreater(axes["harm"]["auc"], 0.9)
+        self.assertIn("Per axis on my-test", res.stdout)
+        self.assertIn("By tier on my-test", res.stdout)
+        # without --dev/--test and without --cases it refuses
+        bad = subprocess.run([sys.executable, str(HERE / "compare.py"), "--runs", "fake"],
+                             capture_output=True, text=True)
+        self.assertNotEqual(bad.returncode, 0)
 
     def test_v3_build_is_preferred_unless_v2_is_asked_for(self):
         args = ([v3_row("echo new", True, "dz-x")], [], [bench_row("echo b", True)])

@@ -4,8 +4,10 @@ the dev split only, then applied unchanged to the benchmark and the 214 cases.
     python compare.py --runs laya-full-all-t0 laya-lora-all-t0 ... [--budget 3]
 
 Reads `runs/<name>/eval/scores-<file>.jsonl` (evaluate.py) and the case files
-in `--cases` (the prepared folder with `heldout-v3-dev.json`,
-`heldout-v3-benchmark.json`, and the 214 from the repo). For each run:
+given by path: `--dev` and `--test` (one or more), or `--cases`, a prepared
+folder with `heldout-v3-dev.json` and `heldout-v3-benchmark.json`; the 214 come
+from the repo. So the owner's independent dev and test files plug in as they
+are (`evaluate.py --heldout` scores them under their file names). For each run:
 
 1. on the dev split, the lowest threshold (two decimals) at which at most
    `--budget` percent of the benign cases are refused (score >= threshold);
@@ -27,6 +29,11 @@ table shows the temperature and the same threshold on the unscaled scores
 (`raw`), the one to configure if the model itself is not rescaled. The order of
 the scores, and so the AUC, does not change.
 
+Threshold-free, per axis (harm: cases without an injection; injection: the
+injection cases of both labels) and per `tier` where the cases carry one: the
+ROC-AUC and the catch rate at fixed benign-refused rates (`--fpr`, default 0.5,
+1, 3, 5 percent), see `evaluate.axis_summary`.
+
 `--breakdown` also writes, per run and file, the rates by capability, os,
 injection and the command's length, chain-operator and nesting buckets at that
 threshold. A run folder named like `d1-3B` or `laya-base` works the same.
@@ -45,24 +52,11 @@ import common
 import evaluate
 from common import WORK
 
-# The label of a case set -> the name evaluate.py gives its scores file.
-SCORES = {"dev": "heldout-v3-dev", "benchmark": "heldout-v3-benchmark", "214": "214"}
-FILES = {"dev": "heldout-v3-dev.json", "benchmark": "heldout-v3-benchmark.json"}
+# The v3.1 files of a prepared folder: the defaults of --dev and --test.
+DEV_FILE = "heldout-v3-dev.json"
+TEST_FILES = ["heldout-v3-benchmark.json"]
 
-
-def auc(rows):
-    """ROC-AUC of the scores: the chance that a dangerous case scores above a
-    benign one (ties count half)."""
-    pos = sorted(r["score"] for r in rows if r["danger"])
-    neg = sorted(r["score"] for r in rows if not r["danger"])
-    if not pos or not neg:
-        return None
-    import bisect
-    total = 0.0
-    for p in pos:
-        total += bisect.bisect_left(neg, p) + 0.5 * (bisect.bisect_right(neg, p)
-                                                      - bisect.bisect_left(neg, p))
-    return total / (len(pos) * len(neg))
+auc = evaluate.auc
 
 
 def pick_threshold(rows, budget):
@@ -117,8 +111,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--runs", nargs="+", required=True,
                     help="run names under runs/ (their eval folder is `eval`, or NAME:SUBFOLDER)")
-    ap.add_argument("--cases", type=Path, required=True,
-                    help="a prepared folder holding heldout-v3-dev.json and heldout-v3-benchmark.json")
+    ap.add_argument("--cases", type=Path, default=None,
+                    help="a prepared folder holding heldout-v3-dev.json and "
+                         "heldout-v3-benchmark.json (the defaults of --dev and --test)")
+    ap.add_argument("--dev", type=Path, default=None,
+                    help="the dev case file (thresholds and the temperature are fitted here)")
+    ap.add_argument("--test", type=Path, nargs="*", default=None,
+                    help="test case files (the benchmark); each is scored under its file name")
     ap.add_argument("--budget", type=float, default=3.0,
                     help="benign refusals allowed on dev, percent")
     ap.add_argument("--fixed", nargs="*", default=[], metavar="NAME=T",
@@ -127,22 +126,35 @@ def main():
                     help="more benign-refusal budgets (percent) for the dev rank")
     ap.add_argument("--also", type=float, nargs="*", default=[],
                     help="also report every run at these fixed thresholds (e.g. 0.8)")
+    ap.add_argument("--fpr", type=float, nargs="*", default=evaluate.FPRS,
+                    help="benign-refused budgets (percent) of the per-axis catch rates")
     ap.add_argument("--calibrate", action="store_true",
                     help="temperature-scale every run's scores, fitted on its dev scores")
     ap.add_argument("--breakdown", action="store_true")
     ap.add_argument("--out", type=Path, default=None, help="write the markdown here too")
     a = ap.parse_args()
+    if a.cases is None and (a.dev is None or a.test is None):
+        ap.error("give --cases, or both --dev and --test")
 
-    cases = {"dev": json.loads((a.cases / FILES["dev"]).read_text(encoding="utf-8")),
-             "benchmark": json.loads((a.cases / FILES["benchmark"]).read_text(encoding="utf-8")),
-             "214": json.loads(common.EVAL_214.read_text(encoding="utf-8"))}
+    dev_path = a.dev or a.cases / DEV_FILE
+    test_paths = a.test if a.test is not None else [a.cases / f for f in TEST_FILES]
+
+    def load_cases(path):
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+
+    # label -> (case file, the name evaluate.py gave its scores file)
+    sets = {"dev": (dev_path, dev_path.stem)}
+    sets.update({p.stem: (p, p.stem) for p in test_paths})
+    sets["214"] = (common.EVAL_214, "214")
+    cases = {label: load_cases(path) for label, (path, _) in sets.items()}
+    tests = [p.stem for p in test_paths]
     fixed = {k: float(v) for k, v in (x.split("=") for x in a.fixed)}
     lines, result = [], {}
     for spec in a.runs:
         run, _, sub = spec.partition(":")
         sub = sub or "eval"
         scores = {}
-        for label, name in SCORES.items():
+        for label, (_, name) in sets.items():
             path = eval_dir(run, sub) / f"scores-{name}.jsonl"
             if path.exists():
                 scores[label] = common.load_jsonl(path)
@@ -168,6 +180,8 @@ def main():
                 entry["raw_threshold"] = calibration.raw_threshold(th, cal["temperature"])
             for label, rows in scores.items():
                 entry[label] = rates(rows, cases[label], th)
+                # threshold-free: AUC and catch at fixed benign-refused rates, per axis and tier
+                entry[label]["axes"] = evaluate.axis_summary(rows, cases[label], a.fpr)
                 if a.breakdown:
                     entry[label]["breakdown"] = evaluate.breakdown_rows(
                         rows, cases[label], [th])[str(th)]
@@ -180,29 +194,67 @@ def main():
                                     for r in at) / len(at)
             result[f"{run}@{how}"] = entry
 
-    lines += ["| Run | Threshold | Dev catch | Dev inj. catch | Dev benign-refused | "
-              "Bench catch | Bench benign-refused | Bench inj. catch | Bench inj. refused | "
-              "Bench AUC | 214 catch | 214 benign-refused | 214 inj. catch | 214 AUC | Dev rank |",
-              "|" + "---|" * 15]
+    lines += ["| Run | Test file | Threshold | Dev catch | Dev inj. catch | Dev benign-refused | "
+              "Test catch | Test benign-refused | Test inj. catch | Test inj. refused | "
+              "Test AUC | 214 catch | 214 benign-refused | 214 inj. catch | 214 AUC | Dev rank |",
+              "|" + "---|" * 16]
+
+    def m(x, k, pm=True):
+        return "-" if x is None else cell(x[k], x.get(k + "_pm") if pm else None)
+
+    def auc_cell(x):
+        return "-" if x is None or x["auc"] is None else f"{x['auc']:.3f}"
+
     for name, e in sorted(result.items(), key=lambda kv: -kv[1]["dev_rank"]):
-        d, b, c = e["dev"], e.get("benchmark"), e.get("214")
-
-        def m(x, k, pm=True):
-            return "-" if x is None else cell(x[k], x.get(k + "_pm") if pm else None)
-
+        d, c = e["dev"], e.get("214")
         thr = f"{e['threshold']:.2f}"
         if "calibration" in e:
             thr += f" (T {e['calibration']['temperature']:.2f}, raw {e['raw_threshold']:.3f})"
-        lines.append(
-            f"| {name} | {thr} | {m(d, 'catch')} | {m(d, 'injection_catch')} | "
-            f"{m(d, 'benign_refused')} | {m(b, 'catch')} | {m(b, 'benign_refused')} | "
-            f"{m(b, 'injection_catch')} | {m(b, 'injection_refused', False)} | "
-            f"{'-' if b is None else f'{b['auc']:.3f}'} | {m(c, 'catch')} | "
-            f"{m(c, 'benign_refused')} | {m(c, 'injection_catch')} | "
-            f"{'-' if c is None else f'{c['auc']:.3f}'} | {e['dev_rank']:.1f} |")
+        for test in (tests if any(x in e for x in tests) else [None]):
+            b = e.get(test)
+            lines.append(
+                f"| {name} | {test or '-'} | {thr} | {m(d, 'catch')} | {m(d, 'injection_catch')} | "
+                f"{m(d, 'benign_refused')} | {m(b, 'catch')} | {m(b, 'benign_refused')} | "
+                f"{m(b, 'injection_catch')} | {m(b, 'injection_refused', False)} | "
+                f"{auc_cell(b)} | {m(c, 'catch')} | {m(c, 'benign_refused')} | "
+                f"{m(c, 'injection_catch')} | {auc_cell(c)} | {e['dev_rank']:.1f} |")
+
+    # Threshold-free, per axis (the same for every threshold row of a run: show the first).
+    shown = {}
+    for name, e in result.items():
+        shown.setdefault(name.split("@")[0], e)
+    for label in ["dev", *tests, "214"]:
+        rows = [(run, e[label]["axes"]) for run, e in shown.items() if label in e]
+        if not rows:
+            continue
+        lines += ["", f"### Per axis on {label} (AUC, catch % at a fixed benign-refused %)", ""]
+        head = " | ".join(f"{f:g} %" for f in a.fpr)
+        lines += [f"| Run | Axis | Dangerous | Benign | AUC | {head} |",
+                  "|---|---|---|---|---|" + "---|" * len(a.fpr)]
+        for run, axes in rows:
+            for axis in ("harm", "injection"):
+                x = axes[axis]
+                lines.append(f"| {run} | {axis} | {x['dangerous']} | {x['benign']} | "
+                             f"{'-' if x['auc'] is None else format(x['auc'], '.3f')} | "
+                             + " | ".join(evaluate.show(x["tpr"][str(f)]) for f in a.fpr) + " |")
+        tier_rows = [(run, axes["tier"]) for run, axes in rows if axes.get("tier")]
+        if tier_rows:
+            lines += ["", f"By tier on {label}: AUC / catch % at the injection axis' threshold "
+                          "for the budget (benign-refused % in brackets)", "",
+                      f"| Run | Tier | Dangerous | Benign | AUC | {head} |",
+                      "|---|---|---|---|---|" + "---|" * len(a.fpr)]
+            for run, tiers in tier_rows:
+                for tier, x in tiers.items():
+                    cells = []
+                    for f in a.fpr:
+                        r = x["at_axis_threshold"][str(f)]
+                        cells.append(f"{evaluate.show(r['catch'])} ({evaluate.show(r['benign_refused'])})")
+                    lines.append(f"| {run} | {tier} | {x['dangerous']} | {x['benign']} | "
+                                 f"{'-' if x['auc'] is None else format(x['auc'], '.3f')} | "
+                                 + " | ".join(cells) + " |")
     if a.breakdown:
         for name, e in result.items():
-            for label in ("benchmark", "214"):
+            for label in [*tests, "214"]:
                 if label not in e:
                     continue
                 lines += ["", f"### {name} on {label} at {e['threshold']:.2f}", "",
@@ -214,7 +266,8 @@ def main():
                                      f"{evaluate.show(mm['catch'])} | {mm['benign']} | "
                                      f"{evaluate.show(mm['benign_refused'])} |")
     if a.calibrate:
-        lines += ["", "| Run | T | Dev log loss | scaled | Dev ECE | scaled |", "|---|---|---|---|---|---|"]
+        lines += ["", "| Run | T | Dev log loss | scaled | Dev ECE | scaled |",
+                  "|---|---|---|---|---|---|"]
         for name, e in result.items():
             if "calibration" in e and e["how"] == "dev-chosen":
                 c = e["calibration"]
