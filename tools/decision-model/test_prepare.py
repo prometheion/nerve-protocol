@@ -289,6 +289,70 @@ class PrepareTest(unittest.TestCase):
         self.assertEqual(stats["heldout"]["v3-dev"]["by_cap_os_label"],
                          {"exec/linux/danger": 1, "fs/linux/harmless": 1})
 
+    def injection_set(self):
+        """40 injection rows (20 each way) among 160 ordinary ones, placeholder text."""
+        train = []
+        for i in range(20):
+            train.append(v3_row(f"echo inj-bad-{word(i)}", True, "dz-x", injection=True))
+            train.append(v3_row(f"echo inj-ok-{word(i)}", False, "vcs", injection=True))
+        for i in range(80):
+            train.append(v3_row(f"echo plain-bad-{word(i)}", True, "dz-x"))
+            train.append(v3_row(f"echo plain-ok-{word(i)}", False, "vcs"))
+        return train, [], [bench_row("echo unrelated-bench", True)]
+
+    def test_injection_rows_are_oversampled_in_train_only(self):
+        args = self.injection_set()
+        d = Path(self.tmp.name)
+        out1, s1 = self.run_prepare_v3(*args, "--calib-share", "0.2", "--injection-oversample", "1",
+                                       "--out", str(d / "o1"))
+        out3, s3 = self.run_prepare_v3(*args, "--calib-share", "0.2", "--injection-oversample", "3",
+                                       "--out", str(d / "o3"))
+        out1, out3 = d / "o1", d / "o3"
+        rows1 = common.load_jsonl(out1 / "train.jsonl")
+        rows3 = common.load_jsonl(out3 / "train.jsonl")
+        n = sum(r["injection"] for r in rows1)
+        self.assertGreater(n, 20)
+        self.assertEqual((s1["oversample"]["copies_added"], len(rows1)), (0, 160))
+        self.assertEqual((s3["oversample"]["injection_rows_before"], s3["oversample"]["copies_added"]),
+                         (n, 2 * n))
+        self.assertEqual(len(rows3), 160 + 2 * n)
+        self.assertEqual(s3["train"]["injection_danger"] + s3["train"]["injection_harmless"], 3 * n)
+        # no new command: the same targets, the injection ones three times, the rest once
+        count = collections.Counter((r["state"]["target"], r["injection"]) for r in rows3)
+        self.assertEqual({t for t, _ in count}, {r["state"]["target"] for r in rows1})
+        self.assertEqual({c for (t, inj), c in count.items() if inj}, {3})
+        self.assertEqual({c for (t, inj), c in count.items() if not inj}, {1})
+        self.assertEqual({(r["injection"], r["gold"]["danger"]) for r in rows3 if r["injection"]},
+                         {(True, True), (True, False)})
+        # both directions are repeated, with their labels
+        by_target = {r["state"]["target"]: r["gold"]["danger"] for r in rows1}
+        self.assertTrue(all(by_target[r["state"]["target"]] == r["gold"]["danger"] for r in rows3))
+        # the repeats differ in state or question: more variants than rows
+        self.assertGreater(s3["oversample"]["injection_variants"], 2 * n)
+        self.assertLess(s3["oversample"]["injection_variants"], 3 * n + 1)
+        # the calibration rows and the held-out files are not touched
+        self.assertEqual((out1 / "calib.jsonl").read_bytes(), (out3 / "calib.jsonl").read_bytes())
+        self.assertEqual((out1 / "heldout-v3-benchmark.json").read_bytes(),
+                         (out3 / "heldout-v3-benchmark.json").read_bytes())
+        self.assertEqual(s3["oversample"]["calib_and_heldout"], "untouched")
+
+    def test_injection_oversampling_defaults_to_a_share_of_train(self):
+        args = self.injection_set()
+        _, s = self.run_prepare_v3(*args, "--calib-share", "0")
+        o = s["oversample"]
+        self.assertEqual(o["mode"], "share")
+        self.assertAlmostEqual(o["injection_share_after"], 0.275, delta=0.01)
+        self.assertGreater(o["factor"], 1.0)
+        # a fractional factor repeats a share of the rows once more
+        _, s = self.run_prepare_v3(*args, "--calib-share", "0", "--injection-oversample", "2.5")
+        self.assertEqual(s["oversample"]["copies_added"], 60)
+        # the factor is capped, and rows without injection are left alone
+        _, s = self.run_prepare_v3(*args, "--calib-share", "0", "--injection-share", "0.99")
+        self.assertEqual(s["oversample"]["factor"], prepare.INJECTION_MAX_FACTOR)
+        _, s = self.run_prepare_v3([v3_row("echo only-a", True, "dz-x"), v3_row("echo only-b", False, "vcs")],
+                                   [], [bench_row("echo c", True)], "--calib-share", "0")
+        self.assertEqual((s["oversample"]["factor"], s["oversample"]["copies_added"]), (1.0, 0))
+
     def test_v3_build_is_preferred_unless_v2_is_asked_for(self):
         args = ([v3_row("echo new", True, "dz-x")], [], [bench_row("echo b", True)])
         _, stats = self.run_prepare_v3(*args, v2=True)

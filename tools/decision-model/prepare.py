@@ -58,7 +58,16 @@ What it does, in order:
    Only the training rows are chosen this way; the held-out files are not.
 5. A stratified `--calib-share` of the rows goes to `calib.jsonl` (fitting the
    temperature after training), the rest to `train.jsonl`.
-6. Each held-out file is written in the eval runner's case format
+6. Injection rows (the owner's `injection` flag, both labels) are oversampled in
+   `train.jsonl` only: `--injection-oversample F` repeats them to F times their
+   number (1: off), or without it `--injection-share` (0.275) sets F so they make
+   up that share of the training rows (at most `--injection-max-factor` 10). A
+   repeat is the same command with a fresh random draw of taint, call arguments
+   and question wording, so the repeats differ in state; no command is new or
+   changed. `calib.jsonl` and the held-out files are not touched (the
+   temperature is fitted on the natural mix, and a repeat cannot leak into
+   them: the split comes first).
+7. Each held-out file is written in the eval runner's case format
    (`heldout-<name>.json`, see crates/nerve-center/tests/checker_eval.rs),
    with the `injection` flag where the source has it.
 
@@ -287,6 +296,52 @@ def floor_rows(rng, kept, pool, floor, limit):
     return picked
 
 
+INJECTION_SHARE = 0.275
+INJECTION_MAX_FACTOR = 10.0
+
+
+def injection_factor(n_rows, n_injection, share, cap):
+    """The factor that makes `n_injection` of `n_rows` rows `share` of the
+    training rows once the injection rows are repeated (never below 1, at
+    most `cap`)."""
+    if n_injection == 0 or n_injection >= n_rows:
+        return 1.0
+    f = share * (n_rows - n_injection) / (n_injection * (1 - share))
+    return min(max(f, 1.0), cap)
+
+
+def restate(rng, row, args_share, tainted_share, paraphrase_share, state_bytes):
+    """One more copy of a training row: the same command with a new random
+    draw of taint, call arguments and question wording."""
+    st = row["state"]
+    if st["capability"] == "exec" and st["action"] == "run":
+        state = command_state(rng, row["_target"], st["os"], args_share, tainted_share,
+                              state_bytes)
+    else:
+        # a file write of the owner's has no content to send; keep any recorded args
+        state = common.model_state(st["capability"], st["action"], row["_target"], st["os"],
+                                   tainted=rng.random() < tainted_share, state_bytes=state_bytes)
+        if "args" in st:
+            state["args"] = st["args"]
+            state = dict(sorted(state.items()))
+    return {**row, "state": state, "questions": pick_question(rng, paraphrase_share)}
+
+
+def oversample_injection(rng, rows, factor, redraw):
+    """`rows` with every injection row repeated up to `factor` times its
+    number: each gets floor(factor - 1) more copies and the rest of the extra
+    copies go to injection rows picked at random without replacement.
+    `redraw(row)` makes a copy. Returns (rows, number of copies added)."""
+    inj = [r for r in rows if r.get("injection")]
+    extra = round(len(inj) * (factor - 1))
+    if extra <= 0:
+        return rows, 0
+    whole, rest = divmod(extra, len(inj))
+    copies = [redraw(r) for r in inj for _ in range(whole)]
+    copies += [redraw(r) for r in rng.sample(inj, rest)]
+    return rows + copies, len(copies)
+
+
 def split_stratified(rng, rows, share):
     by = collections.defaultdict(list)
     for r in rows:
@@ -334,6 +389,13 @@ def main():
                          "chain-operator and nesting bucket when the pool has them (0: a "
                          "random sample only)")
     ap.add_argument("--calib-share", type=float, default=0.1)
+    ap.add_argument("--injection-oversample", type=float, default=None, metavar="F",
+                    help="repeat the injection rows of train.jsonl to F times their number "
+                         "(1: off; default: the factor that gives --injection-share)")
+    ap.add_argument("--injection-share", type=float, default=INJECTION_SHARE,
+                    help="the share of injection rows in train.jsonl that the default "
+                         "oversampling aims at")
+    ap.add_argument("--injection-max-factor", type=float, default=INJECTION_MAX_FACTOR)
     ap.add_argument("--state-bytes", type=int, default=common.LAYA_STATE_BYTES,
                     help="bytes of the target and of the args in a state, as the center "
                          "sends them to this model (Laya: 320, so the prompt fits 512 tokens)")
@@ -503,6 +565,29 @@ def main():
     rng.shuffle(final)
 
     train, calib = split_stratified(rng, final, a.calib_share)
+
+    # Oversample the injection rows of the training part only, after the split.
+    # Its own random stream, so a factor of 1 leaves everything else as it was.
+    n_inj = sum(bool(r.get("injection")) for r in train)
+    if a.injection_oversample is not None:
+        factor, mode = max(a.injection_oversample, 1.0), "given"
+    else:
+        factor = injection_factor(len(train), n_inj, a.injection_share, a.injection_max_factor)
+        mode = "share"
+    over_rng = random.Random(a.seed + 1)
+    train, added = oversample_injection(
+        over_rng, train, factor,
+        lambda r: restate(over_rng, r, a.args_share, a.tainted_share, a.paraphrase_share,
+                          a.state_bytes))
+    over_rng.shuffle(train)
+    inj_rows = [r for r in train if r.get("injection")]
+    stats["oversample"] = {
+        "mode": mode, "factor": round(factor, 3), "injection_rows_before": n_inj,
+        "copies_added": added, "train_rows_after": len(train),
+        "injection_share_after": round(len(inj_rows) / len(train), 4) if train else 0.0,
+        "injection_variants": len({json.dumps([r["state"], r["questions"]], sort_keys=True)
+                                   for r in inj_rows}),
+        "calib_and_heldout": "untouched"}
 
     def counts(part):
         c = collections.Counter()
