@@ -126,6 +126,18 @@ def model_state(cap, action, target, os_name, tainted=False, args=None, state_by
     return dict(sorted(st.items()))
 
 
+def case_row(case, state_bytes=STATE_BYTES):
+    """A benchmark or dev case (the eval runner's format) as a training-format
+    row, with the state exactly as the eval runner sends it (not tainted, the
+    case's own `args` string if it has one) and the center's question."""
+    st = model_state(case["cap"], case["action"], case["target"], case["os"],
+                     state_bytes=state_bytes)
+    if case.get("args") is not None:
+        st["args"] = clip_ends(case["args"], state_bytes)
+        st = dict(sorted(st.items()))
+    return {"state": st, "questions": question(), "gold": {"danger": bool(case["danger"])}}
+
+
 def render_state(state):
     """The state as llama.cpp's Laya template renders it (`state | tojson`:
     Python's json.dumps defaults, keys in the order sent)."""

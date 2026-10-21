@@ -76,6 +76,13 @@ def layer_trains(name, layers):
     return int(m.group(1)) in layers if m else name.startswith("final_norm")
 
 
+def calib_cases_rows(path, state_bytes):
+    """The rows the temperature is fitted on when it is given as a case file:
+    each case as the eval runner sends it (so the temperature matches how the
+    model is asked in serving and in evaluation)."""
+    return [common.case_row(c, state_bytes) for c in json.loads(Path(path).read_text("utf-8"))]
+
+
 def freeze_below(encoder, layers):
     """Freeze every encoder parameter that `layer_trains` rules out. Returns
     (trainable, total) parameter counts."""
@@ -96,6 +103,10 @@ def main():
     ap.add_argument("--base", default=str(WORK / "hf" / "laya"),
                     help="a Laya checkpoint folder (rl_agent_config.json, encoder/, tokenizer/)")
     ap.add_argument("--out", type=Path, default=None, help="default runs/<name>")
+    ap.add_argument("--calib-cases", type=Path, default=None,
+                    help="fit the temperature on this dev case file (the eval runner's format, "
+                         "e.g. heldout-v3-dev.json, later the independent dev) instead of "
+                         "calib.jsonl; give the same file to compare.py as --dev")
     ap.add_argument("--mode", choices=["lora", "full"], default="lora")
     ap.add_argument("--r", type=int, default=32)
     ap.add_argument("--alpha", type=int, default=32)
@@ -111,6 +122,8 @@ def main():
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--grad-accum", type=int, default=2)
     ap.add_argument("--max-seq-length", type=int, default=512)
+    ap.add_argument("--state-bytes", type=int, default=common.LAYA_STATE_BYTES,
+                    help="bytes of the target in the --calib-cases states (as prepare.py's)")
     ap.add_argument("--seed", type=int, default=139)
     a = ap.parse_args()
     out = a.out or WORK / "runs" / a.name
@@ -140,6 +153,10 @@ def main():
 
     train_rows = common.load_jsonl(a.data / "train.jsonl")
     calib_rows = common.load_jsonl(a.data / "calib.jsonl")
+    calib_source = str(a.data / "calib.jsonl")
+    if a.calib_cases:
+        calib_rows = calib_cases_rows(a.calib_cases, a.state_bytes)
+        calib_source = str(a.calib_cases)
     train_items, train_report = FastDecisionModel.build_dataset(train_rows, tokenizer, model)
     calib_items, calib_report = FastDecisionModel.build_dataset(calib_rows, tokenizer, model)
     print(json.dumps({"train": train_report, "calib": calib_report}))
@@ -183,7 +200,7 @@ def main():
         "r": a.r if a.mode == "lora" else None, "alpha": a.alpha if a.mode == "lora" else None,
         "epochs": a.epochs, "max_steps": a.max_steps, "batch": a.batch,
         "grad_accum": a.grad_accum, "seed": a.seed, "train_items": len(train_items),
-        "calib_items": len(calib_items), "train_loss": stats.training_loss,
+        "calib_items": len(calib_items), "calib_source": calib_source, "train_loss": stats.training_loss,
         "minutes": round(minutes, 1), "log": trainer.state.log_history,
         "calibration": {k: v for k, v in calib.items() if isinstance(v, (int, float, str, list))},
         "temperature": model.decision_config.get("temperature"),

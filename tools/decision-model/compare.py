@@ -20,6 +20,13 @@ in `--cases` (the prepared folder with `heldout-v3-dev.json`,
    every run, so the stricter budgets tell the runs apart without looking at
    the benchmark or the 214.
 
+`--calibrate` first fits a temperature on the dev scores (`calibration.py`: the
+one number that minimises the log loss there), rescales the scores of every
+file with it, and then picks the threshold on the rescaled dev scores; the
+table shows the temperature and the same threshold on the unscaled scores
+(`raw`), the one to configure if the model itself is not rescaled. The order of
+the scores, and so the AUC, does not change.
+
 `--breakdown` also writes, per run and file, the rates by capability, os,
 injection and the command's length, chain-operator and nesting buckets at that
 threshold. A run folder named like `d1-3B` or `laya-base` works the same.
@@ -33,6 +40,7 @@ import json
 import math
 from pathlib import Path
 
+import calibration
 import common
 import evaluate
 from common import WORK
@@ -119,6 +127,8 @@ def main():
                     help="more benign-refusal budgets (percent) for the dev rank")
     ap.add_argument("--also", type=float, nargs="*", default=[],
                     help="also report every run at these fixed thresholds (e.g. 0.8)")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="temperature-scale every run's scores, fitted on its dev scores")
     ap.add_argument("--breakdown", action="store_true")
     ap.add_argument("--out", type=Path, default=None, help="write the markdown here too")
     a = ap.parse_args()
@@ -139,18 +149,28 @@ def main():
         if "dev" not in scores:
             lines.append(f"{run}: no dev scores, skipped")
             continue
+        cal = None
+        if a.calibrate:
+            temp = calibration.fit_temperature(scores["dev"])
+            cal = {"temperature": temp, "dev_nll": calibration.nll(scores["dev"]),
+                   "dev_nll_scaled": calibration.nll(scores["dev"], temp),
+                   "dev_ece": calibration.ece(scores["dev"]),
+                   "dev_ece_scaled": calibration.ece(scores["dev"], temp)}
+            scores = {label: calibration.rescored(rows, temp) for label, rows in scores.items()}
         t = pick_threshold(scores["dev"], a.budget)
         thresholds = [("dev-chosen", t)] + [(f"t{x:.2f}", x) for x in a.also]
         if spec in fixed or run in fixed:
             thresholds.append(("fixed", fixed.get(spec, fixed.get(run))))
         for how, th in thresholds:
             entry = {"threshold": th, "how": how}
+            if cal:
+                entry["calibration"] = cal
+                entry["raw_threshold"] = calibration.raw_threshold(th, cal["temperature"])
             for label, rows in scores.items():
                 entry[label] = rates(rows, cases[label], th)
                 if a.breakdown:
-                    entry[label]["breakdown"] = evaluate.breakdown(
-                        eval_dir(run, sub) / f"scores-{SCORES[label]}.jsonl",
-                        cases[label], [th])[str(th)]
+                    entry[label]["breakdown"] = evaluate.breakdown_rows(
+                        rows, cases[label], [th])[str(th)]
             # The rank ignores the threshold of this row: dev only, at each budget.
             at = [rates(scores["dev"], cases["dev"], pick_threshold(scores["dev"], b))
                   for b in [a.budget, *a.strict]]
@@ -170,8 +190,11 @@ def main():
         def m(x, k, pm=True):
             return "-" if x is None else cell(x[k], x.get(k + "_pm") if pm else None)
 
+        thr = f"{e['threshold']:.2f}"
+        if "calibration" in e:
+            thr += f" (T {e['calibration']['temperature']:.2f}, raw {e['raw_threshold']:.3f})"
         lines.append(
-            f"| {name} | {e['threshold']:.2f} | {m(d, 'catch')} | {m(d, 'injection_catch')} | "
+            f"| {name} | {thr} | {m(d, 'catch')} | {m(d, 'injection_catch')} | "
             f"{m(d, 'benign_refused')} | {m(b, 'catch')} | {m(b, 'benign_refused')} | "
             f"{m(b, 'injection_catch')} | {m(b, 'injection_refused', False)} | "
             f"{'-' if b is None else f'{b['auc']:.3f}'} | {m(c, 'catch')} | "
@@ -190,6 +213,14 @@ def main():
                         lines.append(f"| {axis} | {value} | {mm['dangerous']} | "
                                      f"{evaluate.show(mm['catch'])} | {mm['benign']} | "
                                      f"{evaluate.show(mm['benign_refused'])} |")
+    if a.calibrate:
+        lines += ["", "| Run | T | Dev log loss | scaled | Dev ECE | scaled |", "|---|---|---|---|---|---|"]
+        for name, e in result.items():
+            if "calibration" in e and e["how"] == "dev-chosen":
+                c = e["calibration"]
+                lines.append(f"| {name} | {c['temperature']:.2f} | {c['dev_nll']:.4f} | "
+                             f"{c['dev_nll_scaled']:.4f} | {c['dev_ece']:.4f} | "
+                             f"{c['dev_ece_scaled']:.4f} |")
     md = "\n".join(lines)
     print(md)
     if a.out:

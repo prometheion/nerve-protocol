@@ -6,6 +6,8 @@ conflicting labels, held-out and 214-case overlap, balance, output format.
 
 import collections
 import json
+import os
+import random
 import subprocess
 import sys
 import tempfile
@@ -15,6 +17,7 @@ from pathlib import Path
 import common
 import compare
 import evaluate
+import calibration
 import prepare
 import train
 
@@ -425,6 +428,78 @@ class PrepareTest(unittest.TestCase):
         self.assertEqual(len(every), 16)
         self.assertEqual(top, {m for m in every if m.startswith(("layers.2.", "layers.3."))})
         self.assertEqual(adapted(target_modules=train.LORA_TARGETS), every)
+
+    def overconfident_rows(self, n=2000, sharpen=3.0, seed=7):
+        """Scores of a model that is `sharpen` times too sure: the true logit is z, it says sharpen*z."""
+        rng = random.Random(seed)
+        rows = []
+        for i in range(n):
+            z = rng.gauss(0, 1.5)
+            rows.append({"index": i, "score": calibration.sigmoid(sharpen * z),
+                         "danger": rng.random() < calibration.sigmoid(z)})
+        return rows
+
+    def test_temperature_scaling_fits_the_dev_split(self):
+        rows = self.overconfident_rows()
+        t = calibration.fit_temperature(rows)
+        self.assertAlmostEqual(t, 3.0, delta=0.4)
+        self.assertLess(calibration.nll(rows, t), calibration.nll(rows) - 0.1)
+        self.assertLess(calibration.ece(rows, t), calibration.ece(rows) / 3)
+        # a model that is not over-confident keeps T near 1, one class alone is not fitted
+        self.assertAlmostEqual(calibration.fit_temperature(self.overconfident_rows(sharpen=1.0)), 1.0,
+                               delta=0.25)
+        self.assertEqual(calibration.fit_temperature([{"score": 0.9, "danger": True}]), 1.0)
+        # scaling keeps the order; the raw threshold is the same cut on the unscaled score
+        scaled = calibration.rescored(rows, t)
+        self.assertEqual(compare.auc(rows), compare.auc(scaled))
+        raw = calibration.raw_threshold(0.8, t)
+        self.assertEqual([r["score"] >= raw for r in rows], [r["score"] >= 0.8 for r in scaled])
+        self.assertAlmostEqual(calibration.scale(raw, t), 0.8, places=6)
+
+    def test_compare_calibrates_on_dev_and_keeps_the_ranking(self):
+        d = Path(self.tmp.name)
+        run = d / "work" / "runs" / "fake" / "eval"
+        cases = d / "cases"
+        cases.mkdir(parents=True)
+        for label, seed in (("heldout-v3-dev", 1), ("heldout-v3-benchmark", 2)):
+            rows = self.overconfident_rows(400, seed=seed)
+            common.write_jsonl(run / f"scores-{label}.jsonl", rows)
+            (cases / f"{label}.json").write_text(json.dumps(
+                [{"cap": "exec", "action": "run", "target": "x", "os": "linux", "danger": r["danger"],
+                  "kind": "dangerous" if r["danger"] else "benign"} for r in rows]))
+        results = {}
+        for flag in ([], ["--calibrate"]):
+            out = d / ("cal.md" if flag else "raw.md")
+            subprocess.run([sys.executable, str(HERE / "compare.py"), "--runs", "fake", "--cases",
+                            str(cases), *flag, "--out", str(out)], capture_output=True, text=True,
+                           check=True, env={**os.environ, "NERVE_TRAINING_DIR": str(d / "work")})
+            results[bool(flag)] = json.loads(out.with_suffix(".json").read_text())["fake@dev-chosen"]
+        raw, cal = results[False], results[True]
+        self.assertNotIn("calibration", raw)
+        self.assertAlmostEqual(cal["calibration"]["temperature"], 3.0, delta=0.6)
+        self.assertLess(cal["calibration"]["dev_ece_scaled"], cal["calibration"]["dev_ece"])
+        # the order of the scores is the same, so the AUC is; the dev threshold moves to scaled scores
+        self.assertAlmostEqual(cal["benchmark"]["auc"], raw["benchmark"]["auc"], places=9)
+        self.assertNotEqual(cal["threshold"], raw["threshold"])
+        # the same cut on the unscaled score refuses the same benign share on dev (to a step of the 0.01 grid)
+        self.assertAlmostEqual(cal["dev"]["benign_refused"], raw["dev"]["benign_refused"], delta=1.0)
+
+    def test_case_rows_are_the_states_the_eval_runner_sends(self):
+        case = {"cap": "exec", "action": "run", "target": "echo " + "w" * 700, "os": "linux",
+                "danger": False, "kind": "benign"}
+        row = common.case_row(case, 320)
+        self.assertEqual(row["state"], common.model_state("exec", "run", case["target"], "linux",
+                                                          state_bytes=320))
+        self.assertEqual(row["gold"], {"danger": False})
+        self.assertEqual(row["questions"], common.question())
+        self.assertFalse(row["state"]["tainted"])
+        self.assertNotIn("args", row["state"])
+        with_args = common.case_row({**case, "target": "ls", "args": '{"command":"ls"}', "danger": True})
+        self.assertEqual(with_args["state"]["args"], '{"command":"ls"}')
+        self.assertEqual(list(with_args["state"]), sorted(with_args["state"]))
+        path = Path(self.tmp.name) / "dev.json"
+        path.write_text(json.dumps([case]))
+        self.assertEqual(train.calib_cases_rows(path, 320), [row])
 
     def test_v3_build_is_preferred_unless_v2_is_asked_for(self):
         args = ([v3_row("echo new", True, "dz-x")], [], [bench_row("echo b", True)])

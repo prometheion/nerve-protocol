@@ -146,7 +146,11 @@ def groups(case):
 def breakdown(scores_file, cases, thresholds=THRESHOLDS):
     """{threshold: {axis: {value: {dangerous, catch, benign, benign_refused}}}}
     by capability, os, injection, command length, chain operators, nesting."""
-    rows = common.load_jsonl(scores_file)
+    return breakdown_rows(common.load_jsonl(scores_file), cases, thresholds)
+
+
+def breakdown_rows(rows, cases, thresholds=THRESHOLDS):
+    """`breakdown` of score rows already loaded (or rescaled)."""
     by = {}
     for r in rows:
         for axis, value in groups(cases[r["index"]]).items():
