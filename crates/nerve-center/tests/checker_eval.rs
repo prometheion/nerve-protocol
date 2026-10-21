@@ -19,12 +19,12 @@
 //! at another case file of the same form (e.g. the held-out split of the
 //! decision-model training data, `tools/decision-model/`); the default is the
 //! 214 cases here. `NERVE_CHECKER_SCORES_OUT` writes each case's score (one
-//! JSON line: index, score, danger, kind, injection) for the training tools'
-//! metrics. A case may carry `args`, sent in the state as the center sends a
-//! call's arguments, and an `injection` flag (an embedded instruction that
-//! must not move the answer, in either direction; the 214 cases mark theirs
-//! with the kind `injection`). Other fields (`id`, `category`, ...) are
-//! ignored. The state is bounded as the center bounds it
+//! JSON line: index, score, danger, kind, injection, and the call's time `ms`) for
+//! the training tools' metrics and the latency measurements. A case may carry `args`,
+//! sent in the state as the center sends a call's arguments, and an `injection`
+//! flag (an embedded instruction that must not move the answer, in either
+//! direction; the 214 cases mark theirs with the kind `injection`). Other
+//! fields (`id`, `category`, ...) are ignored. The state is bounded as the center bounds it
 //! (`nerve_center::checker::state`): `NERVE_CHECKER_STATE_BYTES` per target
 //! and args, default the center's 2000; a model pinned with a smaller
 //! `state_bytes` (Laya: 320) is evaluated with that.
@@ -117,11 +117,12 @@ async fn evaluate_decision_model() {
         let started = Instant::now();
         match model::ask(&endpoint, &cfg, state).await {
             Ok(score) => {
-                latencies_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+                let ms = started.elapsed().as_secs_f64() * 1000.0;
+                latencies_ms.push(ms);
                 lines.push_str(&format!(
                     "{}\n",
                     json!({"index": i, "score": score, "danger": c.danger, "kind": c.kind,
-                           "injection": c.injected()})
+                           "injection": c.injected(), "ms": ms})
                 ));
                 scored.push(Scored {
                     score,

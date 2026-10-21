@@ -680,3 +680,62 @@ is the optional layer for the long tail and for injection, which is why a 60 %
 catch at a low benign-refusal rate is a good operating point rather than a
 weak one. Raise the threshold to 0.85 to trade a little catch for fewer
 benign refusals.
+
+### Latency on 2 vCPUs
+
+The target is a container with about 2 vCPUs, not the 8-thread desktop CPU of the
+tables above. `tools/decision-model/latency.py` starts the shipped `llama-server`
+(b11719, CPU) inside a systemd scope limited to two cores (`AllowedCPUs`, one hardware
+thread of each of two P-cores of an i5-13400F), `CPUQuota=200%` and `MemoryMax=4G`, with
+`--threads 2`, and runs the eval runner on the 214 cases three times; the table gives
+the median of the three runs. One server ran at a time, the runner on other cores.
+Another agent's builds were running on the machine (load average 90 for part of the
+run), but they did not use the two cores: the three runs of a model agree to 1 to 2 %.
+Cold start is the time from starting the process to `/health` and to the first answer,
+with the model file dropped from the page cache ("disk") or cached; "RAM" is the
+server's resident size at the end (and, in brackets, its peak including mapped model
+pages). Same question as above; Laya with the pin's `state_bytes: 320` and `-b/-ub
+2048`, d1-3B and Kev-4B with 2000 bytes and the center's defaults.
+
+| Model | Setup | p50 / p95 (214) | Calls over 4 s | Cold start, disk (health / first answer) | RAM |
+|---|---|---|---|---|---|
+| Laya, full fine-tune (Q8_0) | `--threads 2 -b/-ub 2048` | 0.94 s / 1.00 s | 0 of 214 | 0.4 s / 1.3 s (cached 0.2 s / 1.1 s) | 0.5 GB |
+| Laya (Q8_0) | no `--threads` (the center's arguments today: llama-server picks 10 here), one run | 1.16 s / 1.23 s | 0 | 0.7 s / 1.8 s | 0.5 GB |
+| d1-3B (Q4_K_M) | `--threads 2` | 3.83 s / 4.21 s | 52 to 53 of 214 | 2.9 s / 7.0 s (cached 1.4 s / 5.3 s) | 2.1 GB (3.4 GB) |
+| Kev-4B (Q4_K_M) | `--threads 2 -c 4096 -np 1` | 6.26 s / 6.99 s | 214 of 214 | 4.6 s / 10.7 s (cached 2.1 s / 8.7 s) | 3.5 GB (4.1 GB, at the 4 GB limit) |
+
+Per-run p50 (ms): Laya 940, 937, 937; d1-3B 3850, 3834, 3825; Kev-4B 6252, 6336, 6263.
+The 214 prompts are 179 to 200 tokens (median 184) for Laya, 143 of them the fixed
+question. For comparison, Laya's 214 median was 0.65 s on 8 threads of the same CPU.
+
+What follows for the center's local server:
+
+- **Laya is the only one of the three that fits.** Its p95 of 1.0 s leaves the 4 to 5 s
+  timeouts a wide margin, and 0.5 GB of RAM is easy in a 4 GB container. Long
+  commands were not measured on 2 cores; the third round's 100 longest calls (target and
+  args of 320 bytes each) had a p95 of 2.4 s on 8 threads, which scaled by the 1.45
+  between the two setups gives about 3.5 s, still inside 5 s.
+- **d1-3B is not usable at its 4 s default.** Its median is 3.8 s, so about a quarter of
+  the calls (52 of 214) run into the 4 000 ms timeout and are refused (fail closed) or
+  let through, depending on `on_error`; it needs a timeout of about 8 s on 2 vCPUs
+  (the slowest call took 6.0 s), and 2 to 3.4 GB of RAM.
+- **Kev-4B is not usable.** 6.3 s per call is over any timeout shorter than about
+  10 s (its own pin has 15 s, and then every `exec` and `fs.write` call waits 6 s).
+  Worse, the center starts it with llama-server's defaults, and Kev-4B's context is
+  262 144 tokens times 4 slots: the server grows to 11.6 GB and is killed by the kernel
+  in a 4 GB container (and in 8 GB). Only with `-c 4096 -np 1` does it run, using the
+  whole 4 GB.
+- The center runs `llama-server` without `--threads`, and llama.cpp picks the number of
+  physical cores of the machine, not the container's limit: 10 threads on the two
+  cores gave 1.16 s instead of 0.94 s for Laya (one run; a container with only a CPU
+  quota and no cpuset, which shows the whole machine, would be worse). Draft change for
+  `build_args` in `checker/server.rs` (not made here): add
+  `-t <n>` with `n = std::thread::available_parallelism()` (it follows cgroup quotas
+  and the CPU affinity), and for a pin with a large default context (Kev-4B) a
+  `-c 4096 -np 1`, the same way `ModelPin::batch` adds `-b/-ub` now (a
+  `ModelPin::context: Option<u32>`). The pin's timeout for Laya can stay 5 000 ms.
+
+Not measured (the scope was cut to the three models): quantisations of Laya below Q8_0,
+other `state_bytes`, batch sizes, `--no-mmap`/`--mlock`, and a real container (the Ubuntu
+LXC was prepared and cleaned up again). The raw runs are in
+`~/Services/nerve-training/runs/latency/local/`.

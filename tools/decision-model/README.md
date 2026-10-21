@@ -171,6 +171,15 @@ answered. For d1-3B and Kev-4B use `--state-bytes 2000 --batch 0`.
    d1-3B and Kev-4B run through `evaluate.py --state-bytes 2000 --batch 0` on
    their pinned GGUFs (`WORK/models/`, hashes of `install.rs`).
 
+6. `latency.py`: latency on a small CPU (the target is about 2 vCPUs). Starts the
+   pinned `llama-server` limited to two cores (`--wrap systemd`: `AllowedCPUs`,
+   `CPUQuota=200%`, `MemoryMax`; or `--wrap taskset`), measures the cold start
+   (process start to health to first answer, model file evicted from the page cache
+   or cached) and runs the compiled eval runner (`--runner`, the test binary from
+   `cargo test -p nerve-center --test checker_eval --no-run`) `--reps` times per case
+   file, writing a JSON with the per-run p50/p95, RAM and the machine load before and
+   after. Results: "Latency on 2 vCPUs" in `docs/dev/action-checker.md`.
+
 ## One command
 
 ```sh
