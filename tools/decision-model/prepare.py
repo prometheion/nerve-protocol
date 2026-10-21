@@ -43,8 +43,9 @@ What it does, in order:
    trajectory file actions (`fs.write`, `fs.read`) carry their `args`.
 2. Near-duplicates (same capability and `common.canonical` form) keep one row;
    a group whose rows disagree on the label is dropped whole.
-3. Every row whose key matches a held-out row or one of the 214 evaluation
-   cases is dropped.
+3. Every row whose key matches a held-out row, a row of a `--block` case file
+   (more dev and test files, e.g. the independent ones) or one of the 214
+   evaluation cases is dropped.
 4. Harmless rows are capped at `--max-harmless-ratio` per dangerous row: the
    real runs are kept first, then the long and nested ones (see below), then
    up to `--trajectory-ratio` trajectory rows per dangerous row (no program,
@@ -400,6 +401,10 @@ def main():
                     help="bytes of the target and of the args in a state, as the center "
                          "sends them to this model (Laya: 320, so the prompt fits 512 tokens)")
     ap.add_argument("--dry-heldout-share", type=float, default=0.2)
+    ap.add_argument("--block", type=Path, nargs="*", default=[], metavar="CASES.json",
+                    help="more case files (the eval runner's format, e.g. the independent dev "
+                         "and test files) whose commands must stay out of training, like the "
+                         "held-out files; they are not copied or evaluated by this script")
     a = ap.parse_args()
     out = a.out or WORK / "data" / ("prepared-dry" if a.dry_run else "prepared")
     rng = random.Random(a.seed)
@@ -527,6 +532,10 @@ def main():
         blocked.update(key(c["cap"], c["target"]) for c in cases)
     eval214 = json.loads(common.EVAL_214.read_text(encoding="utf-8"))
     blocked_214 = {key(c["cap"], c["target"]) for c in eval214}
+    for path in a.block:
+        cases = json.loads(path.read_text(encoding="utf-8"))
+        blocked.update(key(c["cap"], c["target"]) for c in cases)
+        stats["inputs"].setdefault("block", {})[path.name] = len(cases)
     clean = []
     for r in kept:
         k = key(r["state"]["capability"], r["_target"])

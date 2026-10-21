@@ -5,6 +5,8 @@ conflicting labels, held-out and 214-case overlap, balance, output format.
 """
 
 import collections
+import contextlib
+import io
 import json
 import os
 import random
@@ -13,15 +15,22 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import common
 import compare
 import evaluate
 import calibration
+import pipeline
 import prepare
 import train
 
 HERE = Path(__file__).resolve().parent
+
+
+def argparse_namespace(**kw):
+    import argparse
+    return argparse.Namespace(**kw)
 
 
 def word(i):
@@ -595,6 +604,135 @@ class PrepareTest(unittest.TestCase):
         bad = subprocess.run([sys.executable, str(HERE / "compare.py"), "--runs", "fake"],
                              capture_output=True, text=True)
         self.assertNotEqual(bad.returncode, 0)
+
+    def test_block_files_keep_more_cases_out_of_training(self):
+        d = Path(self.tmp.name)
+        train = [v3_row("echo keep-a", False, "vcs"), v3_row("echo keep-bad", True, "dz-x"),
+                 v3_row("ECHO   indep-dev", False, "vcs"),
+                 v3_row("echo indep-test", True, "dz-x"), v3_row("/etc/indep-fs", True, "fs-write-system")]
+        blocked = [bench_row("echo indep-dev", False), bench_row("echo indep-test", True),
+                   bench_row("/etc/indep-fs", True, "fs")]
+        (d / "indep.json").write_text(json.dumps(blocked))
+        _, plain = self.run_prepare_v3(train, [], [bench_row("echo b", True)], "--out", str(d / "o0"))
+        _, stats = self.run_prepare_v3(train, [], [bench_row("echo b", True)], "--out", str(d / "o1"),
+                                       "--block", str(d / "indep.json"))
+        out = d / "o1"
+        self.assertEqual(plain["train"]["danger"] + plain["train"]["harmless"], 5)
+        self.assertEqual(stats["dropped"]["matches_heldout"], 3)
+        self.assertEqual(stats["inputs"]["block"], {"indep.json": 3})
+        self.assertEqual(sorted(r["state"]["target"] for r in common.load_jsonl(out / "train.jsonl")),
+                         ["echo keep-a", "echo keep-bad"])
+        # the blocked file is not copied into the held-out files
+        self.assertEqual(sorted(p.name for p in out.glob("heldout-*.json")),
+                         ["heldout-v3-benchmark.json", "heldout-v3-dev.json"])
+
+    def test_sweep_variants_names_and_flags(self):
+        full = pipeline.variants("full", (1, 3, 5))
+        self.assertEqual(len(full), 12)
+        self.assertEqual(len(set(full)), 12)
+        names = [pipeline.variant_name("p", v) for v in full]
+        self.assertEqual(len(set(names)), 12)
+        self.assertIn("p-nohlr-top12-os5", names)
+        self.assertIn("p-hlr-all-os1", names)
+        # every combination of head LR on/off, top layers 12/all, factor 1/3/5
+        self.assertEqual({(h, t, f) for h in ("hlr", "nohlr") for t in ("all", "top12")
+                          for f in (1, 3, 5)}, set(full))
+        one = pipeline.variants("one-at-a-time", (1, 3, 5))
+        self.assertEqual(one, [("hlr", "all", 1), ("nohlr", "all", 1), ("hlr", "top12", 1),
+                               ("hlr", "all", 3), ("hlr", "all", 5)])
+        self.assertEqual(pipeline.variants("full", (2.5, 8)).__len__(), 8)
+        self.assertEqual(pipeline.train_flags(("hlr", "all", 1)), ["--mode", "full"])
+        self.assertEqual(pipeline.train_flags(("nohlr", "top12", 3)),
+                         ["--mode", "full", "--head-lr", "body", "--top-layers", "12"])
+        # the flags are train.py's own: the head LR and top layers resolve as intended
+        a = ["--head-lr", "body", "--top-layers", "12"]
+        self.assertEqual(train.resolve_lrs("full", None, train.head_lr_arg(a[1])), (2e-5, 2e-5))
+        self.assertEqual(train.top_layer_range(28, int(a[3]))[0], 16)
+
+    def test_sweep_chain_skips_finished_steps_and_pins_the_gpu(self):
+        d = Path(self.tmp.name)
+        calls = []
+
+        def fake_run(cmd, check, env, stdout, stderr):
+            calls.append((Path(cmd[1]).name, cmd[2:], env["CUDA_VISIBLE_DEVICES"]))
+
+        v = ("nohlr", "top12", 3)
+        with mock.patch.object(pipeline, "WORK", d), mock.patch.object(pipeline.subprocess, "run", fake_run):
+            with open(d / "log", "w") as log:
+                pipeline.chain("r1", v, 1, d / "data", d / "dev.json", [d / "t1.json", d / "t2.json"],
+                               ["--epochs", "3"], log)
+                self.assertEqual([c[0] for c in calls], ["train.py", "export.py", "evaluate.py"])
+                self.assertEqual({c[2] for c in calls}, {"1"})
+                tr = calls[0][1]
+                for flag in (["--head-lr", "body"], ["--top-layers", "12"], ["--calib-cases", str(d / "dev.json")],
+                             ["--mode", "full"], ["--epochs", "3"]):
+                    self.assertEqual(tr[tr.index(flag[0]):tr.index(flag[0]) + 2], flag)
+                ev = calls[2][1]
+                self.assertEqual(ev[ev.index("--heldout") + 1:ev.index("--heldout") + 4],
+                                 [str(d / "dev.json"), str(d / "t1.json"), str(d / "t2.json")])
+                self.assertEqual(ev[ev.index("--cpu-check") + 1], "0")
+                # a finished training and export are not repeated
+                (d / "runs" / "r1" / "gguf").mkdir(parents=True)
+                (d / "runs" / "r1" / "train.json").write_text("{}")
+                (d / "runs" / "r1" / "gguf" / "export-summary.json").write_text("{}")
+                calls.clear()
+                pipeline.chain("r1", v, 0, d / "data", d / "dev.json", [], [], log)
+                self.assertEqual([c[0] for c in calls], ["evaluate.py"])
+
+    def test_gpu_idle_check_for_the_smoke_run(self):
+        text = "0, 100, 10619\n1, 0, 3\n"
+        state = pipeline.parse_gpu_state(text, [0, 1])
+        self.assertEqual(state, [(0, 100, 10619), (1, 0, 3)])
+        self.assertEqual(pipeline.busy_gpus(state, [1]), [])
+        self.assertEqual(pipeline.busy_gpus(state, [0, 1]), ["GPU 0: 100 % busy, 10619 MiB used"])
+        self.assertEqual(pipeline.busy_gpus(state, [2]), ["GPU 2: not found"])
+        # memory in use alone also makes a GPU busy (a model loaded, nothing running yet)
+        self.assertEqual(len(pipeline.busy_gpus([(0, 0, 9000)], [0])), 1)
+        args = argparse_namespace(smoke=True, plan=False, factors=[1, 3, 5], gpus="0,1", dev=None,
+                                  test=None, owner=Path(self.tmp.name), skip_prepare=True,
+                                  grid="full", prefix="x", refs=[])
+        d = Path(self.tmp.name)
+        for f in (5,):
+            (d / "data" / "next" / f"os{f}").mkdir(parents=True)
+            (d / "data" / "next" / f"os{f}" / "stats.json").write_text(json.dumps({
+                "train": {"danger": 1, "harmless": 2}, "calib": {"danger": 1, "harmless": 1},
+                "oversample": {"injection_share_after": 0.2, "train_rows_after": 3,
+                               "injection_rows_before": 1, "factor": 5.0, "injection_variants": 1}}))
+
+        def no_chain(*a, **k):
+            raise AssertionError("trained on busy GPUs")
+
+        with mock.patch.object(pipeline, "WORK", d), mock.patch.object(pipeline, "gpu_state", lambda g: state), \
+                mock.patch.object(pipeline, "chain", no_chain), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(pipeline.run_sweep(args, []), 0)
+        self.assertIn("smoke run skipped, GPUs not idle: GPU 0: 100 % busy", out.getvalue())
+
+    def test_sweep_plan_prepares_every_factor_and_prints_counts_only(self):
+        d = Path(self.tmp.name)
+        owner = d / "owner"
+        train_rows, dev, bench = self.injection_set()
+        common.write_jsonl(owner / "v3.1" / "train.jsonl", train_rows)
+        common.write_jsonl(owner / "v3.1" / "dev.jsonl", [v3_row("echo dev-one", True, "dz-x")])
+        common.write_jsonl(owner / "v3.1" / "benchmark.jsonl", bench)
+        res = subprocess.run(
+            [sys.executable, str(HERE / "pipeline.py"), "--sweep", "--plan", "--owner", str(owner)],
+            capture_output=True, text=True, check=True,
+            env={**os.environ, "NERVE_TRAINING_DIR": str(d / "work")})
+        out = res.stdout
+        self.assertIn("12 runs on GPU 0, 1", out)
+        self.assertIn("plan only: nothing trained", out)
+        self.assertIn("laya-nx-nohlr-top12-os5: --mode full --head-lr body --top-layers 12 on os5", out)
+        for f in ("os1", "os3", "os5"):
+            self.assertTrue((d / "work" / "data" / "next" / f / "train.jsonl").exists())
+            self.assertIn(f"{f}: train ", out)
+        # the round-3 choice: every harmless row, no trajectories; the oversampling differs per folder
+        shares = {f: json.loads((d / "work" / "data" / "next" / f / "stats.json").read_text())["oversample"]
+                  for f in ("os1", "os3", "os5")}
+        self.assertEqual([shares[f]["factor"] for f in ("os1", "os3", "os5")], [1.0, 3.0, 5.0])
+        self.assertLess(shares["os1"]["injection_share_after"], shares["os5"]["injection_share_after"])
+        # nothing was trained and no row of data is in the output
+        self.assertFalse((d / "work" / "runs").exists())
+        self.assertNotIn("echo", out)
 
     def test_v3_build_is_preferred_unless_v2_is_asked_for(self):
         args = ([v3_row("echo new", True, "dz-x")], [], [bench_row("echo b", True)])
