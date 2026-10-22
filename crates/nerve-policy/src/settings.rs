@@ -1473,6 +1473,7 @@ mod tests {
             protected: &prot,
             unconfined: None,
             sudo: false,
+            shell: crate::command::Shell::native(),
         };
         let targets = [crate::decide::Target {
             path: file.into(),

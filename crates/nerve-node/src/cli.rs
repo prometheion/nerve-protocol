@@ -1358,7 +1358,7 @@ async fn rule_cmd(paths: &NodePaths, c: RuleCmd, out: &mut dyn Write) -> Result<
             };
             let _ = writeln!(
                 out,
-                "{name}: added {added} deny rules of the guard{replaced}; commands that name this node's programs, service, socket or folders are forbidden"
+                "{name}: added {added} deny rules of the guard{replaced}; commands that run this node's programs, name its socket or folders, or stop its service are forbidden"
             );
         }
         RuleCmd::Ls { list, center } => {
@@ -8428,16 +8428,18 @@ mod tests {
         assert_eq!(changes(), n);
     }
 
-    /// A rule of the guard holds a line break; `rule ls` writes it `\n` so
-    /// a listing keeps a line a rule, and `rule rm` and `rule edit` take the
-    /// entry as `ls` printed it.
+    /// An older text of the guard holds a line break; `rule ls` writes it
+    /// `\n` so a listing keeps a line a rule, and `rule rm` and `rule edit`
+    /// take the entry as `ls` printed it.
     #[test]
     fn rule_ls_writes_line_breaks_out_and_rm_and_edit_take_them_back() {
         let (_d, paths) = setup(&["home"]);
         let deny = || load(&paths).centers[0].policy.deny.clone();
-        let guard = nerve_policy::rules::GUARD;
+        let guard = &nerve_policy::rules::GUARD_OLD[..18];
         assert!(guard.iter().any(|g| g.contains('\n')));
-        run(&paths, &["rule", "guard"]).unwrap();
+        for old in guard {
+            run(&paths, &["config", "add", "center.home.policy.deny", old]).unwrap();
+        }
         let ls = run(&paths, &["rule", "ls", "deny"]).unwrap();
         assert_eq!(ls.lines().count(), deny().len(), "{ls}");
         for (line, rule) in ls.lines().zip(deny()) {

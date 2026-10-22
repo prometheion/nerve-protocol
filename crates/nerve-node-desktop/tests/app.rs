@@ -664,7 +664,7 @@ fn the_app_drives_the_cli_end_to_end() {
     assert!(!allowed("fs.read:~/notes/*"));
     // The text `rule ls` writes for a line break is not one: refused, with
     // the field kept. A Windows path with `\\t` or `\\n` in it is a rule.
-    let listed = nerve_policy::rules::escape_controls(nerve_policy::rules::GUARD[12]);
+    let listed = nerve_policy::rules::escape_controls(nerve_policy::rules::GUARD_OLD[12]);
     let before = config(&paths).centers[0].policy.deny.clone();
     perm.set_deny_text(listed.clone().into());
     perm.invoke_rule_add(1);

@@ -1317,6 +1317,17 @@ impl CenterPolicy {
         for rule in self.allow.iter().chain(&self.deny) {
             crate::rules::validate(rule)?;
         }
+        // A rule of the guard names what to refuse; on the allow list it
+        // would let exactly that run.
+        if let Some(rule) = self
+            .allow
+            .iter()
+            .find(|r| crate::guard::Guard::of_rule(r).is_some())
+        {
+            return Err(format!(
+                "allow rule {rule:?} is a rule of the guard: it belongs on the deny list"
+            ));
+        }
         for glob in &self.sudo_allow {
             crate::rules::validate_command_glob(glob)?;
         }
@@ -1621,10 +1632,16 @@ sudo_allow = ["sudo apt update"]
             "allow = [\"fs:/a/[\"]",
             "sudo_allow = [\"sudo [\"]",
             "caps = { \"a.b.c\" = \"on\" }",
+            "deny = [\"guard:nerve\"]",
         ] {
             assert!(NodeConfig::parse(&center(bad)).is_err(), "{bad}");
         }
         assert!(NodeConfig::parse(&center("allow = [\"fs:/a/*\"]")).is_ok());
+        // A rule of the guard is a deny rule; allowed, it would let through
+        // what it names.
+        assert!(NodeConfig::parse(&center("deny = [\"guard:node-service\"]")).is_ok());
+        let e = NodeConfig::parse(&center("allow = [\"guard:node-service\"]")).unwrap_err();
+        assert!(e.contains("belongs on the deny list"), "{e}");
     }
 
     /// The relay is off and out of the file unless the owner sets it; its

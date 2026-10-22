@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use nerve_policy::command::Shell;
 use nerve_policy::config::{Access, Folder, ProtectedOptions};
 use nerve_policy::protected::{Platform, Protected, WinFolders};
 use nerve_policy::{Call, CenterPolicy, Decision, Env, Mode, Target, decide};
@@ -94,6 +95,7 @@ fn nothing_reaches_the_nodes_own_folders() {
             protected: &prot,
             unconfined: None,
             sudo: true,
+            shell: Shell::Sh,
         };
         let check = |c: &Call| {
             let d = decide(&p, &env, c);
@@ -131,6 +133,7 @@ fn nothing_reaches_the_nodes_own_folders() {
         protected: &prot,
         unconfined: None,
         sudo: false,
+        shell: Shell::native(),
     };
     let notes = at("/h/notes/a", true);
     assert_eq!(
@@ -152,6 +155,7 @@ fn the_nodes_own_folders_are_seen_in_every_plain_spelling() {
             protected: &prot,
             unconfined: None,
             sudo: true,
+            shell: Shell::Sh,
         };
         let home = at("/h", false);
         let proj = at("/h/proj", false);
@@ -204,6 +208,7 @@ fn a_windows_command_line_reaches_no_own_folder() {
         protected: &prot,
         unconfined: None,
         sudo: false,
+        shell: Shell::native(),
     };
     let proj = at("C:\\Users\\u\\nerve-test\\proj", false);
     for mode in [Mode::Allowlist, Mode::Folder, Mode::User] {
@@ -247,6 +252,7 @@ fn a_long_windows_command_line_is_checked_at_once() {
         protected: &prot,
         unconfined: None,
         sudo: false,
+        shell: Shell::native(),
     };
     let proj = at("C:\\Users\\u\\nerve-test\\proj", false);
     let open = wide_open(Mode::User);

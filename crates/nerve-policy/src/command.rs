@@ -1134,12 +1134,10 @@ impl<'b> Parser<'b> {
     /// the here-documents fed to a shell. A shell that reads its script
     /// from a pipe runs what the reader cannot see.
     fn bodies(&self, cmd: &mut Command) -> Result<(), Unparsed> {
-        let Some(at) = program(cmd, self.shell) else {
+        let Some(run) = run(cmd, self.shell) else {
             return Ok(());
         };
-        let name = base_name(&cmd.words[at].text, self.shell.windows());
-        let args = &cmd.words[at + 1..];
-        let body = match runs(&name, args) {
+        let body = match runs(&run.name, &run.args) {
             Runs::Nothing => return Ok(()),
             Runs::Text(text, shell) => text.map(|t| (t, shell)),
             Runs::Input(shell) => {
@@ -1211,6 +1209,13 @@ fn runs(name: &str, args: &[Word]) -> Runs {
             Runs::Nothing
         }
         "eval" => Runs::Text(joined(args), Shell::Sh),
+        "su" | "runuser" => match args
+            .iter()
+            .position(|w| w.text == "-c" || w.text == "--command")
+        {
+            Some(at) => Runs::Text(args.get(at + 1).map(|w| w.text.clone()), Shell::Sh),
+            None => Runs::Nothing,
+        },
         "invoke-expression" | "iex" => {
             let args = match args.first() {
                 Some(a) if a.text.starts_with('-') => &args[1..],
@@ -1330,43 +1335,354 @@ pub fn base_name(word: &str, windows: bool) -> String {
 
 /// The shell's own words that may stand before a command.
 const SH_KEYWORDS: &[&str] = &[
-    "!", "{", "}", "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "time",
+    "!", "{", "}", "if", "then", "else", "elif", "fi", "do", "done", "while", "until",
 ];
 const PS_KEYWORDS: &[&str] = &[
     "&", ".", "if", "elseif", "else", "foreach", "for", "while", "do", "until", "switch", "try",
     "catch", "finally", "trap", "return", "throw",
 ];
 
-/// The place of the program in `cmd`'s words: past the shell's keywords and
-/// its assignments (`X=1 cmd`, `$x = cmd`).
-pub fn program(cmd: &Command, shell: Shell) -> Option<usize> {
-    let words = &cmd.words;
-    let mut i = 0;
-    while let Some(w) = words.get(i) {
+/// The program a command runs, behind the shell's keywords and assignments
+/// and the wrappers that run another program: `sudo` (and `doas`) with
+/// their options, `env` (with `-u`, `-S` and assignments), `timeout`,
+/// `nohup`, `nice`, `ionice`, `time`, `stdbuf`, `xargs`, `exec`, `command`,
+/// `setsid`, `busybox`; on Windows PowerShell's `&` and `Start-Process`, and
+/// cmd's `start`, `call`, `if` and `for … do`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Run {
+    /// The program's name as [`base_name`] gives it (`/usr/bin/systemctl` →
+    /// `systemctl`).
+    pub name: String,
+    /// Its arguments.
+    pub args: Vec<Word>,
+}
+
+/// Each wrapper's options that take a value: as the next word, or after
+/// `=` (`--user=x`), or (a short one) the rest of the word (`-uroot`).
+const SUDO: &[&str] = &[
+    "-u",
+    "-g",
+    "-C",
+    "-D",
+    "-p",
+    "-r",
+    "-t",
+    "-T",
+    "-U",
+    "-R",
+    "--user",
+    "--group",
+    "--close-from",
+    "--chdir",
+    "--prompt",
+    "--role",
+    "--type",
+    "--other-user",
+    "--chroot",
+    "--command-timeout",
+    "--host",
+];
+const ENV: &[&str] = &["-u", "-C", "-P", "--unset", "--chdir"];
+const TIMEOUT: &[&str] = &["-s", "-k", "--signal", "--kill-after"];
+const NICE: &[&str] = &["-n", "--adjustment"];
+const IONICE: &[&str] = &["-c", "-n", "--class", "--classdata"];
+const TIME: &[&str] = &["-f", "-o", "--format", "--output"];
+const STDBUF: &[&str] = &["-i", "-o", "-e", "--input", "--output", "--error"];
+const XARGS: &[&str] = &[
+    "-a",
+    "-d",
+    "-E",
+    "-I",
+    "-L",
+    "-n",
+    "-P",
+    "-s",
+    "--arg-file",
+    "--delimiter",
+    "--eof",
+    "--replace",
+    "--max-lines",
+    "--max-args",
+    "--max-procs",
+    "--max-chars",
+    "--process-slot-var",
+];
+const EXEC: &[&str] = &["-a"];
+
+/// How many of `rest` are options (with their values) before the program.
+fn options(rest: &[Word], values: &[&str]) -> usize {
+    let mut n = 0;
+    while let Some(w) = rest.get(n) {
         let t = w.text.as_str();
+        if t == "--" {
+            return n + 1;
+        }
+        if !t.starts_with('-') || t == "-" {
+            break;
+        }
+        n += 1;
+        if t.starts_with("--") {
+            if values.contains(&t) {
+                n += 1;
+            }
+        } else {
+            // In a group of short options, the first that takes a value
+            // takes the rest of the group, or the next word at its end.
+            let letters: Vec<char> = t.chars().skip(1).collect();
+            if let Some(p) = letters
+                .iter()
+                .position(|c| values.contains(&format!("-{c}").as_str()))
+                && p + 1 == letters.len()
+            {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// Finds the program `cmd` runs. `None`: it runs none (only keywords, a
+/// wrapper with nothing after it, `command -v`).
+pub fn run(cmd: &Command, shell: Shell) -> Option<Run> {
+    let win = shell.windows();
+    let mut words = cmd.words.clone();
+    let mut i = 0;
+    // Every turn takes a word or rewrites one away (`env -S`, a stuck `{`,
+    // `Start-Process`); the bound only stops a line built to turn forever.
+    for _ in 0..256 {
+        let w = words.get(i)?;
+        let t = w.text.clone();
         let lower = t.to_lowercase();
         let keyword = !w.quoted
             && match shell {
-                Shell::Sh => SH_KEYWORDS.contains(&t),
+                Shell::Sh => SH_KEYWORDS.contains(&t.as_str()),
                 Shell::PowerShell => PS_KEYWORDS.contains(&lower.as_str()),
-                Shell::Cmd => false,
+                Shell::Cmd => lower == "else",
             };
         if keyword {
             i += 1;
-        } else if !w.quoted && t == "function" && shell != Shell::Cmd {
+            continue;
+        }
+        if !w.quoted && t == "function" && shell != Shell::Cmd {
             i += 2;
-        } else if shell == Shell::Sh && is_assignment(t) {
+            continue;
+        }
+        if shell == Shell::Sh && !w.quoted && t.len() > 1 && t.starts_with('{') {
+            // `{cmd` reads as the brace and the command.
+            words[i].text.remove(0);
+            continue;
+        }
+        if shell == Shell::Sh && is_assignment(&t) {
             i += 1;
-        } else if shell == Shell::PowerShell
+            continue;
+        }
+        if shell == Shell::PowerShell
             && t.starts_with('$')
             && words.get(i + 1).is_some_and(|n| is_ps_assign(&n.text))
         {
             i += 2;
-        } else {
-            return Some(i);
+            continue;
         }
+        let name = base_name(&t, win);
+        let rest = &words[i + 1..];
+        let skip = match name.as_str() {
+            "sudo" | "doas" => options(rest, SUDO),
+            "env" => {
+                if let Some(split) = env_split(rest) {
+                    words.splice(i + 1..i + 1 + split.0, split.1);
+                    continue;
+                }
+                let n = options(rest, ENV);
+                n + rest[n..]
+                    .iter()
+                    .take_while(|w| is_assignment(&w.text))
+                    .count()
+            }
+            "timeout" => options(rest, TIMEOUT) + 1,
+            "nice" => options(rest, NICE),
+            "ionice" => options(rest, IONICE),
+            "time" => options(rest, TIME),
+            "stdbuf" => options(rest, STDBUF),
+            "xargs" => options(rest, XARGS),
+            "exec" => options(rest, EXEC),
+            "command" => {
+                let n = options(rest, &[]);
+                if rest[..n]
+                    .iter()
+                    .any(|w| w.text.starts_with("-v") || w.text.starts_with("-V"))
+                {
+                    return None;
+                }
+                n
+            }
+            "setsid" => options(rest, &[]),
+            "nohup" | "builtin" | "nocorrect" | "noglob" | "busybox" => {
+                usize::from(rest.first().is_some_and(|w| w.text == "--"))
+            }
+            "start-process" | "saps" if shell != Shell::Cmd => {
+                let started = start_process(rest)?;
+                words.splice(i.., started);
+                continue;
+            }
+            "start" if shell == Shell::PowerShell => {
+                let started = start_process(rest)?;
+                words.splice(i.., started);
+                continue;
+            }
+            "start" if shell == Shell::Cmd => cmd_start(rest),
+            "call" if shell == Shell::Cmd => 0,
+            "if" if shell == Shell::Cmd => cmd_if(rest),
+            "for" if shell == Shell::Cmd => {
+                rest.iter()
+                    .position(|w| w.text.eq_ignore_ascii_case("do"))?
+                    + 1
+            }
+            _ => {
+                return Some(Run {
+                    name,
+                    args: rest.to_vec(),
+                });
+            }
+        };
+        i += 1 + skip;
     }
     None
+}
+
+/// `env -S text` (or `--split-string`): how many words the option takes,
+/// and the text split at blanks into the words that run.
+fn env_split(rest: &[Word]) -> Option<(usize, Vec<Word>)> {
+    for (n, w) in rest.iter().enumerate() {
+        let t = w.text.as_str();
+        let (taken, text) = if t == "-S" || t == "--split-string" {
+            (2, rest.get(n + 1)?.text.clone())
+        } else if let Some(v) = t.strip_prefix("--split-string=") {
+            (1, v.to_string())
+        } else if let Some(v) = t.strip_prefix("-S") {
+            (1, v.to_string())
+        } else if t.starts_with('-') && t != "-" {
+            continue;
+        } else {
+            return None;
+        };
+        let split = text.split_whitespace().map(|s| Word {
+            text: s.to_string(),
+            literal: w.literal,
+            quoted: false,
+        });
+        let mut out: Vec<Word> = rest[..n].to_vec();
+        out.extend(split);
+        return Some((n + taken, out));
+    }
+    None
+}
+
+/// PowerShell's `Start-Process`: the program (`-FilePath` or the first
+/// word) and its arguments (`-ArgumentList` or the second word, a list
+/// split at commas and blanks).
+fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
+    const SWITCHES: &[&str] = &[
+        "wait",
+        "passthru",
+        "nonewwindow",
+        "loaduserprofile",
+        "usenewenvironment",
+    ];
+    let mut file = None;
+    let mut list = None;
+    let mut positional = 0;
+    let mut n = 0;
+    while let Some(w) = rest.get(n) {
+        n += 1;
+        let lower = w.text.to_lowercase();
+        let Some(param) = lower
+            .strip_prefix('-')
+            .filter(|p| !p.is_empty() && !w.quoted)
+        else {
+            match positional {
+                0 => file = Some(w.clone()),
+                1 => list = Some(w.clone()),
+                _ => {}
+            }
+            positional += 1;
+            continue;
+        };
+        let (param, attached) = match param.split_once(':') {
+            Some((p, v)) => (p, Some(v)),
+            None => (param, None),
+        };
+        if SWITCHES.iter().any(|s| s.starts_with(param)) {
+            continue;
+        }
+        let value = match attached {
+            Some(v) if !v.is_empty() => Some(Word {
+                text: w.text[w.text.len() - v.len()..].to_string(),
+                ..w.clone()
+            }),
+            _ => {
+                n += 1;
+                rest.get(n - 1).cloned()
+            }
+        };
+        if "filepath".starts_with(param) || param == "path" || param == "pspath" {
+            file = value;
+        } else if "argumentlist".starts_with(param) || param == "args" {
+            list = value;
+        }
+    }
+    let mut out = vec![file?];
+    if let Some(l) = list {
+        out.extend(
+            l.text
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|s| !s.is_empty())
+                .map(|s| Word {
+                    text: s.to_string(),
+                    literal: l.literal,
+                    quoted: false,
+                }),
+        );
+    }
+    Some(out)
+}
+
+/// cmd's `start`: its switches and the window title (its first quoted word)
+/// before the program.
+fn cmd_start(rest: &[Word]) -> usize {
+    let mut n = 0;
+    let mut title = false;
+    while let Some(w) = rest.get(n) {
+        let lower = w.text.to_lowercase();
+        if lower.starts_with('/') && !w.quoted {
+            if matches!(lower.as_str(), "/d" | "/node" | "/affinity") {
+                n += 1;
+            }
+        } else if w.quoted && !title {
+            title = true;
+        } else {
+            break;
+        }
+        n += 1;
+    }
+    n
+}
+
+/// cmd's `if`: its condition before the command (`if exist x cmd`,
+/// `if /i a==b cmd`, `if not errorlevel 1 cmd`, `if a equ b cmd`).
+fn cmd_if(rest: &[Word]) -> usize {
+    let low = |n: usize| rest.get(n).map(|w| w.text.to_lowercase());
+    let mut n = 0;
+    if low(n).as_deref() == Some("/i") {
+        n += 1;
+    }
+    if low(n).as_deref() == Some("not") {
+        n += 1;
+    }
+    match low(n).as_deref() {
+        Some("exist" | "defined" | "errorlevel" | "cmdextversion") => n + 2,
+        Some(x) if x.contains("==") => n + 1,
+        _ => n + 3,
+    }
 }
 
 fn is_assignment(word: &str) -> bool {
@@ -1676,6 +1992,165 @@ mod tests {
         assert_eq!(base_name("/usr/bin/nerve-node", false), "nerve-node");
         assert_eq!(base_name("C:\\x\\Nerve-Node.EXE", true), "nerve-node");
         assert_eq!(base_name("C:\\x\\a", false), "C:\\x\\a");
+    }
+
+    /// The program the first command runs, and its arguments.
+    fn ran(line: &str, shell: Shell) -> Option<(String, String)> {
+        let s = parse(line, shell).unwrap_or_else(|e| panic!("{line:?}: {e:?}"));
+        run(&s.commands[0], shell).map(|r| {
+            let args: Vec<_> = r.args.iter().map(|w| w.text.as_str()).collect();
+            (r.name, args.join(" "))
+        })
+    }
+
+    #[test]
+    fn wrappers_are_unwrapped_to_the_program() {
+        use Shell::*;
+        for (line, shell, name, args) in [
+            ("sudo systemctl stop x", Sh, "systemctl", "stop x"),
+            (
+                "sudo -n -u root systemctl stop x",
+                Sh,
+                "systemctl",
+                "stop x",
+            ),
+            ("sudo -uroot -E systemctl stop x", Sh, "systemctl", "stop x"),
+            (
+                "sudo --user root -- systemctl stop x",
+                Sh,
+                "systemctl",
+                "stop x",
+            ),
+            ("doas -u root systemctl stop x", Sh, "systemctl", "stop x"),
+            ("env X=1 sudo systemctl stop x", Sh, "systemctl", "stop x"),
+            (
+                "env -i -u HOME X=1 systemctl stop x",
+                Sh,
+                "systemctl",
+                "stop x",
+            ),
+            ("env -S 'systemctl stop' x", Sh, "systemctl", "stop x"),
+            (
+                "timeout 30 sudo systemctl stop x",
+                Sh,
+                "systemctl",
+                "stop x",
+            ),
+            (
+                "timeout -s KILL -k 5 30 systemctl stop x",
+                Sh,
+                "systemctl",
+                "stop x",
+            ),
+            (
+                "nohup nice -n 5 ionice -c 3 systemctl stop x",
+                Sh,
+                "systemctl",
+                "stop x",
+            ),
+            ("nice -10 systemctl stop x", Sh, "systemctl", "stop x"),
+            (
+                "time -p stdbuf -oL systemctl stop x",
+                Sh,
+                "systemctl",
+                "stop x",
+            ),
+            ("xargs -0 -n 1 kill -9", Sh, "kill", "-9"),
+            ("exec -a y systemctl stop x", Sh, "systemctl", "stop x"),
+            ("command systemctl stop x", Sh, "systemctl", "stop x"),
+            ("setsid -f busybox kill 1", Sh, "kill", "1"),
+            (
+                "X=1 Y=2 /usr/bin/systemctl stop x",
+                Sh,
+                "systemctl",
+                "stop x",
+            ),
+            ("! { if then systemctl stop x", Sh, "systemctl", "stop x"),
+            ("{systemctl stop x;}", Sh, "systemctl", "stop x"),
+            (
+                "& 'C:\\x\\Nerve-Node.exe' status",
+                PowerShell,
+                "nerve-node",
+                "status",
+            ),
+            (
+                "Start-Process sc.exe -ArgumentList 'stop','x' -Verb RunAs",
+                PowerShell,
+                "sc",
+                "stop x",
+            ),
+            (
+                "Start-Process -Wait -FilePath sc -ArgumentList \"stop x\"",
+                PowerShell,
+                "sc",
+                "stop x",
+            ),
+            ("start C:\\w\\sc.exe 'stop x'", PowerShell, "sc", "stop x"),
+            ("$null = Stop-Service x", PowerShell, "stop-service", "x"),
+            ("start \"\" /b sc stop x", Cmd, "sc", "stop x"),
+            ("if exist C:\\x sc stop x", Cmd, "sc", "stop x"),
+            ("if /i not %a%==b sc stop x", Cmd, "sc", "stop x"),
+            ("if %a% equ 1 sc stop x", Cmd, "sc", "stop x"),
+            ("for %i in (1) do sc stop x", Cmd, "sc", "stop x"),
+            ("call sc stop x", Cmd, "sc", "stop x"),
+        ] {
+            assert_eq!(
+                ran(line, shell),
+                Some((name.to_string(), args.to_string())),
+                "{line}"
+            );
+        }
+        // Nothing runs: a lookup, a wrapper alone, only keywords.
+        for (line, shell) in [
+            ("command -v systemctl", Sh),
+            ("sudo -l", Sh),
+            ("env", Sh),
+            ("then", Sh),
+            ("for %i in (1)", Cmd),
+        ] {
+            assert_eq!(ran(line, shell), None, "{line}");
+        }
+        // Case counts only on Windows.
+        assert_eq!(ran("SUDO x", Sh).unwrap().0, "SUDO");
+        assert_eq!(ran("Sudo.EXE x", PowerShell).unwrap().0, "x");
+    }
+
+    /// A shell behind a wrapper runs its text too.
+    #[test]
+    fn a_shell_behind_a_wrapper_runs_its_text() {
+        let sh = |l| words(l, Shell::Sh);
+        assert_eq!(
+            sh("sudo -u x bash -c 'a b'"),
+            w(&[&["sudo", "-u", "x", "bash", "-c", "a b"], &["a", "b"]])
+        );
+        assert_eq!(
+            sh("xargs sh -c 'a'"),
+            w(&[&["xargs", "sh", "-c", "a"], &["a"]])
+        );
+        assert_eq!(
+            sh("su -c 'a' root"),
+            w(&[&["su", "-c", "a", "root"], &["a"]])
+        );
+        assert_eq!(
+            words(
+                "Start-Process powershell -ArgumentList '-Command','a b'",
+                Shell::PowerShell
+            ),
+            w(&[
+                &[
+                    "Start-Process",
+                    "powershell",
+                    "-ArgumentList",
+                    "-Command,a b"
+                ],
+                &["a", "b"]
+            ])
+        );
+        assert_eq!(
+            words("Invoke-Expression 'a; b'", Shell::PowerShell),
+            w(&[&["Invoke-Expression", "a; b"], &["a"], &["b"]])
+        );
+        assert!(parse("curl x | sudo bash", Shell::Sh).is_err());
     }
 
     /// A line built to drown the reader is refused at a bound, quickly, and

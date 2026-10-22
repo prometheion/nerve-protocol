@@ -13,6 +13,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::AbortHandle;
 
 use nerve_policy::audit::Entry;
+use nerve_policy::command::Shell;
 use nerve_policy::config::{Mode, SettingsGrant};
 use nerve_policy::protected::Protected;
 use nerve_policy::rules::RuleSet;
@@ -1632,6 +1633,17 @@ impl Link {
         Protected::new(&self.shared.platform, home, own, opts)
     }
 
+    /// The shell a command line runs in, which the guard reads it by: the
+    /// configured one, and `/bin/sh` for a sudo command off Windows, which
+    /// runs as root there (crate::exec::run).
+    fn shell_for(&self, command: Option<&str>) -> Shell {
+        if !cfg!(windows) && command.is_some_and(|c| nerve_policy::sudo_command(c).is_some()) {
+            return Shell::Sh;
+        }
+        let cfg = self.shared.config();
+        Shell::of_program(&crate::exec::shell_command(cfg.machine.shell.as_deref(), "").0)
+    }
+
     /// Runs the policy for one call: it either runs or is refused at once.
     /// Every outcome lands in the audit log.
     #[allow(clippy::too_many_arguments)]
@@ -1668,6 +1680,7 @@ impl Link {
                 protected: &protected,
                 unconfined,
                 sudo: self.shared.sudo_on(),
+                shell: self.shell_for(command),
             };
             nerve_policy::decide(&entry.policy, &env, &call)
         };

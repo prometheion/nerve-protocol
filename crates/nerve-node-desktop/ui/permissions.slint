@@ -750,8 +750,9 @@ export component PermissionsPage inherits PageFrame {
         shown: Perm.centers.length > 0 && Perm.caps.length > 0;
         gap: Space.xxl;
         VerticalLayout {
-            // A pairing from before the guard, or one whose guard rules were
-            // removed: one click puts them back.
+            // A pairing from before the guard, one with the guard's older
+            // texts, or one whose guard rules were removed: one click puts
+            // them on (`rule guard` replaces the older texts).
             Reveal {
                 shown: Perm.guard-missing;
                 VerticalLayout {
