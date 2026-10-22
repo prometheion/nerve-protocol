@@ -299,7 +299,7 @@ pub enum RuleCmd {
         #[command(flatten)]
         center: CenterArg,
     },
-    /// Put the deny rules that keep a center's commands off this node itself (its programs, service, socket and folders) on the deny list, as a new pairing has them. They catch mistakes, not someone who hides the name.
+    /// Put the deny rules that keep a center's commands off this node itself (its programs, service, socket and folders) on the deny list, as a new pairing has them, in place of their older texts. They catch mistakes, not someone who hides the name.
     Guard {
         #[command(flatten)]
         center: CenterArg,

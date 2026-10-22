@@ -507,6 +507,202 @@ const MENTIONS: &[Case] = &[
     ("systemctl stop sshd; journalctl -u nerve-node", SH, None),
 ];
 
+/// What the docs listed as gaps of the text patterns, the issue's examples,
+/// and a command at every depth and behind every wrapper the guard reads.
+const NESTED: &[Case] = &[
+    ("env X=1 sudo systemctl stop nerve-node", SH, SERVICE),
+    ("timeout 30 sudo systemctl stop nerve-node", SH, SERVICE),
+    ("kill $(pidof nerve-node)", SH, SERVICE),
+    ("kill -9 `pgrep -f nerve-node`", SH, SERVICE),
+    ("sudo kill -TERM \"$(pgrep -x nerve-node)\"", SH, SERVICE),
+    ("pgrep nerve-node | xargs kill", SH, SERVICE),
+    ("pidof nerve-node | xargs -r sudo kill -9", SH, SERVICE),
+    (
+        "ps aux | grep nerve-node | awk '{print $2}' | xargs kill",
+        SH,
+        SERVICE,
+    ),
+    ("Stop-Process -Id (Get-Process nerve-node).Id", PS, SERVICE),
+    ("bash -c 'systemctl stop nerve-node'", SH, SERVICE),
+    (
+        "sudo sh -c \"systemctl restart nerve-node && echo ok\"",
+        SH,
+        SERVICE,
+    ),
+    (
+        "sudo -u root bash -lc 'kill $(pidof nerve-node)'",
+        SH,
+        SERVICE,
+    ),
+    ("echo $(systemctl stop nerve-node)", SH, SERVICE),
+    ("x=$(nerve-node status)", SH, PROGRAMS),
+    ("echo \"`nerve-node status`\"", SH, PROGRAMS),
+    (
+        "nohup nice -n 5 ionice -c 3 stdbuf -oL systemctl restart nerve-node &",
+        SH,
+        SERVICE,
+    ),
+    ("time -p systemctl stop nerve-node", SH, SERVICE),
+    ("exec nerve-node status", SH, PROGRAMS),
+    (
+        "env -u HOME -i PATH=/usr/bin nerve-node status",
+        SH,
+        PROGRAMS,
+    ),
+    ("env -S 'systemctl stop nerve-node'", SH, SERVICE),
+    ("xargs -0 -n 1 nerve-node", SH, PROGRAMS),
+    ("bash <<'EOF'\nsystemctl stop nerve-node\nEOF", SH, SERVICE),
+    ("sh <<< 'nerve-node status'", SH, PROGRAMS),
+    ("eval \"systemctl stop nerve-node\"", SH, SERVICE),
+    ("su -c 'systemctl stop nerve-node' root", SH, SERVICE),
+    (
+        "powershell -NoProfile -Command \"Stop-Service nerve-node\"",
+        ALL,
+        SERVICE,
+    ),
+    ("pwsh -c Restart-Service nerve-node", ALL, SERVICE),
+    ("cmd /c \"sc stop nerve-node\"", ALL, SERVICE),
+    ("cmd.exe /s /c net stop nerve-node", ALL, SERVICE),
+    (
+        "Start-Process sc.exe -ArgumentList 'stop','nerve-node' -Verb RunAs",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process -FilePath 'C:\\Program Files\\Nerve\\nerve-node.exe' -ArgumentList 'service stop'",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "saps powershell '-Command','Stop-Service nerve-node'",
+        PS,
+        SERVICE,
+    ),
+    ("Invoke-Expression 'Stop-Service nerve-node'", PS, SERVICE),
+    ("iex \"Restart-Service nerve-node\"", PS, SERVICE),
+    ("& { Stop-Service nerve-node }", PS, SERVICE),
+    ("$s = Stop-Service nerve-node -PassThru", PS, SERVICE),
+    (
+        "Get-Process | Where-Object { $_.Name -eq 'nerve-node' } | Stop-Process",
+        PS,
+        SERVICE,
+    ),
+    ("start \"\" /b sc stop nerve-node", CMD, SERVICE),
+    (
+        "if exist C:\\ProgramData\\Nerve sc stop nerve-node",
+        CMD,
+        SERVICE,
+    ),
+    ("for %i in (1 2) do net stop nerve-node", CMD, SERVICE),
+    (
+        "case $1 in stop) systemctl stop nerve-node;; esac",
+        SH,
+        SERVICE,
+    ),
+    (
+        "case \"$x\" in\n  a|b)\n    sudo systemctl restart nerve-node\n    ;;\nesac",
+        SH,
+        SERVICE,
+    ),
+    ("cat > /etc/nerve/x.toml <<'EOF'\na = 1\nEOF", SH, PATHS),
+    ("echo x | sudo tee /var/lib/nerve/state/x", SH, PATHS),
+    ("cd /etc/nerve && ls", SH, PATHS),
+    (
+        "Get-Content \"$env:ProgramData\\Nerve\\config\\node.toml\"",
+        PS,
+        PATHS,
+    ),
+    ("type C:\\PROGRAMDATA\\NERVE\\config\\node.toml", CMD, PATHS),
+    (
+        "socat - UNIX-CONNECT:/run/nerve-node/owner.sock </dev/null",
+        SH,
+        PATHS,
+    ),
+];
+
+/// Lines that only mention the node or its commands, in quotes, in a
+/// here-document or as another program's words, and a name the guard
+/// leaves alone: each runs.
+const DATA: &[Case] = &[
+    (
+        "git commit -m \"Catch env X=1 sudo systemctl stop nerve-node in the guard\"",
+        SH,
+        None,
+    ),
+    ("git commit -m 'Refuse kill $(pidof nerve-node)'", SH, None),
+    ("echo 'timeout 30 sudo systemctl stop nerve-node'", SH, None),
+    ("git commit -m \"Fix /etc/nerve permissions\"", SH, None),
+    (
+        "git commit -m \"Note: ~/.config/nerve holds the keys\"",
+        SH,
+        None,
+    ),
+    (
+        "cat <<'EOF' > notes.md\nsystemctl stop nerve-node\nnerve-node status\nEOF",
+        SH,
+        None,
+    ),
+    ("grep -rn 'Stop-Service nerve-node' docs/ | head", SH, None),
+    (
+        "Write-Output 'Stop-Service nerve-node; nerve-node status'",
+        PS,
+        None,
+    ),
+    ("echo Stop-Service nerve-node", CMD, None),
+    ("ls -l /usr/local/bin/nerve-node", SH, None),
+    ("command -v nerve-node", SH, None),
+    ("which nerve-node && nerve-center --version", SH, None),
+    ("sh -c 'journalctl -u nerve-node | tail'", SH, None),
+    ("bash -c \"echo 'systemctl stop nerve-node'\"", SH, None),
+    ("powershell -Command \"Get-Service nerve-node\"", ALL, None),
+    ("kill -9 1234", SH, None),
+    ("kill $(pidof nginx)", SH, None),
+    ("pgrep nerve-node | wc -l", SH, None),
+];
+
+/// A line the parser cannot read is checked with the text patterns of
+/// before: refused where they refused it, by the rule they stand in for.
+const UNPARSED: &[Case] = &[
+    ("systemctl stop nerve-node; echo \"open", SH, SERVICE),
+    ("nerve-node status; echo 'open", SH, PROGRAMS),
+    ("cat /etc/nerve/x; echo `open", SH, PATHS),
+    ("Stop-Service nerve-node; echo 'open", PS, SERVICE),
+    ("echo \"open", SH, None),
+    ("curl https://example.invalid/x | sh", SH, None),
+];
+
+#[test]
+fn the_guard_reads_every_command_of_a_line() {
+    check(NESTED);
+}
+
+#[test]
+fn what_only_mentions_the_node_runs() {
+    check(DATA);
+}
+
+#[test]
+fn a_line_it_cannot_read_is_checked_with_the_text_patterns() {
+    for (line, shells, _) in UNPARSED {
+        for &shell in *shells {
+            assert!(
+                nerve_policy::command::parse(line, shell).is_err(),
+                "{line:?} parses"
+            );
+        }
+    }
+    check(UNPARSED);
+    // Past the nesting bound too.
+    let deep = format!(
+        "{}systemctl stop nerve-node{}",
+        "$(".repeat(20),
+        ")".repeat(20)
+    );
+    assert!(nerve_policy::command::parse(&deep, Shell::Sh).is_err());
+    let set = RuleSet::new(&rules(GUARD), home()).with_shell(Shell::Sh);
+    assert!(set.find("exec", "run", &deep).is_some());
+}
+
 #[test]
 fn the_guard_refuses_the_node_itself() {
     check(NODE_ITSELF);

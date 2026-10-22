@@ -183,6 +183,9 @@ struct Parser<'b> {
     /// Where reading goes on at the end of the current line: past the
     /// bodies of the here-documents it opened (sh).
     resume: Option<usize>,
+    /// How many `case … esac` the reader is in (sh): there a pattern ends
+    /// at `)` and its branch at `;;`.
+    cases: usize,
 }
 
 /// The shells that run a `-c` text or their input as sh.
@@ -199,6 +202,7 @@ impl<'b> Parser<'b> {
             depth,
             budget,
             resume: None,
+            cases: 0,
         }
     }
 
@@ -289,11 +293,23 @@ impl<'b> Parser<'b> {
                     if close == Some(c) {
                         break;
                     }
+                    if self.cases > 0 && c == ')' {
+                        // A `case` pattern: its words are not a command.
+                        cmd = Command::default();
+                        continue;
+                    }
                     return Err(Unparsed("a bracket closes that was not opened"));
                 }
                 Tok::Sep => self.finish(&mut script, &mut cmd, &mut piped, false)?,
                 Tok::Pipe => self.finish(&mut script, &mut cmd, &mut piped, true)?,
                 Tok::Word(w, subs) => {
+                    if self.shell == Shell::Sh && cmd.words.is_empty() && !w.quoted {
+                        match w.text.as_str() {
+                            "case" => self.cases += 1,
+                            "esac" => self.cases = self.cases.saturating_sub(1),
+                            _ => {}
+                        }
+                    }
                     cmd.words.push(w);
                     cmd.inner.extend(subs);
                 }
@@ -415,8 +431,13 @@ impl<'b> Parser<'b> {
             }
             ';' => {
                 self.bump();
+                // `;;`, `;&` and `;;&` end a branch of a `case`.
                 if matches!(self.peek(), Some(';' | '&')) {
-                    return Err(Unparsed("a case statement"));
+                    if self.cases == 0 {
+                        return Err(Unparsed("a ;; outside a case"));
+                    }
+                    self.bump();
+                    self.eat('&');
                 }
                 Tok::Sep
             }
@@ -1806,6 +1827,29 @@ mod tests {
     }
 
     #[test]
+    fn sh_case_branches_are_commands() {
+        let sh = |l| words(l, Shell::Sh);
+        assert_eq!(
+            sh("case $x in a|b) c;; (d) e; f;& *) g;;& esac"),
+            // A pattern in `( … )` reads as a group: its word counts as a
+            // command, which only ever refuses more.
+            w(&[
+                &["case", "$x", "in", "a"],
+                &["c"],
+                &["e"],
+                &["d"],
+                &["f"],
+                &["g"],
+                &["esac"]
+            ])
+        );
+        assert_eq!(
+            sh("case x in\n  a)\n    b\n    ;;\nesac\nc"),
+            w(&[&["case", "x", "in"], &["b"], &["esac"], &["c"]])
+        );
+    }
+
+    #[test]
     fn sh_redirections_are_kept_apart() {
         let s = parse("echo x > /a 2>&1 >>/b <c &>d", Shell::Sh).unwrap();
         let c = &s.commands[0];
@@ -1960,7 +2004,7 @@ mod tests {
             ("(a", Shell::Sh),
             ("a)", Shell::Sh),
             ("echo a(b)", Shell::Sh),
-            ("case x in a) b;; esac", Shell::Sh),
+            ("a;; b", Shell::Sh),
             ("cat <<EOF\na", Shell::Sh),
             ("cat <<EOF", Shell::Sh),
             ("echo ${x:-$(a)}", Shell::Sh),

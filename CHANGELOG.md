@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### The guard on parsed commands ([#159](https://github.com/Piggidragon/Nerve-Protocol/issues/159))
+
+- The guard reads each command of a line as the node's shell does (`sh`, PowerShell or cmd) instead of matching the line's text, and refuses the whole line when any command in it runs the node's programs, names its socket, pipes or folders, or stops, restarts, disables or kills its service or process. It sees commands in lists, pipes, groups, `if`/`for`/`while`/`case`, PowerShell blocks, `$( … )` and backticks, the text of `sh -c`, `bash -c`, `su -c`, `eval`, `powershell -Command`, `cmd /c` and `Invoke-Expression`, a here-document fed to a shell, and behind `sudo` (with its options), `env`, `timeout`, `nohup`, `nice`, `ionice`, `time`, `stdbuf`, `xargs`, `exec`, `Start-Process`, `&` and cmd's `start`.
+- Refused now, missed before: `env X=1 sudo systemctl stop nerve-node`, `timeout 30 sudo …`, `kill $(pidof nerve-node)`, `pgrep nerve-node | xargs kill`, `Stop-Process -Id (Get-Process nerve-node).Id`, `bash -c 'systemctl stop nerve-node'`.
+- Runs now, refused before: a mention in another program's words, such as a line of a commit message or a here-document that starts with `systemctl stop nerve-node`, `git commit -m "Docs (Stop-Service nerve-node)"`, `pkill -f "cargo run -p nerve-node"`, and a line that stops another service and names the node later. A path to the node's program as an argument (`ls -l /usr/local/bin/nerve-node`) runs too; running it is still refused.
+- A line the guard cannot read with confidence (an open quote or bracket, a line nested too deep, a shell fed by a pipe) is checked with the guard's former text patterns, so nothing they refused gets through.
+- The guard's command rules are three deny rules now: `guard:node-programs`, `guard:node-paths` and `guard:node-service`, shown so by `rule ls` and the desktop app; the five `fs.write` rules stay. A pairing that holds the former text patterns keeps them working until `rule guard` (or **Add the guard** on **Permissions**) replaces them with the three. A `guard:` rule on the allow list is refused.
+
 ## 0.0.6
 
 ### The desktop app
