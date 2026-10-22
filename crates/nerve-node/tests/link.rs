@@ -740,9 +740,22 @@ async fn a_new_pairing_refuses_commands_that_drive_the_node_itself() {
     let home = dir.path().join("home");
     let r = run_in(&mut conn, &home, "echo fine").await;
     assert_eq!(r["exit_code"], 0, "{r}");
-    for command in [
-        "nerve-node config set machine.user root",
-        "cat /etc/nerve/node.toml",
+    // A mention in another program's words is data (the text patterns of
+    // before refused this one).
+    let r = run_in(
+        &mut conn,
+        &home,
+        "echo \"{ sudo systemctl stop nerve-node }\"",
+    )
+    .await;
+    assert_eq!(r["exit_code"], 0, "{r}");
+    for (command, rule) in [
+        (
+            "nerve-node config set machine.user root",
+            "guard:node-programs",
+        ),
+        ("env X=1 nerve-node status", "guard:node-programs"),
+        ("cat /etc/nerve/node.toml", "guard:node-paths"),
     ] {
         let r = conn
             .call(
@@ -755,7 +768,7 @@ async fn a_new_pairing_refuses_commands_that_drive_the_node_itself() {
             .unwrap();
         let e = r.expect_err(command);
         assert!(
-            e.to_string().contains("is denied (exec.run:"),
+            e.to_string().contains(&format!("is denied ({rule})")),
             "{command}: {e}"
         );
     }
