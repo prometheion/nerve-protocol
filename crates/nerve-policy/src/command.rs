@@ -11,11 +11,12 @@
 //! `Invoke-Expression`, a here-document fed to a shell).
 //!
 //! It is a reader for a mistake guard, not a shell: it reads what agents
-//! write (lists, pipes, `if`/`for`/`while`, functions, here-documents) and
-//! gives up on the rest. A line it cannot read with confidence (a quote or
-//! bracket left open, `case`, a shell that reads its script from a pipe, a
-//! bound hit) is [`Unparsed`], and the caller treats it as such: the guard
-//! checks it with its text patterns, so nothing gets past that they caught.
+//! write (lists, pipes, `if`/`for`/`while`/`case`, functions, here-documents)
+//! and gives up on the rest. A line it cannot read with confidence (a quote
+//! or bracket left open, a shell that reads its script from a pipe, a bound
+//! hit) is [`Unparsed`], which carries the commands read until then; the
+//! guard checks those and the whole line with its text patterns, so nothing
+//! gets past that they caught.
 //!
 //! The walk is bounded: nesting (brackets, substitutions and the text a shell
 //! runs, all together) at [`MAX_DEPTH`], the number of commands at
@@ -112,12 +113,22 @@ pub struct Command {
 }
 
 /// The commands of a line (or of a part of one) in order.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Script {
     pub commands: Vec<Command>,
+    /// The shell the text was read as: a text a shell runs is read by that
+    /// shell's rules, whatever the line around it is.
+    pub shell: Shell,
 }
 
 impl Script {
+    pub fn new(shell: Shell) -> Script {
+        Script {
+            commands: Vec::new(),
+            shell,
+        }
+    }
+
     /// Calls `f` with every command, at any depth: the script it stands in
     /// and its place there, so `f` can look at the pipe it is in.
     pub fn visit<'s, F: FnMut(&'s Script, usize)>(&'s self, f: &mut F) {
@@ -130,20 +141,42 @@ impl Script {
     }
 }
 
-/// Why a line could not be read with confidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Unparsed(pub &'static str);
+/// Why a line could not be read with confidence, and the commands read
+/// before it came to that. The caller checks them as it checks a line it
+/// read whole: they are commands of the line, and what is wrong further on
+/// does not make them harmless.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unparsed {
+    pub why: &'static str,
+    /// The commands read up to the place that could not be read, nested as
+    /// the line nests them; the command it came to is among them as far as
+    /// it was read.
+    pub read: Script,
+}
+
+impl Unparsed {
+    fn because(why: &'static str) -> Unparsed {
+        Unparsed {
+            why,
+            read: Script::new(Shell::Sh),
+        }
+    }
+}
 
 /// Takes `line` apart by the rules of `shell`.
 pub fn parse(line: &str, shell: Shell) -> Result<Script, Unparsed> {
     let budget = Budget::default();
-    let script = Parser::new(line, shell, 0, &budget).list(None);
+    let read = Parser::new(line, shell, 0, &budget).list(None);
     if budget.blown.get() {
-        return Err(Unparsed(
-            "the line is longer or deeper than the guard reads",
-        ));
+        return Err(Unparsed {
+            why: "the line is longer or deeper than the guard reads",
+            read: match read {
+                Ok(script) => script,
+                Err(e) => e.read,
+            },
+        });
     }
-    script
+    read
 }
 
 #[derive(Default)]
@@ -186,6 +219,14 @@ struct Parser<'b> {
     /// How many `case … esac` the reader is in (sh): there a pattern ends
     /// at `)` and its branch at `;;`.
     cases: usize,
+}
+
+/// Whether `w` is a word a command may start with before its own words: a
+/// keyword of sh, or one that is followed by brackets or a `case`.
+fn leads(w: &Word) -> bool {
+    !w.quoted
+        && (SH_KEYWORDS.contains(&w.text.as_str())
+            || matches!(w.text.as_str(), "for" | "select" | "time" | "coproc"))
 }
 
 /// The shells that run a `-c` text or their input as sh.
@@ -272,46 +313,99 @@ impl<'b> Parser<'b> {
         Parser::new(text, shell, self.depth, self.budget).list(None)
     }
 
-    /// Reads commands up to `close` (or the end of the text).
+    /// Reads commands up to `close` (or the end of the text). When the text
+    /// cannot be read, the error carries what was read until then.
     fn list(&mut self, close: Option<char>) -> Result<Script, Unparsed> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
-            return Err(Unparsed("the line nests deeper than the guard reads"));
+            return Err(Unparsed::because(
+                "the line nests deeper than the guard reads",
+            ));
         }
-        let mut script = Script::default();
+        // A `case` of this list ends in this list: a `)` after its patterns
+        // is not the one that closes a group around it.
+        let outer_cases = std::mem::take(&mut self.cases);
+        let mut script = Script::new(self.shell);
         let mut cmd = Command::default();
+        let read = self.commands(close, &mut script, &mut cmd);
+        self.cases = outer_cases;
+        match read {
+            Ok(()) => {
+                self.depth -= 1;
+                Ok(script)
+            }
+            Err(mut e) => {
+                // What a list below read is a part of the command that was
+                // being read here.
+                if !e.read.commands.is_empty() {
+                    let below = std::mem::replace(&mut e.read, Script::new(self.shell));
+                    cmd.inner.push(below);
+                }
+                if !cmd.words.is_empty() || !cmd.inner.is_empty() {
+                    script.commands.push(cmd);
+                }
+                e.read = script;
+                Err(e)
+            }
+        }
+    }
+
+    fn commands(
+        &mut self,
+        close: Option<char>,
+        script: &mut Script,
+        cmd: &mut Command,
+    ) -> Result<(), Unparsed> {
         let mut piped = false;
         loop {
             match self.token(cmd.words.is_empty(), close)? {
                 Tok::End => {
                     if close.is_some() && !self.budget.blown.get() {
-                        return Err(Unparsed("a bracket or a substitution is not closed"));
+                        return Err(Unparsed::because(
+                            "a bracket or a substitution is not closed",
+                        ));
                     }
                     break;
                 }
                 Tok::Close(c) => {
+                    if self.cases > 0 && c == ')' {
+                        // A `case` pattern: its words are not a command,
+                        // but a substitution in it runs.
+                        cmd.words.clear();
+                        cmd.redirects.clear();
+                        cmd.input.clear();
+                        continue;
+                    }
                     if close == Some(c) {
                         break;
                     }
-                    if self.cases > 0 && c == ')' {
-                        // A `case` pattern: its words are not a command.
-                        cmd = Command::default();
-                        continue;
-                    }
-                    return Err(Unparsed("a bracket closes that was not opened"));
+                    return Err(Unparsed::because("a bracket closes that was not opened"));
                 }
-                Tok::Sep => self.finish(&mut script, &mut cmd, &mut piped, false)?,
-                Tok::Pipe => self.finish(&mut script, &mut cmd, &mut piped, true)?,
+                Tok::Sep => self.finish(script, cmd, &mut piped, false)?,
+                Tok::Pipe => self.finish(script, cmd, &mut piped, true)?,
                 Tok::Word(w, subs) => {
-                    if self.shell == Shell::Sh && cmd.words.is_empty() && !w.quoted {
-                        match w.text.as_str() {
-                            "case" => self.cases += 1,
-                            "esac" => self.cases = self.cases.saturating_sub(1),
-                            _ => {}
+                    let mut header = false;
+                    if self.shell == Shell::Sh && !w.quoted {
+                        let lead = cmd.words.iter().take_while(|w| leads(w)).count();
+                        if lead == cmd.words.len() {
+                            match w.text.as_str() {
+                                "case" => self.cases += 1,
+                                "esac" => self.cases = self.cases.saturating_sub(1),
+                                _ => {}
+                            }
                         }
+                        // `case WORD in` is a command of its own: the
+                        // patterns after it are not its words.
+                        header = w.text == "in"
+                            && cmd.words.len() == lead + 2
+                            && cmd.words[lead].text == "case"
+                            && !cmd.words[lead].quoted;
                     }
                     cmd.words.push(w);
                     cmd.inner.extend(subs);
+                    if header {
+                        self.finish(script, cmd, &mut piped, false)?;
+                    }
                 }
                 Tok::Redirect(false) => {}
                 Tok::Redirect(true) => {
@@ -337,26 +431,38 @@ impl<'b> Parser<'b> {
                             self.bump();
                         }
                         if self.eat(')') {
-                            cmd = Command::default();
+                            *cmd = Command::default();
                             continue;
                         }
-                        return Err(Unparsed("a bracket after a word"));
+                        let mut inner = self.list(Some(')'))?;
+                        if !cmd.words.iter().all(leads) {
+                            // After a word the brackets hold an array
+                            // (`a=(x y)`) or a regular expression: the
+                            // words in them are data, a substitution in
+                            // them runs. After `if`, `while`, `for` and the
+                            // like they are a subshell.
+                            for c in &mut inner.commands {
+                                c.words.clear();
+                                c.redirects.clear();
+                                c.input.clear();
+                            }
+                        }
+                        cmd.inner.push(inner);
+                        continue;
                     }
                     let inner = self.list(Some(')'))?;
                     cmd.inner.push(inner);
                 }
             }
         }
-        self.finish(&mut script, &mut cmd, &mut piped, false)?;
-        self.depth -= 1;
-        Ok(script)
+        self.finish(script, cmd, &mut piped, false)
     }
 
     /// The word after a redirection or `<<<`.
     fn target(&mut self, close: Option<char>) -> Result<(Word, Vec<Script>), Unparsed> {
         match self.token(false, close)? {
             Tok::Word(w, subs) => Ok((w, subs)),
-            _ => Err(Unparsed("a redirection has no target")),
+            _ => Err(Unparsed::because("a redirection has no target")),
         }
     }
 
@@ -380,13 +486,22 @@ impl<'b> Parser<'b> {
         let n = self.budget.commands.get() + 1;
         self.budget.commands.set(n);
         if n > MAX_COMMANDS {
-            return Err(Unparsed(
+            return Err(Unparsed::because(
                 "the line holds more commands than the guard reads",
             ));
         }
         let mut c = std::mem::take(cmd);
         c.piped = *piped;
-        self.bodies(&mut c)?;
+        if let Err(mut e) = self.bodies(&mut c) {
+            // The command stays with what was read, with the text it runs
+            // as far as that was read.
+            if !e.read.commands.is_empty() {
+                c.inner
+                    .push(std::mem::replace(&mut e.read, Script::new(self.shell)));
+            }
+            *cmd = c;
+            return Err(e);
+        }
         script.commands.push(c);
         *piped = pipe;
         Ok(())
@@ -434,7 +549,7 @@ impl<'b> Parser<'b> {
                 // `;;`, `;&` and `;;&` end a branch of a `case`.
                 if matches!(self.peek(), Some(';' | '&')) {
                     if self.cases == 0 {
-                        return Err(Unparsed("a ;; outside a case"));
+                        return Err(Unparsed::because("a ;; outside a case"));
                     }
                     self.bump();
                     self.eat('&');
@@ -543,7 +658,7 @@ impl<'b> Parser<'b> {
                         match self.bump() {
                             Some('\'') => break,
                             Some(x) => w.text.push(x),
-                            None => return Err(Unparsed("a quote is not closed")),
+                            None => return Err(Unparsed::because("a quote is not closed")),
                         }
                     }
                 }
@@ -579,7 +694,7 @@ impl<'b> Parser<'b> {
     ) -> Result<(), Unparsed> {
         loop {
             match self.peek() {
-                None if quoted => return Err(Unparsed("a quote is not closed")),
+                None if quoted => return Err(Unparsed::because("a quote is not closed")),
                 None => return Ok(()),
                 Some('"') if quoted => {
                     self.bump();
@@ -635,14 +750,14 @@ impl<'b> Parser<'b> {
                 let mut open = 1;
                 while open > 0 {
                     match self.bump() {
-                        None => return Err(Unparsed("a ${ is not closed")),
+                        None => return Err(Unparsed::because("a ${ is not closed")),
                         Some('{') => open += 1,
                         Some('}') => open -= 1,
                         // A substitution in `${x:-$(…)}` would run: rather
                         // than read that far, the line is not read.
-                        Some('`') => return Err(Unparsed("a substitution inside ${…}")),
+                        Some('`') => return Err(Unparsed::because("a substitution inside ${…}")),
                         Some('$') if self.peek() == Some('(') => {
-                            return Err(Unparsed("a substitution inside ${…}"));
+                            return Err(Unparsed::because("a substitution inside ${…}"));
                         }
                         Some(_) => {}
                     }
@@ -654,10 +769,10 @@ impl<'b> Parser<'b> {
                 w.quoted = true;
                 loop {
                     match self.bump() {
-                        None => return Err(Unparsed("a quote is not closed")),
+                        None => return Err(Unparsed::because("a quote is not closed")),
                         Some('\'') => break,
                         Some('\\') => match self.bump() {
-                            None => return Err(Unparsed("a quote is not closed")),
+                            None => return Err(Unparsed::because("a quote is not closed")),
                             Some('n') => w.text.push('\n'),
                             Some('t') => w.text.push('\t'),
                             Some(x) => w.text.push(x),
@@ -694,7 +809,7 @@ impl<'b> Parser<'b> {
         let mut body = String::new();
         loop {
             match self.bump() {
-                None => return Err(Unparsed("a backtick is not closed")),
+                None => return Err(Unparsed::because("a backtick is not closed")),
                 Some('`') => break,
                 Some('\\') => match self.peek() {
                     Some(c @ ('`' | '\\' | '$')) => {
@@ -719,27 +834,27 @@ impl<'b> Parser<'b> {
         close: Option<char>,
     ) -> Result<(String, Vec<Script>), Unparsed> {
         let Tok::Word(end, _) = self.token(false, close)? else {
-            return Err(Unparsed("a here-document has no end word"));
+            return Err(Unparsed::because("a here-document has no end word"));
         };
         let from = match self.resume {
             Some(r) => r,
             None => match self.s[self.i..].iter().position(|&c| c == '\n') {
                 Some(p) => self.i + p + 1,
-                None => return Err(Unparsed("a here-document has no body")),
+                None => return Err(Unparsed::because("a here-document has no body")),
             },
         };
         let mut at = from;
         let mut body = String::new();
         loop {
             if at >= self.s.len() {
-                return Err(Unparsed("a here-document does not end"));
+                return Err(Unparsed::because("a here-document does not end"));
             }
             let stop = self.s[at..]
                 .iter()
                 .position(|&c| c == '\n')
                 .map_or(self.s.len(), |p| at + p);
             if !self.charge(stop + 1 - at) {
-                return Err(Unparsed(
+                return Err(Unparsed::because(
                     "the line is longer or deeper than the guard reads",
                 ));
             }
@@ -782,7 +897,7 @@ impl<'b> Parser<'b> {
                     self.bump();
                     loop {
                         match self.bump() {
-                            None => return Err(Unparsed("a <# comment is not closed")),
+                            None => return Err(Unparsed::because("a <# comment is not closed")),
                             Some('#') if self.peek() == Some('>') => {
                                 self.bump();
                                 break;
@@ -857,7 +972,7 @@ impl<'b> Parser<'b> {
         let mut subs = Vec::new();
         if self.peek() == Some('-') && self.peek_at(1) == Some('-') && self.peek_at(2) == Some('%')
         {
-            return Err(Unparsed("PowerShell's --%"));
+            return Err(Unparsed::because("PowerShell's --%"));
         }
         if self.peek() == Some('@')
             && matches!(self.peek_at(1), Some('\'' | '"'))
@@ -887,7 +1002,7 @@ impl<'b> Parser<'b> {
                     w.quoted = true;
                     loop {
                         match self.bump() {
-                            None => return Err(Unparsed("a quote is not closed")),
+                            None => return Err(Unparsed::because("a quote is not closed")),
                             Some(q) if is_ps_single(q) => {
                                 if self.peek().is_some_and(is_ps_single) {
                                     self.bump();
@@ -945,7 +1060,7 @@ impl<'b> Parser<'b> {
                 self.bump();
                 loop {
                     match self.bump() {
-                        None => return Err(Unparsed("a ${ is not closed")),
+                        None => return Err(Unparsed::because("a ${ is not closed")),
                         Some('}') => break,
                         Some(_) => {}
                     }
@@ -978,7 +1093,7 @@ impl<'b> Parser<'b> {
     ) -> Result<(), Unparsed> {
         loop {
             match self.peek() {
-                None if quoted => return Err(Unparsed("a quote is not closed")),
+                None if quoted => return Err(Unparsed::because("a quote is not closed")),
                 None => return Ok(()),
                 Some(q) if quoted && is_ps_double(q) => {
                     self.bump();
@@ -993,7 +1108,7 @@ impl<'b> Parser<'b> {
                     self.bump();
                     match self.bump() {
                         Some(x) => w.text.push(x),
-                        None => return Err(Unparsed("a quote is not closed")),
+                        None => return Err(Unparsed::because("a quote is not closed")),
                     }
                 }
                 Some('$') => self.ps_dollar(w, subs)?,
@@ -1019,7 +1134,7 @@ impl<'b> Parser<'b> {
         let from = self.i;
         loop {
             match self.bump() {
-                None => return Err(Unparsed("a here-string is not closed")),
+                None => return Err(Unparsed::because("a here-string is not closed")),
                 Some('\n') if self.peek() == Some(q) && self.peek_at(1) == Some('@') => {
                     let text: String = self.s[from..self.i - 1].iter().collect();
                     self.bump();
@@ -1128,7 +1243,7 @@ impl<'b> Parser<'b> {
                     loop {
                         match self.bump() {
                             None | Some('\n') => {
-                                return Err(Unparsed("a quote is not closed"));
+                                return Err(Unparsed::because("a quote is not closed"));
                             }
                             Some('"') => break,
                             Some(x) => {
@@ -1155,15 +1270,21 @@ impl<'b> Parser<'b> {
     /// the here-documents fed to a shell. A shell that reads its script
     /// from a pipe runs what the reader cannot see.
     fn bodies(&self, cmd: &mut Command) -> Result<(), Unparsed> {
-        let Some(run) = run(cmd, self.shell) else {
-            return Ok(());
+        let run = match unwrap(cmd, self.shell) {
+            Ok(Some(run)) => run,
+            Ok(None) => return Ok(()),
+            Err(Wrapped) => {
+                return Err(Unparsed::because(
+                    "a command is wrapped in more than the guard unwraps",
+                ));
+            }
         };
         let body = match runs(&run.name, &run.args) {
             Runs::Nothing => return Ok(()),
             Runs::Text(text, shell) => text.map(|t| (t, shell)),
             Runs::Input(shell) => {
                 if cmd.piped {
-                    return Err(Unparsed("a shell reads its script from a pipe"));
+                    return Err(Unparsed::because("a shell reads its script from a pipe"));
                 }
                 let inputs = std::mem::take(&mut cmd.input);
                 for text in &inputs {
@@ -1172,7 +1293,7 @@ impl<'b> Parser<'b> {
                 cmd.input = inputs;
                 return Ok(());
             }
-            Runs::Hidden => return Err(Unparsed("a shell runs an encoded command")),
+            Runs::Hidden => return Err(Unparsed::because("a shell runs an encoded command")),
         };
         if let Some((text, shell)) = body {
             cmd.inner.push(self.nested(&text, shell)?);
@@ -1342,10 +1463,10 @@ pub fn base_name(word: &str, windows: bool) -> String {
         word.rsplit('/').next()
     }
     .unwrap_or(word);
-    let base = if base.len() > 4 && base[base.len() - 4..].eq_ignore_ascii_case(".exe") {
-        &base[..base.len() - 4]
-    } else {
-        base
+    // The suffix is compared on bytes: a name is not cut inside a character.
+    let base = match base.len().checked_sub(4) {
+        Some(at) if at > 0 && base.as_bytes()[at..].eq_ignore_ascii_case(b".exe") => &base[..at],
+        _ => base,
     };
     if windows {
         base.to_lowercase()
@@ -1459,19 +1580,30 @@ fn options(rest: &[Word], values: &[&str]) -> usize {
             }
         }
     }
-    n
+    // An option that ends the line has no value to take.
+    n.min(rest.len())
 }
 
 /// Finds the program `cmd` runs. `None`: it runs none (only keywords, a
-/// wrapper with nothing after it, `command -v`).
+/// wrapper with nothing after it, `command -v`), or the unwrapping stopped
+/// at its bound ([`parse`] reports that as a line it cannot read).
 pub fn run(cmd: &Command, shell: Shell) -> Option<Run> {
+    unwrap(cmd, shell).ok().flatten()
+}
+
+/// [`run`] cut off at the bound of its walk.
+struct Wrapped;
+
+fn unwrap(cmd: &Command, shell: Shell) -> Result<Option<Run>, Wrapped> {
     let win = shell.windows();
     let mut words = cmd.words.clone();
     let mut i = 0;
     // Every turn takes a word or rewrites one away (`env -S`, a stuck `{`,
     // `Start-Process`); the bound only stops a line built to turn forever.
     for _ in 0..256 {
-        let w = words.get(i)?;
+        let Some(w) = words.get(i) else {
+            return Ok(None);
+        };
         let t = w.text.clone();
         let lower = t.to_lowercase();
         let keyword = !w.quoted
@@ -1532,7 +1664,7 @@ pub fn run(cmd: &Command, shell: Shell) -> Option<Run> {
                     .iter()
                     .any(|w| w.text.starts_with("-v") || w.text.starts_with("-V"))
                 {
-                    return None;
+                    return Ok(None);
                 }
                 n
             }
@@ -1541,12 +1673,16 @@ pub fn run(cmd: &Command, shell: Shell) -> Option<Run> {
                 usize::from(rest.first().is_some_and(|w| w.text == "--"))
             }
             "start-process" | "saps" if shell != Shell::Cmd => {
-                let started = start_process(rest)?;
+                let Some(started) = start_process(rest) else {
+                    return Ok(None);
+                };
                 words.splice(i.., started);
                 continue;
             }
             "start" if shell == Shell::PowerShell => {
-                let started = start_process(rest)?;
+                let Some(started) = start_process(rest) else {
+                    return Ok(None);
+                };
                 words.splice(i.., started);
                 continue;
             }
@@ -1554,20 +1690,21 @@ pub fn run(cmd: &Command, shell: Shell) -> Option<Run> {
             "call" if shell == Shell::Cmd => 0,
             "if" if shell == Shell::Cmd => cmd_if(rest),
             "for" if shell == Shell::Cmd => {
-                rest.iter()
-                    .position(|w| w.text.eq_ignore_ascii_case("do"))?
-                    + 1
+                let Some(at) = rest.iter().position(|w| w.text.eq_ignore_ascii_case("do")) else {
+                    return Ok(None);
+                };
+                at + 1
             }
             _ => {
-                return Some(Run {
+                return Ok(Some(Run {
                     name,
                     args: rest.to_vec(),
-                });
+                }));
             }
         };
         i += 1 + skip;
     }
-    None
+    Err(Wrapped)
 }
 
 /// `env -S text` (or `--split-string`): how many words the option takes,
@@ -1629,7 +1766,7 @@ fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
             continue;
         };
         let (param, attached) = match param.split_once(':') {
-            Some((p, v)) => (p, Some(v)),
+            Some((p, _)) => (p, w.text[1..].split_once(':').map(|(_, v)| v)),
             None => (param, None),
         };
         if SWITCHES.iter().any(|s| s.starts_with(param)) {
@@ -1637,7 +1774,7 @@ fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
         }
         let value = match attached {
             Some(v) if !v.is_empty() => Some(Word {
-                text: w.text[w.text.len() - v.len()..].to_string(),
+                text: v.to_string(),
                 ..w.clone()
             }),
             _ => {
@@ -1834,7 +1971,8 @@ mod tests {
             // A pattern in `( … )` reads as a group: its word counts as a
             // command, which only ever refuses more.
             w(&[
-                &["case", "$x", "in", "a"],
+                &["case", "$x", "in"],
+                &["a"],
                 &["c"],
                 &["e"],
                 &["d"],
@@ -1847,6 +1985,124 @@ mod tests {
             sh("case x in\n  a)\n    b\n    ;;\nesac\nc"),
             w(&[&["case", "x", "in"], &["b"], &["esac"], &["c"]])
         );
+    }
+
+    /// Whether some command ends in the word `c` (`do c` runs it).
+    fn runs_c(all: &[Vec<String>]) -> bool {
+        all.iter().any(|c| c.last().is_some_and(|w| w == "c"))
+    }
+
+    /// The header of a `case` is a command of its own, so its substitutions
+    /// stay when the first pattern stands on the same line, and a `case`
+    /// after a keyword or in a substitution is read like any other.
+    #[test]
+    fn sh_case_header_and_nesting() {
+        let sh = |l| words(l, Shell::Sh);
+        assert_eq!(
+            sh("case $(a b) in *) c;; esac"),
+            w(&[&["case", "$(a b)", "in"], &["a", "b"], &["c"], &["esac"]])
+        );
+        assert_eq!(
+            sh("case \"$(a)\" in x) c;; esac"),
+            w(&[&["case", "$(a)", "in"], &["a"], &["c"], &["esac"]])
+        );
+        for line in [
+            "for f in *; do case $f in *.txt) c;; esac; done; d",
+            "if x; then case y in a) c;; esac; fi; d",
+            "! case y in a) c;; esac",
+            "echo $(case x in a) c;; esac) d",
+            "( case x in a) c;; esac ); d",
+            "case x in (a) c;; esac; d",
+            "case x in a) echo $(c);; esac",
+        ] {
+            let all = words(line, Shell::Sh);
+            assert!(runs_c(&all), "{line}: {all:?}");
+        }
+    }
+
+    /// Brackets after a word hold an array, a regular expression or an
+    /// arithmetic expression, or (after a keyword) a subshell.
+    #[test]
+    fn sh_brackets_after_a_word() {
+        let sh = |l| words(l, Shell::Sh);
+        // The words in an array are data; a substitution in it runs.
+        assert_eq!(
+            sh("declare -a a=(x y); b"),
+            w(&[&["declare", "-a", "a="], &[], &["b"]])
+        );
+        assert_eq!(sh("a=($(b c))"), w(&[&["a="], &[], &["b", "c"]]));
+        assert_eq!(sh("[[ $x =~ ^(a|b)$ ]] && c").last().unwrap(), &["c"]);
+        // After a keyword they are a subshell, and `(( … ))` is one too.
+        assert_eq!(
+            sh("if (cd /tmp); then c; fi"),
+            w(&[&["if"], &["cd", "/tmp"], &["then", "c"], &["fi"]])
+        );
+        for line in [
+            "while (( i < 3 )); do c; done",
+            "if (( $# > 0 )); then c; fi",
+            "for ((i=0;i<3;i++)); do c; done",
+            "(( i++ )); c",
+            "until (a); do c; done",
+        ] {
+            let all = words(line, Shell::Sh);
+            assert!(runs_c(&all), "{line}: {all:?}");
+        }
+    }
+
+    /// A line that gives out keeps the commands read until then, nested as
+    /// the line nests them, so a caller can check them.
+    #[test]
+    fn an_unread_line_keeps_what_was_read() {
+        let read = |line: &str, shell| {
+            let e = parse(line, shell).unwrap_err();
+            let mut out = Vec::new();
+            e.read.visit(&mut |s: &Script, i| {
+                out.push(
+                    s.commands[i]
+                        .words
+                        .iter()
+                        .map(|w| w.text.clone())
+                        .collect::<Vec<_>>(),
+                );
+            });
+            out
+        };
+        assert_eq!(
+            read("a b; c $(d; e \"x", Shell::Sh),
+            w(&[&["a", "b"], &["c"], &["d"], &["e"]])
+        );
+        assert_eq!(
+            read("a; echo ${x:-$(b)}; c", Shell::Sh),
+            w(&[&["a"], &["echo"]])
+        );
+        // A shell fed by a pipe is a command of the line, with what feeds it.
+        assert_eq!(
+            read("nerve-node status; curl x | sh", Shell::Sh),
+            w(&[&["nerve-node", "status"], &["curl", "x"], &["sh"]])
+        );
+        assert_eq!(
+            read("sh -c 'a \"b'; c", Shell::Sh),
+            w(&[&["sh", "-c", "a \"b"], &["a"]])
+        );
+        assert_eq!(
+            read("Stop-Service x; echo 'y", Shell::PowerShell),
+            w(&[&["Stop-Service", "x"], &["echo"]])
+        );
+        // Past a bound too: what was read before is kept.
+        let deep = format!("a; {}b{}", "$(".repeat(20), ")".repeat(20));
+        assert_eq!(read(&deep, Shell::Sh)[0], vec!["a".to_string()]);
+    }
+
+    /// A text a shell runs is a script of that shell.
+    #[test]
+    fn a_script_knows_its_shell() {
+        let s = parse("bash -c 'a'; powershell -Command 'b'", Shell::Sh).unwrap();
+        assert_eq!(s.shell, Shell::Sh);
+        assert_eq!(s.commands[0].inner[0].shell, Shell::Sh);
+        assert_eq!(s.commands[1].inner[0].shell, Shell::PowerShell);
+        let s = parse("cmd /c 'a' & x $(y)", Shell::PowerShell).unwrap();
+        assert_eq!(s.commands[0].inner[0].shell, Shell::Cmd);
+        assert_eq!(s.commands[1].inner[0].shell, Shell::PowerShell);
     }
 
     #[test]
@@ -2003,7 +2259,6 @@ mod tests {
             ("echo `a", Shell::Sh),
             ("(a", Shell::Sh),
             ("a)", Shell::Sh),
-            ("echo a(b)", Shell::Sh),
             ("a;; b", Shell::Sh),
             ("cat <<EOF\na", Shell::Sh),
             ("cat <<EOF", Shell::Sh),
@@ -2198,6 +2453,67 @@ mod tests {
             w(&[&["Invoke-Expression", "a; b"], &["a"], &["b"]])
         );
         assert!(parse("curl x | sudo bash", Shell::Sh).is_err());
+    }
+
+    /// Words with characters of more than one byte, and options that end the
+    /// line, are read like any other: none of them panics.
+    #[test]
+    fn non_ascii_words_and_dangling_options_are_read() {
+        assert_eq!(base_name("./测试.sh", false), "测试.sh");
+        assert_eq!(base_name("C:\\x\\中文.EXE", true), "中文");
+        assert_eq!(base_name("füße", false), "füße");
+        assert_eq!(base_name("ß.exe", false), "ß");
+        assert_eq!(base_name(".exe", false), ".exe");
+        for shell in [Shell::Sh, Shell::PowerShell, Shell::Cmd] {
+            for line in [
+                "./测试.sh",
+                "中文",
+                "./füße",
+                "ls; ./größe",
+                "ls -l && ./füße",
+                "kill 中文ab",
+                "pkill 中ab",
+                "env -u",
+                "env -C",
+                "env --unset",
+                "env --chdir",
+                "ls; env -u",
+                "sudo -u",
+                "timeout -s",
+                "timeout",
+                "nice -n",
+                "xargs -I",
+                "command -",
+                "Start-Process -FilePath:İİİx",
+                "Start-Process -FilePath:",
+                "Start-Process İ:x",
+                "start \"\" /d",
+                "if",
+                "for",
+            ] {
+                if let Ok(s) = parse(line, shell) {
+                    s.visit(&mut |s: &Script, i| {
+                        let _ = run(&s.commands[i], shell);
+                    });
+                }
+            }
+        }
+        let r = ran("Start-Process -FilePath:İİİx", Shell::PowerShell).unwrap();
+        assert_eq!(r.0, "i̇i̇i̇x");
+        assert_eq!(ran("env -u", Shell::Sh), None);
+        assert_eq!(ran("env -u X y", Shell::Sh).unwrap().0, "y");
+    }
+
+    /// A command wrapped past the bound of the unwrapping is a line the
+    /// reader cannot read, not a command that runs nothing.
+    #[test]
+    fn too_many_wrappers_are_not_read() {
+        for wrapper in ["nice ", "! ", "sudo ", "env ", "time ", "{ "] {
+            let line = format!("{}systemctl stop x", wrapper.repeat(300));
+            assert!(parse(&line, Shell::Sh).is_err(), "{wrapper:?}");
+            let few = format!("{}systemctl stop x", wrapper.repeat(100));
+            assert_eq!(ran(&few, Shell::Sh).map(|r| r.0), Some("systemctl".into()));
+        }
     }
 
     /// A line built to drown the reader is refused at a bound, quickly, and

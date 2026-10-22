@@ -111,14 +111,21 @@ text:
   `node-service` by the program and its arguments (`systemctl`'s verb and
   unit, `sc`, `net`, `pkill`'s pattern) and, for the stopping cmdlets,
   `kill` and `taskkill`, by a name, a substitution that names the node, or
-  an earlier command of the same pipe that does.
+  an earlier command of the same pipe that does (one forward pass per script
+  keeps that linear). `node-programs` also refuses `cp`, `mv`, `rm`,
+  `install`, `ln` and the like on a file named as the node's programs. Each
+  `Script` knows the shell it was read as, so a `powershell -Command` body in
+  a line for sh is checked as PowerShell.
 
 The parser is bounded: 16 levels of nesting, 10 000 commands and 2 Mi
 characters read (a shell's text is read again at each level). A line past a
 bound, or one it cannot read with confidence (an open quote or bracket, a
-shell fed by a pipe, `-EncodedCommand`), is `Unparsed`, and each `guard:`
-rule then matches the line with its share of the text patterns of 0.0.6
-(`rules::TEXTS`), so it refuses at least what they refused. Those texts are
+shell fed by a pipe, `-EncodedCommand`, a command wrapped in more than
+`unwrap` takes apart), is `Unparsed`. The error carries the commands read
+before it (`Unparsed::read`, nested as the line nests them), and each
+`guard:` rule then checks those as a parsed line and also matches the whole
+line with its share of the text patterns of 0.0.6 (`rules::TEXTS`), so it
+refuses at least what they refused. Those texts are
 also in `GUARD_OLD`, which `rule guard` takes off a deny list when it puts the
 three rules on. A `guard:` rule on the allow list is refused by the config
 check. The center's action checker has its own splitter

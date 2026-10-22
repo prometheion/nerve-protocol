@@ -8,15 +8,17 @@
 //! is refused when one command in it is a guarded one. A word of another
 //! program that only mentions the node (`git commit -m "…"`, `echo`) is data.
 //!
-//! A line the parser cannot read is checked with the guard's text patterns
-//! instead (crate::rules), so it is refused wherever those refused it.
+//! A line the parser cannot read is checked on the commands it read before
+//! it gave out, and with the guard's text patterns (crate::rules), so it is
+//! refused wherever those refused it.
 
 use crate::command::{Command, Run, Script, Shell, Word, base_name, run};
 
 /// One rule of the guard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Guard {
-    /// A command that runs `nerve-node` or `nerve-node-desktop`.
+    /// A command that runs `nerve-node` or `nerve-node-desktop`, or that
+    /// copies, moves, links or deletes their files.
     Programs,
     /// A command that names the node's socket, pipes, config or state
     /// folders.
@@ -43,26 +45,38 @@ impl Guard {
         Guard::ALL.into_iter().find(|g| g.rule() == text)
     }
 
-    /// Whether a command of `script` refuses the line.
-    pub fn refuses(self, script: &Script, shell: Shell) -> bool {
-        let mut hit = false;
-        script.visit(&mut |s: &Script, i| {
-            hit = hit || self.command(s, i, shell);
-        });
-        hit
+    /// Whether a command of `script` refuses the line. Every command is read
+    /// by the rules of the shell its text was written for (`script.shell`):
+    /// a `powershell -Command` body in a line for sh is PowerShell.
+    pub fn refuses(self, script: &Script) -> bool {
+        // Whether an earlier command of the pipe the command stands in
+        // names the node: one pass, so a long pipe costs no more than it
+        // is long.
+        let mut fed = false;
+        for cmd in &script.commands {
+            if !cmd.piped {
+                fed = false;
+            }
+            if self.command(cmd, script.shell, fed) || cmd.inner.iter().any(|s| self.refuses(s)) {
+                return true;
+            }
+            fed = fed || (self == Guard::Service && mention(cmd, script.shell.windows()));
+        }
+        false
     }
 
-    fn command(self, script: &Script, i: usize, shell: Shell) -> bool {
-        let cmd = &script.commands[i];
+    fn command(self, cmd: &Command, shell: Shell, fed: bool) -> bool {
         let win = shell.windows();
         match self {
-            Guard::Programs => run(cmd, shell).is_some_and(|r| is_node(&r.name)),
+            Guard::Programs => {
+                run(cmd, shell).is_some_and(|r| is_node(&r.name) || changes_file(&r, win))
+            }
             Guard::Paths => cmd
                 .words
                 .iter()
                 .chain(&cmd.redirects)
                 .any(|w| names_node_path(&w.text, win)),
-            Guard::Service => run(cmd, shell).is_some_and(|r| stops(&r, script, i, win)),
+            Guard::Service => run(cmd, shell).is_some_and(|r| stops(&r, cmd, fed, win)),
         }
     }
 }
@@ -72,6 +86,41 @@ const NODE: [&str; 2] = ["nerve-node", "nerve-node-desktop"];
 
 fn is_node(name: &str) -> bool {
     NODE.contains(&name)
+}
+
+/// The programs that copy, move, link, overwrite or delete files.
+const FILE_TOOLS: &[&str] = &[
+    "rm",
+    "mv",
+    "cp",
+    "install",
+    "ln",
+    "unlink",
+    "shred",
+    "truncate",
+    "del",
+    "erase",
+    "move",
+    "copy",
+    "xcopy",
+    "ren",
+    "rename",
+    "remove-item",
+    "ri",
+    "move-item",
+    "mi",
+    "copy-item",
+    "cpi",
+    "rename-item",
+    "rni",
+];
+
+/// Whether `r` copies, moves, links or deletes the node's program file:
+/// replacing the binary of the node is changing it. Looking at it (`ls`,
+/// `file`, `sha256sum`) is not.
+fn changes_file(r: &Run, win: bool) -> bool {
+    FILE_TOOLS.contains(&r.name.to_lowercase().as_str())
+        && r.args.iter().any(|w| names_node(&w.text, win))
 }
 
 /// The node's service (systemd's unit, Windows' service).
@@ -140,9 +189,8 @@ fn names_node_path(word: &str, win: bool) -> bool {
 }
 
 /// What stops, restarts, disables or kills the node, by the program `r` and
-/// its arguments; `script` and `i` place the command, for what a pipe feeds
-/// into it.
-fn stops(r: &Run, script: &Script, i: usize, win: bool) -> bool {
+/// its arguments; `fed`: an earlier command of its pipe names the node.
+fn stops(r: &Run, cmd: &Command, fed: bool, win: bool) -> bool {
     let args = &r.args;
     let name = r.name.to_lowercase();
     match name.as_str() {
@@ -220,10 +268,9 @@ fn stops(r: &Run, script: &Script, i: usize, win: bool) -> bool {
         // (`Get-Service nerve-node | Stop-Service`, `pgrep … | xargs kill`).
         "stop-service" | "spsv" | "restart-service" | "set-service" | "remove-service"
         | "suspend-service" | "stop-process" | "spps" | "kill" | "taskkill" => {
-            let cmd = &script.commands[i];
             args.iter().any(|w| names_node(&w.text, win))
                 || cmd.inner.iter().any(|s| mentions(s, win))
-                || fed(script, i).any(|c| mention(c, win))
+                || fed
         }
         _ => false,
     }
@@ -300,15 +347,6 @@ fn pattern_names_node(pattern: &str, win: bool) -> bool {
     let first = first.trim_start_matches('^').trim_end_matches('$');
     let name = base_name(first, win);
     is_node(name.trim_end_matches(['*', '.', '$', '+', '?']))
-}
-
-/// The commands before `i` in its pipe, nearest first.
-fn fed(script: &Script, i: usize) -> impl Iterator<Item = &Command> {
-    let cmds = &script.commands;
-    (0..i)
-        .rev()
-        .take_while(move |&j| cmds[j + 1].piped)
-        .map(move |j| &cmds[j])
 }
 
 /// Whether a command (or one nested in it) names the node's program or

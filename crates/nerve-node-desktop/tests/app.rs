@@ -710,7 +710,24 @@ fn the_app_drives_the_cli_end_to_end() {
         store.get_toast()
     );
     assert!(!perm.get_guard_missing());
+    assert!(!perm.get_guard_older());
     assert!(!perm.get_guard_busy());
+    // A text of the guard from before is still a rule that works, and the
+    // app says so instead of saying there is no guard; one click replaces it.
+    let older = nerve_policy::rules::GUARD_OLD[0];
+    perm.set_deny_text(older.into());
+    perm.invoke_rule_add(1);
+    assert!(perm.get_guard_older(), "{}", store.get_toast());
+    assert!(!perm.get_guard_missing());
+    perm.invoke_guard_add();
+    assert!(!perm.get_guard_older(), "{}", store.get_toast());
+    assert!(
+        !config(&paths).centers[0]
+            .policy
+            .deny
+            .iter()
+            .any(|d| d == older)
+    );
 
     // Sudo takes the password on stdin; without a running node it says so
     // and waits for nothing.

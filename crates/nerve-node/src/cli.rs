@@ -1126,8 +1126,13 @@ impl List {
             && (scope.contains('.') || scope.len() > 1)
             && rules::valid_scope(scope)
         {
+            let hint = if scope == "guard" {
+                "; the guard's rules are put on with `nerve-node rule guard`".to_string()
+            } else {
+                String::new()
+            };
             return Err(format!(
-                "`{scope}:` is the pattern form for files and other actions, not a command: add it with `nerve-node config add center.<name>.policy.{}`",
+                "`{scope}:` is the pattern form for files and other actions, not a command: add it with `nerve-node config add center.<name>.policy.{}`{hint}",
                 self.word()
             ));
         }
@@ -1339,7 +1344,7 @@ async fn rule_cmd(paths: &NodePaths, c: RuleCmd, out: &mut dyn Write) -> Result<
                     .collect();
                 let replaced = e.policy.deny.len() - deny.len();
                 let missing = nerve_policy::rules::guard_missing(&deny);
-                if missing.is_empty() {
+                if missing.is_empty() && replaced == 0 {
                     return Err(format!(
                         "{} has every deny rule of the guard already",
                         e.name
@@ -8299,6 +8304,33 @@ mod tests {
             "{e}"
         );
         assert_eq!(deny(), d);
+    }
+
+    /// A pairing that has every rule of the guard and also a text from
+    /// before has nothing to add, but `rule guard` still takes the text off.
+    #[test]
+    fn rule_guard_takes_an_older_text_off_when_nothing_is_missing() {
+        let (_d, paths) = setup(&["home"]);
+        let deny = || load(&paths).centers[0].policy.deny.clone();
+        run(&paths, &["rule", "guard"]).unwrap();
+        let older = nerve_policy::rules::GUARD_OLD[0];
+        run(&paths, &["config", "add", "center.home.policy.deny", older]).unwrap();
+        assert!(deny().iter().any(|r| r == older));
+        let out = run(&paths, &["rule", "guard"]).unwrap();
+        assert!(out.contains("1 of an older text replaced"), "{out}");
+        assert!(!deny().iter().any(|r| r == older));
+        assert!(nerve_policy::rules::guard_missing(&deny()).is_empty());
+    }
+
+    /// A rule of the guard is no command to `rule add`; the answer points at
+    /// the way to put one on.
+    #[test]
+    fn rule_add_points_at_rule_guard_for_a_guard_rule() {
+        let (_d, paths) = setup(&["home"]);
+        let e = run(&paths, &["rule", "add", "deny", "guard:node-service"]).unwrap_err();
+        assert!(e.contains("nerve-node rule guard"), "{e}");
+        let e = run(&paths, &["rule", "add", "allow", "fs.read:~/notes/*"]).unwrap_err();
+        assert!(!e.contains("nerve-node rule guard"), "{e}");
     }
 
     /// `rule edit` changes one entry in its place, on any list and a rule of

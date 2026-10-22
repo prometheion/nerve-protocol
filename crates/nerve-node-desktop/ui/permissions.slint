@@ -754,14 +754,16 @@ export component PermissionsPage inherits PageFrame {
             // texts, or one whose guard rules were removed: one click puts
             // them on (`rule guard` replaces the older texts).
             Reveal {
-                shown: Perm.guard-missing;
+                shown: Perm.guard-missing || Perm.guard-older;
                 VerticalLayout {
                     padding-bottom: Space.xxl;
                     Banner {
                         tone: Tone.warn;
-                        title: "No guard against changing this node";
-                        text: "Deny rules that keep " + Perm.center + "'s commands off Nerve itself. They catch mistakes; an account of their own for commands is the real protection.";
-                        action: Perm.guard-busy ? "" : "Add the guard";
+                        title: Perm.guard-older ? "The guard still reads commands as text" : "No guard against changing this node";
+                        text: Perm.guard-older
+                            ? "Its deny rules from before still work, but they miss a command behind sudo, env or timeout. The update has them read the commands of a line. They catch mistakes; an account of their own for commands is the real protection."
+                            : "Deny rules that keep " + Perm.center + "'s commands off Nerve itself. They catch mistakes; an account of their own for commands is the real protection.";
+                        action: Perm.guard-busy ? "" : (Perm.guard-older ? "Update the guard" : "Add the guard");
                         acted => {
                             Perm.guard-add();
                         }

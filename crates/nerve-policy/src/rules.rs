@@ -256,8 +256,10 @@ impl RuleSet {
             .filter(|r| r.covers(cap, action))
             .find(|r| match r.guard {
                 Some(g) => match parsed.get_or_insert_with(|| parse(target, self.shell)) {
-                    Ok(script) => g.refuses(script, self.shell),
-                    Err(_) => fallback(g).iter().any(|m| m.is_match(target)),
+                    Ok(script) => g.refuses(script),
+                    // What was read before the line gave out is checked as
+                    // a line is, and the text patterns look at all of it.
+                    Err(e) => g.refuses(&e.read) || fallback(g).iter().any(|m| m.is_match(target)),
                 },
                 None => r.globs.is_empty() || r.globs.iter().any(|g| g.is_match(target)),
             })
@@ -773,6 +775,12 @@ pub fn guard_missing(deny: &[String]) -> Vec<&'static str> {
         .copied()
         .filter(|g| !deny.iter().any(|d| d == g))
         .collect()
+}
+
+/// Whether `deny` still holds a text of the guard from before it read
+/// commands ([`GUARD_OLD`]): it works, but as text patterns.
+pub fn guard_older(deny: &[String]) -> bool {
+    deny.iter().any(|d| GUARD_OLD.contains(&d.as_str()))
 }
 
 /// The sudo allow list entry for `command`: the command itself, or with
