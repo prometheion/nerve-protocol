@@ -2154,8 +2154,11 @@ mod tests {
         ] {
             assert_eq!(ran(line, shell), None, "{line}");
         }
-        // Case counts only on Windows.
-        assert_eq!(ran("SUDO x", Sh).unwrap().0, "SUDO");
+        // Case counts only on Windows (in sh too, on a Windows node).
+        assert_eq!(
+            ran("SUDO x", Sh).unwrap().0,
+            if cfg!(windows) { "x" } else { "SUDO" }
+        );
         assert_eq!(ran("Sudo.EXE x", PowerShell).unwrap().0, "x");
     }
 
