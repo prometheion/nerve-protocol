@@ -805,7 +805,7 @@ fn client_only(
     // An allow rule would let a sense capability through in allowlist mode,
     // whatever `caps` says; so adding one for it is the owner's call as well.
     for rule in n.allow.iter().filter(|r| !o.allow.contains(r)) {
-        let scope = rule.split(':').next().unwrap_or(rule);
+        let scope = crate::rules::scope_of(rule);
         if is_sense(scope) {
             return Err(format!(
                 "policy.allow {rule}: only the owner can turn sensing on, and a capability the node does not offer now may sense"
@@ -815,7 +815,7 @@ fn client_only(
     // And so is taking away a deny rule that keeps one off under a wider
     // allow rule or mode.
     for rule in o.deny.iter().filter(|r| !n.deny.contains(r)) {
-        let scope = rule.split(':').next().unwrap_or(rule);
+        let scope = crate::rules::scope_of(rule);
         if is_sense(scope) {
             return Err(format!(
                 "policy.deny {rule}: only the owner can turn sensing on, and a capability the node does not offer now may sense"
@@ -1217,6 +1217,25 @@ mod tests {
         new["policy"]["caps"] =
             json!({"camera": "on", "camera.snap": "hidden", "camera.film": "off"});
         new["policy"]["deny"] = json!(["camera.snap"]);
+        s.set_center_document("home", new, v, senses, unix).unwrap();
+    }
+
+    /// A rule of the guard covers `exec.run`, which does not sense: the
+    /// center may take it away as it may any other command rule.
+    #[test]
+    fn a_rule_of_the_guard_is_a_command_rule_here() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = store(d.path(), SettingsGrant::Write);
+        s.update(|c| {
+            c.centers[0].policy.deny = vec!["guard:node-service".into()];
+            Ok(())
+        })
+        .unwrap();
+        // As the node judges: what it does not know may sense.
+        let senses = |scope: &str| !matches!(scope.split('.').next(), Some("exec" | "fs"));
+        let v = s.version();
+        let mut new = doc(&s);
+        new["policy"]["deny"] = json!([]);
         s.set_center_document("home", new, v, senses, unix).unwrap();
     }
 

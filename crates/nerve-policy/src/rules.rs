@@ -80,6 +80,15 @@ fn build(pattern: &str, path: bool) -> Result<GlobMatcher, globset::Error> {
         .map(|g| g.compile_matcher())
 }
 
+/// The scope a rule covers: `cap` or `cap.action`, and `exec.run` for a rule
+/// of the guard.
+pub fn scope_of(rule: &str) -> &str {
+    if Guard::of_rule(rule).is_some() {
+        return "exec.run";
+    }
+    rule.split(':').next().unwrap_or(rule)
+}
+
 /// Checks a rule of the allow or deny list.
 pub fn validate(rule: &str) -> Result<(), String> {
     if rule.split(':').next() == Some(GUARD_SCOPE) {
