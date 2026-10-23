@@ -8304,6 +8304,17 @@ mod tests {
             "{e}"
         );
         assert_eq!(deny(), d);
+        // The owner may take a rule of the guard off as it is listed, and
+        // `rule guard` puts it back.
+        run(&paths, &["rule", "rm", "deny", "guard:node-service"]).unwrap();
+        assert!(!deny().iter().any(|r| r == "guard:node-service"));
+        assert_eq!(deny().len(), d.len() - 1);
+        assert_eq!(
+            nerve_policy::rules::guard_missing(&deny()),
+            ["guard:node-service"]
+        );
+        run(&paths, &["rule", "guard"]).unwrap();
+        assert_eq!(deny().len(), d.len());
     }
 
     /// A pairing that has every rule of the guard and also a text from

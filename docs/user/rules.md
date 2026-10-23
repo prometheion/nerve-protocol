@@ -58,11 +58,12 @@ is a guarded command:
   `( … )`. The words of an array (`a=(x y)`) or of a regular expression in
   `[[ … ]]` are data; a substitution in them runs;
 - in a substitution: `$( … )` and backticks, also inside double quotes;
-- in the text a shell runs: `sh -c`, `bash -c`, `su -c`, `eval`,
+- in the text a shell runs: `sh -c`, `bash -c`, `su -c`, `runuser -c`, `eval`,
   `powershell -Command`, `cmd /c`, `Invoke-Expression`, and a here-document
   or here-string fed to a shell (`bash`, also with `-s` and arguments, `su`,
   `sudo -s`, `sudo -i`);
 - behind a program that runs another: `sudo` (with its options), `env`,
+  `runuser -u`,
   `timeout`, `nohup`, `nice`, `ionice`, `time`, `stdbuf`, `xargs`, `exec`, a
   path to the program, and on Windows `&`, `Start-Process` and cmd's `start`.
 
@@ -115,7 +116,9 @@ place that gave out is only seen by the text patterns.
 
 What the guard does not see: a name built at run time
 (`n=nerve-node; systemctl stop $n`), a program that another program runs
-(`cargo run -p nerve-node`, `find … -exec`, `ssh`, a script file), a name
+(`cargo run -p nerve-node`, `find … -exec`, `ssh`, a script file, or a
+launcher outside the list above such as `systemd-run`, `taskset` or `watch`,
+also with the program's path), a name
 that reaches `kill` or `systemctl` through a loop or another way than a
 straight pipe (`pgrep -f nerve-node | while read p; do kill $p; done`,
 `echo nerve-node | xargs systemctl stop`), and `pkill` or `killall` with a

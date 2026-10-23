@@ -223,6 +223,79 @@ const NODE_ITSELF: &[Case] = &[
     ("cat ~/.config/nerve-node-desktop/settings.json", SH, None),
     ("ls /etc/nervecenter", SH, None),
     ("git status", ALL, None),
+    // A program path with a blank in it, behind `cmd /c`: the install path.
+    (
+        "cmd /c \"C:\\Program Files\\Nerve\\nerve-node.exe\" status",
+        WIN,
+        PROGRAMS,
+    ),
+    (
+        "cmd.exe /c \"C:\\Program Files\\Nerve\\nerve-node.exe\" mode set user",
+        WIN,
+        PROGRAMS,
+    ),
+    (
+        "cmd /c \"C:\\Program Files\\Nerve\\nerve-node-desktop.exe\"",
+        WIN,
+        PROGRAMS,
+    ),
+    (
+        "cmd /c start \"\" \"C:\\Program Files\\Nerve\\nerve-node.exe\"",
+        WIN,
+        PROGRAMS,
+    ),
+    ("cmd /c \"nerve-node status & echo done\"", WIN, PROGRAMS),
+    // PowerShell continues a line after a backtick, also before CR LF.
+    (
+        "& `\r\n  'C:\\Program Files\\Nerve\\nerve-node.exe' status",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "Start-Process `\r\n  -FilePath 'C:\\Program Files\\Nerve\\nerve-node.exe'",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "Remove-Item `\r\n  'C:\\Program Files\\Nerve\\nerve-node.exe'",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "& `\r 'C:\\Program Files\\Nerve\\nerve-node.exe' status",
+        PS,
+        PROGRAMS,
+    ),
+    // A file tool names the program by its value, not by a word of a sentence.
+    ("dd if=new of=nerve-node", SH, PROGRAMS),
+    (
+        "wget --output-document=nerve-node https://example.com/x",
+        SH,
+        PROGRAMS,
+    ),
+    (
+        "Move-Item new.exe -Destination:nerve-node.exe",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "curl -o \"C:\\Program Files\\Nerve\\nerve-node.exe\" https://example.com/x",
+        WIN,
+        PROGRAMS,
+    ),
+    // A blank inside a substitution is not a blank before the path.
+    ("cat \"$(echo $HOME)/.config/nerve/node.toml\"", SH, PATHS),
+    ("cat $(dirname $HOME)/x/.config/nerve/node.toml", SH, PATHS),
+    (
+        "Get-Content \"$($env:ProgramData)/Nerve/config/node.toml\"",
+        PS,
+        PATHS,
+    ),
+    (
+        "Get-Content \"$($env:ProgramData)\\Nerve\\config\\node.toml\"",
+        PS,
+        PATHS,
+    ),
 ];
 
 /// The forms of #154 that stopped, restarted, disabled or killed the node's
@@ -569,6 +642,10 @@ const SERVICE_FORMS: &[Case] = &[
     ),
     ("echo \"do sudo pkill nerve-node\"", SH, None),
     ("echo then sudo service nerve-node restart", SH, None),
+    // A backtick continues a PowerShell line, before CR LF and CR too.
+    ("Stop-Service `\r\n  -Name nerve-node", PS, SERVICE),
+    ("Stop-Process `\r\n  -Name nerve-node -Force", PS, SERVICE),
+    ("Get-Service nerve-node `\r\n  | Stop-Service", PS, SERVICE),
 ];
 
 /// What the docs listed as refused although it only mentions the node: a
@@ -878,6 +955,82 @@ const NESTED: &[Case] = &[
     ("& 'nerve-node' status", PS, PROGRAMS),
     (". 'nerve-node' status", PS, PROGRAMS),
     ("$r = & 'nerve-node' status", PS, PROGRAMS),
+    // Start-Process takes an array with commas and blanks, or `@( … )`.
+    (
+        "Start-Process sc.exe -ArgumentList 'stop', 'nerve-node' -Verb RunAs",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process net -ArgumentList 'stop', 'nerve-node' -Wait",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process sc.exe -ArgumentList 'stop' ,'nerve-node'",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process sc.exe -ArgumentList @('stop','nerve-node') -Verb RunAs",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process powershell -ArgumentList @('-Command', 'Stop-Service nerve-node') -Verb RunAs",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process powershell -ArgumentList '-NoProfile', '-Command', 'Stop-Service nerve-node'",
+        PS,
+        SERVICE,
+    ),
+    // `su` and `runuser` in their other forms, and `env -`.
+    ("su -lc 'systemctl stop nerve-node'", SH, SERVICE),
+    ("su -c'systemctl stop nerve-node'", SH, SERVICE),
+    ("su --command='systemctl stop nerve-node'", SH, SERVICE),
+    ("su --command 'systemctl stop nerve-node' root", SH, SERVICE),
+    ("env - systemctl stop nerve-node", SH, SERVICE),
+    (
+        "sudo su -lc 'env X=1 systemctl stop nerve-node'",
+        SH,
+        SERVICE,
+    ),
+    (
+        "sudo runuser -u root -- systemctl stop nerve-node",
+        SH,
+        SERVICE,
+    ),
+    ("runuser -u root systemctl stop nerve-node", SH, SERVICE),
+    (
+        "runuser -u root -- bash -c 'systemctl stop nerve-node'",
+        SH,
+        SERVICE,
+    ),
+    // In fish a single-quoted string may hold `\'`.
+    (
+        "echo 'don\\'t'; and env X=1 systemctl stop nerve-node",
+        FISH,
+        SERVICE,
+    ),
+    (
+        "echo 'don\\'t'; and sudo systemctl stop nerve-node",
+        FISH,
+        SERVICE,
+    ),
+    // `|` between the patterns of a `case` branch.
+    ("case $x in a|b) nerve-node status;; esac", SH, PROGRAMS),
+    (
+        "case $x in a|b) echo | nerve-node;; c|d) echo;; esac",
+        SH,
+        PROGRAMS,
+    ),
+    (
+        "case $x in a|b) pgrep nerve-node | xargs kill;; esac",
+        SH,
+        SERVICE,
+    ),
 ];
 
 /// Lines that only mention the node or its commands, in quotes, in a
@@ -950,6 +1103,30 @@ const DATA: &[Case] = &[
         None,
     ),
     ("cat \"/home/john smith/.config/nerve/node.toml\"", SH, None),
+    // Other programs' data that holds the name only in a sentence or as a
+    // value of their own options.
+    ("sed -i 's/a/run nerve-node status/' README.md", SH, None),
+    ("curl -d name=nerve-node https://example.com", SH, None),
+    ("curl -H 'X-App: nerve-node' https://example.com", SH, None),
+    ("rsync -a --exclude=nerve-node src/ dest/", SH, None),
+    // `|` between the patterns of a `case` branch is no pipe.
+    (
+        "case \"$svc\" in nerve-node|nerve-center) echo ours;; esac",
+        SH,
+        None,
+    ),
+    (
+        "case \"$svc\" in nerve-center|nerve-node) echo ours;; esac",
+        SH,
+        None,
+    ),
+    (
+        "case $x in a) echo | cat;; nerve-node|b) echo;; esac",
+        SH,
+        None,
+    ),
+    // fish's `\'` does not end a quote.
+    ("echo 'don\\'t'; and echo second", FISH, None),
 ];
 
 /// A line the parser cannot read is checked with the text patterns of
@@ -1024,6 +1201,21 @@ const UNPARSED: &[Case] = &[
 #[test]
 fn the_guard_reads_every_command_of_a_line() {
     check(NESTED);
+}
+
+/// The command a line gives out in is read whole, however deep the place
+/// is: its `-c` text is read at the depth it stands in.
+#[test]
+fn a_command_keeps_its_text_when_the_line_gives_out_deep() {
+    let set = RuleSet::new(&rules(GUARD), home()).with_shell(Shell::Sh);
+    for n in 1..=20 {
+        let open = "(".repeat(n);
+        let close = ")".repeat(n);
+        for tail in ["\"x".to_string(), format!("1{close}")] {
+            let line = format!("bash -c 'systemctl stop nerve-node' ${open}{tail}");
+            assert!(set.find("exec", "run", &line).is_some(), "{line:?}");
+        }
+    }
 }
 
 #[test]

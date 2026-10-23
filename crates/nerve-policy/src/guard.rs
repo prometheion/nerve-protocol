@@ -152,7 +152,31 @@ const FILE_TOOLS: &[&str] = &[
 /// it (`ls`, `file`, `sha256sum`) is not.
 fn changes_file(r: &Run, win: bool) -> bool {
     FILE_TOOLS.contains(&r.name.to_lowercase().as_str())
-        && r.args.iter().any(|w| names_node(&w.text, win))
+        && r.args.iter().any(|w| is_node_file(&w.text, win))
+}
+
+/// Whether an argument of a file tool names the node's program: the whole
+/// argument as a path (it may hold blanks: `C:\Program Files\…`), or the
+/// value of `of=`, `--output=` or `-Destination:`. Data that only holds the
+/// name (`curl -d name=nerve-node`, `--exclude=nerve-node`) is not it.
+fn is_node_file(word: &str, win: bool) -> bool {
+    let value = match word.split_once('=') {
+        Some((key, v))
+            if key == "of"
+                || ["--output", "--target", "--dest"]
+                    .iter()
+                    .any(|k| key.starts_with(k)) =>
+        {
+            v
+        }
+        _ => match word.split_once(':') {
+            Some((_, v)) if word.starts_with('-') => v,
+            _ => word,
+        },
+    };
+    [word, value]
+        .iter()
+        .any(|w| w.split(',').any(|p| is_node(&base_name(p, win))))
 }
 
 /// The node's service (systemd's unit, Windows' service).
@@ -184,6 +208,25 @@ const PATHS: &[(&str, bool)] = &[
     (".local/state/nerve", false),
 ];
 
+/// Where the first blank of a word stands that is not inside a substitution
+/// (`$(echo $HOME)/…` is one path); the length when there is none.
+fn first_blank(word: &str) -> usize {
+    let mut depth = 0usize;
+    let mut tick = false;
+    let mut prev = ' ';
+    for (at, c) in word.char_indices() {
+        match c {
+            '(' if prev == '$' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            '`' => tick = !tick,
+            c if c.is_whitespace() && depth == 0 && !tick => return at,
+            _ => {}
+        }
+        prev = c;
+    }
+    word.len()
+}
+
 /// Whether `word` names one of the node's paths. The path may stand after a
 /// prefix (`--config=`, `UNIX-CONNECT:`, `$HOME/`), but not after a blank: a
 /// path in a sentence (a commit message) is data. On Windows `\` separates
@@ -197,20 +240,20 @@ fn names_node_path(word: &str, win: bool) -> bool {
     let ends = |rest: &str| {
         !rest.starts_with(|c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
     };
+    let blank = first_blank(&text);
     for (path, open) in PATHS {
         for (at, _) in text.match_indices(path) {
-            if !text[..at].contains(char::is_whitespace)
-                && (*open || ends(&text[at + path.len()..]))
-            {
+            if at <= blank && (*open || ends(&text[at + path.len()..])) {
                 return true;
             }
         }
     }
     // `C:\ProgramData\Nerve`, `%ProgramData%\Nerve`, `$env:ProgramData\Nerve`.
     let lower = text.to_lowercase();
+    let blank = first_blank(&lower);
     for (at, _) in lower.match_indices("programdata") {
-        let rest = lower[at + "programdata".len()..].trim_start_matches(['%', '}', '"', '\'']);
-        if !lower[..at].contains(char::is_whitespace)
+        let rest = lower[at + "programdata".len()..].trim_start_matches(['%', '}', ')', '"', '\'']);
+        if at <= blank
             && let Some(after) = rest.strip_prefix("/nerve")
             && ends(after)
         {

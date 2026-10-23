@@ -247,6 +247,9 @@ struct Parser<'b> {
     /// How many `case … esac` the reader is in (sh): there a pattern ends
     /// at `)` and its branch at `;;`.
     cases: usize,
+    /// The reader is at a `case` pattern: after `in` or `;;`, up to the `)`.
+    /// `|` there separates patterns, it does not pipe.
+    pattern: bool,
     /// How many `$(( … ))` and `(( … ))` the reader is in (sh): there `<<` is
     /// a shift, not a here-document.
     arith: usize,
@@ -275,6 +278,7 @@ impl<'b> Parser<'b> {
             budget,
             resume: None,
             cases: 0,
+            pattern: false,
             arith: 0,
         }
     }
@@ -348,8 +352,10 @@ impl<'b> Parser<'b> {
     /// Reads commands up to `close` (or the end of the text). When the text
     /// cannot be read, the error carries what was read until then.
     fn list(&mut self, close: Option<char>) -> Result<Script, Unparsed> {
+        let entry = self.depth;
         self.depth += 1;
         if self.depth > MAX_DEPTH {
+            self.depth = entry;
             return Err(Unparsed::because(
                 "the line nests deeper than the guard reads",
             ));
@@ -357,16 +363,18 @@ impl<'b> Parser<'b> {
         // A `case` of this list ends in this list: a `)` after its patterns
         // is not the one that closes a group around it.
         let outer_cases = std::mem::take(&mut self.cases);
+        let outer_pattern = std::mem::take(&mut self.pattern);
         let mut script = Script::new(self.shell);
         let mut cmd = Command::default();
         let mut piped = false;
         let read = self.commands(close, &mut script, &mut cmd, &mut piped);
         self.cases = outer_cases;
+        self.pattern = outer_pattern;
+        // Also after an error: the text the command in progress runs is read
+        // at this list's depth, not at the one the error happened in.
+        self.depth = entry;
         match read {
-            Ok(()) => {
-                self.depth -= 1;
-                Ok(script)
-            }
+            Ok(()) => Ok(script),
             Err(mut e) => {
                 // What a list below read is a part of the command that was
                 // being read here.
@@ -419,6 +427,7 @@ impl<'b> Parser<'b> {
                     if self.cases > 0 && c == ')' {
                         // A `case` pattern: its words are not a command,
                         // but a substitution in it runs.
+                        self.pattern = false;
                         cmd.words.clear();
                         cmd.redirects.clear();
                         cmd.input.clear();
@@ -430,6 +439,12 @@ impl<'b> Parser<'b> {
                     return Err(Unparsed::because("a bracket closes that was not opened"));
                 }
                 Tok::Sep => self.finish(script, cmd, piped, false)?,
+                Tok::Pipe if self.cases > 0 && self.pattern => {
+                    // `a|b)`: the patterns of one branch.
+                    cmd.words.clear();
+                    cmd.redirects.clear();
+                    cmd.input.clear();
+                }
                 Tok::Pipe => self.finish(script, cmd, piped, true)?,
                 Tok::Word(w, subs) => {
                     let mut header = false;
@@ -438,7 +453,10 @@ impl<'b> Parser<'b> {
                         if lead == cmd.words.len() {
                             match w.text.as_str() {
                                 "case" => self.cases += 1,
-                                "esac" => self.cases = self.cases.saturating_sub(1),
+                                "esac" => {
+                                    self.cases = self.cases.saturating_sub(1);
+                                    self.pattern = false;
+                                }
                                 _ => {}
                             }
                         }
@@ -453,6 +471,7 @@ impl<'b> Parser<'b> {
                     cmd.inner.extend(subs);
                     if header {
                         self.finish(script, cmd, piped, false)?;
+                        self.pattern = true;
                     }
                 }
                 Tok::Redirect(false) => {}
@@ -615,6 +634,7 @@ impl<'b> Parser<'b> {
                     }
                     self.bump();
                     self.eat('&');
+                    self.pattern = true;
                 }
                 Tok::Sep
             }
@@ -741,6 +761,14 @@ impl<'b> Parser<'b> {
                     loop {
                         match self.bump() {
                             Some('\'') => break,
+                            // Only fish escapes a quote or a backslash in
+                            // single quotes.
+                            Some('\\')
+                                if self.shell == Shell::Fish
+                                    && matches!(self.peek(), Some('\'' | '\\')) =>
+                            {
+                                w.text.extend(self.bump());
+                            }
                             Some(x) => w.text.push(x),
                             None => return Err(Unparsed::because("a quote is not closed")),
                         }
@@ -986,15 +1014,27 @@ impl<'b> Parser<'b> {
 
     // ---- PowerShell ----
 
+    /// How many characters the line break `at` ahead takes (`\n`, `\r\n` or
+    /// `\r`), 0 when there is none. A backtick before it continues the line.
+    fn ps_continuation(&self, at: usize) -> usize {
+        match (self.peek_at(at), self.peek_at(at + 1)) {
+            (Some('\r'), Some('\n')) => 2,
+            (Some('\n' | '\r'), _) => 1,
+            _ => 0,
+        }
+    }
+
     fn ps_token(&mut self, start: bool) -> Result<Tok, Unparsed> {
         loop {
             match self.peek() {
                 Some(' ' | '\t' | '\r') => {
                     self.bump();
                 }
-                Some('`') if self.peek_at(1) == Some('\n') => {
+                Some('`') if self.ps_continuation(1) > 0 => {
                     self.bump();
-                    self.bump();
+                    for _ in 0..self.ps_continuation(0) {
+                        self.bump();
+                    }
                 }
                 Some('<') if self.peek_at(1) == Some('#') => {
                     self.bump();
@@ -1097,11 +1137,17 @@ impl<'b> Parser<'b> {
         while let Some(c) = self.peek() {
             match c {
                 ' ' | '\t' | '\r' | '\n' | ';' | '|' | '&' | ')' | '}' | '>' => break,
+                '`' if self.ps_continuation(1) > 0 => {
+                    // A line continuation ends the word as a blank.
+                    self.bump();
+                    for _ in 0..self.ps_continuation(0) {
+                        self.bump();
+                    }
+                    break;
+                }
                 '`' => {
                     self.bump();
                     match self.bump() {
-                        // A line continuation ends the word as a blank.
-                        Some('\n') => break,
                         Some(x) => {
                             w.text.push(x);
                             w.quoted = true;
@@ -1394,6 +1440,12 @@ impl<'b> Parser<'b> {
         let body = match runs(&run.name, &run.args, self.shell) {
             Runs::Nothing => return Ok(()),
             Runs::Text(text, shell) => text.map(|t| (t, shell)),
+            Runs::Texts(texts, shell) => {
+                for text in texts {
+                    cmd.inner.push(self.nested(&text, shell)?);
+                }
+                return Ok(());
+            }
             Runs::Input(shell) => {
                 if cmd.piped {
                     return Err(Unparsed::because("a shell reads its script from a pipe"));
@@ -1427,6 +1479,8 @@ enum Runs {
     Nothing,
     /// This text, in this shell (`None`: the flag has no text after it).
     Text(Option<String>, Shell),
+    /// Each of these texts may be what it runs.
+    Texts(Vec<String>, Shell),
     /// Its input: a here-document, or a pipe.
     Input(Shell),
     /// A text it is given in a form the reader cannot read.
@@ -1440,6 +1494,41 @@ fn joined(args: &[Word]) -> Option<String> {
             .collect::<Vec<_>>()
             .join(" ")
     })
+}
+
+/// The command lines cmd may get after `/c`. With more than one word, a
+/// word that holds a blank (or nothing) is one word of the line only inside
+/// quotes, as a program path such as `C:\Program Files\x.exe`. One word is
+/// the whole line, or a program path that PowerShell or the C runtime put in
+/// quotes because of a blank; cmd decides by whether the quoted text names a
+/// file, which the reader cannot know, so both are read.
+fn cmd_text(args: &[Word]) -> Vec<String> {
+    match args {
+        [] => Vec::new(),
+        [one] => {
+            let mut texts = vec![one.text.clone()];
+            if one.text.contains(char::is_whitespace)
+                && !one
+                    .text
+                    .contains(['"', '&', '<', '>', '(', ')', '@', '^', '|'])
+            {
+                texts.push(format!("\"{}\"", one.text));
+            }
+            texts
+        }
+        _ => vec![
+            args.iter()
+                .map(|w| {
+                    if w.text.is_empty() || w.text.contains(char::is_whitespace) {
+                        format!("\"{}\"", w.text)
+                    } else {
+                        w.text.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        ],
+    }
 }
 
 /// What `name` runs with `args` when it stands in a script of `shell`.
@@ -1461,7 +1550,7 @@ fn runs(name: &str, args: &[Word], shell: Shell) -> Runs {
             while let Some(a) = args.get(i) {
                 let a = a.text.to_lowercase();
                 if a == "/c" || a == "/k" {
-                    return Runs::Text(joined(&args[i + 1..]), Shell::Cmd);
+                    return Runs::Texts(cmd_text(&args[i + 1..]), Shell::Cmd);
                 }
                 if !a.starts_with('/') {
                     break;
@@ -1480,11 +1569,8 @@ fn runs(name: &str, args: &[Word], shell: Shell) -> Runs {
             },
         ),
         // Without `-c` they start a shell, which runs its input.
-        "su" | "runuser" => match args
-            .iter()
-            .position(|w| w.text == "-c" || w.text == "--command")
-        {
-            Some(at) => Runs::Text(args.get(at + 1).map(|w| w.text.clone()), Shell::Sh),
+        "su" | "runuser" => match su_command(args) {
+            Some(text) => Runs::Text(text, Shell::Sh),
             None => Runs::Input(Shell::Sh),
         },
         "invoke-expression" | "iex" => {
@@ -1496,6 +1582,37 @@ fn runs(name: &str, args: &[Word], shell: Shell) -> Runs {
         }
         _ => Runs::Nothing,
     }
+}
+
+/// The text `su` or `runuser` runs for its `-c` option: `-c text`, a group
+/// such as `-lc text`, `-ctext`, `--command text` or `--command=text`.
+/// `None`: no such option; `Some(None)`: the option ends the line.
+fn su_command(args: &[Word]) -> Option<Option<String>> {
+    for (at, w) in args.iter().enumerate() {
+        let t = w.text.as_str();
+        if t == "--" {
+            break;
+        }
+        let attached = if let Some(long) = t.strip_prefix("--") {
+            if long == "command" {
+                return Some(args.get(at + 1).map(|w| w.text.clone()));
+            }
+            match long.strip_prefix("command=") {
+                Some(text) => text.to_string(),
+                None => continue,
+            }
+        } else if let Some(group) = t.strip_prefix('-') {
+            match group.split_once('c') {
+                Some((_, "")) => return Some(args.get(at + 1).map(|w| w.text.clone())),
+                Some((_, text)) => text.to_string(),
+                None => continue,
+            }
+        } else {
+            continue;
+        };
+        return Some(Some(attached));
+    }
+    None
 }
 
 /// `sh` and its kin: `-c` (alone or in a group such as `-lc`) runs the first
@@ -1842,11 +1959,22 @@ fn unwrap(cmd: &Command, shell: Shell) -> Result<Option<Run>, Wrapped> {
                     words.splice(i + 1..i + 1 + split.0, split.1);
                     continue;
                 }
-                let n = options(rest, ENV);
+                let mut n = options(rest, ENV);
+                // A lone `-` is `-i`.
+                n += usize::from(rest.get(n).is_some_and(|w| w.text == "-"));
                 n + rest[n..]
                     .iter()
                     .take_while(|w| is_assignment(&w.text))
                     .count()
+            }
+            // `runuser -u USER [--] command`; without `-u` it starts a shell.
+            "runuser" if rest.iter().any(|w| w.text == "-u" || w.text == "--user") => {
+                let at = rest
+                    .iter()
+                    .position(|w| w.text == "-u" || w.text == "--user")
+                    .unwrap_or(0);
+                let n = (at + 2).min(rest.len());
+                n + usize::from(rest.get(n).is_some_and(|w| w.text == "--"))
             }
             "timeout" => options(rest, TIMEOUT) + 1,
             "nice" => options(rest, NICE),
@@ -1934,6 +2062,21 @@ fn env_split(rest: &[Word]) -> Option<(usize, Vec<Word>)> {
     None
 }
 
+/// A PowerShell array written with commas (`'a', 'b'`) reaches the reader
+/// as several words: joins the words after `first` that a comma ties to it.
+fn array(rest: &[Word], n: &mut usize, first: &Word) -> Word {
+    let mut out = first.clone();
+    while let Some(next) = rest.get(*n) {
+        if !(out.text.ends_with(',') || next.text.starts_with(',')) {
+            break;
+        }
+        out.text.push_str(&next.text);
+        out.literal &= next.literal;
+        *n += 1;
+    }
+    out
+}
+
 /// PowerShell's `Start-Process`: the program (`-FilePath` or the first
 /// word) and its arguments (`-ArgumentList` or the second word, a list
 /// split at commas and blanks).
@@ -1958,7 +2101,7 @@ fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
         else {
             match positional {
                 0 => file = Some(w.clone()),
-                1 => list = Some(w.clone()),
+                1 => list = Some(array(rest, &mut n, w)),
                 _ => {}
             }
             positional += 1;
@@ -1978,7 +2121,7 @@ fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
             }),
             _ => {
                 n += 1;
-                rest.get(n - 1).cloned()
+                rest.get(n - 1).map(|v| array(rest, &mut n, v))
             }
         };
         if "filepath".starts_with(param) || param == "path" || param == "pspath" {
@@ -1989,9 +2132,14 @@ fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
     }
     let mut out = vec![file?];
     if let Some(l) = list {
+        // `@('a', 'b')` keeps its source text; the quotes and the brackets
+        // are not part of the arguments.
+        let text = match l.text.strip_prefix("@(").and_then(|t| t.strip_suffix(')')) {
+            Some(inner) => inner.replace(['\'', '"'], ""),
+            None => l.text.clone(),
+        };
         out.extend(
-            l.text
-                .split(|c: char| c == ',' || c.is_whitespace())
+            text.split(|c: char| c == ',' || c.is_whitespace())
                 .filter(|s| !s.is_empty())
                 .map(|s| Word {
                     text: s.to_string(),
@@ -2167,11 +2315,11 @@ mod tests {
         let sh = |l| words(l, Shell::Sh);
         assert_eq!(
             sh("case $x in a|b) c;; (d) e; f;& *) g;;& esac"),
-            // A pattern in `( … )` reads as a group: its word counts as a
-            // command, which only ever refuses more.
+            // The patterns of `a|b)` are no command. A pattern in `( … )`
+            // reads as a group: its word counts as a command, which only
+            // ever refuses more.
             w(&[
                 &["case", "$x", "in"],
-                &["a"],
                 &["c"],
                 &["e"],
                 &["d"],
