@@ -849,11 +849,7 @@ const NESTED: &[Case] = &[
         SH,
         SERVICE,
     ),
-    (
-        "sudo sh -s x <<< 'systemctl stop nerve-node'",
-        SH,
-        SERVICE,
-    ),
+    ("sudo sh -s x <<< 'systemctl stop nerve-node'", SH, SERVICE),
     // `<<` in arithmetic shifts; it does not open a here-document, so what
     // follows is read as commands.
     (

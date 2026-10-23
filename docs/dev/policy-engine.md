@@ -93,7 +93,7 @@ folders. A `guard:` rule covers `exec.run` and looks at commands, not at the
 text:
 
 - `nerve_policy::command::parse` splits the line as the node's shell reads it
-  (`Shell::Sh`, `PowerShell`, `Cmd`; `Env::shell`, from `machine.shell` as
+  (`Shell::Sh`, `Fish`, `PowerShell`, `Cmd`; `Env::shell`, from `machine.shell` as
   `exec::shell_command` picks it, and `sh` for a sudo command off Windows).
   It gives the commands of the line with their words (quotes and escapes off,
   `literal` false where a variable or substitution stays), redirect targets,
@@ -112,8 +112,13 @@ text:
   unit, `sc`, `net`, `pkill`'s pattern) and, for the stopping cmdlets,
   `kill` and `taskkill`, by a name, a substitution that names the node, or
   an earlier command of the same pipe that does (one forward pass per script
-  keeps that linear). `node-programs` also refuses `cp`, `mv`, `rm`,
-  `install`, `ln` and the like on a file named as the node's programs. Each
+  keeps that linear). `node-programs` also refuses a redirect target that
+  names the node's programs, and `cp`, `mv`, `rm`, `install`, `ln` and the
+  other tools that copy, delete, overwrite, download into or change the mode
+  of a file (`FILE_TOOLS`: `tee`, `dd`, `sed`, `chmod`, `curl`, `wget`,
+  `Set-Content`, `Out-File` …) on a file named as the node's programs.
+  Programs that only look at a file (`ls`, `sha256sum`) are not on the
+  list. Each
   `Script` knows the shell it was read as, so a `powershell -Command` body in
   a line for sh is checked as PowerShell.
 

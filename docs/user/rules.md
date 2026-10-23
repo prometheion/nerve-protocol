@@ -41,7 +41,7 @@ node itself. `rule ls deny` shows them; remove any you do not want.
 
 | Rule | Refuses |
 |---|---|
-| `guard:node-programs` | A command that runs `nerve-node` or `nerve-node-desktop`, by its name or a path, `.exe` too; and one that copies, moves, links or deletes their files (`cp`, `mv`, `rm`, `install`, `ln`, `Remove-Item`, `del` …), since replacing the program changes the node |
+| `guard:node-programs` | A command that runs `nerve-node` or `nerve-node-desktop`, by its name or a path, `.exe` too; and one that copies, moves, links, deletes or overwrites their files (`cp`, `mv`, `rm`, `install`, `ln`, `Remove-Item`, `del`, a redirection onto the file, `tee`, `dd`, `sed`, `chmod`, `curl -o`, `wget -O`, `Invoke-WebRequest -OutFile`, `Set-Content`, `Out-File` …), since replacing the program changes the node |
 | `guard:node-paths` | A command that names the node's socket or pipes or its config and state folders (`/run/nerve-node`, `/etc/nerve`, `/var/lib/nerve`, `~/.config/nerve`, `~/.local/state/nerve`, `%ProgramData%\Nerve`) |
 | `guard:node-service` | A command that stops, restarts, disables or kills the node's service or process, as the node's own `service stop` would |
 | `fs.write:…` (five rules) | A write into those folders |
@@ -60,10 +60,18 @@ is a guarded command:
 - in a substitution: `$( … )` and backticks, also inside double quotes;
 - in the text a shell runs: `sh -c`, `bash -c`, `su -c`, `eval`,
   `powershell -Command`, `cmd /c`, `Invoke-Expression`, and a here-document
-  fed to a shell;
+  or here-string fed to a shell (`bash`, also with `-s` and arguments, `su`,
+  `sudo -s`, `sudo -i`);
 - behind a program that runs another: `sudo` (with its options), `env`,
   `timeout`, `nohup`, `nice`, `ionice`, `time`, `stdbuf`, `xargs`, `exec`, a
   path to the program, and on Windows `&`, `Start-Process` and cmd's `start`.
+
+fish is read as a shell of its own: its `( … )` is a command substitution
+(`echo (nerve-node status)` is refused) and `and`, `or` and `not` start a
+command, in a `fish -c` text and when `machine.shell` is fish. In PowerShell
+a quoted string that starts a statement is a value
+(`'nerve-node' | Set-Content x.txt` runs), unless `&`, `.` or
+`Start-Process` runs it.
 
 The text a shell runs is read by that shell's rules, not the line's: the
 `& nerve-node` in `powershell -Command "& nerve-node"` is PowerShell's call
@@ -78,7 +86,12 @@ another program is data, so a line that only mentions the node runs:
 here-document written to a file. The name alone is not refused either:
 `cargo build -p nerve-node`, `journalctl -u nerve-node`,
 `ls -l /usr/local/bin/nerve-node`. A path in a sentence (a blank before it in
-the same word) is data too.
+the same word) is data too. For the same reason a script text handed to
+another program is seen only when no blank comes before the path in its word
+(`python3 -c "print(open('/etc/nerve/node.toml').read())"` is refused,
+`python3 -c "import os; print(open('/etc/nerve/node.toml').read())"` runs),
+and a folder name with a blank in it (`"/home/john smith/.config/nerve"`) is
+not seen: both are a program that another program runs, listed below.
 
 | | Refused | Still runs |
 |---|---|---|

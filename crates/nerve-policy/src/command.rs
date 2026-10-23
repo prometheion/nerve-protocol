@@ -1445,7 +1445,14 @@ fn joined(args: &[Word]) -> Option<String> {
 /// What `name` runs with `args` when it stands in a script of `shell`.
 fn runs(name: &str, args: &[Word], shell: Shell) -> Runs {
     if SH.contains(&name) {
-        return runs_sh(args, if name == "fish" { Shell::Fish } else { Shell::Sh });
+        return runs_sh(
+            args,
+            if name == "fish" {
+                Shell::Fish
+            } else {
+                Shell::Sh
+            },
+        );
     }
     match name {
         "powershell" | "pwsh" => runs_powershell(args),
@@ -2750,7 +2757,10 @@ mod tests {
     #[test]
     fn the_command_a_line_gives_out_in_is_kept_whole() {
         let (read, _) = unread("bash -c 'a b' ${X:-$(c)}", Shell::Sh);
-        assert!(read.contains(&vec!["a".to_string(), "b".to_string()]), "{read:?}");
+        assert!(
+            read.contains(&vec!["a".to_string(), "b".to_string()]),
+            "{read:?}"
+        );
         let (read, _) = unread("echo \"$(a) ${X:-$(b)}\"", Shell::Sh);
         assert!(read.contains(&vec!["a".to_string()]), "{read:?}");
         let (read, _) = unread("echo $(a) \"x $(b) ${X:-$(c)}\" y", Shell::Sh);
@@ -2759,10 +2769,16 @@ mod tests {
         let (_, piped) = unread("a | b ${X:-$(c)}", Shell::Sh);
         assert!(piped);
         let (read, _) = unread("bash <<'EOF'\na b\n", Shell::Sh);
-        assert!(read.contains(&vec!["a".to_string(), "b".to_string()]), "{read:?}");
+        assert!(
+            read.contains(&vec!["a".to_string(), "b".to_string()]),
+            "{read:?}"
+        );
         let (read, _) = unread("cat <<EOF\n$(a b)\n", Shell::Sh);
-        assert!(read.contains(&vec!["a".to_string(), "b".to_string()]), "{read:?}");
-        let (read, _) = unread("echo $(a) \"${X:-$(c)}", Shell::PowerShell);
+        assert!(
+            read.contains(&vec!["a".to_string(), "b".to_string()]),
+            "{read:?}"
+        );
+        let (read, _) = unread("echo \"x $(a) y", Shell::PowerShell);
         assert!(read.contains(&vec!["a".to_string()]), "{read:?}");
     }
 
@@ -2804,11 +2820,7 @@ mod tests {
             words("bash -c 'echo (a b)'", Shell::Fish)[1],
             vec!["echo".to_string()]
         );
-        for (line, name) in [
-            ("true; and a b", "a"),
-            ("not a b", "a"),
-            ("a; or b", "b"),
-        ] {
+        for (line, name) in [("true; and a b", "a"), ("not a b", "a"), ("a; or b", "b")] {
             assert_eq!(ran_last(line, Shell::Fish), Some(name.into()), "{line}");
         }
         assert_eq!(ran("and a", Shell::Fish).unwrap().0, "a");
