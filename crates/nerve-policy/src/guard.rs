@@ -18,7 +18,7 @@ use crate::command::{Command, Run, Script, Shell, Word, base_name, run};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Guard {
     /// A command that runs `nerve-node` or `nerve-node-desktop`, or that
-    /// copies, moves, links or deletes their files.
+    /// copies, moves, links, deletes or overwrites their files.
     Programs,
     /// A command that names the node's socket, pipes, config or state
     /// folders.
@@ -69,7 +69,10 @@ impl Guard {
         let win = shell.windows();
         match self {
             Guard::Programs => {
-                run(cmd, shell).is_some_and(|r| is_node(&r.name) || changes_file(&r, win))
+                // A redirection onto the program writes it, whatever
+                // command it stands on.
+                cmd.redirects.iter().any(|w| names_node(&w.text, win))
+                    || run(cmd, shell).is_some_and(|r| is_node(&r.name) || changes_file(&r, win))
             }
             Guard::Paths => cmd
                 .words
@@ -88,7 +91,11 @@ fn is_node(name: &str) -> bool {
     NODE.contains(&name)
 }
 
-/// The programs that copy, move, link, overwrite or delete files.
+/// The programs that copy, move, link, delete, overwrite or change a file:
+/// the file tools proper, the writers (`tee`, `dd`, `sed`), the downloaders
+/// (`curl -o`, `wget -O`, `Invoke-WebRequest -OutFile`) and those that
+/// change its mode or owner. The programs that only look at a file are not
+/// here.
 const FILE_TOOLS: &[&str] = &[
     "rm",
     "mv",
@@ -113,11 +120,36 @@ const FILE_TOOLS: &[&str] = &[
     "cpi",
     "rename-item",
     "rni",
+    "tee",
+    "dd",
+    "sed",
+    "patch",
+    "strip",
+    "chmod",
+    "chown",
+    "chgrp",
+    "setcap",
+    "rsync",
+    "scp",
+    "curl",
+    "wget",
+    "invoke-webrequest",
+    "iwr",
+    "invoke-restmethod",
+    "irm",
+    "set-content",
+    "add-content",
+    "out-file",
+    "new-item",
+    "set-itemproperty",
+    "icacls",
+    "takeown",
+    "attrib",
 ];
 
-/// Whether `r` copies, moves, links or deletes the node's program file:
-/// replacing the binary of the node is changing it. Looking at it (`ls`,
-/// `file`, `sha256sum`) is not.
+/// Whether `r` copies, moves, links, deletes or overwrites the node's
+/// program file: replacing the binary of the node is changing it. Looking at
+/// it (`ls`, `file`, `sha256sum`) is not.
 fn changes_file(r: &Run, win: bool) -> bool {
     FILE_TOOLS.contains(&r.name.to_lowercase().as_str())
         && r.args.iter().any(|w| names_node(&w.text, win))

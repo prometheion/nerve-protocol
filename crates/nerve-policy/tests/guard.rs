@@ -15,6 +15,7 @@ const PS: &[Shell] = &[Shell::PowerShell];
 const CMD: &[Shell] = &[Shell::Cmd];
 const WIN: &[Shell] = &[Shell::PowerShell, Shell::Cmd];
 const ALL: &[Shell] = &[Shell::Sh, Shell::PowerShell, Shell::Cmd];
+const FISH: &[Shell] = &[Shell::Fish];
 
 const PROGRAMS: Option<Guard> = Some(Guard::Programs);
 const PATHS: Option<Guard> = Some(Guard::Paths);
@@ -79,6 +80,11 @@ const NODE_ITSELF: &[Case] = &[
     ),
     ("socat - UNIX-CONNECT:/run/nerve-node/owner.sock", SH, PATHS),
     ("ls /run/nerve-node", SH, PATHS),
+    (
+        "python3 -c \"print(open('/etc/nerve/node.toml').read())\"",
+        SH,
+        PATHS,
+    ),
     ("echo x > //./pipe/nerve-node-owner", SH, PATHS),
     ("cat /etc/nerve/node.toml", SH, PATHS),
     ("rm -rf /var/lib/nerve/state", SH, PATHS),
@@ -137,6 +143,61 @@ const NODE_ITSELF: &[Case] = &[
     ),
     ("del C:\\Nerve\\nerve-node.exe", CMD, PROGRAMS),
     ("copy x.exe C:\\Nerve\\NERVE-NODE.EXE", WIN, PROGRAMS),
+    // So is writing over it, by a redirection or by a program that writes,
+    // downloads into or changes the file.
+    ("cat new > /usr/local/bin/nerve-node", SH, PROGRAMS),
+    ("echo x 2>> /usr/local/bin/nerve-node-desktop", SH, PROGRAMS),
+    (
+        "curl -fsSLo /usr/local/bin/nerve-node https://example.invalid/x",
+        SH,
+        PROGRAMS,
+    ),
+    (
+        "wget -O /usr/local/bin/nerve-node https://example.invalid/x",
+        SH,
+        PROGRAMS,
+    ),
+    (
+        "curl -fsSL https://example.invalid/x | sudo tee /usr/local/bin/nerve-node",
+        SH,
+        PROGRAMS,
+    ),
+    ("dd if=new of=/usr/local/bin/nerve-node", SH, PROGRAMS),
+    ("chmod -x /usr/local/bin/nerve-node", SH, PROGRAMS),
+    ("sed -i s/a/b/ /usr/local/bin/nerve-node", SH, PROGRAMS),
+    ("rsync new /usr/local/bin/nerve-node", SH, PROGRAMS),
+    (
+        "Invoke-WebRequest https://example.invalid/x -OutFile 'C:\\Program Files\\Nerve\\nerve-node.exe'",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "Set-Content -Path 'C:\\Program Files\\Nerve\\nerve-node.exe' x",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "Get-Content new.exe | Out-File 'C:\\Program Files\\Nerve\\nerve-node.exe'",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "echo x > 'C:\\Program Files\\Nerve\\nerve-node.exe'",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "echo x > \"C:\\Program Files\\Nerve\\nerve-node.exe\"",
+        CMD,
+        PROGRAMS,
+    ),
+    (
+        "curl -o \"C:\\Program Files\\Nerve\\nerve-node.exe\" https://example.invalid/x",
+        CMD,
+        PROGRAMS,
+    ),
+    ("curl -o /tmp/x https://example.invalid/y", SH, None),
+    ("cat notes.txt > /tmp/nerve-node-notes.txt", SH, None),
     ("rm /tmp/nerve-node-notes.txt", SH, None),
     ("cp notes.md nerve-node.md", SH, None),
     ("rm -rf target/debug/nerve-node.d", SH, None),
@@ -729,6 +790,98 @@ const NESTED: &[Case] = &[
         SH,
         PATHS,
     ),
+    // In fish `( … )` is a command substitution, and `and`, `or` and `not`
+    // start a command, whether the shell is fish or a `fish -c` text.
+    ("fish -c 'echo (nerve-node status)'", SH, PROGRAMS),
+    (
+        "fish -c 'set v (nerve-node --version); echo $v'",
+        SH,
+        PROGRAMS,
+    ),
+    ("fish -c 'true; and systemctl stop nerve-node'", SH, SERVICE),
+    ("echo (nerve-node status)", FISH, PROGRAMS),
+    ("set v (nerve-node --version)", FISH, PROGRAMS),
+    ("count (systemctl stop nerve-node)", FISH, SERVICE),
+    ("echo (sudo systemctl stop nerve-node)", FISH, SERVICE),
+    ("true; and systemctl stop nerve-node", FISH, SERVICE),
+    ("not true; or kill (pidof nerve-node)", FISH, SERVICE),
+    ("diff =(nerve-node status) x", SH, PROGRAMS),
+    ("zsh -c 'diff =(nerve-node status) x'", SH, PROGRAMS),
+    // A shell that runs its input runs it with arguments too, and `su`,
+    // `sudo -s` and `sudo -i` start one.
+    (
+        "bash -s x <<'EOF'\nsystemctl stop nerve-node\nEOF",
+        SH,
+        SERVICE,
+    ),
+    (
+        "bash -s -- --verbose <<'EOF'\nsystemctl stop nerve-node\nEOF",
+        SH,
+        SERVICE,
+    ),
+    (
+        "sudo bash -s -- x <<'EOF'\nsystemctl stop nerve-node\nEOF",
+        SH,
+        SERVICE,
+    ),
+    (
+        "su root <<'EOF'\nsystemctl stop nerve-node\nEOF",
+        SH,
+        SERVICE,
+    ),
+    (
+        "sudo su <<'EOF'\nsystemctl stop nerve-node\nEOF",
+        SH,
+        SERVICE,
+    ),
+    (
+        "sudo su - <<'EOF'\nsystemctl stop nerve-node\nEOF",
+        SH,
+        SERVICE,
+    ),
+    (
+        "sudo -s <<'EOF'\nsystemctl stop nerve-node\nEOF",
+        SH,
+        SERVICE,
+    ),
+    (
+        "sudo -u root -i <<'EOF'\nsystemctl stop nerve-node\nEOF",
+        SH,
+        SERVICE,
+    ),
+    (
+        "sudo sh -s x <<< 'systemctl stop nerve-node'",
+        SH,
+        SERVICE,
+    ),
+    // `<<` in arithmetic shifts; it does not open a here-document, so what
+    // follows is read as commands.
+    (
+        "echo $((1 << 4)); timeout 30 sudo systemctl restart nerve-node",
+        SH,
+        SERVICE,
+    ),
+    (
+        "(( x = 1 << 4 )); timeout 30 sudo systemctl restart nerve-node",
+        SH,
+        SERVICE,
+    ),
+    (
+        "for ((i=0; i < 1 << 2; i++)); do nerve-node status; done",
+        SH,
+        PROGRAMS,
+    ),
+    ("coproc X { nerve-node status; }", SH, PROGRAMS),
+    ("coproc nerve-node status", SH, PROGRAMS),
+    // In PowerShell `&`, `.` and `Start-Process` run a quoted string.
+    (
+        "Start-Process -FilePath 'C:\\Program Files\\Nerve\\nerve-node.exe' -ArgumentList 'status'",
+        PS,
+        PROGRAMS,
+    ),
+    ("& 'nerve-node' status", PS, PROGRAMS),
+    (". 'nerve-node' status", PS, PROGRAMS),
+    ("$r = & 'nerve-node' status", PS, PROGRAMS),
 ];
 
 /// Lines that only mention the node or its commands, in quotes, in a
@@ -774,6 +927,33 @@ const DATA: &[Case] = &[
     ("[[ $x =~ ^(nerve-node|b)$ ]] && echo yes", SH, None),
     ("case $x in nerve-node) echo node;; esac", SH, None),
     ("pgrep nerve-node | wc -l", SH, None),
+    // A quoted string that starts a PowerShell statement is a value.
+    ("$svc = 'nerve-node'; Get-Service $svc", PS, None),
+    ("$n = \"nerve-node\"", PS, None),
+    ("'nerve-node' | Set-Content x.txt", PS, None),
+    ("\"nerve-node\" -replace 'node','x'", PS, None),
+    ("$names = @('nerve-node'); Get-Service $names", PS, None),
+    // A shell that runs its input and has no command for it.
+    ("bash -s x <<'EOF'\necho hi\nEOF", SH, None),
+    ("sudo -s <<'EOF'\nls\nEOF", SH, None),
+    ("su root <<'EOF'\nls\nEOF", SH, None),
+    ("echo $((1 << 4)); ls", SH, None),
+    ("echo (nerve-node-notes)", FISH, None),
+    ("echo (date)", FISH, None),
+    // A path in the node's folders in a text another program runs is seen
+    // when no blank comes before it in the same word, and not otherwise;
+    // a folder name with a blank in it is not seen either.
+    (
+        "python3 -c \"import os; print(open('/etc/nerve/node.toml').read())\"",
+        SH,
+        None,
+    ),
+    (
+        "perl -e 'open F, \"/etc/nerve/node.toml\"; print <F>'",
+        SH,
+        None,
+    ),
+    ("cat \"/home/john smith/.config/nerve/node.toml\"", SH, None),
 ];
 
 /// A line the parser cannot read is checked with the text patterns of
@@ -816,6 +996,30 @@ const UNPARSED: &[Case] = &[
     ),
     (
         "sh -c 'env X=1 sudo systemctl stop nerve-node; echo \"open'",
+        SH,
+        SERVICE,
+    ),
+    // The command the line gives out in is checked as far as it was read:
+    // its `-c` text, its pipe, the substitutions of its last word and a
+    // here-document that does not end.
+    (
+        "bash -c 'timeout 30 sudo systemctl stop nerve-node' ${X:-$(pwd)}",
+        SH,
+        SERVICE,
+    ),
+    (
+        "echo \"restarted: $(timeout 30 sudo systemctl restart nerve-node) at ${TS:-$(date)}\"",
+        SH,
+        SERVICE,
+    ),
+    (
+        "pgrep nerve-node | xargs kill -s ${SIG:-$(echo TERM)}",
+        SH,
+        SERVICE,
+    ),
+    ("bash <<'EOF'\nkill $(pidof nerve-node)\n", SH, SERVICE),
+    (
+        "cat <<EOF\n$(timeout 30 sudo systemctl stop nerve-node)\n",
         SH,
         SERVICE,
     ),
@@ -1000,9 +1204,19 @@ fn no_line_makes_the_guard_panic() {
         "nice -n ",
         "[[ ",
         "]]",
+        "and ",
+        "su ",
+        "sudo -s ",
+        "-s ",
+        "<< ",
+        "$((",
+        "coproc ",
+        "> nerve-node ",
+        "curl -o ",
     ];
     let sets: Vec<RuleSet> = ALL
         .iter()
+        .chain(FISH)
         .map(|&s| RuleSet::new(&rules(GUARD), home()).with_shell(s))
         .collect();
     let mut seed = 0x2545_f491_4f6c_dd1du64;

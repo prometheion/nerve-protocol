@@ -2271,7 +2271,7 @@ mod tests {
         assert_eq!(shell_of(None, None), Shell::native());
         for (shell, want) in [
             ("/bin/bash", Shell::Sh),
-            ("/usr/bin/fish", Shell::Sh),
+            ("/usr/bin/fish", Shell::Fish),
             ("pwsh", Shell::PowerShell),
             (
                 "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",

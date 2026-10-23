@@ -42,6 +42,9 @@ pub enum Shell {
     /// `sh`, `bash` and the like: `\` escapes, `'…'` is literal, `"…"`
     /// expands `$( … )` and backticks.
     Sh,
+    /// fish: read like `sh`, but `( … )` is a command substitution, and
+    /// `and`, `or`, `not`, `begin` and `end` are keywords.
+    Fish,
     /// Windows PowerShell or PowerShell 7: a backtick escapes, `\` is a path
     /// separator, and `( … )`, `$( … )` and `{ … }` hold commands.
     PowerShell,
@@ -58,9 +61,16 @@ impl Shell {
             Shell::PowerShell
         } else if lower.ends_with("cmd.exe") || lower == "cmd" {
             Shell::Cmd
+        } else if base_name(program, false) == "fish" {
+            Shell::Fish
         } else {
             Shell::Sh
         }
+    }
+
+    /// `sh` or a shell read like it.
+    fn posix(self) -> bool {
+        matches!(self, Shell::Sh | Shell::Fish)
     }
 
     /// The shell a node runs a command in when none is set: PowerShell on
@@ -77,7 +87,7 @@ impl Shell {
     /// path's parts, as on Windows: in PowerShell and cmd, and in any shell
     /// on a Windows node.
     pub fn windows(self) -> bool {
-        self != Shell::Sh || cfg!(windows)
+        !self.posix() || cfg!(windows)
     }
 }
 
@@ -161,6 +171,24 @@ impl Unparsed {
             read: Script::new(Shell::Sh),
         }
     }
+
+    /// The error with `subs`, the substitutions of a word read before it
+    /// gave out, kept among what was read.
+    fn with_subs(mut self, subs: Vec<Script>, shell: Shell) -> Unparsed {
+        if !subs.is_empty() {
+            if self.read.commands.is_empty() {
+                self.read.shell = shell;
+            }
+            self.read.commands.insert(
+                0,
+                Command {
+                    inner: subs,
+                    ..Command::default()
+                },
+            );
+        }
+        self
+    }
 }
 
 /// Takes `line` apart by the rules of `shell`.
@@ -219,6 +247,9 @@ struct Parser<'b> {
     /// How many `case … esac` the reader is in (sh): there a pattern ends
     /// at `)` and its branch at `;;`.
     cases: usize,
+    /// How many `$(( … ))` and `(( … ))` the reader is in (sh): there `<<` is
+    /// a shift, not a here-document.
+    arith: usize,
 }
 
 /// Whether `w` is a word a command may start with before its own words: a
@@ -244,6 +275,7 @@ impl<'b> Parser<'b> {
             budget,
             resume: None,
             cases: 0,
+            arith: 0,
         }
     }
 
@@ -327,7 +359,8 @@ impl<'b> Parser<'b> {
         let outer_cases = std::mem::take(&mut self.cases);
         let mut script = Script::new(self.shell);
         let mut cmd = Command::default();
-        let read = self.commands(close, &mut script, &mut cmd);
+        let mut piped = false;
+        let read = self.commands(close, &mut script, &mut cmd, &mut piped);
         self.cases = outer_cases;
         match read {
             Ok(()) => {
@@ -341,7 +374,15 @@ impl<'b> Parser<'b> {
                     let below = std::mem::replace(&mut e.read, Script::new(self.shell));
                     cmd.inner.push(below);
                 }
-                if !cmd.words.is_empty() || !cmd.inner.is_empty() {
+                if !cmd.words.is_empty()
+                    || !cmd.inner.is_empty()
+                    || !cmd.redirects.is_empty()
+                    || !cmd.input.is_empty()
+                {
+                    // The command comes with the text it runs and the pipe
+                    // it stands in, as far as they were read.
+                    cmd.piped = piped;
+                    let _ = self.read_bodies(&mut cmd);
                     script.commands.push(cmd);
                 }
                 e.read = script;
@@ -355,10 +396,17 @@ impl<'b> Parser<'b> {
         close: Option<char>,
         script: &mut Script,
         cmd: &mut Command,
+        piped: &mut bool,
     ) -> Result<(), Unparsed> {
-        let mut piped = false;
         loop {
-            match self.token(cmd.words.is_empty(), close)? {
+            // A command starts where its first word can: after a PowerShell
+            // assignment too (`$r = & prog`).
+            let start = cmd.words.is_empty()
+                || (self.shell == Shell::PowerShell
+                    && cmd.words.len() == 2
+                    && cmd.words[0].text.starts_with('$')
+                    && is_ps_assign(&cmd.words[1].text));
+            match self.token(start, close)? {
                 Tok::End => {
                     if close.is_some() && !self.budget.blown.get() {
                         return Err(Unparsed::because(
@@ -381,8 +429,8 @@ impl<'b> Parser<'b> {
                     }
                     return Err(Unparsed::because("a bracket closes that was not opened"));
                 }
-                Tok::Sep => self.finish(script, cmd, &mut piped, false)?,
-                Tok::Pipe => self.finish(script, cmd, &mut piped, true)?,
+                Tok::Sep => self.finish(script, cmd, piped, false)?,
+                Tok::Pipe => self.finish(script, cmd, piped, true)?,
                 Tok::Word(w, subs) => {
                     let mut header = false;
                     if self.shell == Shell::Sh && !w.quoted {
@@ -404,7 +452,7 @@ impl<'b> Parser<'b> {
                     cmd.words.push(w);
                     cmd.inner.extend(subs);
                     if header {
-                        self.finish(script, cmd, &mut piped, false)?;
+                        self.finish(script, cmd, piped, false)?;
                     }
                 }
                 Tok::Redirect(false) => {}
@@ -418,11 +466,7 @@ impl<'b> Parser<'b> {
                     cmd.input.push(w.text);
                     cmd.inner.extend(subs);
                 }
-                Tok::HereDoc(strip) => {
-                    let (body, subs) = self.here_doc(strip, close)?;
-                    cmd.input.push(body);
-                    cmd.inner.extend(subs);
-                }
+                Tok::HereDoc(strip) => self.here_doc(strip, close, cmd)?,
                 Tok::Open => {
                     if self.shell == Shell::Sh && !cmd.words.is_empty() {
                         // `name()` defines a function: the name is not a
@@ -434,7 +478,7 @@ impl<'b> Parser<'b> {
                             *cmd = Command::default();
                             continue;
                         }
-                        let mut inner = self.list(Some(')'))?;
+                        let mut inner = self.group(self.peek() == Some('('))?;
                         if !cmd.words.iter().all(leads) {
                             // After a word the brackets hold an array
                             // (`a=(x y)`) or a regular expression: the
@@ -450,12 +494,25 @@ impl<'b> Parser<'b> {
                         cmd.inner.push(inner);
                         continue;
                     }
-                    let inner = self.list(Some(')'))?;
+                    let inner = self.group(self.shell.posix() && self.peek() == Some('('))?;
                     cmd.inner.push(inner);
                 }
             }
         }
-        self.finish(script, cmd, &mut piped, false)
+        self.finish(script, cmd, piped, false)
+    }
+
+    /// The commands of a group up to its `)`; `arith`: it is `((`, where
+    /// `<<` shifts.
+    fn group(&mut self, arith: bool) -> Result<Script, Unparsed> {
+        if arith {
+            self.arith += 1;
+        }
+        let read = self.list(Some(')'));
+        if arith {
+            self.arith -= 1;
+        }
+        read
     }
 
     /// The word after a redirection or `<<<`.
@@ -492,24 +549,29 @@ impl<'b> Parser<'b> {
         }
         let mut c = std::mem::take(cmd);
         c.piped = *piped;
-        if let Err(mut e) = self.bodies(&mut c) {
-            // The command stays with what was read, with the text it runs
-            // as far as that was read.
-            if !e.read.commands.is_empty() {
-                c.inner
-                    .push(std::mem::replace(&mut e.read, Script::new(self.shell)));
-            }
-            *cmd = c;
-            return Err(e);
-        }
+        let read = self.read_bodies(&mut c);
         script.commands.push(c);
+        read?;
         *piped = pipe;
         Ok(())
     }
 
+    /// [`Parser::bodies`], and when the text a command runs cannot be read,
+    /// what was read of it stays with the command.
+    fn read_bodies(&self, c: &mut Command) -> Result<(), Unparsed> {
+        let mut read = self.bodies(c);
+        if let Err(e) = &mut read
+            && !e.read.commands.is_empty()
+        {
+            c.inner
+                .push(std::mem::replace(&mut e.read, Script::new(self.shell)));
+        }
+        read
+    }
+
     fn token(&mut self, start: bool, close: Option<char>) -> Result<Tok, Unparsed> {
         match self.shell {
-            Shell::Sh => self.sh_token(),
+            Shell::Sh | Shell::Fish => self.sh_token(),
             Shell::PowerShell => self.ps_token(start),
             Shell::Cmd => self.cmd_token(start, close),
         }
@@ -608,6 +670,11 @@ impl<'b> Parser<'b> {
 
     fn sh_redirect(&mut self) -> Tok {
         if self.bump() == Some('<') {
+            if self.arith > 0 && self.peek() == Some('<') && self.peek_at(1) != Some('<') {
+                // `1 << 4` in an arithmetic expression shifts.
+                self.bump();
+                return Tok::Redirect(true);
+            }
             if self.eat('<') {
                 if self.eat('<') {
                     return Tok::HereString;
@@ -627,11 +694,28 @@ impl<'b> Parser<'b> {
             ..Word::default()
         };
         let mut subs = Vec::new();
+        match self.sh_word_parts(&mut w, &mut subs) {
+            Ok(()) => Ok(Tok::Word(w, subs)),
+            // The substitutions read before the place that gave out run.
+            Err(e) => Err(e.with_subs(subs, self.shell)),
+        }
+    }
+
+    fn sh_word_parts(&mut self, w: &mut Word, subs: &mut Vec<Script>) -> Result<(), Unparsed> {
         while let Some(c) = self.peek() {
             match c {
                 ' ' | '\t' | '\r' | '\n' | ';' | '&' | '|' | '(' | ')' => break,
                 '<' | '>' if self.peek_at(1) == Some('(') => {
                     // Process substitution: `<( … )` runs its commands.
+                    let from = self.i;
+                    self.bump();
+                    self.bump();
+                    subs.push(self.list(Some(')'))?);
+                    w.text.push_str(&self.raw(from));
+                    w.literal = false;
+                }
+                // zsh's `=( … )` runs its commands as `<( … )` does.
+                '=' if w.text.is_empty() && self.peek_at(1) == Some('(') => {
                     let from = self.i;
                     self.bump();
                     self.bump();
@@ -665,7 +749,7 @@ impl<'b> Parser<'b> {
                 '"' => {
                     self.bump();
                     w.quoted = true;
-                    self.sh_double(&mut w, &mut subs, true)?;
+                    self.sh_double(w, subs, true)?;
                 }
                 '`' => {
                     let from = self.i;
@@ -674,14 +758,14 @@ impl<'b> Parser<'b> {
                     w.text.push_str(&self.raw(from));
                     w.literal = false;
                 }
-                '$' => self.sh_dollar(&mut w, &mut subs, false)?,
+                '$' => self.sh_dollar(w, subs, false)?,
                 _ => {
                     self.bump();
                     w.text.push(c);
                 }
             }
         }
-        Ok(Tok::Word(w, subs))
+        Ok(())
     }
 
     /// The inside of `"…"` up to its closing quote, or (`quoted` false) a
@@ -742,7 +826,7 @@ impl<'b> Parser<'b> {
             Some('(') => {
                 // `$((…))` reads as a subshell inside: its words are data.
                 self.bump();
-                subs.push(self.list(Some(')'))?);
+                subs.push(self.group(self.peek() == Some('('))?);
                 w.literal = false;
             }
             Some('{') => {
@@ -827,12 +911,15 @@ impl<'b> Parser<'b> {
     /// A here-document: its end word, then its body from the next line (or
     /// after the body of one opened before on this line). Reading goes on
     /// after the body at the end of this line. An unquoted end word lets
-    /// the body's substitutions run.
+    /// the body's substitutions run. The body and what runs in it go on
+    /// `cmd`; a here-document that does not end is read to the end of the
+    /// text (sh runs it so) and the line is not read with confidence.
     fn here_doc(
         &mut self,
         strip: bool,
         close: Option<char>,
-    ) -> Result<(String, Vec<Script>), Unparsed> {
+        cmd: &mut Command,
+    ) -> Result<(), Unparsed> {
         let Tok::Word(end, _) = self.token(false, close)? else {
             return Err(Unparsed::because("a here-document has no end word"));
         };
@@ -847,6 +934,13 @@ impl<'b> Parser<'b> {
         let mut body = String::new();
         loop {
             if at >= self.s.len() {
+                let subs = if end.quoted {
+                    Ok(Vec::new())
+                } else {
+                    self.here_subs(&body)
+                };
+                cmd.input.push(body);
+                cmd.inner.extend(subs?);
                 return Err(Unparsed::because("a here-document does not end"));
             }
             let stop = self.s[at..]
@@ -872,12 +966,22 @@ impl<'b> Parser<'b> {
             body.push('\n');
         }
         self.resume = Some(at);
-        let mut subs = Vec::new();
         if !end.quoted {
-            let mut p = Parser::new(&body, Shell::Sh, self.depth, self.budget);
-            p.sh_double(&mut Word::default(), &mut subs, false)?;
+            cmd.inner.extend(self.here_subs(&body)?);
         }
-        Ok((body, subs))
+        cmd.input.push(body);
+        Ok(())
+    }
+
+    /// What runs in the body of a here-document whose end word is not
+    /// quoted.
+    fn here_subs(&self, body: &str) -> Result<Vec<Script>, Unparsed> {
+        let mut subs = Vec::new();
+        let mut p = Parser::new(body, Shell::Sh, self.depth, self.budget);
+        match p.sh_double(&mut Word::default(), &mut subs, false) {
+            Ok(()) => Ok(subs),
+            Err(e) => Err(e.with_subs(subs, Shell::Sh)),
+        }
     }
 
     // ---- PowerShell ----
@@ -970,6 +1074,14 @@ impl<'b> Parser<'b> {
             ..Word::default()
         };
         let mut subs = Vec::new();
+        match self.ps_word_parts(&mut w, &mut subs) {
+            Ok(()) => Ok(Tok::Word(w, subs)),
+            // The substitutions read before the place that gave out run.
+            Err(e) => Err(e.with_subs(subs, self.shell)),
+        }
+    }
+
+    fn ps_word_parts(&mut self, w: &mut Word, subs: &mut Vec<Script>) -> Result<(), Unparsed> {
         if self.peek() == Some('-') && self.peek_at(1) == Some('-') && self.peek_at(2) == Some('%')
         {
             return Err(Unparsed::because("PowerShell's --%"));
@@ -980,7 +1092,7 @@ impl<'b> Parser<'b> {
         {
             self.bump();
             let q = self.bump().unwrap_or('\'');
-            self.ps_here_string(q, &mut w, &mut subs)?;
+            self.ps_here_string(q, w, subs)?;
         }
         while let Some(c) = self.peek() {
             match c {
@@ -1018,7 +1130,7 @@ impl<'b> Parser<'b> {
                 '"' | '“' | '”' | '„' => {
                     self.bump();
                     w.quoted = true;
-                    self.ps_double(&mut w, &mut subs, true)?;
+                    self.ps_double(w, subs, true)?;
                 }
                 '(' | '{' => {
                     let from = self.i;
@@ -1035,14 +1147,14 @@ impl<'b> Parser<'b> {
                     w.text.push_str(&self.raw(from));
                     w.literal = false;
                 }
-                '$' => self.ps_dollar(&mut w, &mut subs)?,
+                '$' => self.ps_dollar(w, subs)?,
                 _ => {
                     self.bump();
                     w.text.push(c);
                 }
             }
         }
-        Ok(Tok::Word(w, subs))
+        Ok(())
     }
 
     /// `$…` in PowerShell: `$( … )` runs its commands, `${…}` and `$name`
@@ -1279,7 +1391,7 @@ impl<'b> Parser<'b> {
                 ));
             }
         };
-        let body = match runs(&run.name, &run.args) {
+        let body = match runs(&run.name, &run.args, self.shell) {
             Runs::Nothing => return Ok(()),
             Runs::Text(text, shell) => text.map(|t| (t, shell)),
             Runs::Input(shell) => {
@@ -1330,9 +1442,10 @@ fn joined(args: &[Word]) -> Option<String> {
     })
 }
 
-fn runs(name: &str, args: &[Word]) -> Runs {
+/// What `name` runs with `args` when it stands in a script of `shell`.
+fn runs(name: &str, args: &[Word], shell: Shell) -> Runs {
     if SH.contains(&name) {
-        return runs_sh(args);
+        return runs_sh(args, if name == "fish" { Shell::Fish } else { Shell::Sh });
     }
     match name {
         "powershell" | "pwsh" => runs_powershell(args),
@@ -1350,13 +1463,22 @@ fn runs(name: &str, args: &[Word]) -> Runs {
             }
             Runs::Nothing
         }
-        "eval" => Runs::Text(joined(args), Shell::Sh),
+        // `eval` runs its text in the shell it stands in.
+        "eval" => Runs::Text(
+            joined(args),
+            if shell == Shell::Fish {
+                Shell::Fish
+            } else {
+                Shell::Sh
+            },
+        ),
+        // Without `-c` they start a shell, which runs its input.
         "su" | "runuser" => match args
             .iter()
             .position(|w| w.text == "-c" || w.text == "--command")
         {
             Some(at) => Runs::Text(args.get(at + 1).map(|w| w.text.clone()), Shell::Sh),
-            None => Runs::Nothing,
+            None => Runs::Input(Shell::Sh),
         },
         "invoke-expression" | "iex" => {
             let args = match args.first() {
@@ -1371,10 +1493,12 @@ fn runs(name: &str, args: &[Word]) -> Runs {
 
 /// `sh` and its kin: `-c` (alone or in a group such as `-lc`) runs the first
 /// word after the options; with neither `-c` nor a script file the shell
-/// runs its input.
-fn runs_sh(args: &[Word]) -> Runs {
+/// runs its input, and so it does with `-s`, whose words after it are the
+/// script's arguments.
+fn runs_sh(args: &[Word], shell: Shell) -> Runs {
     let mut i = 0;
     let mut c = false;
+    let mut s = false;
     while let Some(a) = args.get(i) {
         let a = a.text.as_str();
         if a == "--" || a == "-" {
@@ -1387,6 +1511,7 @@ fn runs_sh(args: &[Word]) -> Runs {
             }
         } else if let Some(flags) = a.strip_prefix(['-', '+']).filter(|f| !f.is_empty()) {
             c |= flags.contains('c');
+            s |= a.starts_with('-') && flags.contains('s');
             if flags.contains(['o', 'O']) {
                 i += 1;
             }
@@ -1397,9 +1522,9 @@ fn runs_sh(args: &[Word]) -> Runs {
     }
     let rest = args.get(i..).unwrap_or_default();
     if c {
-        Runs::Text(rest.first().map(|w| w.text.clone()), Shell::Sh)
-    } else if rest.is_empty() {
-        Runs::Input(Shell::Sh)
+        Runs::Text(rest.first().map(|w| w.text.clone()), shell)
+    } else if rest.is_empty() || s {
+        Runs::Input(shell)
     } else {
         Runs::Nothing
     }
@@ -1478,6 +1603,10 @@ pub fn base_name(word: &str, windows: bool) -> String {
 /// The shell's own words that may stand before a command.
 const SH_KEYWORDS: &[&str] = &[
     "!", "{", "}", "if", "then", "else", "elif", "fi", "do", "done", "while", "until",
+];
+const FISH_KEYWORDS: &[&str] = &[
+    "!", "{", "}", "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "and", "or",
+    "not", "begin", "end",
 ];
 const PS_KEYWORDS: &[&str] = &[
     "&", ".", "if", "elseif", "else", "foreach", "for", "while", "do", "until", "switch", "try",
@@ -1584,6 +1713,38 @@ fn options(rest: &[Word], values: &[&str]) -> usize {
     n.min(rest.len())
 }
 
+/// Whether the options of `sudo` or `doas` ask for a shell (`-s`, `-i`,
+/// `--shell`, `--login`, also in a group such as `-iu`).
+fn sudo_shell(opts: &[Word]) -> bool {
+    let mut k = 0;
+    while let Some(w) = opts.get(k) {
+        k += 1;
+        let t = w.text.as_str();
+        if let Some(long) = t.strip_prefix("--") {
+            if matches!(long, "shell" | "login") {
+                return true;
+            }
+            if SUDO.contains(&t) {
+                k += 1;
+            }
+        } else if let Some(letters) = t.strip_prefix('-') {
+            let letters: Vec<char> = letters.chars().collect();
+            for (p, c) in letters.iter().enumerate() {
+                if matches!(c, 's' | 'i') {
+                    return true;
+                }
+                if SUDO.contains(&format!("-{c}").as_str()) {
+                    if p + 1 == letters.len() {
+                        k += 1;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Finds the program `cmd` runs. `None`: it runs none (only keywords, a
 /// wrapper with nothing after it, `command -v`), or the unwrapping stopped
 /// at its bound ([`parse`] reports that as a line it cannot read).
@@ -1598,6 +1759,9 @@ fn unwrap(cmd: &Command, shell: Shell) -> Result<Option<Run>, Wrapped> {
     let win = shell.windows();
     let mut words = cmd.words.clone();
     let mut i = 0;
+    // PowerShell's `&` or `.` was the last word taken: what follows is run
+    // even when it is a quoted string, which is a value anywhere else.
+    let mut called = false;
     // Every turn takes a word or rewrites one away (`env -S`, a stuck `{`,
     // `Start-Process`); the bound only stops a line built to turn forever.
     for _ in 0..256 {
@@ -1609,10 +1773,12 @@ fn unwrap(cmd: &Command, shell: Shell) -> Result<Option<Run>, Wrapped> {
         let keyword = !w.quoted
             && match shell {
                 Shell::Sh => SH_KEYWORDS.contains(&t.as_str()),
+                Shell::Fish => FISH_KEYWORDS.contains(&t.as_str()),
                 Shell::PowerShell => PS_KEYWORDS.contains(&lower.as_str()),
                 Shell::Cmd => lower == "else",
             };
         if keyword {
+            called = shell == Shell::PowerShell && matches!(t.as_str(), "&" | ".");
             i += 1;
             continue;
         }
@@ -1620,13 +1786,22 @@ fn unwrap(cmd: &Command, shell: Shell) -> Result<Option<Run>, Wrapped> {
             i += 2;
             continue;
         }
-        if shell == Shell::Sh && !w.quoted && t.len() > 1 && t.starts_with('{') {
+        if shell.posix() && !w.quoted && t.len() > 1 && t.starts_with('{') {
             // `{cmd` reads as the brace and the command.
             words[i].text.remove(0);
             continue;
         }
-        if shell == Shell::Sh && is_assignment(&t) {
+        if shell.posix() && is_assignment(&t) {
             i += 1;
+            continue;
+        }
+        if shell == Shell::Sh && !w.quoted && t == "coproc" {
+            // `coproc NAME { cmd; }` and `coproc cmd`.
+            i += if words.get(i + 2).is_some_and(|n| n.text.starts_with('{')) {
+                2
+            } else {
+                1
+            };
             continue;
         }
         if shell == Shell::PowerShell
@@ -1636,10 +1811,25 @@ fn unwrap(cmd: &Command, shell: Shell) -> Result<Option<Run>, Wrapped> {
             i += 2;
             continue;
         }
+        // In PowerShell a quoted string that starts a statement is a value.
+        if shell == Shell::PowerShell && w.quoted && !called {
+            return Ok(None);
+        }
         let name = base_name(&t, win);
         let rest = &words[i + 1..];
         let skip = match name.as_str() {
-            "sudo" | "doas" => options(rest, SUDO),
+            "sudo" | "doas" => {
+                let n = options(rest, SUDO);
+                if n == rest.len() && sudo_shell(&rest[..n]) {
+                    // `sudo -s` and `sudo -i` with no command start a
+                    // shell, which runs its input.
+                    return Ok(Some(Run {
+                        name: "sh".into(),
+                        args: Vec::new(),
+                    }));
+                }
+                n
+            }
             "env" => {
                 if let Some(split) = env_split(rest) {
                     words.splice(i + 1..i + 1 + split.0, split.1);
@@ -1677,6 +1867,7 @@ fn unwrap(cmd: &Command, shell: Shell) -> Result<Option<Run>, Wrapped> {
                     return Ok(None);
                 };
                 words.splice(i.., started);
+                called = true;
                 continue;
             }
             "start" if shell == Shell::PowerShell => {
@@ -1684,6 +1875,7 @@ fn unwrap(cmd: &Command, shell: Shell) -> Result<Option<Run>, Wrapped> {
                     return Ok(None);
                 };
                 words.splice(i.., started);
+                called = true;
                 continue;
             }
             "start" if shell == Shell::Cmd => cmd_start(rest),
@@ -2540,5 +2732,177 @@ mod tests {
         assert!(line.len() < MAX_WORK);
         assert!(parse(&line, Shell::Sh).is_err());
         assert!(parse(&wide, Shell::Sh).is_ok());
+    }
+
+    /// Every command read before the line gave out, at any depth.
+    fn unread(line: &str, shell: Shell) -> (Vec<Vec<String>>, bool) {
+        let e = parse(line, shell).unwrap_err();
+        let mut out = Vec::new();
+        e.read.visit(&mut |s: &Script, i| {
+            out.push(s.commands[i].words.iter().map(|w| w.text.clone()).collect());
+        });
+        (out, e.read.commands.last().is_some_and(|c| c.piped))
+    }
+
+    /// The command the line gives out in keeps the text it runs, its pipe,
+    /// the substitutions of its last word and a here-document that does not
+    /// end.
+    #[test]
+    fn the_command_a_line_gives_out_in_is_kept_whole() {
+        let (read, _) = unread("bash -c 'a b' ${X:-$(c)}", Shell::Sh);
+        assert!(read.contains(&vec!["a".to_string(), "b".to_string()]), "{read:?}");
+        let (read, _) = unread("echo \"$(a) ${X:-$(b)}\"", Shell::Sh);
+        assert!(read.contains(&vec!["a".to_string()]), "{read:?}");
+        let (read, _) = unread("echo $(a) \"x $(b) ${X:-$(c)}\" y", Shell::Sh);
+        assert!(read.contains(&vec!["a".to_string()]), "{read:?}");
+        assert!(read.contains(&vec!["b".to_string()]), "{read:?}");
+        let (_, piped) = unread("a | b ${X:-$(c)}", Shell::Sh);
+        assert!(piped);
+        let (read, _) = unread("bash <<'EOF'\na b\n", Shell::Sh);
+        assert!(read.contains(&vec!["a".to_string(), "b".to_string()]), "{read:?}");
+        let (read, _) = unread("cat <<EOF\n$(a b)\n", Shell::Sh);
+        assert!(read.contains(&vec!["a".to_string(), "b".to_string()]), "{read:?}");
+        let (read, _) = unread("echo $(a) \"${X:-$(c)}", Shell::PowerShell);
+        assert!(read.contains(&vec!["a".to_string()]), "{read:?}");
+    }
+
+    /// `<<` shifts in arithmetic: the line is read, and what follows is
+    /// read as commands.
+    #[test]
+    fn a_shift_in_arithmetic_is_not_a_here_document() {
+        for line in [
+            "echo $((1 << 4)); b",
+            "echo $((1<<4)); b",
+            "(( x = 1 << 4 )); b",
+            "x=$(( y << 2 )); b",
+            "for ((i=0; i < 1 << 2; i++)); do :; done; b",
+            "echo \"$((1 << 4))\"; b",
+        ] {
+            let all = words(line, Shell::Sh);
+            assert_eq!(all.last().unwrap(), &["b"], "{line}: {all:?}");
+        }
+        // Outside arithmetic it is a here-document still.
+        assert!(parse("b <<4", Shell::Sh).is_err());
+        assert!(parse("echo $(a <<EOF\nx\nEOF\n)", Shell::Sh).is_ok());
+    }
+
+    /// fish: `( … )` runs, and `and`, `or` and `not` lead a command.
+    #[test]
+    fn fish_brackets_run_and_its_keywords_lead() {
+        assert_eq!(Shell::of_program("/usr/bin/fish"), Shell::Fish);
+        assert_eq!(Shell::of_program("fish"), Shell::Fish);
+        assert_eq!(Shell::of_program("/usr/bin/fishfood"), Shell::Sh);
+        assert_eq!(
+            words("set v (a b); c", Shell::Fish),
+            w(&[&["set", "v"], &["a", "b"], &["c"]])
+        );
+        assert_eq!(
+            words("fish -c 'echo (a b)'", Shell::Sh),
+            w(&[&["fish", "-c", "echo (a b)"], &["echo"], &["a", "b"]])
+        );
+        assert_eq!(
+            words("bash -c 'echo (a b)'", Shell::Fish)[1],
+            vec!["echo".to_string()]
+        );
+        for (line, name) in [
+            ("true; and a b", "a"),
+            ("not a b", "a"),
+            ("a; or b", "b"),
+        ] {
+            assert_eq!(ran_last(line, Shell::Fish), Some(name.into()), "{line}");
+        }
+        assert_eq!(ran("and a", Shell::Fish).unwrap().0, "a");
+        assert_eq!(ran("and a", Shell::Sh).unwrap().0, "and");
+        // `eval` stays in the shell it stands in.
+        assert_eq!(
+            words("eval 'echo (a)'", Shell::Fish).last().unwrap(),
+            &["a"]
+        );
+    }
+
+    fn ran_last(line: &str, shell: Shell) -> Option<String> {
+        let s = parse(line, shell).unwrap();
+        run(s.commands.last()?, shell).map(|r| r.name)
+    }
+
+    /// A shell with `-s`, `su` and `sudo -s` or `-i` run their input.
+    #[test]
+    fn a_shell_that_runs_its_input_with_arguments() {
+        for line in [
+            "bash -s x <<'EOF'\na b\nEOF",
+            "bash -s -- --verbose <<'EOF'\na b\nEOF",
+            "sh -es x <<'EOF'\na b\nEOF",
+            "sudo bash -s -- x <<'EOF'\na b\nEOF",
+            "su root <<'EOF'\na b\nEOF",
+            "su - <<'EOF'\na b\nEOF",
+            "sudo su <<'EOF'\na b\nEOF",
+            "sudo -s <<'EOF'\na b\nEOF",
+            "sudo -i <<'EOF'\na b\nEOF",
+            "sudo -u root -i <<'EOF'\na b\nEOF",
+            "doas -s <<'EOF'\na b\nEOF",
+            "sudo --login <<'EOF'\na b\nEOF",
+            "sudo sh -s x <<< 'a b'",
+        ] {
+            let all = words(line, Shell::Sh);
+            assert_eq!(all.last().unwrap(), &["a", "b"], "{line}: {all:?}");
+        }
+        // Without input, or with a script file, nothing is read as one.
+        assert_eq!(words("bash script.sh x", Shell::Sh).len(), 1);
+        assert_eq!(words("sudo -u root ls", Shell::Sh).len(), 1);
+        assert_eq!(ran("sudo -s ls", Shell::Sh).unwrap().0, "ls");
+        assert_eq!(ran("sudo -u root", Shell::Sh), None);
+        // The shell of a pipe is not read.
+        assert!(parse("a | su root", Shell::Sh).is_err());
+    }
+
+    /// In PowerShell a quoted string that starts a statement is a value,
+    /// unless `&`, `.` or `Start-Process` runs it.
+    #[test]
+    fn a_quoted_string_in_powershell_is_a_value() {
+        use Shell::PowerShell as Ps;
+        for line in [
+            "'x' a",
+            "\"x\" -replace 'a','b'",
+            "$n = 'x'",
+            "$n = \"x\"",
+            "$n = 'x' a",
+            "'x' | Set-Content a",
+        ] {
+            assert_eq!(ran(line, Ps), None, "{line}");
+        }
+        for (line, name) in [
+            ("& 'x' a", "x"),
+            (". 'x' a", "x"),
+            ("$r = & 'x' a", "x"),
+            ("Start-Process 'x' a", "x"),
+            ("Start-Process -FilePath 'x'", "x"),
+            ("& \"x\"", "x"),
+            ("x a", "x"),
+        ] {
+            assert_eq!(ran(line, Ps).map(|r| r.0), Some(name.into()), "{line}");
+        }
+        // In sh and cmd a quoted word is a program as before.
+        assert_eq!(ran("'x' a", Shell::Sh).unwrap().0, "x");
+        assert_eq!(ran("\"x\" a", Shell::Cmd).unwrap().0, "x");
+    }
+
+    /// `coproc NAME { … }` and `coproc cmd` run the command.
+    #[test]
+    fn coproc_runs_its_command() {
+        assert_eq!(ran("coproc X { a b; }", Shell::Sh).unwrap().0, "a");
+        assert_eq!(ran("coproc { a b; }", Shell::Sh).unwrap().0, "a");
+        assert_eq!(ran("coproc a b", Shell::Sh).unwrap().0, "a");
+        assert_eq!(ran("coproc X {a b; }", Shell::Sh).unwrap().0, "a");
+    }
+
+    /// zsh's `=( … )` runs its commands.
+    #[test]
+    fn zsh_process_substitution_runs() {
+        assert_eq!(
+            words("diff =(a b) x", Shell::Sh),
+            w(&[&["diff", "=(a b)", "x"], &["a", "b"]])
+        );
+        // An assignment is not one.
+        assert_eq!(words("x=(a b)", Shell::Sh), w(&[&["x="], &[]]));
     }
 }
