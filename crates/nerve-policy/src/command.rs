@@ -513,7 +513,13 @@ impl<'b> Parser<'b> {
                         cmd.inner.push(inner);
                         continue;
                     }
+                    let at_pattern = self.cases > 0 && self.pattern;
                     let inner = self.group(self.shell.posix() && self.peek() == Some('('))?;
+                    if at_pattern {
+                        // `(pattern)`: the `)` ended the patterns inside the
+                        // group, so the branch's body starts here.
+                        self.pattern = false;
+                    }
                     cmd.inner.push(inner);
                 }
             }
@@ -1027,7 +1033,12 @@ impl<'b> Parser<'b> {
     fn ps_token(&mut self, start: bool) -> Result<Tok, Unparsed> {
         loop {
             match self.peek() {
-                Some(' ' | '\t' | '\r') => {
+                Some(' ' | '\t') => {
+                    self.bump();
+                }
+                // CR LF is one line break, which the LF ends; a CR alone is
+                // a line break of its own.
+                Some('\r') if self.peek_at(1) == Some('\n') => {
                     self.bump();
                 }
                 Some('`') if self.ps_continuation(1) > 0 => {
@@ -1058,7 +1069,7 @@ impl<'b> Parser<'b> {
             return Ok(Tok::End);
         };
         Ok(match c {
-            '\n' | ';' => {
+            '\n' | '\r' | ';' => {
                 self.bump();
                 Tok::Sep
             }
@@ -1803,6 +1814,18 @@ const XARGS: &[&str] = &[
     "--process-slot-var",
 ];
 const EXEC: &[&str] = &["-a"];
+const RUNUSER: &[&str] = &[
+    "-u",
+    "-g",
+    "-G",
+    "-s",
+    "-w",
+    "--user",
+    "--group",
+    "--supp-group",
+    "--shell",
+    "--whitelist-environment",
+];
 
 /// How many of `rest` are options (with their values) before the program.
 fn options(rest: &[Word], values: &[&str]) -> usize {
@@ -1835,6 +1858,19 @@ fn options(rest: &[Word], values: &[&str]) -> usize {
     }
     // An option that ends the line has no value to take.
     n.min(rest.len())
+}
+
+/// Whether the options of `runuser` name a user (`-u root`, `-uroot`,
+/// `--user=root`): then the command follows the options, it is not run with
+/// `-c`.
+fn runuser_user(rest: &[Word]) -> bool {
+    rest[..options(rest, RUNUSER)].iter().any(|w| {
+        let t = w.text.as_str();
+        match t.strip_prefix("--") {
+            Some(long) => long == "user" || long.starts_with("user="),
+            None => t.strip_prefix('-').is_some_and(|f| f.contains('u')),
+        }
+    })
 }
 
 /// Whether the options of `sudo` or `doas` ask for a shell (`-s`, `-i`,
@@ -1967,15 +2003,9 @@ fn unwrap(cmd: &Command, shell: Shell) -> Result<Option<Run>, Wrapped> {
                     .take_while(|w| is_assignment(&w.text))
                     .count()
             }
-            // `runuser -u USER [--] command`; without `-u` it starts a shell.
-            "runuser" if rest.iter().any(|w| w.text == "-u" || w.text == "--user") => {
-                let at = rest
-                    .iter()
-                    .position(|w| w.text == "-u" || w.text == "--user")
-                    .unwrap_or(0);
-                let n = (at + 2).min(rest.len());
-                n + usize::from(rest.get(n).is_some_and(|w| w.text == "--"))
-            }
+            // `runuser -u USER [options] [--] command`; without `-u` it
+            // starts a shell (or runs `-c`).
+            "runuser" if runuser_user(rest) => options(rest, RUNUSER),
             "timeout" => options(rest, TIMEOUT) + 1,
             "nice" => options(rest, NICE),
             "ionice" => options(rest, IONICE),
@@ -2095,9 +2125,17 @@ fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
     while let Some(w) = rest.get(n) {
         n += 1;
         let lower = w.text.to_lowercase();
+        // A quoted value may follow a parameter's colon
+        // (`-FilePath:'sc.exe'`): the whole word is quoted then, but what
+        // stands before the colon is a name.
+        let named = |p: &str| {
+            p.split_once(':').is_some_and(|(name, _)| {
+                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphabetic())
+            })
+        };
         let Some(param) = lower
             .strip_prefix('-')
-            .filter(|p| !p.is_empty() && !w.quoted)
+            .filter(|p| !p.is_empty() && (!w.quoted || named(p)))
         else {
             match positional {
                 0 => file = Some(w.clone()),
@@ -2115,10 +2153,13 @@ fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
             continue;
         }
         let value = match attached {
-            Some(v) if !v.is_empty() => Some(Word {
-                text: v.to_string(),
-                ..w.clone()
-            }),
+            Some(v) if !v.is_empty() => {
+                let first = Word {
+                    text: v.to_string(),
+                    ..w.clone()
+                };
+                Some(array(rest, &mut n, &first))
+            }
             _ => {
                 n += 1;
                 rest.get(n - 1).map(|v| array(rest, &mut n, v))
@@ -2135,20 +2176,61 @@ fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
         // `@('a', 'b')` keeps its source text; the quotes and the brackets
         // are not part of the arguments.
         let text = match l.text.strip_prefix("@(").and_then(|t| t.strip_suffix(')')) {
-            Some(inner) => inner.replace(['\'', '"'], ""),
+            Some(inner) => inner.replace('\'', ""),
             None => l.text.clone(),
         };
-        out.extend(
-            text.split(|c: char| c == ',' || c.is_whitespace())
-                .filter(|s| !s.is_empty())
-                .map(|s| Word {
-                    text: s.to_string(),
-                    literal: l.literal,
-                    quoted: false,
-                }),
-        );
+        out.extend(split_arguments(&text).into_iter().map(|s| Word {
+            text: s,
+            literal: l.literal,
+            quoted: false,
+        }));
     }
     Some(out)
+}
+
+/// The words of `Start-Process`' argument list as the child splits its
+/// command line (the C runtime's rules): a `"` opens and closes a group and
+/// goes, `\"` is a quote, and the words end at blanks and, as PowerShell's
+/// array syntax writes them, at commas outside a group.
+fn split_arguments(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        i += 1;
+        match c {
+            '\\' => {
+                let mut n = 1;
+                while chars.get(i) == Some(&'\\') {
+                    n += 1;
+                    i += 1;
+                }
+                let before_quote = chars.get(i) == Some(&'"');
+                cur.extend(std::iter::repeat_n(
+                    '\\',
+                    if before_quote { n / 2 } else { n },
+                ));
+                if before_quote && n % 2 == 1 {
+                    cur.push('"');
+                    i += 1;
+                }
+            }
+            '"' => quoted = !quoted,
+            c if (c == ',' || c.is_whitespace()) && !quoted => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 /// cmd's `start`: its switches and the window title (its first quoted word)
@@ -2332,6 +2414,50 @@ mod tests {
             sh("case x in\n  a)\n    b\n    ;;\nesac\nc"),
             w(&[&["case", "x", "in"], &["b"], &["esac"], &["c"]])
         );
+    }
+
+    /// The body of a `(pattern)` branch pipes like any other command.
+    #[test]
+    fn sh_case_body_after_a_group_pattern_pipes() {
+        let sh = |l| words(l, Shell::Sh);
+        assert_eq!(
+            sh("case x in (a) b | c;; (d) e | f;; esac"),
+            // The pattern groups are visited between the commands.
+            w(&[
+                &["case", "x", "in"],
+                &["b"],
+                &["a"],
+                &["c"],
+                &["e"],
+                &["d"],
+                &["f"],
+                &["esac"]
+            ])
+        );
+    }
+
+    /// `Start-Process` splits its argument string like the child's C
+    /// runtime: a quoted group is one word, `\"` is a quote.
+    #[test]
+    fn start_process_arguments_split_like_the_c_runtime() {
+        let split = |t| split_arguments(t);
+        assert_eq!(
+            split("-NoProfile -Command \"Stop-Service nerve-node\""),
+            ["-NoProfile", "-Command", "Stop-Service nerve-node"]
+        );
+        assert_eq!(
+            split("stop,nerve-node a\\\"b"),
+            ["stop", "nerve-node", "a\"b"]
+        );
+        assert_eq!(split("a\\\\\"b c\" d"), ["a\\b c", "d"]);
+        assert_eq!(split("x \"a,b\""), ["x", "a,b"]);
+    }
+
+    /// A CR alone ends a PowerShell statement, CR LF is one line break.
+    #[test]
+    fn powershell_lone_cr_ends_a_statement() {
+        let ps = |l| words(l, Shell::PowerShell);
+        assert_eq!(ps("a\rb\r\nc"), w(&[&["a"], &["b"], &["c"]]));
     }
 
     /// Whether some command ends in the word `c` (`do c` runs it).

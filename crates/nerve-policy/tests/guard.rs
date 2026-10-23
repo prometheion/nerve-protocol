@@ -266,6 +266,13 @@ const NODE_ITSELF: &[Case] = &[
         PS,
         PROGRAMS,
     ),
+    // A CR alone ends a PowerShell statement.
+    ("Write-Host a\rnerve-node status", PS, PROGRAMS),
+    (
+        "Write-Output a\r& 'C:\\Program Files\\Nerve\\nerve-node.exe' status",
+        PS,
+        PROGRAMS,
+    ),
     // A file tool names the program by its value, not by a word of a sentence.
     ("dd if=new of=nerve-node", SH, PROGRAMS),
     (
@@ -646,6 +653,9 @@ const SERVICE_FORMS: &[Case] = &[
     ("Stop-Service `\r\n  -Name nerve-node", PS, SERVICE),
     ("Stop-Process `\r\n  -Name nerve-node -Force", PS, SERVICE),
     ("Get-Service nerve-node `\r\n  | Stop-Service", PS, SERVICE),
+    // A CR alone ends a PowerShell statement.
+    ("Write-Host a\rStop-Service nerve-node", PS, SERVICE),
+    ("Write-Host a\rStop-Process -Name nerve-node", PS, SERVICE),
 ];
 
 /// What the docs listed as refused although it only mentions the node: a
@@ -1031,6 +1041,122 @@ const NESTED: &[Case] = &[
         SH,
         SERVICE,
     ),
+    // A pipe in the body of a `(pattern)` branch.
+    (
+        "case \"$1\" in (stop) timeout 30 sudo systemctl stop nerve-node 2>&1 | tail -1;; esac",
+        SH,
+        SERVICE,
+    ),
+    (
+        "case x in (a) systemctl stop nerve-node | cat;; esac",
+        SH,
+        SERVICE,
+    ),
+    (
+        "case x in (a) pgrep nerve-node | xargs kill;; esac",
+        SH,
+        SERVICE,
+    ),
+    (
+        "case \"$1\" in (stop) nerve-node status | grep x;; esac",
+        SH,
+        PROGRAMS,
+    ),
+    (
+        "case $1 in a) echo;; (b) kill $(pidof nerve-node) 2>&1 | tail -1;; esac",
+        SH,
+        SERVICE,
+    ),
+    (
+        "for f in *; do case $f in (*.txt) systemctl stop nerve-node | cat;; esac; done",
+        SH,
+        SERVICE,
+    ),
+    (
+        "case \"$1\" in\n  (stop)\n    timeout 30 sudo systemctl stop nerve-node 2>&1 | tail -1\n    ;;\nesac",
+        SH,
+        SERVICE,
+    ),
+    (
+        "case $1 in (a) /usr/local/bin/nerve-node status | cat;; esac",
+        SH,
+        PROGRAMS,
+    ),
+    (
+        "case $1 in (a) cat /etc/nerve/node.toml | cat;; esac",
+        SH,
+        PATHS,
+    ),
+    // `Start-Process` hands its argument string to the child, which splits
+    // it with the C runtime's rules: a quoted group is one word.
+    (
+        "Start-Process powershell -Verb RunAs -ArgumentList '-Command \"& ''C:\\Program Files\\Nerve\\nerve-node.exe'' status\"'",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -Command \"Restart-Service nerve-node\"'",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process powershell -Verb RunAs -ArgumentList '-Command \"Stop-Service -Name nerve-node -Force\"'",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process pwsh -Verb RunAs -ArgumentList '-c \"Stop-Service nerve-node\"'",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process powershell -Verb RunAs -ArgumentList \"-NoProfile -Command `\"Stop-Service nerve-node`\"\"",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process cmd.exe -ArgumentList '/c \"sc stop nerve-node\"' -Verb RunAs",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process sc.exe -ArgumentList 'stop \"nerve-node\"' -Verb RunAs",
+        PS,
+        SERVICE,
+    ),
+    // A parameter with a quoted value after its colon is still a parameter.
+    (
+        "Start-Process -FilePath:'sc.exe' -ArgumentList 'stop','nerve-node'",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process -FilePath:sc.exe -ArgumentList:'stop,nerve-node'",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process -FilePath:sc.exe -ArgumentList:'stop', 'nerve-node'",
+        PS,
+        SERVICE,
+    ),
+    // `runuser` takes more options between the user and the command.
+    (
+        "runuser -u root -g wheel -- systemctl stop nerve-node",
+        SH,
+        SERVICE,
+    ),
+    (
+        "runuser --user=root -- systemctl stop nerve-node",
+        SH,
+        SERVICE,
+    ),
+    ("runuser -uroot systemctl stop nerve-node", SH, SERVICE),
+    (
+        "sudo runuser -u root -g wheel -- systemctl stop nerve-node",
+        SH,
+        SERVICE,
+    ),
 ];
 
 /// Lines that only mention the node or its commands, in quotes, in a
@@ -1127,6 +1253,31 @@ const DATA: &[Case] = &[
     ),
     // fish's `\'` does not end a quote.
     ("echo 'don\\'t'; and echo second", FISH, None),
+    // A commit message or a PR body written through a substitution: a path
+    // in its prose is data, as when it stands straight in the quotes.
+    (
+        "git commit -m \"$(cat <<'EOF'\nMove the socket to /run/nerve-node\n\nCo-Authored-By: x\nEOF\n)\"",
+        SH,
+        None,
+    ),
+    (
+        "git commit -m \"$(cat <<'EOF'\nRead /etc/nerve/node.toml once\nEOF\n)\"",
+        SH,
+        None,
+    ),
+    (
+        "gh pr create --title x --body \"$(cat <<'EOF'\n- the config lives in ~/.config/nerve/node.toml\nEOF\n)\"",
+        SH,
+        None,
+    ),
+    (
+        "git commit -m \"$(printf 'fix %s' 'reading /etc/nerve/node.toml')\"",
+        SH,
+        None,
+    ),
+    // The part before the blank in a substitution is still a path.
+    ("cat \"$(echo $HOME)/.config/nerve/node.toml\"", SH, PATHS),
+    ("cat $(echo /etc/nerve/node.toml)", SH, PATHS),
 ];
 
 /// A line the parser cannot read is checked with the text patterns of

@@ -208,23 +208,44 @@ const PATHS: &[(&str, bool)] = &[
     (".local/state/nerve", false),
 ];
 
-/// Where the first blank of a word stands that is not inside a substitution
-/// (`$(echo $HOME)/…` is one path); the length when there is none.
-fn first_blank(word: &str) -> usize {
-    let mut depth = 0usize;
-    let mut tick = false;
+/// Whether a blank stands before `at` in the same region of the word: the
+/// word itself, or one `$( … )` or pair of backticks in it. A path after a
+/// blank is a sentence (a commit message, the text of a here-document), not
+/// a path the command opens; `$(echo $HOME)/…` has no blank outside its
+/// substitution, so it stays a path. The commands of a substitution are
+/// checked on their own.
+fn after_blank(word: &str, at: usize) -> bool {
+    // The regions entered and not left yet (`true`: backticks), and the
+    // ones that saw a blank; region 0 is the word.
+    let mut open: Vec<(usize, bool)> = vec![(0, false)];
+    let mut blank = vec![false];
     let mut prev = ' ';
-    for (at, c) in word.char_indices() {
+    for (i, c) in word.char_indices() {
+        if i >= at {
+            break;
+        }
+        let top = open.last().copied().unwrap_or((0, false));
         match c {
-            '(' if prev == '$' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            '`' => tick = !tick,
-            c if c.is_whitespace() && depth == 0 && !tick => return at,
+            '(' if prev == '$' => {
+                blank.push(false);
+                open.push((blank.len() - 1, false));
+            }
+            ')' if !top.1 && open.len() > 1 => {
+                open.pop();
+            }
+            '`' if top.1 => {
+                open.pop();
+            }
+            '`' => {
+                blank.push(false);
+                open.push((blank.len() - 1, true));
+            }
+            c if c.is_whitespace() => blank[top.0] = true,
             _ => {}
         }
         prev = c;
     }
-    word.len()
+    open.last().is_some_and(|(id, _)| blank[*id])
 }
 
 /// Whether `word` names one of the node's paths. The path may stand after a
@@ -240,20 +261,18 @@ fn names_node_path(word: &str, win: bool) -> bool {
     let ends = |rest: &str| {
         !rest.starts_with(|c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
     };
-    let blank = first_blank(&text);
     for (path, open) in PATHS {
         for (at, _) in text.match_indices(path) {
-            if at <= blank && (*open || ends(&text[at + path.len()..])) {
+            if !after_blank(&text, at) && (*open || ends(&text[at + path.len()..])) {
                 return true;
             }
         }
     }
     // `C:\ProgramData\Nerve`, `%ProgramData%\Nerve`, `$env:ProgramData\Nerve`.
     let lower = text.to_lowercase();
-    let blank = first_blank(&lower);
     for (at, _) in lower.match_indices("programdata") {
         let rest = lower[at + "programdata".len()..].trim_start_matches(['%', '}', ')', '"', '\'']);
-        if at <= blank
+        if !after_blank(&lower, at)
             && let Some(after) = rest.strip_prefix("/nerve")
             && ends(after)
         {

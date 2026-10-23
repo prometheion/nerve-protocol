@@ -232,7 +232,11 @@ const COMMANDS: &[(&str, &str, Place)] = &[
     (
         "rule guard",
         "nerve-node rule guard --center lab",
-        (Some(Page::Policy), -1, "Permissions › Add the guard"),
+        (
+            Some(Page::Policy),
+            -1,
+            "Permissions › Add the guard / Update the guard",
+        ),
     ),
     (
         "cap set",
@@ -662,6 +666,22 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// `rule guard` runs from two buttons of one banner: one for a pairing
+    /// without the guard, one for a pairing that holds its older texts.
+    #[test]
+    fn the_guard_row_names_both_of_its_buttons() {
+        let (_, _, (_, _, place)) = COMMANDS
+            .iter()
+            .find(|(c, _, _)| *c == "rule guard")
+            .unwrap();
+        for button in ["Add the guard", "Update the guard"] {
+            assert!(
+                place.contains(button),
+                "`rule guard` does not name \"{button}\""
+            );
         }
     }
 
