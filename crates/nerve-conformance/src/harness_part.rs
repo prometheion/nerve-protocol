@@ -714,6 +714,25 @@ fn check_details(result: &Value, want: &[(&str, &str, Value)]) -> Result<(), Str
     Ok(())
 }
 
+/// `list(node)` of a harness node: its mode and folder in the text and
+/// its `access` block, as the node sent it, in `structuredContent.result`.
+fn check_access(result: &Value) -> Result<(), String> {
+    not_error(result)?;
+    let text = text_of(result);
+    ensure(
+        text.lines().any(|l| l.contains("folder")) && text.contains(echo::ACCESS_FOLDER),
+        format!("the text names neither the mode nor the folder: {text:?}"),
+    )?;
+    let access = &result["structuredContent"]["result"]["access"];
+    ensure(
+        access["mode"] == json!("folder")
+            && access["account"] == json!(echo::ACCESS_ACCOUNT)
+            && access["folders"][0]["path"] == json!(echo::ACCESS_FOLDER)
+            && access["folders"][0]["access"] == json!("rw"),
+        format!("structuredContent.result.access is {access}"),
+    )
+}
+
 const END: &str = "[end of device content]";
 
 /// Text the node wrote (`said`) is in the answer only inside device-content
@@ -1065,6 +1084,17 @@ pub async fn run(target: &Target) -> Report {
                 .list(json!({"node": A, "capability": "echo.say"}))
                 .await?;
             check_framed(&details, A, &id_a, "Return the text.")
+        }
+        .await,
+    );
+    r.check(
+        "harness 4",
+        "list(node) tells the node's mode, account and folders inside device content and the envelope",
+        async {
+            let units = s1.list(json!({"node": A})).await?;
+            check_access(&units)?;
+            check_framed(&units, A, &id_a, echo::ACCESS_FOLDER)?;
+            check_framed(&units, A, &id_a, echo::ACCESS_ACCOUNT)
         }
         .await,
     );
