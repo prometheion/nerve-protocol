@@ -118,6 +118,9 @@ pub struct HttpCenter {
 }
 
 impl HttpCenter {
+    /// Its call wait: a call that runs longer becomes a job.
+    pub const CALL_WAIT: Duration = Duration::from_secs(1);
+
     pub fn start(state: &Path, token: &str) -> HttpCenter {
         let mcp_addr = format!("127.0.0.1:{}", free_port());
         let (mut cmd, _) = center_command(
@@ -129,6 +132,9 @@ impl HttpCenter {
                 ("NERVE_HARNESS_TOKEN", token),
                 // The UI is open on loopback for the test to pair through.
                 ("NERVE_UI_NO_LOGIN", "true"),
+                // A short call wait, so the harness part's job takes little
+                // time ([`HttpCenter::CALL_WAIT`]).
+                ("NERVE_CALL_WAIT", "1"),
             ],
         );
         let mut child = cmd
