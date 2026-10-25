@@ -69,6 +69,8 @@ in the machine's audit log. The model can mostly fix them by itself.
 | `unknown_node: there is no node "…"` | No paired machine has that name or id; the message names the ones there are | Use one of those names |
 | `unavailable: node … is disabled in the center` | You disabled the machine in the center | **Enable** it on the Overview |
 | `forbidden: "…" is turned off on node … by its owner` | `cap set … off` on the machine | `nerve-node cap set <capability> on` |
+| `unknown_job: node … has no job "j-…" of this session` | The id is wrong or another session's, or the job's result was given already, or not read within 10 minutes ([long calls](harness.md#long-calls-become-jobs)) | Run the call again if its result is still needed |
+| `busy: this session has 16 calls running` | The session runs 16 calls at once already, jobs included | Wait for one with `job.status`, or stop one with `job.cancel` |
 
 ## The center's action checker refuses a call
 

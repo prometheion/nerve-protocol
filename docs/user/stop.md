@@ -4,7 +4,7 @@ From the quickest to the most thorough.
 
 | You want | Do | Effect |
 |---|---|---|
-| Stop one agent session | Web UI, Overview, Sessions, **End** | The session's running commands stop |
+| Stop one agent session | Web UI, Overview, Sessions, **End** | The session's running commands stop, its jobs too |
 | Hide a machine from the agent | Web UI, Overview, **Disable** on the machine | The machine stays paired and connected. The agent's `list` shows it as disabled with no capabilities, and calls to it are refused. **Enable** undoes it |
 | Stop one center on a machine | `nerve-node center pause --center lab` | The node drops the link and does not dial it again |
 | Stop every center on a machine | `nerve-node panic` | Every link ends. Nothing runs until `unlock` |
@@ -38,7 +38,12 @@ Only you can resume it.
 ## What ends a command
 
 A command stops when its call ends: on its timeout, when the caller cancels,
-when its session ends, or when its link ends. A link that drops without a
+when its session ends, or when its link ends. A command that ran past the
+center's call wait is a job ([long calls](harness.md#long-calls-become-jobs)):
+the harness's cancel of its tool call no longer reaches it, and the agent
+stops it with `job.cancel`, or sends it a signal with `exec.signal` where you
+allowed that (`nerve-node cap set exec.signal on`; in `allowlist` mode an
+allow rule `exec.signal`). A link that drops without a
 goodbye is kept 30 seconds and its commands run on; they end when the link is
 not back by then, or at once when the link ends with a goodbye (`panic`,
 `center pause`, a stopped node). Taking the machine off the network for less

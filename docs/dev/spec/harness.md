@@ -29,6 +29,7 @@ and `uninstall`, which run the center as a systemd service on Linux
 | `--mcp` | `NERVE_MCP` | `stdio` | `stdio`, `http`, or `none` (center only) |
 | `--mcp-listen` | `NERVE_MCP_LISTEN` | `127.0.0.1:7481` | HTTP MCP address |
 | `--harness-token` | `NERVE_HARNESS_TOKEN` | none | the harness token: bearer token for HTTP MCP and the secret that logs in to the UI (more can be made in the UI) |
+| `--call-wait` | `NERVE_CALL_WAIT` | `20s` | how long `execute` waits for a result before the call becomes a job (§4.4): `20` or `20s`, or `500ms`; 10 ms to 600 s |
 | `--log` | `NERVE_LOG` | the stored level, `info` at first | log level; wins over the stored one for this run. The log goes to stderr and `log.jsonl`, never to stdout |
 
 Example entry:
@@ -106,8 +107,12 @@ never appears in a capability id or action name (protocol §6), while `_` and
   them, and `execute` of one says that the center left it out, not why.
 - `node`, `settings` and `audit` are never units, so a model cannot change
   the policy that limits it.
-- `exec.signal` is not offered for now: its `call` is the `invoke` id of a
-  running call, which a model cannot know.
+- `exec.signal` is offered by the job's id: `params` name `job` where the
+  node's name `call`, the `invoke` id only the center knows (§4.4).
+- Beside a node's own units, when it offers at least one that is not off,
+  the center offers its own `job.status` and `job.cancel` (§4.4). A
+  capability of the node named `job` or `stream` is left out whole, as one
+  entry: these names are the center's (`stream` is kept for streams).
 - A capability with exposure `off` offers none of its units; `list(node)`
   names them in one trailing line, and `execute` of one is
   `error forbidden`.
@@ -276,16 +281,21 @@ and sends nothing to the node.
    sudo list or sudo switch that changed), for `fs.*` and `exec.run` only
    (`exec.signal` names no folder). A session
    remembers at most 1024 units and drops the one listed longest ago; the
-   model then lists it again.
+   model then lists it again. An `execute` answered with a job counts as the
+   details of that node's `job.status` and `job.cancel`: it names them with
+   their args (§4.4).
 5. `args` (missing or `null` is `{}`) against the unit's `params`. Arguments
    that do not fit are `error invalid_args: <field>: expected <what>`
    (`error invalid_args: path: expected a string (required)`). This refusal
    is logged and counted as a failed call of the unit.
 6. The call itself: the action checker (§6), then the node, as for any call.
-   A node that is offline is `error unavailable`.
+   A node that is offline is `error unavailable`. A call that runs past the
+   call wait becomes a job (§4.4). The center's own `job.status` and
+   `job.cancel` go to neither: the center answers them.
 
-`unknown_node` and `list_first` are the center's own codes; the others are
-those of [protocol.md](protocol.md) §5. Nothing of this changes the node link.
+`unknown_node`, `list_first` and `unknown_job` (§4.4) are the center's own
+codes; the others are those of [protocol.md](protocol.md) §5. Nothing of
+this changes the node link.
 
 A result is text marked as device content:
 
@@ -308,6 +318,60 @@ are cut at 4 KiB each. Every error text of `execute` is one line, whoever wrote
 its words (a node's message, or a field of the node's schema that the center's
 own `invalid_args` names): a line break in them becomes a space.
 
+### 4.4 Jobs
+
+`execute` waits for a call's result at most the **call wait**
+(`--call-wait`, 20 s by default). A call still running then becomes a
+**job** of the session: `execute` answers at once, not as an error, with a
+text that names the job, the calls that follow it up and their args, and
+`structuredContent` `{"job": "j-…", "state": "running"}`. The call runs on.
+The center owns it, not the request, so a `notifications/cancelled` for that
+request no longer reaches it (§5). A harness gives up on a tool call after a
+while, often a minute: the call wait stays below that, so no tool call of the
+center takes longer.
+
+The center serves two units of its own on every node that offers units of
+its own (§4.1). They never go to the node, the action checker never sees
+them, and they count in no statistics:
+
+| Unit | Effect | `args` | Answer |
+|---|---|---|---|
+| `job.status` | `read` | `job`, `wait_ms?` (0 to 600 000) | the job's state, or its result once it ended |
+| `job.cancel` | `actuate` | `job` | the job stopped: `{"job", "state": "cancelled"}` |
+
+- `job.status` waits up to `wait_ms` for the job's end, never longer than
+  the call wait. A running job is `Job j-… (exec.run on node box-1) still
+  runs after 42 s. …` with `{"job", "state": "running"}`. A job that ended
+  gives its result as `execute` would (§4.3), after a line that names the
+  job, with the center's `{"job", "state": "done"}` as `center` beside the
+  envelope. A failure is `error <code>: job j-… (exec.run on node box-1)
+  failed after …: …`; a call whose link ended before its result came is
+  `error connection_lost: job j-… … was lost …`. A result is given once.
+- `job.cancel` of a running job tells the node to `cancel` its `invoke`,
+  which stops a command, and the job is gone. A job that ended is named with
+  its state and stays for `job.status`.
+- An id that names no job of this session on that node (another session's,
+  one given already or expired, a wrong one) is `error unknown_job`.
+- `exec.signal {job, signal}`: the node's `exec.signal` names a call by its
+  `invoke` id, which only the center knows. The center sends the `invoke` id
+  of the job's call, for a running `exec.run` job of the calling session on
+  that node only, on the link that call runs on (an `invoke` id counts on
+  its link only). The action checker and the node's policy decide on it as
+  on any call. An id that names no such job is `error unknown_job`, a job
+  that is no command `error invalid_args`.
+- Limits per session: at most 16 calls run at once, jobs or not; the 17th is
+  `error busy` and reaches no node. The node's own limit, 64 calls in flight
+  per link, holds for all sessions together. Finished results are kept in
+  memory only, each cut as a result is (256 KiB), at most 4 MiB per session
+  (a result past that is not kept: `job.status` says `error too_large`),
+  until they are read or for 10 minutes.
+- A job counts in the statistics, taints the session (the action checker's
+  taint) and logs a failure when it ends, not when it became a job.
+- The end of the session stops its jobs (the node gets `cancel` for each and
+  `session.end`) and drops their results. A link that drops and is not
+  resumed ends its calls, and their jobs are `lost`; a link the node resumes
+  (protocol.md §4.9) carries them on.
+
 ## 5. Sessions
 
 Each MCP connection (stdio, attached, or HTTP session) is one session with an
@@ -315,8 +379,10 @@ id the center sends as `ctx.session`. A session remembers the units `list`
 gave it the details of (§4.3); a new session remembers none, also the one
 that replaces a session the web UI ended over stdio. When a session ends, every
 node it used gets `session.end` and cancels that session's calls, which stops
-their commands. The web UI can end a session. A `notifications/cancelled`
-cancels its call on the node, and the cancelled request gets no response.
+their commands; its jobs stop and their results are dropped (§4.4). The web
+UI can end a session. A `notifications/cancelled` within the call wait
+cancels its call on the node, and the cancelled request gets no response;
+once the call became a job, only `job.cancel` or the session's end stops it.
 
 ## 6. Refused calls
 
@@ -397,4 +463,5 @@ settings). For the action checker also `<state>/checker-model.token` (the
 model endpoint's bearer token, mode 0600) and `<state>/checker/` (the
 installed llama.cpp build and model). It never stores file contents, command
 output or arguments; the endpoint token is its one secret, and it is in no
-backup.
+backup. A job's result (§4.4) is held in memory only, until it is read, for
+10 minutes, or until its session ends.

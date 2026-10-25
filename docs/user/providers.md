@@ -71,8 +71,10 @@ and a call that was waiting for it fails with `unavailable`.
 Each capability and action has a name of 1 to 64 letters, digits, `-` and
 `_`, such as `lamp` and `set_level`; the agent sees them joined, `lamp.set_level`.
 The node refuses a program that gives another name, or a capability that is
-the node's own (`fs`, `exec`, …) or another provider's already, and the
-program's attach fails with the reason.
+the node's own (`fs`, `exec`, …) or the center's (`job`, `stream`), or another
+provider's already, and the program's attach fails with the reason. The
+center serves `job.status` and `job.cancel` on every machine itself
+([long calls](harness.md#long-calls-become-jobs)).
 
 ## What its schemas may say
 

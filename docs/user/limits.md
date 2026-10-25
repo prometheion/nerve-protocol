@@ -45,6 +45,16 @@ refused with `invalid_args`, and the error says the most. The node
 describes the defaults and the most to the center, so the agent can see them
 in the params `list` gives for `exec.run`.
 
+## Calls of one agent session
+
+Beside the limits of each command, the center bounds what one agent session
+keeps busy: at most 16 calls run at once, also the ones that became jobs
+([long calls](harness.md#long-calls-become-jobs)), and a 17th is refused with
+`busy` until one ends or is stopped. Results of finished jobs are kept in the
+center's memory, at most 4 MiB per session and for 10 minutes; a result past
+that is not kept. These are fixed in the center; the node's own limit of 64
+calls at once per center holds as well.
+
 ## Past a limit
 
 | Limit | What happens |
