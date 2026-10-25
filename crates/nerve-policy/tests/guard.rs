@@ -701,6 +701,55 @@ const SERVICE_FORMS: &[Case] = &[
     ("net stop /y nerve-node", WIN, SERVICE),
     ("net.exe stop /Y nerve-node", WIN, SERVICE),
     ("net stop nerve-node /y", WIN, SERVICE),
+    // r8-2: a pipe that starts its line goes on with the pipe before it
+    // (PowerShell 7); in fish `&|` is a separator and a pipe.
+    ("Get-Service nerve-node\n  | Stop-Service", PS, SERVICE),
+    (
+        "Get-Service nerve-node\r\n  | Stop-Service -Force",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Get-Process -Name nerve-node\n    | Stop-Process -Force",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Get-Service -Name nerve-node\n| Restart-Service",
+        PS,
+        SERVICE,
+    ),
+    ("Get-Service nerve-node\n# c\n| Stop-Service", PS, SERVICE),
+    (
+        "if ($true) {\n  Get-Service nerve-node\n  | Stop-Service\n}",
+        PS,
+        SERVICE,
+    ),
+    ("pgrep nerve-node &| xargs kill", FISH, SERVICE),
+    // r8-3: PowerShell takes `/` before its switches.
+    ("powershell /c \"Stop-Service nerve-node\"", ALL, SERVICE),
+    (
+        "powershell /NoProfile /Command \"Stop-Service nerve-node\"",
+        ALL,
+        SERVICE,
+    ),
+    ("pwsh /c \"Restart-Service nerve-node\"", ALL, SERVICE),
+    // r8-4: the service's registry key holds its start type and its path.
+    (
+        "reg add HKLM\\SYSTEM\\CurrentControlSet\\Services\\nerve-node /v Start /t REG_DWORD /d 4 /f",
+        WIN,
+        SERVICE,
+    ),
+    (
+        "reg delete HKLM\\SYSTEM\\CurrentControlSet\\Services\\nerve-node /f",
+        WIN,
+        SERVICE,
+    ),
+    (
+        "reg.exe delete \"HKLM\\SYSTEM\\ControlSet001\\Services\\Nerve-Node\" /f",
+        WIN,
+        SERVICE,
+    ),
 ];
 
 /// What the docs listed as refused although it only mentions the node: a
@@ -1407,6 +1456,17 @@ const NESTED: &[Case] = &[
         PS,
         PROGRAMS,
     ),
+    // r8-3: `/c` and `/Command` run the text as `-c` does.
+    (
+        "powershell /c \"& 'C:\\Program Files\\Nerve\\nerve-node.exe' status\"",
+        WIN,
+        PROGRAMS,
+    ),
+    (
+        "powershell /c C:\\Nerve\\nerve-node.exe status",
+        WIN,
+        PROGRAMS,
+    ),
 ];
 
 /// Lines that only mention the node or its commands, in quotes, in a
@@ -1642,6 +1702,28 @@ const DATA: &[Case] = &[
     ),
     // r7-6
     ("net stop /y spooler", WIN, None),
+    // r8-2: a leading pipe into a command that is not a stopper, or from a
+    // service that is not the node's.
+    ("Get-Service nerve-node\n  | Format-List", PS, None),
+    ("Get-Service spooler\n  | Stop-Service", PS, None),
+    ("pgrep sshd &| xargs kill", FISH, None),
+    // r8-3: a word with a `/` that names no switch is the command.
+    (
+        "powershell /usr/bin/true Stop-Service nerve-node",
+        ALL,
+        None,
+    ),
+    // r8-4: reading the key, or changing another service's, is not it.
+    (
+        "reg query HKLM\\SYSTEM\\CurrentControlSet\\Services\\nerve-node",
+        WIN,
+        None,
+    ),
+    (
+        "reg add HKLM\\SYSTEM\\CurrentControlSet\\Services\\spooler /v Start /d 4 /f",
+        WIN,
+        None,
+    ),
 ];
 
 /// A line the parser cannot read is checked with the text patterns of

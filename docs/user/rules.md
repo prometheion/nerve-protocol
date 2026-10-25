@@ -82,7 +82,8 @@ is cmd's.
 
 So `env X=1 sudo systemctl stop nerve-node`, `timeout 30 sudo systemctl
 restart nerve-node`, `bash -c 'pkill nerve-node'` and
-`powershell -Command "Stop-Service nerve-node"` are refused. A word of
+`powershell -Command "Stop-Service nerve-node"` (or `/c`, as PowerShell
+takes `/` before its switches too) are refused. A word of
 another program is data, so a line that only mentions the node runs:
 `git commit -m "refuse systemctl stop nerve-node"`, `echo`, `grep`, a
 here-document written to a file. The name alone is not refused either:
@@ -97,8 +98,8 @@ not seen: both are a program that another program runs, listed below.
 
 | | Refused | Still runs |
 |---|---|---|
-| Linux | `systemctl stop`, `restart`, `try-restart`, `reload-or-restart` (and its aliases `force-reload`, `condrestart`, `condstop`), `freeze`, `disable`, `kill` or `mask` on `nerve-node` (or `nerve-node.service`); `service nerve-node stop`, `restart`, `try-restart`, `force-reload` or `condrestart`; `pkill` or `killall` on `nerve-node` or `nerve-node-desktop`, with flags such as `-9`, `-f` or `-x`; `kill` with what `pidof` or `pgrep` finds in a substitution, or a pipe that goes straight into `kill` or `xargs kill` (`kill $(pidof nerve-node)`, `pgrep nerve-node \| xargs kill`) | `systemctl status`, `is-active`, `show`, `cat` on it, `service nerve-node status`, `journalctl -u nerve-node`, `pgrep`, `ps`, `pkill -f "cargo run -p nerve-node"` (another program) |
-| Windows | `sc stop`, `config` or `delete`; `net stop`; `Stop-Service`, `Restart-Service`, `Set-Service` or `Remove-Service`; `Stop-Process` and `taskkill` with `nerve-node.exe` or `nerve-node-desktop.exe`, or with what `Get-Process` finds (`Stop-Process -Id (Get-Process nerve-node).Id`); `Get-Service` or `Get-Process` on the node piped into one of the cmdlets | `sc query`, `sc qc`, `Get-Service nerve-node`, `Get-Process nerve-node` |
+| Linux | `systemctl stop`, `restart`, `try-restart`, `reload-or-restart`, `try-reload-or-restart` (and `force-reload`, `condrestart`, `condstop`, `condreload`, `reload-or-try-restart`), `freeze`, `disable`, `kill` or `mask` on `nerve-node` (or `nerve-node.service`); `service nerve-node stop`, `restart`, `try-restart`, `force-reload` or `condrestart`; `pkill` or `killall` on `nerve-node` or `nerve-node-desktop`, with flags such as `-9`, `-f` or `-x`; `kill` with what `pidof` or `pgrep` finds in a substitution, or a pipe that goes straight into `kill` or `xargs kill` (`kill $(pidof nerve-node)`, `pgrep nerve-node \| xargs kill`) | `systemctl status`, `is-active`, `show`, `cat` on it, `service nerve-node status`, `journalctl -u nerve-node`, `pgrep`, `ps`, `pkill -f "cargo run -p nerve-node"` (another program) |
+| Windows | `sc stop`, `config` or `delete`; `net stop`; `Stop-Service`, `Restart-Service`, `Set-Service` or `Remove-Service`; `Stop-Process` and `taskkill` with `nerve-node.exe` or `nerve-node-desktop.exe`, or with what `Get-Process` finds (`Stop-Process -Id (Get-Process nerve-node).Id`); `Get-Service` or `Get-Process` on the node piped into one of the cmdlets (also with the `\|` at the start of the next line); `reg add`, `delete`, `copy` or `restore` on the service's key (`…\Services\nerve-node`) | `sc query`, `sc qc`, `Get-Service nerve-node`, `Get-Process nerve-node` |
 
 The Windows commands and program names match in any case (`STOP-SERVICE`,
 `NET STOP`, `sc stop Nerve-Node`, `taskkill /IM NERVE-NODE.EXE`), as Windows

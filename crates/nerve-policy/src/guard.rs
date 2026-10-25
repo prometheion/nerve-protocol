@@ -67,12 +67,16 @@ impl Guard {
 
     fn command(self, cmd: &Command, shell: Shell, fed: bool) -> bool {
         let win = shell.windows();
+        // A comma separates paths only where PowerShell or cmd reads the
+        // line: a Windows node's sh keeps it in the word, as any sh does.
+        let comma = !shell.posix();
         match self {
             Guard::Programs => {
                 // A redirection onto the program writes it, whatever
                 // command it stands on.
                 cmd.redirects.iter().any(|w| names_node(&w.text, win))
-                    || run(cmd, shell).is_some_and(|r| is_node(&r.name) || changes_file(&r, win))
+                    || run(cmd, shell)
+                        .is_some_and(|r| is_node(&r.name) || changes_file(&r, win, comma))
             }
             Guard::Paths => cmd
                 .words
@@ -163,18 +167,18 @@ const FILE_TOOLS: &[&str] = &[
 /// Whether `r` copies, moves, links, deletes or overwrites the node's
 /// program file: replacing the binary of the node is changing it. Looking at
 /// it (`ls`, `file`, `sha256sum`) is not.
-fn changes_file(r: &Run, win: bool) -> bool {
+fn changes_file(r: &Run, win: bool, comma: bool) -> bool {
     FILE_TOOLS.contains(&r.name.to_lowercase().as_str())
-        && r.args.iter().any(|w| is_node_file(&w.text, win))
+        && r.args.iter().any(|w| is_node_file(&w.text, win, comma))
 }
 
 /// Whether an argument of a file tool names the node's program: the whole
 /// argument as a path (it may hold blanks: `C:\Program Files\…`), or the
 /// value of `of=`, `--output=` or `-Destination:`. Data that only holds the
 /// name (`curl -d name=nerve-node`, `--exclude=nerve-node`) is not it.
-/// On Windows a comma separates paths (`Remove-Item a,b`); in sh it is part
-/// of the word (`sed -i "s,a/nerve-node,b,"`).
-fn is_node_file(word: &str, win: bool) -> bool {
+/// In PowerShell and cmd (`comma`) a comma separates paths (`Remove-Item
+/// a,b`); in sh it is part of the word (`sed -i "s,a/nerve-node,b,"`).
+fn is_node_file(word: &str, win: bool, comma: bool) -> bool {
     let value = match word.split_once('=') {
         Some((key, v))
             if key == "of"
@@ -190,9 +194,17 @@ fn is_node_file(word: &str, win: bool) -> bool {
         },
     };
     [word, value].iter().any(|w| {
-        w.split(|c| win && c == ',')
+        w.split(|c| comma && c == ',')
             .any(|p| is_node(&base_name(p, win)))
     })
+}
+
+/// Whether a registry key is the node's service: `…\Services\nerve-node`.
+fn is_service_key(key: &str) -> bool {
+    let key = key.replace('/', "\\").to_lowercase();
+    key.trim_end_matches('\\')
+        .strip_suffix("nerve-node")
+        .is_some_and(|rest| rest.ends_with("\\services\\"))
 }
 
 /// The node's service (systemd's unit, Windows' service).
@@ -337,6 +349,20 @@ fn stops(r: &Run, cmd: &Command, fed: bool, win: bool) -> bool {
                 .filter(|o| !o.starts_with('/'))
                 .collect();
             ops.len() >= 2 && ops[0].eq_ignore_ascii_case("stop") && is_service(ops[1], true)
+        }
+        // The service's registry key holds its start type and its path:
+        // changing or deleting the key disables or removes the service.
+        "reg" => {
+            let ops: Vec<&str> = operands(args, &[])
+                .into_iter()
+                .filter(|o| !o.starts_with('/'))
+                .collect();
+            ops.split_first().is_some_and(|(verb, keys)| {
+                matches!(
+                    verb.to_lowercase().as_str(),
+                    "add" | "delete" | "copy" | "restore"
+                ) && keys.iter().any(|k| is_service_key(k))
+            })
         }
         "pkill" | "killall" => {
             let values: &[&str] = if name == "pkill" {
@@ -483,4 +509,41 @@ fn mention(cmd: &Command, win: bool) -> bool {
 
 fn mentions(script: &Script, win: bool) -> bool {
     script.commands.iter().any(|c| mention(c, win))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_comma_splits_paths_only_where_the_dialect_says() {
+        // PowerShell and cmd: `Remove-Item a.txt,C:\x\nerve-node.exe`.
+        assert!(is_node_file("a.txt,C:\\x\\nerve-node.exe", true, true));
+        // sh on a Windows node: case and `\` count, the comma stays in the
+        // word (`sed -i "s,a/nerve-node,b,"`).
+        assert!(!is_node_file(
+            "s,crates/nerve-node,crates/node,g",
+            true,
+            false
+        ));
+        assert!(is_node_file("C:\\x\\NERVE-NODE.exe", true, false));
+    }
+
+    #[test]
+    fn a_registry_key_of_the_service_is_the_key_ending_in_its_name() {
+        for key in [
+            "HKLM\\SYSTEM\\CurrentControlSet\\Services\\nerve-node",
+            "hklm\\system\\controlset001\\SERVICES\\Nerve-Node\\",
+            "HKEY_LOCAL_MACHINE/SYSTEM/CurrentControlSet/Services/nerve-node",
+        ] {
+            assert!(is_service_key(key), "{key:?}");
+        }
+        for key in [
+            "HKLM\\SYSTEM\\CurrentControlSet\\Services\\spooler",
+            "HKLM\\SYSTEM\\CurrentControlSet\\Services\\nerve-node\\Parameters",
+            "HKLM\\SOFTWARE\\nerve-node",
+        ] {
+            assert!(!is_service_key(key), "{key:?}");
+        }
+    }
 }

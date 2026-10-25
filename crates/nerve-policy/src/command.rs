@@ -69,7 +69,7 @@ impl Shell {
     }
 
     /// `sh` or a shell read like it.
-    fn posix(self) -> bool {
+    pub(crate) fn posix(self) -> bool {
         matches!(self, Shell::Sh | Shell::Fish)
     }
 
@@ -580,7 +580,10 @@ impl<'b> Parser<'b> {
             && cmd.redirects.is_empty()
             && cmd.input.is_empty()
         {
-            // A line break after `|` or `&&` goes on with the same pipe.
+            // A line break after `|` or `&&` goes on with the same pipe. A
+            // `|` that starts a line goes on with the pipe of the line
+            // before (PowerShell 7), as does fish's `&|` after its `&`.
+            *piped |= pipe;
             return Ok(());
         }
         let n = self.budget.commands.get() + 1;
@@ -1745,7 +1748,13 @@ fn runs_powershell(args: &[Word]) -> Runs {
     let mut i = 0;
     while let Some(a) = args.get(i) {
         let lower = a.text.to_lowercase();
-        let Some(name) = lower.strip_prefix('-').filter(|n| !n.is_empty()) else {
+        // PowerShell takes `/` before its switches as well as `-`; a path
+        // that starts with `/` is a switch only when it names one.
+        let Some(name) = lower
+            .strip_prefix('-')
+            .filter(|n| !n.is_empty())
+            .or_else(|| lower.strip_prefix('/').filter(|n| is_ps_switch(n)))
+        else {
             break;
         };
         if "command".starts_with(name) {
@@ -1770,6 +1779,37 @@ fn runs_powershell(args: &[Word]) -> Runs {
         Some(rest) if !rest.is_empty() => Runs::Text(joined(rest), Shell::PowerShell),
         _ => Runs::Input(Shell::PowerShell),
     }
+}
+
+/// Whether `name` (a word without its `/`) is, or abbreviates, one of
+/// PowerShell's switches.
+fn is_ps_switch(name: &str) -> bool {
+    const SWITCHES: &[&str] = &[
+        "command",
+        "encodedcommand",
+        "file",
+        "noprofile",
+        "noexit",
+        "nologo",
+        "noninteractive",
+        "sta",
+        "mta",
+        "login",
+        "windowstyle",
+        "executionpolicy",
+        "inputformat",
+        "outputformat",
+        "version",
+        "configurationname",
+        "workingdirectory",
+        "settingsfile",
+        "custompipename",
+        "psconsolefile",
+        "help",
+    ];
+    !name.is_empty()
+        && (SWITCHES.iter().any(|s| s.starts_with(name))
+            || matches!(name, "ec" | "ep" | "of" | "wd" | "w"))
 }
 
 /// A program's name as the guard compares it: the last part of its path,
@@ -2952,6 +2992,47 @@ mod tests {
         );
         assert_eq!(ps("a |\n  b"), w(&[&["a"], &["b"]]));
         assert!(parse("a |\n b", Shell::PowerShell).unwrap().commands[1].piped);
+    }
+
+    #[test]
+    fn a_pipe_that_starts_a_line_goes_on_with_the_pipe_before() {
+        // PowerShell 7 reads `a⏎| b` as `a | b`; fish's `&|` reads as `&`
+        // and a pipe.
+        for (line, shell) in [
+            ("a\n  | b", Shell::PowerShell),
+            ("a\r\n| b", Shell::PowerShell),
+            ("a\n# c\n| b", Shell::PowerShell),
+            ("a &| b", Shell::Fish),
+        ] {
+            let s = parse(line, shell).unwrap();
+            let piped: Vec<bool> = s.commands.iter().map(|c| c.piped).collect();
+            assert_eq!(piped, [false, true], "{line:?}");
+        }
+        // A separator before it does not make it a pipe of its own.
+        let s = parse("a\n\nb; c", Shell::PowerShell).unwrap();
+        assert!(s.commands.iter().all(|c| !c.piped));
+    }
+
+    #[test]
+    fn powershell_takes_a_slash_before_its_switches() {
+        let sh = |l| words(l, Shell::Sh);
+        for line in [
+            "powershell /c \"Stop-Service x\"",
+            "powershell /NoProfile /Command \"Stop-Service x\"",
+            "pwsh /noprofile /ep bypass /c \"Stop-Service x\"",
+        ] {
+            assert!(
+                sh(line).contains(&vec!["Stop-Service".into(), "x".into()]),
+                "{line:?}"
+            );
+        }
+        // A path that is no switch is the command's first word.
+        assert_eq!(
+            sh("powershell /usr/bin/true Stop-Service x")[1],
+            ["/usr/bin/true", "Stop-Service", "x"]
+        );
+        // An encoded command is hidden with the slash too.
+        assert!(parse("powershell /EncodedCommand abc", Shell::Sh).is_err());
     }
 
     #[test]
