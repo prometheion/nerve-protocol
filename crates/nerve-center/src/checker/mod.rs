@@ -556,6 +556,7 @@ mod tests {
             NodeSettings {
                 blocklist: NodeSwitch::Off,
                 model: NodeSwitch::On,
+                ..Default::default()
             },
         );
         let checker = Checker::build(cfg.clone(), None);
@@ -597,6 +598,7 @@ mod tests {
             NodeSettings {
                 blocklist: NodeSwitch::On,
                 model: NodeSwitch::Inherit,
+                ..Default::default()
             },
         );
         let checker = Checker::build(cfg, None);

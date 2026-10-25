@@ -972,7 +972,7 @@ mod tests {
         c.id = "id-old".into();
         c.disabled = true;
         let fresh = record("new", None);
-        let lines = [
+        let mut lines = [
             line(&a, true),
             line(&b, false),
             line(&c, true),
@@ -1003,6 +1003,24 @@ mod tests {
         assert_eq!(got.data["result"]["nodes"][2]["state"], "disabled");
         assert_eq!(got.data["result"]["nodes"][2]["capabilities"], 0);
         assert_eq!(got.data["result"]["nodes"].as_array().unwrap().len(), 4);
+        // The owner's note stands after the framing, as the owner's words,
+        // and in the node's data.
+        assert!(!got.text.contains("Notes the owner"), "{}", got.text);
+        lines[1].note = Some("test VM; throwaway data".into());
+        let noted = nodes(&lines);
+        assert!(
+            noted.text.ends_with(
+                "[end of device content]\nNotes the owner of these machines wrote in this \
+                 center:\n- lab: test VM; throwaway data"
+            ),
+            "{}",
+            noted.text
+        );
+        assert_eq!(
+            noted.data["result"]["nodes"][1]["note"],
+            "test VM; throwaway data"
+        );
+        assert!(noted.data["result"]["nodes"][0].get("note").is_none());
         // One node is one line, and no node at all is said in words.
         assert!(nodes(&lines[..1]).text.starts_with("1 node paired"));
         let none = nodes(&[]);

@@ -818,6 +818,13 @@ mod tests {
         .unwrap();
         let mut s = Store::new(id.into(), format!("center-{id}"));
         s.nodes.insert("n1".into(), record("n1"));
+        s.checker.nodes.insert(
+            "n1".into(),
+            crate::checker::NodeSettings {
+                note: "test VM; throwaway data".into(),
+                ..Default::default()
+            },
+        );
         s.harness_tokens.push(store::TokenRecord {
             id: "t1".into(),
             label: "harness".into(),
@@ -858,6 +865,9 @@ mod tests {
             (s.center_id.as_str(), s.nodes.len(), s.harness_tokens.len()),
             ("c1", 1, 1)
         );
+        // The checker's settings come along, the owner's note on a machine
+        // among them.
+        assert_eq!(s.checker.nodes["n1"].note, "test VM; throwaway data");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
