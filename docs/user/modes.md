@@ -403,7 +403,7 @@ folders.
   It returns 0 also for a name that has no profile, so check that the
   folder is gone. A folder that stays may be held by a registry hive that is
   still loaded; it goes after a restart of Windows
-  ([#94](https://github.com/Piggidragon/Nerve-Protocol/issues/94)). A node that still runs makes the profile of its
+  ([#94](https://github.com/prometheion/nerve-protocol/issues/94)). A node that still runs makes the profile of its
   container again at its next command, without what its commands kept
   there.
 - A granted folder you move or rename on the same drive takes its entry

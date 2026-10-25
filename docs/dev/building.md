@@ -46,11 +46,11 @@ every push to `main`. Its Linux job and its Windows job each run fmt, clippy and
 the integrity level, the service steps, the job object, Windows paths) run on
 a Windows runner. Most of the AppContainer and grant end-to-end tests are
 skipped there for now, because they fail on the hosted runner (issues
-[#105](https://github.com/Piggidragon/Nerve-Protocol/issues/105) and
-[#106](https://github.com/Piggidragon/Nerve-Protocol/issues/106)): run them by
+[#105](https://github.com/prometheion/nerve-protocol/issues/105) and
+[#106](https://github.com/prometheion/nerve-protocol/issues/106)): run them by
 hand on the Windows test machine. The same job skips
 `a_cancel_ends_a_chain_of_processes_that_hand_over_and_exit`, a timing flake
-([#107](https://github.com/Piggidragon/Nerve-Protocol/issues/107)). Both use the toolchain of the release
+([#107](https://github.com/prometheion/nerve-protocol/issues/107)). Both use the toolchain of the release
 and a cargo cache keyed by `Cargo.lock`, so a change to the lock file builds
 once from scratch.
 

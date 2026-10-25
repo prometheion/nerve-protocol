@@ -20,7 +20,7 @@ On a Linux machine the agent may use, install the node as a service (use
 `nerve-node-aarch64-linux` on ARM):
 
 ```sh
-curl -LO https://github.com/Piggidragon/Nerve-Protocol/releases/latest/download/nerve-node-x86_64-linux
+curl -LO https://github.com/prometheion/nerve-protocol/releases/latest/download/nerve-node-x86_64-linux
 chmod +x nerve-node-x86_64-linux
 sudo ./nerve-node-x86_64-linux install
 nerve-node center add '<pairing link>'
@@ -41,7 +41,7 @@ from the same release.
 
 1. Download `nerve-node-desktop-x86_64-linux` or
    `nerve-node-desktop-x86_64-windows.exe` from
-   [Releases](https://github.com/Piggidragon/Nerve-Protocol/releases/latest).
+   [Releases](https://github.com/prometheion/nerve-protocol/releases/latest).
 2. On Linux, allow it to run: in the file's **Properties** switch on
    **Executable as Program** (GNOME Files) or tick **Is executable** under
    **Permissions** (KDE Dolphin).
@@ -54,7 +54,7 @@ pairing it ([desktop app](docs/user/desktop.md)).
 ## Quick start
 
 Get the programs from
-[Releases](https://github.com/Piggidragon/Nerve-Protocol/releases).
+[Releases](https://github.com/prometheion/nerve-protocol/releases).
 
 1. Add the center to the harness's MCP configuration:
 
