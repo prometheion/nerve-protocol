@@ -34,7 +34,7 @@ set them: a center with the [settings grant](settings-grant.md) cannot.
 
 ## What a call asks for
 
-`exec_run` takes `memory_mb`, `cpu_percent` and `processes`, each optional:
+`exec.run` takes `memory_mb`, `cpu_percent` and `processes`, each optional:
 
 ```json
 {"command": "make -j8", "memory_mb": 8192, "cpu_percent": 800}
@@ -43,7 +43,7 @@ set them: a center with the [settings grant](settings-grant.md) cannot.
 A value the call leaves out is your default. A value above your most is
 refused with `invalid_args`, and the error says the most. The node
 describes the defaults and the most to the center, so the agent can see them
-in the tool's parameters.
+in the params `list` gives for `exec.run`.
 
 ## Past a limit
 

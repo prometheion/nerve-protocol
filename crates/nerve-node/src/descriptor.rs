@@ -258,11 +258,8 @@ fn fs_cap(exposure: Exposure) -> Capability {
     c
 }
 
-/// `timeout_ms` with the run-time limits in it, as `memory_mb` has its own.
-/// The center makes one tool of the `exec.run` of nodes whose params are
-/// equal and takes its text from the first of them, so nodes that differ in
-/// their limits must differ here, or the model reads one node's numbers for
-/// all.
+/// `timeout_ms` with the run-time limits in it, as `memory_mb` has its own:
+/// the params are what the model reads of this node's limits.
 ///
 /// The most is said in words, not as `maximum`: a larger value is not
 /// refused but cut to it, and 0 is the same as none (protocol.md §7.3), so
@@ -550,8 +547,8 @@ struct View {
 }
 
 /// The descriptor `entry` sees now; `rev` is derived from its content, so it
-/// changes exactly when the view changes. The center builds its tools from
-/// it, so an action the policy cannot allow is not in it. `confined` says
+/// changes exactly when the view changes. The center lists what it offers
+/// from it, so an action the policy cannot allow is not in it. `confined` says
 /// whether this machine can confine a command in `folder` mode (Landlock,
 /// a Windows AppContainer); where it cannot, folder mode offers no command.
 /// `provided` are the capabilities the attached providers add
@@ -1134,8 +1131,8 @@ mod tests {
     }
 
     /// Nodes that differ only in their run-time limits have different params
-    /// for `exec.run`, so the center keeps their tools apart (nerve-center
-    /// `tools`); nodes with equal limits have equal ones.
+    /// for `exec.run`, so each node's details say its own limits; nodes with
+    /// equal limits have equal ones.
     #[test]
     fn nodes_with_other_run_time_limits_have_other_params() {
         let params = |cfg: &NodeConfig| {

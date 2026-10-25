@@ -153,7 +153,7 @@ The node starts the command line after `sudo` with the shell
 job: the logon Windows uses for a scheduled task that runs with highest
 privileges. The account needs the right "Log on as a batch job", which
 administrators have unless a policy takes it. The command runs in a Job
-Object like every other command, so a timeout or `exec.signal` ends it.
+Object like every other command, so a timeout ends it.
 
 A sudo command can change anything on the machine and read the node's keys.
 Put only the commands you mean on the sudo list. On Windows the sudo list is

@@ -31,14 +31,14 @@
       "type": "object",
       "required": ["id", "exposure"],
       "properties": {
-        "id": {"type": "string", "pattern": "^[A-Za-z0-9-]+$"},
+        "id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"},
         "profile": {"type": "string"},
         "provider": {"type": "string", "default": "node"},
         "exposure": {"enum": ["on", "off"]},
         "summary": {"type": "string"},
         "actions": {
           "type": "object",
-          "propertyNames": {"pattern": "^[A-Za-z0-9-]+$"},
+          "propertyNames": {"pattern": "^[A-Za-z0-9_-]{1,64}$"},
           "additionalProperties": {
             "type": "object",
             "required": ["effect"],

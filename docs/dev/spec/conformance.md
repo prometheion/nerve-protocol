@@ -26,7 +26,8 @@ report, and `cargo test -p nerve-conformance` runs them:
 - `tests/e2e.rs`: the center part and the harness part against a real
   `nerve-center`, the node part and the provider part against a real
   `nerve-node`, and `nerve-center` with `nerve-node` against each other
-  (pairing, link, tools over MCP, folders and rules, settings, audit).
+  (pairing, link, `list` and `execute` over MCP, folders and rules, settings,
+  audit).
 
 The end-to-end tests start `nerve-center` and `nerve-node` from the programs
 named by `NERVE_CENTER_BIN` and `NERVE_NODE_BIN`, and build them only when the
@@ -39,7 +40,11 @@ fresh pairing link of that center, `node_part::run(start)` with a closure
 that pairs the node under test with the link it is handed and starts it, or
 `harness_part::run(&target)` with the center's HTTP MCP address, a harness
 token and two fresh pairing links (the part pairs two echo nodes, `conf-a` and
-`conf-b`, so the center must have no node of those names).
+`conf-b`, so the center must have no node of those names). Each node offers
+`echo.say`, `echo.fail` (valid by its schema, it always fails on the node),
+`mirror.say` and `mirror.set`, and describes `node`, `settings` and `audit`
+units that a center must never offer; the part changes a node's descriptor
+while it runs.
 
 The closure returns a `Setup`. With `folder` (an empty folder on the node, in
 wire form) and the settings grant `write` for the fake center, the node part
@@ -122,19 +127,26 @@ JSON is a failure of the check, not an empty result.
 |---|---|
 | 3 | a request without a token, and one with a wrong token, is answered with 401 |
 | 3 | a request whose `Origin` names another host is answered with 403 |
-| 3 | `initialize` answers with the version asked for (`2025-06-18`, `2025-03-26`, `2024-11-05`) and with `2025-06-18` for an unknown one; it names `nerve-center` and declares `tools.listChanged` |
+| 3 | `initialize` answers with the version asked for (`2025-06-18`, `2025-03-26`, `2024-11-05`) and with `2025-06-18` for an unknown one; it names `nerve-center`, declares `tools` and no `listChanged` |
 | 3 | `initialize` opens a session; a request without `Mcp-Session-Id` is 400 and one with an unknown id is 404; `ping` is answered with an empty result |
-| 4 | the tools of both nodes are listed, and `nodes` is a tool that lists them as online |
-| 4 | tool names keep `[A-Za-z0-9_-]` within 64 characters |
-| 4 | a capability with a profile is one tool, `<cap>_<action>`, with `node` as first required argument and an enum of exactly the nodes that offer it |
-| 4 | a capability without a profile is a tool per node, `<node>_<cap>_<action>`, with no `node` argument |
-| 4 | the actions of the capabilities `node`, `settings` and `audit` are never tools |
-| 4 | a read action has `readOnlyHint`, and a write action does not |
-| 4 | a result is device content (marked text, the object as `structuredContent`) |
-| 4 | a shared tool without `node` is `error invalid_args`; a failure on the node is `error <code>: <message>` |
-| 4 | arguments that do not fit the action's schema (one missing, of another type, one too many) are `error invalid_args` and never reach the node |
-| 4 | a shared tool reaches the node `node` names |
-| 4 | a call to a node that is offline is `error unavailable`, and its tools stay listed |
+| 4 | the tools are exactly `list` and `execute`, with object input schemas; `list` has `readOnlyHint` and `execute` does not; `execute` requires `node`, `capability` and `args` |
+| 4 | a call of another tool is the JSON-RPC error -32602 |
+| 4 | `list(node)` gives each node's capabilities, exactly the offered ones, one per line |
+| 4 | the tools stay the same when nodes pair |
+| 4 | `list()` gives every node with its state, in `structuredContent` in the envelope of all the nodes |
+| 4 | `list(node, capability)` gives the details of one capability or of a list of them: effect and `params` in `structuredContent`, the name in the text |
+| 4 | what a node wrote stands inside device content and the envelope in a listing: in the text inside the framing, in `structuredContent` only in `result` of `{source: "node <name> (id <id>)", note, result}` |
+| 4 | the units of `node`, `settings` and `audit` are never listed, and `execute` of one is refused and never reaches the node |
+| 4 | `execute` of a capability the session was not given the details of is `error list_first` and never reaches the node (in a second session, and for the other node in the first) |
+| 4 | a result is device content, in the text and in the envelope of `structuredContent`: the object is its `result` |
+| 4 | arguments that do not fit (one missing, of another type, one too many) are `error invalid_args` naming the field, and never reach the node |
+| 4 | a misspelt capability or node is answered with the name it was likely meant to be |
+| 4 | a failure on the node is `error <code>: node <name> answered: <message>` |
+| 4 | `execute` reaches the node it names |
+| 4 | a capability whose `params` changed since `list` gave its details is `error list_first` until it is listed again |
+| 4 | a change to another capability of the node needs no new `list` |
+| 4 | `list()` says a node that left is offline, and its capabilities stay listed |
+| 4 | `execute` on a node that is offline is `error unavailable` |
 | 5 | two sessions have two ids; a node sees one `ctx.session` per session, so a node that two sessions use sees two |
 | 5 | `DELETE /mcp` ends the session (204), and the ended session is 404 |
 | 5 | `session.end` goes to every node the session used (checked for a session that used two) |
@@ -142,8 +154,10 @@ JSON is a failure of the check, not an empty result.
 | 5 | the other session goes on, and still reaches the node |
 
 Not covered: `notifications/cancelled`, the stdio transport and attach, a node
-the owner disabled, exposure `off`, names cut to 64 characters and clashes (these
-have unit tests in `nerve-center`).
+the owner disabled, exposure `off`, a capability the center left out, the
+1024 units a session remembers, and of a node's error the 4 KiB cut, the one
+line and a code outside the protocol's becoming `internal` (the echo node
+cannot send those; these have tests in `nerve-center`).
 
 ## Provider part
 

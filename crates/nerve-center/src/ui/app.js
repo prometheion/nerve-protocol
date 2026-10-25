@@ -571,7 +571,7 @@ function nodeCard(n) {
     el("p", { class: "meta", title: when(n.online ? n.since_ms : n.last_seen_ms) },
       n.online ? `Since ${ago(n.since_ms)}` : `Last seen ${ago(n.last_seen_ms)}`),
     n.going_away ? el("p", { class: "meta" }, `Going away: ${n.going_away}`) : null,
-    n.disabled ? el("p", { class: "meta" }, "Hidden from the agent: it is offered none of this machine's tools, and calls to it are refused.") : null,
+    n.disabled ? el("p", { class: "meta" }, "Hidden from the agent: it is offered none of this machine's capabilities, and calls to it are refused.") : null,
     n.summary ? el("p", {}, n.summary) : null,
     caps.length
       ? el("div", { class: "chips" }, caps.map((c) => el("span", { class: "chip" + (c.exposure === "off" ? " off" : ""), title: `${c.summary || c.id} (${c.exposure})` }, c.id)))

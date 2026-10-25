@@ -24,7 +24,7 @@ pub fn descriptor(node_id: &str, name: &str) -> Descriptor {
                  "arch": std::env::consts::ARCH,
                  "software": {"name": "nerve-echo", "version": env!("CARGO_PKG_VERSION")}},
         "rev": 1,
-        "summary": "Conformance echo node: answers echo.say with what it was sent.",
+        "summary": "Conformance echo node: answers echo.say with what it was sent and fails echo.fail.",
         "capabilities": [
             {"id": "node", "profile": "node", "exposure": "on", "summary": "The node itself.",
              "events": {"descriptor_changed": {"implicit": true}, "going_away": {"implicit": true}}},
@@ -32,31 +32,33 @@ pub fn descriptor(node_id: &str, name: &str) -> Descriptor {
              "actions": {"say": {"effect": "read", "summary": "Return the text.",
                 "params": {"type": "object", "properties": {"text": {"type": "string"}},
                            "required": ["text"], "additionalProperties": false},
-                "result": {"type": "object", "properties": {"text": {"type": "string"}}}}}}
+                "result": {"type": "object", "properties": {"text": {"type": "string"}}}},
+              // Arguments that fit, and still a failure on the node: a
+              // center checks the arguments itself, so only an action like
+              // this shows how it passes on what the node answered.
+              "fail": {"effect": "read", "summary": "Fail with io, whatever it is sent.",
+                "params": {"type": "object", "properties": {}, "additionalProperties": false}}}}
         ]
     }))
     .expect("the echo descriptor is well formed")
 }
 
 /// The descriptor the harness part's nodes offer: the echo node's, plus
-/// `mirror`, an `echo` twin with a profile (so two nodes share one tool) and a
-/// write action, and actions of `node`, `settings` and `audit`, which a center
-/// must never turn into tools.
+/// `mirror`, an `echo` twin with a write action, and actions of `node`,
+/// `settings` and `audit`, which a center must never offer a harness.
 pub fn harness_descriptor(node_id: &str, name: &str) -> Descriptor {
     let mut d = serde_json::to_value(descriptor(node_id, name)).expect("a descriptor is JSON");
     let caps = d["capabilities"].as_array_mut().expect("capabilities");
     let say = caps[1]["actions"]["say"].clone();
-    // A write action, so that one tool must not be read-only.
+    // A write action, so that `list` has another effect to tell.
     let mut set = say.clone();
     set["effect"] = json!("write");
     set["summary"] = json!("Store the text.");
-    caps.push(
-        json!({"id": "mirror", "profile": "mirror", "exposure": "on",
-        "summary": "Says back what it is sent, with a profile.",
-        "actions": {"say": say, "set": set}}),
-    );
-    // The three capabilities a center must never turn into tools, each with an
-    // action that would become one.
+    caps.push(json!({"id": "mirror", "exposure": "on",
+        "summary": "Says back what it is sent, like echo.",
+        "actions": {"say": say, "set": set}}));
+    // The three capabilities a center must never offer, each with an action
+    // that would otherwise be listed.
     caps[0]["actions"] =
         json!({"info": {"effect": "read", "summary": "Never offered to a harness."}});
     caps.push(
@@ -204,10 +206,6 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
-/// The text `say` fails with `io` on, as a node may fail a call whose
-/// arguments fit.
-pub const FAIL: &str = "fail";
-
 /// The echo node's answer to one request.
 pub fn handle(m: &str, p: &Map<String, Value>, d: &Descriptor) -> Result<Value, RpcError> {
     match m {
@@ -227,16 +225,14 @@ pub fn handle(m: &str, p: &Map<String, Value>, d: &Descriptor) -> Result<Value, 
             match (inv.cap.as_str(), inv.action.as_str()) {
                 ("echo", "say") | ("mirror", "say" | "set") => {
                     match inv.args.get("text").and_then(Value::as_str) {
-                        // A call that fits the schema and still fails on the
-                        // node, for the harness part.
-                        Some(FAIL) => Err(RpcError::new(
-                            ErrorCode::Other("io".into()),
-                            "the echo node fails this text on purpose",
-                        )),
                         Some(t) if inv.args.len() == 1 => Ok(json!({"text": t})),
                         _ => Err(RpcError::invalid_args("say takes {text}")),
                     }
                 }
+                ("echo", "fail") => Err(RpcError::new(
+                    ErrorCode::Other("io".into()),
+                    "the echo node fails this action on purpose",
+                )),
                 (cap, _) if d.capability(cap).is_none() => Err(RpcError::new(
                     ErrorCode::UnknownCapability,
                     format!("no capability {cap}"),

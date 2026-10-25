@@ -13,7 +13,8 @@ For a link that drops, a pairing that fails or an error, open the center's
 ## A call is refused
 
 The agent sees `error forbidden: …` or `error disabled: …`. Every refusal
-names its reason.
+names its reason. One the machine gave reads
+`error forbidden: node box-1 answered: …`.
 
 | Message | Cause | Fix |
 |---|---|---|
@@ -50,8 +51,24 @@ names its reason.
 | `commands run WITHOUT these limits: …` in `status` | The node has no cgroup of its own: started in a terminal | [Where the limits hold](limits.md#where-the-limits-hold) |
 | `the cgroup … no longer passes on the controllers the node turned on`, or `NO COMMAND RUNS` in `status` | Something turned a limit off in the node's cgroup while it ran, such as a reload of a service manager that did not delegate it | Start the node again; give its unit `Delegate=yes` ([limits](limits.md#where-the-limits-hold)) |
 
-The agent sees only the tools a machine could allow. If it sees only `nodes`,
-nothing is allowed yet.
+`list` shows only the capabilities a machine could allow. If it shows none
+for a machine, nothing is allowed yet: in `allowlist` mode, add a
+[rule](rules.md) or choose a [mode](modes.md).
+
+## The center refuses a call itself
+
+These come from the center, before the machine gets the call, so they are not
+in the machine's audit log. The model can mostly fix them by itself.
+
+| Message | Cause | Fix |
+|---|---|---|
+| `list_first: call list with node "…" and capability ["…"] first` | The model ran a capability without asking `list` for its details in this session | The model calls `list` with that node and capability, then runs it again |
+| `list_first: "…" on node … changed since list gave its details` | The capability's arguments or description changed since, for example after a change of the machine's limits | The model lists it again |
+| `invalid_args: <field>: expected …` | The arguments do not fit the capability's schema | The model fixes that field |
+| `unknown_capability: node … offers no "…"` | The machine offers no capability of that name, maybe with `(did you mean "…"?)`. Or the center left it out: then the Overview names it under **Not offered to the agent** ([web UI](web-ui.md#overview)) | Check the name with `list`. If it should be offered, allow it on the machine |
+| `unknown_node: there is no node "…"` | No paired machine has that name or id; the message names the ones there are | Use one of those names |
+| `unavailable: node … is disabled in the center` | You disabled the machine in the center | **Enable** it on the Overview |
+| `forbidden: "…" is turned off on node … by its owner` | `cap set … off` on the machine | `nerve-node cap set <capability> on` |
 
 ## The center's action checker refuses a call
 
@@ -98,6 +115,8 @@ calls.
 |---|---|---|
 | `the pairing code is unknown, used, expired or out of tries` | Wrong, old or used code | Make a new link in the web UI |
 | `another node already has this name` | Two machines have the same name | `nerve-node config set node.name <other>`, then pair again |
+| `this name is a node's id` | The machine's name is a paired machine's id (or its own), which the agent could mistake for that machine | `nerve-node config set node.name <other>`, then pair again |
+| `another node is named like this node's id` | A paired machine's name is this machine's id | Rename that machine in the web UI, then pair again |
 | `this center is paired already as …` | The machine already has a pairing with this center | Use it, or `nerve-node center rm` it first |
 | `a center named … is paired already` | You already use this local name | Pass `--name <other>` |
 | A link or TLS error | The address in the link does not reach the center, or the center's certificate changed | Check `--public-url` and the port. Make a new link |

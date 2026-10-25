@@ -1,9 +1,9 @@
 # Architecture
 
 Nerve lets an agent harness use computers it does not run on. The harness
-reaches a **center**. Each computer runs a **node**. The center turns what the
-nodes can do into tools for the harness and routes the harness's calls to the
-nodes. Each node decides every call by the rules its owner set.
+reaches a **center**. Each computer runs a **node**. The center offers what
+the nodes can do to the harness through two MCP tools, `list` and `execute`,
+and routes the harness's calls to the nodes. Each node decides every call by the rules its owner set.
 
 ```
    harness A ── MCP ──┐

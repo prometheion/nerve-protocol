@@ -72,7 +72,7 @@ fn stdio_and_a_second_instance_that_attaches() {
         &mut owner_out,
         json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
     );
-    assert_eq!(tools["result"]["tools"][0]["name"], "nodes", "{tools}");
+    assert_eq!(tools["result"]["tools"][0]["name"], "list", "{tools}");
 
     // The second instance finds the lock held and relays to the owner.
     let mut second = spawn(dir.path());
@@ -81,7 +81,7 @@ fn stdio_and_a_second_instance_that_attaches() {
     let nodes = ask(
         &mut second,
         &mut second_out,
-        json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "nodes", "arguments": {}}}),
+        json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "list", "arguments": {}}}),
     );
     assert_ne!(nodes["result"]["isError"], true, "{nodes}");
 

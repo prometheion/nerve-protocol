@@ -481,6 +481,40 @@ impl Wire {
     }
 }
 
+/// How long a node's error message, and its reason, may be: an error
+/// says in a few lines what went wrong.
+pub const NODE_ERROR_MAX: usize = 4096;
+
+/// A node's error as the center passes it on. A node may answer only the
+/// protocol's codes, so `list_first` and `unknown_node` stay the center's
+/// own, and its words are cut and marked as the node's (`data.from`), so
+/// the center can say whose they are.
+fn from_node(e: RpcError) -> RpcError {
+    let code = match e.kind() {
+        c if c.is_protocol() => c,
+        _ => ErrorCode::Internal,
+    };
+    let mut data = match e.data {
+        Some(Value::Object(m)) => m,
+        _ => Default::default(),
+    };
+    data.insert("code".into(), Value::String(code.as_str().to_string()));
+    if let Some(Value::String(r)) = data.get_mut("reason") {
+        *r = crate::util::clip(r, NODE_ERROR_MAX);
+    }
+    data.insert("from".into(), json!("node"));
+    RpcError {
+        code: code.numeric(),
+        message: crate::util::clip(&e.message, NODE_ERROR_MAX),
+        data: Some(Value::Object(data)),
+    }
+}
+
+/// Whether the node wrote this error, not the center.
+pub fn by_node(e: &RpcError) -> bool {
+    e.data.as_ref().and_then(|d| d.get("from")) == Some(&json!("node"))
+}
+
 fn lost() -> RpcError {
     RpcError::new(ErrorCode::ConnectionLost, "the link to the node ended")
 }
@@ -921,7 +955,7 @@ async fn handle(center: &Center, link: &Arc<Link>, m: Message) -> Option<ByeReas
         Message::Error {
             id: Some(id),
             error,
-        } => link.reply(&id, Err(error)),
+        } => link.reply(&id, Err(from_node(error))),
         Message::Error { id: None, error } => {
             center.note(
                 Level::Warn,

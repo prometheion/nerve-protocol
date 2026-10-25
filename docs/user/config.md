@@ -118,12 +118,13 @@ nerve-node config set limits.default_timeout_secs 1800 # and gets half an hour u
 ```
 
 Both are yours alone: a center, also with the [settings grant](settings-grant.md),
-cannot change them. The agent sees the two numbers in the description of
-`exec_run`, and in the `description` and `default` of its `timeout_ms` (in
-milliseconds), and both follow a change. The most is said in words, not as a
-`maximum`, since a larger `timeout_ms` is cut to it, not refused. Machines with other limits are
-separate tools for the agent (`build_exec_run`, `lab_exec_run`), so it never
-reads one machine's numbers for another. A limit is at least 1 second;
+cannot change them. The agent sees the two numbers when it lists `exec.run` of
+this machine: in its description, and in the `description` and `default` of
+its `timeout_ms` (in milliseconds). Both follow a change, and after one the
+agent must list `exec.run` again before its next command here. The most is
+said in words, not as a `maximum`, since a larger `timeout_ms` is cut to it,
+not refused. The agent lists `exec.run` per machine, so it never reads one
+machine's numbers for another. A limit is at least 1 second;
 for a long job, set a large maximum and not none. The settings are left out of
 `node.toml` while they are the defaults, so `config get` shows them only once
 you set them. A command already running keeps the limit it started with.

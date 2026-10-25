@@ -114,7 +114,7 @@ now:
 nerve-node center rotate-key --end-grace --center lab
 ```
 
-- The machine keeps its id at the center; its tools and statistics stay.
+- The machine keeps its id at the center; what it offers and its statistics stay.
 - If the center refuses the new key, the old one stays. If no answer comes,
   the old key stays in use and the node sends the new key again on its next
   link.

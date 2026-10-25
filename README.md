@@ -8,7 +8,7 @@ Three programs:
 
 | Program | Job | Put it on |
 |---|---|---|
-| `nerve-center` | The center. A harness starts it as an MCP server. It pairs machines, keeps their links, gives the harness their tools and serves a web UI | the machine where the harness runs |
+| `nerve-center` | The center. A harness starts it as an MCP server. It pairs machines, keeps their links, gives the harness two tools, `list` and `execute`, for what they offer, and serves a web UI | the machine where the harness runs |
 | `nerve-node` | The node. A daemon, plus a CLI for pairing, rules and the audit log | each machine the agent may use, without a desktop (a server, Linux on ARM), or where you prefer a terminal |
 | `nerve-node-desktop` | The node with an app: the same node and CLI, and a window that does what the CLI does. It installs itself with the node as a service | each machine the agent may use that has a desktop: Linux x86_64 with GNOME or KDE Plasma, Windows x86_64 |
 

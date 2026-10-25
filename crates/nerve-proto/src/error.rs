@@ -4,6 +4,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+/// The codes the profiles add to the core's, carried as `Other`.
+pub const PROFILE_CODES: [&str; 3] = ["conflict", "bad_path", "io"];
+
 /// The string codes of the core spec. Profiles add their own (`conflict`,
 /// `bad_path`, `io`), carried as `Other`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +92,15 @@ impl ErrorCode {
             ErrorCode::UnknownMember => -32011,
             ErrorCode::ConnectionLost => -32012,
             ErrorCode::Other(_) => -32000,
+        }
+    }
+
+    /// Whether this is a code of the protocol, the core's or a profile's
+    /// (`PROFILE_CODES`), not one a peer made up.
+    pub fn is_protocol(&self) -> bool {
+        match self {
+            ErrorCode::Other(c) => PROFILE_CODES.contains(&c.as_str()),
+            _ => true,
         }
     }
 
@@ -181,6 +193,9 @@ mod tests {
             let e = RpcError::new(c.clone(), "x");
             assert_eq!(e.kind(), c);
         }
+        assert!(ErrorCode::Other("io".into()).is_protocol());
+        assert!(ErrorCode::Forbidden.is_protocol());
+        assert!(!ErrorCode::Other("list_first".into()).is_protocol());
         assert!(ErrorCode::ConnectionLost.retryable());
         assert!(!ErrorCode::Forbidden.retryable());
     }

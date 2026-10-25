@@ -5,7 +5,7 @@ From the quickest to the most thorough.
 | You want | Do | Effect |
 |---|---|---|
 | Stop one agent session | Web UI, Overview, Sessions, **End** | The session's running commands stop |
-| Hide a machine from the agent | Web UI, Overview, **Disable** on the machine | The machine stays paired and connected. The agent gets none of its tools, and calls to it are refused. **Enable** undoes it |
+| Hide a machine from the agent | Web UI, Overview, **Disable** on the machine | The machine stays paired and connected. The agent's `list` shows it as disabled with no capabilities, and calls to it are refused. **Enable** undoes it |
 | Stop one center on a machine | `nerve-node center pause --center lab` | The node drops the link and does not dial it again |
 | Stop every center on a machine | `nerve-node panic` | Every link ends. Nothing runs until `unlock` |
 | End a pairing | `nerve-node center rm --center lab`, or **Remove** in the web UI | The pairing and its key are gone |
@@ -50,7 +50,7 @@ Every command also has a timeout: its `timeout_ms`, or the node's default, and
 never more than the node's maximum
 ([how long a command may run](config.md#how-long-a-command-may-run)).
 
-On Windows a timeout, and `exec_signal` with `term` or `int`, first ask the
-command to end: its console programs get Ctrl+C and its windows a close
-request. What has not ended 3 seconds later is ended with the Job Object.
-`kill`, a cancel, the end of a session and the end of its link end it at once.
+On Windows a timeout first asks the command to end: its console programs get
+Ctrl+C and its windows a close request. What has not ended 3 seconds later is
+ended with the Job Object.
+A cancel, the end of a session and the end of its link end it at once.

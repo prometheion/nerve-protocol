@@ -149,7 +149,7 @@ in "don't") ends with that line, so it cannot hide the commands after the
 document. This also means a file written that way with `curl … | sh` in it (a
 Dockerfile's `RUN curl … | bash -`, a CI step) is refused like the command
 itself, and an allow rule does not get past it: have the agent write such a
-file with the file tool (`fs.write`) instead, which the command entries do not
+file with the file capability (`fs.write`) instead, which the command entries do not
 look at. A `#` comment runs to the end of its line. The
 line is read by the rules of the machine's shell: PowerShell on Windows,
 `/bin/sh` elsewhere. For a `fs` write it normalises the path first (`//`, `/.`

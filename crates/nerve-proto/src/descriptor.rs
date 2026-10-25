@@ -201,30 +201,45 @@ impl Descriptor {
     }
 }
 
-/// A capability or action name as it may appear in a tool name: ASCII
-/// letters, digits and `-`, at least one. A harness joins the parts of a tool name with `_`
-/// (docs/dev/spec/harness.md), so a name can never hold one.
+/// The longest capability or action name, in bytes. A center copies a
+/// unit's name `cap.action` into every listing and a session's memory, and
+/// a model has to type it.
+pub const NAME_MAX: usize = 64;
+
+/// A capability or action name: 1 to [`NAME_MAX`] ASCII letters, digits,
+/// `-` and `_`. The center names a unit `cap.action`
+/// (docs/dev/spec/harness.md), so a name can never hold a `.`.
 pub fn valid_member_name(name: &str) -> bool {
-    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    !name.is_empty()
+        && name.len() <= NAME_MAX
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Why `name` cannot name a capability or action, as `name …: …`. A long
+/// name is not repeated, only its length.
+pub fn bad_member_name(name: &str) -> Option<String> {
+    if name.len() > NAME_MAX {
+        return Some(format!("name of {} bytes: at most {NAME_MAX}", name.len()));
+    }
+    if !valid_member_name(name) {
+        return Some(format!("name {name:?}: letters, digits, - and _ only"));
+    }
+    None
 }
 
 impl Descriptor {
-    /// Refuses a capability or action name a tool name could not carry, so a
-    /// tool name can never be split wrongly.
+    /// Refuses a capability or action name a unit's name could not carry,
+    /// so `cap.action` can never be split wrongly.
     pub fn check_names(&self) -> Result<(), String> {
         for c in &self.capabilities {
-            if !valid_member_name(&c.id) {
-                return Err(format!(
-                    "capability name {:?}: letters, digits and - only, no _",
-                    c.id
-                ));
+            if let Some(why) = bad_member_name(&c.id) {
+                return Err(format!("capability {why}"));
             }
             for a in c.actions.keys() {
-                if !valid_member_name(a) {
-                    return Err(format!(
-                        "action name {:?} of capability {}: letters, digits and - only, no _",
-                        a, c.id
-                    ));
+                if let Some(why) = bad_member_name(a) {
+                    return Err(format!("capability {}: action {why}", c.id));
                 }
             }
         }
@@ -263,15 +278,22 @@ mod tests {
     fn member_names() {
         assert!(valid_member_name("list-files"));
         assert!(valid_member_name("fs2"));
+        assert!(valid_member_name("list_files"));
+        assert!(valid_member_name("_"));
         assert!(!valid_member_name(""));
-        assert!(!valid_member_name("list_files"));
         assert!(!valid_member_name("a.b"));
         assert!(!valid_member_name("ü"));
+        assert!(valid_member_name(&"a".repeat(NAME_MAX)));
+        assert!(!valid_member_name(&"a".repeat(NAME_MAX + 1)));
+        assert_eq!(
+            bad_member_name(&"a".repeat(1000)).unwrap(),
+            "name of 1000 bytes: at most 64"
+        );
+        assert_eq!(bad_member_name("a_b-c"), None);
     }
 
     /// schemas/descriptor.schema.json says in a pattern what
-    /// `valid_member_name` checks: letters, digits and `-`, at least one, and
-    /// no upper bound on the length.
+    /// `valid_member_name` checks: 1 to 64 letters, digits, `-` and `_`.
     #[test]
     fn the_published_schema_names_members_as_the_code_does() {
         let path = concat!(
@@ -280,25 +302,41 @@ mod tests {
         );
         let s: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let cap = &s["$defs"]["capability"]["properties"];
-        let rule = "^[A-Za-z0-9-]+$";
-        assert_eq!(cap["id"]["pattern"], rule);
-        assert_eq!(cap["actions"]["propertyNames"]["pattern"], rule);
-        assert!(valid_member_name(&"a".repeat(33)));
-        assert!(valid_member_name(&"a".repeat(200)));
+        let rule = format!("^[A-Za-z0-9_-]{{1,{NAME_MAX}}}$");
+        assert_eq!(cap["id"]["pattern"], rule.as_str());
+        assert_eq!(cap["actions"]["propertyNames"]["pattern"], rule.as_str());
     }
 
     #[test]
-    fn underscore_in_a_name_is_refused() {
+    fn a_dot_in_a_name_is_refused_and_an_underscore_is_not() {
         let mut d = sample();
         assert_eq!(d.check_names(), Ok(()));
         d.capabilities[0].id = "my_fs".into();
+        assert_eq!(d.check_names(), Ok(()));
+        d.capabilities[0].id = "my.fs".into();
         let e = d.check_names().unwrap_err();
-        assert!(e.contains("capability name") && e.contains("my_fs"), "{e}");
+        assert!(e.contains("capability name") && e.contains("my.fs"), "{e}");
         let mut d = sample();
         let a = d.capabilities[0].actions.remove("read").unwrap();
-        d.capabilities[0].actions.insert("read_all".into(), a);
+        d.capabilities[0]
+            .actions
+            .insert("read_all".into(), a.clone());
+        assert_eq!(d.check_names(), Ok(()));
+        d.capabilities[0].actions.insert("read.all".into(), a);
         let e = d.check_names().unwrap_err();
-        assert!(e.contains("action name") && e.contains("read_all"), "{e}");
+        assert!(e.contains("action name") && e.contains("read.all"), "{e}");
+        // A name over the bound is refused, and not repeated.
+        let mut d = sample();
+        d.capabilities[0].id = "f".repeat(NAME_MAX + 1);
+        let e = d.check_names().unwrap_err();
+        assert_eq!(e, "capability name of 65 bytes: at most 64");
+        let mut d = sample();
+        let a = d.capabilities[0].actions.remove("read").unwrap();
+        d.capabilities[0]
+            .actions
+            .insert("r".repeat(NAME_MAX + 1), a);
+        let e = d.check_names().unwrap_err();
+        assert_eq!(e, "capability fs: action name of 65 bytes: at most 64");
     }
 
     #[test]
