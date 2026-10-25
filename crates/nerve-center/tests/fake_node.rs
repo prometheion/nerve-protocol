@@ -3306,6 +3306,52 @@ async fn another_session_cannot_see_cancel_or_signal_a_job() {
     r.stop().await;
 }
 
+/// The node's exec.signal names a job also where the node wrote another
+/// provider for its commands: no session signals a call by its raw number,
+/// which could be another session's command.
+#[tokio::test]
+async fn exec_signal_names_a_job_whatever_the_provider() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, _node, mut seen, _task, _) = job_box_with(&r, json!({}), |d| {
+        with_signal(d);
+        d["capabilities"][1]["provider"] = json!("helper");
+    })
+    .await;
+    let job = job_of(&execute_as(&e, json!(1), "exec.run", json!({"command": "hang"})).await);
+    let Seen::Hang(invoke) = next_seen(&mut seen).await else {
+        panic!("no invoke")
+    };
+    let other = Engine::new(&r.center, "test");
+    list_text(
+        &other,
+        json!({"node": "box-1", "capability": ["exec.signal"]}),
+    )
+    .await;
+    let raw = execute_as(
+        &other,
+        json!(1),
+        "exec.signal",
+        json!({"call": invoke, "signal": "kill"}),
+    )
+    .await;
+    assert!(said(&raw).0.starts_with("error invalid_args: "), "{raw}");
+    nothing_more(&mut seen).await;
+    let sig = execute_as(
+        &e,
+        json!(2),
+        "exec.signal",
+        json!({"job": job, "signal": "term"}),
+    )
+    .await;
+    assert!(!said(&sig).1, "{sig}");
+    let Seen::Invoke(inv) = next_seen(&mut seen).await else {
+        panic!("no signal")
+    };
+    assert_eq!(inv["args"], json!({"call": invoke, "signal": "term"}));
+    r.stop().await;
+}
+
 /// The job answer names exec.signal only where the node offers it: a model
 /// told to call it on a node without it would only be refused.
 #[tokio::test]
