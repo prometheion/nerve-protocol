@@ -558,13 +558,22 @@ impl Engine {
                 ),
                 true,
             ),
-            Some(Outcome::Dropped { bytes }) => text_result(
-                &format!(
-                    "error too_large: job {job} ({what}) ended after {ran}, but its result ({bytes} bytes) was not kept: a session keeps at most {} MiB of results nobody read yet. Read a job's result soon after it ends.",
-                    jobs::KEPT_MAX / (1024 * 1024)
-                ),
-                true,
-            ),
+            Some(Outcome::Dropped { bytes, failed }) => {
+                // A failure that was not kept still says it failed, with its
+                // code: a model must not take a refused or stopped command
+                // for one that ended well.
+                let (code, how, words) = match &failed {
+                    Some(code) => (code.as_str(), "failed", "error"),
+                    None => ("too_large", "ended", "result"),
+                };
+                text_result(
+                    &format!(
+                        "error {code}: job {job} ({what}) {how} after {ran}, but its {words} ({bytes} bytes) was not kept: a session keeps at most {} MiB of results nobody read yet. Read a job's result soon after it ends.",
+                        jobs::KEPT_MAX / (1024 * 1024)
+                    ),
+                    true,
+                )
+            }
         }
     }
 }

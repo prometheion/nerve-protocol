@@ -85,9 +85,13 @@ pub enum Outcome {
     /// The link to the node ended before the result came: the node ends a
     /// call whose link ends, so what the call did is not known.
     Lost,
-    /// The result came but was not kept: the session's finished results
-    /// would have passed [`KEPT_MAX`].
-    Dropped { bytes: usize },
+    /// The call ended but what it gave was not kept: the session's
+    /// finished results would have passed [`KEPT_MAX`]. `failed` holds the
+    /// code of a failure, so its answer still says the call failed.
+    Dropped {
+        bytes: usize,
+        failed: Option<ErrorCode>,
+    },
 }
 
 impl Outcome {
@@ -135,8 +139,11 @@ impl Outcome {
 
     pub fn state(&self) -> &'static str {
         match self {
-            Outcome::Done { .. } | Outcome::Dropped { .. } => "done",
-            Outcome::Failed(_) => "failed",
+            Outcome::Done { .. } | Outcome::Dropped { failed: None, .. } => "done",
+            Outcome::Failed(_)
+            | Outcome::Dropped {
+                failed: Some(_), ..
+            } => "failed",
             Outcome::Lost => "lost",
         }
     }
@@ -334,7 +341,11 @@ impl Jobs {
         }
         let (mut outcome, mut bytes) = Outcome::of(r);
         if self.kept + bytes > KEPT_MAX {
-            outcome = Outcome::Dropped { bytes };
+            let failed = match outcome {
+                Outcome::Failed(e) => Some(e.kind()),
+                _ => None,
+            };
+            outcome = Outcome::Dropped { bytes, failed };
             bytes = 0;
         }
         self.kept += bytes;
@@ -578,6 +589,14 @@ mod tests {
         assert!(j.done("j-1", "n2").is_none());
         assert_eq!(j.signal_target("j-1", "n2").err(), Some(NoSignal::Unknown));
         assert_eq!(j.signal_target("j-1", "n1").err(), Some(NoSignal::NotSent));
+        // Once its call went out, exec.signal goes on that link, to that
+        // invoke id.
+        let link = Arc::new(Link::for_test("n1"));
+        j.sent("j-1", &link, 7);
+        let (on, invoke) = j.signal_target("j-1", "n1").unwrap();
+        assert!(Arc::ptr_eq(&on, &link));
+        assert_eq!(invoke, 7);
+        assert_eq!(j.signal_target("j-1", "n2").err(), Some(NoSignal::Unknown));
         assert!(j.status("j-1", "n1", now).is_some());
     }
 
@@ -634,8 +653,9 @@ mod tests {
             j.detach(&id);
             j.finish(&id, Ok(json!(big)), now);
             let v = j.entries[&id].end.as_ref().unwrap().0.clone();
-            if let Outcome::Dropped { bytes } = v {
+            if let Outcome::Dropped { bytes, failed } = v {
                 assert!(bytes > RESULT_TEXT && bytes < RESULT_TEXT + 8);
+                assert_eq!(failed, None);
                 break;
             }
             let Outcome::Done { value, cut } = v else {
@@ -648,6 +668,24 @@ mod tests {
         }
         assert!(j.kept() <= KEPT_MAX, "{}", j.kept());
         assert_eq!(i, KEPT_MAX / (RESULT_TEXT + 3));
+        // A failure past the bound keeps its code, so it still reads as
+        // failed, not as a call that ended well.
+        let _ = j.start("j-f", &route("n1", "exec.run"), false).unwrap();
+        j.detach("j-f");
+        let e = RpcError::new(ErrorCode::Forbidden, "x".repeat(RESULT_TEXT));
+        j.finish("j-f", Err(e), now);
+        let v = j.entries["j-f"].end.as_ref().unwrap().0.clone();
+        assert!(
+            matches!(
+                v,
+                Outcome::Dropped {
+                    failed: Some(ErrorCode::Forbidden),
+                    ..
+                }
+            ),
+            "{v:?}"
+        );
+        assert_eq!(v.state(), "failed");
     }
 
     /// A finished result nobody reads is forgotten after `KEEP_FOR`.

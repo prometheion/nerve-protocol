@@ -2961,6 +2961,11 @@ async fn a_failed_or_dropped_job_is_an_error_of_that_job() {
                 let _ = jobs.start(id, &route, false).unwrap();
                 jobs.detach(id);
                 jobs.finish(id, Ok(json!(big)), std::time::Instant::now());
+                // A failure past the bound: its words are not kept either.
+                let _ = jobs.start("j-overfail", &route, false).unwrap();
+                jobs.detach("j-overfail");
+                let e = nerve_proto::RpcError::new(nerve_proto::ErrorCode::Forbidden, big.clone());
+                jobs.finish("j-overfail", Err(e), std::time::Instant::now());
                 break id;
             }
             i += 1;
@@ -2979,6 +2984,29 @@ async fn a_failed_or_dropped_job_is_an_error_of_that_job() {
         text.contains(&format!(
             "but its result ({} bytes) was not kept: a session keeps at most 4 MiB",
             big.len()
+        )),
+        "{text}"
+    );
+    // The failure that was not kept still reads as a failure, with its
+    // code, never as a job that ended well.
+    let got = execute_as(&e, json!(4), "job.cancel", json!({"job": "j-overfail"})).await;
+    assert!(said(&got).0.contains("had ended already (failed)"), "{got}");
+    assert_eq!(
+        got["result"]["structuredContent"],
+        json!({"job": "j-overfail", "state": "failed"})
+    );
+    let got = execute_as(&e, json!(5), "job.status", json!({"job": "j-overfail"})).await;
+    let (text, err) = said(&got);
+    assert!(err, "{got}");
+    assert!(
+        text.starts_with("error forbidden: job j-overfail (exec.run on node box-1) failed after "),
+        "{text}"
+    );
+    assert!(
+        // Its bytes: the message and the error's data.
+        text.contains(&format!(
+            "but its error ({} bytes) was not kept",
+            big.len() + r#"{"code":"forbidden"}"#.len()
         )),
         "{text}"
     );
@@ -3251,6 +3279,52 @@ async fn the_checker_decides_on_a_jobs_signal() {
     assert!(err, "{sig}");
     assert!(text.starts_with("error forbidden: "), "{text}");
     nothing_more(&mut seen).await;
+    r.stop().await;
+}
+
+/// `job.status` and `job.cancel` are the center's own: they pass no action
+/// checker and count in no statistics. With the decision model on and out
+/// of reach, which refuses every checked call, the agent still reads and
+/// stops its job.
+#[tokio::test]
+async fn the_centers_job_units_pass_no_checker_and_count_nowhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, _node, mut seen, _task) = job_box(&r).await;
+    let job = job_of(&execute_as(&e, json!(1), "exec.run", json!({"command": "hang"})).await);
+    let Seen::Hang(invoke) = next_seen(&mut seen).await else {
+        panic!("no invoke")
+    };
+    r.center.update(|s| {
+        s.checker.model_on = true;
+        // An endpoint source with no URL: nothing to reach.
+        s.checker.model.source = ModelSource::Endpoint;
+        s.checker.model.endpoint_url = String::new();
+    });
+    r.center.rebuild_checker();
+    let status = execute_as(&e, json!(2), "job.status", json!({"job": job})).await;
+    let (text, err) = said(&status);
+    assert!(!err, "{status}");
+    assert!(text.contains("still runs"), "{text}");
+    let cancel = execute_as(&e, json!(3), "job.cancel", json!({"job": job})).await;
+    assert!(!said(&cancel).1, "{cancel}");
+    assert_eq!(
+        cancel["result"]["structuredContent"],
+        json!({"job": job, "state": "cancelled"})
+    );
+    let Seen::Cancel(id) = next_seen(&mut seen).await else {
+        panic!("the node got no cancel")
+    };
+    assert_eq!(id, invoke);
+    // The checker is on and refuses a call of the node's own.
+    let run = execute_as(&e, json!(4), "exec.run", json!({"command": "hang"})).await;
+    assert!(said(&run).0.starts_with("error forbidden: "), "{run}");
+    nothing_more(&mut seen).await;
+    let stats = r.center.stats_json();
+    let calls = &stats["nodes"]["box-1"]["calls"];
+    for unit in ["job.status", "job.cancel"] {
+        assert!(calls[unit].is_null(), "{unit}: {stats}");
+    }
     r.stop().await;
 }
 

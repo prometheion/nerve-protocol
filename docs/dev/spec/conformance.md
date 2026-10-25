@@ -41,8 +41,11 @@ that pairs the node under test with the link it is handed and starts it, or
 `harness_part::run(&target)` with the center's HTTP MCP address, a harness
 token, two fresh pairing links (the part pairs two echo nodes, `conf-a` and
 `conf-b`, so the center must have no node of those names) and the center's
-call wait (harness.md §4.4; a short one keeps the part quick, the tests use
-1 s). Each node offers `echo.say`, `echo.fail` (valid by its schema, it
+call wait (harness.md §4.4). The part waits for each answer that long plus
+15 s, since an `execute` holds its answer for the whole call wait, and it
+takes a call wait of up to 598.5 s (its job call runs 1.5 s longer, and
+`echo.wait` waits at most 600 s). A short one keeps the part quick; the
+tests use nerve-center's default, 20 s. Each node offers `echo.say`, `echo.fail` (valid by its schema, it
 always fails on the node), `echo.wait` (answered after the `ms` it is
 asked to wait), `mirror.say` and `mirror.set`, and describes `node`,
 `settings` and `audit` units that a center must never offer; the part

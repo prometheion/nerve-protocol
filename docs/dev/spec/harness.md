@@ -358,7 +358,9 @@ and they count in no statistics:
   failed after …: …`; a call whose link ended before its result came is
   `error connection_lost: job j-… … was lost …`; a result that was not kept
   is `error too_large: job j-… … ended after …, but its result (N bytes) was
-  not kept …`. A result is given once.
+  not kept …`, a failure that was not kept keeps its code and state
+  (`error <code>: job j-… … failed after …, but its error (N bytes) was not
+  kept …`). A result is given once.
 - `job.cancel` of a running job tells the node to `cancel` its `invoke`,
   which stops a command, and the job is gone. A job that ended is named with
   its state and stays for `job.status`.
@@ -383,7 +385,8 @@ and they count in no statistics:
   `error busy: node box-1 runs 56 calls already, …` before the node.
   Finished results are kept in
   memory only, each cut as a result is (256 KiB), at most 4 MiB per session
-  (a result past that is not kept: `job.status` says `error too_large`),
+  (a result past that is not kept: `job.status` says `error too_large`, or
+  for a failure its own code),
   until they are read or for 10 minutes.
 - A job counts in the statistics, taints the session (the action checker's
   taint) and logs a failure when it ends, not when it became a job.

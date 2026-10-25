@@ -53,7 +53,8 @@ keeps busy: at most 16 calls run at once, also the ones that became jobs
 `busy` until one ends or is stopped; the refusal names the session's running
 jobs. A job's `exec.signal` still goes through then. Results of finished jobs
 are kept in the center's memory, at most 4 MiB per session and for 10 minutes;
-a result past that is not kept. These are fixed in the center.
+a result past that is not kept (a job that failed still says that it failed,
+and why in one word). These are fixed in the center.
 
 The node's own limit of 64 calls at once per center holds for all sessions
 together. The center keeps 8 of those for itself: the agents' calls take at

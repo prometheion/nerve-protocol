@@ -33,6 +33,11 @@ use crate::wire::{Conn, Recv};
 use crate::{Report, ensure};
 
 const WAIT: Duration = Duration::from_secs(15);
+/// The longest call wait the part takes: its job call runs 1.5 s past the
+/// call wait, and `echo.wait` waits at most [`echo::WAIT_MAX_MS`].
+pub const CALL_WAIT_MAX: Duration = Duration::from_millis(echo::WAIT_MAX_MS - JOB_PAST_MS);
+/// How long the part's job call runs past the call wait.
+const JOB_PAST_MS: u64 = 1500;
 const LATEST: &str = "2025-06-18";
 /// The names of the two nodes the part pairs.
 const A: &str = "conf-a";
@@ -49,8 +54,9 @@ pub struct Target {
     /// Two fresh pairing links of it, one for each node.
     pub links: [PairLink; 2],
     /// How long its `execute` waits for a result before the call becomes a
-    /// job (`--call-wait`): the part makes a call that takes longer. A short
-    /// one keeps the part quick.
+    /// job (`--call-wait`): the part makes a call that takes longer, and
+    /// waits that long more for each answer. A short one keeps the part
+    /// quick; it takes at most [`CALL_WAIT_MAX`].
     pub call_wait: Duration,
 }
 
@@ -85,8 +91,8 @@ struct Req<'a> {
     body: Option<&'a Value>,
 }
 
-/// One request, `Connection: close`.
-async fn http(addr: &str, r: Req<'_>) -> Result<Reply, String> {
+/// One request, `Connection: close`, answered within `wait`.
+async fn http(addr: &str, r: Req<'_>, wait: Duration) -> Result<Reply, String> {
     let body = r.body.map(Value::to_string).unwrap_or_default();
     let mut req = format!(
         "{} /mcp HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
@@ -108,7 +114,7 @@ async fn http(addr: &str, r: Req<'_>) -> Result<Reply, String> {
     }
     req.push_str("\r\n");
     req.push_str(&body);
-    let raw = tokio::time::timeout(WAIT, async {
+    let raw = tokio::time::timeout(wait, async {
         let mut s = TcpStream::connect(addr).await.map_err(|e| e.to_string())?;
         s.write_all(req.as_bytes())
             .await
@@ -118,7 +124,7 @@ async fn http(addr: &str, r: Req<'_>) -> Result<Reply, String> {
         Ok::<_, String>(raw)
     })
     .await
-    .map_err(|_| format!("no answer from {addr} within {WAIT:?}"))??;
+    .map_err(|_| format!("no answer from {addr} within {wait:?}"))??;
     parse_reply(&raw)
 }
 
@@ -182,12 +188,33 @@ fn dechunk(mut raw: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
+/// How long a request of a session may take with the center's call wait
+/// `call_wait`: the part's own wait on top of it.
+fn request_wait(call_wait: Duration) -> Duration {
+    WAIT + call_wait
+}
+
+/// How long the part's job call runs: past the call wait `call_wait`, and
+/// no longer than `echo.wait` takes.
+fn job_ms(call_wait: Duration) -> Result<u64, String> {
+    ensure(
+        call_wait <= CALL_WAIT_MAX,
+        format!(
+            "the part takes a call wait of at most {CALL_WAIT_MAX:?}, not {call_wait:?}: its job call would wait longer than echo.wait does"
+        ),
+    )?;
+    Ok(call_wait.as_millis() as u64 + JOB_PAST_MS)
+}
+
 /// One MCP session over HTTP.
 struct Session {
     addr: String,
     token: String,
     id: String,
     next: AtomicU64,
+    /// How long a request may take: an `execute` holds its answer for the
+    /// whole call wait before it answers with the job.
+    wait: Duration,
 }
 
 impl Session {
@@ -206,6 +233,7 @@ impl Session {
                 origin: None,
                 body: Some(&body),
             },
+            WAIT,
         )
         .await?;
         ensure(
@@ -221,6 +249,7 @@ impl Session {
             token: t.token.clone(),
             id,
             next: AtomicU64::new(1),
+            wait: request_wait(t.call_wait),
         };
         s.notify("notifications/initialized").await?;
         Ok((s, reply.json()?))
@@ -241,6 +270,7 @@ impl Session {
                 origin: None,
                 body,
             },
+            self.wait,
         )
         .await
     }
@@ -1046,6 +1076,7 @@ pub async fn run(target: &Target) -> Report {
                     origin: origin.as_deref(),
                     body: Some(&init),
                 },
+                WAIT,
             )
             .await
             .map(|r| r.status)
@@ -1522,8 +1553,9 @@ pub async fn run(target: &Target) -> Report {
 
     // harness 4.4: a call that runs past the call wait becomes a job of its
     // session, which `job.status` follows and `job.cancel` stops.
-    let ms = t.call_wait.as_millis() as u64 + 1500;
+    let ms = job_ms(t.call_wait);
     let job = async {
+        let ms = ms.clone()?;
         let started = tokio::time::Instant::now();
         let res = s3.run(A, "echo.wait", json!({"ms": ms})).await?;
         let job = check_job(&res)?;
@@ -1545,7 +1577,7 @@ pub async fn run(target: &Target) -> Report {
         async {
             let job = job.clone()?;
             let done = job_ended(&s3, A, &job).await?;
-            check_job_done(&done, A, &id_a, &job, &json!({"waited": ms}))?;
+            check_job_done(&done, A, &id_a, &job, &json!({"waited": ms.clone()?}))?;
             let again = s3.execute(A, "job.status", json!({"job": job})).await?;
             check_error_result(&again, "unknown_job").map_err(|e| format!("read again: {e}"))?;
             ensure(
@@ -1919,6 +1951,21 @@ mod tests {
         let mut err = ok.clone();
         err["isError"] = json!(true);
         assert!(check_device_content(&err, "a", "1", "mirror.say", "hi").is_err());
+    }
+
+    /// The part waits for each answer as long as an `execute` may hold it
+    /// and longer, and names a call wait its job call cannot outlast.
+    #[test]
+    fn the_part_waits_past_the_call_wait() {
+        let wait = Duration::from_secs(20);
+        assert_eq!(request_wait(wait), WAIT + wait);
+        assert_eq!(job_ms(wait), Ok(21_500));
+        assert_eq!(job_ms(CALL_WAIT_MAX), Ok(echo::WAIT_MAX_MS));
+        let e = job_ms(CALL_WAIT_MAX + Duration::from_millis(1)).unwrap_err();
+        assert!(
+            e.starts_with("the part takes a call wait of at most"),
+            "{e}"
+        );
     }
 
     /// A call that became a job is answered as one: not an error, exactly
