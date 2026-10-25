@@ -147,7 +147,10 @@ by the center, not by the request. `job.status` gives its state or, once it
 ended, its result (given once, kept in memory for 10 minutes at most);
 `job.cancel` stops it on the node; `exec.signal` sends its command a signal
 by the job's id. Jobs are the session's own: another session's id names
-nothing. A session runs at most 16 calls at once. Details:
+nothing. `job.status` and `job.cancel` work on every node that is not
+disabled, also once its offer dropped to nothing; disabling a node stops its
+jobs. A session runs at most 16 calls at once, and the agents' calls of all
+sessions leave 8 of a node's call places free. Details:
 [harness spec §4.4](spec/harness.md#44-jobs).
 
 ## Sessions

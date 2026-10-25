@@ -108,9 +108,14 @@ never appears in a capability id or action name (protocol §6), while `_` and
 - `node`, `settings` and `audit` are never units, so a model cannot change
   the policy that limits it.
 - `exec.signal` is offered by the job's id: `params` name `job` where the
-  node's name `call`, the `invoke` id only the center knows (§4.4).
+  node's name `call`, the `invoke` id only the center knows (§4.4), and
+  `job` is required whatever the node said of `call`.
 - Beside a node's own units, when it offers at least one that is not off,
-  the center offers its own `job.status` and `job.cancel` (§4.4). A
+  `list` shows the center's own `job.status` and `job.cancel` (§4.4).
+  `execute` finds them on every node that is not disabled, also once its
+  offer dropped to nothing (an `until` passed, every unit turned off), so a
+  running job can still be read and stopped. The center tells its units by
+  their capability, never by the node's `provider` field. A
   capability of the node named `job` or `stream` is left out whole, as one
   entry: these names are the center's (`stream` is kept for streams).
 - A capability with exposure `off` offers none of its units; `list(node)`
@@ -282,8 +287,9 @@ and sends nothing to the node.
    (`exec.signal` names no folder). A session
    remembers at most 1024 units and drops the one listed longest ago; the
    model then lists it again. An `execute` answered with a job counts as the
-   details of that node's `job.status` and `job.cancel`: it names them with
-   their args (§4.4).
+   details of that node's `job.status` and `job.cancel`, and of its
+   `exec.signal` where the node offers it: it names them with their args
+   (§4.4).
 5. `args` (missing or `null` is `{}`) against the unit's `params`. Arguments
    that do not fit are `error invalid_args: <field>: expected <what>`
    (`error invalid_args: path: expected a string (required)`). This refusal
@@ -330,9 +336,9 @@ request no longer reaches it (§5). A harness gives up on a tool call after a
 while, often a minute: the call wait stays below that, so no tool call of the
 center takes longer.
 
-The center serves two units of its own on every node that offers units of
-its own (§4.1). They never go to the node, the action checker never sees
-them, and they count in no statistics:
+The center serves two units of its own on every node (§4.1 says where `list`
+shows them). They never go to the node, the action checker never sees them,
+and they count in no statistics:
 
 | Unit | Effect | `args` | Answer |
 |---|---|---|---|
@@ -346,7 +352,9 @@ them, and they count in no statistics:
   job, with the center's `{"job", "state": "done"}` as `center` beside the
   envelope. A failure is `error <code>: job j-… (exec.run on node box-1)
   failed after …: …`; a call whose link ended before its result came is
-  `error connection_lost: job j-… … was lost …`. A result is given once.
+  `error connection_lost: job j-… … was lost …`; a result that was not kept
+  is `error too_large: job j-… … ended after …, but its result (N bytes) was
+  not kept …`. A result is given once.
 - `job.cancel` of a running job tells the node to `cancel` its `invoke`,
   which stops a command, and the job is gone. A job that ended is named with
   its state and stays for `job.status`.
@@ -358,17 +366,27 @@ them, and they count in no statistics:
   that node only, on the link that call runs on (an `invoke` id counts on
   its link only). The action checker and the node's policy decide on it as
   on any call. An id that names no such job is `error unknown_job`, a job
-  that is no command `error invalid_args`.
+  that is no command `error invalid_args`. The job answer names
+  `exec.signal` only where the node offers it.
 - Limits per session: at most 16 calls run at once, jobs or not; the 17th is
-  `error busy` and reaches no node. The node's own limit, 64 calls in flight
-  per link, holds for all sessions together. Finished results are kept in
+  `error busy`, reaches no node, and names the session's running jobs (id,
+  unit, node, how long), so a model that lost their ids can stop one. A
+  job's `exec.signal` has 4 places beyond the 16. The node's own limit
+  (`limits.calls` of its hello, 64 for nerve-node) holds for all sessions
+  together: the agents' calls leave 8 of those places free, for the owner's
+  settings changes from the center and for `exec.signal`, and a call past
+  that is `error busy: node box-1 runs 56 calls already, …` before the node.
+  Finished results are kept in
   memory only, each cut as a result is (256 KiB), at most 4 MiB per session
   (a result past that is not kept: `job.status` says `error too_large`),
   until they are read or for 10 minutes.
 - A job counts in the statistics, taints the session (the action checker's
   taint) and logs a failure when it ends, not when it became a job.
 - The end of the session stops its jobs (the node gets `cancel` for each and
-  `session.end`) and drops their results. A link that drops and is not
+  `session.end`) and drops their results. Disabling a node in the center
+  stops the calls that run there, jobs too (the node gets `cancel`); once it
+  is enabled again, `job.status` says `error cancelled: job j-… failed after
+  …: the node was disabled in the center`. A link that drops and is not
   resumed ends its calls, and their jobs are `lost`; a link the node resumes
   (protocol.md §4.9) carries them on.
 

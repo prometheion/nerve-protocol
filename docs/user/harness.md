@@ -217,12 +217,16 @@ exec.run on node box-1 still runs after 20 s, so it became job j-4kq2…: it run
 |---|---|
 | `job.status` with `{"job": "j-…"}` | Says the job still runs, or gives its result once it ended, as `execute` would have. `"wait_ms"` waits for the end, at most the call wait |
 | `job.cancel` with `{"job": "j-…"}` | Stops the job: the machine cancels its call, which ends a command |
-| `exec.signal` with `{"job": "j-…", "signal": "term"}` | Sends a command that runs as a job a signal: `term` asks it to stop, `int` interrupts it, `kill` ends it. Only where you allowed `exec.signal` ([stop](stop.md)) |
+| `exec.signal` with `{"job": "j-…", "signal": "term"}` | Sends a command that runs as a job a signal: `term` asks it to stop, `int` interrupts it, `kill` ends it. Only where you allowed `exec.signal` ([stop](stop.md)); the job's answer names it only there |
 
 The center answers `job.status` and `job.cancel` itself, without the
 machine, the action checker or the statistics; `exec.signal` goes to the
 machine like any call. A job belongs to its session: another session cannot
-read, stop or signal it. A session runs at most 16 calls at once. A finished
+read, stop or signal it. `job.status` and `job.cancel` keep working when the
+machine offers nothing any more while a job runs (its `until` passed, you
+turned everything off); **Disable** in the center stops the machine's jobs.
+A session runs at most 16 calls at once, and the refusal of a 17th names its
+running jobs ([limits](limits.md#calls-of-one-agent-session)). A finished
 job's result is kept in the center's memory only, until it is read once, for
 10 minutes, or until the session ends, and at most 4 MiB of results per
 session. When the machine's link drops and does not come back, its jobs are
