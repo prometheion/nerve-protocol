@@ -12,12 +12,18 @@
 //! `git`), and one ending in `/*` the folder itself, so the wildcard the
 //! buttons write covers what the owner clicked on. The audit buttons write
 //! rules with [`rule_for`], the CLI with the same function.
+//!
+//! A rule `guard:<name>` is one of the guard's ([`crate::guard`]): it looks
+//! at the commands of an `exec.run` line, not at its text.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use globset::{GlobBuilder, GlobMatcher};
 
+use crate::command::{Shell, parse};
 use crate::decide::sudo_command;
+use crate::guard::Guard;
 use crate::paths::to_wire;
 
 /// The capability whose targets are paths.
@@ -74,8 +80,26 @@ fn build(pattern: &str, path: bool) -> Result<GlobMatcher, globset::Error> {
         .map(|g| g.compile_matcher())
 }
 
+/// The scope a rule covers: `cap` or `cap.action`, and `exec.run` for a rule
+/// of the guard.
+pub fn scope_of(rule: &str) -> &str {
+    if Guard::of_rule(rule).is_some() {
+        return "exec.run";
+    }
+    rule.split(':').next().unwrap_or(rule)
+}
+
 /// Checks a rule of the allow or deny list.
 pub fn validate(rule: &str) -> Result<(), String> {
+    if rule.split(':').next() == Some(GUARD_SCOPE) {
+        return match Guard::of_rule(rule) {
+            Some(_) => Ok(()),
+            None => Err(format!(
+                "rule {rule:?}: the guard's rules are {}",
+                Guard::ALL.map(Guard::rule).join(", ")
+            )),
+        };
+    }
     let (scope, pattern) = split(rule)?;
     if let Some(p) = pattern {
         build(p, is_path_scope(scope)).map_err(|e| format!("rule {rule:?}: {e}"))?;
@@ -139,6 +163,9 @@ pub fn offers(rules: &[String], cap: &str, action: &str) -> bool {
     })
 }
 
+/// The scope word of the guard's rules (`guard:node-programs`).
+const GUARD_SCOPE: &str = "guard";
+
 struct Compiled {
     text: String,
     cap: String,
@@ -146,23 +173,41 @@ struct Compiled {
     /// The pattern with `~/` resolved; [`RuleSet::find_exact`] compares it.
     pattern: Option<String>,
     globs: Vec<GlobMatcher>,
+    /// A rule of the guard: it matches parsed commands, not the text.
+    guard: Option<Guard>,
 }
 
 /// An allow or deny list, compiled.
 pub struct RuleSet {
     rules: Vec<Compiled>,
+    /// The shell that runs the commands, by whose rules the guard reads them.
+    shell: Shell,
 }
 
 impl RuleSet {
     /// Compiles `rules`; one that does not parse is left out (the config
     /// check refuses them before they get here). `~/` in an `fs` pattern is
-    /// `home`.
+    /// `home`. The guard reads a command line as the node's default shell
+    /// does; [`RuleSet::with_shell`] names another.
     pub fn new(rules: &[String], home: &Path) -> RuleSet {
         let home = to_wire(home);
         let rules = rules
             .iter()
             .filter_map(|text| {
+                if let Some(guard) = Guard::of_rule(text) {
+                    return Some(Compiled {
+                        text: text.clone(),
+                        cap: "exec".into(),
+                        action: Some("run".into()),
+                        pattern: None,
+                        globs: Vec::new(),
+                        guard: Some(guard),
+                    });
+                }
                 let (scope, pattern) = split(text).ok()?;
+                if scope == GUARD_SCOPE {
+                    return None;
+                }
                 let (cap, action) = match scope.split_once('.') {
                     Some((c, a)) => (c, Some(a)),
                     None => (scope, None),
@@ -185,18 +230,39 @@ impl RuleSet {
                     action: action.map(Into::into),
                     pattern,
                     globs,
+                    guard: None,
                 })
             })
             .collect();
-        RuleSet { rules }
+        RuleSet {
+            rules,
+            shell: Shell::native(),
+        }
     }
 
-    /// The first rule that covers `target` of `cap.action`.
+    /// The list with its command lines read as `shell` reads them.
+    pub fn with_shell(mut self, shell: Shell) -> RuleSet {
+        self.shell = shell;
+        self
+    }
+
+    /// The first rule that covers `target` of `cap.action`. A rule of the
+    /// guard parses the line once (for all of them); a line that does not
+    /// parse is checked with the guard's text patterns.
     pub fn find(&self, cap: &str, action: &str, target: &str) -> Option<&str> {
+        let mut parsed = None;
         self.rules
             .iter()
             .filter(|r| r.covers(cap, action))
-            .find(|r| r.globs.is_empty() || r.globs.iter().any(|g| g.is_match(target)))
+            .find(|r| match r.guard {
+                Some(g) => match parsed.get_or_insert_with(|| parse(target, self.shell)) {
+                    Ok(script) => g.refuses(script),
+                    // What was read before the line gave out is checked as
+                    // a line is, and the text patterns look at all of it.
+                    Err(e) => g.refuses(&e.read) || fallback(g).iter().any(|m| m.is_match(target)),
+                },
+                None => r.globs.is_empty() || r.globs.iter().any(|g| g.is_match(target)),
+            })
             .map(|r| r.text.as_str())
     }
 
@@ -416,22 +482,36 @@ macro_rules! end_ps {
 }
 
 /// The deny rules every new pairing gets, the guard against an agent that
-/// changes the node it runs on (owner's decision of 2026-10-20): a command
-/// that runs the node's programs (at the start of a command, after `sudo`,
-/// or by a path, `.exe` too), names its socket and pipes (all named
-/// `nerve-node…`) or its config and state folders, and a write into those
-/// folders, and a command that stops, restarts, disables or kills the node's
-/// service or process by its name (`systemctl stop nerve-node`,
-/// `service nerve-node restart`, `pkill nerve-node`, `sc stop nerve-node`,
-/// `taskkill /im nerve-node.exe`). Only running or stopping it counts, not
-/// its name anywhere: `cargo build -p nerve-node`, `journalctl -u nerve-node`
-/// and `systemctl status nerve-node` stay allowed. They
-/// are on top of the node's own folders, which nothing releases
-/// (crate::protected). A deny rule matches the whole line, so they catch a
-/// confused agent, not one that builds the name at run time: the real
-/// protection is that commands run as an account of their own. The owner
-/// may remove any of them.
+/// changes the node it runs on (owner's decisions of 2026-10-20 and
+/// 2026-10-22): a command that runs the node's programs, one that names its
+/// socket, pipes or config and state folders, and one that stops, restarts,
+/// disables or kills its service or process ([`Guard`], on the parsed
+/// commands of the line), and a write into those folders. Only running or
+/// stopping the node counts, not its name anywhere: `cargo build -p
+/// nerve-node`, `journalctl -u nerve-node`, `systemctl status nerve-node`
+/// and a commit message that names them stay allowed. They are on top of the
+/// node's own folders, which nothing releases (crate::protected). They catch
+/// a confused agent, not one that builds the name at run time: the real
+/// protection is that commands run as an account of their own. The owner may
+/// remove any of them.
 pub const GUARD: &[&str] = &[
+    "guard:node-programs",
+    "guard:node-paths",
+    "guard:node-service",
+    "fs.write:~/.config/nerve/*",
+    "fs.write:~/.local/state/nerve/*",
+    "fs.write:/etc/nerve/*",
+    "fs.write:/var/lib/nerve/*",
+    "fs.write:/?/ProgramData/Nerve/*",
+];
+
+/// The guard's text patterns from before it read commands (0.0.6), as globs
+/// over the whole line: a command that runs the node's programs (`..2`),
+/// names its paths (`2..9`) or stops its service (`9..`), where a command
+/// starts. They miss what a pattern cannot see (`env X=1 sudo …`) and refuse
+/// some mentions; the guard still checks a line it cannot parse with them,
+/// so such a line is refused wherever they refused it.
+const TEXTS: [&str; 18] = [
     // By name where a command starts: the line's start, after `;`, `&`,
     // `|`, `(`, `{` or a line break (with its indent), a shell keyword, and
     // `sudo`; then the line's end, a space, a tab, a line break or a quote.
@@ -571,16 +651,51 @@ pub const GUARD: &[&str] = &[
         "{,*[/\\]}{pkill,killall} {,-* }{,[\"']}{,^}{,*/}nerve-node{,-desktop}{,[$\"']}",
         end!()
     ),
-    "fs.write:~/.config/nerve/*",
-    "fs.write:~/.local/state/nerve/*",
-    "fs.write:/etc/nerve/*",
-    "fs.write:/var/lib/nerve/*",
-    "fs.write:/?/ProgramData/Nerve/*",
 ];
 
-/// The texts of [`GUARD`] rules from before a line break ended a command,
-/// which `rule guard` takes off a deny list when it puts the new ones on.
+/// The [`TEXTS`] that stand in for `guard` on a line that does not parse.
+fn fallback(guard: Guard) -> &'static [GlobMatcher] {
+    static COMPILED: OnceLock<[Vec<GlobMatcher>; 3]> = OnceLock::new();
+    let all = COMPILED.get_or_init(|| {
+        let globs = |texts: &[&str]| {
+            texts
+                .iter()
+                .filter_map(|t| t.strip_prefix("exec.run:"))
+                .flat_map(|p| matchers(p, false))
+                .collect::<Vec<_>>()
+        };
+        [globs(&TEXTS[..2]), globs(&TEXTS[2..9]), globs(&TEXTS[9..])]
+    });
+    match guard {
+        Guard::Programs => &all[0],
+        Guard::Paths => &all[1],
+        Guard::Service => &all[2],
+    }
+}
+
+/// The guard's older texts, which `rule guard` takes off a deny list when it
+/// puts the current ones on: the text patterns of 0.0.6 ([`TEXTS`]) and
+/// those from before a line break ended a command. A pairing that still has
+/// them keeps them as plain deny rules until then.
 pub const GUARD_OLD: &[&str] = &[
+    TEXTS[0],
+    TEXTS[1],
+    TEXTS[2],
+    TEXTS[3],
+    TEXTS[4],
+    TEXTS[5],
+    TEXTS[6],
+    TEXTS[7],
+    TEXTS[8],
+    TEXTS[9],
+    TEXTS[10],
+    TEXTS[11],
+    TEXTS[12],
+    TEXTS[13],
+    TEXTS[14],
+    TEXTS[15],
+    TEXTS[16],
+    TEXTS[17],
     "exec.run:{,*[;&|(] ,*[;&|(],*sudo }nerve-node{,-desktop}{,.exe}{,[ \"']*}",
     "exec.run:*[/\\]nerve-node{,-desktop}{,.exe}{,[ \"']*}",
     "exec.run:*/run/nerve-node{,/*,[ \"']*}",
@@ -592,8 +707,8 @@ pub const GUARD_OLD: &[&str] = &[
 ];
 
 /// `rule` with its tab, carriage return and line feed written `\t`, `\r` and
-/// `\n`, as `rule ls` and the app show it: a rule of the guard holds them
-/// (they end a command in a script), and a listing keeps one line a rule.
+/// `\n`, as `rule ls` and the app show it: an older text of the guard holds
+/// them (they end a command in a script), and a listing keeps one line a rule.
 pub fn escape_controls(rule: &str) -> String {
     let mut out = String::with_capacity(rule.len());
     for c in rule.chars() {
@@ -660,6 +775,12 @@ pub fn guard_missing(deny: &[String]) -> Vec<&'static str> {
         .copied()
         .filter(|g| !deny.iter().any(|d| d == g))
         .collect()
+}
+
+/// Whether `deny` still holds a text of the guard from before it read
+/// commands ([`GUARD_OLD`]): it works, but as text patterns.
+pub fn guard_older(deny: &[String]) -> bool {
+    deny.iter().any(|d| GUARD_OLD.contains(&d.as_str()))
 }
 
 /// The sudo allow list entry for `command`: the command itself, or with
@@ -787,160 +908,13 @@ mod tests {
         );
     }
 
-    /// The guard of a new pairing refuses what drives the node itself,
-    /// and leaves work near it alone.
-    #[test]
-    fn the_guard_refuses_the_node_itself() {
-        let home = Path::new("/home/alice");
-        let set = RuleSet::new(
-            &GUARD.iter().map(|g| g.to_string()).collect::<Vec<_>>(),
-            home,
-        );
-        let run = |c: &str| set.find("exec", "run", c).is_some();
-        for c in [
-            "nerve-node config set machine.user root",
-            "nerve-node",
-            "sudo /usr/local/bin/nerve-node-desktop mode set user",
-            "sudo nerve-node rule rm deny 'rm *'",
-            "cd /tmp && nerve-node status",
-            "cd /tmp;nerve-node-desktop status",
-            "true | nerve-node audit",
-            "(nerve-node.exe panic)",
-            "./target/release/nerve-node-desktop mode set user",
-            "& 'C:/Program Files/Nerve/nerve-node-desktop.exe' config set node.name x",
-            "socat - UNIX-CONNECT:/run/nerve-node/owner.sock",
-            "ls /run/nerve-node",
-            "echo x > //./pipe/nerve-node-owner",
-            "cat /etc/nerve/node.toml",
-            "rm -rf /var/lib/nerve/state",
-            "sed -i s/a/b/ ~/.config/nerve/node.toml",
-            "ls $HOME/.local/state/nerve",
-            "type %ProgramData%/Nerve/config/node.toml",
-            // A line break or a tab ends a command and its name like a space,
-            // and a script line may be indented.
-            "cd /tmp\nnerve-node status",
-            "cd /tmp\r\nnerve-node status",
-            "nerve-node\necho x",
-            "nerve-node\r\n",
-            "echo hi\n  nerve-node status",
-            "echo hi\n\tsudo nerve-node audit",
-            "/usr/local/bin/nerve-node\tstatus",
-            "/usr/local/bin/nerve-node\nls",
-            "ls /run/nerve-node\n",
-            "cat /etc/nerve\nls",
-            "cat /var/lib/nerve\tx",
-            "cat ~/.config/nerve\r\nls",
-            "ls $HOME/.local/state/nerve\n",
-            "type %ProgramData%/Nerve\r\ndir",
-            // sudo and the keywords before a program: at a command's start.
-            "sudo -n nerve-node status",
-            "if true; then nerve-node status; fi",
-            "if true; then sudo nerve-node status; fi",
-            "for i in 1; do sudo -u root nerve-node audit; done",
-            "{ nerve-node status; }",
-        ] {
-            assert!(run(c), "should be refused: {c}");
-        }
-        for c in [
-            // sudo has to begin the command, in rule 0 too.
-            "git commit -m \"use sudo nerve-node audit to see it\"",
-            "echo \"then run sudo nerve-node service stop\"",
-            "ls ~/.config",
-            "cargo build -p nerve-node",
-            "cargo test -p nerve-node-desktop --test shots",
-            "journalctl -u nerve-node",
-            "grep -r nerve-node docs/",
-            "git commit -m 'run nerve-node status'",
-            "cargo build --manifest-path crates/nerve-node/Cargo.toml",
-            "cat ~/.config/nerve-node-desktop/settings.json",
-            "ls /etc/nervecenter",
-            "git status",
-        ] {
-            assert!(!run(c), "should stay allowed: {c}");
-        }
-        let write = |p: &str| set.find("fs", "write", p).is_some();
-        assert!(write("/home/alice/.config/nerve/node.toml"));
-        assert!(write("/etc/nerve/keys/home.key"));
-        assert!(write("/var/lib/nerve/state/audit.jsonl"));
-        assert!(write("/c/ProgramData/Nerve/config/node.toml"));
-        assert!(!write("/home/alice/notes.md"));
-        assert!(set.find("fs", "read", "/etc/nerve/node.toml").is_none());
-        for g in GUARD {
-            validate(g).unwrap();
-        }
-        let have = vec![GUARD[0].to_string(), "exec.run:rm *".to_string()];
-        assert_eq!(guard_missing(&have), GUARD[1..].to_vec());
-    }
-
-    /// The guard's rules before a line break ended a command let a second
-    /// line through; the new texts do not. `rule guard` replaces the old ones.
-    #[test]
-    fn the_old_guard_texts_missed_a_line_break_and_are_replaced() {
-        let home = Path::new("/home/alice");
-        let old = RuleSet::new(
-            &GUARD_OLD.iter().map(|g| g.to_string()).collect::<Vec<_>>(),
-            home,
-        );
-        let new = RuleSet::new(
-            &GUARD.iter().map(|g| g.to_string()).collect::<Vec<_>>(),
-            home,
-        );
-        for c in [
-            "cd /tmp\nnerve-node status",
-            "nerve-node\necho x",
-            "echo hi\n  nerve-node status",
-            "/usr/local/bin/nerve-node\nls",
-            "ls /run/nerve-node\n",
-            "cat /etc/nerve\nls",
-            "cat /var/lib/nerve\tx",
-            "cat ~/.config/nerve\r\nls",
-            "ls $HOME/.local/state/nerve\n",
-            "type %ProgramData%/Nerve\r\ndir",
-        ] {
-            assert!(old.find("exec", "run", c).is_none(), "old guard: {c}");
-            assert!(new.find("exec", "run", c).is_some(), "new guard: {c}");
-        }
-        // What the old texts refused, the new ones refuse.
-        for c in [
-            "nerve-node status",
-            "sudo nerve-node audit",
-            "ls /etc/nerve/x",
-        ] {
-            assert!(old.find("exec", "run", c).is_some(), "old guard: {c}");
-            assert!(new.find("exec", "run", c).is_some(), "new guard: {c}");
-        }
-        for o in GUARD_OLD {
-            validate(o).unwrap();
-            assert!(!GUARD.contains(o), "{o} is current");
-        }
-    }
-
-    /// What the rules refuse although it only mentions the node, as the docs
-    /// say: a line break in quoted text starts a command, and `pkill -f`
-    /// reads on to a name later in the line. A change here is a change of the
-    /// documented limit.
-    #[test]
-    fn the_known_false_positives_stay_the_documented_ones() {
-        let rules: Vec<String> = GUARD.iter().map(|g| g.to_string()).collect();
-        let set = RuleSet::new(&rules, Path::new("/home/alice"));
-        for c in [
-            "git commit -m \"Guard the service\n\nnerve-node now refuses systemctl stop\"",
-            "git commit -F - <<'EOF'\nFix it\n\nsystemctl stop nerve-node is refused now\nEOF",
-            "git commit -m \"Docs (Stop-Service nerve-node)\"",
-            "echo \"{ sudo systemctl stop nerve-node }\"",
-            "pkill -f \"cargo run -p nerve-node\"",
-        ] {
-            assert!(set.find("exec", "run", c).is_some(), "{c}");
-        }
-    }
-
     /// Only the listed form of a rule with a tab or line break is refused as
     /// a new rule; the rest is taken as it is, a Windows path too (there `\`
     /// is a separator, and `C:\tools` has a `\t`).
     #[test]
     fn only_the_listed_form_of_a_rule_with_controls_is_refused() {
         let listed = vec!["exec.run:a\nb*".to_string()];
-        for rule in GUARD {
+        for rule in GUARD.iter().chain(GUARD_OLD) {
             let shown = escape_controls(rule);
             let r = check_not_a_listed_form(&shown, &[]);
             assert_eq!(r.is_err(), shown != *rule, "{shown}");
@@ -966,7 +940,7 @@ mod tests {
 
     #[test]
     fn controls_are_written_out_and_read_back() {
-        for rule in GUARD {
+        for rule in GUARD.iter().chain(GUARD_OLD) {
             let shown = escape_controls(rule);
             assert!(!shown.contains(['\t', '\r', '\n']), "{shown}");
             assert_eq!(unescape_controls(&shown), *rule);
@@ -976,273 +950,6 @@ mod tests {
         // A pair of backslashes stays, and so does a lone one.
         assert_eq!(unescape_controls("[/\\\\]n \\x \\"), "[/\\\\]n \\x \\");
         assert_eq!(escape_controls("fs.read:/a b/*"), "fs.read:/a b/*");
-    }
-
-    /// The guard also refuses a command that stops, restarts, disables or
-    /// kills the node's service by its name, and leaves reading it alone.
-    #[test]
-    fn the_guard_refuses_stopping_the_service() {
-        // The rules before the service rules: they alone refuse none of these.
-        const BEFORE: usize = 9;
-        // The service rules after them: the fs.write rules follow.
-        const SERVICE_RULES: usize = 9;
-        assert!(GUARD[BEFORE + SERVICE_RULES].starts_with("fs.write"));
-        let rules = |g: &[&str]| g.iter().map(|g| g.to_string()).collect::<Vec<_>>();
-        let home = Path::new("/home/alice");
-        let all = RuleSet::new(&rules(GUARD), home);
-        let before = RuleSet::new(&rules(&GUARD[..BEFORE]), home);
-        let mut caught = std::collections::BTreeSet::new();
-        for c in [
-            "systemctl stop nerve-node",
-            "sudo systemctl stop nerve-node",
-            "sudo -n systemctl stop nerve-node.service",
-            "systemctl restart nerve-node",
-            "systemctl try-restart nerve-node",
-            "systemctl reload-or-restart nerve-node.service",
-            "systemctl disable nerve-node",
-            "systemctl disable --now nerve-node",
-            "sudo systemctl --now disable nerve-node.service",
-            "systemctl kill nerve-node",
-            "systemctl kill -s KILL nerve-node",
-            "systemctl kill --signal=SIGKILL nerve-node.service",
-            "systemctl mask nerve-node",
-            "systemctl mask --now nerve-node",
-            "systemctl --no-block stop 'nerve-node'",
-            "systemctl stop nerve-node nerve-center",
-            "systemctl stop sshd; journalctl -u nerve-node",
-            "/usr/bin/systemctl stop nerve-node",
-            "sudo /bin/systemctl restart nerve-node.service",
-            "cd /tmp && sudo systemctl stop nerve-node",
-            "true; systemctl stop nerve-node",
-            "(systemctl stop nerve-node)",
-            "sc stop nerve-node",
-            "sc.exe stop nerve-node",
-            "sc config nerve-node start= disabled",
-            "sc.exe config nerve-node start= disabled",
-            "sc delete nerve-node",
-            "sc \\\\host stop nerve-node",
-            "sc stop \"nerve-node\"",
-            "C:\\Windows\\System32\\sc.exe stop nerve-node",
-            "Stop-Service nerve-node",
-            "Stop-Service -Name nerve-node",
-            "Stop-Service -Name nerve-node -Force",
-            "Stop-Service -Name:nerve-node",
-            "Stop-Service -Name \"nerve-node\"",
-            "stop-service nerve-node",
-            "Restart-Service nerve-node",
-            "Restart-Service -Name nerve-node -Force",
-            "Set-Service -Name nerve-node -StartupType Disabled",
-            "Set-Service nerve-node -StartupType Disabled",
-            "Remove-Service nerve-node",
-            "cd C:\\ ; Stop-Service nerve-node",
-            "& Stop-Service nerve-node",
-            "Get-Service nerve-node | Stop-Service",
-            "Get-Service nerve-node | Restart-Service -Force",
-            "Get-Service -Name nerve-node | Set-Service -StartupType Disabled",
-            "Get-Service nerve-node|Stop-Service",
-            "Get-Service nerve-node | Select-Object Name | Stop-Service",
-            "net stop nerve-node",
-            "net.exe stop nerve-node",
-            "net stop \"nerve-node\"",
-            "taskkill /im nerve-node.exe",
-            "taskkill /IM nerve-node.exe /F",
-            "taskkill /f /im nerve-node-desktop.exe",
-            "taskkill.exe /f /im nerve-node-desktop.exe /t",
-            "taskkill /fi \"IMAGENAME eq nerve-node.exe\"",
-            "Stop-Process -Name nerve-node",
-            "Stop-Process -Name nerve-node-desktop -Force",
-            "Stop-Process -Name nerve-node.exe",
-            "stop-process -name:nerve-node",
-            "Stop-Process -Force -Name \"nerve-node\"",
-            "Get-Process nerve-node | Stop-Process",
-            "Get-Process nerve-node-desktop | Stop-Process -Force",
-            "Get-Process | Where-Object Name -eq nerve-node | Stop-Process",
-            // A line break or a tab ends a command and its name like a space.
-            "sudo systemctl restart nerve-node\necho done",
-            "sudo systemctl restart nerve-node\n",
-            "sudo systemctl restart nerve-node\t",
-            "systemctl stop nerve-node\r\nsleep 1",
-            "cd /srv\nsystemctl restart nerve-node",
-            "cd /srv\r\nsystemctl restart nerve-node",
-            "echo hi\n    systemctl stop nerve-node",
-            "echo hi\n\tsudo systemctl stop nerve-node",
-            "echo hi\n\n  sudo -n systemctl disable nerve-node.service",
-            "sc stop nerve-node\nsc query nerve-node",
-            "Stop-Service nerve-node\nStart-Sleep 2",
-            "Stop-Service nerve-node\r\nStart-Sleep 2",
-            "Start-Sleep 1\nStop-Service nerve-node",
-            "Get-Service nerve-node |\n  Stop-Service",
-            "taskkill /im nerve-node.exe\ntasklist",
-            "Stop-Process -Name nerve-node\n",
-            // sudo counts at a command's start, with its flags.
-            "sudo -u root systemctl stop nerve-node",
-            "cd x && sudo -u root systemctl restart nerve-node",
-            "echo ok | sudo -n systemctl stop nerve-node",
-            // The SysV wrapper calls systemctl.
-            "service nerve-node stop",
-            "sudo service nerve-node restart",
-            "sudo -n service nerve-node.service try-restart",
-            "/usr/sbin/service nerve-node force-reload",
-            "service \"nerve-node\" stop",
-            "service nerve-node condrestart; true",
-            "service nerve-node stop\necho done",
-            "cd /srv && service nerve-node restart",
-            // Killing the process by its name.
-            "pkill nerve-node",
-            "sudo pkill nerve-node",
-            "sudo killall nerve-node",
-            "sudo pkill -f nerve-node",
-            "pkill -9 -f 'nerve-node --config x'",
-            "pkill -x \"nerve-node\"",
-            "killall -s KILL nerve-node-desktop",
-            "killall -9 nerve-node && echo gone",
-            "pkill -u nerve -x nerve-node",
-            "pkill '^nerve-node$'",
-            "pkill -f nerve-node\nsleep 1",
-            "/usr/bin/pkill nerve-node",
-            "sudo -n killall -9 nerve-node; true",
-            // The Windows commands ignore case.
-            "STOP-SERVICE nerve-node",
-            "Stop-service nerve-node",
-            "RESTART-SERVICE -Name NERVE-NODE",
-            "SET-SERVICE Nerve-Node -StartupType Disabled",
-            "SC STOP nerve-node",
-            "sc stop Nerve-Node",
-            "SC.EXE CONFIG nerve-node start= disabled",
-            "Sc Delete NERVE-NODE",
-            "NET STOP nerve-node",
-            "Net Stop NERVE-NODE",
-            "NET.EXE STOP \"Nerve-Node\"",
-            "TASKKILL /IM NERVE-NODE.EXE /F",
-            "Taskkill /F /IM nerve-node-desktop.EXE",
-            "taskkill /im Nerve-Node-Desktop.exe",
-            "STOP-PROCESS -Name NERVE-NODE",
-            "stop-process -name nerve-node-desktop -force",
-            "get-service nerve-node | stop-service",
-            "GET-SERVICE NERVE-NODE | STOP-SERVICE",
-            "Get-Process Nerve-Node | Stop-Process",
-            // A shell keyword or a brace is not a program: a command after
-            // one starts a command, with or without sudo.
-            "if systemctl is-active --quiet nerve-node; then sudo systemctl restart nerve-node; fi",
-            "if true; then systemctl restart nerve-node; fi",
-            "for i in 1 2; do sudo systemctl restart nerve-node; done",
-            "if x; then echo; else sudo systemctl stop nerve-node; fi",
-            "{ sudo systemctl stop nerve-node; }",
-            "{sudo systemctl stop nerve-node;}",
-            "! sudo systemctl stop nerve-node",
-            "time sudo systemctl restart nerve-node",
-            "nohup sudo systemctl restart nerve-node &",
-            "if ($true) { Stop-Service nerve-node }",
-            "if ($true) {Stop-Service nerve-node}",
-            "try { Restart-Service nerve-node -Force } catch { Write-Error $_ }",
-            "foreach ($s in 1..2) { Restart-Service nerve-node }",
-            "$null = 1; if ($?) { sc stop nerve-node }",
-            "f() {\n    if x; then\n        if y; then\n            sudo systemctl restart nerve-node\n        fi\n    fi\n}",
-            "foreach ($i in 1..2) {\n    if ($i) {\n        if ($i -gt 1) {\n            Restart-Service nerve-node\n        }\n    }\n}",
-            "f() {\n                sudo systemctl restart nerve-node\n}",
-        ] {
-            let found = all.find("exec", "run", c);
-            let Some(rule) = found else {
-                panic!("should be refused: {c}");
-            };
-            assert!(
-                before.find("exec", "run", c).is_none(),
-                "refused without the service rules: {c}"
-            );
-            caught.insert(rule.to_string());
-        }
-        // Every service rule refuses a line of its own, so none can go dead.
-        for g in &GUARD[BEFORE..BEFORE + SERVICE_RULES] {
-            assert!(caught.contains(*g), "no case for {g}");
-        }
-        let run = |c: &str| all.find("exec", "run", c).is_some();
-        for c in [
-            "systemctl status nerve-node",
-            "systemctl status nerve-node.service",
-            "sudo systemctl status nerve-node",
-            "systemctl is-active nerve-node",
-            "systemctl is-enabled nerve-node",
-            "systemctl show nerve-node",
-            "systemctl cat nerve-node",
-            "systemctl list-units 'nerve*'",
-            "systemctl stop sshd",
-            "systemctl restart nerve-center",
-            "systemctl stop nerve-node-extra",
-            "systemctl stop my-nerve-node",
-            "journalctl -u nerve-node",
-            "journalctl -u nerve-node -f",
-            "sc query nerve-node",
-            "sc.exe query nerve-node",
-            "sc qc nerve-node",
-            "sc stop spooler",
-            "sc queryex nerve-node",
-            "Get-Service nerve-node",
-            "Get-Service -Name nerve-node | Format-List",
-            "Get-Service nerve-node | Select-Object Status",
-            "Stop-Service spooler",
-            "Restart-Service -Name spooler",
-            "Set-Service -Name spooler -StartupType Disabled",
-            "net start spooler",
-            "net stop spooler",
-            "net start nerve-node-other",
-            "taskkill /im notepad.exe",
-            "taskkill /im nerve-center.exe",
-            "tasklist /fi \"IMAGENAME eq nerve-node.exe\"",
-            "Get-Process nerve-node",
-            "Get-Process notepad | Stop-Process",
-            "Stop-Process -Name notepad",
-            "cargo build -p nerve-node",
-            "cargo build -p nerve-node-desktop --release",
-            "cargo test -p nerve-node",
-            "git commit -m 'systemctl stop nerve-node'",
-            "git commit -m 'Stop-Service nerve-node'",
-            "echo systemctl stop nerve-node",
-            "grep -r 'systemctl stop nerve-node' docs/",
-            // A quoted mention that holds `sudo` is not a command: sudo has to
-            // begin the command.
-            "git commit -m \"Refuse sudo systemctl stop nerve-node in the guard\"",
-            "echo \"then run: sudo systemctl restart nerve-node\"",
-            "grep -rn \"sudo systemctl stop nerve-node\" docs/",
-            "grep -rn 'sudo service nerve-node restart' docs/",
-            "git commit -m 'Docs: sudo pkill nerve-node'",
-            "git commit -m 'run sudo Stop-Service nerve-node'",
-            // Reading the service, a process or a log, in one line or several.
-            "systemctl status nerve-node\nsleep 1",
-            "sudo systemctl status nerve-node\r\nsystemctl is-active nerve-node",
-            "echo ok\nsystemctl stop sshd",
-            "Get-Service nerve-node\nGet-Process nerve-node",
-            "SC QUERY nerve-node",
-            "NET START nerve-node",
-            "TASKLIST /FI \"IMAGENAME eq nerve-node.exe\"",
-            "STOP-SERVICE spooler",
-            "TASKKILL /IM NOTEPAD.EXE",
-            "service nerve-node status",
-            "sudo service nerve-node-extra stop",
-            "service sshd restart",
-            "sudo service ssh restart",
-            "pgrep nerve-node",
-            "pgrep -a nerve-node",
-            "ps aux | grep nerve-node",
-            "pkill sshd",
-            "pkill -f nginx",
-            "sudo killall nginx",
-            "pkill nerve-node-extra",
-            "pkill -f my-nerve-node",
-            "pkill -u nerve sshd",
-            // Keywords and braces need a command start in front.
-            "git commit -m \"then sudo systemctl stop nerve-node\"",
-            "echo \"do sudo pkill nerve-node\"",
-            "echo then sudo service nerve-node restart",
-        ] {
-            assert!(!run(c), "should stay allowed: {c}");
-        }
-        // Refused by the rules for the program's path already.
-        for c in [
-            "pkill -f /usr/local/bin/nerve-node",
-            "/etc/init.d/nerve-node stop",
-        ] {
-            assert!(all.find("exec", "run", c).is_some(), "{c}");
-        }
     }
 
     #[test]

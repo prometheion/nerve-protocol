@@ -83,6 +83,69 @@ call's target: the whole command line, the resolved path, or `<cap>.<action>`.
   A wildcard sudo entry covers plain lines only, as a wildcard allow rule
   does; any other line needs an entry that names it whole.
 
+## The guard
+
+A new pairing's deny list starts with the guard (`nerve_policy::rules::GUARD`,
+[rules](../user/rules.md#the-guard-against-changing-the-node)): three rules
+`guard:node-programs`, `guard:node-paths` and `guard:node-service`
+(`nerve_policy::guard::Guard`), and five `fs.write` globs for the node's
+folders. A `guard:` rule covers `exec.run` and looks at commands, not at the
+text:
+
+- `nerve_policy::command::parse` splits the line as the node's shell reads it
+  (`Shell::Sh`, `Fish`, `PowerShell`, `Cmd`; `Env::shell`, from `machine.shell` as
+  `exec::shell_command` picks it, and `sh` for a sudo command off Windows).
+  It gives the commands of the line with their words (quotes and escapes off,
+  `literal` false where a variable or substitution stays), redirect targets,
+  here-document text and, as `inner`, what runs inside a command:
+  substitutions, groups, PowerShell blocks and the text a shell runs
+  (`sh -c`, `eval`, `su -c`, `powershell -Command`, `cmd /c`,
+  `Invoke-Expression`, a here-document fed to a shell). cmd reads the text
+  after `/c` from the line, so a cmd `Word` keeps its source (`raw`, also for
+  the words of `Start-Process`' argument string) and `cmd_text` reads that
+  text as it stands and without its first and last quote.
+- `command::run` finds the program behind keywords, assignments and wrappers
+  (`sudo` and its options, `env`, `timeout`, `nohup`, `nice`, `ionice`,
+  `time`, `stdbuf`, `xargs`, `exec`, `command`, `setsid`; `&`,
+  `Start-Process`, cmd's `start`, `call`, `if` and `for`).
+- `Guard::refuses` visits every command at any depth: `node-programs` by the
+  program's name, `node-paths` by any word or redirect target that holds one
+  of the node's paths (not after a blank in the same word),
+  `node-service` by the program and its arguments (`systemctl`'s verb and
+  unit, `sc`, `net`, `pkill`'s pattern) and, for the stopping cmdlets,
+  `kill` and `taskkill`, by a name, a substitution that names the node, or
+  an earlier command of the same pipe that does (one forward pass per script
+  keeps that linear). `node-programs` also refuses a redirect target that
+  names the node's programs, and `cp`, `mv`, `rm`, `install`, `ln` and the
+  other tools that copy, delete, overwrite, download into or change the mode
+  of a file (`FILE_TOOLS`: `tee`, `dd`, `sed`, `chmod`, `curl`, `wget`,
+  `Set-Content`, `Out-File`, `gzip`, `objcopy` …) on a file named as the node's programs.
+  A word with a brace group is also read expanded in sh and fish
+  (`nerve-node{,.bak}`, bounded to a few times the word's length in bytes, each word built counting a fixed amount too; what is over stays as written), and the tools that take
+  paths (`TAKES_PATHS`, not the writers) are refused when an earlier
+  command of their pipe names the program, also in a bracket or group of
+  that command (`… | xargs rm`, `Get-Item … | Remove-Item`, `(Get-Item …) |
+  Remove-Item`), as `node-service` does with a name.
+  Programs that only look at a file (`ls`, `sha256sum`) are not on the
+  list, and neither are the ones that write a file in ways a list cannot
+  cover (an interpreter, a .NET call). Each
+  `Script` knows the shell it was read as, so a `powershell -Command` body in
+  a line for sh is checked as PowerShell.
+
+The parser is bounded: 16 levels of nesting, 10 000 commands and 2 Mi
+characters read (a shell's text is read again at each level). A line past a
+bound, or one it cannot read with confidence (an open quote or bracket, a
+shell fed by a pipe, `-EncodedCommand`, a command wrapped in more than
+`unwrap` takes apart), is `Unparsed`. The error carries the commands read
+before it (`Unparsed::read`, nested as the line nests them), and each
+`guard:` rule then checks those as a parsed line and also matches the whole
+line with its share of the text patterns of 0.0.6 (`rules::TEXTS`), so it
+refuses at least what they refused. Those texts are
+also in `GUARD_OLD`, which `rule guard` takes off a deny list when it puts the
+three rules on. A `guard:` rule on the allow list is refused by the config
+check. The center's action checker has its own splitter
+(`checker/normalize.rs`); it is meant to move onto this parser.
+
 ## Modes
 
 - **`allowlist`.** Default deny. Only allow rules count.

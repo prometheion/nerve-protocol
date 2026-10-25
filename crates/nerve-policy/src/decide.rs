@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use nerve_proto::Effect;
 
+use crate::command::Shell;
 use crate::config::{CapSetting, CenterPolicy, Folder, Mode};
 use crate::paths::{depth, to_wire, within};
 use crate::protected::Protected;
@@ -64,6 +65,8 @@ pub struct Env<'a> {
     /// The node's sudo switch: on only while the node holds a sudo password
     /// it has checked.
     pub sudo: bool,
+    /// The shell `exec.run` lines run in: the guard reads them by its rules.
+    pub shell: Shell,
 }
 
 /// The arguments of a command that runs through `sudo`: its first word is
@@ -258,7 +261,7 @@ pub fn decide(policy: &CenterPolicy, env: &Env, call: &Call) -> Decision {
 
     // Deny rules: forbidden in every mode, and they win over any allow.
     let targets = rule_targets(call);
-    let deny = RuleSet::new(&policy.deny, env.home);
+    let deny = RuleSet::new(&policy.deny, env.home).with_shell(env.shell);
     for t in &targets {
         if let Some(rule) = deny.find(call.cap, call.action, t) {
             // The rule as `rule ls` shows it: the guard's hold tabs and line
@@ -521,26 +524,60 @@ mod tests {
         assert!(folder_reach(&folders, Path::new("/w/a/c"), true));
     }
 
-    /// A refusal by a guard rule is one line: the rule holds tabs and line
-    /// breaks, and the reason goes into the audit and the log as it is.
+    /// A refusal by a guard rule names the rule, on one line: an older text
+    /// of the guard holds tabs and line breaks, and the reason goes into the
+    /// audit and the log as it is.
     #[test]
     fn a_refusal_by_the_guard_names_the_rule_on_one_line() {
         let t = T::new();
         let env = t.env(true);
         let mut p = policy(Mode::User);
-        p.deny = crate::rules::GUARD.iter().map(|g| g.to_string()).collect();
-        for c in [
-            "systemctl stop nerve-node",
-            "nerve-node status",
-            "pkill nerve-node",
+        for (deny, names) in [
+            (crate::rules::GUARD, "is denied (guard:node-"),
+            (crate::rules::GUARD_OLD, "is denied (exec.run:"),
         ] {
-            let Decision::Forbidden(why) = decide(&p, &env, &call(Effect::Execute, &[], Some(c)))
-            else {
-                panic!("{c} should be refused");
-            };
-            assert!(why.contains("is denied (exec.run:"), "{why}");
-            assert!(!why.contains(['\n', '\r', '\t']), "{why:?}");
+            p.deny = deny.iter().map(|g| g.to_string()).collect();
+            for c in [
+                "systemctl stop nerve-node",
+                "nerve-node status",
+                "pkill nerve-node",
+            ] {
+                let Decision::Forbidden(why) =
+                    decide(&p, &env, &call(Effect::Execute, &[], Some(c)))
+                else {
+                    panic!("{c} should be refused");
+                };
+                assert!(why.contains(names), "{why}");
+                assert!(!why.contains(['\n', '\r', '\t']), "{why:?}");
+            }
         }
+    }
+
+    /// The guard reads a line by the rules of the node's shell: a quoted
+    /// mention in PowerShell is text, and a line it cannot read is checked
+    /// with the guard's text patterns.
+    #[test]
+    fn the_guard_reads_the_line_in_the_nodes_shell() {
+        let t = T::new();
+        let mut p = policy(Mode::User);
+        p.deny = crate::rules::GUARD.iter().map(|g| g.to_string()).collect();
+        let refused = |shell: Shell, c: &str| {
+            let env = Env {
+                shell,
+                ..t.env(true)
+            };
+            matches!(
+                decide(&p, &env, &call(Effect::Execute, &[], Some(c))),
+                Decision::Forbidden(_)
+            )
+        };
+        // In PowerShell a backtick escapes the quote, so the mention stays
+        // inside it; sh reads the same line as a quote that ends early.
+        let line = "echo \"a`\"; Stop-Service nerve-node\"";
+        assert!(!refused(Shell::PowerShell, line));
+        assert!(refused(Shell::Sh, "echo \"a\"; Stop-Service nerve-node"));
+        assert!(refused(Shell::Sh, "systemctl stop nerve-node; echo \"open"));
+        assert!(!refused(Shell::Sh, "echo \"open"));
     }
 
     /// An action that names no path (a provider's) lies in no folder:
@@ -625,6 +662,7 @@ mod tests {
                 protected: &self.prot,
                 unconfined: (!confined).then_some("commands cannot be confined on this machine"),
                 sudo: false,
+                shell: Shell::Sh,
             }
         }
 
@@ -1498,6 +1536,7 @@ mod tests {
             protected: &prot,
             unconfined: Some("commands cannot be confined on this machine"),
             sudo: false,
+            shell: Shell::PowerShell,
         };
         let p = policy(Mode::User);
         let keys = t("C:\\ProgramData\\ssh\\administrators_authorized_keys", true);

@@ -3750,11 +3750,11 @@ node_id = "n1"
         );
     }
 
-    /// A guard rule holds tabs and line breaks; the log line keeps them
-    /// written out, so one change is one line.
+    /// An older text of the guard holds tabs and line breaks; the log line
+    /// keeps them written out, so one change is one line.
     #[test]
     fn a_rule_with_line_breaks_is_one_log_line() {
-        let rule = nerve_policy::rules::GUARD[0];
+        let rule = nerve_policy::rules::GUARD_OLD[0];
         assert!(rule.contains('\n'));
         let list =
             |v: &[&str]| Value::Array(v.iter().map(|s| Value::String(s.to_string())).collect());

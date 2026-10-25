@@ -222,6 +222,8 @@ export global Perm {
 
     // The deny list lacks rules of the guard (nerve_policy::rules::GUARD).
     in-out property <bool> guard-missing;
+    // ... but the ones it has are the older text patterns, which still work.
+    in-out property <bool> guard-older;
     in-out property <bool> guard-busy;
 
     callback pick(int);
