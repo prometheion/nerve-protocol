@@ -1868,7 +1868,14 @@ fn runuser_user(rest: &[Word]) -> bool {
         let t = w.text.as_str();
         match t.strip_prefix("--") {
             Some(long) => long == "user" || long.starts_with("user="),
-            None => t.strip_prefix('-').is_some_and(|f| f.contains('u')),
+            // In a group of short options the first that takes a value takes
+            // the rest of the group (`-s/usr/bin/bash`): only a `u` that is
+            // that option names a user.
+            None => t.strip_prefix('-').is_some_and(|f| {
+                f.chars()
+                    .find(|c| RUNUSER.contains(&format!("-{c}").as_str()))
+                    == Some('u')
+            }),
         }
     })
 }
@@ -2120,7 +2127,11 @@ fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
     ];
     let mut file = None;
     let mut list = None;
-    let mut positional = 0;
+    let (mut file_named, mut list_named) = (false, false);
+    // PowerShell binds the parameters written by name first and gives the
+    // words left to the positional ones that are still unbound: in
+    // `-FilePath x status`, `status` is the argument list.
+    let mut positional = Vec::new();
     let mut n = 0;
     while let Some(w) = rest.get(n) {
         n += 1;
@@ -2137,12 +2148,7 @@ fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
             .strip_prefix('-')
             .filter(|p| !p.is_empty() && (!w.quoted || named(p)))
         else {
-            match positional {
-                0 => file = Some(w.clone()),
-                1 => list = Some(array(rest, &mut n, w)),
-                _ => {}
-            }
-            positional += 1;
+            positional.push((w, n));
             continue;
         };
         let (param, attached) = match param.split_once(':') {
@@ -2167,9 +2173,18 @@ fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
         };
         if "filepath".starts_with(param) || param == "path" || param == "pspath" {
             file = value;
+            file_named = true;
         } else if "argumentlist".starts_with(param) || param == "args" {
             list = value;
+            list_named = true;
         }
+    }
+    let mut free = positional.into_iter();
+    if !file_named {
+        file = free.next().map(|(w, _)| w.clone());
+    }
+    if !list_named {
+        list = free.next().map(|(w, mut after)| array(rest, &mut after, w));
     }
     let mut out = vec![file?];
     if let Some(l) = list {
@@ -2451,6 +2466,51 @@ mod tests {
         );
         assert_eq!(split("a\\\\\"b c\" d"), ["a\\b c", "d"]);
         assert_eq!(split("x \"a,b\""), ["x", "a,b"]);
+    }
+
+    /// A word after a parameter written by name fills the positional
+    /// parameter that is still unbound, not the one the name took.
+    #[test]
+    fn start_process_positional_words_fill_the_unbound_parameters() {
+        for (line, name, args) in [
+            ("Start-Process x status", "x", "status"),
+            ("Start-Process -FilePath x status", "x", "status"),
+            ("Start-Process status -FilePath x", "x", "status"),
+            (
+                "Start-Process -NoNewWindow -FilePath x status",
+                "x",
+                "status",
+            ),
+            (
+                "Start-Process -FilePath x stop,y -Verb RunAs",
+                "x",
+                "stop y",
+            ),
+            ("Start-Process -FilePath x stop, y", "x", "stop y"),
+            ("Start-Process -ArgumentList a b", "b", "a"),
+            ("Start-Process x -ArgumentList a b", "x", "a"),
+            ("Start-Process -FilePath x -ArgumentList a b", "x", "a"),
+        ] {
+            let got = ran(line, Shell::PowerShell);
+            assert_eq!(got, Some((name.to_string(), args.to_string())), "{line}");
+        }
+    }
+
+    /// Only a `u` that is an option of its own names the user of `runuser`;
+    /// in the value of another option (`-s/usr/bin/bash`) it does not.
+    #[test]
+    fn runuser_names_a_user_only_with_its_own_option() {
+        let user = |l: &str| {
+            let s = parse(l, Shell::Sh).unwrap();
+            runuser_user(&s.commands[0].words[1..])
+        };
+        assert!(user("runuser -u root x"));
+        assert!(user("runuser -uroot x"));
+        assert!(user("runuser --user=root x"));
+        assert!(user("runuser -u root -s /bin/sh x"));
+        assert!(!user("runuser -s/usr/bin/bash -c x root"));
+        assert!(!user("runuser -Gaudio -c x root"));
+        assert!(!user("runuser -gusers -c x root"));
     }
 
     /// A CR alone ends a PowerShell statement, CR LF is one line break.

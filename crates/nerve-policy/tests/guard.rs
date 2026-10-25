@@ -1157,12 +1157,79 @@ const NESTED: &[Case] = &[
         SH,
         SERVICE,
     ),
+    // A `u` in the value of another short option (`-s/usr/bin/bash`) names
+    // no user, so the text of `-c` is what runs.
+    (
+        "runuser -s/usr/bin/bash -c 'systemctl stop nerve-node' root",
+        SH,
+        SERVICE,
+    ),
+    (
+        "runuser -Gaudio -c 'systemctl stop nerve-node' root",
+        SH,
+        SERVICE,
+    ),
+    // After a parameter written by name, the next word is the positional
+    // parameter that is still unbound: `-FilePath x status` has the
+    // argument list `status`.
+    (
+        "Start-Process -FilePath 'C:\\Program Files\\Nerve\\nerve-node.exe' status",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "Start-Process -NoNewWindow -FilePath /usr/local/bin/nerve-node status",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "Start-Process status -FilePath C:/Nerve/nerve-node.exe -PassThru",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "$p = saps -FilePath C:/Nerve/nerve-node.exe status -PassThru",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "pwsh -c \"Start-Process -FilePath /usr/local/bin/nerve-node status\"",
+        SH,
+        PROGRAMS,
+    ),
+    (
+        "Start-Process -FilePath sc.exe stop,nerve-node -Verb RunAs",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process -Verb RunAs -FilePath net.exe 'stop', 'nerve-node'",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process -FilePath powershell.exe \"-Command Restart-Service nerve-node\" -Verb RunAs",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process -FilePath cmd.exe \"/c net stop nerve-node\" -Verb RunAs",
+        PS,
+        SERVICE,
+    ),
 ];
 
 /// Lines that only mention the node or its commands, in quotes, in a
 /// here-document or as another program's words, and a name the guard
 /// leaves alone: each runs.
 const DATA: &[Case] = &[
+    ("runuser -s/usr/bin/bash -c 'ls' root", SH, None),
+    (
+        "Start-Process -FilePath notepad.exe nerve-node.txt",
+        PS,
+        None,
+    ),
+    ("Start-Process -FilePath sc.exe query,nerve-node", PS, None),
     (
         "git commit -m \"Catch env X=1 sudo systemctl stop nerve-node in the guard\"",
         SH,
@@ -1489,6 +1556,22 @@ fn a_long_pipe_is_checked_in_linear_time() {
         "kill|".repeat(5_000)
     );
     assert!(set.find("exec", "run", &both).is_some());
+    // One long word with thousands of path matches, alone and read again
+    // at each level of `eval`.
+    let word = "/etc/nervex".repeat(5_900);
+    for line in [
+        format!("cat {word}"),
+        format!("git commit -m \"x {}\"", "/etc/nerve ".repeat(5_900)),
+        format!("{}{word}", "eval ".repeat(14)),
+    ] {
+        set.find("exec", "run", &line);
+    }
+    let ps = RuleSet::new(&rules(GUARD), home()).with_shell(Shell::PowerShell);
+    ps.find(
+        "exec",
+        "run",
+        &format!("{}{}", "iex ".repeat(14), "\\programdatax".repeat(5_000)),
+    );
     assert!(
         start.elapsed() < std::time::Duration::from_secs(3),
         "took {:?}",

@@ -761,7 +761,7 @@ export component PermissionsPage inherits PageFrame {
                         tone: Tone.warn;
                         title: Perm.guard-older ? "The guard still reads commands as text" : "No guard against changing this node";
                         text: Perm.guard-older
-                            ? "Its deny rules from before still work, but they miss a command behind sudo, env or timeout. The update has them read the commands of a line. They catch mistakes; an account of their own for commands is the real protection."
+                            ? "Its deny rules from before still work, but they miss a command behind env, timeout or bash -c, or in a substitution. The update has them read the commands of a line. They catch mistakes; an account of their own for commands is the real protection."
                             : "Deny rules that keep " + Perm.center + "'s commands off Nerve itself. They catch mistakes; an account of their own for commands is the real protection.";
                         action: Perm.guard-busy ? "" : (Perm.guard-older ? "Update the guard" : "Add the guard");
                         acted => {
