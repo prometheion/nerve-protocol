@@ -977,6 +977,7 @@ mod tests {
                     last_seen_ms: 0,
                     going_away: None,
                     descriptor: None,
+                    catalog: Default::default(),
                 },
             );
             let day = store.day(id, crate::util::now_ms());
@@ -1215,6 +1216,25 @@ mod tests {
         assert!(parts.contains(".filter((p) => p != null)"), "{parts}");
         assert_eq!(APP_JS.matches("...localInstallParts(").count(), 3);
         assert!(!APP_JS.contains("...localInstallBlocks("));
+    }
+
+    /// The node card names each action the center left out with its
+    /// reason, from the overview's `broken`.
+    #[test]
+    fn the_node_card_shows_what_the_center_left_out() {
+        let card = &APP_JS[APP_JS.find("function nodeCard(").unwrap()..];
+        let card = &card[..card.find("\n}\n").unwrap()];
+        assert!(card.contains("const broken = n.broken || [];"), "{card}");
+        assert!(card.contains("broken.length"), "{card}");
+        // A neutral heading: a unit may be left out for its name as well
+        // as for a schema the center cannot check.
+        assert!(card.contains("\"Not offered to the agent:\""), "{card}");
+        assert!(
+            card.contains("broken.map((b) =>")
+                && card.contains("b.name")
+                && card.contains("b.reason"),
+            "{card}"
+        );
     }
 
     /// A button's handler gets the event: the switches of the Action checker
@@ -2493,6 +2513,7 @@ mod tests {
                     last_seen_ms: 0,
                     going_away: None,
                     descriptor: None,
+                    catalog: Default::default(),
                 },
             );
         });

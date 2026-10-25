@@ -12,18 +12,18 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.6"
+version = "0.0.7"
 edition = "2024"
 repository = "https://github.com/Piggidragon/Nerve-Protocol"
 rust-version = "1.88"
 
 [workspace.dependencies]
-nerve-proto = { path = "crates/nerve-proto", version = "0.0.6" }
-nerve-transport = { path = "crates/nerve-transport", version = "0.0.6" }
-nerve-policy = { path = "crates/nerve-policy", version = "0.0.6" }
-nerve-sandbox = { path = "crates/nerve-sandbox", version = "0.0.6" }
-nerve-node = { path = "crates/nerve-node", version = "0.0.6" }
-nerve-center = { path = "crates/nerve-center", version = "0.0.6" }
+nerve-proto = { path = "crates/nerve-proto", version = "0.0.7" }
+nerve-transport = { path = "crates/nerve-transport", version = "0.0.7" }
+nerve-policy = { path = "crates/nerve-policy", version = "0.0.7" }
+nerve-sandbox = { path = "crates/nerve-sandbox", version = "0.0.7" }
+nerve-node = { path = "crates/nerve-node", version = "0.0.7" }
+nerve-center = { path = "crates/nerve-center", version = "0.0.7" }
 
 # Every crate below except keyring is a widely used, well-tested choice for its job.
 tokio = { version = "1.47", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "time", "sync", "signal", "fs"] }

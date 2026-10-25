@@ -41,7 +41,15 @@ motion, nothing moves. On a phone the menu opens from the button at the top.
 
 - **Machines.** Each paired machine with its state (online, offline,
   disabled), platform, a short summary and what it offers. Buttons: Rename,
-  Disable or Enable, Remove.
+  Disable or Enable, Remove. Under **Not offered to the agent** a card lists
+  the actions the center left out, each with the reason: a name with a
+  character other than letters, digits and `-`, or a schema the center
+  cannot check (arguments or result, for example one with `oneOf`). When a
+  capability's `state` or the data of one of its events has such a schema,
+  every action of it is left out, with a reason that starts with `state:` or
+  `event <name>:`; a capability without actions is then listed by its own
+  name. A reason is one line, cut after 300 characters. The agent never sees
+  them; the rest of the machine's actions stay.
 - **Pair a machine.** Makes a [pairing](pairing.md) command and its bare link
   (for the desktop app), each with Copy.
 - **Sessions.** The harnesses connected now, each marked `tainted` once the

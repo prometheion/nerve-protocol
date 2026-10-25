@@ -524,10 +524,11 @@ cut to it, and so is the default when the maximum is lower. Both are at least
 and are left out of the file while they are the defaults. They are read when a
 call starts: a running command keeps its limit. The `timeout` error names the
 limit that ended the command, and the descriptor states both numbers in
-`exec.run`'s text and as `maximum` and `default` (milliseconds) of its
+`exec.run`'s text and in the `default` and `description` (milliseconds) of its
 `timeout_ms` parameter, so a change of either changes the descriptor's rev, and
 nodes with other limits have other params (a center merges the tools of nodes
-with equal params).
+with equal params). The parameter has no `maximum`: a larger value is cut to
+the most, not refused, so a center that checks the arguments lets it through.
 A command is killed with its process group when its call ends: on
 `timeout_ms`, `cancel`, `session.end` of the session that started it, a
 link that ended without being resumed (protocol §4.9), and when the call
@@ -1422,7 +1423,8 @@ below a command of a center. Then it sends one request, `hello`:
  "params": {"role": "provider", "name": "desk",
             "capabilities": [{"id": "lamp", "summary": "The desk lamp.",
                               "actions": {"on": {"effect": "write", "summary": "…",
-                                                 "params": {}, "result": {}}}}]}}
+                                                 "params": {"type": "object"},
+                                                 "result": {"type": "object"}}}}]}}
 ```
 
 The node refuses it, with nothing attached, when:
@@ -1438,7 +1440,16 @@ The node refuses it, with nothing attached, when:
   `settings`, `audit`), or is added by another attached provider; or a
   capability declares anything but `id`, `profile`, `summary` and `actions`
   (no events, state or streams: the node forwards calls only, and the node,
-  not the provider, says `provider` and `exposure`).
+  not the provider, says `provider` and `exposure`);
+- no action is left once those whose schemas are outside the subset are
+  left out (below).
+
+An action's `params` and `result` must keep to the schema subset of
+protocol.md §6.1; an action without `params` takes any arguments, as
+`{"type": "object"}`. The node leaves out an action whose schemas do not
+keep to it, with the reason (`params: /properties/n/oneOf: oneOf:
+alternatives are not supported: …`), and a capability with no action left;
+the provider's other actions attach.
 
 The check tells programs apart, not users: a process of the same user can
 still make the allowed program attach for it (`LD_PRELOAD`, `ptrace` where the
@@ -1447,19 +1458,28 @@ program of a desktop user cannot attach there yet.
 
 ### While it is attached
 
-The answer is `{"ok": {"name", "capabilities": [ids]}}`, and the connection
-stays. The node reads the provider's lines while it writes its own, so a
+The answer is `{"ok": {"name", "capabilities": [ids], "broken": [{name,
+reason}]}}`, `broken` naming each action left out as `cap.action` (the
+reason is one line of at most 300 characters, since it holds the
+provider's own names), and the connection stays. The node reads the provider's lines while it writes its own, so a
 provider may answer one call before it reads the next. The node lists each
 capability in every center's descriptor with
 `provider: <name>` and cuts it by that center's policy as its own (§3): `caps`
 hides it or turns it off; in `allowlist` mode an action is shown only when an
 allow rule covers it; in `folder` mode only where it is set `on`; sense and
 actuate only with `on`. The descriptor's `rev` changes, so every center gets
-`node/descriptor_changed`. `status` lists the attached providers.
+`node/descriptor_changed`. `status` lists the attached providers, each with
+the actions left out and why (`provider desk: lamp.dim left out: <reason>`;
+`status --json` has them as `broken`), and the node logs each one as a
+warning.
 
-A center's call to such an action is decided and audited by the node like any
-other, with `<cap>.<action>` as its rule target, deny rules and `caps`
-included. Only an allowed call reaches the provider, as one line:
+A center's call to such an action is first checked against the action's
+`params`: arguments that do not fit are refused with `invalid_args`, whose
+`data` names the `field` and what was `expected` (protocol.md §6.1), before
+the policy and without an audit entry. Then it is decided and audited by the
+node like any other, with `<cap>.<action>` as its rule target, deny rules and
+`caps` included. Only an allowed call whose arguments fit reaches the
+provider, as one line:
 
 ```json
 {"id": 7, "method": "invoke", "params": {"cap": "lamp", "action": "on", "args": {}}}

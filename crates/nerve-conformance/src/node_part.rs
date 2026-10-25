@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 
 use nerve_proto::link::PairLink;
 use nerve_proto::msg::method;
+use nerve_proto::schema::{Role, check};
 use nerve_proto::{Descriptor, ErrorCode, PROTOCOL_VERSION};
 
 use nerve_transport::sudo::{Offer, seal};
@@ -656,5 +657,87 @@ fn check_descriptor(v: &Value, node_id: &str, rev: u64) -> Result<(), String> {
     for c in &d.capabilities {
         ensure(ids.insert(&c.id), format!("capability {} twice", c.id))?;
     }
+    check_schemas(&d)
+}
+
+/// Whether every schema of `d` keeps to the subset (§6): a center leaves out
+/// what does not, so a node that publishes such a schema offers less than it
+/// means to. An action without `params` takes any arguments; a result, event
+/// data or state that is not given says nothing.
+fn check_schemas(d: &Descriptor) -> Result<(), String> {
+    for c in &d.capabilities {
+        for (a, decl) in &c.actions {
+            if !decl.params.is_null() {
+                check(&decl.params, Role::Params)
+                    .map_err(|e| format!("{}.{a} params: {e}", c.id))?;
+            }
+            if !decl.result.is_null() {
+                check(&decl.result, Role::Result)
+                    .map_err(|e| format!("{}.{a} result: {e}", c.id))?;
+            }
+        }
+        for (n, ev) in &c.events {
+            if !ev.data.is_null() {
+                check(&ev.data, Role::Result).map_err(|e| format!("{}/{n} data: {e}", c.id))?;
+            }
+        }
+        if !c.state.is_null() {
+            check(&c.state, Role::Result).map_err(|e| format!("{} state: {e}", c.id))?;
+        }
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn echo() -> Value {
+        serde_json::to_value(crate::echo::descriptor("node-id", "echo-node")).unwrap()
+    }
+
+    #[test]
+    fn a_descriptor_whose_schemas_keep_to_the_subset_passes() {
+        check_descriptor(&echo(), "node-id", 1).unwrap();
+    }
+
+    #[test]
+    fn a_schema_outside_the_subset_fails_the_descriptor_check() {
+        let cases = [
+            (
+                "/capabilities/1/actions/say/params/properties/text",
+                json!({"oneOf": [{"type": "string"}, {"type": "integer"}]}),
+                "echo.say params: /properties/text/oneOf: ",
+            ),
+            (
+                "/capabilities/1/actions/say/result",
+                json!({"$ref": "#/$defs/text"}),
+                "echo.say result: /$ref: ",
+            ),
+            (
+                "/capabilities/0/events/going_away/data",
+                json!({"type": "object", "properties": {"reason": {"type": "string", "pattern": "^."}}}),
+                "node/going_away data: /properties/reason/pattern: ",
+            ),
+            (
+                "/capabilities/1/state",
+                json!({"type": "object", "if": {"type": "object"}}),
+                "echo state: /if: ",
+            ),
+        ];
+        for (at, schema, want) in cases {
+            let mut d = echo();
+            // Index by index, as some of these fields are not there yet.
+            let mut at_v = &mut d;
+            for step in at.split('/').skip(1) {
+                at_v = match step.parse::<usize>() {
+                    Ok(i) => &mut at_v[i],
+                    Err(_) => &mut at_v[step],
+                };
+            }
+            *at_v = schema;
+            let e = check_descriptor(&d, "node-id", 1).unwrap_err();
+            assert!(e.starts_with(want), "{at}: {e}");
+        }
+    }
 }

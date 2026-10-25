@@ -32,7 +32,12 @@ are attached:
 
 ```
 provider desk attached: lamp
+provider desk: lamp.dim left out: params: /properties/level/oneOf: oneOf: alternatives are not supported: use one schema, with enum for a choice of values
 ```
+
+The second line is an action the node left out (below); `nerve-node status
+--json` has them as `broken`. A reason is one line, cut after 300
+characters, since it holds names from the program's schemas.
 
 The check tells programs apart, not users: another program of your user can
 still make the allowed one attach for it. Allow only programs you trust.
@@ -60,6 +65,27 @@ such an update, check `nerve-node rule ls allow` and `nerve-node cap ls`.
 
 When the program exits, its capabilities leave the centers' tool lists, and a
 call that was waiting for it fails with `unavailable`.
+
+## What its schemas may say
+
+Each action describes its arguments and its result with a JSON Schema. The
+center hands them to the agent and checks every call's arguments against
+them, so only a small, plain part of JSON Schema is allowed: one type per
+value (or one type and `null`), properties, required fields, lists, a list of
+allowed values (`enum`), bounds for numbers, texts and lists, and
+descriptions. References (`$ref`), alternatives (`oneOf`, `anyOf`), conditions,
+patterns and formats are not, nor is nesting more than three levels deep in
+the arguments. What a text must look like goes into its `description`. The
+exact list is in the [spec](../dev/spec/protocol.md#61-schemas).
+
+An action whose schema goes beyond that is left out, and the program's other
+actions attach: `nerve-node status` names it with the reason, and the node's
+log has a warning. If none of its actions is left, the node refuses the
+program.
+
+Arguments that do not fit an action's schema never reach the program: the
+node answers `invalid_args`, naming the field and what it expected
+(`level: expected an integer from 0 to 10`).
 
 How a program attaches is in the
 [spec](../dev/spec/node-local.md#7-capability-providers).

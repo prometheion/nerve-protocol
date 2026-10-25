@@ -261,6 +261,42 @@ async fn a_call_no_rule_allows_is_refused_immediately() {
     node.stop().await;
 }
 
+/// An `invoke` with a text id is refused before it runs: `exec.signal` and
+/// the `exec/exit` event name a call by its number. The same call with a
+/// number runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invoke_with_a_text_id_is_refused() {
+    use nerve_conformance::wire::Recv;
+    use nerve_proto::rpc::{Id, Message};
+    let dir = tempdir();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let node = paired_node_with(dir.path(), &center, |p| {
+        p.mode = nerve_policy::Mode::User;
+    })
+    .await;
+    let mut conn = linked(&mut center).await;
+    let home = nerve_policy::paths::to_wire(&dir.path().join("home"));
+    let params = json!({"cap": "fs", "action": "stat", "args": {"path": home}});
+    let frame = json!({"jsonrpc": "2.0", "id": "abc", "method": "invoke", "params": params});
+    conn.send_raw(&frame.to_string()).await.unwrap();
+    let e = loop {
+        match conn.recv(WAIT).await {
+            Recv::Msg(Message::Error {
+                id: Some(Id::Str(s)),
+                error,
+            }) if s == "abc" => break error,
+            Recv::Msg(Message::Result { id, result }) => panic!("{id}: ran: {result}"),
+            Recv::Msg(_) => {}
+            other => panic!("no answer: {other:?}"),
+        }
+    };
+    assert_eq!(nerve_conformance::wire::code_of(&e), "invalid_request");
+    assert!(e.message.contains("whole number"), "{}", e.message);
+    let stat = conn.call("invoke", params, WAIT).await.unwrap();
+    assert_eq!(stat.expect("a number runs")["type"], "dir");
+    node.stop().await;
+}
+
 /// A command line longer than the node checks is refused, also with no
 /// grant at all, and the audit log says why.
 #[tokio::test(flavor = "multi_thread")]

@@ -284,6 +284,35 @@ impl Mcp {
         r["result"].clone()
     }
 
+    /// The `tools/call` params that run `unit` (`cap.action`) on `node` with
+    /// the arguments `args`. The tests name units, never tools: this is the
+    /// one place that knows how a unit is called. Today that is the tool
+    /// ending in `<cap>_<action>`, with a `node` argument when it covers
+    /// several nodes.
+    pub fn run_params(&mut self, node: &str, unit: &str, args: Value) -> Value {
+        let (cap, action) = unit.split_once('.').expect("a unit is cap.action");
+        let suffix = format!("{cap}_{action}");
+        let tools = self.tools();
+        let t = tools
+            .iter()
+            .find(|t| t["name"].as_str().is_some_and(|n| n.ends_with(&suffix)))
+            .unwrap_or_else(|| panic!("no tool for {unit}: {tools:?}"));
+        let mut arguments = args;
+        if t["inputSchema"]["properties"].get("node").is_some() {
+            arguments["node"] = json!(node);
+        }
+        json!({"name": t["name"], "arguments": arguments})
+    }
+
+    /// Runs `unit` on `node` as a harness would and returns the result
+    /// object.
+    pub fn run(&mut self, node: &str, unit: &str, args: Value) -> Value {
+        let params = self.run_params(node, unit, args);
+        let r = self.request("tools/call", params);
+        assert!(r.get("result").is_some(), "{unit} on {node}: {r}");
+        r["result"].clone()
+    }
+
     /// A web UI API call; see [`Ui::api`].
     pub fn api(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
         self.ui.api(method, path, body)

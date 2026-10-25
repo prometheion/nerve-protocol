@@ -342,6 +342,11 @@ impl HarnessNode {
         })
     }
 
+    /// How many invokes reached the node.
+    fn invoked(&self) -> usize {
+        self.seen.lock().unwrap().calls.len()
+    }
+
     fn calls(&self) -> BTreeSet<String> {
         self.seen.lock().unwrap().calls.iter().cloned().collect()
     }
@@ -831,9 +836,27 @@ pub async fn run(target: &Target) -> Report {
     r.check(
         "harness 4",
         "a failure on the node is `error <code>: <message>`",
-        s1.call(&format!("{A}_echo_say"), json!({}))
+        s1.call(&format!("{A}_echo_say"), json!({"text": echo::FAIL}))
             .await
-            .and_then(|res| check_error_result(&res, "invalid_args")),
+            .and_then(|res| check_error_result(&res, "io")),
+    );
+    // The node notes a call before it answers, so one the center forwarded
+    // would be counted by the time the answer is back.
+    r.check(
+        "harness 4",
+        "arguments that do not fit the action's schema are `error invalid_args` and never reach the node",
+        async {
+            let before = a.invoked();
+            for args in [json!({}), json!({"text": 5}), json!({"text": "x", "more": 1})] {
+                let res = s1.call(&format!("{A}_echo_say"), args.clone()).await?;
+                check_error_result(&res, "invalid_args").map_err(|e| format!("{args}: {e}"))?;
+            }
+            ensure(
+                a.invoked() == before,
+                format!("the node got {} of the calls", a.invoked() - before),
+            )
+        }
+        .await,
     );
     // Session 2 calls A as well, so a node is used by two sessions.
     let calls_s1 = a.calls();

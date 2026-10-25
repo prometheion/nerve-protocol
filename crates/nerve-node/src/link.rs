@@ -1391,6 +1391,15 @@ impl Link {
     /// Starts an `invoke` as its own task, so a slow call does not hold up the
     /// link.
     async fn start_invoke(self: &Arc<Self>, id: Id, p: Map<String, Value>) {
+        // `exec.signal` and the `exec/exit` event name a call by its number
+        // (spec §5.1), so a call with a text id could not be named there.
+        if let Id::Str(_) = id {
+            let e = RpcError::new(
+                ErrorCode::InvalidRequest,
+                "an invoke id is a whole number of 0 or more",
+            );
+            return self.reply(id, Err(e)).await;
+        }
         let inv = match params::<Invoke>(&p).and_then(|i| i.check().map(|()| i)) {
             Ok(i) => i,
             Err(e) => return self.reply(id, Err(e)).await,
@@ -1487,15 +1496,18 @@ impl Link {
         }
         // A provider's action (crate::provider) is decided and audited here
         // like any other, with `cap.action` as its rule target; only an
-        // allowed call reaches the provider.
+        // allowed call reaches the provider. Its arguments are checked first
+        // against the schema it published, so it never sees ones that do
+        // not fit, and the center learns which field is wrong.
         if cap.provider != "node" {
             let provider = cap.provider.clone();
+            nerve_proto::schema::validate(&action.params, &Value::Object(inv.args.clone()))?;
             let target = format!("{}.{}", inv.cap, inv.action);
             self.gate(&entry, &inv, effect, &[], None, None, target, None, None)?;
             return self
                 .shared
                 .providers
-                .invoke(&provider, &inv.cap, &inv.action, inv.args.clone())
+                .invoke(&provider, &inv.cap, &inv.action, inv.args)
                 .await;
         }
         match (inv.cap.as_str(), inv.action.as_str()) {
@@ -1797,8 +1809,7 @@ impl Link {
         let s: SignalArgs = params(args)?;
         let sig = Sig::parse(&s.signal)
             .ok_or_else(|| RpcError::invalid_args("signal must be term, kill or int"))?;
-        let id: Id = serde_json::from_value(s.call)
-            .map_err(|_| RpcError::invalid_args("call must be a request id"))?;
+        let id = Id::Num(s.call);
         let ender = lock(&self.commands)
             .get(&id)
             .cloned()

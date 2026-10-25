@@ -10,18 +10,25 @@
 //! any other; only an allowed call is forwarded. The capabilities go when
 //! the connection does. A provider never talks to a center and changes no
 //! policy.
+//!
+//! Every action's schemas must keep to the subset a center checks
+//! (nerve_proto::schema). An action whose do not is left out with the
+//! reason, which `status` shows; the provider's other actions attach. A call
+//! whose arguments do not fit its action's schema is refused by the node and
+//! never reaches the provider (crate::link).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 use nerve_policy::NodeConfig;
 use nerve_proto::descriptor::{Action, Capability, Effect, Exposure, valid_member_name};
+use nerve_proto::schema::{self, Role};
 use nerve_proto::{ErrorCode, RpcError};
 
 use crate::daemon::{Shared, lock};
@@ -74,6 +81,13 @@ struct FragmentAction {
     result: Value,
 }
 
+/// An action of a fragment the node left out, as `cap.action`, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Broken {
+    pub name: String,
+    pub reason: String,
+}
+
 /// One attached provider. The registry holds the only lasting reference:
 /// dropping it drops `tx`, which ends the connection, and `pending`, which
 /// fails the calls that wait for an answer.
@@ -84,6 +98,8 @@ struct Attached {
     /// Tells this attachment from a later one of the same name.
     serial: u64,
     caps: Vec<Capability>,
+    /// The actions of its fragment that were left out.
+    broken: Vec<Broken>,
     tx: mpsc::Sender<Value>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>,
     next: AtomicU64,
@@ -143,13 +159,14 @@ impl Providers {
         }
     }
 
-    /// What `status` shows of them.
+    /// What `status` shows of them: each one's capabilities, and the
+    /// actions left out with their reasons.
     pub fn status(&self) -> Value {
         let list: Vec<Value> = lock(&self.attached)
             .values()
             .map(|a| {
                 let caps: Vec<&str> = a.caps.iter().map(|c| c.id.as_str()).collect();
-                json!({"name": a.name, "capabilities": caps})
+                json!({"name": a.name, "capabilities": caps, "broken": a.broken})
             })
             .collect();
         json!(list)
@@ -329,18 +346,37 @@ fn same_program(running: &Path, allowed: &Path) -> Result<bool, String> {
     Ok(running == allowed)
 }
 
+/// Why an action's schemas are outside the subset a center checks, if they
+/// are. A missing `params` takes any arguments, a missing `result` says
+/// nothing of the result. The reason is brief: `status`, the hello answer
+/// and the log repeat it, and it holds the provider's own names.
+fn outside_subset(params: &Value, result: &Value) -> Option<String> {
+    if let Err(e) = schema::check(params, Role::Params) {
+        return Some(schema::brief(&format!("params: {e}")));
+    }
+    if !result.is_null()
+        && let Err(e) = schema::check(result, Role::Result)
+    {
+        return Some(schema::brief(&format!("result: {e}")));
+    }
+    None
+}
+
 /// Checks a fragment and makes its capabilities, each with `provider:
-/// name`. `taken` holds the capability ids of the other attached providers.
+/// name`, and the actions left out because their schemas are outside the
+/// subset; a capability left with no action goes too. `taken` holds the
+/// capability ids of the other attached providers.
 fn capabilities(
     name: &str,
     fragment: Vec<Fragment>,
     taken: &BTreeSet<String>,
-) -> Result<Vec<Capability>, String> {
+) -> Result<(Vec<Capability>, Vec<Broken>), String> {
     if fragment.is_empty() || fragment.len() > MAX_CAPS {
         return Err(format!("a provider adds 1 to {MAX_CAPS} capabilities"));
     }
     let mut seen = BTreeSet::new();
     let mut caps = Vec::new();
+    let mut broken = Vec::new();
     for f in fragment {
         if !valid_member_name(&f.id) {
             return Err(format!(
@@ -377,15 +413,30 @@ fn capabilities(
                     f.id
                 ));
             }
+            // Arguments are always an object; no schema takes any.
+            let params = match decl.params {
+                Value::Null => json!({"type": "object"}),
+                p => p,
+            };
+            if let Some(reason) = outside_subset(&params, &decl.result) {
+                broken.push(Broken {
+                    name: format!("{}.{a}", f.id),
+                    reason,
+                });
+                continue;
+            }
             actions.insert(
                 a,
                 Action {
                     effect: decl.effect,
                     summary: decl.summary,
-                    params: decl.params,
+                    params,
                     result: decl.result,
                 },
             );
+        }
+        if actions.is_empty() {
+            continue;
         }
         caps.push(Capability {
             id: f.id,
@@ -399,7 +450,17 @@ fn capabilities(
             streams: BTreeMap::new(),
         });
     }
-    Ok(caps)
+    if caps.is_empty() {
+        let why: Vec<String> = broken
+            .iter()
+            .map(|b| format!("{}: {}", b.name, b.reason))
+            .collect();
+        return Err(format!(
+            "no action has schemas a center can check: {}",
+            why.join("; ")
+        ));
+    }
+    Ok((caps, broken))
 }
 
 /// `hello` on the control socket from the process `pid`: attaches it as the
@@ -456,12 +517,13 @@ fn check(
             .values()
             .flat_map(|a| a.caps.iter().map(|c| c.id.clone()))
             .collect();
-        let caps = capabilities(&name, hello.capabilities, &taken)?;
+        let (caps, broken) = capabilities(&name, hello.capabilities, &taken)?;
         let a = Arc::new(Attached {
             name: name.clone(),
             exe: allowed.exe.clone(),
             serial: shared.providers.serial.fetch_add(1, Ordering::Relaxed),
             caps,
+            broken,
             tx: out_tx,
             pending: Mutex::default(),
             next: AtomicU64::new(1),
@@ -470,11 +532,15 @@ fn check(
         a
     };
     let ids: Vec<String> = attached.caps.iter().map(|c| c.id.clone()).collect();
+    let broken = attached.broken.clone();
     tracing::info!(
         "provider {name} attached ({}): {}",
         running.display(),
         ids.join(", ")
     );
+    for b in &broken {
+        tracing::warn!("provider {name}: {} left out: {}", b.name, b.reason);
+    }
     let (weak, serial) = (Arc::downgrade(&attached), attached.serial);
     drop(attached);
     let s = shared.clone();
@@ -494,7 +560,7 @@ fn check(
     });
     shared.bump();
     Ok(nerve_transport::ctl::Reply::Session {
-        ok: json!({"name": name, "capabilities": ids}),
+        ok: json!({"name": name, "capabilities": ids, "broken": broken}),
         out: out_rx,
         inbound: in_tx,
     })
@@ -515,12 +581,90 @@ mod tests {
 
     #[test]
     fn a_fragment_becomes_capabilities_of_its_provider() {
-        let caps = capabilities("desk", fragment(echo()), &BTreeSet::new()).unwrap();
+        let (caps, broken) = capabilities("desk", fragment(echo()), &BTreeSet::new()).unwrap();
+        assert_eq!(broken, []);
         assert_eq!(caps.len(), 1);
         assert_eq!(caps[0].id, "echo");
         assert_eq!(caps[0].provider, "desk");
         assert_eq!(caps[0].exposure, Exposure::On);
         assert_eq!(caps[0].actions["say"].effect, Effect::Read);
+    }
+
+    /// An action whose schemas a center cannot check is left out with the
+    /// reason, and the rest attaches; one without params takes any
+    /// arguments. A capability left with no action goes, and a fragment left
+    /// with none is refused.
+    #[test]
+    fn an_action_outside_the_schema_subset_is_left_out() {
+        let one_of = json!({"type": "object", "properties": {
+            "level": {"oneOf": [{"type": "integer"}, {"type": "string"}]}}});
+        let frag = json!([
+            {"id": "lamp", "actions": {
+                "on": {"effect": "write"},
+                "dim": {"effect": "write", "params": one_of},
+                "get": {"effect": "read", "params": {"type": "object"},
+                        "result": {"$ref": "#/defs/x"}}}},
+            {"id": "fan", "actions": {"spin": {"effect": "write", "params": {"type": "string"}}}}
+        ]);
+        let (caps, broken) = capabilities("desk", fragment(frag), &BTreeSet::new()).unwrap();
+        let ids: Vec<&str> = caps.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["lamp"]);
+        let actions: Vec<&String> = caps[0].actions.keys().collect();
+        assert_eq!(actions, ["on"]);
+        assert_eq!(caps[0].actions["on"].params, json!({"type": "object"}));
+        let names: Vec<&str> = broken.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["lamp.dim", "lamp.get", "fan.spin"]);
+        assert!(
+            broken[0]
+                .reason
+                .starts_with("params: /properties/level/oneOf: "),
+            "{broken:?}"
+        );
+        assert!(
+            broken[1].reason.starts_with("result: /$ref: "),
+            "{broken:?}"
+        );
+        assert!(
+            broken[2].reason.contains("must be type \"object\""),
+            "{broken:?}"
+        );
+
+        let none = json!([{"id": "fan", "actions": {"spin": {"effect": "write", "params": {}}}}]);
+        let e = capabilities("desk", fragment(none), &BTreeSet::new()).unwrap_err();
+        assert!(
+            e.contains("no action") && e.contains("fan.spin: params"),
+            "{e}"
+        );
+    }
+
+    /// The reason names the provider's own property names, so `status`
+    /// shows it as one line of its own, cut.
+    #[test]
+    fn the_reason_for_leaving_out_an_action_is_one_short_line() {
+        let long = "/".repeat(4000);
+        let frag = json!([{"id": "lamp", "actions": {
+            "on": {"effect": "write"},
+            "dim": {"effect": "write", "params": {"type": "object", "properties": {
+                "x\nprovider other attached: fake\u{1b}[2J": {"type": "string", "pattern": "a"}}}},
+            "get": {"effect": "read", "result": {"type": "object", long: 1}}}}]);
+        let (_, broken) = capabilities("desk", fragment(frag), &BTreeSet::new()).unwrap();
+        let names: Vec<&str> = broken.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["lamp.dim", "lamp.get"]);
+        for b in &broken {
+            assert!(!b.reason.chars().any(char::is_control), "{b:?}");
+            assert!(
+                b.reason.chars().count() <= schema::BRIEF_MAX + 1,
+                "{}",
+                b.reason.len()
+            );
+        }
+        assert!(
+            broken[0]
+                .reason
+                .starts_with("params: /properties/x provider other attached: fake [2J/pattern"),
+            "{broken:?}"
+        );
+        assert!(broken[1].reason.ends_with('…'), "{broken:?}");
     }
 
     #[test]

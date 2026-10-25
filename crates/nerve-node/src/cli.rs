@@ -2431,11 +2431,16 @@ fn status_lines(v: &Value) -> Vec<String> {
             .flatten()
             .filter_map(Value::as_str)
             .collect();
-        lines.push(format!(
-            "provider {} attached: {}",
-            p["name"].as_str().unwrap_or_default(),
-            caps.join(", ")
-        ));
+        let name = p["name"].as_str().unwrap_or_default();
+        lines.push(format!("provider {name} attached: {}", caps.join(", ")));
+        // Actions whose schemas a center cannot check are not offered.
+        for b in p["broken"].as_array().into_iter().flatten() {
+            lines.push(format!(
+                "provider {name}: {} left out: {}",
+                b["name"].as_str().unwrap_or_default(),
+                b["reason"].as_str().unwrap_or_default()
+            ));
+        }
     }
     let relay = &v["relay"];
     if relay["listen"].is_string() {
