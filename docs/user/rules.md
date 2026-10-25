@@ -41,7 +41,7 @@ node itself. `rule ls deny` shows them; remove any you do not want.
 
 | Rule | Refuses |
 |---|---|
-| `guard:node-programs` | A command that runs `nerve-node` or `nerve-node-desktop`, by its name or a path, `.exe` too; and one that copies, moves, links, deletes or overwrites their files (`cp`, `mv`, `rm`, `install`, `ln`, `Remove-Item`, `del`, a redirection onto the file, `tee`, `dd`, `sed`, `chmod`, `curl -o`, `wget -O`, `Invoke-WebRequest -OutFile`, `Start-BitsTransfer`, `certutil`, `Set-Content`, `Clear-Content`, `Out-File`, `gzip`, `upx`, `objcopy` …), since replacing the program changes the node; only the listed programs count, so another program or a .NET call that writes the file is not seen |
+| `guard:node-programs` | A command that runs `nerve-node` or `nerve-node-desktop`, by its name or a path, `.exe` too; and one that copies, moves, links, deletes or overwrites their files (`cp`, `mv`, `rm`, `install`, `ln`, `Remove-Item`, `del`, a redirection onto the file, `tee`, `dd`, `sed`, `chmod`, `curl -o`, `wget -O`, `Invoke-WebRequest -OutFile`, `Start-BitsTransfer`, `certutil`, `Set-Content`, `Clear-Content`, `Out-File`, `gzip`, `upx`, `objcopy` …), since replacing the program changes the node. The path may stand in a brace group in `sh` and fish (`mv nerve-node{,.bak}`), and may come through a pipe into the tools that take paths (`echo /usr/local/bin/nerve-node \| xargs rm`, `Get-Item …\nerve-node.exe \| Remove-Item`; not into a writer such as `tee`). Only the listed programs count, so another program or a .NET call that writes the file is not seen |
 | `guard:node-paths` | A command that names the node's socket or pipes or its config and state folders (`/run/nerve-node`, `/etc/nerve`, `/var/lib/nerve`, `~/.config/nerve`, `~/.local/state/nerve`, `%ProgramData%\Nerve`) |
 | `guard:node-service` | A command that stops, restarts, disables or kills the node's service or process, as the node's own `service stop` would |
 | `fs.write:…` (five rules) | A write into those folders |
@@ -83,7 +83,8 @@ is cmd's.
 So `env X=1 sudo systemctl stop nerve-node`, `timeout 30 sudo systemctl
 restart nerve-node`, `bash -c 'pkill nerve-node'` and
 `powershell -Command "Stop-Service nerve-node"` (or `/c`, as PowerShell
-takes `/` before its switches too) are refused. A word of
+takes `/` before its switches too) are refused. cmd's `/c` text is read as cmd reads it from the line, also in the form with doubled quotes that a program path with a blank needs
+(`cmd /s /c ""C:\Program Files\Nerve\nerve-node.exe" status"`), and the argument string of `Start-Process cmd`. A word of
 another program is data, so a line that only mentions the node runs:
 `git commit -m "refuse systemctl stop nerve-node"`, `echo`, `grep`, a
 here-document written to a file. The name alone is not refused either:
@@ -98,8 +99,8 @@ not seen: both are a program that another program runs, listed below.
 
 | | Refused | Still runs |
 |---|---|---|
-| Linux | `systemctl stop`, `restart`, `try-restart`, `reload-or-restart`, `try-reload-or-restart` (and `force-reload`, `condrestart`, `condstop`, `condreload`, `reload-or-try-restart`), `freeze`, `disable`, `kill` or `mask` on `nerve-node` (or `nerve-node.service`); `service nerve-node stop`, `restart`, `try-restart`, `force-reload` or `condrestart`; `pkill` or `killall` on `nerve-node` or `nerve-node-desktop`, with flags such as `-9`, `-f` or `-x`; `kill` with what `pidof` or `pgrep` finds in a substitution, or a pipe that goes straight into `kill` or `xargs kill` (`kill $(pidof nerve-node)`, `pgrep nerve-node \| xargs kill`) | `systemctl status`, `is-active`, `show`, `cat` on it, `service nerve-node status`, `journalctl -u nerve-node`, `pgrep`, `ps`, `pkill -f "cargo run -p nerve-node"` (another program) |
-| Windows | `sc stop`, `config` or `delete`; `net stop`; `Stop-Service`, `Restart-Service`, `Set-Service` or `Remove-Service`; `Stop-Process` and `taskkill` with `nerve-node.exe` or `nerve-node-desktop.exe`, or with what `Get-Process` finds (`Stop-Process -Id (Get-Process nerve-node).Id`); `Get-Service` or `Get-Process` on the node piped into one of the cmdlets (also with the `\|` at the start of the next line); `reg add`, `delete`, `copy` or `restore` on the service's key (`…\Services\nerve-node`) | `sc query`, `sc qc`, `Get-Service nerve-node`, `Get-Process nerve-node` |
+| Linux | `systemctl stop`, `restart`, `try-restart`, `reload-or-restart`, `try-reload-or-restart` (and `force-reload`, `condrestart`, `condstop`, `condreload`, `reload-or-try-restart`), `freeze`, `disable`, `kill` or `mask` on `nerve-node` (or `nerve-node.service`); `service nerve-node stop`, `restart`, `try-restart`, `force-reload` or `condrestart`; `pkill` or `killall` on `nerve-node` or `nerve-node-desktop`, with flags such as `-9`, `-f` or `-x`, also as one alternative of the pattern (`pkill -f 'nerve-node\|nerve-center'`); `kill` with what `pidof` or `pgrep` finds in a substitution, or a pipe that goes straight into `kill` or `xargs kill` (`kill $(pidof nerve-node)`, `pgrep nerve-node \| xargs kill`) | `systemctl status`, `is-active`, `show`, `cat` on it, `service nerve-node status`, `journalctl -u nerve-node`, `pgrep`, `ps`, `pkill -f "cargo run -p nerve-node"` (another program) |
+| Windows | `sc stop`, `config` or `delete`; `net stop`; `Stop-Service`, `Restart-Service`, `Set-Service` or `Remove-Service`; `Stop-Process` and `taskkill` with `nerve-node.exe` or `nerve-node-desktop.exe`, or with what `Get-Process` finds (`Stop-Process -Id (Get-Process nerve-node).Id`); `Get-Service` or `Get-Process` on the node piped into one of the cmdlets (also with the `\|` at the start of the next line); `reg add`, `delete`, `copy` or `restore` on the service's key or a key below it (`…\Services\nerve-node`, `…\nerve-node\Parameters`, which holds the node's owners), and PowerShell's `Set-ItemProperty`, `New-ItemProperty`, `Remove-ItemProperty` and their kin on them; the service by its display name too (`net stop "Nerve node"`, `Stop-Service -DisplayName 'Nerve node'`) | `sc query`, `sc qc`, `Get-Service nerve-node`, `Get-Process nerve-node` |
 
 The Windows commands and program names match in any case (`STOP-SERVICE`,
 `NET STOP`, `sc stop Nerve-Node`, `taskkill /IM NERVE-NODE.EXE`), as Windows
@@ -124,7 +125,7 @@ also with the program's path), a name
 that reaches `kill` or `systemctl` through a loop or another way than a
 straight pipe (`pgrep -f nerve-node | while read p; do kill $p; done`,
 `echo nerve-node | xargs systemctl stop`), and `pkill` or `killall` with a
-part of the name (`pkill nerve`, which matches the node too).
+part of the name (`pkill nerve`, which matches the node too), and `reg import` or `regedit` of a file that holds the service's key.
 
 A rule of the guard is written `guard:<name>`, and only these three exist.
 They belong on the deny list; the allow list refuses them.

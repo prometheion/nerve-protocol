@@ -100,7 +100,10 @@ text:
   here-document text and, as `inner`, what runs inside a command:
   substitutions, groups, PowerShell blocks and the text a shell runs
   (`sh -c`, `eval`, `su -c`, `powershell -Command`, `cmd /c`,
-  `Invoke-Expression`, a here-document fed to a shell).
+  `Invoke-Expression`, a here-document fed to a shell). cmd reads the text
+  after `/c` from the line, so a cmd `Word` keeps its source (`raw`, also for
+  the words of `Start-Process`' argument string) and `cmd_text` reads that
+  text as it stands and without its first and last quote.
 - `command::run` finds the program behind keywords, assignments and wrappers
   (`sudo` and its options, `env`, `timeout`, `nohup`, `nice`, `ionice`,
   `time`, `stdbuf`, `xargs`, `exec`, `command`, `setsid`; `&`,
@@ -117,6 +120,11 @@ text:
   other tools that copy, delete, overwrite, download into or change the mode
   of a file (`FILE_TOOLS`: `tee`, `dd`, `sed`, `chmod`, `curl`, `wget`,
   `Set-Content`, `Out-File`, `gzip`, `objcopy` …) on a file named as the node's programs.
+  A word with a brace group is also read expanded in sh and fish
+  (`nerve-node{,.bak}`, bounded to 64 groups), and the tools that take
+  paths (`TAKES_PATHS`, not the writers) are refused when an earlier
+  command of their pipe names the program (`… | xargs rm`, `Get-Item … |
+  Remove-Item`), as `node-service` does with a name.
   Programs that only look at a file (`ls`, `sha256sum`) are not on the
   list, and neither are the ones that write a file in ways a list cannot
   cover (an interpreter, a .NET call). Each

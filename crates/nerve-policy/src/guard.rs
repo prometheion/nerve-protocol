@@ -49,41 +49,81 @@ impl Guard {
     /// by the rules of the shell its text was written for (`script.shell`):
     /// a `powershell -Command` body in a line for sh is PowerShell.
     pub fn refuses(self, script: &Script) -> bool {
-        // Whether an earlier command of the pipe the command stands in
-        // names the node: one pass, so a long pipe costs no more than it
-        // is long.
-        let mut fed = false;
+        // What the earlier commands of the pipe the command stands in
+        // name: one pass, so a long pipe costs no more than it is long.
+        let mut fed = Fed::default();
         for cmd in &script.commands {
             if !cmd.piped {
-                fed = false;
+                fed = Fed::default();
             }
             if self.command(cmd, script.shell, fed) || cmd.inner.iter().any(|s| self.refuses(s)) {
                 return true;
             }
-            fed = fed || (self == Guard::Service && mention(cmd, script.shell.windows()));
+            match self {
+                Guard::Service => fed.service |= mention(cmd, script.shell.windows()),
+                Guard::Programs => {
+                    let spelling = Spelling::of(script.shell);
+                    fed.file |= cmd.words.iter().any(|w| is_node_file(&w.text, spelling));
+                }
+                Guard::Paths => {}
+            }
         }
         false
     }
 
-    fn command(self, cmd: &Command, shell: Shell, fed: bool) -> bool {
+    fn command(self, cmd: &Command, shell: Shell, fed: Fed) -> bool {
         let win = shell.windows();
-        // A comma separates paths only where PowerShell or cmd reads the
-        // line: a Windows node's sh keeps it in the word, as any sh does.
-        let comma = !shell.posix();
         match self {
             Guard::Programs => {
                 // A redirection onto the program writes it, whatever
                 // command it stands on.
                 cmd.redirects.iter().any(|w| names_node(&w.text, win))
-                    || run(cmd, shell)
-                        .is_some_and(|r| is_node(&r.name) || changes_file(&r, win, comma))
+                    || run(cmd, shell).is_some_and(|r| {
+                        is_node(&r.name)
+                            || changes_file(&r, Spelling::of(shell))
+                            // `Get-Item <program> | Remove-Item`,
+                            // `echo <program> | xargs rm`: the path comes
+                            // from the command before.
+                            || (fed.file && TAKES_PATHS.contains(&r.name.to_lowercase().as_str()))
+                    })
             }
             Guard::Paths => cmd
                 .words
                 .iter()
                 .chain(&cmd.redirects)
                 .any(|w| names_node_path(&w.text, win)),
-            Guard::Service => run(cmd, shell).is_some_and(|r| stops(&r, cmd, fed, win)),
+            Guard::Service => run(cmd, shell).is_some_and(|r| stops(&r, cmd, fed.service, win)),
+        }
+    }
+}
+
+/// What the earlier commands of a pipe name, for the rule that looks at it.
+#[derive(Debug, Clone, Copy, Default)]
+struct Fed {
+    /// Service rule: the node's program or service by name.
+    service: bool,
+    /// Programs rule: a path of the node's program.
+    file: bool,
+}
+
+/// How a shell spells the paths in a word of a file tool.
+#[derive(Debug, Clone, Copy)]
+struct Spelling {
+    /// Case does not count and `\` separates.
+    win: bool,
+    /// A comma separates paths, where PowerShell or cmd reads the line: a
+    /// Windows node's sh keeps it in the word, as any sh does.
+    comma: bool,
+    /// `{a,b}` is several words, in sh and fish.
+    brace: bool,
+}
+
+impl Spelling {
+    fn of(shell: Shell) -> Spelling {
+        Spelling {
+            win: shell.windows(),
+            comma: !shell.posix(),
+            brace: shell.posix(),
         }
     }
 }
@@ -164,12 +204,45 @@ const FILE_TOOLS: &[&str] = &[
     "patchelf",
 ];
 
+/// The file tools that get the paths they work on, not data, from what a
+/// pipe feeds them (`xargs rm`, PowerShell's pipeline into `Remove-Item`).
+/// The writers (`tee`, `sed`, `dd`, `curl`, `Out-File`) are not here: what
+/// they get from a pipe is data, and `cargo build -p nerve-node | tee log`
+/// is not a change of the program.
+const TAKES_PATHS: &[&str] = &[
+    "rm",
+    "mv",
+    "cp",
+    "install",
+    "ln",
+    "unlink",
+    "shred",
+    "truncate",
+    "chmod",
+    "chown",
+    "chgrp",
+    "del",
+    "erase",
+    "move",
+    "copy",
+    "ren",
+    "rename",
+    "remove-item",
+    "ri",
+    "move-item",
+    "mi",
+    "copy-item",
+    "cpi",
+    "rename-item",
+    "rni",
+];
+
 /// Whether `r` copies, moves, links, deletes or overwrites the node's
 /// program file: replacing the binary of the node is changing it. Looking at
 /// it (`ls`, `file`, `sha256sum`) is not.
-fn changes_file(r: &Run, win: bool, comma: bool) -> bool {
+fn changes_file(r: &Run, spelling: Spelling) -> bool {
     FILE_TOOLS.contains(&r.name.to_lowercase().as_str())
-        && r.args.iter().any(|w| is_node_file(&w.text, win, comma))
+        && r.args.iter().any(|w| is_node_file(&w.text, spelling))
 }
 
 /// Whether an argument of a file tool names the node's program: the whole
@@ -177,8 +250,11 @@ fn changes_file(r: &Run, win: bool, comma: bool) -> bool {
 /// value of `of=`, `--output=` or `-Destination:`. Data that only holds the
 /// name (`curl -d name=nerve-node`, `--exclude=nerve-node`) is not it.
 /// In PowerShell and cmd (`comma`) a comma separates paths (`Remove-Item
-/// a,b`); in sh it is part of the word (`sed -i "s,a/nerve-node,b,"`).
-fn is_node_file(word: &str, win: bool, comma: bool) -> bool {
+/// a,b`); in sh it is part of the word (`sed -i "s,a/nerve-node,b,"`). In sh
+/// and fish (`brace`) a word with `{a,b}` is several (`mv nerve-node{,.bak}`),
+/// whether it was quoted or not.
+fn is_node_file(word: &str, spelling: Spelling) -> bool {
+    let Spelling { win, comma, brace } = spelling;
     let value = match word.split_once('=') {
         Some((key, v))
             if key == "of"
@@ -194,17 +270,71 @@ fn is_node_file(word: &str, win: bool, comma: bool) -> bool {
         },
     };
     [word, value].iter().any(|w| {
-        w.split(|c| comma && c == ',')
-            .any(|p| is_node(&base_name(p, win)))
+        w.split(|c| comma && c == ',').any(|p| {
+            if brace {
+                let mut all = Vec::new();
+                expand_braces(p, &mut all, &mut { MAX_GROUPS });
+                all.iter().any(|p| is_node(&base_name(p, win)))
+            } else {
+                is_node(&base_name(p, win))
+            }
+        })
     })
 }
 
-/// Whether a registry key is the node's service: `…\Services\nerve-node`.
+/// How many groups of one word are expanded; the groups left stay as
+/// written, so a hostile word costs a bounded amount of work.
+const MAX_GROUPS: usize = 64;
+
+/// `word` with its first `{a,b,…}` group expanded into each alternative, and
+/// so on for the groups left. A group without a comma at its top level
+/// (`{}`, `{a..c}`) is not one.
+fn expand_braces(word: &str, out: &mut Vec<String>, groups: &mut usize) {
+    if *groups > 0 {
+        let mut open = 0;
+        let mut depth = 0usize;
+        let mut cuts: Vec<usize> = Vec::new();
+        for (i, c) in word.char_indices() {
+            match c {
+                '{' => {
+                    if depth == 0 {
+                        open = i;
+                        cuts.clear();
+                    }
+                    depth += 1;
+                }
+                ',' if depth == 1 => cuts.push(i),
+                '}' if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 && !cuts.is_empty() {
+                        *groups -= 1;
+                        let mut start = open + 1;
+                        for end in cuts.iter().copied().chain([i]) {
+                            let alt = &word[start..end];
+                            let expanded = format!("{}{alt}{}", &word[..open], &word[i + 1..]);
+                            expand_braces(&expanded, out, groups);
+                            start = end + 1;
+                        }
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out.push(word.to_string());
+}
+
+/// Whether a registry key is the node's service or below it:
+/// `…\Services\nerve-node` and its subkeys (`…\Parameters` holds the list
+/// of the node's owners).
 fn is_service_key(key: &str) -> bool {
     let key = key.replace('/', "\\").to_lowercase();
-    key.trim_end_matches('\\')
-        .strip_suffix("nerve-node")
-        .is_some_and(|rest| rest.ends_with("\\services\\"))
+    let key = key.trim_end_matches('\\');
+    key.match_indices("\\services\\nerve-node").any(|(at, m)| {
+        let rest = &key[at + m.len()..];
+        rest.is_empty() || rest.starts_with('\\')
+    })
 }
 
 /// The node's service (systemd's unit, Windows' service).
@@ -214,8 +344,12 @@ fn is_service(word: &str, win: bool) -> bool {
     } else {
         word.to_string()
     };
-    w == "nerve-node" || w == "nerve-node.service"
+    w == "nerve-node" || w == "nerve-node.service" || (win && w == DISPLAY_NAME)
 }
+
+/// The Windows service's display name, which `net` and the service cmdlets
+/// take as well as its key name (lower case).
+const DISPLAY_NAME: &str = "nerve node";
 
 /// Whether a word names the node's program or service by its name: the
 /// whole word, or a part of it after `-Name:`, `=` or a comma, or a word of
@@ -223,6 +357,16 @@ fn is_service(word: &str, win: bool) -> bool {
 fn names_node(word: &str, win: bool) -> bool {
     word.split(|c: char| matches!(c, ',' | ':' | '=') || c.is_whitespace())
         .any(|part| is_node(&base_name(part, win)))
+}
+
+/// [`names_node`], or on Windows the service's display name, which holds a
+/// blank (`-DisplayName 'Nerve node'`).
+fn names_service(word: &str, win: bool) -> bool {
+    names_node(word, win)
+        || (win
+            && word
+                .split([',', ':', '='])
+                .any(|part| part.trim().eq_ignore_ascii_case(DISPLAY_NAME)))
 }
 
 /// The paths of the node's socket and pipes and its folders, and whether
@@ -364,6 +508,29 @@ fn stops(r: &Run, cmd: &Command, fed: bool, win: bool) -> bool {
                 ) && keys.iter().any(|k| is_service_key(k))
             })
         }
+        // The same key through PowerShell's registry provider.
+        "new-itemproperty"
+        | "remove-itemproperty"
+        | "clear-itemproperty"
+        | "rename-itemproperty"
+        | "copy-itemproperty"
+        | "move-itemproperty"
+        | "set-itemproperty"
+        | "sp"
+        | "rp"
+        | "clp"
+        | "rnp"
+        | "cpp"
+        | "mp"
+        | "remove-item"
+        | "ri"
+        | "new-item"
+        | "ni"
+            if win =>
+        {
+            // `-Path:HKLM:\…` holds the key as well as `-Path HKLM:\…`.
+            args.iter().any(|w| is_service_key(&w.text))
+        }
         "pkill" | "killall" => {
             let values: &[&str] = if name == "pkill" {
                 &[
@@ -414,7 +581,7 @@ fn stops(r: &Run, cmd: &Command, fed: bool, win: bool) -> bool {
         // (`Get-Service nerve-node | Stop-Service`, `pgrep … | xargs kill`).
         "stop-service" | "spsv" | "restart-service" | "set-service" | "remove-service"
         | "suspend-service" | "stop-process" | "spps" | "kill" | "taskkill" => {
-            args.iter().any(|w| names_node(&w.text, win))
+            args.iter().any(|w| names_service(&w.text, win))
                 || cmd.inner.iter().any(|s| mentions(s, win))
                 || fed
         }
@@ -492,19 +659,25 @@ fn operands<'a>(args: &'a [Word], values: &[&str]) -> Vec<&'a str> {
 
 /// Whether a `pkill`/`killall` pattern names the node: its first word
 /// (`pkill -f 'nerve-node --config x'`), without `^`, `$` and a trailing
-/// `.*`, by its program's name (`^/usr/bin/nerve-node`). A pattern that
+/// `.*`, by its program's name (`^/usr/bin/nerve-node`), in any of its
+/// alternatives (`nerve-node|nerve-center`). A pattern that
 /// names it later (`pkill -f "cargo run -p nerve-node"`) is another program.
 fn pattern_names_node(pattern: &str, win: bool) -> bool {
     let first = pattern.split_whitespace().next().unwrap_or("");
-    let first = first.trim_start_matches('^').trim_end_matches('$');
-    let name = base_name(first, win);
-    is_node(name.trim_end_matches(['*', '.', '$', '+', '?']))
+    // The pattern is a regular expression: `|` separates alternatives, and
+    // a group's brackets surround one.
+    first.split('|').any(|alt| {
+        let alt = alt.trim_matches(['^', '$', '(', ')']);
+        let name = base_name(alt, win);
+        is_node(name.trim_end_matches(['*', '.', '$', '+', '?']))
+    })
 }
 
 /// Whether a command (or one nested in it) names the node's program or
 /// service in a word.
 fn mention(cmd: &Command, win: bool) -> bool {
-    cmd.words.iter().any(|w| names_node(&w.text, win)) || cmd.inner.iter().any(|s| mentions(s, win))
+    cmd.words.iter().any(|w| names_service(&w.text, win))
+        || cmd.inner.iter().any(|s| mentions(s, win))
 }
 
 fn mentions(script: &Script, win: bool) -> bool {
@@ -515,35 +688,116 @@ fn mentions(script: &Script, win: bool) -> bool {
 mod tests {
     use super::*;
 
+    const SH: Spelling = Spelling {
+        win: false,
+        comma: false,
+        brace: true,
+    };
+    const PS: Spelling = Spelling {
+        win: true,
+        comma: true,
+        brace: false,
+    };
+    // sh on a Windows node.
+    const WIN_SH: Spelling = Spelling {
+        win: true,
+        comma: false,
+        brace: true,
+    };
+
     #[test]
     fn a_comma_splits_paths_only_where_the_dialect_says() {
         // PowerShell and cmd: `Remove-Item a.txt,C:\x\nerve-node.exe`.
-        assert!(is_node_file("a.txt,C:\\x\\nerve-node.exe", true, true));
+        assert!(is_node_file("a.txt,C:\\x\\nerve-node.exe", PS));
         // sh on a Windows node: case and `\` count, the comma stays in the
         // word (`sed -i "s,a/nerve-node,b,"`).
-        assert!(!is_node_file(
-            "s,crates/nerve-node,crates/node,g",
-            true,
-            false
-        ));
-        assert!(is_node_file("C:\\x\\NERVE-NODE.exe", true, false));
+        assert!(!is_node_file("s,crates/nerve-node,crates/node,g", WIN_SH));
+        assert!(is_node_file("C:\\x\\NERVE-NODE.exe", WIN_SH));
     }
 
     #[test]
-    fn a_registry_key_of_the_service_is_the_key_ending_in_its_name() {
+    fn a_brace_group_is_several_words_in_sh_and_fish_only() {
+        for word in [
+            "/usr/local/bin/nerve-node{,.bak}",
+            "nerve-{node,x}",
+            "nerve-{x,node-desktop}",
+            "/usr/{bin,sbin}/nerve-node",
+            "{a,b}/nerve-{c,node}",
+        ] {
+            assert!(is_node_file(word, SH), "{word:?}");
+        }
+        // PowerShell and cmd do not expand it.
+        assert!(!is_node_file("/usr/local/bin/nerve-node{,.bak}", PS));
+        for word in [
+            "/usr/local/bin/nerve-node{.old,.bak}",
+            "nerve-{a,b}",
+            "nerve-node{}",
+            "{a..c}nerve",
+            "a{,b",
+            "}nerve-{",
+        ] {
+            assert!(!is_node_file(word, SH), "{word:?}");
+        }
+        // A word that expands to many stays bounded.
+        let big = "{a,b}".repeat(5000) + "/nerve-node";
+        assert!(is_node_file(&big, SH));
+    }
+
+    #[test]
+    fn a_registry_key_of_the_service_is_the_key_and_the_keys_below_it() {
         for key in [
             "HKLM\\SYSTEM\\CurrentControlSet\\Services\\nerve-node",
             "hklm\\system\\controlset001\\SERVICES\\Nerve-Node\\",
             "HKEY_LOCAL_MACHINE/SYSTEM/CurrentControlSet/Services/nerve-node",
+            "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\nerve-node\\Parameters",
+            "HKLM\\SYSTEM\\CurrentControlSet\\Services\\nerve-node\\Parameters\\x",
         ] {
             assert!(is_service_key(key), "{key:?}");
         }
         for key in [
             "HKLM\\SYSTEM\\CurrentControlSet\\Services\\spooler",
-            "HKLM\\SYSTEM\\CurrentControlSet\\Services\\nerve-node\\Parameters",
+            "HKLM\\SYSTEM\\CurrentControlSet\\Services\\nerve-node.exe",
+            "HKLM\\SYSTEM\\CurrentControlSet\\Services\\nerve-node-desktop\\x",
             "HKLM\\SOFTWARE\\nerve-node",
         ] {
             assert!(!is_service_key(key), "{key:?}");
         }
+    }
+
+    #[test]
+    fn a_pkill_pattern_names_the_node_in_any_alternative() {
+        for p in [
+            "nerve-node",
+            "nerve-node|nerve-center",
+            "nerve-center|nerve-node",
+            "^nerve-node|foo$",
+            "(nerve-center|nerve-node)",
+            "^(a|nerve-node)$",
+            "nerve-node|nerve-node-desktop",
+        ] {
+            assert!(pattern_names_node(p, false), "{p:?}");
+        }
+        for p in ["nginx|php-fpm", "nerve-center|nerve", "nerve-node-x|y"] {
+            assert!(!pattern_names_node(p, false), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn the_display_name_counts_on_windows_only() {
+        for w in [
+            "Nerve node",
+            "NERVE NODE",
+            "-DisplayName:Nerve node",
+            "x=Nerve node",
+        ] {
+            assert!(names_service(w, true), "{w:?}");
+            assert!(!names_service(w, false), "{w:?}");
+        }
+        assert!(!names_service("Nerve nodes", true));
+        // A file named so is not the node's program.
+        assert!(!names_node("Nerve node", true));
+        assert!(is_service("Nerve node", true));
+        assert!(!is_service("Nerve node", false));
+        assert!(!is_service("nerve node", false));
     }
 }

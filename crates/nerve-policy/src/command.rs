@@ -103,6 +103,11 @@ pub struct Word {
     pub literal: bool,
     /// Some of it was quoted or escaped.
     pub quoted: bool,
+    /// The word as it stands in the source, quotes and escapes included,
+    /// where the reader keeps it (cmd's words, the split arguments of
+    /// `Start-Process`); empty elsewhere. cmd reads the text after `/c`
+    /// from the source, not from the words.
+    pub raw: String,
 }
 
 /// One command: its words, and what runs inside it.
@@ -524,8 +529,8 @@ impl<'b> Parser<'b> {
                             ForSource::Text(texts) => {
                                 cmd.words.extend(texts.into_iter().map(|text| Word {
                                     text,
-                                    literal: false,
                                     quoted: true,
+                                    ..Word::default()
                                 }));
                             }
                         }
@@ -1108,7 +1113,7 @@ impl<'b> Parser<'b> {
                         Word {
                             text: "&".into(),
                             literal: true,
-                            quoted: false,
+                            ..Word::default()
                         },
                         Vec::new(),
                     )
@@ -1416,6 +1421,7 @@ impl<'b> Parser<'b> {
             literal: true,
             ..Word::default()
         };
+        let start = self.i;
         while let Some(c) = self.peek() {
             match c {
                 ' ' | '\t' | '\r' | '\n' | '&' | '|' | '<' | '>' | '(' => break,
@@ -1450,6 +1456,7 @@ impl<'b> Parser<'b> {
                 }
             }
         }
+        w.raw = self.s[start..self.i].iter().collect();
         Ok(Tok::Word(w, Vec::new()))
     }
 
@@ -1567,6 +1574,34 @@ fn joined(args: &[Word]) -> Option<String> {
 /// quotes because of a blank; cmd decides by whether the quoted text names a
 /// file, which the reader cannot know, so both are read.
 fn cmd_text(args: &[Word]) -> Vec<String> {
+    let mut texts = cmd_words_text(args);
+    // cmd reads the text from the source, not from the words: it takes the
+    // quotes as they stand, or, when the text starts with one, without the
+    // first and the last of them (`/s`, or more than two quotes), which
+    // groups differently than the words do.
+    if !args.is_empty() && args.iter().all(|w| !w.raw.is_empty()) {
+        let raw = args
+            .iter()
+            .map(|w| w.raw.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if let Some(inner) = raw.strip_prefix('"') {
+            // The first quote and the last one of the line go, wherever the
+            // last one stands.
+            let mut text = inner.to_string();
+            if let Some(last) = text.rfind('"') {
+                text.remove(last);
+            }
+            texts.push(text);
+        }
+        texts.push(raw);
+    }
+    texts.dedup();
+    texts
+}
+
+/// [`cmd_text`] from the words alone.
+fn cmd_words_text(args: &[Word]) -> Vec<String> {
     match args {
         [] => Vec::new(),
         [one] => {
@@ -2198,7 +2233,7 @@ fn env_split(rest: &[Word]) -> Option<(usize, Vec<Word>)> {
         let split = text.split_whitespace().map(|s| Word {
             text: s.to_string(),
             literal: w.literal,
-            quoted: false,
+            ..Word::default()
         });
         let mut out: Vec<Word> = rest[..n].to_vec();
         out.extend(split);
@@ -2311,10 +2346,11 @@ fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
             Some(inner) => inner.replace('\'', ""),
             None => l.text.clone(),
         };
-        out.extend(split_arguments(&text).into_iter().map(|s| Word {
+        out.extend(split_with_source(&text).into_iter().map(|(s, raw)| Word {
             text: s,
             literal: l.literal,
-            quoted: false,
+            raw,
+            ..Word::default()
         }));
     }
     Some(out)
@@ -2323,16 +2359,23 @@ fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
 /// The words of `Start-Process`' argument list as the child splits its
 /// command line (the C runtime's rules): a `"` opens and closes a group and
 /// goes, `\"` is a quote, and the words end at blanks and, as PowerShell's
-/// array syntax writes them, at commas outside a group.
-fn split_arguments(text: &str) -> Vec<String> {
+/// array syntax writes them, at commas outside a group. Each word comes
+/// with the text it stands as in `text`.
+fn split_with_source(text: &str) -> Vec<(String, String)> {
     let chars: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut quoted = false;
+    // Where the word being read starts: a pair of quotes starts it too.
+    let mut begin = None;
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
+        let at = i;
         i += 1;
+        if quoted || !(c == ',' || c.is_whitespace()) {
+            begin.get_or_insert(at);
+        }
         match c {
             '\\' => {
                 let mut n = 1;
@@ -2353,14 +2396,17 @@ fn split_arguments(text: &str) -> Vec<String> {
             '"' => quoted = !quoted,
             c if (c == ',' || c.is_whitespace()) && !quoted => {
                 if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
+                    let from = begin.unwrap_or(at);
+                    out.push((std::mem::take(&mut cur), chars[from..at].iter().collect()));
                 }
+                begin = None;
             }
             c => cur.push(c),
         }
     }
     if !cur.is_empty() {
-        out.push(cur);
+        let from = begin.unwrap_or(0);
+        out.push((cur, chars[from..].iter().collect()));
     }
     out
 }
@@ -2620,7 +2666,12 @@ mod tests {
     /// runtime: a quoted group is one word, `\"` is a quote.
     #[test]
     fn start_process_arguments_split_like_the_c_runtime() {
-        let split = |t| split_arguments(t);
+        let split = |t| {
+            split_with_source(t)
+                .into_iter()
+                .map(|(w, _)| w)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
             split("-NoProfile -Command \"Stop-Service nerve-node\""),
             ["-NoProfile", "-Command", "Stop-Service nerve-node"]
@@ -2631,6 +2682,50 @@ mod tests {
         );
         assert_eq!(split("a\\\\\"b c\" d"), ["a\\b c", "d"]);
         assert_eq!(split("x \"a,b\""), ["x", "a,b"]);
+    }
+
+    /// `Start-Process`' words keep the text they stand as, which cmd reads
+    /// after `/c`.
+    #[test]
+    fn start_process_arguments_keep_their_source() {
+        assert_eq!(
+            split_with_source(r#"/s /c ""C:\Program Files\x.exe" status""#),
+            [
+                ("/s".to_string(), "/s".to_string()),
+                ("/c".to_string(), "/c".to_string()),
+                (r"C:\Program".to_string(), r#"""C:\Program"#.to_string()),
+                (
+                    r#"Files\x.exe status"#.to_string(),
+                    r#"Files\x.exe" status""#.to_string()
+                ),
+            ]
+        );
+    }
+
+    /// cmd strips the outer quotes of the text after `/c` when it starts
+    /// with one and holds more (`/s`, or a quoted argument): the program is
+    /// the quoted path, whatever the words of the line look like.
+    #[test]
+    fn cmd_runs_the_program_in_the_doubled_quote_form() {
+        for line in [
+            r#"cmd /s /c ""C:\Program Files\Nerve\nerve-node.exe" status""#,
+            r#"cmd /c ""C:\Program Files\Nerve\nerve-node.exe" status & echo done""#,
+            r#"cmd /c ""C:\Program Files\Nerve\nerve-node.exe" set "my node"""#,
+            r#"cmd /c "C:\Program Files\Nerve\nerve-node.exe" status"#,
+        ] {
+            let script = parse(line, Shell::Cmd).unwrap();
+            let names: Vec<String> = script.commands[0]
+                .inner
+                .iter()
+                .flat_map(|s| &s.commands)
+                .filter_map(|c| run(c, Shell::Cmd))
+                .map(|r| r.name)
+                .collect();
+            assert!(
+                names.contains(&"nerve-node".to_string()),
+                "{line}: {names:?}"
+            );
+        }
     }
 
     /// A word after a parameter written by name fills the positional

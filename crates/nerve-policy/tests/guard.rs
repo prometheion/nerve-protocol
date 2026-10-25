@@ -337,6 +337,98 @@ const NODE_ITSELF: &[Case] = &[
     ("Remove-Item a.txt,C:\\x\\nerve-node.exe", PS, PROGRAMS),
     ("Remove-Item C:\\x\\nerve-node.exe,a.txt", PS, PROGRAMS),
     ("del C:\\x\\nerve-node.exe,a.txt", CMD, PROGRAMS),
+    // A path that comes through a pipe reaches the file tools unseen, but
+    // the tool still works on the node's program (`xargs rm`, the pipeline
+    // into `Remove-Item`).
+    (
+        r##"Get-Item 'C:\Program Files\Nerve\nerve-node.exe' | Remove-Item -Force"##,
+        PS,
+        PROGRAMS,
+    ),
+    (
+        r##"Get-ChildItem 'C:\Program Files\Nerve\nerve-node.exe' | Remove-Item"##,
+        PS,
+        PROGRAMS,
+    ),
+    (
+        r##"'C:\Program Files\Nerve\nerve-node.exe' | Remove-Item"##,
+        PS,
+        PROGRAMS,
+    ),
+    (
+        r##"Get-Item 'C:\Program Files\Nerve\nerve-node.exe' | Rename-Item -NewName old.exe"##,
+        PS,
+        PROGRAMS,
+    ),
+    ("echo /usr/local/bin/nerve-node | xargs rm", SH, PROGRAMS),
+    (
+        "echo /usr/local/bin/nerve-node | xargs sudo rm -f",
+        SH,
+        PROGRAMS,
+    ),
+    (
+        "ls /usr/local/bin/nerve-node | xargs -I{} cp /tmp/evil {}",
+        SH,
+        PROGRAMS,
+    ),
+    (
+        "printf '%s\\n' /usr/local/bin/nerve-node | xargs chmod 000",
+        SH,
+        PROGRAMS,
+    ),
+    // sh and fish expand a brace group into several words.
+    ("sudo mv /usr/local/bin/nerve-node{,.old}", SH, PROGRAMS),
+    ("mv target/release/nerve-node{,.bak}", SH, PROGRAMS),
+    ("mv target/release/nerve-node{,.bak}", FISH, PROGRAMS),
+    ("rm /usr/local/bin/nerve-{node,node-desktop}", SH, PROGRAMS),
+    (
+        "rm /usr/local/bin/nerve-{node,node-desktop}",
+        FISH,
+        PROGRAMS,
+    ),
+    (
+        "sudo cp /tmp/new /usr/local/bin/nerve-{node,x}",
+        SH,
+        PROGRAMS,
+    ),
+    // cmd takes the text after /c from the line: a quoted program path with a
+    // blank, and `/s` or one more pair of quotes, make it strip the outer
+    // quotes and run what is left.
+    (
+        r##"cmd /s /c ""C:\Program Files\Nerve\nerve-node.exe" status""##,
+        CMD,
+        PROGRAMS,
+    ),
+    (
+        r##"cmd /c ""C:\Program Files\Nerve\nerve-node.exe" status""##,
+        CMD,
+        PROGRAMS,
+    ),
+    (
+        r##"cmd /c ""C:\Program Files\Nerve\nerve-node.exe" config set machine.user x""##,
+        CMD,
+        PROGRAMS,
+    ),
+    (
+        r##"cmd /c ""C:\Program Files\Nerve\nerve-node.exe" status & echo done""##,
+        CMD,
+        PROGRAMS,
+    ),
+    (
+        r##"cmd /c ""C:\Program Files\Nerve\nerve-node.exe" config set node.name "my node"""##,
+        CMD,
+        PROGRAMS,
+    ),
+    (
+        r##"Start-Process cmd -ArgumentList '/s /c ""C:\Program Files\Nerve\nerve-node.exe" status"' -Verb RunAs"##,
+        PS,
+        PROGRAMS,
+    ),
+    (
+        r##"Start-Process cmd.exe '/c ""C:\Program Files\Nerve\nerve-node.exe" config set machine.user root"' -Verb RunAs -Wait"##,
+        PS,
+        PROGRAMS,
+    ),
 ];
 
 /// The forms of #154 that stopped, restarted, disabled or killed the node's
@@ -748,6 +840,61 @@ const SERVICE_FORMS: &[Case] = &[
     (
         "reg.exe delete \"HKLM\\SYSTEM\\ControlSet001\\Services\\Nerve-Node\" /f",
         WIN,
+        SERVICE,
+    ),
+    // The pattern of pkill and killall is a regular expression.
+    ("pkill -f 'nerve-node|nerve-center'", SH, SERVICE),
+    (r#"pkill -x "nerve-node|nerve-node-desktop""#, SH, SERVICE),
+    ("killall -r '^nerve-node|foo$'", SH, SERVICE),
+    ("pkill -f 'nerve-center|nerve-node'", SH, SERVICE),
+    // The keys below the service's key hold its owners.
+    (
+        r"reg add HKLM\SYSTEM\CurrentControlSet\Services\nerve-node\Parameters /v Owners /t REG_MULTI_SZ /d S-1-5-21-1001 /f",
+        CMD,
+        SERVICE,
+    ),
+    (
+        r"reg delete HKLM\SYSTEM\CurrentControlSet\Services\nerve-node\Parameters /v Owners /f",
+        WIN,
+        SERVICE,
+    ),
+    (
+        r"Set-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Services\nerve-node\Parameters -Name Owners -Value @('S-1-5-21-1001')",
+        PS,
+        SERVICE,
+    ),
+    // The registry cmdlets on the service's key itself.
+    (
+        r"New-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Services\nerve-node -Name Start -Value 4",
+        PS,
+        SERVICE,
+    ),
+    (
+        r"Remove-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Services\nerve-node -Name Start",
+        PS,
+        SERVICE,
+    ),
+    (
+        r"Clear-ItemProperty -Path:HKLM:\SYSTEM\CurrentControlSet\Services\nerve-node -Name Start",
+        PS,
+        SERVICE,
+    ),
+    (
+        r"Rename-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Services\nerve-node Start Start2",
+        PS,
+        SERVICE,
+    ),
+    // The service by its display name.
+    (r#"net stop "Nerve node""#, WIN, SERVICE),
+    ("Stop-Service -DisplayName 'Nerve node'", PS, SERVICE),
+    (
+        r#"Restart-Service -DisplayName "Nerve node" -Force"#,
+        PS,
+        SERVICE,
+    ),
+    (
+        "Get-Service -DisplayName 'Nerve node' | Stop-Service",
+        PS,
         SERVICE,
     ),
 ];
@@ -1724,6 +1871,57 @@ const DATA: &[Case] = &[
         WIN,
         None,
     ),
+    // A writer that gets the node's path from a pipe gets data.
+    ("cargo build -p nerve-node 2>&1 | tee build.log", SH, None),
+    ("echo /usr/local/bin/nerve-node | tee paths.txt", SH, None),
+    (
+        r##"Get-Item 'C:\Program Files\Nerve\nerve-node.exe' | Out-File paths.txt"##,
+        PS,
+        None,
+    ),
+    ("ls /usr/local/bin/nerve-node | xargs wc -c", SH, None),
+    // The pipe ends at the line break.
+    ("echo /usr/local/bin/nerve-node\nxargs rm < list", SH, None),
+    (
+        r##"Get-Item nerve-node.exe\nRemove-Item old.log"##,
+        PS,
+        None,
+    ),
+    // Brace groups of other files.
+    ("mv notes{,.bak}", SH, None),
+    ("cp /etc/hosts{,.bak}", SH, None),
+    ("rm /tmp/nerve-{a,b}", SH, None),
+    // cmd's quoted program of another name.
+    (
+        r##"cmd /s /c ""C:\Program Files\Tool\tool.exe" status""##,
+        CMD,
+        None,
+    ),
+    (
+        r##"Start-Process cmd -ArgumentList '/s /c ""C:\Program Files\Tool\tool.exe" status"'"##,
+        PS,
+        None,
+    ),
+    // Patterns, registry keys and display names of other things.
+    ("pkill -f 'nginx|php-fpm'", SH, None),
+    (
+        r"Get-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Services\nerve-node\Parameters",
+        PS,
+        None,
+    ),
+    (
+        r"New-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Services\spooler -Name Start -Value 4",
+        PS,
+        None,
+    ),
+    (
+        r"reg query HKLM\SYSTEM\CurrentControlSet\Services\nerve-node\Parameters",
+        WIN,
+        None,
+    ),
+    ("Get-Service -DisplayName 'Nerve node'", PS, None),
+    (r#"net start "Nerve node""#, WIN, None),
+    ("echo 'Nerve node'", ALL, None),
 ];
 
 /// A line the parser cannot read is checked with the text patterns of
