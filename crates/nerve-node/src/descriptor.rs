@@ -1484,9 +1484,25 @@ mod tests {
         e.policy.mode = Mode::Folder;
         e.policy.folders = vec![folder("/srv/a\nb", "rw"), folder("/srv/c\\d", "r")];
         let r = Reach::of(&e, 0, None, true, None);
-        let d = super::for_center(&NodeConfig::default(), &e, &r, &[]);
+        let named = |windows: bool| -> Vec<(String, String)> {
+            r.access(windows)
+                .folders
+                .into_iter()
+                .map(|f| (f.path, f.access))
+                .collect()
+        };
         // A backslash is part of a Unix name, and stays.
-        assert_eq!(folders(&d), pairs(&[("/srv/c\\d", "r")]));
+        assert_eq!(named(false), pairs(&[("/srv/c\\d", "r")]));
+        e.policy.folders = vec![folder("C:\\a\tb", "rw"), folder("C:\\c", "r")];
+        let r = Reach::of(&e, 0, None, true, None);
+        assert_eq!(
+            r.access(true)
+                .folders
+                .into_iter()
+                .map(|f| (f.path, f.access))
+                .collect::<Vec<_>>(),
+            pairs(&[("/c/c", "r")])
+        );
     }
 
     /// A Windows node names its folders in the center's form, as its paths
