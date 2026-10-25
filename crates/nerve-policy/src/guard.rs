@@ -172,6 +172,8 @@ fn changes_file(r: &Run, win: bool) -> bool {
 /// argument as a path (it may hold blanks: `C:\Program Files\…`), or the
 /// value of `of=`, `--output=` or `-Destination:`. Data that only holds the
 /// name (`curl -d name=nerve-node`, `--exclude=nerve-node`) is not it.
+/// On Windows a comma separates paths (`Remove-Item a,b`); in sh it is part
+/// of the word (`sed -i "s,a/nerve-node,b,"`).
 fn is_node_file(word: &str, win: bool) -> bool {
     let value = match word.split_once('=') {
         Some((key, v))
@@ -187,9 +189,10 @@ fn is_node_file(word: &str, win: bool) -> bool {
             _ => word,
         },
     };
-    [word, value]
-        .iter()
-        .any(|w| w.split(',').any(|p| is_node(&base_name(p, win))))
+    [word, value].iter().any(|w| {
+        w.split(|c| win && c == ',')
+            .any(|p| is_node(&base_name(p, win)))
+    })
 }
 
 /// The node's service (systemd's unit, Windows' service).
@@ -328,7 +331,11 @@ fn stops(r: &Run, cmd: &Command, fed: bool, win: bool) -> bool {
                 && is_service(ops[1], true)
         }
         "net" => {
-            let ops = operands(args, &[]);
+            // net takes its switches (`/y`) before the service as well.
+            let ops: Vec<&str> = operands(args, &[])
+                .into_iter()
+                .filter(|o| !o.starts_with('/'))
+                .collect();
             ops.len() >= 2 && ops[0].eq_ignore_ascii_case("stop") && is_service(ops[1], true)
         }
         "pkill" | "killall" => {
@@ -427,6 +434,12 @@ fn systemctl(args: &[Word], win: bool) -> bool {
             | "try-restart"
             | "reload-or-restart"
             | "try-reload-or-restart"
+            | "reload-or-try-restart"
+            | "force-reload"
+            | "condreload"
+            | "condrestart"
+            | "condstop"
+            | "freeze"
             | "disable"
             | "kill"
             | "mask"

@@ -333,6 +333,10 @@ const NODE_ITSELF: &[Case] = &[
         SH,
         PROGRAMS,
     ),
+    // r7-4: a comma separates paths on Windows only.
+    ("Remove-Item a.txt,C:\\x\\nerve-node.exe", PS, PROGRAMS),
+    ("Remove-Item C:\\x\\nerve-node.exe,a.txt", PS, PROGRAMS),
+    ("del C:\\x\\nerve-node.exe,a.txt", CMD, PROGRAMS),
 ];
 
 /// The forms of #154 that stopped, restarted, disabled or killed the node's
@@ -686,6 +690,17 @@ const SERVICE_FORMS: &[Case] = &[
     // A CR alone ends a PowerShell statement.
     ("Write-Host a\rStop-Service nerve-node", PS, SERVICE),
     ("Write-Host a\rStop-Process -Name nerve-node", PS, SERVICE),
+    // r7-3: the aliases of the verbs that stop or restart a unit, and freeze.
+    ("systemctl condstop nerve-node", SH, SERVICE),
+    ("systemctl condrestart nerve-node", SH, SERVICE),
+    ("systemctl freeze nerve-node", SH, SERVICE),
+    ("systemctl force-reload nerve-node", SH, SERVICE),
+    ("systemctl condreload nerve-node", SH, SERVICE),
+    ("systemctl reload-or-try-restart nerve-node", SH, SERVICE),
+    // r7-6: net takes its switch before the service as well.
+    ("net stop /y nerve-node", WIN, SERVICE),
+    ("net.exe stop /Y nerve-node", WIN, SERVICE),
+    ("net stop nerve-node /y", WIN, SERVICE),
 ];
 
 /// What the docs listed as refused although it only mentions the node: a
@@ -1336,6 +1351,62 @@ const NESTED: &[Case] = &[
         PS,
         PATHS,
     ),
+    // r7-1: a file name or a string in the brackets of `for /f` is read, so
+    // a path in it counts.
+    (
+        "for /f \"tokens=*\" %i in (C:\\ProgramData\\Nerve\\config\\node.toml) do @echo %i",
+        CMD,
+        PATHS,
+    ),
+    (
+        "for /f \"usebackq tokens=*\" %i in (\"%ProgramData%\\Nerve\\config\\node.toml\") do @echo %i",
+        CMD,
+        PATHS,
+    ),
+    (
+        "for /f \"usebackq\" %i in (\"\\\\.\\pipe\\nerve-node-owner\") do @echo %i",
+        CMD,
+        PATHS,
+    ),
+    // A `do` in the set is not the keyword.
+    ("for /f %i in (\"do\") do nerve-node status", CMD, PROGRAMS),
+    // r7-2: the `for` is not the first word of the command.
+    (
+        "if exist x for /f %i in ('sc stop nerve-node') do @echo %i",
+        CMD,
+        SERVICE,
+    ),
+    (
+        "if exist x for /f %i in ('nerve-node status') do @echo %i",
+        CMD,
+        PROGRAMS,
+    ),
+    (
+        "if a==b (echo) else for /f %i in ('nerve-node status') do @echo %i",
+        CMD,
+        PROGRAMS,
+    ),
+    (
+        "for %a in (1) do for /f %i in ('sc stop nerve-node') do @echo %i",
+        CMD,
+        SERVICE,
+    ),
+    // r7-5: the aliases of the common switches are switches.
+    (
+        "Start-Process -vb \"C:\\Program Files\\Nerve\\nerve-node.exe\" status",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "Start-Process -db 'C:\\Program Files\\Nerve\\nerve-node.exe' status",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "Start-Process -wi -cf 'C:\\Program Files\\Nerve\\nerve-node.exe' status",
+        PS,
+        PROGRAMS,
+    ),
 ];
 
 /// Lines that only mention the node or its commands, in quotes, in a
@@ -1550,6 +1621,27 @@ const DATA: &[Case] = &[
     ("for %i in (1) do @echo nerve-node", CMD, None),
     // r6-4
     ("gzip -l /usr/local/share/doc/x.gz", SH, None),
+    // r7-1, r7-2: the set of a `for /f` is data for the programs and the
+    // service rules, also behind `if`.
+    (
+        "if exist x for /f %i in (nerve-node.txt) do @echo %i",
+        CMD,
+        None,
+    ),
+    ("for /f %i in (a.txt b.txt) do @echo %i", CMD, None),
+    // r7-4: sed's comma delimiter is no list in sh.
+    (
+        "sed -i \"s,/usr/local/bin/nerve-node,/opt/nerve/bin/nerve-node,g\" docs/user/install.md",
+        SH,
+        None,
+    ),
+    (
+        "sed -i \"s,crates/nerve-node,crates/node,g\" Cargo.toml",
+        SH,
+        None,
+    ),
+    // r7-6
+    ("net stop /y spooler", WIN, None),
 ];
 
 /// A line the parser cannot read is checked with the text patterns of

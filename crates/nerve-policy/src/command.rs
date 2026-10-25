@@ -514,9 +514,20 @@ impl<'b> Parser<'b> {
                         continue;
                     }
                     if self.shell == Shell::Cmd && is_for_source(&cmd.words) {
-                        // `for /f … in ('command')` runs the command.
-                        if let Some(text) = self.cmd_for_source()? {
-                            cmd.inner.push(self.nested(&text, Shell::Cmd)?);
+                        // `for /f … in ('command')` runs the command; a
+                        // file name or a string is read, so its words stay
+                        // words of the `for` (a path in them still counts).
+                        match self.cmd_for_source()? {
+                            ForSource::Command(text) => {
+                                cmd.inner.push(self.nested(&text, Shell::Cmd)?);
+                            }
+                            ForSource::Text(texts) => {
+                                cmd.words.extend(texts.into_iter().map(|text| Word {
+                                    text,
+                                    literal: false,
+                                    quoted: true,
+                                }));
+                            }
                         }
                         continue;
                     }
@@ -1441,8 +1452,9 @@ impl<'b> Parser<'b> {
 
     /// The text in the brackets of `for /f … in ( … )` after its `(`: the
     /// command in single quotes (or backticks), which `for` runs. A bare
-    /// or double-quoted text is a file name or a string, not a command.
-    fn cmd_for_source(&mut self) -> Result<Option<String>, Unparsed> {
+    /// or double-quoted text is a file name or a string, not a command; its
+    /// words (quotes off) are returned.
+    fn cmd_for_source(&mut self) -> Result<ForSource, Unparsed> {
         let mut text = String::new();
         let mut quoted = false;
         loop {
@@ -1464,7 +1476,10 @@ impl<'b> Parser<'b> {
                 .and_then(|t| t.strip_suffix(q))
                 .map(str::to_string)
         });
-        Ok(command)
+        Ok(match command {
+            Some(command) => ForSource::Command(command),
+            None => ForSource::Text(for_words(text)),
+        })
     }
 
     // ---- the text a command runs ----
@@ -2103,7 +2118,11 @@ fn unwrap(cmd: &Command, shell: Shell) -> Result<Option<Run>, Wrapped> {
             "call" if shell == Shell::Cmd => 0,
             "if" if shell == Shell::Cmd => cmd_if(rest),
             "for" if shell == Shell::Cmd => {
-                let Some(at) = rest.iter().position(|w| w.text.eq_ignore_ascii_case("do")) else {
+                // A `do` in the set's words is not the keyword.
+                let Some(at) = rest
+                    .iter()
+                    .position(|w| !w.quoted && w.text.eq_ignore_ascii_case("do"))
+                else {
                     return Ok(None);
                 };
                 at + 1
@@ -2178,6 +2197,8 @@ fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
     // own and a prefix of `-Verbose`, so a prefix of these counts only from
     // four letters on, and never `verb`.
     const COMMON: &[&str] = &["verbose", "debug", "whatif", "confirm"];
+    // Their aliases, which are whole names.
+    const ALIASES: &[&str] = &["vb", "db", "wi", "cf"];
     let mut file = None;
     let mut list = None;
     let (mut file_named, mut list_named) = (false, false);
@@ -2210,6 +2231,7 @@ fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
         };
         if SWITCHES.iter().any(|s| s.starts_with(param))
             || (param.len() >= 4 && param != "verb" && COMMON.iter().any(|s| s.starts_with(param)))
+            || ALIASES.contains(&param)
         {
             continue;
         }
@@ -2342,13 +2364,49 @@ fn cmd_if(rest: &[Word]) -> usize {
     }
 }
 
-/// Whether the words so far are `for /f … in`, whose `( … )` holds a
-/// command.
+/// What the brackets of `for /f … in ( … )` hold.
+enum ForSource {
+    /// The command in single quotes or backticks.
+    Command(String),
+    /// A set of file names or a string.
+    Text(Vec<String>),
+}
+
+/// The words of a `for` set: they end at blanks, commas and semicolons
+/// outside double quotes, and the quotes go.
+fn for_words(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    for c in text.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            c if (c == ',' || c == ';' || c.is_whitespace()) && !quoted => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Whether the words so far end in `for /f … in`, whose `( … )` holds a
+/// command. The `for` is the last one: it may stand after `if`, `else` or
+/// another `for … do`.
 fn is_for_source(words: &[Word]) -> bool {
-    words
-        .first()
-        .is_some_and(|w| w.text.eq_ignore_ascii_case("for"))
-        && words.iter().any(|w| w.text.eq_ignore_ascii_case("/f"))
+    let Some(at) = words
+        .iter()
+        .rposition(|w| !w.quoted && w.text.eq_ignore_ascii_case("for"))
+    else {
+        return false;
+    };
+    let words = &words[at..];
+    words.iter().any(|w| w.text.eq_ignore_ascii_case("/f"))
         && words
             .last()
             .is_some_and(|w| w.text.eq_ignore_ascii_case("in"))
@@ -2576,6 +2634,9 @@ mod tests {
                 "status",
             ),
             ("Start-Process -Verbo x status", "x", "status"),
+            ("Start-Process -vb x status", "x", "status"),
+            ("Start-Process -db x status", "x", "status"),
+            ("Start-Process -wi -cf x status", "x", "status"),
             ("Start-Process -Verb RunAs x status", "x", "status"),
         ] {
             let got = ran(line, Shell::PowerShell);
@@ -2632,6 +2693,22 @@ mod tests {
         assert!(all.iter().all(|c| c[0] != "sc.txt" && c[0] != "sc"));
         let all = words("for /f %i in (\"sc stop x\") do @echo %i", Shell::Cmd);
         assert!(all.iter().all(|c| c[0] != "sc"), "{all:?}");
+        // They stay words of the `for`, with their quotes off.
+        let all = words("for /f %i in (\"a b\" c.txt) do @echo %i", Shell::Cmd);
+        let tail: Vec<&str> = all[0].iter().skip(4).map(String::as_str).collect();
+        assert_eq!(tail, ["a b", "c.txt", "do", "@echo", "%i"], "{all:?}");
+        // The `for` may stand after `if` and `else`, or another `for`.
+        for line in [
+            "if exist x for /f %i in ('sc stop x') do @echo %i",
+            "if a==b (echo) else for /f %i in ('sc stop x') do @echo %i",
+            "for %a in (1) do for /f %i in ('sc stop x') do @echo %i",
+        ] {
+            let all = words(line, Shell::Cmd);
+            assert!(
+                all.iter().any(|c| c.first().is_some_and(|w| w == "sc")),
+                "{line}: {all:?}"
+            );
+        }
     }
 
     /// Only a `u` that is an option of its own names the user of `runuser`;
