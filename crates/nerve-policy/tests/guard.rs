@@ -2250,58 +2250,110 @@ fn too_many_wrappers_are_a_line_it_cannot_read() {
 
 /// The check of a long pipe costs no more than the pipe is long: every
 /// `kill` in it asks whether an earlier command of the pipe names the node.
+/// The other lines are the ones that took seconds and gigabytes once.
+///
+/// Machines differ in speed (a debug build on a slow runner takes two to
+/// three times what it takes on a desktop), so each part is timed against a
+/// plain line of about the same size on the same machine, not against the
+/// clock. When the guard does its work in proportion to the line, a part
+/// takes 1 to 9 such lines (23 to 40 for the thousands of short words), and
+/// its bound is at least 2.5 times that; the guards that read a pipe or a
+/// word again and again took hundreds of them.
 #[test]
 fn a_long_pipe_is_checked_in_linear_time() {
+    use std::time::{Duration, Instant};
+    // On top of every bound, for the work that does not grow with the line.
+    const SLACK: Duration = Duration::from_millis(100);
     let set = RuleSet::new(&rules(GUARD), home()).with_shell(Shell::Sh);
-    let line = "kill|".repeat(9_990) + "cat";
-    let start = std::time::Instant::now();
-    assert!(set.find("exec", "run", &line).is_none());
-    let both = format!(
-        "a {}|{}",
-        "nerve-node ".repeat(2_000),
-        "kill|".repeat(5_000)
-    );
-    assert!(set.find("exec", "run", &both).is_some());
-    // One long word with thousands of path matches, alone and read again
-    // at each level of `eval`.
-    let word = "/etc/nervex".repeat(5_900);
-    for line in [
-        format!("cat {word}"),
-        format!("git commit -m \"x {}\"", "/etc/nerve ".repeat(5_900)),
-        format!("{}{word}", "eval ".repeat(14)),
-    ] {
-        set.find("exec", "run", &line);
-    }
-    let ps = RuleSet::new(&rules(GUARD), home()).with_shell(Shell::PowerShell);
-    ps.find(
-        "exec",
-        "run",
-        &format!("{}{}", "iex ".repeat(14), "\\programdatax".repeat(5_000)),
-    );
-    // A word of brace groups with many alternatives and a long tail: the
-    // words built from it are bounded, whatever the command (seconds and
-    // gigabytes without the bound).
-    let sh_fish =
-        [Shell::Sh, Shell::Fish].map(|s| RuleSet::new(&rules(GUARD), home()).with_shell(s));
-    for (alts, groups, tail) in [(1_000, 2, 8_000), (2_000, 2, 16_000), (16_000, 1, 32_000)] {
-        let group = format!("{{{}a}}", "a,".repeat(alts - 1));
-        let hostile = format!("{}{}", group.repeat(groups), "x".repeat(tail));
-        for set in &sh_fish {
-            for program in ["echo", "cp", "ls"] {
-                set.find("exec", "run", &format!("{program} {hostile}"));
+    let took = |run: &dyn Fn()| {
+        let start = Instant::now();
+        run();
+        start.elapsed()
+    };
+    let plain = format!("cat {}", "word ".repeat(13_000));
+    let plain_time = (0..5)
+        .map(|_| took(&|| assert!(set.find("exec", "run", &plain).is_none())))
+        .min()
+        .unwrap();
+    // A part may take `times` plain lines. One that is over is timed twice
+    // more before it counts, unless it is far over: a guard that does too
+    // much is slow every time, a busy machine is not.
+    let part = |name: &str, times: u32, run: &dyn Fn()| {
+        let limit = plain_time * times + SLACK;
+        let mut best = Duration::MAX;
+        for _ in 0..3 {
+            let t = took(run);
+            best = best.min(t);
+            if best < limit || t > limit * 4 {
+                break;
             }
         }
+        assert!(
+            best < limit,
+            "{name} took {best:?}, over {limit:?}: {times} times the {plain_time:?} \
+             of a plain line of the same size, and {SLACK:?}"
+        );
+    };
+    part("a long pipe", 20, &|| {
+        let line = "kill|".repeat(9_990) + "cat";
+        assert!(set.find("exec", "run", &line).is_none());
+        let both = format!(
+            "a {}|{}",
+            "nerve-node ".repeat(2_000),
+            "kill|".repeat(5_000)
+        );
+        assert!(set.find("exec", "run", &both).is_some());
+    });
+    // One long word with thousands of path matches, alone and read again
+    // at each level of `eval`.
+    part("path matches with eval", 30, &|| {
+        let word = "/etc/nervex".repeat(5_900);
+        for line in [
+            format!("cat {word}"),
+            format!("git commit -m \"x {}\"", "/etc/nerve ".repeat(5_900)),
+            format!("{}{word}", "eval ".repeat(14)),
+        ] {
+            set.find("exec", "run", &line);
+        }
+    });
+    part("a PowerShell iex line", 40, &|| {
+        let ps = RuleSet::new(&rules(GUARD), home()).with_shell(Shell::PowerShell);
+        ps.find(
+            "exec",
+            "run",
+            &format!("{}{}", "iex ".repeat(14), "\\programdatax".repeat(5_000)),
+        );
+    });
+    // A word of brace groups with many alternatives and a long tail: the
+    // words built from it are bounded, whatever the command (seconds and
+    // gigabytes without the bound). The smallest comes first, so a guard
+    // without the bound is stopped by the clock before it runs out of memory.
+    let sh_fish =
+        [Shell::Sh, Shell::Fish].map(|s| RuleSet::new(&rules(GUARD), home()).with_shell(s));
+    for (alts, groups, tail) in [
+        (4_000, 1, 16_000),
+        (16_000, 1, 32_000),
+        (1_000, 2, 8_000),
+        (2_000, 2, 16_000),
+    ] {
+        let name = format!("{groups} brace group(s) of {alts} alternatives");
+        part(&name, 20, &|| {
+            let group = format!("{{{}a}}", "a,".repeat(alts - 1));
+            let hostile = format!("{}{}", group.repeat(groups), "x".repeat(tail));
+            for set in &sh_fish {
+                for program in ["echo", "cp", "ls"] {
+                    set.find("exec", "run", &format!("{program} {hostile}"));
+                }
+            }
+        });
     }
     // Thousands of short brace words, read again at each level of `eval`:
     // every word built costs, not only its bytes.
-    let words = "{,}{,}{,}{,}{,}{,}{,} ".repeat(2_900);
-    let hostile = format!("{}echo {words}", "eval ".repeat(15));
-    sh_fish[0].find("exec", "run", &hostile);
-    assert!(
-        start.elapsed() < std::time::Duration::from_secs(3),
-        "took {:?}",
-        start.elapsed()
-    );
+    part("short brace words with eval", 100, &|| {
+        let words = "{,}{,}{,}{,}{,}{,}{,} ".repeat(2_900);
+        let hostile = format!("{}echo {words}", "eval ".repeat(15));
+        sh_fish[0].find("exec", "run", &hostile);
+    });
 }
 
 /// Whatever a line holds, the guard answers: it does not panic on a name
