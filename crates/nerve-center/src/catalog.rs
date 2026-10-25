@@ -182,7 +182,26 @@ impl Reach {
     /// programs keep there included, so they are for throwaway files only.
     /// None outside folder mode.
     pub fn advice(&self) -> Option<String> {
+        self.advice_on(true)
+    }
+
+    /// The advice for the file calls alone: [`Reach::advice`] without what
+    /// holds a command (the sandbox, the sudo list), which no file call
+    /// depends on. `fs.*` carry it, so a sudo or sandbox change does not
+    /// ask for a new `list` of them.
+    pub fn file_advice(&self) -> Option<String> {
+        self.advice_on(false)
+    }
+
+    fn advice_on(&self, commands: bool) -> Option<String> {
         self.note()?;
+        if self.no_folder() && !commands {
+            return Some(
+                "The node is in folder mode with no folder granted: its file calls are refused \
+                 until its owner grants one."
+                    .into(),
+            );
+        }
         if self.no_folder() {
             return Some(if self.sudo {
                 "The node is in folder mode with no folder granted: its file calls are refused \
@@ -195,17 +214,22 @@ impl Reach {
             .into());
         }
         let mut out = "The node is in folder mode: its file calls may use only the folders in \
-                       the `folders:` line (r read, w write, x run commands), and a command may \
-                       start only in one marked x. Where folders nest, the deepest one decides."
+                       the `folders:` line (r read, w write, x run commands)"
             .to_string();
-        out.push_str(if self.confined {
-            " The machine's sandbox holds what a command reaches to these folders and the \
-             system's files."
-        } else {
-            " The machine does not hold what a command reaches to these folders: where it \
-             runs commands, they reach what the account they run as may reach."
-        });
-        if self.sudo {
+        if commands {
+            out.push_str(", and a command may start only in one marked x");
+        }
+        out.push_str(". Where folders nest, the deepest one decides.");
+        if commands {
+            out.push_str(if self.confined {
+                " The machine's sandbox holds what a command reaches to these folders and the \
+                 system's files."
+            } else {
+                " The machine does not hold what a command reaches to these folders: where it \
+                 runs commands, they reach what the account they run as may reach."
+            });
+        }
+        if commands && self.sudo {
             out.push_str(
                 " A command on the owner's sudo list for you runs by that list alone, with full \
                  rights: in any folder, and beyond the folders and the sandbox.",
@@ -275,10 +299,11 @@ pub struct Unit {
     /// In folder mode, the folders `fs.*` and `exec.run` may use and how
     /// ([`Reach::note`]); shared by the node's units that have it.
     pub note: Option<Arc<str>>,
-    /// The center's advice on that note ([`Reach::advice`]), for the units
-    /// that have one. The details show it once for all of them; the hash
-    /// covers it, so a sudo list or sandbox that changes what it says asks
-    /// for a new `list` too.
+    /// The center's advice on that note, for the units that have one:
+    /// [`Reach::advice`] for `exec.run`, [`Reach::file_advice`] for `fs.*`.
+    /// The details show the fullest one once for all of them; the hash
+    /// covers it, so a sudo list or sandbox that changes what `exec.run`'s
+    /// says asks for a new `list` of it, not of the file calls.
     pub advice: Option<Arc<str>>,
 }
 
@@ -343,6 +368,11 @@ impl Catalog {
         };
         let note: Option<Arc<str>> = c.reach.as_ref().and_then(Reach::note).map(Into::into);
         let advice: Option<Arc<str>> = c.reach.as_ref().and_then(Reach::advice).map(Into::into);
+        let file_advice: Option<Arc<str>> = c
+            .reach
+            .as_ref()
+            .and_then(Reach::file_advice)
+            .map(Into::into);
         // A capability id given twice would make `cap.action` name two
         // actions: `list` would show one and `execute` might check the
         // other. Neither is offered.
@@ -426,7 +456,14 @@ impl Catalog {
                     provider: provider.clone(),
                     off: cap.exposure == Exposure::Off || def.exposure == Some(Exposure::Off),
                     note: note.clone().filter(|_| bound),
-                    advice: advice.clone().filter(|_| bound),
+                    // Only `exec.run` carries what holds a command, so a
+                    // sudo or sandbox change leaves the file calls alone.
+                    advice: if cap.id == "fs" {
+                        file_advice.clone()
+                    } else {
+                        advice.clone()
+                    }
+                    .filter(|_| bound),
                 });
             }
         }
@@ -896,21 +933,32 @@ mod tests {
         assert_ne!(two[1], one[1]);
         assert_eq!(two[2], one[2]);
         assert_eq!(two[3], one[3]);
-        // What the center's advice says counts too: a sudo list that comes
-        // into force, or a sandbox that goes, changes it.
+        // What the center's advice says of commands counts for `exec.run`
+        // only: a sudo list that comes into force, or a sandbox that goes,
+        // changes its hash and leaves the file calls' alone.
         let mut a = d.access.clone().unwrap();
         a.sudo = true;
         d.access = Some(a.clone());
         let sudo = hashes(&d);
-        assert_ne!(sudo[0], two[0]);
+        assert_eq!(sudo[0], two[0]);
         assert_ne!(sudo[1], two[1]);
         assert_eq!(sudo[2..], two[2..]);
         a.sudo = false;
         a.confined = false;
-        d.access = Some(a);
+        d.access = Some(a.clone());
         let loose = hashes(&d);
+        assert_eq!(loose[0], two[0]);
         assert_ne!(loose[1], two[1]);
         assert_eq!(loose[2..], two[2..]);
+        // With no folder granted the same holds.
+        a.folders.clear();
+        d.access = Some(a.clone());
+        let bare = hashes(&d);
+        a.sudo = true;
+        d.access = Some(a);
+        let bare_sudo = hashes(&d);
+        assert_eq!(bare_sudo[0], bare[0]);
+        assert_ne!(bare_sudo[1], bare[1]);
         // Out of folder mode the folders decide nothing and no note is told.
         d.access = access(json!({"mode": "user", "account": "me"}));
         let user = hashes(&d);

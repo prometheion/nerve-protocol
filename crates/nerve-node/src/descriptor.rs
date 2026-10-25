@@ -569,8 +569,9 @@ pub struct Reach {
     pub held_by_account: bool,
     /// Whether the owner's sudo allow list for this center names commands,
     /// which run by that list alone, in any folder and unconfined, while
-    /// the node's sudo switch is on. The daemon clears it while the switch
-    /// is off ([`crate::daemon::Shared::reach`]).
+    /// the node's sudo switch is on and `exec.run` is neither hidden nor off
+    /// for this center. The daemon clears it while the switch is off
+    /// ([`crate::daemon::Shared::reach`]).
     pub sudo: bool,
     /// The folders the owner granted this center.
     pub folders: Vec<Folder>,
@@ -598,7 +599,13 @@ impl Reach {
             account,
             confined,
             held_by_account: false,
-            sudo: !entry.policy.sudo_allow.is_empty(),
+            // A command on the list runs only through `exec.run`: where the
+            // owner hid or turned that off for this center, none runs.
+            sudo: !entry.policy.sudo_allow.is_empty()
+                && !matches!(
+                    entry.policy.cap_setting("exec", Some("run")),
+                    Some(CapSetting::Hidden | CapSetting::Off)
+                ),
             folders: entry.policy.folders.clone(),
             own: run_home.map(crate::account::built_in).unwrap_or_default(),
         }
@@ -1674,6 +1681,24 @@ mod tests {
         assert!(none.access(false).sudo);
         let d = super::for_center(&NodeConfig::default(), &e, &none, &[]);
         assert!(actions(&d, "exec").contains(&"run".to_string()));
+        // With `exec.run` hidden or off for this center no listed command
+        // runs, so the block names no sudo list.
+        for (key, setting) in [
+            ("exec", CapSetting::Off),
+            ("exec", CapSetting::Hidden),
+            ("exec.run", CapSetting::Off),
+            ("exec.run", CapSetting::Hidden),
+        ] {
+            e.policy.caps.insert(key.into(), setting);
+            assert!(
+                !Reach::of(&e, 0, None, false, None).access(false).sudo,
+                "{key} {setting:?}"
+            );
+            e.policy.caps.clear();
+        }
+        e.policy.caps.insert("exec".into(), CapSetting::On);
+        assert!(Reach::of(&e, 0, None, false, None).access(false).sudo);
+        e.policy.caps.clear();
         // Outside folder mode the block names no folder, and no sudo list.
         e.policy.mode = Mode::Allowlist;
         let r = Reach::of(&e, 0, None, true, None);

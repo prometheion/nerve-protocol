@@ -727,6 +727,11 @@ pub fn details(o: &Offer, asked: &[String]) -> Answer {
     let mut entries: Vec<Value> = Vec::new();
     let mut data_len = 0;
     let mut later = Vec::new();
+    // How to read the `folders:` lines is the center's advice, not the
+    // node's data: it stands outside the framing and the `result`. It is
+    // given once, `exec.run`'s when it is detailed, since that one adds
+    // what holds a command to what the file calls' says.
+    let mut advice: Option<&str> = None;
     for u in &found {
         let mut entry = json!({"name": u.name, "description": &*u.description,
             "effect": u.effect.as_str(), "params": u.params, "result": u.result,
@@ -758,6 +763,9 @@ pub fn details(o: &Offer, asked: &[String]) -> Answer {
         body.push_str(&block);
         data_len += entry_len;
         entries.push(entry);
+        if u.advice.is_some() && (advice.is_none() || u.cap == "exec") {
+            advice = u.advice.as_deref();
+        }
     }
     if !later.is_empty() {
         // These are the node's own names, which the next call must give
@@ -782,14 +790,7 @@ pub fn details(o: &Offer, asked: &[String]) -> Answer {
         json!({"node": o.node, "capabilities": entries, "off": off, "unknown": unknown,
                "later": later}),
     );
-    // How to read the `folders:` lines is the center's advice, not the
-    // node's data: it stands outside the framing and the `result`.
-    let advice = o
-        .reach
-        .as_ref()
-        .and_then(Reach::advice)
-        .filter(|_| entries.iter().any(|e| e.get("folders").is_some()));
-    if let Some(a) = &advice {
+    if let Some(a) = advice {
         data = with_center(data, json!({"folders": a}));
     }
     if found.is_empty() {
@@ -813,7 +814,7 @@ pub fn details(o: &Offer, asked: &[String]) -> Answer {
         offline_note(o),
         framed(&format!("node {name:?}"), false, body.trim_end())
     );
-    if let Some(a) = &advice {
+    if let Some(a) = advice {
         text.push_str(&format!("\nFolders: {a}"));
     }
     for m in &missing {
@@ -1243,6 +1244,18 @@ mod tests {
         there: what one pairing leaves there can change what another one's commands do. Use one \
         marked w for throwaway files only, keep nothing secret there, and change no program's \
         settings there unless asked.";
+    /// The advice of the file calls alone: [`ADVICE`] without what holds a
+    /// command.
+    const FILE_ADVICE: &str = "The node is in folder mode: its file calls may use only the \
+        folders in the `folders:` line (r read, w write, x run commands). Where folders nest, \
+        the deepest one decides. Its commands run as an account of their own, not as the \
+        machine's owner, whose access to the files they make goes through the group bits: keep \
+        those, 0640 or 0660 for files and 0750 or 0770 for folders, not 0600 or 0700 unless \
+        asked. The folders marked own belong to that account, and every pairing whose commands \
+        run as it shares them (a temporary folder also every account on the machine), with the \
+        settings and caches its programs keep there: what one pairing leaves there can change \
+        what another one's commands do. Use one marked w for throwaway files only, keep nothing \
+        secret there, and change no program's settings there unless asked.";
 
     /// A unit's description is its action's own summary, not its
     /// capability's beside it (which speaks of all the actions), else the
@@ -1291,15 +1304,23 @@ mod tests {
         // The advice is the center's, outside the nodes' data.
         assert_eq!(got.data["center"], json!({"folders": ADVICE}));
         assert!(!got.data["result"].to_string().contains("throwaway"));
-        // A unit without a folder note gets no advice.
+        // The file calls alone get the advice without what holds a
+        // command, whichever order they are asked in.
         let got = details(&o, &["fs.read".into()]);
-        assert!(got.text.contains("\nFolders: "));
+        assert!(
+            got.text.ends_with(&format!("\nFolders: {FILE_ADVICE}")),
+            "{}",
+            got.text
+        );
+        assert_eq!(got.data["center"], json!({"folders": FILE_ADVICE}));
+        let got = details(&o, &["exec.run".into(), "fs.read".into()]);
+        assert!(got.text.ends_with(&format!("\nFolders: {ADVICE}")));
+        // A unit without a folder note gets no advice.
         let mut lampless = box_node();
-        lampless
-            .catalog
-            .units
-            .iter_mut()
-            .for_each(|u| u.note = None);
+        lampless.catalog.units.iter_mut().for_each(|u| {
+            u.note = None;
+            u.advice = None;
+        });
         let got = details(&offer(&lampless, true), &["fs.read".into()]);
         assert!(!got.text.contains("Folders:"), "{}", got.text);
         assert!(got.data.get("center").is_none());
@@ -1315,10 +1336,10 @@ mod tests {
         assert!(!got.is_error);
         assert!(
             got.text.ends_with(
-                "[end of device content]\nFolders: {ADVICE}\nNode box-1 offers no \"fs.raed\" (did you mean \
+                "[end of device content]\nFolders: {FILE_ADVICE}\nNode box-1 offers no \"fs.raed\" (did you mean \
                  \"fs.read\"?): call list with node \"box-1\" for its capabilities.\nTurned off on node box-1 by its owner: \
                  \"lamp.on\"."
-                    .replace("{ADVICE}", ADVICE)
+                    .replace("{FILE_ADVICE}", FILE_ADVICE)
                     .as_str()
             ),
             "{}",
