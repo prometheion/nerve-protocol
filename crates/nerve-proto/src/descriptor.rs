@@ -307,24 +307,6 @@ mod tests {
         assert_eq!(cap["actions"]["propertyNames"]["pattern"], rule.as_str());
     }
 
-    /// schemas/descriptor.schema.json says in a pattern what
-    /// `valid_member_name` checks: letters, digits and `-`, at least one, and
-    /// no upper bound on the length.
-    #[test]
-    fn the_published_schema_names_members_as_the_code_does() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../schemas/descriptor.schema.json"
-        );
-        let s: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        let cap = &s["$defs"]["capability"]["properties"];
-        let rule = "^[A-Za-z0-9-]+$";
-        assert_eq!(cap["id"]["pattern"], rule);
-        assert_eq!(cap["actions"]["propertyNames"]["pattern"], rule);
-        assert!(valid_member_name(&"a".repeat(33)));
-        assert!(valid_member_name(&"a".repeat(200)));
-    }
-
     #[test]
     fn a_dot_in_a_name_is_refused_and_an_underscore_is_not() {
         let mut d = sample();
