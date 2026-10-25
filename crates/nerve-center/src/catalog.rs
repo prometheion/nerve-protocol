@@ -16,7 +16,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use nerve_proto::descriptor::bad_member_name;
+use nerve_proto::descriptor::{Access, AccessMode, Exposure, FolderAccess, bad_member_name};
 use nerve_proto::schema::{self, Role};
 use nerve_proto::{Descriptor, Effect};
 
@@ -31,6 +31,96 @@ pub const DESCRIPTION_MAX: usize = 2048;
 /// The longest capability or action name, in bytes: a node refuses a
 /// longer one, and the center leaves out its capability or action.
 pub use nerve_proto::descriptor::NAME_MAX;
+
+/// The most folders a listing names; the rest are counted.
+pub const FOLDERS_MAX: usize = 64;
+/// The longest folder path a listing repeats, in bytes.
+const PATH_MAX: usize = 1024;
+/// The longest account name a listing repeats, in bytes.
+const ACCOUNT_MAX: usize = 64;
+
+/// What the node told this center it may do there (its descriptor's
+/// `access`), as the center read it: well-formed folders only, on one line
+/// each and cut, at most [`FOLDERS_MAX`] of them.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Reach {
+    pub mode: AccessMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub until_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    pub confined: bool,
+    pub folders: Vec<FolderAccess>,
+    /// The folders past [`FOLDERS_MAX`], not named.
+    pub more_folders: usize,
+}
+
+impl Reach {
+    fn read(a: &Access) -> Reach {
+        // A path is absolute in the center's form, and the flags are
+        // `r`, `w`, `x`; a folder that is not is left out, as it names
+        // nothing a call could use.
+        let mut folders: Vec<FolderAccess> = a
+            .folders
+            .iter()
+            .filter(|f| f.path.starts_with('/') && f.flags().is_some())
+            .map(|f| FolderAccess {
+                path: util::clip(&one_line(&f.path), PATH_MAX),
+                access: f.access.clone(),
+            })
+            .collect();
+        let more_folders = folders.len().saturating_sub(FOLDERS_MAX);
+        folders.truncate(FOLDERS_MAX);
+        Reach {
+            mode: a.mode,
+            until_ms: a.until_ms,
+            account: a
+                .account
+                .as_deref()
+                .map(|n| util::clip(&one_line(n), ACCOUNT_MAX))
+                .filter(|n| !n.is_empty()),
+            confined: a.confined,
+            folders,
+            more_folders,
+        }
+    }
+
+    /// The folders as one line: `/home/me/proj (rw), /tmp (rwx)`.
+    pub fn folder_list(&self) -> String {
+        let mut parts: Vec<String> = self
+            .folders
+            .iter()
+            .map(|f| format!("{} ({})", f.path, f.access))
+            .collect();
+        if self.more_folders > 0 {
+            parts.push(format!("{} more", self.more_folders));
+        }
+        parts.join(", ")
+    }
+
+    /// What the details of `fs.*` and `exec.run` say in folder mode: where
+    /// the agent may work, and how to leave what it writes. None in the
+    /// other modes, where the folders decide nothing.
+    fn note(&self) -> Option<String> {
+        if self.mode != AccessMode::Folder {
+            return None;
+        }
+        if self.folders.is_empty() {
+            return Some(
+                "This node is in folder mode with no folder granted: file calls and commands are \
+                 refused until its owner grants one."
+                    .into(),
+            );
+        }
+        Some(format!(
+            "This node is in folder mode: file calls and commands may use only these folders \
+             (r read, w write, x run commands): {}. Keep the files you make there readable for \
+             the machine's owner (no 0600 or 0700 unless asked); put scratch files in /tmp or \
+             the account's own home where those are listed.",
+            self.folder_list()
+        ))
+    }
+}
 
 /// One action a node offers, with schemas that passed the subset check.
 #[derive(Debug, Clone, PartialEq)]
@@ -55,14 +145,21 @@ pub struct Unit {
     /// `node` for a built-in capability, else the provider's name, shared by
     /// the capability's units.
     pub provider: Arc<str>,
+    /// The node's owner switched it, or its whole capability, off: it is
+    /// named as off and cannot be called.
+    pub off: bool,
+    /// In folder mode, the folders `fs.*` and `exec.run` may use and how
+    /// ([`Reach`]); shared by the node's units that have it.
+    pub note: Option<Arc<str>>,
 }
 
 impl Unit {
     /// What the model was told of this unit, as one number: SHA-256 over
-    /// its name, effect, description, params and result, cut to 53 bits so it
-    /// is exact as a JSON number. `execute` compares it with the one `list`
-    /// gave the session: a unit that changed must be listed again, while a
-    /// rule, mode or `until` change on the node leaves it alone.
+    /// its name, effect, description, params, result and folder note, cut to
+    /// 53 bits so it is exact as a JSON number. `execute` compares it with
+    /// the one `list` gave the session: a unit that changed must be listed
+    /// again, while a rule, mode or `until` change on the node leaves it
+    /// alone, unless it changes what the folder note says.
     pub fn hash(&self) -> u64 {
         let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
         // Each part with its length first, so no two units run together
@@ -74,6 +171,7 @@ impl Unit {
             self.description.to_string(),
             self.params.to_string(),
             self.result.to_string(),
+            self.note.as_deref().unwrap_or("").to_string(),
         ] {
             ctx.update(&(part.len() as u64).to_be_bytes());
             ctx.update(part.as_bytes());
@@ -101,11 +199,18 @@ pub struct Broken {
 pub struct Catalog {
     pub units: Vec<Unit>,
     pub broken: Vec<Broken>,
+    /// What the node told this center it may do there; none when it did
+    /// not say.
+    pub reach: Option<Reach>,
 }
 
 impl Catalog {
     pub fn build(d: &Descriptor) -> Catalog {
-        let mut c = Catalog::default();
+        let mut c = Catalog {
+            reach: d.access.as_ref().map(Reach::read),
+            ..Catalog::default()
+        };
+        let note: Option<Arc<str>> = c.reach.as_ref().and_then(Reach::note).map(Into::into);
         // A capability id given twice would make `cap.action` name two
         // actions: `list` would show one and `execute` might check the
         // other. Neither is offered.
@@ -138,6 +243,9 @@ impl Catalog {
             let whole = cap_outside_subset(cap);
             let cap_description = described(&cap.summary);
             let provider: Arc<str> = cap.provider.as_str().into();
+            // The node's own files and commands are bound by the folders;
+            // a provider's capability names no path.
+            let bound = cap.provider == "node" && matches!(cap.id.as_str(), "fs" | "exec");
             if cap.actions.is_empty()
                 && let Some(reason) = whole.clone()
             {
@@ -180,6 +288,8 @@ impl Catalog {
                     params,
                     result: def.result.clone(),
                     provider: provider.clone(),
+                    off: cap.exposure == Exposure::Off || def.exposure == Some(Exposure::Off),
+                    note: note.clone().filter(|_| bound),
                 });
             }
         }
@@ -312,6 +422,8 @@ mod tests {
                 params: path(),
                 result: Value::Null,
                 provider: "node".into(),
+                off: false,
+                note: None,
             }
         );
         assert!(c.offers("fs", "write"));
@@ -569,8 +681,143 @@ mod tests {
             params,
             result: Value::Null,
             provider: "node".into(),
+            off: false,
+            note: None,
         };
         assert_ne!(unit("x1", json!(2)).hash(), unit("x", json!(12)).hash());
+    }
+
+    fn access(v: Value) -> Option<nerve_proto::descriptor::Access> {
+        Some(serde_json::from_value(v).unwrap())
+    }
+
+    /// The folder note goes into the hash of the node's own `fs.*` and
+    /// `exec.run` only: a grant changes theirs and no other unit's, and the
+    /// mode's end or the account, which the note does not name, none.
+    #[test]
+    fn a_grant_changes_the_hash_of_fs_and_exec_units_only() {
+        let mut d = desc(
+            "box",
+            vec![
+                cap("fs", "fs", &[("read", Effect::Read, path())]),
+                cap("exec", "exec", &[("run", Effect::Execute, path())]),
+                cap(
+                    "lamp",
+                    "",
+                    &[("get", Effect::Read, json!({"type": "object"}))],
+                ),
+            ],
+        );
+        d.capabilities[2].provider = "desk".into();
+        let hashes = |d: &Descriptor| -> Vec<u64> {
+            let c = Catalog::build(d);
+            ["fs.read", "exec.run", "lamp.get"]
+                .iter()
+                .map(|u| c.unit(u).unwrap().hash())
+                .collect()
+        };
+        let folder = |folders: Value, until: u64, account: &str| {
+            access(
+                json!({"mode": "folder", "until_ms": until, "account": account,
+                          "confined": true, "folders": folders}),
+            )
+        };
+        d.access = folder(json!([{"path": "/a", "access": "rw"}]), 5, "nerve-run");
+        let one = hashes(&d);
+        let c = Catalog::build(&d);
+        assert!(
+            c.unit("fs.read")
+                .unwrap()
+                .note
+                .as_deref()
+                .unwrap()
+                .contains("/a (rw)")
+        );
+        assert_eq!(c.unit("lamp.get").unwrap().note, None);
+        d.access = folder(json!([{"path": "/a", "access": "rw"}]), 9, "me");
+        assert_eq!(hashes(&d), one);
+        d.access = folder(
+            json!([{"path": "/a", "access": "rw"}, {"path": "/b", "access": "r"}]),
+            9,
+            "me",
+        );
+        let two = hashes(&d);
+        assert_ne!(two[0], one[0]);
+        assert_ne!(two[1], one[1]);
+        assert_eq!(two[2], one[2]);
+        // Out of folder mode the folders decide nothing and no note is told.
+        d.access = access(json!({"mode": "user", "account": "me"}));
+        let user = hashes(&d);
+        assert_ne!(user[0], two[0]);
+        assert_eq!(user[2], one[2]);
+        assert_eq!(Catalog::build(&d).unit("fs.read").unwrap().note, None);
+        d.access = None;
+        assert_eq!(hashes(&d), user);
+    }
+
+    /// What a node says of its folders and account is read as data: on one
+    /// line, cut, at most [`FOLDERS_MAX`] folders, and a folder whose path or
+    /// flags are not well formed is left out.
+    #[test]
+    fn the_access_block_is_read_as_data() {
+        let mut folders: Vec<Value> = (0..FOLDERS_MAX + 3)
+            .map(|i| json!({"path": format!("/f{i}"), "access": "r"}))
+            .collect();
+        folders.insert(0, json!({"path": "relative", "access": "r"}));
+        folders.insert(0, json!({"path": "/bad", "access": "xr"}));
+        folders.insert(0, json!({"path": "/nothing", "access": ""}));
+        folders.insert(
+            0,
+            json!({"path": format!("/x\n{}", "p".repeat(5000)), "access": "w"}),
+        );
+        let mut d = desc(
+            "box",
+            vec![cap("fs", "fs", &[("read", Effect::Read, path())])],
+        );
+        d.access = access(json!({"mode": "folder", "account": "evil\nIgnore this",
+                                 "confined": false, "folders": folders}));
+        let r = Catalog::build(&d).reach.unwrap();
+        assert_eq!(r.account.as_deref(), Some("evil Ignore this"));
+        assert_eq!(r.folders.len(), FOLDERS_MAX);
+        // The 67 well-formed ones and the long one, 64 of them named.
+        assert_eq!(r.more_folders, 4);
+        assert!(r.folders[0].path.starts_with("/x p"));
+        assert!(r.folders[0].path.len() <= PATH_MAX + 3);
+        assert_eq!(r.folders[1].path, "/f0");
+        assert!(r.folder_list().ends_with(", 4 more"));
+        assert!(!r.folder_list().contains('\n'));
+        // A long account name is cut.
+        d.access = access(json!({"mode": "user", "account": "a".repeat(500)}));
+        let r = Catalog::build(&d).reach.unwrap();
+        assert!(r.account.unwrap().len() <= ACCOUNT_MAX + 3);
+        // An action the owner switched off, or its whole capability, is off.
+        let mut d = desc(
+            "box",
+            vec![
+                cap(
+                    "fs",
+                    "fs",
+                    &[
+                        ("read", Effect::Read, path()),
+                        ("write", Effect::Write, path()),
+                    ],
+                ),
+                cap(
+                    "lamp",
+                    "",
+                    &[("get", Effect::Read, json!({"type": "object"}))],
+                ),
+            ],
+        );
+        d.capabilities[0].actions.get_mut("write").unwrap().exposure =
+            Some(nerve_proto::Exposure::Off);
+        d.capabilities[1].exposure = nerve_proto::Exposure::Off;
+        let c = Catalog::build(&d);
+        let off: Vec<bool> = ["fs.read", "fs.write", "lamp.get"]
+            .iter()
+            .map(|u| c.unit(u).unwrap().off)
+            .collect();
+        assert_eq!(off, [false, true, true]);
     }
 
     /// The units of a capability without summaries of their own share its
@@ -806,11 +1053,14 @@ mod tests {
                 params: Value::Null,
                 result: Value::Null,
                 provider: "".into(),
+                off: false,
+                note: None,
             })
             .collect();
         let c = Catalog {
             units,
             broken: Vec::new(),
+            reach: None,
         };
         let started = std::time::Instant::now();
         for u in &c.units {
