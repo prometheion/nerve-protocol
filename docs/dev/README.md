@@ -12,7 +12,7 @@ pages explain the design and link to the spec for detail.
 | [identity-and-pairing.md](identity-and-pairing.md) | Keys, pins, ids, the pairing flow |
 | [node-link.md](node-link.md) | The link: dial, handshake, liveness, reconnect, limits |
 | [capabilities.md](capabilities.md) | Descriptor, capabilities, effects, profiles, messages |
-| [mcp-surface.md](mcp-surface.md) | How the center turns capabilities into MCP tools |
+| [mcp-surface.md](mcp-surface.md) | The two MCP tools, `list` and `execute`, and how the center offers capabilities through them |
 | [policy-engine.md](policy-engine.md) | How the node decides a call, and the sandbox |
 | [action-checker.md](action-checker.md) | The center's action checker: blocklist, allow rules, decision model |
 | [settings-and-config.md](settings-and-config.md) | `node.toml`, the settings API, the control socket |

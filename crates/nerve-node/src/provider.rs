@@ -27,7 +27,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 use nerve_policy::NodeConfig;
-use nerve_proto::descriptor::{Action, Capability, Effect, Exposure, valid_member_name};
+use nerve_proto::descriptor::{Action, Capability, Effect, Exposure, bad_member_name};
 use nerve_proto::schema::{self, Role};
 use nerve_proto::{ErrorCode, RpcError};
 
@@ -378,11 +378,10 @@ fn capabilities(
     let mut caps = Vec::new();
     let mut broken = Vec::new();
     for f in fragment {
-        if !valid_member_name(&f.id) {
-            return Err(format!(
-                "capability name {:?}: letters, digits and - only, no _",
-                f.id
-            ));
+        // A center leaves out a longer name, and its agent would never see
+        // it: refused here, the program learns why.
+        if let Some(why) = bad_member_name(&f.id) {
+            return Err(format!("capability {why}"));
         }
         if BUILT_IN.contains(&f.id.as_str()) {
             return Err(format!("capability {} is the node's own", f.id));
@@ -407,11 +406,8 @@ fn capabilities(
         }
         let mut actions = BTreeMap::new();
         for (a, decl) in f.actions {
-            if !valid_member_name(&a) {
-                return Err(format!(
-                    "action name {a:?} of capability {}: letters, digits and - only, no _",
-                    f.id
-                ));
+            if let Some(why) = bad_member_name(&a) {
+                return Err(format!("capability {}: action {why}", f.id));
             }
             // Arguments are always an object; no schema takes any.
             let params = match decl.params {
@@ -673,8 +669,8 @@ mod tests {
         for (bad, why) in [
             (json!([]), "1 to 16"),
             (
-                json!([{"id": "my_cap", "actions": {"a": {"effect": "read"}}}]),
-                "no _",
+                json!([{"id": "my.cap", "actions": {"a": {"effect": "read"}}}]),
+                "capability name",
             ),
             (
                 json!([{"id": "fs", "actions": {"a": {"effect": "read"}}}]),
@@ -695,8 +691,17 @@ mod tests {
             ),
             (json!([{"id": "x", "actions": {}}]), "1 to 64 actions"),
             (
-                json!([{"id": "x", "actions": {"a_b": {"effect": "read"}}}]),
+                json!([{"id": "x", "actions": {"a.b": {"effect": "read"}}}]),
                 "action name",
+            ),
+            // A name a center would leave out, said by its length.
+            (
+                json!([{"id": "c".repeat(65), "actions": {"a": {"effect": "read"}}}]),
+                "capability name of 65 bytes: at most 64",
+            ),
+            (
+                json!([{"id": "x", "actions": {"a".repeat(65): {"effect": "read"}}}]),
+                "capability x: action name of 65 bytes: at most 64",
             ),
         ] {
             let e = capabilities("desk", fragment(bad.clone()), &taken).unwrap_err();

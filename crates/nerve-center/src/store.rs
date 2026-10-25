@@ -114,7 +114,7 @@ impl Store {
                     std::io::Error::other(format!("{} is not valid: {e}", dir.join(FILE).display()))
                 })?;
                 // The catalogs are not in the file: they come from the
-                // cached descriptors, so tools stay listed while a node is
+                // cached descriptors, so capabilities stay listed while a node is
                 // offline.
                 for n in s.nodes.values_mut() {
                     n.catalog = n
@@ -199,7 +199,7 @@ pub struct NodeRecord {
     pub arch: String,
     pub paired_ms: u64,
     /// The owner switched the node off in the center: it stays paired and
-    /// connected, but the agent is offered none of its tools and no call
+    /// connected, but the agent is offered none of its capabilities and no call
     /// reaches it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
@@ -208,7 +208,7 @@ pub struct NodeRecord {
     /// Why the node said it was going away before its last link dropped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub going_away: Option<String>,
-    /// The last full descriptor, so tools stay listed while the node is offline.
+    /// The last full descriptor, so capabilities stay listed while the node is offline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub descriptor: Option<Descriptor>,
     /// The descriptor as the center checked it ([`Catalog`]), built again
@@ -340,7 +340,7 @@ mod tests {
 
     /// The catalog is derived from the descriptor: it is not in the state
     /// file, and a load builds it again, so a restarted center offers an
-    /// offline node's tools as before and leaves out the same units.
+    /// offline node's capabilities as before and leaves out the same units.
     #[test]
     fn the_catalog_is_built_after_a_load_and_never_written() {
         use crate::tools::tests::{cap, desc};

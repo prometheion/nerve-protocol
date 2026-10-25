@@ -1,7 +1,9 @@
 # Capabilities
 
-A node describes what it can do in a **descriptor**. The center builds tools
-from it. Exact shapes: [spec/protocol.md](spec/protocol.md) §5 to §7.
+A node describes what it can do in a **descriptor**. The center offers it to
+the agent through its two MCP tools, `list` and `execute`
+([mcp-surface](mcp-surface.md)). Exact shapes:
+[spec/protocol.md](spec/protocol.md) §5 to §7.
 
 ## Capabilities
 
@@ -46,22 +48,28 @@ and state included) and `validate` before every call it sends.
   capability that is `hidden` for it is absent. One that is `off` is listed
   with `exposure: "off"`.
 - In `allowlist` mode, an `fs` or `exec` action is also absent unless an allow
-  rule covers its capability and action. The center then builds no tool the
-  node would refuse. `exec.run` also stays when the sudo list has an entry.
+  rule covers its capability and action. `list` then offers nothing the node
+  would refuse. `exec.run` also stays when the sudo list has an entry.
 - `rev` changes whenever what this center sees changes. The node sends
   `node/descriptor_changed` and the center asks again.
 - `describe` has three levels of detail: `summary` (no schemas), `capability`
   (one capability in full) and `full`.
-- Capability ids and action names use letters, digits and `-`, never `_`. The
-  harness side joins names with `_`, and a `_` inside a name would make the tool
-  name ambiguous. A center leaves out the actions of a capability with such
-  an id, and an action with such a name, and keeps the rest.
+- Capability ids and action names are 1 to 64 bytes of letters, digits, `-`
+  and `_`, never `.`. The harness side names an action `<cap>.<action>`, and
+  a `.` inside a name would make that name ambiguous. A node refuses a
+  provider with another name. A center leaves out the actions of a
+  capability with another character in its id, an id over 64 bytes or an id
+  the descriptor gives twice, and an action with another character in its
+  name or a name over 64 bytes, and keeps the rest.
 - The center builds a catalog per node from its descriptor
   (`nerve-center` `catalog.rs`): one unit per `cap.action`, and the units it
   left out (a bad name, a schema outside the subset; every action of a
   capability whose event data or state is outside it) with their reasons. The
-  catalog is rebuilt from the descriptor, never stored; the overview shows
-  what was left out.
+  catalog is rebuilt from the descriptor, never stored; `list` reads it, and
+  the overview shows what was left out. Each unit has a hash over its name,
+  effect, description, `params` and `result`: `execute` runs a unit only
+  while its hash is the one `list` gave the session
+  ([harness.md](spec/harness.md) §4.3).
 - `provider` says which process serves the capability: `node` for the node's
   own, else the name of a local program the owner allowed to attach to the
   node ([node-local §7](spec/node-local.md#7-capability-providers)). Such a
@@ -81,7 +89,10 @@ Every action has an effect. The node's policy maps modes and rules onto them.
 | `execute` | Runs code the center chose | `exec.run` |
 
 `execute` stands apart because running a command includes every other effect.
-The center sets `readOnlyHint` on MCP tools for `read` and `sense`.
+`list(node, capability)` names each capability's effect; the MCP tools'
+annotations are fixed (`list` read-only, `execute` destructive), whatever
+the effect. (The `execute` effect and the `execute` tool share only the
+word.)
 
 `folder` and `user` mode do not cover `sense` and `actuate` actions. They run
 only when the owner set the action to `on`, or, in `allowlist` mode, when an

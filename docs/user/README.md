@@ -8,7 +8,7 @@ Three programs make it work:
 
 | Program | Runs on | Job |
 |---|---|---|
-| `nerve-center` | the machine where the harness runs | Pairs machines, keeps their links, gives the harness their tools over MCP, serves the web UI |
+| `nerve-center` | the machine where the harness runs | Pairs machines, keeps their links, gives the harness two MCP tools, `list` and `execute`, for what they offer, serves the web UI |
 | `nerve-node` | each machine the agent may use, without a desktop or run from a terminal | Links to a center and decides each call by the rules you set; its CLI sets them |
 | `nerve-node-desktop` | each machine the agent may use that has a desktop (Linux x86_64 with GNOME or KDE Plasma, Windows x86_64) | The same node, with an app that installs itself and does what the CLI does in a window ([desktop app](desktop.md)) |
 
@@ -35,7 +35,7 @@ open port.
 |---|---|
 | [install.md](install.md) | Download, check, install, where files live |
 | [center.md](center.md) | Start the center, its flags and ports, install it as a service on Linux |
-| [harness.md](harness.md) | Connect an MCP harness, the tools it gets |
+| [harness.md](harness.md) | Connect an MCP harness, the two tools it gets |
 | [pairing.md](pairing.md) | Pair a machine, start the node, unpair |
 | [service.md](service.md) | Install the node as a service, set it up, update and uninstall it |
 | [desktop.md](desktop.md) | The desktop app: install it by opening it, start and stop the node, update and uninstall it |

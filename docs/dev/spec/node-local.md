@@ -526,8 +526,8 @@ call starts: a running command keeps its limit. The `timeout` error names the
 limit that ended the command, and the descriptor states both numbers in
 `exec.run`'s text and in the `default` and `description` (milliseconds) of its
 `timeout_ms` parameter, so a change of either changes the descriptor's rev, and
-nodes with other limits have other params (a center merges the tools of nodes
-with equal params). The parameter has no `maximum`: a larger value is cut to
+nodes with other limits have other params (a harness gets each node's
+details from `list`). The parameter has no `maximum`: a larger value is cut to
 the most, not refused, so a center that checks the arguments lets it through.
 A command is killed with its process group when its call ends: on
 `timeout_ms`, `cancel`, `session.end` of the session that started it, a
@@ -1027,8 +1027,8 @@ answer. For each call the node takes the center's policy and, in this order:
 
 Every refusal names its reasons in the error and in the audit log.
 
-What the center is shown follows the same policy, so that its harness builds
-no tool the node would refuse. In `allowlist` mode an `fs` or `exec` action,
+What the center is shown follows the same policy, so that its `list` offers
+nothing the node would refuse. In `allowlist` mode an `fs` or `exec` action,
 or one a provider adds (§7), is in the descriptor only when an `allow` rule
 covers it by scope: `<cap>`
 covers every action of the capability, `<cap>.<action>` that action, with or
@@ -1435,7 +1435,8 @@ The node refuses it, with nothing attached, when:
   program replaced since it started is not);
 - a provider of that name is attached already;
 - the fragment is not 1 to 16 capabilities of 1 to 64 actions each, with
-  names of letters, digits and `-`; a capability is named twice, takes the
+  names of 1 to 64 letters, digits, `-` and `_` (a center would leave out a
+  longer name); a capability is named twice, takes the
   name or the profile of one of the node's own (`node`, `fs`, `exec`,
   `settings`, `audit`), or is added by another attached provider; or a
   capability declares anything but `id`, `profile`, `summary` and `actions`

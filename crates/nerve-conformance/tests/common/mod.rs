@@ -284,24 +284,35 @@ impl Mcp {
         r["result"].clone()
     }
 
+    /// `list` with `args`: its result object.
+    pub fn list(&mut self, args: Value) -> Value {
+        self.call("list", args)
+    }
+
+    /// The capabilities `list(node)` offers now; none while the node is not
+    /// known or not described yet.
+    pub fn offered(&mut self, node: &str) -> Vec<String> {
+        self.list(json!({"node": node}))["structuredContent"]["result"]["capabilities"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
     /// The `tools/call` params that run `unit` (`cap.action`) on `node` with
-    /// the arguments `args`. The tests name units, never tools: this is the
-    /// one place that knows how a unit is called. Today that is the tool
-    /// ending in `<cap>_<action>`, with a `node` argument when it covers
-    /// several nodes.
+    /// the arguments `args`, after `list` gave this session the unit's
+    /// details, as `execute` asks. The tests name units: this is the one
+    /// place that knows how a unit is called.
     pub fn run_params(&mut self, node: &str, unit: &str, args: Value) -> Value {
-        let (cap, action) = unit.split_once('.').expect("a unit is cap.action");
-        let suffix = format!("{cap}_{action}");
-        let tools = self.tools();
-        let t = tools
-            .iter()
-            .find(|t| t["name"].as_str().is_some_and(|n| n.ends_with(&suffix)))
-            .unwrap_or_else(|| panic!("no tool for {unit}: {tools:?}"));
-        let mut arguments = args;
-        if t["inputSchema"]["properties"].get("node").is_some() {
-            arguments["node"] = json!(node);
-        }
-        json!({"name": t["name"], "arguments": arguments})
+        let listed = self.list(json!({"node": node, "capability": unit}));
+        assert_ne!(
+            listed["isError"],
+            json!(true),
+            "list {unit} on {node}: {listed}"
+        );
+        json!({"name": "execute",
+               "arguments": {"node": node, "capability": unit, "args": args}})
     }
 
     /// Runs `unit` on `node` as a harness would and returns the result

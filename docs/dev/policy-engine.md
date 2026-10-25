@@ -371,7 +371,7 @@ how it was checked on Windows 11 Pro 26H2, build 10.0.26300, and what was not:
 - Files a command leaves in a `w` folder are run by others outside the
   container. Links and permission entries: above.
 - A `sudo` command (installed service only) is started by `winsudo` outside
-  the container, whatever the folders say (`exec_run`: `folder` is false for
+  the container, whatever the folders say (`exec.run`: `folder` is false for
   it). The folders do not gate it: the switch, the sudo list, the deny rules
   and the protected paths do (`decide`), also where `folder` mode runs nothing
   else.
@@ -412,5 +412,5 @@ password.
 
 ## What a center is shown
 
-The descriptor follows the same policy ([capabilities](capabilities.md)). A
-tool exists only for an action a call could get through.
+The descriptor follows the same policy ([capabilities](capabilities.md)).
+`list` offers only an action a call could get through.

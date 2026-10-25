@@ -59,7 +59,7 @@ fn harness_part_passes_against_nerve_center() {
     let report = block_on(harness_part::run(&target));
     assert!(report.ok(), "{report}");
     // Every check ran; a count that shrinks silently would hide a lost check.
-    assert_eq!(report.outcomes.len(), 37, "{report}");
+    assert_eq!(report.outcomes.len(), 40, "{report}");
 }
 
 fn with(mut args: Value, more: Value) -> Value {
@@ -128,13 +128,15 @@ fn nerve_center_and_nerve_node_work_together() {
     let node_name = ov["nodes"][0]["name"].as_str().unwrap().to_string();
     assert_eq!(ov["nodes"][0]["settings_write"], json!(false), "{ov}");
 
-    // Tools: none for files and commands while no allow rule could let a
-    // call through, and never one for the node's settings.
-    let tools = mcp.tools();
-    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-    assert!(!names.iter().any(|n| n.ends_with("fs_read")), "{names:?}");
-    assert!(!names.iter().any(|n| n.ends_with("exec_run")), "{names:?}");
-    assert!(!names.iter().any(|n| n.contains("settings_")), "{names:?}");
+    // Capabilities: none for files and commands while no allow rule could
+    // let a call through, and never one for the node's settings.
+    let offered = mcp.offered(&node_name);
+    assert!(!offered.iter().any(|n| n == "fs.read"), "{offered:?}");
+    assert!(!offered.iter().any(|n| n == "exec.run"), "{offered:?}");
+    assert!(
+        !offered.iter().any(|n| n.starts_with("settings.")),
+        "{offered:?}"
+    );
 
     // The settings grant, given on the node, reaches the center.
     node.ok(&["center", "grant", "settings", "write"]);
@@ -303,22 +305,18 @@ fn nerve_center_and_nerve_node_work_together() {
     }
     assert_eq!(list("allow"), allow);
 
-    // The allow rules above made the tools appear: the node announced a new
-    // descriptor and the center built them.
+    // The allow rules above made the capabilities appear: the node
+    // announced a new descriptor and the center lists them.
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let tools = mcp.tools();
-        let has = |suffix: &str| {
-            tools
-                .iter()
-                .any(|t| t["name"].as_str().is_some_and(|n| n.ends_with(suffix)))
-        };
-        if has("fs_read") && has("exec_run") {
+        let offered = mcp.offered(&node_name);
+        let has = |unit: &str| offered.iter().any(|n| n == unit);
+        if has("fs.read") && has("exec.run") {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "the tools did not appear: {tools:?}"
+            "the capabilities did not appear: {offered:?}"
         );
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -384,18 +382,20 @@ fn nerve_center_and_nerve_node_work_together() {
         "{stats}"
     );
 
-    // Removing the node from the web UI: its tools go, and the node stops.
+    // Removing the node from the web UI: it is no longer listed, and the
+    // node stops.
     let (status, v) = mcp.api("POST", "/api/nodes/remove", json!({"id": node_id}));
     assert_eq!(status, 200, "{v}");
     mcp.wait_overview("the node is gone", |v| {
         v["nodes"].as_array().is_some_and(|n| n.is_empty())
     });
-    let names: Vec<String> = mcp
-        .tools()
-        .iter()
-        .filter_map(|t| t["name"].as_str().map(str::to_string))
-        .collect();
-    assert!(!names.iter().any(|n| n.ends_with("fs_read")), "{names:?}");
+    let listed = mcp.list(json!({}));
+    assert_eq!(
+        listed["structuredContent"]["result"]["nodes"],
+        json!([]),
+        "{listed}"
+    );
+    assert!(mcp.offered(&node_name).is_empty());
     let status = node.ok(&["status"]);
     assert!(
         status.contains("revoked") || status.contains("unknown") || status.contains("stopped"),
@@ -437,22 +437,19 @@ fn a_cancelled_call_and_an_ended_session_stop_their_command() {
     node.ok(&["center", "add", &mcp.pair_link(), "--yes"]);
     node.ok(&["mode", "set", "user"]);
     node.start();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let tools = mcp.tools();
-        if tools
-            .iter()
-            .any(|t| t["name"].as_str().is_some_and(|n| n.ends_with("exec_run")))
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline, "no exec_run tool: {tools:?}");
-        std::thread::sleep(Duration::from_millis(100));
-    }
     let ov = mcp.wait_overview("the node is online", |v| {
         v["nodes"][0]["online"] == json!(true)
     });
     let name = ov["nodes"][0]["name"].as_str().unwrap().to_string();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let offered = mcp.offered(&name);
+        if offered.iter().any(|n| n == "exec.run") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no exec.run: {offered:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
     let start = |mcp: &mut Mcp, id: &str| -> u32 {
         let file = node.home.join(format!("{id}.pid"));
         let command = format!("sleep 30 & echo $! > {}; wait", file.display());
@@ -564,22 +561,19 @@ fn a_command_survives_a_dropped_link() {
     node.ok(&["center", "add", &mcp.pair_link(), "--yes"]);
     node.ok(&["mode", "set", "user"]);
     node.start();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let tools = mcp.tools();
-        if tools
-            .iter()
-            .any(|t| t["name"].as_str().is_some_and(|n| n.ends_with("exec_run")))
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline, "no exec_run tool: {tools:?}");
-        std::thread::sleep(Duration::from_millis(100));
-    }
     let ov = mcp.wait_overview("the node is online", |v| {
         v["nodes"][0]["online"] == json!(true)
     });
     let name = ov["nodes"][0]["name"].as_str().unwrap().to_string();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let offered = mcp.offered(&name);
+        if offered.iter().any(|n| n == "exec.run") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no exec.run: {offered:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
     let (started, go) = (node.home.join("started"), node.home.join("go"));
     let command = format!(
         "touch {}; while [ ! -e {} ]; do sleep 0.05; done; echo resumed-output",

@@ -1,8 +1,8 @@
 # The action checker
 
 The action checker (issue #17) is a gate in the center, in
-`crates/nerve-center/src/checker/`. It checks each tool call before the center
-sends it to the node. The node's policy still decides afterwards: design rule 1
+`crates/nerve-center/src/checker/`. It checks each `execute` call before the
+center sends it to the node (`list` is never checked). The node's policy still decides afterwards: design rule 1
 holds, the center can only make a call stricter. For how it looks to an owner,
 see the user guide ([action-checker](../user/action-checker.md)).
 

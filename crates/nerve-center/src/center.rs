@@ -26,9 +26,10 @@ use crate::checker::{
     ModelSource, NodeSettings, NodeSwitch, Scope,
 };
 use crate::link::{Link, SHORT_CALL};
+use crate::listing;
 use crate::pairing::{Codes, Outcome};
 use crate::store::{KeyRotation, NodeRecord, OldKey, Store};
-use crate::tools::{self, Route, Tool};
+use crate::tools::Route;
 use crate::util::{self, now_ms};
 
 pub const IDENTITY_FILE: &str = "tls.pem";
@@ -38,10 +39,9 @@ pub const NEXT_IDENTITY_FILE: &str = "tls.next.pem";
 pub use crate::audit::{AUDIT_KEEP, AUDIT_MAX_BYTES};
 const ALERTS_KEEP: usize = 50;
 
-/// What changed, for the MCP servers (tool lists) and the web UI.
+/// What changed, for whoever subscribed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
-    Tools,
     Nodes,
     Audit,
     Sessions,
@@ -230,9 +230,49 @@ pub struct Session {
     /// successful `read`, `sense` or `execute`). The action checker's model
     /// may be told, and its "only tainted sessions" scope acts on it.
     tainted: AtomicBool,
+    /// The units `list` gave this session the details of, with each one's
+    /// hash then: `execute` runs only what the model was shown as it is.
+    /// Locked on its own: never while the state is held (see
+    /// `Inner::store`), so the hashes are copied out of the state first.
+    fetched: Mutex<Fetched>,
+}
+
+/// The most units a session remembers having been shown; past it the one
+/// shown longest ago is forgotten, and the model just lists it again.
+pub const FETCHED_MAX: usize = 1024;
+
+/// A session's shown units by (node id, `cap.action`), and the order they
+/// were shown in, oldest first.
+#[derive(Default)]
+struct Fetched {
+    hashes: HashMap<(String, String), u64>,
+    order: VecDeque<(String, String)>,
 }
 
 impl Session {
+    /// Notes that `list` gave this session the details of `unit` of the
+    /// node `node_id`, whose hash was `hash`.
+    pub fn listed(&self, node_id: &str, unit: &str, hash: u64) {
+        let key = (node_id.to_string(), unit.to_string());
+        let mut f = self.fetched.lock().unwrap();
+        if f.hashes.insert(key.clone(), hash).is_some() {
+            f.order.retain(|k| *k != key);
+        }
+        f.order.push_back(key);
+        while f.order.len() > FETCHED_MAX {
+            if let Some(old) = f.order.pop_front() {
+                f.hashes.remove(&old);
+            }
+        }
+    }
+
+    /// The hash `unit` of the node `node_id` had when `list` gave this
+    /// session its details; none when it never did (or it was forgotten).
+    pub fn listed_hash(&self, node_id: &str, unit: &str) -> Option<u64> {
+        let key = (node_id.to_string(), unit.to_string());
+        self.fetched.lock().unwrap().hashes.get(&key).copied()
+    }
+
     pub fn ended(&self) -> bool {
         self.ended.load(Ordering::SeqCst)
     }
@@ -247,7 +287,7 @@ impl Session {
     }
 }
 
-/// Why a tool call did not produce a result.
+/// Why a call of a unit (an `execute`) did not produce a result.
 #[derive(Debug)]
 pub enum CallError {
     Rpc(RpcError),
@@ -931,6 +971,14 @@ impl Center {
             if s.node_by_name(&req.name).is_some() {
                 return Err("another node already has this name");
             }
+            // `list` and `execute` find a node by its id or its name, so a
+            // name is never a node's id: it would point at that node.
+            if s.nodes.contains_key(&req.name) || req.name == node_id {
+                return Err("this name is a node's id");
+            }
+            if s.node_by_name(&node_id).is_some() {
+                return Err("another node is named like this node's id");
+            }
             s.nodes.insert(
                 node_id.clone(),
                 NodeRecord {
@@ -1487,6 +1535,10 @@ impl Center {
             if s.nodes.values().any(|n| n.name == name && n.id != node_id) {
                 return Err("another node already has this name".to_string());
             }
+            // As at pairing: a node's id as a name would point at that node.
+            if s.nodes.contains_key(name) {
+                return Err("this name is a node's id".to_string());
+            }
             let n = s.nodes.get_mut(node_id).ok_or("no such node")?;
             Ok(std::mem::replace(&mut n.name, name.to_string()))
         })?;
@@ -1496,12 +1548,11 @@ impl Center {
             format!("the node was renamed from {old}"),
         );
         self.changed(Change::Nodes);
-        self.changed(Change::Tools);
         Ok(())
     }
 
     /// Switches a node off or on for the agent. The link stays as it is;
-    /// only the tool list and the call path look at the flag.
+    /// only `list` and the call path look at the flag.
     pub fn set_disabled(&self, node_id: &str, disabled: bool) -> Result<(), String> {
         self.update(|s| {
             s.nodes.get_mut(node_id).ok_or("no such node")?.disabled = disabled;
@@ -1511,13 +1562,12 @@ impl Center {
             Level::Info,
             Some(node_id),
             if disabled {
-                "the node was disabled: the agent gets none of its tools and calls to it are refused"
+                "the node was disabled: the agent is offered none of its capabilities and calls to it are refused"
             } else {
                 "the node was enabled"
             },
         );
         self.changed(Change::Nodes);
-        self.changed(Change::Tools);
         Ok(())
     }
 
@@ -1552,7 +1602,6 @@ impl Center {
                 &format!("the node is no longer paired: {why}"),
             );
             self.changed(Change::Nodes);
-            self.changed(Change::Tools);
         }
     }
 
@@ -1859,7 +1908,6 @@ impl Center {
                             ),
                         );
                     }
-                    self.changed(Change::Tools);
                     self.changed(Change::Nodes);
                 }
                 Err(e) => self.note(
@@ -1957,7 +2005,7 @@ impl Center {
         self.audit.lock().unwrap().list()
     }
 
-    /// The nodes as the web UI and `nodes` show them.
+    /// The nodes as the web UI shows them.
     pub fn nodes_json(&self) -> Value {
         let links: BTreeMap<String, Arc<Link>> = self.links.lock().unwrap().clone();
         // Which sessions use each node, read before the state is locked (see
@@ -1978,8 +2026,8 @@ impl Center {
                     let d = n.descriptor.as_ref();
                     // Whether the agent is offered anything of a capability:
                     // one whose every action was left out, or that the node's
-                    // owner turned off, is listed for the owner, but the
-                    // `nodes` tool does not name it.
+                    // owner turned off, is listed for the owner, but `list`
+                    // does not count it.
                     let offered: BTreeSet<&str> =
                         n.catalog.units.iter().map(|u| u.cap.as_str()).collect();
                     let caps: Vec<Value> = d
@@ -2020,32 +2068,69 @@ impl Center {
         json!(nodes)
     }
 
-    // ---- Tools ----
+    // ---- What the agent is offered ----
 
-    pub fn tools(&self) -> Vec<Tool> {
+    /// The ids of the nodes with a live link, read before the state is
+    /// locked (see `Inner::store`).
+    fn online_ids(&self) -> BTreeSet<String> {
+        self.links
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, l)| l.is_live())
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// The nodes as `list()` shows them.
+    pub fn listed_nodes(&self) -> Vec<listing::NodeLine> {
+        let online = self.online_ids();
         self.read(|s| {
-            let views: Vec<tools::NodeView> = s
-                .nodes
+            s.nodes
                 .values()
-                // A disabled node offers the agent nothing.
-                .filter(|n| !n.disabled)
-                .filter_map(|n| {
-                    n.descriptor.as_ref().map(|d| tools::NodeView {
-                        id: &n.id,
-                        name: &n.name,
-                        descriptor: d,
-                        catalog: &n.catalog,
-                    })
-                })
-                .collect();
-            tools::build(&views)
+                .map(|n| listing::line(n, online.contains(&n.id)))
+                .collect()
         })
     }
 
-    /// The unit `name` (`cap.action`) of a node as the center checked it;
-    /// none when the node has no such unit or it is left out.
-    pub fn unit(&self, node_id: &str, name: &str) -> Option<catalog::Unit> {
-        self.read(|s| s.nodes.get(node_id)?.catalog.unit(name).cloned())
+    /// The node `given` (its name or id) with what it offers the agent, as
+    /// `list(node)` shows it; none when there is no such node.
+    pub fn offer(&self, given: &str) -> Option<listing::Offer> {
+        let online = self.online_ids();
+        self.read(|s| {
+            let n = listing::find(&s.nodes, given)?;
+            Some(listing::offer(n, online.contains(&n.id)))
+        })
+    }
+
+    /// The names of the paired nodes, for an answer that names a node that
+    /// is not there.
+    pub fn node_names(&self) -> Vec<String> {
+        self.read(|s| s.nodes.values().map(|n| n.name.clone()).collect())
+    }
+
+    /// Where `execute` of `unit` on the node `given` (its name or id) goes,
+    /// with the unit to check the arguments against. `Ok(None)` when there
+    /// is no such node.
+    pub fn listed_unit(
+        &self,
+        given: &str,
+        unit: &str,
+    ) -> Result<Option<(Route, catalog::Unit)>, (String, listing::Miss)> {
+        self.read(|s| {
+            let Some(n) = listing::find(&s.nodes, given) else {
+                return Ok(None);
+            };
+            let u = listing::unit(n, unit).map_err(|m| (n.name.clone(), m))?;
+            let route = Route {
+                node_id: n.id.clone(),
+                node_name: n.name.clone(),
+                cap: u.cap.clone(),
+                action: u.action.clone(),
+                effect: u.effect,
+            };
+            Ok(Some((route, u)))
+        })
     }
 
     // ---- Sessions ----
@@ -2060,6 +2145,7 @@ impl Center {
             calls: AtomicU64::new(0),
             nodes: Mutex::new(BTreeSet::new()),
             tainted: AtomicBool::new(false),
+            fetched: Mutex::new(Fetched::default()),
         });
         self.sessions
             .lock()
@@ -2287,7 +2373,7 @@ impl Center {
 
     // ---- Calls ----
 
-    /// Runs a tool call on its node: the node's policy decides.
+    /// Runs a call of a unit (an `execute`) on its node: the node's policy decides.
     pub async fn call(
         &self,
         sess: &Arc<Session>,
@@ -2358,8 +2444,8 @@ impl Center {
         args: Map<String, Value>,
     ) -> Result<Value, CallError> {
         // Checked first: nothing is sent to a disabled node, not even the
-        // session mark. A call can still arrive here from a tool list that
-        // was read before the switch.
+        // session mark. `execute` refuses a disabled node before it gets
+        // here, but the switch may come in between.
         if self.read(|s| s.nodes.get(&route.node_id).is_some_and(|n| n.disabled)) {
             return Err(RpcError::new(
                 ErrorCode::Unavailable,
@@ -3180,7 +3266,6 @@ mod tests {
             node_name: node.into(),
             cap: "exec".into(),
             action: "run".into(),
-            profile: "exec".into(),
             effect: nerve_proto::Effect::Execute,
         }
     }
@@ -3402,6 +3487,36 @@ mod tests {
             Store::load(dir.path()).unwrap().unwrap().center_name,
             "latest"
         );
+    }
+
+    /// A session remembers at most `FETCHED_MAX` shown units: past it the
+    /// one shown longest ago is forgotten, and one shown again is new again.
+    #[test]
+    fn a_session_forgets_the_units_it_was_shown_longest_ago() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let s = c.new_session("test");
+        assert_eq!(s.listed_hash("n1", "fs.read"), None);
+        s.listed("n1", "fs.read", 1);
+        s.listed("n2", "fs.read", 2);
+        assert_eq!(s.listed_hash("n1", "fs.read"), Some(1));
+        assert_eq!(s.listed_hash("n2", "fs.read"), Some(2));
+        assert_eq!(s.listed_hash("n1", "fs.write"), None);
+        // Shown again, with what it is now.
+        s.listed("n1", "fs.read", 3);
+        for i in 0..FETCHED_MAX - 2 {
+            s.listed("n3", &format!("c{i}.a"), 0);
+        }
+        // n2's fs.read is the oldest now, and goes first.
+        assert_eq!(s.listed_hash("n2", "fs.read"), Some(2));
+        s.listed("n3", "last.a", 0);
+        assert_eq!(s.listed_hash("n2", "fs.read"), None);
+        assert_eq!(s.listed_hash("n1", "fs.read"), Some(3));
+        s.listed("n3", "after.a", 0);
+        assert_eq!(s.listed_hash("n1", "fs.read"), None);
+        assert_eq!(s.listed_hash("n3", "c0.a"), Some(0));
+        let f = s.fetched.lock().unwrap();
+        assert_eq!((f.hashes.len(), f.order.len()), (FETCHED_MAX, FETCHED_MAX));
     }
 
     /// The web UI's node and session lists read at the same time (two
@@ -4267,6 +4382,48 @@ mod tests {
         assert_eq!(open(dir.path(), None).log().level(), Level::Error);
     }
 
+    /// `list` and `execute` find a node by its id or its name, so neither
+    /// pairing nor a rename lets a name be a node's id, which would make it
+    /// point at that node.
+    #[test]
+    fn a_name_is_never_a_nodes_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let pair = |name: &str, key: u8| {
+            let code = c.new_pairing()["code"].as_str().unwrap().to_string();
+            c.pair(&pair_body(&code, name, key))
+        };
+        let id = |key: u8| nerve_transport::keys::node_id(&[key; 32]);
+        assert!(nerve_proto::valid_node_name(&id(7)));
+        assert_eq!(pair("box-1", 7).0, 200);
+        // Another node's id, or its own.
+        let told = pair(&id(7), 8);
+        assert_eq!(
+            told,
+            (409, json!({"error": "this name is a node's id"})),
+            "{told:?}"
+        );
+        assert_eq!(pair(&id(8), 8).0, 409);
+        // A node whose id is another node's name.
+        assert_eq!(pair(&id(9), 8).0, 200);
+        let told = pair("box-9", 9);
+        assert_eq!(
+            told,
+            (
+                409,
+                json!({"error": "another node is named like this node's id"})
+            )
+        );
+        // A rename to a node's id, its own too; another name is fine.
+        assert_eq!(
+            c.rename(&id(8), &id(7)).unwrap_err(),
+            "this name is a node's id"
+        );
+        assert!(c.rename(&id(8), &id(8)).is_err());
+        c.rename(&id(8), "box-2").unwrap();
+        assert_eq!(pair("box-9", 9).0, 200);
+    }
+
     #[tokio::test]
     async fn changes_to_a_node_are_logged_under_its_name_and_id() {
         let dir = tempfile::tempdir().unwrap();
@@ -4368,7 +4525,6 @@ mod tests {
             node_name: "box-1".into(),
             cap: "fs".into(),
             action: "read".into(),
-            profile: "fs".into(),
             effect: nerve_proto::Effect::Read,
         };
         let took = Duration::from_millis(1500);
