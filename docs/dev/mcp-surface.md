@@ -53,6 +53,11 @@ Replies are JSON. The server opens no SSE stream, so an HTTP client gets no
   connected, but the center refuses calls to it.
 - The node already cuts its descriptor to what its policy can allow, so the
   center builds no tool for an action that would be refused.
+- An action whose name or schemas the center cannot handle (protocol.md §6.1)
+  is not a tool; the Overview lists it under "Not offered to the agent", with
+  the reason. The center checks each call's arguments against the action's
+  `params` and refuses a misfit with `invalid_args` (`data`: `field`,
+  `expected`) before the node gets it.
 - A paired node that is offline keeps its tools. A call returns `unavailable`.
 - When nodes come, go or change their descriptor, the center sends
   `tools/list_changed` over stdio.

@@ -660,6 +660,7 @@ mod tests {
             last_seen_ms: 0,
             going_away: None,
             descriptor: None,
+            catalog: Default::default(),
         }
     }
 

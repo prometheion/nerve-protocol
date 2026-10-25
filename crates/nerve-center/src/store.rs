@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use nerve_proto::Descriptor;
 use nerve_transport::log::Level;
 
+use crate::catalog::Catalog;
 use crate::checker::CheckerConfig;
 
 pub const FILE: &str = "state.json";
@@ -108,9 +109,22 @@ impl Store {
 
     pub fn load(dir: &Path) -> std::io::Result<Option<Store>> {
         match std::fs::read(dir.join(FILE)) {
-            Ok(b) => serde_json::from_slice(&b).map(Some).map_err(|e| {
-                std::io::Error::other(format!("{} is not valid: {e}", dir.join(FILE).display()))
-            }),
+            Ok(b) => {
+                let mut s: Store = serde_json::from_slice(&b).map_err(|e| {
+                    std::io::Error::other(format!("{} is not valid: {e}", dir.join(FILE).display()))
+                })?;
+                // The catalogs are not in the file: they come from the
+                // cached descriptors, so tools stay listed while a node is
+                // offline.
+                for n in s.nodes.values_mut() {
+                    n.catalog = n
+                        .descriptor
+                        .as_ref()
+                        .map(Catalog::build)
+                        .unwrap_or_default();
+                }
+                Ok(Some(s))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
@@ -197,6 +211,19 @@ pub struct NodeRecord {
     /// The last full descriptor, so tools stay listed while the node is offline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub descriptor: Option<Descriptor>,
+    /// The descriptor as the center checked it ([`Catalog`]), built again
+    /// with it and never written: it is derived data. Read under the store
+    /// lock like the descriptor.
+    #[serde(skip)]
+    pub catalog: Catalog,
+}
+
+impl NodeRecord {
+    /// Keeps `d` as the node's descriptor, with its catalog.
+    pub fn set_descriptor(&mut self, d: Descriptor) {
+        self.catalog = Catalog::build(&d);
+        self.descriptor = Some(d);
+    }
 }
 
 /// A node's replaced key and the end of its grace.
@@ -307,7 +334,48 @@ mod tests {
             last_seen_ms: 0,
             going_away: None,
             descriptor: None,
+            catalog: Catalog::default(),
         }
+    }
+
+    /// The catalog is derived from the descriptor: it is not in the state
+    /// file, and a load builds it again, so a restarted center offers an
+    /// offline node's tools as before and leaves out the same units.
+    #[test]
+    fn the_catalog_is_built_after_a_load_and_never_written() {
+        use crate::tools::tests::{cap, desc};
+        use nerve_proto::Effect;
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Store::new("c".into(), "home".into());
+        let mut n = record("a");
+        n.set_descriptor(desc(
+            "a",
+            vec![
+                cap(
+                    "fs",
+                    "fs",
+                    &[("read", Effect::Read, json!({"type": "object"}))],
+                ),
+                cap(
+                    "lamp",
+                    "",
+                    &[("dim", Effect::Actuate, json!({"$ref": "#/defs/level"}))],
+                ),
+            ],
+        ));
+        assert_eq!(n.catalog.units.len(), 1);
+        s.nodes.insert("a".into(), n);
+        s.save(dir.path()).unwrap();
+        let text = std::fs::read_to_string(dir.path().join(FILE)).unwrap();
+        assert!(
+            !text.contains("\"units\"") && !text.contains("\"broken\""),
+            "{text}"
+        );
+        let back = Store::load(dir.path()).unwrap().unwrap();
+        assert_eq!(back.nodes["a"].catalog, s.nodes["a"].catalog);
+        assert_eq!(back.nodes["a"].catalog.units[0].name, "fs.read");
+        assert_eq!(back.nodes["a"].catalog.broken[0].name, "lamp.dim");
     }
 
     #[test]

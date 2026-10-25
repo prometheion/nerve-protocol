@@ -12,13 +12,17 @@
 //!
 //! The built-in capabilities `node`, `settings` and `audit` are never tools:
 //! they are the center's own business, and a harness that could call
-//! `settings.set` would let a model change its own permissions.
+//! `settings.set` would let a model change its own permissions. Nor is an
+//! action the center leaves out of the node's catalog (a bad name, or a
+//! schema outside the subset): the owner sees those in the overview.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
 use nerve_proto::{Descriptor, Effect, Exposure};
+
+use crate::catalog::Catalog;
 
 /// The center's own tool listing the nodes.
 pub const NODES_TOOL: &str = "nodes";
@@ -34,6 +38,8 @@ pub struct NodeView<'a> {
     /// The center's name for the node.
     pub name: &'a str,
     pub descriptor: &'a Descriptor,
+    /// The descriptor as the center checked it: only its units are tools.
+    pub catalog: &'a Catalog,
 }
 
 /// Where a tool call goes.
@@ -94,6 +100,9 @@ pub fn build(nodes: &[NodeView]) -> Vec<Tool> {
                 continue;
             }
             for (action, def) in &cap.actions {
+                if !node.catalog.offers(&cap.id, action) {
+                    continue;
+                }
                 let e = Entry {
                     node,
                     cap,
@@ -273,7 +282,7 @@ fn unique(name: &str, taken: &BTreeSet<String>) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use nerve_proto::Capability;
     use nerve_proto::descriptor::{Action, NodeInfo, Software};
@@ -346,6 +355,7 @@ mod tests {
             id: "n1",
             name: "laptop",
             descriptor: &d,
+            catalog: &Catalog::build(&d),
         }]);
         assert_eq!(names(&t), ["fs_read"]);
         let s = &t[0].input_schema;
@@ -368,6 +378,7 @@ mod tests {
             id: "1",
             name: "box",
             descriptor: &d,
+            catalog: &Catalog::build(&d),
         }]);
         assert_eq!(names(&t), ["exec_run"]);
         // With a hyphen in the action, still one `_` between the parts.
@@ -383,6 +394,7 @@ mod tests {
             id: "1",
             name: "box",
             descriptor: &d,
+            catalog: &Catalog::build(&d),
         }]);
         assert_eq!(names(&t), ["box_fs_list-files"]);
     }
@@ -402,11 +414,13 @@ mod tests {
                 id: "1",
                 name: "a",
                 descriptor: &a,
+                catalog: &Catalog::build(&a),
             },
             NodeView {
                 id: "2",
                 name: "b",
                 descriptor: &b,
+                catalog: &Catalog::build(&b),
             },
         ]);
         assert_eq!(names(&t), ["fs_read"]);
@@ -439,11 +453,13 @@ mod tests {
                 id: "1",
                 name: "a",
                 descriptor: &a,
+                catalog: &Catalog::build(&a),
             },
             NodeView {
                 id: "2",
                 name: "b",
                 descriptor: &b,
+                catalog: &Catalog::build(&b),
             },
         ]);
         assert_eq!(names(&t), ["a_fs_read", "a_lamp_on", "b_fs_read"]);
@@ -463,7 +479,8 @@ mod tests {
             build(&[NodeView {
                 id: "1",
                 name: "a",
-                descriptor: &d
+                descriptor: &d,
+                catalog: &Catalog::build(&d),
             }])
             .is_empty()
         );
@@ -484,7 +501,8 @@ mod tests {
         let u = unique(&full, &BTreeSet::from([full.clone()]));
         assert_eq!(u.len(), 64);
         assert!(u.ends_with("_2"));
-        // Two caps whose names clean to the same tool name stay apart.
+        // Caps whose names would clean to the same tool name are left out
+        // of the catalog, so they never get that far.
         let d = desc(
             "a",
             vec![
@@ -496,8 +514,41 @@ mod tests {
             id: "1",
             name: "a",
             descriptor: &d,
+            catalog: &Catalog::build(&d),
         }]);
-        assert_eq!(names(&t), ["a_x-y_go", "a_x-y_go_2"]);
+        assert_eq!(names(&t), [] as [&str; 0]);
+    }
+
+    /// An action the catalog leaves out is no tool; the rest of its node and
+    /// of its capability stay tools.
+    #[test]
+    fn broken_units_are_not_tools() {
+        let one_of = json!({"type": "object", "properties": {"level": {"anyOf": [
+            {"type": "integer"}, {"type": "null"}]}}});
+        let d = desc(
+            "a",
+            vec![
+                cap("fs", "fs", &[("read", Effect::Read, path_schema())]),
+                cap(
+                    "lamp",
+                    "",
+                    &[
+                        ("dim", Effect::Actuate, one_of),
+                        ("on", Effect::Actuate, Value::Null),
+                    ],
+                ),
+                cap("my_box", "", &[("go", Effect::Read, Value::Null)]),
+            ],
+        );
+        let c = Catalog::build(&d);
+        assert_eq!(c.broken.len(), 2, "{:?}", c.broken);
+        let t = build(&[NodeView {
+            id: "1",
+            name: "a",
+            descriptor: &d,
+            catalog: &c,
+        }]);
+        assert_eq!(names(&t), ["a_lamp_on", "fs_read"]);
     }
 
     /// Two nodes that differ only in how long a command may run are two
@@ -529,11 +580,13 @@ mod tests {
                     id: "1",
                     name: "build",
                     descriptor: a,
+                    catalog: &Catalog::build(a),
                 },
                 NodeView {
                     id: "2",
                     name: "lab",
                     descriptor: b,
+                    catalog: &Catalog::build(b),
                 },
             ]);
             t.retain(|t| t.name.ends_with("exec_run"));
@@ -543,10 +596,10 @@ mod tests {
         assert_eq!(names(&t), ["build_exec_run", "lab_exec_run"]);
         assert!(t[0].description.contains("never runs longer than 1 h"));
         assert!(t[1].description.contains("never runs longer than 24 h"));
-        assert_eq!(
-            t[1].input_schema["properties"]["timeout_ms"]["maximum"],
-            86_400_000
-        );
+        let timeout = t[1].input_schema["properties"]["timeout_ms"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(timeout.contains("at most 86400000"), "{timeout}");
         // Equal limits stay one tool.
         assert_eq!(names(&exec(&build_node, &same)), ["exec_run"]);
     }
@@ -559,6 +612,7 @@ mod tests {
             id: "1",
             name: "a",
             descriptor: &d,
+            catalog: &Catalog::build(&d),
         }]);
         assert_eq!(names(&t), ["a_fs_read"]);
     }

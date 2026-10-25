@@ -382,7 +382,7 @@ const HELP_KEYS = [
   ["Enter", "Pick the marked entry of a list"],
   ["← →", "Choose in a row of choices"],
 ];
-const GUIDE = "https://github.com/Piggidragon/Nerve-Protocol/tree/main/docs/user";
+const GUIDE = "https://github.com/prometheion/nerve-protocol/tree/main/docs/user";
 let helpParts = null;
 
 function pageHelp() {
@@ -558,6 +558,9 @@ function pairingCard(p) {
 
 function nodeCard(n) {
   const caps = n.capabilities || [];
+  // Actions the center left out: a bad name, or a schema it cannot check
+  // arguments with. The owner learns why here; the agent never sees them.
+  const broken = n.broken || [];
   return el("div", { class: "card" },
     el("div", { class: "card-top" },
       itile("server", n.disabled ? "warn" : n.online ? "ok" : "neutral"),
@@ -573,6 +576,11 @@ function nodeCard(n) {
     caps.length
       ? el("div", { class: "chips" }, caps.map((c) => el("span", { class: "chip" + (c.exposure === "off" ? " off" : ""), title: `${c.summary || c.id} (${c.exposure})` }, c.id)))
       : el("p", { class: "meta" }, "Offers nothing yet."),
+    broken.length
+      ? el("div", { class: "broken" },
+        el("p", { class: "meta" }, "Not offered to the agent:"),
+        broken.map((b) => el("p", { class: "meta" }, el("code", { class: "mono" }, b.name), ` ${b.reason}`)))
+      : null,
     el("div", { class: "actions" },
       btn("Rename", "ghost", act(async () => {
         const name = await modal({ title: `Rename ${n.name}`, confirm: "Rename", field: { label: "New name (a-z, 0-9 and -, not starting or ending with -)", value: n.name, pattern: "[a-z0-9]([a-z0-9\\-]*[a-z0-9])?" } });

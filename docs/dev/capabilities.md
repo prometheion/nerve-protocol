@@ -16,7 +16,15 @@ A capability is a named part of a node, with four kinds of members:
 
 A capability may follow a **profile**, a published contract such as `fs` or
 `exec`. A capability without a profile is usable from its schemas alone.
-Parameters, results and state are JSON Schema 2020-12.
+Parameters, results, event data and state are JSON Schemas of a small subset
+of 2020-12 ([protocol §6.1](spec/protocol.md#61-schemas)): one type (or one
+type and `null`), properties, items, enums and bounds; no `$ref`, `oneOf`,
+conditions, `pattern` or `format`. `nerve_proto::schema::check` says whether
+a schema keeps to it, `nerve_proto::schema::validate` whether arguments fit
+one. The node runs `check` on every schema it publishes (a test covers each
+built-in one) and on a provider's, and `validate` on a provider's arguments;
+the center runs `check` on every schema of a descriptor it reads (event data
+and state included) and `validate` before every call it sends.
 
 ## Descriptor
 
@@ -30,7 +38,7 @@ Parameters, results and state are JSON Schema 2020-12.
    {"id": "fs", "profile": "fs", "provider": "node", "exposure": "on",
     "summary": "…",
     "actions": {"read": {"effect": "read", "summary": "…",
-                         "params": {}, "result": {}}},
+                         "params": {"type": "object", …}, "result": {…}}},
     "events": {}, "state": null, "streams": {}}]}
 ```
 
@@ -46,7 +54,14 @@ Parameters, results and state are JSON Schema 2020-12.
   (one capability in full) and `full`.
 - Capability ids and action names use letters, digits and `-`, never `_`. The
   harness side joins names with `_`, and a `_` inside a name would make the tool
-  name ambiguous. A center ignores a descriptor with such a name.
+  name ambiguous. A center leaves out the actions of a capability with such
+  an id, and an action with such a name, and keeps the rest.
+- The center builds a catalog per node from its descriptor
+  (`nerve-center` `catalog.rs`): one unit per `cap.action`, and the units it
+  left out (a bad name, a schema outside the subset; every action of a
+  capability whose event data or state is outside it) with their reasons. The
+  catalog is rebuilt from the descriptor, never stored; the overview shows
+  what was left out.
 - `provider` says which process serves the capability: `node` for the node's
   own, else the name of a local program the owner allowed to attach to the
   node ([node-local §7](spec/node-local.md#7-capability-providers)). Such a
@@ -91,6 +106,8 @@ runs it only when it is set to `on`, whatever its effect.
   `allowlist` mode, with `caps.exec.signal = on` in `folder` and `user` mode.
 - Every command has a time limit: `timeout_ms`, else the node's default, and
   never more than the node's maximum (the owner's `limits` in `node.toml`).
+  The schema gives the default as `default` and the most in the
+  `description`, not as `maximum`, since a larger value is cut, not refused.
 - `exec.run` takes `memory_mb`, `cpu_percent` and `processes`, each up to
   the most the owner set (`limits.command`); the descriptor shows the
   defaults and the most. A command killed for its memory has `killed:
@@ -131,4 +148,7 @@ Errors carry the JSON-RPC code and a string code in `data.code`:
 `invalid_args`, `forbidden`, `disabled`, `unavailable`, `busy`, `timeout`,
 `cancelled`, `too_large`, `unknown_capability`, `unknown_member`,
 `connection_lost`, `internal`. Profiles add `conflict`, `bad_path` and `io`.
-The `message` is for people and models and says what to do next.
+The `message` is for people and models and says what to do next. Arguments
+that do not fit the action's schema are `invalid_args` with `data.field` (a
+dotted path such as `sudo.sealed`) and `data.expected` (in words, such as
+`an integer from 1 to 600`).

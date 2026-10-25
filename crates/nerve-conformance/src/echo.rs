@@ -204,6 +204,10 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
+/// The text `say` fails with `io` on, as a node may fail a call whose
+/// arguments fit.
+pub const FAIL: &str = "fail";
+
 /// The echo node's answer to one request.
 pub fn handle(m: &str, p: &Map<String, Value>, d: &Descriptor) -> Result<Value, RpcError> {
     match m {
@@ -223,6 +227,12 @@ pub fn handle(m: &str, p: &Map<String, Value>, d: &Descriptor) -> Result<Value, 
             match (inv.cap.as_str(), inv.action.as_str()) {
                 ("echo", "say") | ("mirror", "say" | "set") => {
                     match inv.args.get("text").and_then(Value::as_str) {
+                        // A call that fits the schema and still fails on the
+                        // node, for the harness part.
+                        Some(FAIL) => Err(RpcError::new(
+                            ErrorCode::Other("io".into()),
+                            "the echo node fails this text on purpose",
+                        )),
                         Some(t) if inv.args.len() == 1 => Ok(json!({"text": t})),
                         _ => Err(RpcError::invalid_args("say takes {text}")),
                     }

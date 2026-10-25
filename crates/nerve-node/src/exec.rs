@@ -184,10 +184,12 @@ impl RunLimit {
     }
 }
 
+/// The arguments of `exec.signal`. `call` is the id of the `invoke` that
+/// runs the command; it is a number, as the descriptor publishes it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignalArgs {
-    pub call: Value,
+    pub call: u64,
     pub signal: String,
 }
 

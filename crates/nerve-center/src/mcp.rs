@@ -11,6 +11,7 @@ use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
+use nerve_proto::{ErrorCode, RpcError};
 use nerve_transport::http::{self, Request, Response};
 use nerve_transport::net::BoxIo;
 
@@ -234,8 +235,35 @@ impl Engine {
                 .cloned()
                 .ok_or((-32603, "a tool without a node".to_string()))?
         };
+        // The arguments are checked against the unit's schema before
+        // anything goes to the node, so a model that got them wrong learns
+        // which field at once. A unit gone since the tool list was read is
+        // refused here as well. Either refusal is logged and counted as a
+        // failed call of the unit, as the node's own refusal was.
+        let name = format!("{}.{}", route.cap, route.action);
+        let checked = match self.center.unit(&route.node_id, &name) {
+            None => Err(RpcError::new(
+                ErrorCode::Unavailable,
+                format!(
+                    "the node {} no longer offers {name}; list the tools again",
+                    route.node_name
+                ),
+            )),
+            Some(unit) => {
+                let args = Value::Object(args);
+                let fits = nerve_proto::schema::validate(&unit.params, &args);
+                let Value::Object(args) = args else {
+                    unreachable!("the arguments are an object")
+                };
+                fits.map(|()| args).map_err(RpcError::from)
+            }
+        };
         let sess = self.live_session();
-        match self.center.call(&sess, &route, args).await {
+        let out = match checked {
+            Ok(args) => self.center.call(&sess, &route, args).await,
+            Err(e) => Err(self.center.refused(&sess, &route, e)),
+        };
+        match out {
             Ok(v) => {
                 let body = match &v {
                     Value::String(s) => s.clone(),
@@ -288,6 +316,9 @@ fn nodes_text(center: &Center) -> String {
             .as_array()
             .into_iter()
             .flatten()
+            // Only what the agent has a tool of: a capability that is off,
+            // or whose every action the center left out, is no use to it.
+            .filter(|c| c["offered"] == true)
             .filter_map(|c| c["id"].as_str())
             .filter(|c| !tools::RESERVED_CAPS.contains(c))
             .collect();

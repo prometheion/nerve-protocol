@@ -72,8 +72,8 @@ that does not match `Host` are refused (403).
 ## 4. Tools
 
 - `nodes` lists the paired nodes, whether they are online and what
-  they offer. A node the owner disabled in the center is listed and marked as
-  disabled, with no offer.
+  they offer: the capabilities the agent has a tool of. A node the owner
+  disabled in the center is listed and marked as disabled, with no offer.
 - A capability with a profile becomes one tool per action, `<cap>_<action>`,
   shared by every node that offers the same capability with the same
   arguments and effect. Its first, required argument `node` names the node.
@@ -81,10 +81,20 @@ that does not match `Host` are refused (403).
   nodes, becomes `<node>_<cap>_<action>`.
 - `_` is the only separator in a tool name, so node, capability and action
   names use letters, digits and `-` and never `_` (`list-files`, not
-  `list_files`). A node's descriptor with a `_` in a capability or action name
-  is refused by the center. Tool names keep `[A-Za-z0-9_-]`; anything else in
-  a name becomes `-`. Names longer than 64 are cut and get a short hash;
-  clashes get `_2`, `_3`.
+  `list_files`). The center offers no tool for a capability with another
+  character in its id (a `_`, a `.`) or for an action with one in its name;
+  the rest of the node's descriptor stays. Tool names keep `[A-Za-z0-9_-]`;
+  anything else in a name becomes `-`. Names longer than 64 are cut and get a
+  short hash; clashes get `_2`, `_3`.
+- An action whose schemas are outside the subset of protocol.md §6.1 is not
+  a tool either. The center keeps what it left out, with the reason (one
+  line of at most 300 characters), for the owner (`broken` of the node in
+  `GET /api/overview`, §7); the agent never sees it.
+- Before a call goes to its node, the center checks its arguments (less
+  `node`) against the action's `params`. Arguments that do not fit are
+  `isError` with `error invalid_args: <field>: expected <what>` (`error
+  invalid_args: path: expected a string (required)`), and the call never
+  reaches the node.
 - `node`, `settings` and `audit` are never tools, so a model cannot change
   the policy that limits it.
 - Capabilities with exposure `off` are left out, and so is every capability
@@ -136,7 +146,8 @@ center's action checker tab.
 ## 7. Web UI
 
 Served by `nerve-center` itself at `--ui`. Tabs: overview (alerts, machines
-with rename, disable and remove, pairing, sessions). A disabled machine stays
+with rename, disable and remove and the actions the center left out with
+their reasons (§4), pairing, sessions). A disabled machine stays
 paired and connected, but the agent is offered none of its tools and calls to
 it are refused (`POST /api/nodes/disable`, §4). Further tabs: statistics, audit (for every entry with a known
 target, a command, a path or another action: Allow, Allow as wildcard, Deny

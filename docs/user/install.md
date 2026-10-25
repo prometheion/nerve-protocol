@@ -8,7 +8,7 @@ desktop `nerve-node-desktop`, the node with an app
 ## Download
 
 Get the programs from
-[Releases](https://github.com/Piggidragon/Nerve-Protocol/releases). Each
+[Releases](https://github.com/prometheion/nerve-protocol/releases). Each
 release has eight programs and a `SHA256SUMS` file.
 
 | System | Files |
@@ -40,7 +40,7 @@ To run the node as a service that starts with the machine, download it and
 let it install itself instead ([service](service.md)):
 
 ```sh
-curl -LO https://github.com/Piggidragon/Nerve-Protocol/releases/latest/download/nerve-node-x86_64-linux
+curl -LO https://github.com/prometheion/nerve-protocol/releases/latest/download/nerve-node-x86_64-linux
 chmod +x nerve-node-x86_64-linux
 sudo ./nerve-node-x86_64-linux install
 nerve-node setup
@@ -57,7 +57,7 @@ The center installs itself as a service the same way, with MCP over HTTP
 ([center](center.md#run-it-as-a-service)):
 
 ```sh
-curl -LO https://github.com/Piggidragon/Nerve-Protocol/releases/latest/download/nerve-center-x86_64-linux
+curl -LO https://github.com/prometheion/nerve-protocol/releases/latest/download/nerve-center-x86_64-linux
 chmod +x nerve-center-x86_64-linux
 sudo ./nerve-center-x86_64-linux install
 ```

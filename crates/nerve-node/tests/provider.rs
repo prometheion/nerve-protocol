@@ -109,14 +109,19 @@ impl Provider {
 /// `hello` as the provider `desk` with one capability `lamp` whose
 /// action `on` writes: the connection and the node's first answer.
 async fn hello(socket: &Path) -> (Provider, Value) {
+    let caps = json!([{"id": "lamp", "summary": "A lamp.",
+                       "actions": {"on": {"effect": "write"}}}]);
+    hello_with(socket, caps).await
+}
+
+/// `hello` as the provider `desk` with the capabilities `caps`.
+async fn hello_with(socket: &Path, caps: Value) -> (Provider, Value) {
     let token = std::fs::read_to_string(socket.with_file_name("ctl.token")).unwrap();
     let (r, w) = UnixStream::connect(socket).await.unwrap().into_split();
     let mut p = Provider {
         lines: BufReader::new(r).lines(),
         w,
     };
-    let caps = json!([{"id": "lamp", "summary": "A lamp.",
-                       "actions": {"on": {"effect": "write"}}}]);
     p.send(json!({"method": "hello", "token": token,
                   "params": {"role": "provider", "name": "desk", "capabilities": caps}}))
         .await;
@@ -141,6 +146,11 @@ async fn descriptor_changed(conn: &mut Conn<TcpStream>) {
 }
 
 async fn lamp_listed(conn: &mut Conn<TcpStream>) -> bool {
+    lamp(conn).await.is_some()
+}
+
+/// The `lamp` capability of the descriptor the center gets now.
+async fn lamp(conn: &mut Conn<TcpStream>) -> Option<Value> {
     let d = conn
         .call("describe", json!({"detail": "full"}), WAIT)
         .await
@@ -150,7 +160,8 @@ async fn lamp_listed(conn: &mut Conn<TcpStream>) -> bool {
         .as_array()
         .unwrap()
         .iter()
-        .any(|c| c["id"] == "lamp")
+        .find(|c| c["id"] == "lamp")
+        .cloned()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -244,7 +255,7 @@ async fn a_provider_the_owner_no_longer_allows_is_detached() {
     assert!(lamp_listed(&mut conn).await);
     assert_eq!(
         daemon.status()["providers"],
-        json!([{"name": "desk", "capabilities": ["lamp"]}])
+        json!([{"name": "desk", "capabilities": ["lamp"], "broken": []}])
     );
     let paths = daemon.paths().clone();
     assert!(
@@ -263,15 +274,22 @@ async fn a_provider_the_owner_no_longer_allows_is_detached() {
 
 /// What `nerve-node status` prints.
 async fn status(paths: &NodePaths) -> String {
+    status_as(paths, &[]).await
+}
+
+/// What `nerve-node status` prints with the flags `extra`.
+async fn status_as(paths: &NodePaths, extra: &[&str]) -> String {
     use clap::Parser;
-    let cli = nerve_node::cli::Cli::parse_from([
+    let mut args = vec![
         "nerve-node".into(),
         "--config-dir".into(),
         paths.config_dir.clone(),
         "--state-dir".into(),
         paths.state_dir.clone(),
         PathBuf::from("status"),
-    ]);
+    ];
+    args.extend(extra.iter().map(PathBuf::from));
+    let cli = nerve_node::cli::Cli::parse_from(args);
     let mut out = Vec::new();
     nerve_node::cli::execute(cli, &mut out).await.unwrap();
     String::from_utf8(out).unwrap()
@@ -493,5 +511,121 @@ async fn large_calls_at_once_do_not_wedge_a_provider() {
         assert_eq!(v["pad"].as_str().map(str::len), Some(big.len()));
     }
     drop(provider.await.unwrap());
+    daemon.stop().await;
+}
+
+/// An action whose schema a center cannot check (here a `oneOf`) is left
+/// out of the descriptor, and the provider's other action attaches. The
+/// provider's answer, the daemon's status and `nerve-node status` (text and
+/// `--json`) name it with the reason.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_oneof_action_is_left_out_and_status_names_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let daemon = node(dir.path(), &center, &me(), |p| {
+        p.mode = nerve_policy::Mode::User;
+    })
+    .await;
+    let mut conn = linked(&mut center).await;
+    let level = json!({"type": "object", "properties": {
+        "level": {"oneOf": [{"type": "integer"}, {"type": "string"}]}}});
+    let caps = json!([{"id": "lamp", "summary": "A lamp.",
+                       "actions": {"on": {"effect": "write"},
+                                   "dim": {"effect": "write", "params": level}}}]);
+    let (_p, first) = hello_with(&daemon.paths().ctl_socket(), caps).await;
+    assert_eq!(first["ok"]["capabilities"], json!(["lamp"]), "{first}");
+    assert_eq!(first["ok"]["broken"][0]["name"], "lamp.dim", "{first}");
+    descriptor_changed(&mut conn).await;
+    let lamp = lamp(&mut conn).await.expect("the lamp is listed");
+    let actions: Vec<&String> = lamp["actions"].as_object().unwrap().keys().collect();
+    assert_eq!(actions, ["on"]);
+
+    let providers = daemon.status()["providers"].clone();
+    let broken = &providers[0]["broken"];
+    assert_eq!(broken.as_array().map(Vec::len), Some(1), "{providers}");
+    assert_eq!(broken[0]["name"], "lamp.dim");
+    let reason = broken[0]["reason"].as_str().unwrap();
+    assert!(
+        reason.starts_with("params: /properties/level/oneOf: ") && reason.contains("alternatives"),
+        "{reason}"
+    );
+    let paths = daemon.paths().clone();
+    let text = status(&paths).await;
+    assert!(text.contains("provider desk attached: lamp"), "{text}");
+    assert!(
+        text.contains(&format!("provider desk: lamp.dim left out: {reason}")),
+        "{text}"
+    );
+    let json: Value = serde_json::from_str(&status_as(&paths, &["--json"]).await).unwrap();
+    assert_eq!(json["providers"][0]["broken"], *broken, "{json}");
+    daemon.stop().await;
+}
+
+/// Arguments that do not fit the action's schema are refused by the node
+/// with `invalid_args`, naming the field and what it expects, and never
+/// reach the provider: the first call it sees is the one that fits.
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_args_never_reach_the_provider() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let daemon = node(dir.path(), &center, &me(), |p| {
+        p.allow.push("lamp.on".into());
+    })
+    .await;
+    let mut conn = linked(&mut center).await;
+    let params = json!({"type": "object", "additionalProperties": false, "required": ["level"],
+                        "properties": {"level": {"type": "integer", "minimum": 0, "maximum": 10}}});
+    let caps = json!([{"id": "lamp", "summary": "A lamp.",
+                       "actions": {"on": {"effect": "write", "params": params}}}]);
+    let (mut p, first) = hello_with(&daemon.paths().ctl_socket(), caps).await;
+    assert_eq!(first["ok"]["broken"], json!([]), "{first}");
+    descriptor_changed(&mut conn).await;
+
+    let call = |args: Value| json!({"cap": "lamp", "action": "on", "args": args, "ctx": {}});
+    for (args, field, expected) in [
+        (json!({"level": "high"}), "level", "an integer from 0 to 10"),
+        (json!({"level": 11}), "level", "an integer from 0 to 10"),
+        (json!({}), "level", "an integer from 0 to 10 (required)"),
+        (
+            json!({"level": 3, "colour": "red"}),
+            "colour",
+            "no field of this name; known: level",
+        ),
+    ] {
+        let e = conn
+            .call("invoke", call(args.clone()), WAIT)
+            .await
+            .unwrap()
+            .expect_err("refused");
+        assert_eq!(code_of(&e), "invalid_args", "{args}: {}", e.message);
+        let data = e.data.clone().unwrap();
+        assert_eq!(data["field"], field, "{args}: {data}");
+        assert_eq!(data["expected"], expected, "{args}: {data}");
+        assert_eq!(e.message, format!("{field}: expected {expected}"));
+    }
+    // The first line the provider gets is the call that fits.
+    let id = conn
+        .request("invoke", call(json!({"level": 3})))
+        .await
+        .unwrap();
+    let got = p.next().await.expect("the call");
+    assert_eq!(got["params"]["args"], json!({"level": 3}), "{got}");
+    p.send(json!({"id": got["id"], "ok": {"on": true}})).await;
+    let v = conn
+        .answer(id, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .expect("answered");
+    assert_eq!(v, json!({"on": true}));
+    // The arguments are checked before the policy, so only the call that fits
+    // is decided and audited: the refused ones never show up as allowed.
+    let audit = std::fs::read_to_string(daemon.paths().audit_log()).unwrap();
+    let decided: Vec<Value> = audit
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e["cap"] == "lamp")
+        .collect();
+    assert_eq!(decided.len(), 1, "{decided:?}");
+    assert_eq!(decided[0]["decision"], "allowed", "{decided:?}");
     daemon.stop().await;
 }

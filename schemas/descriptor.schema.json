@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/Piggidragon/Nerve-Protocol/schemas/descriptor.schema.json",
+  "$id": "https://github.com/prometheion/nerve-protocol/schemas/descriptor.schema.json",
   "title": "Nerve node descriptor, protocol \"0\"",
   "type": "object",
   "required": ["nerve", "node", "rev", "capabilities"],
@@ -31,14 +31,14 @@
       "type": "object",
       "required": ["id", "exposure"],
       "properties": {
-        "id": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,32}$"},
+        "id": {"type": "string", "pattern": "^[A-Za-z0-9-]+$"},
         "profile": {"type": "string"},
         "provider": {"type": "string", "default": "node"},
         "exposure": {"enum": ["on", "off"]},
         "summary": {"type": "string"},
         "actions": {
           "type": "object",
-          "propertyNames": {"pattern": "^[A-Za-z0-9-]{1,32}$"},
+          "propertyNames": {"pattern": "^[A-Za-z0-9-]+$"},
           "additionalProperties": {
             "type": "object",
             "required": ["effect"],

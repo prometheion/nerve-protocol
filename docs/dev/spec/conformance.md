@@ -75,7 +75,7 @@ points the node at a fake `sudo` (`machine.sudo_path`) for this.
 | 4.1 | the node dials the center |
 | 4.1 | the `Nerve-Node` header names the paired node id |
 | 4.2 | the hello is signed and names version "0" |
-| 6 | describe full returns a well-formed descriptor |
+| 6 | describe full returns a well-formed descriptor, every schema in the subset of §6.1 |
 | 5.1 | describe capability without cap is `invalid_args` |
 | 5.2 | an unknown method is `method_not_found` |
 | 5.3 | invoke of an unknown capability is `unknown_capability` |
@@ -132,6 +132,7 @@ JSON is a failure of the check, not an empty result.
 | 4 | a read action has `readOnlyHint`, and a write action does not |
 | 4 | a result is device content (marked text, the object as `structuredContent`) |
 | 4 | a shared tool without `node` is `error invalid_args`; a failure on the node is `error <code>: <message>` |
+| 4 | arguments that do not fit the action's schema (one missing, of another type, one too many) are `error invalid_args` and never reach the node |
 | 4 | a shared tool reaches the node `node` names |
 | 4 | a call to a node that is offline is `error unavailable`, and its tools stay listed |
 | 5 | two sessions have two ids; a node sees one `ctx.session` per session, so a node that two sessions use sees two |
@@ -153,8 +154,9 @@ settings grant `write`, allows the program that runs the part
 and starts the node; `Setup::socket` is its control socket. The part writes its
 own policy with `settings.set` (`user` mode and a deny rule for `echo.shout`
 before the provider comes, allow rules for `echo.say` and `echo.fail` once it
-is there) and attaches an `echo` provider with the actions `say`, `shout` and
-`fail`. Every check names node-local §7.
+is there) and attaches an `echo` provider with the actions `say` (a string
+`text`), `shout`, `fail` and `odd`, whose schema has a `oneOf` and so is
+outside the subset of protocol.md §6.1. Every check names node-local §7.
 
 | Check |
 |---|
@@ -164,10 +166,12 @@ is there) and attaches an `echo` provider with the actions `say`, `shout` and
 | a second provider of the same name is refused |
 | the node tells the center that its descriptor changed |
 | the descriptor lists the capability with its provider |
+| an action whose schema is outside the subset is left out with its reason, and the others attach |
 | a center may allow an offered capability that does not sense, and the descriptor follows |
 | a call the policy allows reaches the provider and its answer comes back |
 | a provider's error comes back with its code |
 | a call the policy refuses never reaches the provider |
+| a call whose arguments do not fit the action's schema is `invalid_args` and never reaches the provider |
 | when the provider exits its capability leaves the descriptor |
 | a call to a provider that left is `unknown_capability` |
 

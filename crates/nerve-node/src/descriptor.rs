@@ -53,6 +53,19 @@ fn obj(props: Value, required: &[&str]) -> Value {
            "additionalProperties": false})
 }
 
+/// An argument that may be left out. Its parser reads `null` as left out,
+/// so the schema takes `null` as well: a center checks arguments against it
+/// and must not refuse what the node takes.
+fn opt(mut s: Value) -> Value {
+    if let Some(t) = s.get("type").cloned() {
+        s["type"] = json!([t, "null"]);
+    }
+    if let Some(Value::Array(e)) = s.get_mut("enum") {
+        e.push(Value::Null);
+    }
+    s
+}
+
 fn event(summary: &str, implicit: bool, data: Value) -> EventDecl {
     EventDecl {
         summary: summary.into(),
@@ -127,12 +140,12 @@ fn path_param(windows: bool) -> Value {
 /// The `cwd` argument of `exec.run`: it takes the same wire form as an `fs`
 /// path, so a Windows node says so here as well. A Unix node's is unchanged.
 fn cwd_param(windows: bool) -> Value {
-    if windows {
+    opt(if windows {
         json!({"type": "string",
                "description": "working folder, the drive as a folder: /c/Users/x for C:\\Users\\x"})
     } else {
         json!({"type": "string"})
-    }
+    })
 }
 
 fn fs_cap(exposure: Exposure) -> Capability {
@@ -177,8 +190,8 @@ fn fs_cap(exposure: Exposure) -> Capability {
             Effect::Read,
             "A file's content, utf8 or base64, with its etag.",
             obj(
-                json!({"path": path, "offset": {"type": "integer", "minimum": 0},
-                       "length": {"type": "integer", "minimum": 0}}),
+                json!({"path": path, "offset": opt(json!({"type": "integer", "minimum": 0})),
+                       "length": opt(json!({"type": "integer", "minimum": 0}))}),
                 &["path"],
             ),
             obj(
@@ -194,8 +207,9 @@ fn fs_cap(exposure: Exposure) -> Capability {
             Effect::Read,
             "Lines containing a literal pattern, below a path.",
             obj(
-                json!({"path": path, "pattern": {"type": "string"}, "glob": {"type": "string"},
-                       "max": {"type": "integer", "minimum": 1}}),
+                json!({"path": path, "pattern": {"type": "string", "minLength": 1},
+                       "glob": opt(json!({"type": "string"})),
+                       "max": opt(json!({"type": "integer", "minimum": 1}))}),
                 &["path", "pattern"],
             ),
             obj(
@@ -214,7 +228,7 @@ fn fs_cap(exposure: Exposure) -> Capability {
             "Paths below a path that match a glob.",
             obj(
                 json!({"path": path, "glob": {"type": "string"},
-                       "max": {"type": "integer", "minimum": 1}}),
+                       "max": opt(json!({"type": "integer", "minimum": 1}))}),
                 &["path", "glob"],
             ),
             obj(
@@ -231,7 +245,8 @@ fn fs_cap(exposure: Exposure) -> Capability {
             "Writes a whole file; if_match guards against a concurrent change.",
             obj(
                 json!({"path": path, "content": {"type": "string"},
-                       "encoding": {"enum": ["utf8", "base64"]}, "if_match": {"type": "string"}}),
+                       "encoding": opt(json!({"enum": ["utf8", "base64"]})),
+                       "if_match": opt(json!({"type": "string"}))}),
                 &["path", "content"],
             ),
             obj(
@@ -248,10 +263,23 @@ fn fs_cap(exposure: Exposure) -> Capability {
 /// equal and takes its text from the first of them, so nodes that differ in
 /// their limits must differ here, or the model reads one node's numbers for
 /// all.
+///
+/// The most is said in words, not as `maximum`: a larger value is not
+/// refused but cut to it, and 0 is the same as none (protocol.md §7.3), so
+/// the schema takes every value the node does.
 fn timeout_param(t: &crate::exec::Timeouts) -> Value {
     let ms = |d: std::time::Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
-    json!({"type": "integer", "minimum": 1,
-           "maximum": ms(t.max), "default": ms(t.limit(None).after)})
+    let max = ms(t.max);
+    opt(
+        json!({"type": "integer", "minimum": 0, "default": ms(t.limit(None).after),
+           "description": format!("milliseconds, at most {max}: a larger value gets {max}; 0 gets the default")}),
+    )
+}
+
+/// The `call` of `exec.signal` and of the `exit` event: the id of the
+/// `invoke` that runs the command, which a center gives as a number.
+fn call_param() -> Value {
+    json!({"type": "integer", "minimum": 0})
 }
 
 /// `limits` give the defaults and the most of what a call may ask its
@@ -279,17 +307,17 @@ fn exec_cap(
                 crate::exec::timeout_summary(timeouts)
             ),
             obj(
-                json!({"command": {"type": "string"}, "cwd": cwd_param(windows),
+                json!({"command": {"type": "string", "minLength": 1}, "cwd": cwd_param(windows),
                        "timeout_ms": timeout_param(timeouts),
-                       "memory_mb": {"type": "integer", "minimum": 1,
-                                     "maximum": limits.memory_max_mb,
-                                     "default": limits.memory_mb},
-                       "cpu_percent": {"type": "integer", "minimum": 1,
-                                       "maximum": limits.cpu_max_percent,
-                                       "default": limits.cpu_percent},
-                       "processes": {"type": "integer", "minimum": 1,
-                                     "maximum": limits.processes_max,
-                                     "default": limits.processes}}),
+                       "memory_mb": opt(json!({"type": "integer", "minimum": 1,
+                                               "maximum": limits.memory_max_mb,
+                                               "default": limits.memory_mb})),
+                       "cpu_percent": opt(json!({"type": "integer", "minimum": 1,
+                                                 "maximum": limits.cpu_max_percent,
+                                                 "default": limits.cpu_percent})),
+                       "processes": opt(json!({"type": "integer", "minimum": 1,
+                                               "maximum": limits.processes_max,
+                                               "default": limits.processes}))}),
                 &["command"],
             ),
             obj(
@@ -307,7 +335,7 @@ fn exec_cap(
             Effect::Actuate,
             "Signals a running command of this center.",
             obj(
-                json!({"call": {}, "signal": {"enum": ["term", "kill", "int"]}}),
+                json!({"call": call_param(), "signal": {"enum": ["term", "kill", "int"]}}),
                 &["call", "signal"],
             ),
             obj(json!({}), &[]),
@@ -323,7 +351,7 @@ fn exec_cap(
             "A command ended.",
             false,
             obj(
-                json!({"call": {}, "exit_code": {"type": ["integer", "null"]}}),
+                json!({"call": call_param(), "exit_code": {"type": ["integer", "null"]}}),
                 &["call", "exit_code"],
             ),
         ),
@@ -388,10 +416,10 @@ fn settings_cap() -> Capability {
             "Turns the sudo switch on (with the sealed password) or off.",
             obj(
                 json!({"on": {"type": "boolean"},
-                       "sealed": {"type": "object", "properties": {
+                       "sealed": opt(json!({"type": "object", "properties": {
                            "offer": {"type": "string"}, "key": {"type": "string"},
                            "iv": {"type": "string"}, "ct": {"type": "string"}},
-                        "required": ["offer", "key", "iv", "ct"]}}),
+                        "required": ["offer", "key", "iv", "ct"]}))}),
                 &["on"],
             ),
             obj(json!({"sudo": {"enum": ["on", "off"]}}), &["sudo"]),
@@ -656,6 +684,8 @@ mod tests {
     use super::*;
 
     use nerve_policy::config::CenterPolicy;
+    use nerve_proto::RpcError;
+    use serde_json::Map;
 
     fn entry() -> CenterEntry {
         CenterEntry {
@@ -1030,7 +1060,7 @@ mod tests {
     }
 
     /// `exec.run`'s `cwd` shows the same form on a Windows node, and stays
-    /// a bare string on a Unix one.
+    /// a bare string (or null) on a Unix one.
     #[test]
     fn a_windows_node_shows_the_wire_form_of_a_working_folder() {
         let win = cwd_param(true);
@@ -1039,7 +1069,7 @@ mod tests {
             text.contains("/c/Users/x") && text.contains("C:\\Users\\x"),
             "{text}"
         );
-        assert_eq!(cwd_param(false), json!({"type": "string"}));
+        assert_eq!(cwd_param(false), json!({"type": ["string", "null"]}));
         for windows in [true, false] {
             let exec = exec_cap(
                 Exposure::On,
@@ -1074,7 +1104,8 @@ mod tests {
         );
         assert_eq!(
             timeout_ms(&cfg),
-            json!({"type": "integer", "minimum": 1, "maximum": 3_600_000, "default": 600_000})
+            json!({"type": ["integer", "null"], "minimum": 0, "default": 600_000,
+                   "description": "milliseconds, at most 3600000: a larger value gets 3600000; 0 gets the default"})
         );
         cfg.limits.default_timeout_secs = 90;
         cfg.limits.max_timeout_secs = 120;
@@ -1086,7 +1117,8 @@ mod tests {
         assert_ne!(changed, rev);
         assert_eq!(
             timeout_ms(&cfg),
-            json!({"type": "integer", "minimum": 1, "maximum": 120_000, "default": 90_000})
+            json!({"type": ["integer", "null"], "minimum": 0, "default": 90_000,
+                   "description": "milliseconds, at most 120000: a larger value gets 120000; 0 gets the default"})
         );
         // The default shown is the one that applies: cut to the maximum.
         cfg.limits.max_timeout_secs = 30;
@@ -1136,7 +1168,7 @@ mod tests {
         let (p, rev) = run(&cfg);
         assert_eq!(
             p["memory_mb"],
-            json!({"type": "integer", "minimum": 1, "maximum": 16384, "default": 4096})
+            json!({"type": ["integer", "null"], "minimum": 1, "maximum": 16384, "default": 4096})
         );
         assert_eq!(p["cpu_percent"]["maximum"], 800);
         assert_eq!(p["cpu_percent"]["default"], 200);
@@ -1168,5 +1200,336 @@ mod tests {
         e.policy.allow.clear();
         assert_eq!(for_center(&cfg, &e, 0, true, &[]).rev, none);
         assert_ne!(none, one);
+    }
+
+    /// Every schema the node publishes keeps to the subset a center checks
+    /// (nerve_proto::schema), in every mode, settings grant and
+    /// confinement, with every switch on, and with either platform's path
+    /// and working-folder text.
+    #[test]
+    fn every_built_in_schema_passes_the_subset() {
+        use nerve_proto::schema::{Role, check};
+        let fits = |c: &Capability, what: &str| {
+            for (a, decl) in &c.actions {
+                let at = format!("{what}: {}.{a}", c.id);
+                check(&decl.params, Role::Params).unwrap_or_else(|e| panic!("{at} params: {e}"));
+                check(&decl.result, Role::Result).unwrap_or_else(|e| panic!("{at} result: {e}"));
+            }
+            for (n, ev) in &c.events {
+                check(&ev.data, Role::Result)
+                    .unwrap_or_else(|e| panic!("{what}: {}/{n} data: {e}", c.id));
+            }
+            if !c.state.is_null() {
+                check(&c.state, Role::Result)
+                    .unwrap_or_else(|e| panic!("{what}: {} state: {e}", c.id));
+            }
+        };
+        let cfg = NodeConfig::default();
+        let mut actions = std::collections::BTreeSet::new();
+        for mode in [Mode::Allowlist, Mode::Folder, Mode::User] {
+            for settings in [SettingsGrant::Off, SettingsGrant::Write] {
+                for confined in [false, true] {
+                    let mut e = entry();
+                    e.policy.mode = mode;
+                    e.settings = settings;
+                    e.policy.allow = rules(&["fs", "exec"]);
+                    e.policy.caps.insert("exec.signal".into(), CapSetting::On);
+                    let what = format!("{mode:?} {settings:?} confined={confined}");
+                    for d in [
+                        for_center(&cfg, &e, 0, confined, &[]),
+                        for_call(&cfg, &e, 0, &[]),
+                    ] {
+                        for c in &d.capabilities {
+                            fits(c, &what);
+                            for a in c.actions.keys() {
+                                actions.insert(format!("{}.{a}", c.id));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Each built-in action was looked at, `exec.signal` among them.
+        assert_eq!(actions.len(), 12, "{actions:?}");
+        // The path and working-folder text of the other platform too.
+        let exec = |windows| {
+            exec_cap(
+                Exposure::On,
+                None,
+                windows,
+                &Default::default(),
+                &Default::default(),
+            )
+        };
+        fits(&exec(true), "windows");
+        fits(&exec(false), "unix");
+        let mut fs = fs_cap(Exposure::On);
+        for decl in fs.actions.values_mut() {
+            decl.params["properties"]["path"] = path_param(!cfg!(windows));
+        }
+        fits(&fs, "the other platform's fs");
+    }
+
+    /// How a row of the agreement table below comes out.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Agree {
+        /// The schema and the parser both take the arguments.
+        Take,
+        /// Both refuse them.
+        Refuse,
+        /// The schema takes them and the parser refuses them, for what the
+        /// subset cannot say: the form of a path, a glob, base64, a command
+        /// of blanks.
+        Content,
+        /// The schema refuses what the parser takes. No row wants this: a
+        /// center checks the arguments against the schema, so the agent
+        /// would be refused what the node does (an optional field sent as
+        /// `null`, which the parser reads as left out, was one).
+        Stricter,
+    }
+
+    /// The `fs` and `exec` schemas say what their parsers take: arguments
+    /// a schema takes reach the action (unless their content is wrong in a
+    /// way no schema of the subset can say), and arguments it refuses the
+    /// parser refuses too. `exec.run` counts with the limits a command is
+    /// granted, which refuse 0 and more than the most.
+    #[test]
+    fn fs_and_exec_schemas_agree_with_their_parsers() {
+        use Agree::*;
+        use nerve_proto::schema::validate;
+        let dir = tempfile::tempdir().unwrap();
+        let p = nerve_policy::paths::to_wire(dir.path());
+        let cfg = NodeConfig::default();
+        let d = for_call(&cfg, &entry(), 0, &[]);
+        let limits = &cfg.limits.command;
+        let parse = |cap: &str, action: &str, args: &Map<String, Value>| -> Result<(), RpcError> {
+            match cap {
+                "fs" => crate::fs::FsCall::parse(action, args).map(drop),
+                _ if action == "run" => {
+                    let run = crate::exec::RunCall::parse(args, dir.path())?;
+                    let a = run.limits;
+                    limits
+                        .grant(a.memory_mb, a.cpu_percent, a.processes)
+                        .map(drop)
+                        .map_err(RpcError::invalid_args)
+                }
+                _ => {
+                    let s: crate::exec::SignalArgs = nerve_proto::rpc::params(args)?;
+                    crate::exec::Sig::parse(&s.signal)
+                        .map(drop)
+                        .ok_or_else(|| RpcError::invalid_args("no such signal"))
+                }
+            }
+        };
+        let rows = [
+            ("fs.stat", json!({"path": p}), Take),
+            ("fs.stat", json!({}), Refuse),
+            ("fs.stat", json!({"path": 5}), Refuse),
+            ("fs.stat", json!({"path": null}), Refuse),
+            ("fs.stat", json!({"path": p, "other": 1}), Refuse),
+            ("fs.stat", json!({"path": "relative/x"}), Content),
+            ("fs.list", json!({"path": p}), Take),
+            ("fs.list", json!({"path": [p]}), Refuse),
+            (
+                "fs.read",
+                json!({"path": p, "offset": 0, "length": 10}),
+                Take,
+            ),
+            ("fs.read", json!({"path": p, "length": u64::MAX}), Take),
+            ("fs.read", json!({"path": p, "offset": -1}), Refuse),
+            ("fs.read", json!({"path": p, "offset": 1.5}), Refuse),
+            ("fs.read", json!({"path": p, "offset": 5.0}), Refuse),
+            ("fs.read", json!({"path": p, "offset": "5"}), Refuse),
+            ("fs.read", json!({"path": p, "offset": null}), Take),
+            ("fs.read", json!({"path": p, "length": null}), Take),
+            ("fs.grep", json!({"path": p, "pattern": "x"}), Take),
+            (
+                "fs.grep",
+                json!({"path": p, "pattern": "x", "glob": "*.rs", "max": 1}),
+                Take,
+            ),
+            (
+                "fs.grep",
+                json!({"path": p, "pattern": "x", "max": 1_000_000_000}),
+                Take,
+            ),
+            (
+                "fs.grep",
+                json!({"path": p, "pattern": "x", "glob": null, "max": null}),
+                Take,
+            ),
+            ("fs.grep", json!({"path": p, "pattern": ""}), Refuse),
+            ("fs.grep", json!({"path": p}), Refuse),
+            (
+                "fs.grep",
+                json!({"path": p, "pattern": "x", "max": 0}),
+                Refuse,
+            ),
+            (
+                "fs.grep",
+                json!({"path": p, "pattern": "x", "glob": "["}),
+                Content,
+            ),
+            ("fs.find", json!({"path": p, "glob": "*"}), Take),
+            (
+                "fs.find",
+                json!({"path": p, "glob": "*", "max": null}),
+                Take,
+            ),
+            ("fs.find", json!({"path": p, "glob": null}), Refuse),
+            ("fs.find", json!({"path": p}), Refuse),
+            ("fs.find", json!({"path": p, "glob": 3}), Refuse),
+            ("fs.find", json!({"path": p, "glob": "*", "max": 0}), Refuse),
+            ("fs.write", json!({"path": p, "content": "hi"}), Take),
+            (
+                "fs.write",
+                json!({"path": p, "content": "aGk=", "encoding": "base64", "if_match": "e"}),
+                Take,
+            ),
+            (
+                "fs.write",
+                json!({"path": p, "content": "hi", "encoding": "latin1"}),
+                Refuse,
+            ),
+            (
+                "fs.write",
+                json!({"path": p, "content": "hi", "encoding": null, "if_match": null}),
+                Take,
+            ),
+            ("fs.write", json!({"path": p}), Refuse),
+            (
+                "fs.write",
+                json!({"path": p, "content": "!!", "encoding": "base64"}),
+                Content,
+            ),
+            ("exec.run", json!({"command": "true"}), Take),
+            ("exec.run", json!({"command": "true", "cwd": p}), Take),
+            ("exec.run", json!({}), Refuse),
+            ("exec.run", json!({"command": ""}), Refuse),
+            ("exec.run", json!({"command": 1}), Refuse),
+            ("exec.run", json!({"command": "true", "other": 1}), Refuse),
+            ("exec.run", json!({"command": "  "}), Content),
+            (
+                "exec.run",
+                json!({"command": "true", "cwd": "relative"}),
+                Content,
+            ),
+            // 0 is the same as none; a larger one than the most is cut to it.
+            (
+                "exec.run",
+                json!({"command": "true", "timeout_ms": 0}),
+                Take,
+            ),
+            (
+                "exec.run",
+                json!({"command": "true", "timeout_ms": 1}),
+                Take,
+            ),
+            (
+                "exec.run",
+                json!({"command": "true", "timeout_ms": 1_000_000_000_000u64}),
+                Take,
+            ),
+            (
+                "exec.run",
+                json!({"command": "true", "timeout_ms": -1}),
+                Refuse,
+            ),
+            (
+                "exec.run",
+                json!({"command": "true", "timeout_ms": 1.5}),
+                Refuse,
+            ),
+            (
+                "exec.run",
+                json!({"command": "true", "timeout_ms": null}),
+                Take,
+            ),
+            (
+                "exec.run",
+                json!({"command": "true", "cwd": null, "memory_mb": null,
+                       "cpu_percent": null, "processes": null}),
+                Take,
+            ),
+            ("exec.run", json!({"command": null}), Refuse),
+            ("exec.run", json!({"command": "true", "memory_mb": 1}), Take),
+            (
+                "exec.run",
+                json!({"command": "true", "memory_mb": limits.memory_max_mb}),
+                Take,
+            ),
+            (
+                "exec.run",
+                json!({"command": "true", "memory_mb": limits.memory_max_mb + 1}),
+                Refuse,
+            ),
+            (
+                "exec.run",
+                json!({"command": "true", "memory_mb": 0}),
+                Refuse,
+            ),
+            (
+                "exec.run",
+                json!({"command": "true", "cpu_percent": limits.cpu_max_percent}),
+                Take,
+            ),
+            (
+                "exec.run",
+                json!({"command": "true", "cpu_percent": 4_294_967_296u64}),
+                Refuse,
+            ),
+            (
+                "exec.run",
+                json!({"command": "true", "processes": 0}),
+                Refuse,
+            ),
+            (
+                "exec.run",
+                json!({"command": "true", "processes": limits.processes_max + 1}),
+                Refuse,
+            ),
+            ("exec.signal", json!({"call": 3, "signal": "term"}), Take),
+            ("exec.signal", json!({"call": 0, "signal": "kill"}), Take),
+            (
+                "exec.signal",
+                json!({"call": "3", "signal": "term"}),
+                Refuse,
+            ),
+            ("exec.signal", json!({"call": -1, "signal": "term"}), Refuse),
+            (
+                "exec.signal",
+                json!({"call": 1.5, "signal": "term"}),
+                Refuse,
+            ),
+            ("exec.signal", json!({"call": {}, "signal": "term"}), Refuse),
+            (
+                "exec.signal",
+                json!({"call": null, "signal": "term"}),
+                Refuse,
+            ),
+            ("exec.signal", json!({"call": 3, "signal": "hup"}), Refuse),
+            ("exec.signal", json!({"call": 3}), Refuse),
+            (
+                "exec.signal",
+                json!({"call": 3, "signal": "int", "other": 1}),
+                Refuse,
+            ),
+        ];
+        for (name, args, want) in rows {
+            let (cap, action) = name.split_once('.').unwrap();
+            let schema = &d.capability(cap).unwrap().actions[action].params;
+            let by_schema = validate(schema, &args);
+            let by_parser = parse(cap, action, args.as_object().unwrap());
+            let got = match (&by_schema, &by_parser) {
+                (Ok(()), Ok(())) => Take,
+                (Err(_), Err(_)) => Refuse,
+                (Ok(()), Err(_)) => Content,
+                (Err(_), Ok(())) => Stricter,
+            };
+            assert_eq!(
+                got, want,
+                "{name} {args}: schema {by_schema:?}, parser {by_parser:?}"
+            );
+        }
     }
 }

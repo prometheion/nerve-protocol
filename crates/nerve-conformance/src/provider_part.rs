@@ -9,7 +9,8 @@
 //! with `settings.set` (`user` mode and a deny rule for `echo.shout` before
 //! the provider comes, allow rules for `echo.say` and `echo.fail` once it is
 //! there), attaches an echo provider, and calls it through the center's
-//! link.
+//! link. One action of the provider, `odd`, has a schema outside the subset
+//! a center can check (protocol.md §6), so the node must leave it out.
 //!
 //! Unix only: the provider attaches on the control socket.
 
@@ -57,10 +58,12 @@ pub const CHECKS: &[&str] = &[
     "a second provider of the same name is refused",
     "the node tells the center that its descriptor changed",
     "the descriptor lists the capability with its provider",
+    "an action whose schema is outside the subset is left out with its reason, and the others attach",
     "a center may allow an offered capability that does not sense, and the descriptor follows",
     "a call the policy allows reaches the provider and its answer comes back",
     "a provider's error comes back with its code",
     "a call the policy refuses never reaches the provider",
+    "a call whose arguments do not fit the action's schema is invalid_args and never reaches the provider",
     "when the provider exits its capability leaves the descriptor",
     "a call to a provider that left is unknown_capability",
 ];
@@ -132,7 +135,9 @@ struct Provider {
 }
 
 /// Sends `hello` as the provider `name` with the echo fragment: the
-/// connection, and the node's answer (`ok` or the error text).
+/// connection, and the node's answer (`ok` or the error text). `say` takes
+/// a string `text`; `odd` takes one of two types, which the subset cannot
+/// say.
 async fn hello(socket: &Path, name: &str) -> Result<(Provider, Result<Value, String>), String> {
     let token = std::fs::read_to_string(socket.with_file_name("ctl.token"))
         .map_err(|e| format!("cannot read the control socket's token: {e}"))?;
@@ -144,10 +149,17 @@ async fn hello(socket: &Path, name: &str) -> Result<(Provider, Result<Value, Str
         json!({"effect": "read", "summary": text,
                                    "params": {"type": "object"}})
     };
+    let mut say = read("Return the arguments.");
+    say["params"] = json!({"type": "object", "required": ["text"],
+                           "properties": {"text": {"type": "string"}}});
+    let mut odd = read("Never offered: its schema is outside the subset.");
+    odd["params"]["properties"] =
+        json!({"n": {"oneOf": [{"type": "string"}, {"type": "integer"}]}});
     let fragment = json!([{"id": CAP, "summary": "Says back what it is sent.",
-        "actions": {"say": read("Return the arguments."),
+        "actions": {"say": say,
                     "shout": read("Never called: no rule allows it."),
-                    "fail": read("Fails with io.")}}]);
+                    "fail": read("Fails with io."),
+                    "odd": odd}}]);
     let line = json!({"method": "hello", "token": token.trim(),
                       "params": {"role": "provider", "name": name, "capabilities": fragment}});
     w.write_all(format!("{line}\n").as_bytes())
@@ -370,6 +382,10 @@ async fn steps(
     })?;
 
     let (provider, answer) = hello(&setup.socket, &setup.provider).await?;
+    let left_out = answer
+        .as_ref()
+        .map(|v| v["broken"].clone())
+        .unwrap_or_default();
     step(answer.and_then(|v| {
         ensure(
             v["capabilities"] == json!([CAP]),
@@ -389,6 +405,23 @@ async fn steps(
         ensure(
             actions.contains(&"say".to_string()) && actions.contains(&"fail".to_string()),
             format!("its actions are {actions:?}"),
+        )
+    }))?;
+
+    step(actions(conn, &setup.provider).await.and_then(|actions| {
+        ensure(
+            !actions.iter().any(|a| a == "odd"),
+            format!("its actions are {actions:?}"),
+        )?;
+        let named = left_out.as_array().is_some_and(|b| {
+            b.iter().any(|b| {
+                b["name"] == format!("{CAP}.odd")
+                    && b["reason"].as_str().is_some_and(|r| !r.is_empty())
+            })
+        });
+        ensure(
+            named,
+            format!("the hello answer names as left out: {left_out}"),
         )
     }))?;
 
@@ -439,6 +472,24 @@ async fn steps(
             ensure(
                 !seen.iter().any(|a| a == "shout"),
                 format!("the provider was called for {seen:?}"),
+            )
+        }
+        .await,
+    )?;
+
+    // As above, a call that had been forwarded would come before the next.
+    step(
+        async {
+            let before = seen.lock().unwrap().len();
+            expect_code(
+                invoke(conn, "say", json!({"text": 5})).await,
+                ErrorCode::InvalidArgs,
+            )?;
+            ok(invoke(conn, "say", json!({"text": "fits"})).await)?;
+            let seen = seen.lock().unwrap().clone();
+            ensure(
+                seen.len() == before + 1,
+                format!("the provider was called for {:?}", &seen[before..]),
             )
         }
         .await,

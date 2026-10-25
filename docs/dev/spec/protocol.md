@@ -504,7 +504,10 @@ Errors carry a string code in `error.data.code` (§5.3).
   refused. There is no field for "allowed", a mode or a folder.
 - `deadline_ms` is a duration in milliseconds from receipt; past it the node
   fails the call with `timeout`.
-- `progress.id` and `cancel.id` are the `invoke` request id.
+- `progress.id` and `cancel.id` are the `invoke` request id. An `invoke` id
+  is an integer of 0 or more, since `exec.signal` and the `exec/exit` event
+  name a call by it (§7.3); a node refuses an `invoke` with a string id
+  (`invalid_request`). Other requests may use either.
 - Topics are `<cap>/<event>`, `<cap>/state` or `<cap>/*`. Events of the `node`
   and `settings` capabilities are implicit: they are sent without
   `sub`. Everything else needs one.
@@ -522,7 +525,7 @@ tolerant of unknown fields a node sends, so newer nodes keep working.
 
 | Code | JSON-RPC code | Meaning |
 |---|---|---|
-| `invalid_args` | -32602 | arguments do not match the action |
+| `invalid_args` | -32602 | arguments do not match the action (§6.1) |
 | `forbidden` | -32001 | policy refuses: no rule allows the call, or a rule forbids it |
 | `disabled` | -32004 | the capability or action is off |
 | `unavailable` | -32005 | the node or capability is not reachable now |
@@ -583,7 +586,9 @@ over the center's message limit: the call fails with `too_large` instead.
 - Capability ids and action names use ASCII letters, digits and `-`, never
   `_`: a harness joins node, capability and action with `_` into one tool
   name (`docs/dev/spec/harness.md`), and a `_` inside a part would make that name
-  ambiguous. A center ignores a descriptor with a name outside that set.
+  ambiguous. A center leaves out every action of a capability whose id is
+  outside that set, and an action whose name is; it keeps the rest of the
+  descriptor.
 - Effects: `read`, `sense`, `write`, `actuate`, `execute`.
 - `provider` names what serves a capability: `node`, or a local program
   attached to the node (node-local.md §7). A center treats both alike; the
@@ -595,6 +600,70 @@ over the center's message limit: the call fails with `too_large` instead.
   center fetches the descriptor again.
 - `detail: "summary"` drops `params`, `result` and schemas;
   `"capability"` returns only `cap`, in full; `"full"` returns everything.
+
+### 6.1 Schemas
+
+`params` (an action's arguments), `result`, an event's `data` and `state`
+are JSON Schemas of a small subset of JSON Schema 2020-12. A center shows
+them to a model and checks each call's arguments against them, and the node
+checks them again, so a schema must mean the same at every end. A schema is
+in the subset when:
+
+- Each schema object names `type`, `enum` or `const`. `type` is one of
+  `null`, `boolean`, `object`, `array`, `number`, `integer`, `string`, or a
+  pair of one of them and `"null"` (`["integer", "null"]`).
+- It uses only these keywords: `type`, `properties`, `required`,
+  `additionalProperties` (`true` or `false`), `items` (one schema), `enum`,
+  `const`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`,
+  `minLength`, `maxLength`, `minItems`, `maxItems`, `default`,
+  `description`, `title`, `examples`, `$schema` (only
+  `https://json-schema.org/draft/2020-12/schema`, only at the root) and
+  `x-nerve-path` (`"read"` or `"write"`: the string is a path the action
+  reads or writes; only its value is checked for now).
+- A keyword fits its type: `properties`, `required` and
+  `additionalProperties` need `object`; `items`, `minItems` and `maxItems`
+  `array`; `minLength`, `maxLength` and `x-nerve-path` `string`; the
+  numeric bounds `integer` or `number`. `required` names each property once,
+  and only properties that `properties` names. `enum` is not empty, and its
+  values and `const` fit the type. No pair of bounds leaves nothing between
+  them: of `minimum` and `exclusiveMinimum` the tighter counts (the same for
+  the upper pair), and for `integer` there must be a whole number between
+  them. Each value of `enum` and the `const` keeps to the schema's bounds.
+  With both, the `const` is one of the `enum`; the other `enum` values need
+  not equal it.
+- The arguments schema's root is `{"type": "object", …}`. It nests at most 3
+  levels deep, a result, event data or state at most 4: the root is level 1,
+  and a property's or an array's items schema is one level below its
+  parent's.
+- One object names at most 32 properties, one `enum` lists at most 256
+  values, and the schema takes at most 16 KiB as compact JSON.
+
+Everything else is refused, among it `$ref` and `$defs`, `oneOf`, `anyOf`,
+`allOf` and `not`, `if`, `then` and `else`, `patternProperties`, `pattern`
+and `format`, and any keyword the list does not name. What a text must look
+like goes into `description`; a choice of values is an `enum`.
+
+An action without `params` takes any object of arguments, as
+`{"type": "object"}`; without `result` (or an event without `data`) the
+descriptor says nothing of it. A center leaves out an action whose schemas
+are outside the subset, with the reason, and offers the rest; it leaves out
+every action of a capability whose `state` or an event's `data` is outside
+it. The owner sees what was left out (harness.md §7). A node does not attach a provider's action
+whose schemas are outside it (node-local.md §7).
+
+Arguments fit a schema when their value has its type, takes a value of
+`enum` or the `const`, keeps to its bounds, has every `required` field, and,
+with `additionalProperties: false`, no field `properties` does not name; the
+same holds for each field and item. An `integer` is a number without a
+fraction or an exponent, so `5.0` is not one. `enum` and `const` compare
+numbers by value, as JSON Schema does: `1.0` is one of `[0.5, 1, 2]` (but
+still not an `integer`). `default` is a hint for the caller; neither end
+fills it in. An argument that may be left out and whose
+`null` the node reads as left out says so with `null` in its type
+(`["integer", "null"]`), as the node's own do. Arguments that do not fit are refused with
+`invalid_args` whose `data` holds `field`, the dotted path to what does not
+fit (`sudo.sealed`, `entries[2].name`, empty for the arguments as a whole),
+and `expected`, in words (`an integer from 1 to 600`).
 
 ## 7. Profiles
 
@@ -630,15 +699,17 @@ concurrently.
 | `signal` | actuate | `{call, signal: "term"|"kill"|"int"}` → `{}` |
 
 - `command` is a string run by the node's shell. `call` is the `invoke` id of a
-  running `run`.
+  running `run`, an integer (§5.1).
 - `timeout_ms` is the longest the command may run; 0 is the same as none.
   A node ends every command: one without `timeout_ms` gets the node's
   default, one with a larger value gets the node's maximum, and past its limit
   the command is killed and the call fails with `timeout`. Both numbers are
   the owner's (`limits` of `node.toml`, node-local §2). The descriptor states
-  them in the action's text and as `maximum` and `default`, in milliseconds,
-  of the `timeout_ms` parameter; as that parameter differs between nodes
-  with other limits, a center does not merge their `exec.run` into one tool.
+  them in the action's text, as the `default` of the `timeout_ms`
+  parameter and in its `description`, in milliseconds; it has no `maximum`,
+  as a larger value is cut to the most and not refused. As that parameter
+  differs between nodes with other limits, a center does not merge their
+  `exec.run` into one tool.
 - state: `{shell, confinement}`; event `exit {call, exit_code}` (needs `sub`).
 - Output is capped at `limits.output_cap_bytes` of the node's config;
   `truncated` says it was cut.

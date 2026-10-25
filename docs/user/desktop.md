@@ -12,7 +12,7 @@ records.
 
 ## Download
 
-From [Releases](https://github.com/Piggidragon/Nerve-Protocol/releases):
+From [Releases](https://github.com/prometheion/nerve-protocol/releases):
 
 | System | File |
 |---|---|

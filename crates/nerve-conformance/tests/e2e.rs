@@ -59,22 +59,7 @@ fn harness_part_passes_against_nerve_center() {
     let report = block_on(harness_part::run(&target));
     assert!(report.ok(), "{report}");
     // Every check ran; a count that shrinks silently would hide a lost check.
-    assert_eq!(report.outcomes.len(), 36, "{report}");
-}
-
-/// The name of the tool for `cap.action` and the arguments that pick `node`
-/// when the tool covers several nodes.
-fn tool(tools: &[Value], cap: &str, action: &str, node: &str) -> (String, Value) {
-    let suffix = format!("{cap}_{action}");
-    let t = tools
-        .iter()
-        .find(|t| t["name"].as_str().is_some_and(|n| n.ends_with(&suffix)))
-        .unwrap_or_else(|| panic!("no tool for {suffix}: {tools:?}"));
-    let mut args = json!({});
-    if t["inputSchema"]["properties"].get("node").is_some() {
-        args["node"] = json!(node);
-    }
-    (t["name"].as_str().unwrap().to_string(), args)
+    assert_eq!(report.outcomes.len(), 37, "{report}");
 }
 
 fn with(mut args: Value, more: Value) -> Value {
@@ -321,7 +306,7 @@ fn nerve_center_and_nerve_node_work_together() {
     // The allow rules above made the tools appear: the node announced a new
     // descriptor and the center built them.
     let deadline = Instant::now() + Duration::from_secs(15);
-    let tools = loop {
+    loop {
         let tools = mcp.tools();
         let has = |suffix: &str| {
             tools
@@ -329,19 +314,18 @@ fn nerve_center_and_nerve_node_work_together() {
                 .any(|t| t["name"].as_str().is_some_and(|n| n.ends_with(suffix)))
         };
         if has("fs_read") && has("exec_run") {
-            break tools;
+            break;
         }
         assert!(
             Instant::now() < deadline,
             "the tools did not appear: {tools:?}"
         );
         std::thread::sleep(Duration::from_millis(100));
-    };
+    }
 
     // exec.run goes straight to the node: the center holds no call back, and
     // the node lets it run (the allow rule above).
-    let (run, args) = tool(&tools, "exec", "run", &node_name);
-    let r = mcp.call(&run, with(args, json!({"command": "echo hi"})));
+    let r = mcp.run(&node_name, "exec.run", json!({"command": "echo hi"}));
     let text = text_of(&r);
     assert_eq!(r["isError"], json!(false), "{r}");
     assert!(
@@ -353,28 +337,28 @@ fn nerve_center_and_nerve_node_work_together() {
     // call no rule allows is refused at once instead of waiting for anybody.
     std::fs::write(node.home.join("notes.txt"), "hello from the node").unwrap();
     let path = node.home.join("notes.txt").to_string_lossy().to_string();
-    let (read, args) = tool(&tools, "fs", "read", &node_name);
     let started = Instant::now();
-    let r = mcp.call(&read, with(args.clone(), json!({"path": path})));
+    let r = mcp.run(&node_name, "fs.read", json!({"path": path}));
     assert!(started.elapsed() < Duration::from_secs(10), "{r}");
     assert_eq!(r["isError"], json!(true), "{r}");
     assert!(text_of(&r).contains("forbidden"), "{r}");
 
     // A folder counts in folder mode only: in default deny it allows nothing.
     node.ok(&["folder", "add", &node.home.to_string_lossy(), "+r"]);
-    let r = mcp.call(&read, with(args.clone(), json!({"path": path})));
+    let r = mcp.run(&node_name, "fs.read", json!({"path": path}));
     assert_eq!(r["isError"], json!(true), "{r}");
     node.ok(&["mode", "set", "folder"]);
-    let r = mcp.call(&read, with(args.clone(), json!({"path": path})));
+    let r = mcp.run(&node_name, "fs.read", json!({"path": path}));
     assert_eq!(r["isError"], json!(false), "{r}");
     assert!(text_of(&r).contains("hello from the node"), "{r}");
 
     // A file outside every folder is refused at once.
     let outside = root.path().join("outside.txt");
     std::fs::write(&outside, "not for the model").unwrap();
-    let r = mcp.call(
-        &read,
-        with(args, json!({"path": outside.to_string_lossy()})),
+    let r = mcp.run(
+        &node_name,
+        "fs.read",
+        json!({"path": outside.to_string_lossy()}),
     );
     assert_eq!(r["isError"], json!(true), "{r}");
     assert!(text_of(&r).contains("forbidden"), "{r}");
@@ -454,30 +438,26 @@ fn a_cancelled_call_and_an_ended_session_stop_their_command() {
     node.ok(&["mode", "set", "user"]);
     node.start();
     let deadline = Instant::now() + Duration::from_secs(30);
-    let tools = loop {
+    loop {
         let tools = mcp.tools();
         if tools
             .iter()
             .any(|t| t["name"].as_str().is_some_and(|n| n.ends_with("exec_run")))
         {
-            break tools;
+            break;
         }
         assert!(Instant::now() < deadline, "no exec_run tool: {tools:?}");
         std::thread::sleep(Duration::from_millis(100));
-    };
+    }
     let ov = mcp.wait_overview("the node is online", |v| {
         v["nodes"][0]["online"] == json!(true)
     });
     let name = ov["nodes"][0]["name"].as_str().unwrap().to_string();
-    let (run, args) = tool(&tools, "exec", "run", &name);
     let start = |mcp: &mut Mcp, id: &str| -> u32 {
         let file = node.home.join(format!("{id}.pid"));
         let command = format!("sleep 30 & echo $! > {}; wait", file.display());
-        mcp.send(
-            id,
-            "tools/call",
-            json!({"name": run, "arguments": with(args.clone(), json!({"command": command}))}),
-        );
+        let params = mcp.run_params(&name, "exec.run", json!({"command": command}));
+        mcp.send(id, "tools/call", params);
         let mut pid = 0;
         assert!(
             within(15, || {
@@ -585,33 +565,29 @@ fn a_command_survives_a_dropped_link() {
     node.ok(&["mode", "set", "user"]);
     node.start();
     let deadline = Instant::now() + Duration::from_secs(30);
-    let tools = loop {
+    loop {
         let tools = mcp.tools();
         if tools
             .iter()
             .any(|t| t["name"].as_str().is_some_and(|n| n.ends_with("exec_run")))
         {
-            break tools;
+            break;
         }
         assert!(Instant::now() < deadline, "no exec_run tool: {tools:?}");
         std::thread::sleep(Duration::from_millis(100));
-    };
+    }
     let ov = mcp.wait_overview("the node is online", |v| {
         v["nodes"][0]["online"] == json!(true)
     });
     let name = ov["nodes"][0]["name"].as_str().unwrap().to_string();
-    let (run, args) = tool(&tools, "exec", "run", &name);
     let (started, go) = (node.home.join("started"), node.home.join("go"));
     let command = format!(
         "touch {}; while [ ! -e {} ]; do sleep 0.05; done; echo resumed-output",
         started.display(),
         go.display()
     );
-    mcp.send(
-        "run",
-        "tools/call",
-        json!({"name": run, "arguments": with(args, json!({"command": command}))}),
-    );
+    let params = mcp.run_params(&name, "exec.run", json!({"command": command}));
+    mcp.send("run", "tools/call", params);
     assert!(within(15, || started.exists()), "the command did not start");
 
     relay.cut();
@@ -710,11 +686,9 @@ fn provider_part_passes_against_nerve_node() {
         .map_err(|e| e.to_string())?
     }));
     assert!(report.ok(), "{report}");
-    assert_eq!(
-        report.outcomes.len(),
-        provider_part::CHECKS.len(),
-        "{report}"
-    );
+    // Every check ran; a count that shrinks silently would hide a lost check.
+    assert_eq!(report.outcomes.len(), 14, "{report}");
+    assert_eq!(provider_part::CHECKS.len(), 14);
     drop(node);
 }
 
