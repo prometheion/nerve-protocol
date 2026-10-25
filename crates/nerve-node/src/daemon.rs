@@ -2275,6 +2275,8 @@ mod every_platform {
         o.home = d.path().to_path_buf();
         o.ctl = false;
         o.log = Some(Log::new(Level::Info));
+        // Not elevated, also where the test runs elevated (a Windows CI).
+        o.full_rights = Some(false);
         o.owner = Some("alice".into());
         let daemon = Daemon::start(o).await.unwrap();
         let s = daemon.shared.clone();
