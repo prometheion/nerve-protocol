@@ -666,7 +666,8 @@ fn check_descriptor(v: &Value, node_id: &str, rev: u64) -> Result<(), String> {
 /// path in the center's form that reads the same on one line (a center
 /// would show another one shown changed) with one to three of `r`, `w`, `x`
 /// in that order (a closed folder is not named), `own` and `closed_below`
-/// booleans, no place twice. A `\` is part of a Unix name, so it is not
+/// booleans, no place twice; `sudo` a boolean and `unnamed` a count, each
+/// set only in folder mode. A `\` is part of a Unix name, so it is not
 /// refused. A center reads a block it cannot take as none,
 /// so a node that sends one tells the agent nothing. (An action's
 /// `exposure` other than `on` or `off` fails the descriptor as a whole.)
@@ -694,6 +695,18 @@ fn check_access(v: &Value) -> Result<(), String> {
         ensure(
             c.as_bool().is_some_and(|c| !c || mode == "folder"),
             format!("access confined {c} in {mode} mode"),
+        )?;
+    }
+    if let Some(s) = a.get("sudo") {
+        ensure(
+            s.as_bool().is_some_and(|s| !s || mode == "folder"),
+            format!("access sudo {s} in {mode} mode"),
+        )?;
+    }
+    if let Some(n) = a.get("unnamed") {
+        ensure(
+            n.as_u64().is_some_and(|n| n == 0 || mode == "folder"),
+            format!("access unnamed {n} in {mode} mode"),
         )?;
     }
     let folders = match a.get("folders") {
@@ -780,7 +793,7 @@ mod tests {
     #[test]
     fn the_access_block_must_be_well_formed() {
         let good = json!({"mode": "folder", "until_ms": 5, "account": "nerve-run",
-                          "confined": true,
+                          "confined": true, "sudo": true, "unnamed": 2,
                           "folders": [{"path": "/home/me/proj", "access": "rw",
                                        "closed_below": true},
                                       {"path": "/c/Users/me", "access": "rwx"},
@@ -792,7 +805,7 @@ mod tests {
         d["access"] = json!({"mode": "user", "account": "me"});
         check_descriptor(&d, "node-id", 1).unwrap();
         type Edit = fn(&mut Value);
-        let cases: [(Edit, &str); 19] = [
+        let cases: [(Edit, &str); 23] = [
             (|a| a["mode"] = json!("later"), "access mode"),
             (|a| a["until_ms"] = json!(-1), "access until_ms"),
             (|a| a["account"] = json!("me\nyou"), "access account"),
@@ -810,8 +823,27 @@ mod tests {
                     a["mode"] = json!("user");
                     a["confined"] = json!(false)
                 },
+                "access sudo",
+            ),
+            (
+                |a| {
+                    a["mode"] = json!("user");
+                    a["confined"] = json!(false);
+                    a["sudo"] = json!(false)
+                },
+                "access unnamed",
+            ),
+            (
+                |a| {
+                    a["mode"] = json!("user");
+                    a["confined"] = json!(false);
+                    a["sudo"] = json!(false);
+                    a["unnamed"] = json!(0)
+                },
                 "access names folders in user mode",
             ),
+            (|a| a["sudo"] = json!("yes"), "access sudo"),
+            (|a| a["unnamed"] = json!(-1), "access unnamed"),
             (
                 |a| a["folders"][0]["path"] = json!("home/me"),
                 "access folder path",

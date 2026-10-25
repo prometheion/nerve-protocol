@@ -548,7 +548,12 @@ fn reach_lines(r: Option<&Reach>) -> String {
     }
     out.push_str(".\n");
     if r.mode == nerve_proto::descriptor::AccessMode::Folder {
-        if r.folders.is_empty() {
+        if r.no_folder() && r.sudo {
+            out.push_str(
+                "Folders: none granted yet, so file calls are refused, and commands unless the \
+                 owner's sudo list names them.\n",
+            );
+        } else if r.no_folder() {
             out.push_str("Folders: none granted yet, so file calls and commands are refused.\n");
         } else {
             let own = if r.folders.iter().any(|f| f.own) {
@@ -1012,6 +1017,32 @@ mod tests {
                                              {"path": "/tmp", "access": "rwx", "own": true}]})
     }
 
+    /// With no folder named, the folders line says whether the node left
+    /// some out for their names, and that a command on the sudo list still
+    /// runs: neither reads as a node that refuses everything.
+    #[test]
+    fn the_folders_line_counts_unnamed_folders_and_the_sudo_list() {
+        let lines = |access: Value| {
+            let mut d = desc("box-1", vec![]);
+            d.access = Some(serde_json::from_value(access).unwrap());
+            reach_lines(offer(&record("box-1", Some(d)), true).reach.as_ref())
+        };
+        assert_eq!(
+            lines(json!({"mode": "folder"})),
+            "Mode: folder.\nFolders: none granted yet, so file calls and commands are refused.\n"
+        );
+        assert_eq!(
+            lines(json!({"mode": "folder", "unnamed": 1})),
+            "Mode: folder.\nFolders (r read, w write, x run commands): 1 more whose names cannot \
+             be shown on one line\n"
+        );
+        assert_eq!(
+            lines(json!({"mode": "folder", "sudo": true})),
+            "Mode: folder.\nFolders: none granted yet, so file calls are refused, and commands \
+             unless the owner's sudo list names them.\n"
+        );
+    }
+
     #[test]
     fn list_gives_one_line_per_node() {
         let a = box_node();
@@ -1206,10 +1237,12 @@ mod tests {
         holds what a command reaches to these folders and the system's files. Its commands run \
         as an account of their own, not as the machine's owner, whose access to the files they \
         make goes through the group bits: keep those, 0640 or 0660 for files and 0750 or 0770 \
-        for folders, not 0600 or 0700 unless asked. The folders marked own belong to that account, and every pairing whose commands \
-        run as it shares them (a temporary folder also every account on the machine): use one \
-        marked w for throwaway files only, keep nothing secret there, and trust nothing found \
-        there.";
+        for folders, not 0600 or 0700 unless asked. The folders marked own belong to that \
+        account, and every pairing whose commands run as it shares them (a temporary folder \
+        also every account on the machine), with the settings and caches its programs keep \
+        there: what one pairing leaves there can change what another one's commands do. Use one \
+        marked w for throwaway files only, keep nothing secret there, and change no program's \
+        settings there unless asked.";
 
     /// A unit's description is its action's own summary, not its
     /// capability's beside it (which speaks of all the actions), else the
@@ -1379,7 +1412,7 @@ mod tests {
         // The center's advice after the framing names no folder.
         let d = details(&o, &["fs.read".into()]);
         assert!(
-            d.text.contains("use one marked w for throwaway files only"),
+            d.text.contains("Use one marked w for throwaway files only"),
             "{}",
             d.text
         );

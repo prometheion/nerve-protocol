@@ -567,6 +567,9 @@ pub struct Reach {
     /// account may reach, more than the folders, so the block does not call
     /// them confined. Set by the daemon ([`crate::daemon::Shared::reach`]).
     pub held_by_account: bool,
+    /// Whether the owner's sudo allow list for this center names commands,
+    /// which run by that list alone, in any folder and unconfined.
+    pub sudo: bool,
     /// The folders the owner granted this center.
     pub folders: Vec<Folder>,
     /// The built-in folders of `nerve-run` where its commands run as that
@@ -593,6 +596,7 @@ impl Reach {
             account,
             confined,
             held_by_account: false,
+            sudo: !entry.policy.sudo_allow.is_empty(),
             folders: entry.policy.folders.clone(),
             own: run_home.map(crate::account::built_in).unwrap_or_default(),
         }
@@ -605,9 +609,14 @@ impl Reach {
     /// leaves it out, a refusal under it reads like any other), so the block
     /// does not give it away either. Where it lies inside a granted folder,
     /// which it closes (the deepest folder decides), the deepest such folder
-    /// is marked `closed_below`. Only folder mode names folders: in
-    /// allowlist mode as `nerve-run` they still hold the allowed commands,
-    /// which the block does not tell.
+    /// is marked `closed_below`. A folder whose name the center could not
+    /// show as it is ([`nerve_proto::descriptor::plain_line`]) is left out
+    /// and counted; it narrows like any other, so where it allows less than
+    /// the deepest named folder around it, that one is marked too. Where the
+    /// machine runs no folder-mode command, no folder is marked `x`: only
+    /// a command on the sudo allow list runs then. Only folder mode names
+    /// folders: in allowlist mode as `nerve-run` they still hold the allowed
+    /// commands, which the block does not tell.
     fn access(&self, windows: bool) -> Access {
         let folder = self.mode == Mode::Folder;
         let within = |p: &str, b: &str| {
@@ -643,21 +652,51 @@ impl Reach {
                 None => folders.push((&f.path, path, f.access, own)),
             }
         }
+        // A machine that cannot confine a folder-mode command refuses it
+        // ([`crate::daemon::folder_refusal`]), so `x` lets nothing start.
+        if !self.confined {
+            for (_, _, a, _) in &mut folders {
+                a.execute = false;
+            }
+        }
         let below = |n: &str, b: &str| within(n, b) && !within(b, n);
+        let named: Vec<bool> = folders
+            .iter()
+            .map(|(_, path, a, _)| !a.is_none() && nerve_proto::descriptor::plain_line(path))
+            .collect();
         let mut closed_below = vec![false; folders.len()];
-        for (c, _, _, _) in folders.iter().filter(|(_, _, a, _)| a.is_none()) {
+        for (c, (n, _, a, _)) in folders.iter().enumerate() {
+            if named[c] {
+                continue;
+            }
             let around: Vec<usize> = (0..folders.len())
-                .filter(|&g| !folders[g].2.is_none() && below(c, folders[g].0))
+                .filter(|&g| named[g] && below(n, folders[g].0))
                 .collect();
-            // The granted folders around it nest, so the deepest one is the
+            // The named folders around it nest, so the deepest one is the
             // one no other lies below.
-            if let Some(&g) = around
+            let Some(&g) = around
                 .iter()
                 .find(|&&g| !around.iter().any(|&o| below(folders[o].0, folders[g].0)))
+            else {
+                continue;
+            };
+            // A folder left out for its name that allows at least what the
+            // one around it does takes nothing the agent was told of.
+            let more = |x: bool, y: bool| x || !y;
+            let g_a = folders[g].2;
+            if a.is_none()
+                || !(more(a.read, g_a.read)
+                    && more(a.write, g_a.write)
+                    && more(a.execute, g_a.execute))
             {
                 closed_below[g] = true;
             }
         }
+        let unnamed = folders
+            .iter()
+            .zip(&named)
+            .filter(|((_, _, a, _), named)| !a.is_none() && !**named)
+            .count() as u64;
         Access {
             mode: match self.mode {
                 Mode::Allowlist => AccessMode::Allowlist,
@@ -667,22 +706,23 @@ impl Reach {
             until_ms: self.until_ms,
             account: self.account.clone(),
             confined: folder && self.confined && !self.held_by_account,
+            sudo: folder && self.sudo,
             folders: folders
                 .into_iter()
                 .zip(closed_below)
+                .zip(named)
                 // A name the center cannot show on one line as it is (a
                 // control character or separator, a blank at either end)
                 // would be shown changed, which names another place.
-                .filter(|((_, path, a, _), _)| {
-                    !a.is_none() && nerve_proto::descriptor::plain_line(path)
-                })
-                .map(|((_, path, a, own), closed_below)| FolderAccess {
+                .filter(|(_, named)| *named)
+                .map(|(((_, path, a, own), closed_below), _)| FolderAccess {
                     path,
                     access: a.to_string(),
                     own,
                     closed_below,
                 })
                 .collect(),
+            unnamed,
         }
     }
 }
@@ -1509,7 +1549,7 @@ mod tests {
             folder("c:\\work\\keys", ""),
             folder("c:\\WORK", "x"),
         ];
-        let r = Reach::of(&e, 0, Some("me".into()), false, None);
+        let r = Reach::of(&e, 0, Some("me".into()), true, None);
         let got: Vec<(String, String, bool)> = r
             .access(true)
             .folders
@@ -1553,6 +1593,89 @@ mod tests {
                 .collect::<Vec<_>>(),
             pairs(&[("/c/c", "r")])
         );
+        assert_eq!(r.access(true).unnamed, 1);
+    }
+
+    /// A folder left out for its name still narrows the folder around it
+    /// (the deepest one decides), so where it allows less, the named folder
+    /// around it says some folders below allow less; and the folders left
+    /// out are counted, so a block with none named does not read as no
+    /// grant at all.
+    #[test]
+    fn a_folder_left_out_for_its_name_still_narrows_and_is_counted() {
+        let marked = |list: Vec<Folder>| -> (Vec<(String, String, bool)>, u64) {
+            let mut e = entry();
+            e.policy.mode = Mode::Folder;
+            e.policy.folders = list;
+            let a = Reach::of(&e, 0, None, true, None).access(false);
+            let named = a
+                .folders
+                .into_iter()
+                .map(|f| (f.path, f.access, f.closed_below))
+                .collect();
+            (named, a.unnamed)
+        };
+        let s = |p: &str, a: &str, c: bool| (p.to_string(), a.to_string(), c);
+        // Less than the folder around it: that one is marked.
+        assert_eq!(
+            marked(vec![folder("/srv", "rwx"), folder("/srv/data ", "r")]),
+            (vec![s("/srv", "rwx", true)], 1)
+        );
+        // At least as much: nothing the agent was told is taken.
+        assert_eq!(
+            marked(vec![folder("/srv", "r"), folder("/srv/data ", "rw")]),
+            (vec![s("/srv", "r", false)], 1)
+        );
+        // A closed folder inside a left-out one marks the named one around.
+        assert_eq!(
+            marked(vec![
+                folder("/srv", "rw"),
+                folder("/srv/data ", "rw"),
+                folder("/srv/data /keys", ""),
+            ]),
+            (vec![s("/srv", "rw", true)], 1)
+        );
+        // None named, but one granted: counted. A closed one is not.
+        assert_eq!(
+            marked(vec![folder("/srv/data ", "rw"), folder("/srv/k", "")]),
+            (vec![], 1)
+        );
+    }
+
+    /// Where the machine runs no folder-mode command, no folder is marked
+    /// `x` (a folder with `x` alone then allows nothing, like a closed
+    /// one); and in folder mode the block says when the sudo allow list
+    /// names commands, which run by that list alone.
+    #[test]
+    fn the_block_tells_where_commands_run_and_the_sudo_list() {
+        let mut e = entry();
+        e.policy.mode = Mode::Folder;
+        e.policy.folders = vec![folder("/srv", "rwx"), folder("/srv/bin", "x")];
+        let flags = |r: &Reach| -> Vec<(String, String, bool)> {
+            r.access(false)
+                .folders
+                .into_iter()
+                .map(|f| (f.path, f.access, f.closed_below))
+                .collect()
+        };
+        let s = |p: &str, a: &str, c: bool| (p.to_string(), a.to_string(), c);
+        let runs = Reach::of(&e, 0, None, true, None);
+        assert_eq!(
+            flags(&runs),
+            vec![s("/srv", "rwx", false), s("/srv/bin", "x", false)]
+        );
+        assert!(!runs.access(false).sudo);
+        let none = Reach::of(&e, 0, None, false, None);
+        assert_eq!(flags(&none), vec![s("/srv", "rw", true)]);
+        e.policy.sudo_allow = vec!["sudo apt update".into()];
+        let none = Reach::of(&e, 0, None, false, None);
+        assert!(none.access(false).sudo);
+        let d = super::for_center(&NodeConfig::default(), &e, &none, &[]);
+        assert!(actions(&d, "exec").contains(&"run".to_string()));
+        // Outside folder mode the block names no folder, and no sudo list.
+        e.policy.mode = Mode::Allowlist;
+        let r = Reach::of(&e, 0, None, true, None);
+        assert!(!r.access(false).sudo);
     }
 
     /// Where only the account they run as holds folder-mode commands back,
@@ -1578,7 +1701,7 @@ mod tests {
         let mut e = entry();
         e.policy.mode = Mode::Folder;
         e.policy.folders = vec![folder("C:\\Users\\me\\proj", "rwx"), folder("D:\\", "r")];
-        let r = Reach::of(&e, 0, Some("me".into()), false, None);
+        let r = Reach::of(&e, 0, Some("me".into()), true, None);
         let a = r.access(true);
         let got: Vec<(&str, &str)> = a
             .folders
@@ -1586,7 +1709,6 @@ mod tests {
             .map(|f| (f.path.as_str(), f.access.as_str()))
             .collect();
         assert_eq!(got, [("/c/Users/me/proj", "rwx"), ("/d", "r")]);
-        assert!(!a.confined);
         // A Unix node's stay as they are.
         assert_eq!(r.access(false).folders[0].path, "C:\\Users\\me\\proj");
     }

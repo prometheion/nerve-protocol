@@ -35,6 +35,8 @@
         "until_ms": {"type": "integer", "minimum": 0},
         "account": {"type": "string"},
         "confined": {"type": "boolean"},
+        "sudo": {"type": "boolean", "default": false},
+        "unnamed": {"type": "integer", "minimum": 0, "default": 0},
         "folders": {
           "type": "array",
           "items": {

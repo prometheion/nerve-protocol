@@ -200,17 +200,32 @@ pub struct Access {
     pub account: Option<String>,
     /// In `folder` mode: whether a sandbox (Landlock, a Windows
     /// AppContainer) holds the commands to the folders. False where folder
-    /// mode runs no command (`exec.run` is not offered then), and where only
+    /// mode runs no command (no folder is marked `x` then), and where only
     /// the account they run as holds them back, which reaches more than the
-    /// folders. Always false in the other modes.
+    /// folders. Always false in the other modes. A command on the sudo
+    /// allow list is never held by it ([`Access::sudo`]).
     #[serde(default)]
     pub confined: bool,
+    /// In `folder` mode: the owner's sudo allow list for this center names
+    /// commands. Such a command runs by that list alone, with full rights:
+    /// in any folder, and outside the folders' limits and the sandbox.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sudo: bool,
     /// In `folder` mode: the folders the center's file calls and commands
     /// may use. Only folder mode names them: in `allowlist` mode as
     /// `nerve-run` they still hold the allowed commands, which this block
     /// does not tell.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<FolderAccess>,
+    /// In `folder` mode: how many folders that grant something are left out
+    /// of `folders` because their names do not read the same on one line
+    /// ([`plain_line`]).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unnamed: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// One folder of a center's grant.
@@ -228,9 +243,10 @@ pub struct FolderAccess {
     /// files only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub own: bool,
-    /// Some folder below this one is closed to the center (the owner gave
-    /// it no rights, and where folders nest the deepest one decides). The
-    /// closed folder is not named: the node's file calls hide its name too.
+    /// Some folder below this one, not named, allows the center less than
+    /// this one (where folders nest the deepest one decides): one the owner
+    /// gave no rights, which the node's file calls hide too, or one left
+    /// out of `folders` for its name ([`Access::unnamed`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub closed_below: bool,
 }
@@ -460,12 +476,14 @@ mod tests {
             until_ms: Some(1),
             account: Some("a".into()),
             confined: true,
+            sudo: true,
             folders: vec![FolderAccess {
                 path: "/a".into(),
                 access: "r".into(),
                 own: true,
                 closed_below: true,
             }],
+            unnamed: 1,
         };
         let v = serde_json::to_value(&full).unwrap();
         assert_eq!(members(&access["properties"]), members(&v));

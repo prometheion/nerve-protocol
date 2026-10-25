@@ -53,9 +53,21 @@ pub struct Reach {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     pub confined: bool,
+    /// The owner's sudo allow list for this center names commands, which
+    /// run by that list alone ([`Access::sudo`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sudo: bool,
     pub folders: Vec<FolderAccess>,
     /// The folders past [`FOLDERS_MAX`], not named.
     pub more_folders: usize,
+    /// The granted folders the node left out for their names
+    /// ([`Access::unnamed`]).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unnamed: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl Reach {
@@ -101,13 +113,15 @@ impl Reach {
                 .map(|n| util::clip(&one_line(n), ACCOUNT_MAX))
                 .filter(|n| !n.is_empty()),
             confined: a.confined,
+            sudo: a.sudo,
             folders,
             more_folders,
+            unnamed: a.unnamed,
         }
     }
 
     /// The folders as one line: `/home/me/proj (rw, some folders below
-    /// closed), /tmp (rwx, own)`.
+    /// allow less), /tmp (rwx, own)`.
     pub fn folder_list(&self) -> String {
         let mut parts: Vec<String> = self
             .folders
@@ -115,7 +129,7 @@ impl Reach {
             .map(|f| {
                 let own = if f.own { ", own" } else { "" };
                 let closed = if f.closed_below {
-                    ", some folders below closed"
+                    ", some folders below allow less"
                 } else {
                     ""
                 };
@@ -125,7 +139,18 @@ impl Reach {
         if self.more_folders > 0 {
             parts.push(format!("{} more", self.more_folders));
         }
+        if self.unnamed > 0 {
+            parts.push(format!(
+                "{} more whose names cannot be shown on one line",
+                self.unnamed
+            ));
+        }
         parts.join(", ")
+    }
+
+    /// Whether the node named or counted no folder at all.
+    pub fn no_folder(&self) -> bool {
+        self.folders.is_empty() && self.more_folders == 0 && self.unnamed == 0
     }
 
     /// The folder note of `fs.*` and `exec.run` in folder mode: the folders
@@ -135,7 +160,7 @@ impl Reach {
         if self.mode != AccessMode::Folder {
             return None;
         }
-        if self.folders.is_empty() && self.more_folders == 0 {
+        if self.no_folder() {
             return Some("none granted".into());
         }
         Some(self.folder_list())
@@ -146,21 +171,27 @@ impl Reach {
     /// where files go. Only file calls and a command's start follow the
     /// folders exactly: a sandbox holds what a command reaches to the
     /// folders that grant something, closed ones below them included, and
-    /// without one (`confined` false) only its account holds it. Files made
+    /// without one (`confined` false) only its account holds it. A command
+    /// on the sudo allow list is held by neither. Files made
     /// in the owner's folders should stay readable for the owner, which
     /// matters only where the commands run as an account of their own (the
     /// node then marks that account's folders `own`). Those folders are
     /// shared by every pairing whose commands run as that account, and
-    /// `/tmp` by every account on the machine, so they are for throwaway
-    /// files only. None outside folder mode.
+    /// `/tmp` by every account on the machine, the settings and caches its
+    /// programs keep there included, so they are for throwaway files only.
+    /// None outside folder mode.
     pub fn advice(&self) -> Option<String> {
         self.note()?;
-        if self.folders.is_empty() && self.more_folders == 0 {
-            return Some(
+        if self.no_folder() {
+            return Some(if self.sudo {
+                "The node is in folder mode with no folder granted: its file calls are refused \
+                 until its owner grants one, and so are its commands, except one on the owner's \
+                 sudo list for you, which runs by that list alone, with full rights."
+            } else {
                 "The node is in folder mode with no folder granted: its file calls and commands \
                  are refused until its owner grants one."
-                    .into(),
-            );
+            }
+            .into());
         }
         let mut out = "The node is in folder mode: its file calls may use only the folders in \
                        the `folders:` line (r read, w write, x run commands), and a command may \
@@ -173,11 +204,17 @@ impl Reach {
             " The machine does not hold what a command reaches to these folders: where it \
              runs commands, they reach what the account they run as may reach."
         });
+        if self.sudo {
+            out.push_str(
+                " A command on the owner's sudo list for you runs by that list alone, with full \
+                 rights: in any folder, and beyond the folders and the sandbox.",
+            );
+        }
         if self.folders.iter().any(|f| f.closed_below) {
             out.push_str(
-                " A folder marked \"some folders below closed\" holds folders, not named, where \
-                 file calls are refused and no command may start; a command started in a folder \
-                 around them still reaches them.",
+                " A folder marked \"some folders below allow less\" holds folders, not named, \
+                 that allow less than it or nothing, where a file call or a command's start may \
+                 be refused; a command started in a folder around them still reaches them.",
             );
         }
         if self.folders.iter().any(|f| f.own) {
@@ -198,8 +235,10 @@ impl Reach {
             out.push_str(
                 " The folders marked own belong to that account, and every pairing whose \
                  commands run as it shares them (a temporary folder also every account on the \
-                 machine): use one marked w for throwaway files only, keep nothing secret \
-                 there, and trust nothing found there.",
+                 machine), with the settings and caches its programs keep there: what one \
+                 pairing leaves there can change what another one's commands do. Use one \
+                 marked w for throwaway files only, keep nothing secret there, and change no \
+                 program's settings there unless asked.",
             );
         }
         Some(out)
@@ -862,17 +901,18 @@ mod tests {
             {"path": "/srv/own-r", "access": "r", "own": true}]));
         assert_eq!(
             separate.note().unwrap(),
-            "/home/me/proj (rw, some folders below closed), /tmp (rwx, own), \
+            "/home/me/proj (rw, some folders below allow less), /tmp (rwx, own), \
              /var/lib/nerve-run (rwx, own), /srv/own-r (r, own)"
         );
         let advice = separate.advice().unwrap();
-        // A closed folder refuses file calls and a command's start, not a
-        // command that started around it.
+        // A folder below that allows less (closed, or left out for its
+        // name) may refuse file calls and a command's start, not a command
+        // that started around it.
         assert!(
             advice.contains(
-                "A folder marked \"some folders below closed\" holds folders, not named, where \
-                 file calls are refused and no command may start; a command started in a folder \
-                 around them still reaches them."
+                "A folder marked \"some folders below allow less\" holds folders, not named, \
+                 that allow less than it or nothing, where a file call or a command's start may \
+                 be refused; a command started in a folder around them still reaches them."
             ),
             "{advice}"
         );
@@ -894,17 +934,20 @@ mod tests {
             ),
             "{advice}"
         );
-        // The own folders are shared, so they are for throwaway files and
-        // never called private.
+        // The own folders are shared, the settings its programs keep there
+        // too, so they are for throwaway files and never called private.
         assert!(
             advice.ends_with(
                 "The folders marked own belong to that account, and every pairing whose \
                  commands run as it shares them (a temporary folder also every account on the \
-                 machine): use one marked w for throwaway files only, keep nothing secret \
-                 there, and trust nothing found there."
+                 machine), with the settings and caches its programs keep there: what one \
+                 pairing leaves there can change what another one's commands do. Use one \
+                 marked w for throwaway files only, keep nothing secret there, and change no \
+                 program's settings there unless asked."
             ),
             "{advice}"
         );
+        assert!(!advice.contains("sudo"), "{advice}");
         assert!(!advice.contains("private"), "{advice}");
         // It names no path: the paths are the node's words.
         assert!(!advice.contains('/'), "{advice}");
@@ -952,6 +995,43 @@ mod tests {
                 .advice()
                 .unwrap()
                 .contains("no folder granted")
+        );
+        // A command on the sudo list runs by that list alone, beyond the
+        // folders, the folders' `x` and the sandbox.
+        let sudo = |folders: Value| {
+            Catalog::build(&Descriptor {
+                access: access(json!({"mode": "folder", "confined": true, "sudo": true,
+                                      "folders": folders})),
+                ..desc("box", vec![])
+            })
+            .reach
+            .unwrap()
+            .advice()
+            .unwrap()
+        };
+        assert!(sudo(json!([{"path": "/srv", "access": "rw"}])).contains(
+            "A command on the owner's sudo list for you runs by that list alone, with full \
+                 rights: in any folder, and beyond the folders and the sandbox."
+        ));
+        assert!(sudo(json!([])).contains(
+            "and so are its commands, except one on the owner's sudo list for you, which runs \
+             by that list alone, with full rights."
+        ));
+        // Folders the node left out for their names are no grant of none.
+        let unnamed = Catalog::build(&Descriptor {
+            access: access(json!({"mode": "folder", "confined": true, "unnamed": 2})),
+            ..desc("box", vec![])
+        })
+        .reach
+        .unwrap();
+        assert_eq!(
+            unnamed.note().unwrap(),
+            "2 more whose names cannot be shown on one line"
+        );
+        assert!(
+            !unnamed.advice().unwrap().contains("no folder granted"),
+            "{:?}",
+            unnamed.advice()
         );
         let user = Catalog::build(&Descriptor {
             access: access(json!({"mode": "user"})),
