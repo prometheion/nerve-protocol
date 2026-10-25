@@ -151,7 +151,8 @@ the `result` of the envelope described below.
   account's own ones kept first and the rest counted, and the folders the
   node left out for their names counted apart (`N more whose names cannot
   be shown on one line`); with none of either, `Folders: none granted yet`,
-  which with `sudo` adds that a command on the sudo list still runs); a
+  which with `sudo` adds that a command on the sudo list still runs, as
+  the node sends `sudo` only while its sudo switch is on); a
   disabled node shows
   neither, and a node that offers nothing still shows them, as the mode
   often says why; then one line per unit with its
@@ -264,12 +265,15 @@ and sends nothing to the node.
    first, …` (or `… changed since list gave its details …`), with no schema
    in it. "The same" compares a per-unit hash: SHA-256 over the unit's name,
    effect, description (as `list` shows it), `params`, `result` and, for the
-   node's own `fs.*` and `exec.run`, the folder note, cut to 53 bits. A
+   node's own `fs.*` and `exec.run`, the folder note and the center's advice
+   on it, cut to 53 bits. A
    change to a rule, an `until`, the account or another unit of the node
    leaves it alone; a change of the unit's schema or text needs a new
    `list`, and so does a change of the folder note (a folder granted,
-   changed or taken back in folder mode, or folder mode begun or ended),
-   for `fs.*` and `exec.run` only. A session
+   changed or taken back in folder mode, or folder mode begun or ended) or
+   of the advice (`confined` or `sudo` changed: a sandbox gone or back, a
+   sudo list or sudo switch that changed), for `fs.*` and `exec.run` only
+   (`exec.signal` names no folder). A session
    remembers at most 1024 units and drops the one listed longest ago; the
    model then lists it again.
 5. `args` (missing or `null` is `{}`) against the unit's `params`. Arguments

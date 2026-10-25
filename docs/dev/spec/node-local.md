@@ -1062,8 +1062,10 @@ sandbox holds folder-mode commands: the installed Linux node without
 Landlock runs them, held back by `nerve-run`'s account alone, and sends
 `false`. Where the node runs no folder-mode command at all (`folder_refusal`
 answers, as on the Windows service), no folder is marked `x`. `sudo` says
-that the center's sudo allow list names commands, which run by that list
-alone, in any folder and unconfined. In
+that the center's sudo allow list names commands and the sudo switch is on
+(`Shared::sudo_on`: set and a checked password held), so they run by that
+list alone, in any folder and unconfined; with the switch off they are
+refused, and the block does not say so. A switch change moves the rev. In
 `allowlist` mode as `nerve-run` the folders still hold the allowed
 commands, but only `folder` mode names them. The account's name needs no
 lookup of its own (the home of `nerve-run` is the last one looked up). The

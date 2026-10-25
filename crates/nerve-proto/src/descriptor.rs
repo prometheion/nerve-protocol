@@ -207,8 +207,10 @@ pub struct Access {
     #[serde(default)]
     pub confined: bool,
     /// In `folder` mode: the owner's sudo allow list for this center names
-    /// commands. Such a command runs by that list alone, with full rights:
-    /// in any folder, and outside the folders' limits and the sandbox.
+    /// commands and the node's sudo switch is on. Such a command runs by
+    /// that list alone, with full rights: in any folder, and outside the
+    /// folders' limits and the sandbox. While the switch is off it is
+    /// refused, and this is false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sudo: bool,
     /// In `folder` mode: the folders the center's file calls and commands

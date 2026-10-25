@@ -68,9 +68,10 @@ its folders with their flags (the built-in ones of `nerve-run` among them,
 marked as its own; a folder left without rights is not named, and the
 granted folder around it is marked as having folders below it that allow
 less; where the machine runs no `folder` mode command, no folder is shown
-with `x`, and where your sudo list for that center names commands, the
-agent is told that those run by that list alone, in any folder and outside
-the sandbox): `list` shows them
+with `x`, and where your sudo list for that center names commands while
+the node's [sudo switch](sudo.md) is on, the agent is told that those run
+by that list alone, in any folder and outside the sandbox): `list` shows
+them
 ([harness](harness.md#the-tools-the-model-gets)). Every center is told this
 of its own pairing, with the [settings grant](settings-grant.md) or without.
 A change of the folders, the mode or the account reaches the center at once.
@@ -85,9 +86,13 @@ does, inside that other pairing's folders. The agent is told to keep only
 throwaway files there and to change no program's settings there unless
 asked, but its programs read those settings by themselves. So do not give
 a center you trust less `folder` mode, or `allowlist` mode as `nerve-run`,
-beside a pairing whose folders are worth more: give it `allowlist` mode
-`--as-owner` with narrow rules, or a machine of its own
-([the account `nerve-run`](#the-account-nerve-run-linux)).
+beside a pairing whose folders are worth more: no mode on one machine keeps
+the two apart while they share that home. Give such a center a machine of
+its own. The closest second best is `allowlist` mode as `nerve-run` with
+exact rules, for programs that keep no settings in its home. Not
+`--as-owner`: that runs the allowed commands as you (as root where root is
+the owner), outside the sandbox, so they reach all your folders and
+credentials ([the account `nerve-run`](#the-account-nerve-run-linux)).
 
 | Command | Does |
 |---|---|
@@ -270,10 +275,12 @@ and no other groups; `uninstall` removes both.
   and the `XDG_*` folders point there. Every pairing whose commands run as
   `nerve-run` uses the same home, so a pairing that may write there can
   change the settings the programs of another pairing's commands load, and
-  through them what those commands do in that pairing's folders. Pair a
-  center you trust less beside one with folders worth more only in
-  `allowlist` mode as you (`--as-owner`) with narrow allow rules, not as
-  `nerve-run`.
+  through them what those commands do in that pairing's folders. Give a
+  center you trust less a machine of its own rather than a pairing beside
+  one with folders worth more; the closest second best is `allowlist` mode
+  as `nerve-run` with exact rules, for programs that keep no settings in its
+  home. `--as-owner` is no way out: it runs the allowed commands as you (as
+  root where root is the owner), outside the sandbox.
 - git trusts the repositories it reaches (`safe.directory`), so it works in
   your repositories although they are not its own.
 - It has no SSH keys or other credentials of yours, so `git push` and the
