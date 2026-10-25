@@ -200,6 +200,7 @@ impl Ctl {
                     ))));
                     p.set_deny(ModelRc::new(VecModel::from(view::rule_list_of(&r, "deny"))));
                     p.set_guard_missing(view::guard_missing(&r));
+                    p.set_guard_older(view::guard_older(&r));
                     p.set_sudo_list(ModelRc::new(VecModel::from(view::rule_list_of(&r, "sudo"))));
                     p.set_caps(ModelRc::new(VecModel::from(view::caps(&k))));
                     p.set_sudo_on(s["sudo"] == "on");

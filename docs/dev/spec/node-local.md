@@ -894,6 +894,13 @@ rule without a pattern covers every target of its scope. A pattern ending in
 ` *` also matches the bare program, one ending in `/*` the folder itself.
 Commands and paths never mix: `fs:/tmp/*` is no command rule.
 
+A third form is `guard:<name>`, a rule of the guard against changing the node
+(`guard:node-programs`, `guard:node-paths`, `guard:node-service`). It covers
+`exec.run`, has no pattern, and matches the commands the line holds (parsed as
+the node's shell reads it), not its text. It is a deny rule only: a node
+refuses it on the allow list and any other `guard:` name. See the user
+documentation of rules for what each refuses.
+
 | Rule | Covers |
 |---|---|
 | `exec.run:git status` | that command line, exactly |

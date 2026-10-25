@@ -419,6 +419,19 @@ pub fn guard_missing(v: &Value) -> bool {
     !nerve_policy::rules::guard_missing(&deny).is_empty()
 }
 
+/// Whether the deny list of `rule ls --json` still holds a text of the
+/// guard from before it read commands (`nerve-node rule guard` replaces it).
+pub fn guard_older(v: &Value) -> bool {
+    let deny: Vec<String> = v["deny"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    nerve_policy::rules::guard_older(&deny)
+}
+
 /// Why the keys cannot go into the system keyring here, by the `reason` of
 /// `config get machine.secret_storage --json`.
 pub fn no_keyring(reason: &str) -> &'static str {
@@ -1330,6 +1343,22 @@ pub fn rule_args(e: &Value, list: &str, wildcard: bool) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// A pairing from before the guard read commands is told its guard is of
+    /// the older kind, not that it has none.
+    #[test]
+    fn the_guard_of_a_pairing_is_older_or_missing() {
+        let old = nerve_policy::rules::GUARD_OLD[0];
+        let v = json!({"deny": [old, "exec.run:rm *"]});
+        assert!(guard_missing(&v));
+        assert!(guard_older(&v));
+        let v = json!({"deny": ["exec.run:rm *"]});
+        assert!(guard_missing(&v));
+        assert!(!guard_older(&v));
+        let v = json!({"deny": nerve_policy::rules::GUARD});
+        assert!(!guard_missing(&v));
+        assert!(!guard_older(&v));
+    }
+
     /// A rule with a line break is one row, written as `rule ls` prints it.
     #[test]
     fn a_rule_with_a_line_break_is_one_row() {

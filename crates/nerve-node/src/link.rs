@@ -13,6 +13,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::AbortHandle;
 
 use nerve_policy::audit::Entry;
+use nerve_policy::command::Shell;
 use nerve_policy::config::{Mode, SettingsGrant};
 use nerve_policy::protected::Protected;
 use nerve_policy::rules::RuleSet;
@@ -1644,6 +1645,14 @@ impl Link {
         Protected::new(&self.shared.platform, home, own, opts)
     }
 
+    /// The shell a command line runs in, which the guard reads it by: the
+    /// configured one, and `/bin/sh` for a sudo command off Windows, which
+    /// runs as root there (crate::exec::run).
+    fn shell_for(&self, command: Option<&str>) -> Shell {
+        let cfg = self.shared.config();
+        shell_of(cfg.machine.shell.as_deref(), command)
+    }
+
     /// Runs the policy for one call: it either runs or is refused at once.
     /// Every outcome lands in the audit log.
     #[allow(clippy::too_many_arguments)]
@@ -1680,6 +1689,7 @@ impl Link {
                 protected: &protected,
                 unconfined,
                 sudo: self.shared.sudo_on(),
+                shell: self.shell_for(command),
             };
             nerve_policy::decide(&entry.policy, &env, &call)
         };
@@ -2188,6 +2198,15 @@ impl Drop for Running<'_> {
     }
 }
 
+/// The shell a command line runs in, by the shell the machine is set to
+/// run commands in (`machine.shell`; none: the default of the platform).
+fn shell_of(configured: Option<&str>, command: Option<&str>) -> Shell {
+    if !cfg!(windows) && command.is_some_and(|c| nerve_policy::sudo_command(c).is_some()) {
+        return Shell::Sh;
+    }
+    Shell::of_program(&crate::exec::shell_command(configured, "").0)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -2250,6 +2269,39 @@ mod tests {
             at - started < Duration::from_millis(300),
             "{:?}",
             at - started
+        );
+    }
+
+    /// The guard reads a line by the shell that runs it: the configured
+    /// one, and for a sudo command off Windows `/bin/sh`, whatever is set.
+    #[test]
+    fn the_guard_reads_a_line_by_the_shell_that_runs_it() {
+        use super::shell_of;
+        use nerve_policy::command::Shell;
+        assert_eq!(shell_of(None, Some("ls")), Shell::native());
+        assert_eq!(shell_of(None, None), Shell::native());
+        for (shell, want) in [
+            ("/bin/bash", Shell::Sh),
+            ("/usr/bin/fish", Shell::Fish),
+            ("pwsh", Shell::PowerShell),
+            (
+                "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                Shell::PowerShell,
+            ),
+            ("cmd.exe", Shell::Cmd),
+            ("C:\\Windows\\System32\\cmd.exe", Shell::Cmd),
+        ] {
+            assert_eq!(shell_of(Some(shell), Some("ls")), want, "{shell}");
+        }
+        // A sudo command runs as root in /bin/sh, off Windows.
+        let sudo = shell_of(Some("pwsh"), Some("sudo apt update"));
+        assert_eq!(
+            sudo,
+            if cfg!(windows) {
+                Shell::PowerShell
+            } else {
+                Shell::Sh
+            }
         );
     }
 

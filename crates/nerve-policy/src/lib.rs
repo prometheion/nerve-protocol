@@ -2,8 +2,10 @@
 //! the local audit log.
 
 pub mod audit;
+pub mod command;
 pub mod config;
 pub mod decide;
+pub mod guard;
 pub mod paths;
 pub mod protected;
 pub mod rules;

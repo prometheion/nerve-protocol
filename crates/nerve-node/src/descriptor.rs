@@ -871,6 +871,7 @@ mod tests {
             protected: &prot,
             unconfined: None,
             sudo: false,
+            shell: nerve_policy::command::Shell::native(),
         };
         let call = Call {
             cap: "exec",
@@ -938,6 +939,7 @@ mod tests {
             protected: &prot,
             unconfined: None,
             sudo: false,
+            shell: nerve_policy::command::Shell::native(),
         };
         let cfg = NodeConfig::default();
         let effects = [
