@@ -418,8 +418,9 @@ The descriptor follows the same policy ([capabilities](capabilities.md)).
 The descriptor also says what the policy lets this center do now
 ([spec/protocol.md](spec/protocol.md) §6.2): the mode in force and when it
 ends, the account its commands run as, and in folder mode the folders with
-their flags, the built-in ones of `nerve-run` among them and marked `own`,
-and a folder with no flag inside a granted one, which closes what lies
-below it (the deepest folder decides). It is built from
+their flags, the built-in ones of `nerve-run` among them and marked `own`.
+A folder with no flag is not named; the deepest granted folder around it
+is marked `closed_below`, as it closes what lies below it (the deepest
+folder decides). It is built from
 that center's pairing alone. It describes the policy; it decides nothing, and
 every call is still decided as above.

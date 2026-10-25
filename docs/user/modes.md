@@ -65,8 +65,9 @@ the sandbox the allowed commands run in; the allow rules decide what runs.
 
 The agent is told each center's own mode and account, and in `folder` mode
 its folders with their flags (the built-in ones of `nerve-run` among them,
-marked as its own, and a folder left without rights inside a granted one, as
-`no access`): `list` shows them
+marked as its own; a folder left without rights is not named, and the
+granted folder around it is marked as having folders below it closed):
+`list` shows them
 ([harness](harness.md#the-tools-the-model-gets)). Every center is told this
 of its own pairing, with the [settings grant](settings-grant.md) or without.
 A change of the folders, the mode or the account reaches the center at once.

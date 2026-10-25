@@ -13,7 +13,8 @@ With several centers, add `--center <name>`.
 
 Every center, with the grant or without, is told its own pairing's mode,
 until when it holds, the account its commands run as and, in `folder` mode,
-its folders: the agent needs them to know where it may work
+its folders (a folder you closed inside one is not named, only that some
+folder below is closed): the agent needs them to know where it may work
 ([modes](modes.md#folders)). It is never told another center's.
 
 ## What a center with the grant can do

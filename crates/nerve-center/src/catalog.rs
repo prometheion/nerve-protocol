@@ -881,7 +881,7 @@ mod tests {
         assert!(!advice.contains("private"), "{advice}");
         // It names no path: the paths are the node's words.
         assert!(!advice.contains('/'), "{advice}");
-        // An own folder that may not be written is no scratch place.
+        // An own folder that may not be written is no place for throwaway files.
         let read_only = reach(json!([{"path": "/srv/own-r", "access": "r", "own": true}]));
         let advice = read_only.advice().unwrap();
         assert!(advice.contains("group bits") && !advice.contains("throwaway"));

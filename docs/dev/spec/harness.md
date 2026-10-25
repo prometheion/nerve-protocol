@@ -146,9 +146,11 @@ the `result` of the envelope described below.
   `access` block, a line with the mode, its end and the account
   (`Mode: folder until …; commands run as nerve-run.`) and, in folder mode,
   one with the folders and their flags (`Folders (r read, w write, x run
-  commands; own: the command account's own): /home/me/proj (rw),
-  /home/me/proj/keys (no access), /tmp (rwx, own)`; at most 64 folders, the
-  rest counted); a disabled node shows neither; then one line per unit with its
+  commands; own: the command account's own): /home/me/proj (rw, some
+  folders below closed), /tmp (rwx, own)`; at most 64 folders, the
+  account's own ones kept first and the rest counted); a disabled node shows
+  neither, and a node that offers nothing still shows them, as the mode
+  often says why; then one line per unit with its
   summary (its description cut at 200 characters), then the units that are
   `off` (a capability or a single action the owner switched off). Lines are given whole: when the summaries would take the answer past
   240 KiB (in the text or in `structuredContent`), every unit is named alone,
@@ -158,8 +160,8 @@ the `result` of the envelope described below.
   `structuredContent`: `{node, described, access?, capabilities: [{name,
   summary}], off, more, more_off}`, with the names shown, `summary` only when
   the text has it, and the counts of those not shown; `access` is `{mode,
-  until_ms?, account?, confined, folders: [{path, access, own?}],
-  more_folders}`.
+  until_ms?, account?, confined, folders: [{path, access, own?,
+  closed_below?}], more_folders}`.
 - `list(node, capability)`: `capability` is a list of at most 32 names (a
   single name as a string is accepted too, though the schema declares the
   array).
@@ -170,13 +172,17 @@ the `result` of the envelope described below.
   add a line `folders:` with the folder note: the folders and their flags as
   in `list(node)` (`none granted` when there are none). After the framing a
   line `Folders: …` gives the center's advice on them, in its own words and
-  naming no path: where folders nest the deepest one decides; and, only
-  where a folder is marked `own` (the commands run as an account of their
-  own), that files made in the other folders should stay readable for the
-  machine's owner (no 0600 or 0700 unless asked) and that scratch files go
-  into an `own` folder marked `w`, where they may stay private (`/tmp` is
-  open to every account). Where the commands run as the owner it asks
-  neither. The same advice is under `center` as `{"folders": …}` in
+  naming no path: where folders nest the deepest one decides, and a folder
+  marked as having folders below it closed holds folders, not named, that
+  refuse every call; and, only where a folder is marked `own` (the commands
+  run as an account of their own), that files made in the other folders
+  should stay readable for the machine's owner, whose access goes through
+  the group bits (0640 or 0660 for files, 0750 or 0770 for folders, not 0600
+  or 0700 unless asked), and that an `own` folder marked `w` is for
+  throwaway files only: every pairing whose commands run as that account
+  shares it (`/tmp` also every account on the machine), so nothing secret
+  stays there and nothing found there is trusted. Where the commands run as
+  the owner it says neither. The same advice is under `center` as `{"folders": …}` in
   `structuredContent`. Details are given whole: those that would take the
   answer past 240 KiB (in the text or in `structuredContent`) are named, whole,
   in a line `Not detailed, this answer is full: …` and in `later`, for another

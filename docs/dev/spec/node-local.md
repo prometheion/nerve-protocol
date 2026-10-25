@@ -1051,12 +1051,14 @@ The descriptor also tells the center what it may do (protocol.md §6.2,
 link builds it from that center's entry alone, with the built-in folders of
 `nerve-run` added where its commands run as that account, as the gate and
 the sandbox see them, and marked `own`; no other pairing's folders are in
-it. A folder with no flag is named only inside a granted one, which it
-closes; one whose name holds a control character is left out. In
+it. A folder with no flag is never named, as the file calls hide its name
+(`fs.list` leaves it out, a refusal under it reads like any other): the
+deepest granted folder around it is marked `closed_below` instead. A folder
+whose name holds a control character is left out. In
 `allowlist` mode as `nerve-run` the folders still hold the allowed
-commands, but only `folder` mode names them. The account is
-named without a lookup (the last one is reused), so the 5 s check costs no
-`getent`. The descriptor's `rev` follows its content, so adding or removing a
+commands, but only `folder` mode names them. The account's name needs no
+lookup of its own (the home of `nerve-run` is the last one looked up). The
+descriptor's `rev` follows its content, so adding or removing a
 rule that changes the set, a folder grant, a mode change or another account
 sends `node/descriptor_changed`; a call naming an action that is not shown
 still reaches the policy and is refused and audited.
