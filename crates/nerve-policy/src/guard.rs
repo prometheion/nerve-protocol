@@ -278,7 +278,7 @@ fn is_node_file(word: &str, spelling: Spelling) -> bool {
         w.split(|c| comma && c == ',').any(|p| {
             if brace && p.contains('{') {
                 let mut all = Vec::new();
-                expand_braces(p, &mut all, &mut { MAX_GROUPS });
+                expand_braces(p, &mut all, &mut Budget::of(p));
                 all.iter().any(|p| is_node(&base_name(p, win)))
             } else {
                 is_node(&base_name(p, win))
@@ -287,15 +287,31 @@ fn is_node_file(word: &str, spelling: Spelling) -> bool {
     })
 }
 
-/// How many groups of one word are expanded; the groups left stay as
-/// written, so a hostile word costs a bounded amount of work.
+/// How much of one word `expand_braces` builds: at most `MAX_GROUPS` groups
+/// and a few times the word's length in bytes (every alternative copies the
+/// rest of the word). What is left stays as written, so a hostile word costs
+/// work in proportion to its length, not to its groups.
+struct Budget {
+    groups: usize,
+    bytes: usize,
+}
+
 const MAX_GROUPS: usize = 64;
+
+impl Budget {
+    fn of(word: &str) -> Budget {
+        Budget {
+            groups: MAX_GROUPS,
+            bytes: 16 * word.len() + 1024,
+        }
+    }
+}
 
 /// `word` with its first `{a,b,…}` group expanded into each alternative, and
 /// so on for the groups left. A group without a comma at its top level
 /// (`{}`, `{a..c}`) is not one.
-fn expand_braces(word: &str, out: &mut Vec<String>, groups: &mut usize) {
-    if *groups > 0 {
+fn expand_braces(word: &str, out: &mut Vec<String>, budget: &mut Budget) {
+    if budget.groups > 0 {
         let mut open = 0;
         let mut depth = 0usize;
         let mut cuts: Vec<usize> = Vec::new();
@@ -312,12 +328,20 @@ fn expand_braces(word: &str, out: &mut Vec<String>, groups: &mut usize) {
                 '}' if depth > 0 => {
                     depth -= 1;
                     if depth == 0 && !cuts.is_empty() {
-                        *groups -= 1;
+                        // The words this group makes, counted before one is
+                        // built: a group that does not fit stays as written.
+                        let rest = word.len() - (i + 1 - open);
+                        let cost = (cuts.len() + 1) * rest + (i - open - 1) - cuts.len();
+                        if cost > budget.bytes {
+                            break;
+                        }
+                        budget.bytes -= cost;
+                        budget.groups -= 1;
                         let mut start = open + 1;
                         for end in cuts.iter().copied().chain([i]) {
                             let alt = &word[start..end];
                             let expanded = format!("{}{alt}{}", &word[..open], &word[i + 1..]);
-                            expand_braces(&expanded, out, groups);
+                            expand_braces(&expanded, out, budget);
                             start = end + 1;
                         }
                         return;
@@ -768,6 +792,34 @@ mod tests {
         // A word that expands to many stays bounded.
         let big = "{a,b}".repeat(5000) + "/nerve-node";
         assert!(is_node_file(&big, SH));
+    }
+
+    #[test]
+    fn the_expansion_of_one_word_builds_a_bounded_amount() {
+        // Many short alternatives in front of a long tail: every alternative
+        // copies the tail, in each of the groups.
+        let word = |alts: usize, tail: usize| {
+            let group = format!("{{{}a}}", "a,".repeat(alts - 1));
+            group.repeat(2) + &"x".repeat(tail)
+        };
+        for (alts, tail) in [(1000, 8000), (2000, 16_000), (8000, 32_000)] {
+            let word = word(alts, tail);
+            let mut out = Vec::new();
+            expand_braces(&word, &mut out, &mut Budget::of(&word));
+            let built: usize = out.iter().map(String::len).sum();
+            assert!(built <= 20 * word.len() + 2048, "{alts} x {tail}: {built}");
+            assert!(!out.is_empty());
+        }
+        // Many groups: each fits, together they do not.
+        let word = "{a,b}".repeat(12) + &"x".repeat(4000);
+        let mut out = Vec::new();
+        expand_braces(&word, &mut out, &mut Budget::of(&word));
+        let built: usize = out.iter().map(String::len).sum();
+        assert!(built <= 20 * word.len() + 2048, "{built}");
+        // A group that fits is still expanded in full.
+        let mut out = Vec::new();
+        expand_braces("a{b,c}d{e,f}", &mut out, &mut Budget::of("a{b,c}d{e,f}"));
+        assert_eq!(out, ["abde", "abdf", "acde", "acdf"]);
     }
 
     #[test]

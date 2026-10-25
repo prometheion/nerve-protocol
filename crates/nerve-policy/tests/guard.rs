@@ -2149,6 +2149,20 @@ fn a_long_pipe_is_checked_in_linear_time() {
         "run",
         &format!("{}{}", "iex ".repeat(14), "\\programdatax".repeat(5_000)),
     );
+    // A word of brace groups with many alternatives and a long tail: the
+    // words built from it are bounded, whatever the command (seconds and
+    // gigabytes without the bound).
+    let sh_fish =
+        [Shell::Sh, Shell::Fish].map(|s| RuleSet::new(&rules(GUARD), home()).with_shell(s));
+    for (alts, groups, tail) in [(1_000, 2, 8_000), (2_000, 2, 16_000), (16_000, 1, 32_000)] {
+        let group = format!("{{{}a}}", "a,".repeat(alts - 1));
+        let hostile = format!("{}{}", group.repeat(groups), "x".repeat(tail));
+        for set in &sh_fish {
+            for program in ["echo", "cp", "ls"] {
+                set.find("exec", "run", &format!("{program} {hostile}"));
+            }
+        }
+    }
     assert!(
         start.elapsed() < std::time::Duration::from_secs(3),
         "took {:?}",
