@@ -198,8 +198,11 @@ pub struct Access {
     /// cannot name it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
-    /// In `folder` mode: whether the machine holds commands to the folders
-    /// too, so `exec.run` is offered. Always false in the other modes.
+    /// In `folder` mode: whether a sandbox (Landlock, a Windows
+    /// AppContainer) holds the commands to the folders. False where folder
+    /// mode runs no command (`exec.run` is not offered then), and where only
+    /// the account they run as holds them back, which reaches more than the
+    /// folders. Always false in the other modes.
     #[serde(default)]
     pub confined: bool,
     /// In `folder` mode: the folders the center's file calls and commands
@@ -247,6 +250,17 @@ impl FolderAccess {
         let flags = (take('r'), take('w'), take('x'));
         (rest.is_empty() && flags != (false, false, false)).then_some(flags)
     }
+}
+
+/// Whether `s` reads the same when it is shown on one line: it holds no
+/// control character and no line or paragraph separator, and starts and
+/// ends with no blank. A center puts a node's text on one line and trims
+/// it, so a folder name that is not plain would be shown as another place.
+pub fn plain_line(s: &str) -> bool {
+    s.trim() == s
+        && !s
+            .chars()
+            .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
 }
 
 /// An optional field read so that a value it cannot take is left out
@@ -603,6 +617,27 @@ mod tests {
         // A folder with no rights is not named: it grants nothing.
         for bad in ["", "xr", "rr", "rwxq", "R", " "] {
             assert_eq!(f(bad), None, "{bad}");
+        }
+    }
+
+    /// A name is plain when it reads the same on one line; one that a
+    /// center would change (a control character, a line or paragraph
+    /// separator, a blank at either end) is not.
+    #[test]
+    fn a_plain_line_reads_the_same_on_one_line() {
+        for ok in ["/srv/data", "/srv/my data", "/c/Users/me", "/srv/caf\u{e9}"] {
+            assert!(plain_line(ok), "{ok:?}");
+        }
+        for bad in [
+            "/srv/data ",
+            " /srv/data",
+            "/srv/data\u{a0}",
+            "/srv/a\nb",
+            "/srv/a\u{7f}b",
+            "/srv/a\u{2028}b",
+            "/srv/a\u{2029}b",
+        ] {
+            assert!(!plain_line(bad), "{bad:?}");
         }
     }
 

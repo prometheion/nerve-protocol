@@ -597,13 +597,17 @@ impl Shared {
             .then(|| self.account_seen(cfg, &entry.policy))
             .flatten()
             .map(|a| a.home);
-        crate::descriptor::Reach::of(
+        let mut reach = crate::descriptor::Reach::of(
             entry,
             now,
             self.account_name(cfg, &entry.policy),
             self.confined(cfg),
             run_home.as_deref(),
-        )
+        );
+        // Without a sandbox, a folder-mode command that runs at all runs as
+        // `nerve-run`, held back by that account alone ([`folder_refusal`]).
+        reach.held_by_account = !self.sandboxed();
+        reach
     }
 
     /// The name of the account the commands of a pairing with `policy` run
@@ -885,11 +889,17 @@ impl Shared {
         account: impl FnOnce() -> Option<crate::service::Account>,
     ) -> Option<&'static str> {
         folder_refusal(
-            self.confinement.available() && self.exe.is_some(),
+            self.sandboxed(),
             self.service,
             cfg.machine.secret_storage,
             account,
         )
+    }
+
+    /// Whether a sandbox can hold folder-mode commands to the folders here:
+    /// Landlock or an AppContainer, and a program to start them through.
+    fn sandboxed(&self) -> bool {
+        self.confinement.available() && self.exe.is_some()
     }
 
     /// Whether the commands of a pairing with `policy` run under Landlock
@@ -2729,6 +2739,52 @@ mod tests {
                 );
                 assert_eq!(told(Mode::User, false), (me, vec![]), "{what}");
             }
+            daemon.stop().await;
+        }
+    }
+
+    /// The installed node without Landlock holds folder-mode commands back
+    /// by their account alone, so the reach it tells a center says so (and
+    /// the block does not call them confined); with Landlock it does not.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_reach_says_where_only_the_account_holds_commands() {
+        use nerve_policy::config::{CenterPolicy, Mode};
+        for (landlock, held) in [(Some(6), false), (None, true)] {
+            let log = Log::new(Level::Info);
+            let d = tempfile::tempdir().unwrap();
+            let mut o = options(&d, &log);
+            o.full_rights = Some(false);
+            o.exe = Some("/bin/true".into());
+            o.service = Some(true);
+            o.owner = Some("alice".into());
+            o.confinement = Some(Confinement {
+                landlock_abi: landlock,
+                appcontainer: false,
+            });
+            let daemon = Daemon::start(o).await.unwrap();
+            let s = daemon.shared.clone();
+            let entry = nerve_policy::CenterEntry {
+                name: "c".into(),
+                url: "https://center.example".into(),
+                pin: None,
+                center_id: "c".into(),
+                node_id: "n".into(),
+                settings: Default::default(),
+                paused: false,
+                revoked: false,
+                unknown: false,
+                public_key: None,
+                key_rotations: 0,
+                pin_rotations: 0,
+                old_pin: None,
+                policy: CenterPolicy {
+                    mode: Mode::Folder,
+                    ..Default::default()
+                },
+            };
+            let r = s.reach(&s.config(), &entry);
+            assert_eq!(r.held_by_account, held, "landlock {landlock:?}");
             daemon.stop().await;
         }
     }

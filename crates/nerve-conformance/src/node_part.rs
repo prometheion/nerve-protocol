@@ -663,7 +663,8 @@ fn check_descriptor(v: &Value, node_id: &str, rev: u64) -> Result<(), String> {
 
 /// Whether the descriptor's `access` block (§6.2), when there is one, is
 /// well formed: a known mode, folders only in folder mode, each an absolute
-/// path in the center's form on one line with one to three of `r`, `w`, `x`
+/// path in the center's form that reads the same on one line (a center
+/// would show another one shown changed) with one to three of `r`, `w`, `x`
 /// in that order (a closed folder is not named), `own` and `closed_below`
 /// booleans, no place twice. A `\` is part of a Unix name, so it is not
 /// refused. A center reads a block it cannot take as none,
@@ -707,7 +708,7 @@ fn check_access(v: &Value) -> Result<(), String> {
     for f in folders {
         let path = f["path"].as_str().unwrap_or_default();
         ensure(
-            path.starts_with('/') && !path.chars().any(char::is_control),
+            path.starts_with('/') && nerve_proto::descriptor::plain_line(path),
             format!("access folder path {:?}", f["path"]),
         )?;
         let flags = nerve_proto::descriptor::FolderAccess {
@@ -791,7 +792,7 @@ mod tests {
         d["access"] = json!({"mode": "user", "account": "me"});
         check_descriptor(&d, "node-id", 1).unwrap();
         type Edit = fn(&mut Value);
-        let cases: [(Edit, &str); 16] = [
+        let cases: [(Edit, &str); 19] = [
             (|a| a["mode"] = json!("later"), "access mode"),
             (|a| a["until_ms"] = json!(-1), "access until_ms"),
             (|a| a["account"] = json!("me\nyou"), "access account"),
@@ -821,6 +822,18 @@ mod tests {
             ),
             (
                 |a| a["folders"][0]["path"] = json!("/home/me/a\nb"),
+                "access folder path",
+            ),
+            (
+                |a| a["folders"][0]["path"] = json!("/home/me/a\u{2028}b"),
+                "access folder path",
+            ),
+            (
+                |a| a["folders"][0]["path"] = json!("/home/me/a "),
+                "access folder path",
+            ),
+            (
+                |a| a["folders"][0]["path"] = json!("/home/me/a\u{2029}"),
                 "access folder path",
             ),
             (

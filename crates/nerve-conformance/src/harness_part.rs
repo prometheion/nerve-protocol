@@ -765,6 +765,13 @@ fn check_framed(result: &Value, node: &str, id: &str, said: &str) -> Result<(), 
     ensure(
         data.to_string().contains(said),
         format!("{said:?} is not inside the envelope's result: {data}"),
+    )?;
+    // `center` holds the center's own words, which a harness may show
+    // without the envelope's note: the node's text has no place there.
+    let center = &result["structuredContent"]["center"];
+    ensure(
+        !center.to_string().contains(said),
+        format!("{said:?} stands in the center's own words: {center}"),
     )
 }
 
@@ -1608,6 +1615,13 @@ mod tests {
         assert!(check_framed(&beside, "a", "1", "Return the text.").is_err());
         let empty = content(framed, of_a(json!({"capabilities": []})));
         assert!(check_framed(&empty, "a", "1", "Return the text.").is_err());
+        // The center's own words beside the envelope pass, but not with the
+        // node's text in them.
+        let mut words = ok.clone();
+        words["structuredContent"]["center"] = json!({"folders": "The deepest decides."});
+        assert!(check_framed(&words, "a", "1", "Return the text.").is_ok());
+        words["structuredContent"]["center"] = json!({"folders": "Return the text."});
+        assert!(check_framed(&words, "a", "1", "Return the text.").is_err());
     }
 
     #[test]

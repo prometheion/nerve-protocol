@@ -562,6 +562,11 @@ pub struct Reach {
     /// Windows AppContainer, or `nerve-run` held by its own account);
     /// where it cannot, folder mode offers no command.
     pub confined: bool,
+    /// Whether only the account they run as holds those commands back (the
+    /// installed Linux node without Landlock): they then reach what that
+    /// account may reach, more than the folders, so the block does not call
+    /// them confined. Set by the daemon ([`crate::daemon::Shared::reach`]).
+    pub held_by_account: bool,
     /// The folders the owner granted this center.
     pub folders: Vec<Folder>,
     /// The built-in folders of `nerve-run` where its commands run as that
@@ -587,6 +592,7 @@ impl Reach {
             until_ms: entry.policy.until.filter(|_| mode != Mode::Allowlist),
             account,
             confined,
+            held_by_account: false,
             folders: entry.policy.folders.clone(),
             own: run_home.map(crate::account::built_in).unwrap_or_default(),
         }
@@ -660,14 +666,16 @@ impl Reach {
             },
             until_ms: self.until_ms,
             account: self.account.clone(),
-            confined: folder && self.confined,
+            confined: folder && self.confined && !self.held_by_account,
             folders: folders
                 .into_iter()
                 .zip(closed_below)
-                // A name with a control character cannot be shown on one
-                // line as it is, and a line that changed it would name
-                // another place.
-                .filter(|((n, _, a, _), _)| !a.is_none() && !n.chars().any(char::is_control))
+                // A name the center cannot show on one line as it is (a
+                // control character or separator, a blank at either end)
+                // would be shown changed, which names another place.
+                .filter(|((_, path, a, _), _)| {
+                    !a.is_none() && nerve_proto::descriptor::plain_line(path)
+                })
                 .map(|((_, path, a, own), closed_below)| FolderAccess {
                     path,
                     access: a.to_string(),
@@ -1511,13 +1519,20 @@ mod tests {
         assert_eq!(got, vec![s("/c/Work", "rwx", true)]);
     }
 
-    /// A folder whose name holds a control character is left out: the
-    /// center shows each on one line, and a changed name is another place.
+    /// A folder whose name the center would change to show it on one line
+    /// is left out: a control character or a line or paragraph separator,
+    /// or a blank at either end. A changed name is another place.
     #[test]
     fn a_folder_named_with_a_control_character_is_left_out() {
         let mut e = entry();
         e.policy.mode = Mode::Folder;
-        e.policy.folders = vec![folder("/srv/a\nb", "rw"), folder("/srv/c\\d", "r")];
+        e.policy.folders = vec![
+            folder("/srv/a\nb", "rw"),
+            folder("/srv/data ", "rw"),
+            folder("/srv/e\u{2028}f", "rw"),
+            folder("/srv/g\u{2029}h", "rw"),
+            folder("/srv/c\\d", "r"),
+        ];
         let r = Reach::of(&e, 0, None, true, None);
         let named = |windows: bool| -> Vec<(String, String)> {
             r.access(windows)
@@ -1538,6 +1553,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             pairs(&[("/c/c", "r")])
         );
+    }
+
+    /// Where only the account they run as holds folder-mode commands back,
+    /// they reach more than the folders: the block does not call them
+    /// confined, though they run.
+    #[test]
+    fn commands_held_by_their_account_alone_are_not_called_confined() {
+        let mut e = entry();
+        e.policy.mode = Mode::Folder;
+        e.policy.folders = vec![folder("/srv/data", "rwx")];
+        let mut r = Reach::of(&e, 0, Some("nerve-run".into()), true, None);
+        assert!(r.access(false).confined);
+        r.held_by_account = true;
+        let d = super::for_center(&NodeConfig::default(), &e, &r, &[]);
+        assert!(!d.access.clone().unwrap().confined);
+        assert!(actions(&d, "exec").contains(&"run".to_string()));
     }
 
     /// A Windows node names its folders in the center's form, as its paths

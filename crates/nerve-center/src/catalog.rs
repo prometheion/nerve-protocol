@@ -16,7 +16,9 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use nerve_proto::descriptor::{Access, AccessMode, Exposure, FolderAccess, bad_member_name};
+use nerve_proto::descriptor::{
+    Access, AccessMode, Exposure, FolderAccess, bad_member_name, plain_line,
+};
 use nerve_proto::schema::{self, Role};
 use nerve_proto::{Descriptor, Effect};
 
@@ -40,9 +42,9 @@ const PATH_MAX: usize = 1024;
 const ACCOUNT_MAX: usize = 64;
 
 /// What the node told this center it may do there (its descriptor's
-/// `access`), as the center read it: well-formed folders only, on one line
-/// each and cut, at most [`FOLDERS_MAX`] of them, the account's own ones
-/// kept first.
+/// `access`), as the center read it: well-formed folders only, each named as
+/// the node wrote it (cut when long), at most [`FOLDERS_MAX`] of them, the
+/// account's own ones kept first.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Reach {
     pub mode: AccessMode,
@@ -60,13 +62,14 @@ impl Reach {
     fn read(a: &Access) -> Reach {
         // A path is absolute in the center's form, and the flags are one to
         // three of `r`, `w`, `x`; a folder that is not is left out, as it
-        // names nothing a call could use.
+        // names nothing a call could use. So is a path that would read
+        // otherwise on one line: shown changed, it would name another place.
         let mut folders: Vec<FolderAccess> = a
             .folders
             .iter()
-            .filter(|f| f.path.starts_with('/') && f.flags().is_some())
+            .filter(|f| f.path.starts_with('/') && plain_line(&f.path) && f.flags().is_some())
             .map(|f| FolderAccess {
-                path: util::clip(&one_line(&f.path), PATH_MAX),
+                path: util::clip(&f.path, PATH_MAX),
                 access: f.access.clone(),
                 own: f.own,
                 closed_below: f.closed_below,
@@ -139,7 +142,11 @@ impl Reach {
     }
 
     /// What the center says of the folder note, in its own words and
-    /// outside the framing: how to read it, and where files go. Files made
+    /// outside the framing: how to read it, what holds the commands, and
+    /// where files go. Only file calls and a command's start follow the
+    /// folders exactly: a sandbox holds what a command reaches to the
+    /// folders that grant something, closed ones below them included, and
+    /// without one (`confined` false) only its account holds it. Files made
     /// in the owner's folders should stay readable for the owner, which
     /// matters only where the commands run as an account of their own (the
     /// node then marks that account's folders `own`). Those folders are
@@ -155,14 +162,22 @@ impl Reach {
                     .into(),
             );
         }
-        let mut out = "The node is in folder mode: its file calls and commands may use only the \
-                       folders in the `folders:` line (r read, w write, x run commands). Where \
-                       folders nest, the deepest one decides."
+        let mut out = "The node is in folder mode: its file calls may use only the folders in \
+                       the `folders:` line (r read, w write, x run commands), and a command may \
+                       start only in one marked x. Where folders nest, the deepest one decides."
             .to_string();
+        out.push_str(if self.confined {
+            " The machine's sandbox holds what a command reaches to these folders and the \
+             system's files."
+        } else {
+            " The machine does not hold what a command reaches to these folders: where it \
+             runs commands, they reach what the account they run as may reach."
+        });
         if self.folders.iter().any(|f| f.closed_below) {
             out.push_str(
-                " A folder marked \"some folders below closed\" holds folders, not named, that \
-                 refuse every call.",
+                " A folder marked \"some folders below closed\" holds folders, not named, where \
+                 file calls are refused and no command may start; a command started in a folder \
+                 around them still reaches them.",
             );
         }
         if self.folders.iter().any(|f| f.own) {
@@ -851,10 +866,22 @@ mod tests {
              /var/lib/nerve-run (rwx, own), /srv/own-r (r, own)"
         );
         let advice = separate.advice().unwrap();
+        // A closed folder refuses file calls and a command's start, not a
+        // command that started around it.
         assert!(
             advice.contains(
-                "A folder marked \"some folders below closed\" holds folders, not named, that \
-                 refuse every call."
+                "A folder marked \"some folders below closed\" holds folders, not named, where \
+                 file calls are refused and no command may start; a command started in a folder \
+                 around them still reaches them."
+            ),
+            "{advice}"
+        );
+        assert!(!advice.contains("every call"), "{advice}");
+        // The block says a sandbox holds the commands.
+        assert!(
+            advice.contains(
+                "The machine's sandbox holds what a command reaches to these folders and the \
+                 system's files."
             ),
             "{advice}"
         );
@@ -895,6 +922,25 @@ mod tests {
         for never in ["throwaway", "0600", "/tmp", "own"] {
             assert!(!advice.contains(never), "{never}: {advice}");
         }
+        // Where no sandbox holds the commands, the advice does not say one
+        // does: they reach what their account may reach.
+        let held = Catalog::build(&Descriptor {
+            access: access(json!({"mode": "folder", "confined": false,
+                                  "folders": [{"path": "/srv/proj", "access": "rwx"}]})),
+            ..desc("box", vec![])
+        })
+        .reach
+        .unwrap()
+        .advice()
+        .unwrap();
+        assert!(!held.contains("sandbox"), "{held}");
+        assert!(
+            held.contains(
+                "The machine does not hold what a command reaches to these folders: where it \
+                 runs commands, they reach what the account they run as may reach."
+            ),
+            "{held}"
+        );
         // The own mark is in the note, so it moves the units' hash.
         assert_ne!(
             reach(json!([{"path": "/tmp", "access": "rwx", "own": true}])).note(),
@@ -928,8 +974,13 @@ mod tests {
         folders.insert(0, json!({"path": "/nothing", "access": ""}));
         folders.insert(
             0,
-            json!({"path": format!("/x\n{}", "p".repeat(5000)), "access": "w"}),
+            json!({"path": format!("/x{}", "p".repeat(5000)), "access": "w"}),
         );
+        // Names that would read otherwise on one line are left out, not
+        // shown changed.
+        for bad in ["/y\nz", "/srv/data ", "/a\u{2028}b"] {
+            folders.insert(0, json!({"path": bad, "access": "rw"}));
+        }
         let mut d = desc(
             "box",
             vec![cap("fs", "fs", &[("read", Effect::Read, path())])],
@@ -941,7 +992,7 @@ mod tests {
         assert_eq!(r.folders.len(), FOLDERS_MAX);
         // The 67 well-formed ones and the long one, 64 of them named.
         assert_eq!(r.more_folders, 4);
-        assert!(r.folders[0].path.starts_with("/x p"));
+        assert!(r.folders[0].path.starts_with("/xp"));
         assert!(r.folders[0].path.len() <= PATH_MAX + 3);
         assert_eq!(r.folders[1].path, "/f0");
         assert!(!r.folder_list().contains("/nothing"));
