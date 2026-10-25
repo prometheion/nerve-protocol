@@ -2133,6 +2133,12 @@ impl Center {
         })
     }
 
+    /// The unit `name` (`cap.action`) of a node as the center checked it;
+    /// none when the node has no such unit or it is left out.
+    pub fn unit(&self, node_id: &str, name: &str) -> Option<catalog::Unit> {
+        self.read(|s| s.nodes.get(node_id)?.catalog.unit(name).cloned())
+    }
+
     // ---- Sessions ----
 
     pub fn new_session(&self, transport: &str) -> Arc<Session> {

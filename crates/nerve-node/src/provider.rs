@@ -421,6 +421,18 @@ fn capabilities(
                 });
                 continue;
             }
+            // Arguments are always an object; no schema takes any.
+            let params = match decl.params {
+                Value::Null => json!({"type": "object"}),
+                p => p,
+            };
+            if let Some(reason) = outside_subset(&params, &decl.result) {
+                broken.push(Broken {
+                    name: format!("{}.{a}", f.id),
+                    reason,
+                });
+                continue;
+            }
             actions.insert(
                 a,
                 Action {
