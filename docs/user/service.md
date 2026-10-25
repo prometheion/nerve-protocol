@@ -19,7 +19,7 @@ Download the program for your machine (`nerve-node-x86_64-linux` or
 `sudo` from your own account:
 
 ```sh
-curl -LO https://github.com/Piggidragon/Nerve-Protocol/releases/latest/download/nerve-node-x86_64-linux
+curl -LO https://github.com/prometheion/nerve-protocol/releases/latest/download/nerve-node-x86_64-linux
 chmod +x nerve-node-x86_64-linux
 sudo ./nerve-node-x86_64-linux install
 nerve-node center add '<pairing link>'

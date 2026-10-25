@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/Piggidragon/Nerve-Protocol/schemas/descriptor.schema.json",
+  "$id": "https://github.com/prometheion/nerve-protocol/schemas/descriptor.schema.json",
   "title": "Nerve node descriptor, protocol \"0\"",
   "type": "object",
   "required": ["nerve", "node", "rev", "capabilities"],

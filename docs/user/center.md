@@ -143,7 +143,7 @@ Download the program for your machine (`nerve-center-x86_64-linux` or
 root:
 
 ```sh
-curl -LO https://github.com/Piggidragon/Nerve-Protocol/releases/latest/download/nerve-center-x86_64-linux
+curl -LO https://github.com/prometheion/nerve-protocol/releases/latest/download/nerve-center-x86_64-linux
 chmod +x nerve-center-x86_64-linux
 sudo ./nerve-center-x86_64-linux install
 ```

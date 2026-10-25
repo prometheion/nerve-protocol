@@ -382,7 +382,7 @@ const HELP_KEYS = [
   ["Enter", "Pick the marked entry of a list"],
   ["← →", "Choose in a row of choices"],
 ];
-const GUIDE = "https://github.com/Piggidragon/Nerve-Protocol/tree/main/docs/user";
+const GUIDE = "https://github.com/prometheion/nerve-protocol/tree/main/docs/user";
 let helpParts = null;
 
 function pageHelp() {

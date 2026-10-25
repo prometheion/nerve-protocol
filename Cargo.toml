@@ -14,7 +14,7 @@ members = [
 [workspace.package]
 version = "0.0.6"
 edition = "2024"
-repository = "https://github.com/Piggidragon/Nerve-Protocol"
+repository = "https://github.com/prometheion/nerve-protocol"
 rust-version = "1.88"
 
 [workspace.dependencies]
