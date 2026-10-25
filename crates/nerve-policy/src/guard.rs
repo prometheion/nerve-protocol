@@ -63,7 +63,8 @@ impl Guard {
                 Guard::Service => fed.service |= mention(cmd, script.shell.windows()),
                 Guard::Programs => {
                     let spelling = Spelling::of(script.shell);
-                    fed.file |= cmd.words.iter().any(|w| is_node_file(&w.text, spelling));
+                    fed.file =
+                        fed.file || cmd.words.iter().any(|w| is_node_file(&w.text, spelling));
                 }
                 Guard::Paths => {}
             }
@@ -255,6 +256,9 @@ fn changes_file(r: &Run, spelling: Spelling) -> bool {
 /// whether it was quoted or not.
 fn is_node_file(word: &str, spelling: Spelling) -> bool {
     let Spelling { win, comma, brace } = spelling;
+    if !may_name_node(word, win) {
+        return false;
+    }
     let value = match word.split_once('=') {
         Some((key, v))
             if key == "of"
@@ -271,7 +275,7 @@ fn is_node_file(word: &str, spelling: Spelling) -> bool {
     };
     [word, value].iter().any(|w| {
         w.split(|c| comma && c == ',').any(|p| {
-            if brace {
+            if brace && p.contains('{') {
                 let mut all = Vec::new();
                 expand_braces(p, &mut all, &mut { MAX_GROUPS });
                 all.iter().any(|p| is_node(&base_name(p, win)))
@@ -347,6 +351,19 @@ fn is_service(word: &str, win: bool) -> bool {
     w == "nerve-node" || w == "nerve-node.service" || (win && w == DISPLAY_NAME)
 }
 
+/// Whether `word` holds the node's name at all (the display name has a blank
+/// where the program's has a dash). The exact checks cut the word into parts,
+/// so this keeps a long word that cannot name the node from costing a pass of
+/// them; on Windows case does not count.
+fn may_name_node(word: &str, win: bool) -> bool {
+    if win {
+        let lower = word.to_ascii_lowercase();
+        lower.contains("nerve-node") || lower.contains(DISPLAY_NAME)
+    } else {
+        word.contains("nerve-node")
+    }
+}
+
 /// The Windows service's display name, which `net` and the service cmdlets
 /// take as well as its key name (lower case).
 const DISPLAY_NAME: &str = "nerve node";
@@ -355,18 +372,27 @@ const DISPLAY_NAME: &str = "nerve node";
 /// whole word, or a part of it after `-Name:`, `=` or a comma, or a word of
 /// a filter (`"IMAGENAME eq nerve-node.exe"`).
 fn names_node(word: &str, win: bool) -> bool {
-    word.split(|c: char| matches!(c, ',' | ':' | '=') || c.is_whitespace())
-        .any(|part| is_node(&base_name(part, win)))
+    may_name_node(word, win)
+        && word
+            .split(|c: char| matches!(c, ',' | ':' | '=') || c.is_whitespace())
+            .any(|part| is_node(&base_name(part, win)))
 }
 
 /// [`names_node`], or on Windows the service's display name, which holds a
 /// blank (`-DisplayName 'Nerve node'`).
 fn names_service(word: &str, win: bool) -> bool {
-    names_node(word, win)
-        || (win
-            && word
-                .split([',', ':', '='])
-                .any(|part| part.trim().eq_ignore_ascii_case(DISPLAY_NAME)))
+    if !may_name_node(word, win) {
+        return false;
+    }
+    // One pass over the word: the display name is a part between the
+    // separators, the program or service name is a blank-separated word of
+    // one.
+    word.split([',', ':', '=']).any(|part| {
+        (win && part.trim().eq_ignore_ascii_case(DISPLAY_NAME))
+            || part
+                .split_whitespace()
+                .any(|name| is_node(&base_name(name, win)))
+    })
 }
 
 /// The paths of the node's socket and pipes and its folders, and whether
