@@ -80,7 +80,7 @@ points the node at a fake `sudo` (`machine.sudo_path`) for this.
 | 4.1 | the node dials the center |
 | 4.1 | the `Nerve-Node` header names the paired node id |
 | 4.2 | the hello is signed and names version "0" |
-| 6 | describe full returns a well-formed descriptor, every schema in the subset of §6.1, and its `access` block (§6.2), when it has one, well formed: a known mode, folders only in folder mode, each an absolute path in the center's form with `r`, `w`, `x` in order, no place twice |
+| 6 | describe full returns a well-formed descriptor, every schema in the subset of §6.1, and its `access` block (§6.2), when it has one, well formed: a known mode, folders only in folder mode, each an absolute path in the center's form on one line with up to `r`, `w`, `x` in order (none for a folder that closes what lies below it), `own` a boolean, no place twice |
 | 5.1 | describe capability without cap is `invalid_args` |
 | 5.2 | an unknown method is `method_not_found` |
 | 5.3 | invoke of an unknown capability is `unknown_capability` |
@@ -135,7 +135,7 @@ JSON is a failure of the check, not an empty result.
 | 4 | the tools stay the same when nodes pair |
 | 4 | `list()` gives every node with its state, in `structuredContent` in the envelope of all the nodes |
 | 4 | `list(node, capability)` gives the details of one capability or of a list of them: effect and `params` in `structuredContent`, the name in the text |
-| 4 | what a node wrote stands inside device content and the envelope in a listing: in the text inside the framing, in `structuredContent` only in `result` of `{source: "node <name> (id <id>)", note, result}` |
+| 4 | what a node wrote stands inside device content and the envelope in a listing: in the text inside the framing, in `structuredContent` only in `result` of `{source: "node <name> (id <id>)", note, result}`, beside which only an object `center` (the center's own words) may stand |
 | 4 | the units of `node`, `settings` and `audit` are never listed, and `execute` of one is refused and never reaches the node |
 | 4 | `execute` of a capability the session was not given the details of is `error list_first` and never reaches the node (in a second session, and for the other node in the first) |
 | 4 | a result is device content, in the text and in the envelope of `structuredContent`: the object is its `result` |

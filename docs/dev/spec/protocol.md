@@ -585,7 +585,8 @@ over the center's message limit: the call fails with `too_large` instead.
  "access": {"mode": "folder", "until_ms": 1792936800000, "account": "nerve-run",
             "confined": true,
             "folders": [{"path": "/home/me/proj", "access": "rw"},
-                        {"path": "/tmp", "access": "rwx"}]}}
+                        {"path": "/home/me/proj/keys", "access": ""},
+                        {"path": "/tmp", "access": "rwx", "own": true}]}}
 ```
 
 - Capability ids and action names are 1 to 64 bytes of ASCII letters,
@@ -692,7 +693,7 @@ ever in it.
 | `until_ms` | when a `folder` or `user` mode ends, in milliseconds since the epoch; absent when it does not end, and in `allowlist` mode |
 | `account` | the account this center's commands run as: `nerve-run` or the owner on the installed node, the node's own user on a node run by hand; absent when the node cannot name it |
 | `confined` | in `folder` mode: whether the machine holds commands to the folders (Landlock, a Windows AppContainer, or `nerve-run` held by its own account), so `exec.run` is offered; always `false` in the other modes |
-| `folders` | in `folder` mode only: the folders the center's file calls and commands may use, each `{path, access}`. `path` is absolute in the center's form (`/c/Users/me` for `C:\Users\me`), `access` is one to three of `r` (read), `w` (write) and `x` (run commands) in that order. Where the commands run as `nerve-run`, its built-in folders (`/tmp`, `/var/tmp` and its home, all `rwx`) are among them. A place is named once, with the flags of all its grants together; a folder without a flag is left out. Absent or empty in the other modes, where folders decide nothing |
+| `folders` | in `folder` mode only: the folders the center's file calls and commands may use, each `{path, access, own?}`. `path` is absolute in the center's form (`/c/Users/me` for `C:\Users\me`) and on one line (a folder whose name holds a control character is left out). `access` is up to three of `r` (read), `w` (write) and `x` (run commands) in that order. Where folders nest, the deepest one decides, so a folder with no flag (`""`) inside a named one is named too: it closes what lies below it; a folder with no flag elsewhere grants nothing and is left out. `own: true` marks the command account's own folders: where the commands run as `nerve-run`, its built-in folders (`/tmp`, `/var/tmp` and its home, all `rwx`), the place for scratch files. A node sends `own` only there, so a block with an `own` folder says the commands do not run as the owner. A place is named once, with the flags of all its grants together. Absent or empty in the other modes: only folder mode names folders. In `allowlist` mode as `nerve-run` they still hold the allowed commands (node-local.md), which the block does not tell |
 
 A grant, a mode or its end, or another account changes the block and so
 `rev` (§6). It describes the policy as it is now; the node still decides

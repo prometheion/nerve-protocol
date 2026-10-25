@@ -1050,7 +1050,11 @@ The descriptor also tells the center what it may do (protocol.md §6.2,
 `folder` mode its folders with their flags, in the center's path form. The
 link builds it from that center's entry alone, with the built-in folders of
 `nerve-run` added where its commands run as that account, as the gate and
-the sandbox see them; no other pairing's folders are in it. The account is
+the sandbox see them, and marked `own`; no other pairing's folders are in
+it. A folder with no flag is named only inside a granted one, which it
+closes; one whose name holds a control character is left out. In
+`allowlist` mode as `nerve-run` the folders still hold the allowed
+commands, but only `folder` mode names them. The account is
 named without a lookup (the last one is reused), so the 5 s check costs no
 `getent`. The descriptor's `rev` follows its content, so adding or removing a
 rule that changes the set, a folder grant, a mode change or another account

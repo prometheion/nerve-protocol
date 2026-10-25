@@ -47,7 +47,7 @@ conversation the model asks for it, like a skill:
 |---|---|
 | `list()` | the paired nodes: name, id, `online`/`offline`/`disabled`, platform, how many capabilities, this center's mode there and the account its commands run as; then the owner's notes on machines |
 | `list(node)` | the mode line, in folder mode the folders this center may use with `r`/`w`/`x`, then the node's capabilities, one line each: name and what it does |
-| `list(node, capability)` | for a list of names (or one): description, effect, `params` schema, result; for `fs.*` and `exec.run` in folder mode the folder note |
+| `list(node, capability)` | for a list of names (or one): description, effect, `params` schema, result; for `fs.*` and `exec.run` in folder mode the folder note, and after the framing the center's advice on it |
 | `execute(node, capability, args)` | runs one capability on one node |
 
 - A capability is named `<cap>.<action>`, a **unit** of the node's catalog

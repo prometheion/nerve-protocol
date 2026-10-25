@@ -187,7 +187,8 @@ The **Per machine** part of the page has a card for each paired machine. In it:
 - **Your note on this machine**: a few words for the agent, such as "test VM;
   its databases hold throwaway data". `list()` shows it to every harness of
   this center next to the machine, as your words (not the machine's). One
-  line, at most 400 bytes; **Save note** keeps it, an empty note removes it.
+  line, at most 400 bytes (a letter such as `ü` takes two; the field counts
+  the bytes left); **Save note** keeps it, an empty note removes it.
   It is kept in backups and when the machine is unpaired, like the other
   settings here. The checker does not read it yet (issue
   [#140](https://github.com/prometheion/nerve-protocol/issues/140)).

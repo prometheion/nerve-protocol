@@ -64,10 +64,14 @@ Folders count in `folder` mode. In `allowlist` mode as `nerve-run` they are
 the sandbox the allowed commands run in; the allow rules decide what runs.
 
 The agent is told each center's own mode and account, and in `folder` mode
-its folders with their flags (the built-in ones of `nerve-run` among them):
-`list` shows them ([harness](harness.md#the-tools-the-model-gets)). A change
-of the folders, the mode or the account reaches the center at once. Another
-center's folders are never shown.
+its folders with their flags (the built-in ones of `nerve-run` among them,
+marked as its own, and a folder left without rights inside a granted one, as
+`no access`): `list` shows them
+([harness](harness.md#the-tools-the-model-gets)). Every center is told this
+of its own pairing, with the [settings grant](settings-grant.md) or without.
+A change of the folders, the mode or the account reaches the center at once.
+Another center's folders are never shown. In `allowlist` mode the folders
+are not shown, though they still hold the commands that run as `nerve-run`.
 
 | Command | Does |
 |---|---|
