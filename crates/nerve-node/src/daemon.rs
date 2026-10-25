@@ -2674,6 +2674,54 @@ mod tests {
         }
     }
 
+    /// The installed node names the account each pairing's commands run as
+    /// without a lookup: on Windows always the owner (`machine.user`), whose
+    /// commands run in an AppContainer, never `nerve-run`, which does not
+    /// exist there; elsewhere `nerve-run` unless the pairing runs as the
+    /// owner. Runs on every platform, so each half is checked where it holds.
+    #[tokio::test]
+    async fn the_installed_node_names_the_command_account_of_each_pairing() {
+        use nerve_policy::config::{CenterPolicy, Mode};
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let mut o = options(&d, &log);
+        o.full_rights = Some(false);
+        o.service = Some(true);
+        o.owner = Some("alice".into());
+        let daemon = Daemon::start(o).await.unwrap();
+        let s = daemon.shared.clone();
+        let mut cfg = s.config();
+        cfg.machine.user = Some("alice".into());
+        let named = |mode: Mode, as_owner: bool| {
+            s.account_name(
+                &cfg,
+                &CenterPolicy {
+                    mode,
+                    as_owner,
+                    ..Default::default()
+                },
+            )
+        };
+        let run = if cfg!(windows) {
+            "alice"
+        } else {
+            crate::account::RUN_USER
+        };
+        for (mode, as_owner, want) in [
+            (Mode::Folder, false, run),
+            (Mode::Allowlist, false, run),
+            (Mode::Allowlist, true, "alice"),
+            (Mode::User, false, "alice"),
+        ] {
+            assert_eq!(
+                named(mode, as_owner).as_deref(),
+                Some(want),
+                "{mode:?} as owner {as_owner}"
+            );
+        }
+        daemon.stop().await;
+    }
+
     /// The status says of each pairing whether Landlock holds its commands,
     /// and on the installed Linux node without Landlock what nerve-run may
     /// read of the owner's home beyond its folders: with the home open to
