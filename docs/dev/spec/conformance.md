@@ -80,7 +80,7 @@ points the node at a fake `sudo` (`machine.sudo_path`) for this.
 | 4.1 | the node dials the center |
 | 4.1 | the `Nerve-Node` header names the paired node id |
 | 4.2 | the hello is signed and names version "0" |
-| 6 | describe full returns a well-formed descriptor, every schema in the subset of §6.1 |
+| 6 | describe full returns a well-formed descriptor, every schema in the subset of §6.1, and its `access` block (§6.2), when it has one, well formed: a known mode, folders only in folder mode, each an absolute path in the center's form with `r`, `w`, `x` in order, no place twice |
 | 5.1 | describe capability without cap is `invalid_args` |
 | 5.2 | an unknown method is `method_not_found` |
 | 5.3 | invoke of an unknown capability is `unknown_capability` |

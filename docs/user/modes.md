@@ -63,6 +63,12 @@ below it. Where folders nest, the deepest one decides.
 Folders count in `folder` mode. In `allowlist` mode as `nerve-run` they are
 the sandbox the allowed commands run in; the allow rules decide what runs.
 
+The agent is told each center's own mode and account, and in `folder` mode
+its folders with their flags (the built-in ones of `nerve-run` among them):
+`list` shows them ([harness](harness.md#the-tools-the-model-gets)). A change
+of the folders, the mode or the account reaches the center at once. Another
+center's folders are never shown.
+
 | Command | Does |
 |---|---|
 | `nerve-node folder add ~/proj +r +w +x` | Add a folder. Name at least one right |

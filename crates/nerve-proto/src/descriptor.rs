@@ -154,7 +154,7 @@ pub struct Descriptor {
     pub summary: String,
     #[serde(default)]
     pub capabilities: Vec<Capability>,
-    /// What this center may do on the node, and where (spec §6.5). Read
+    /// What this center may do on the node, and where (spec §6.2). Read
     /// tolerantly: a block the center cannot read is left out, and the
     /// rest of the descriptor stays.
     #[serde(

@@ -130,26 +130,42 @@ statistics. It has three levels; the `structuredContent` named for each is
 the `result` of the envelope described below.
 
 - `list()`: one line per paired node: name, id, `online`, `offline` or
-  `disabled`, platform/arch, and how many capabilities it offers.
-  `structuredContent`: `{"nodes": [{name, id, state, platform, arch,
-  capabilities}]}`.
-- `list(node)`: the node by id, else by name; one line per unit with its
+  `disabled`, platform/arch, how many capabilities it offers, and what the
+  node told this center of itself (protocol.md §6.2): its mode with its end
+  (`folder mode until 2026-10-25 14:00 UTC`) and the account its commands
+  run as. After the framing, the notes the owner wrote on machines in this
+  center (Action checker › Per machine), one line each (`- box-1: test VM`).
+  A note is the owner's own text, set in the center and never sent by a
+  node, so it stands outside the device-content framing. `structuredContent`:
+  `{"nodes": [{name, id, state, platform, arch, capabilities, mode?,
+  until_ms?, account?, note?}]}`.
+- `list(node)`: the node by id, else by name; first, when the node sent an
+  `access` block, a line with the mode, its end and the account
+  (`Mode: folder until …; commands run as nerve-run.`) and, in folder mode,
+  one with the folders and their flags (`Folders (r read, w write, x run
+  commands): /home/me/proj (rw), /tmp (rwx)`; at most 64 folders, the rest
+  counted); then one line per unit with its
   summary (its description cut at 200 characters), then the units that are
-  `off`. Lines are given whole: when the summaries would take the answer past
+  `off` (a capability or a single action the owner switched off). Lines are given whole: when the summaries would take the answer past
   240 KiB (in the text or in `structuredContent`), every unit is named alone,
   without its summary, and the units that do not fit even then are counted
   in a line `Not shown, this answer is full: N more capabilities, from "x.y"
   on.`, as are the `off` ones past it (`N more` in their line).
-  `structuredContent`: `{node, described, capabilities: [{name, summary}],
-  off, more, more_off}`, with the names shown, `summary` only when the text
-  has it, and the counts of those not shown.
+  `structuredContent`: `{node, described, access?, capabilities: [{name,
+  summary}], off, more, more_off}`, with the names shown, `summary` only when
+  the text has it, and the counts of those not shown; `access` is `{mode,
+  until_ms?, account?, confined, folders: [{path, access}], more_folders}`.
 - `list(node, capability)`: `capability` is a list of at most 32 names (a
   single name as a string is accepted too, though the schema declares the
   array).
   For each offered unit: its name, description (the action's summary, else
   the capability's, on one line and cut at 2 KiB), effect, `params` (the JSON
   schema, compact) and its result (in words; the schema in
-  `structuredContent`). Details are given whole: those that would take the
+  `structuredContent`). The node's own `fs.*` and `exec.run` in folder mode
+  add a line `folders:` with the folder note: the folders and their flags,
+  and that files made there should stay readable for the machine's owner
+  (no 0600 or 0700 unless asked), with `/tmp` or the account's home for
+  scratch where those are listed. Details are given whole: those that would take the
   answer past 240 KiB (in the text or in `structuredContent`) are named, whole,
   in a line `Not detailed, this answer is full: …` and in `later`, for another
   `list` call; only the units given count as listed (§4.3 step 4). Names that are not
@@ -158,7 +174,7 @@ the `result` of the envelope described below.
   is `isError` with `error unknown_capability` (`error forbidden` when all are
   off, `error unavailable` for a disabled node). `structuredContent`:
   `{node, capabilities: [{name, description, effect, params, result,
-  result_description}], off, unknown, later}`.
+  result_description, folders?}], off, unknown, later}`.
 
 Everything a node wrote (names, platform, summaries, descriptions, schemas)
 stands on lines of its own inside the device-content framing (below). The
@@ -212,10 +228,13 @@ and sends nothing to the node.
    `error list_first: call list with node "box-1" and capability ["fs.read"]
    first, …` (or `… changed since list gave its details …`), with no schema
    in it. "The same" compares a per-unit hash: SHA-256 over the unit's name,
-   effect, description (as `list` shows it), `params` and `result`, cut to
-   53 bits. A change to a
-   rule, a mode, an `until` or another unit of the node leaves it alone; a
-   change of the unit's schema or text needs a new `list`. A session
+   effect, description (as `list` shows it), `params`, `result` and, for the
+   node's own `fs.*` and `exec.run`, the folder note, cut to 53 bits. A
+   change to a rule, an `until`, the account or another unit of the node
+   leaves it alone; a change of the unit's schema or text needs a new
+   `list`, and so does a change of the folder note (a folder granted,
+   changed or taken back in folder mode, or folder mode begun or ended),
+   for `fs.*` and `exec.run` only. A session
    remembers at most 1024 units and drops the one listed longest ago; the
    model then lists it again.
 5. `args` (missing or `null` is `{}`) against the unit's `params`. Arguments
@@ -292,7 +311,7 @@ same version), settings (center name, statistics retention, how long a
 pairing code is valid: 1 to 1440 minutes, 10 by default, harness tokens,
 per-node settings and the node's sudo switch), action checker (the
 blocklist, the allow rules, the decision model, taint and the per-node
-switches: `GET` and `POST /api/checker`, the endpoint token with
+switches and notes: `GET` and `POST /api/checker`, the endpoint token with
 `POST /api/checker/token`, which is never sent back, the local model with
 `POST /api/checker/install` and `/api/checker/remove`, and the audit tab's
 allow buttons on a model refusal with `POST /api/checker/allow`). The sudo password is sealed in the browser for the

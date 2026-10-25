@@ -579,8 +579,13 @@ over the center's message limit: the call fails with `too_large` instead.
    {"id": "fs", "profile": "fs", "provider": "node", "exposure": "on",
     "summary": "…",
     "actions": {"read": {"effect": "read", "summary": "…",
-                         "params": {JSON Schema}, "result": {JSON Schema}}},
-    "events": {}, "state": null, "streams": {}}]}
+                         "params": {JSON Schema}, "result": {JSON Schema}},
+                "write": {"effect": "write", "exposure": "off", …}},
+    "events": {}, "state": null, "streams": {}}],
+ "access": {"mode": "folder", "until_ms": 1792936800000, "account": "nerve-run",
+            "confined": true,
+            "folders": [{"path": "/home/me/proj", "access": "rw"},
+                        {"path": "/tmp", "access": "rwx"}]}}
 ```
 
 - Capability ids and action names are 1 to 64 bytes of ASCII letters,
@@ -598,11 +603,17 @@ over the center's message limit: the call fails with `too_large` instead.
   node decides every call either way.
 - Exposure: `on`, `off`. A capability that is `hidden` for a center is
   absent from that center's descriptor; `off` is listed with exposure `off`.
+  An action the owner switched off while its capability stays on carries
+  `"exposure": "off"` itself (absent means on); a call of it fails
+  `disabled`. The actions of a capability that is `off` carry it too.
+- `access` says what this center may do on the node now (§6.2). It is
+  for that center alone, like the rest of the descriptor.
 - The descriptor is filtered per center. `rev` changes whenever that center's
   view changes; the node then sends `node/descriptor_changed {rev}` and the
   center fetches the descriptor again.
 - `detail: "summary"` drops `params`, `result` and schemas;
   `"capability"` returns only `cap`, in full; `"full"` returns everything.
+  `access` is in every detail.
 
 ### 6.1 Schemas
 
@@ -667,6 +678,26 @@ fills it in. An argument that may be left out and whose
 `invalid_args` whose `data` holds `field`, the dotted path to what does not
 fit (`sudo.sealed`, `entries[2].name`, empty for the arguments as a whole),
 and `expected`, in words (`an integer from 1 to 600`).
+
+### 6.2 What the center may do (`access`)
+
+The node tells each center its own mode and folders, so the agent behind it
+does not have to guess paths and collect refusals. The block is built from
+that center's pairing alone: no other center's mode, account or folders are
+ever in it.
+
+| Field | |
+|---|---|
+| `mode` | `allowlist`, `folder` or `user`: the mode in force now (a `folder` or `user` mode whose `until` has passed is `allowlist`) |
+| `until_ms` | when a `folder` or `user` mode ends, in milliseconds since the epoch; absent when it does not end, and in `allowlist` mode |
+| `account` | the account this center's commands run as: `nerve-run` or the owner on the installed node, the node's own user on a node run by hand; absent when the node cannot name it |
+| `confined` | in `folder` mode: whether the machine holds commands to the folders (Landlock, a Windows AppContainer, or `nerve-run` held by its own account), so `exec.run` is offered; always `false` in the other modes |
+| `folders` | in `folder` mode only: the folders the center's file calls and commands may use, each `{path, access}`. `path` is absolute in the center's form (`/c/Users/me` for `C:\Users\me`), `access` is one to three of `r` (read), `w` (write) and `x` (run commands) in that order. Where the commands run as `nerve-run`, its built-in folders (`/tmp`, `/var/tmp` and its home, all `rwx`) are among them. A place is named once, with the flags of all its grants together; a folder without a flag is left out. Absent or empty in the other modes, where folders decide nothing |
+
+A grant, a mode or its end, or another account changes the block and so
+`rev` (§6). It describes the policy as it is now; the node still decides
+every call (§5). A center reads the block tolerantly: one it cannot read is
+taken as absent, and the rest of the descriptor stays.
 
 ## 7. Profiles
 

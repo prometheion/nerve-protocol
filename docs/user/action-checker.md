@@ -184,6 +184,13 @@ The **Per machine** part of the page has a card for each paired machine. In it:
   blocklist for every machine (a built-in one or your own) to switch it off for
   this machine only; it stays on for the others. **Switch on again** undoes it.
 - **Allow rules for this machine only**, to remove; add them under Allow rules.
+- **Your note on this machine**: a few words for the agent, such as "test VM;
+  its databases hold throwaway data". `list()` shows it to every harness of
+  this center next to the machine, as your words (not the machine's). One
+  line, at most 400 bytes; **Save note** keeps it, an empty note removes it.
+  It is kept in backups and when the machine is unpaired, like the other
+  settings here. The checker does not read it yet (issue
+  [#140](https://github.com/prometheion/nerve-protocol/issues/140)).
 
 A refusal says whether the entry or switch behind it was the one for every
 machine or this machine's own, and so does its line on the Audit page, so you

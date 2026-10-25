@@ -124,8 +124,9 @@ deterministic blocklist, saved allow rules, and an optional decision model,
 each with its own switch. The page lets you edit the blocklist (add, remove,
 switch single entries off, reset to the defaults) with entries for every
 machine or one, keep allow rules for every machine or one, set the blocklist
-and the model on or off per machine and switch single entries off for one
-machine (**Per machine**), and set up the model (a System One endpoint, or a
+and the model on or off per machine, switch single entries off for one
+machine and write a note on it that `list()` shows the agent (**Per
+machine**), and set up the model (a System One endpoint, or a
 local model the center installs with one click, d1-3B or Kev-4B) with its
 threshold, timeout, question and which calls it sees. It shows the install's
 progress and the local model's state, and names each model's size and

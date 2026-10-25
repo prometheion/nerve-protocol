@@ -1040,12 +1040,22 @@ before and allow rules do not matter, except a sense or actuate action such
 as `exec.signal`, which is shown there only when the owner set it to `on`,
 and in `folder` mode a provider's action, which names no folder (step 7);
 deny rules never hide an action.
-`off` actions stay listed (exposure `off`), `hidden` ones and the actions
+`off` actions stay listed (exposure `off`, on the capability or, for an
+action switched off alone, on the action), `hidden` ones and the actions
 left out here are absent, and a capability with no action left is absent.
-`settings` and `audit` follow their own rules. The descriptor's `rev` follows
-its content, so adding or removing a rule that changes the set sends
-`node/descriptor_changed`; a call naming an action that is not shown still
-reaches the policy and is refused and audited.
+`settings` and `audit` follow their own rules.
+
+The descriptor also tells the center what it may do (protocol.md §6.2,
+`access`): its mode now and its end, the account its commands run as, and in
+`folder` mode its folders with their flags, in the center's path form. The
+link builds it from that center's entry alone, with the built-in folders of
+`nerve-run` added where its commands run as that account, as the gate and
+the sandbox see them; no other pairing's folders are in it. The account is
+named without a lookup (the last one is reused), so the 5 s check costs no
+`getent`. The descriptor's `rev` follows its content, so adding or removing a
+rule that changes the set, a folder grant, a mode change or another account
+sends `node/descriptor_changed`; a call naming an action that is not shown
+still reaches the policy and is refused and audited.
 
 ## 4. The sudo switch
 
