@@ -233,6 +233,62 @@ async fn a_rule_edit_changes_what_the_center_is_offered() {
     node.stop().await;
 }
 
+/// A folder the owner grants while the link is up reaches the center: the
+/// node tells it the descriptor changed, and the access block names the
+/// folder with its flags, the mode and the account. Unix only, as above.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_grant_through_the_owner_tells_the_center() {
+    let dir = tempdir();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let node = paired_node_with(dir.path(), &center, |p| {
+        p.mode = nerve_policy::Mode::Folder;
+    })
+    .await;
+    let mut conn = linked(&mut center).await;
+    let access = |d: &Value| d["access"].clone();
+    let d = conn
+        .call("describe", json!({"detail": "summary"}), WAIT)
+        .await
+        .unwrap()
+        .expect("describe");
+    assert_eq!(access(&d)["mode"], "folder", "{d}");
+    assert!(access(&d).get("folders").is_none(), "{d}");
+    // A node run by hand runs its commands as its own user, and says so.
+    assert!(
+        access(&d)["account"]
+            .as_str()
+            .is_some_and(|a| !a.is_empty()),
+        "{d}"
+    );
+    let rev0 = d["rev"].as_u64().unwrap();
+
+    let proj = dir.path().join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    let proj = std::fs::canonicalize(&proj).unwrap();
+    owner_edit(node.paths(), |c| {
+        c.centers[0].policy.folders = vec![nerve_policy::config::Folder {
+            path: proj.display().to_string(),
+            access: nerve_policy::config::Access::parse("rw").unwrap(),
+        }];
+    })
+    .await;
+    let rev1 = changed_rev(&mut conn).await;
+    assert_ne!(rev1, rev0);
+    let d = conn
+        .call("describe", json!({"detail": "summary"}), WAIT)
+        .await
+        .unwrap()
+        .expect("describe");
+    assert_eq!(d["rev"].as_u64(), Some(rev1));
+    assert_eq!(
+        access(&d)["folders"],
+        json!([{"path": nerve_policy::paths::to_wire(&proj), "access": "rw"}]),
+        "{d}"
+    );
+    node.stop().await;
+}
+
 /// No folder and no rule allows the read, so the node refuses it at once: it
 /// does not wait for anyone, and nothing is asked.
 #[tokio::test(flavor = "multi_thread")]

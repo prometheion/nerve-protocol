@@ -588,8 +588,7 @@ async fn session(
         let rev = descriptor::for_center(
             &cfg,
             entry,
-            crate::now_ms(),
-            shared.confined(&cfg),
+            &shared.reach(&cfg, entry),
             &shared.providers.caps(),
         )
         .rev;
@@ -927,14 +926,7 @@ impl Link {
             }
             return self.end(reason, Outcome::Stop).await;
         }
-        let mut rev = descriptor::for_center(
-            &cfg,
-            &entry,
-            crate::now_ms(),
-            self.shared.confined(&cfg),
-            &self.shared.providers.caps(),
-        )
-        .rev;
+        let mut rev = self.descriptor(&cfg, &entry).rev;
         let mut version = cfg.version;
         loop {
             tokio::select! {
@@ -1087,14 +1079,7 @@ impl Link {
     /// Tells the center when its view of the node changed.
     fn check_rev(&self, rev: &mut u64) {
         if let Some((cfg, entry)) = self.entry() {
-            let now = descriptor::for_center(
-                &cfg,
-                &entry,
-                crate::now_ms(),
-                self.shared.confined(&cfg),
-                &self.shared.providers.caps(),
-            )
-            .rev;
+            let now = self.descriptor(&cfg, &entry).rev;
             if now != *rev {
                 *rev = now;
                 self.handle
@@ -1279,13 +1264,23 @@ impl Link {
         let (cfg, entry) = self
             .entry()
             .ok_or_else(|| RpcError::new(ErrorCode::Unavailable, "this center was removed"))?;
-        Ok(descriptor::for_center(
-            &cfg,
-            &entry,
-            crate::now_ms(),
-            self.shared.confined(&cfg),
+        Ok(self.descriptor(&cfg, &entry))
+    }
+
+    /// The descriptor this center sees now. Its `access` holds the folders
+    /// the gate goes by, the built-in ones of `nerve-run` among them, so a
+    /// grant, a mode or an account that changes moves its rev.
+    fn descriptor(
+        &self,
+        cfg: &NodeConfig,
+        entry: &CenterEntry,
+    ) -> nerve_proto::descriptor::Descriptor {
+        descriptor::for_center(
+            cfg,
+            entry,
+            &self.shared.reach(cfg, entry),
             &self.shared.providers.caps(),
-        ))
+        )
     }
 
     fn describe(&self, p: &Map<String, Value>) -> Result<Value, RpcError> {

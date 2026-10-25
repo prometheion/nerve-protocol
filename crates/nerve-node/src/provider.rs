@@ -428,6 +428,7 @@ fn capabilities(
                     summary: decl.summary,
                     params,
                     result: decl.result,
+                    exposure: None,
                 },
             );
         }

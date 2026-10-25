@@ -757,6 +757,7 @@ mod tests {
                 summary: String::new(),
                 params: Value::Null,
                 result: json!({"type": "object", long.clone(): 1}),
+                exposure: None,
             },
         );
         let mut door = cap("door", "", &[("open", Effect::Actuate, path())]);
@@ -837,7 +838,12 @@ mod tests {
             }))
             .unwrap();
             e.policy.mode = mode;
-            let d = nerve_node::descriptor::for_center(&NodeConfig::default(), &e, 0, true, &[]);
+            let d = nerve_node::descriptor::for_center(
+                &NodeConfig::default(),
+                &e,
+                &nerve_node::descriptor::Reach::of(&e, 0, None, true, None),
+                &[],
+            );
             let c = Catalog::build(&d);
             assert_eq!(c.broken, [], "{mode:?}");
             // In allowlist mode without rules the node offers nothing yet.

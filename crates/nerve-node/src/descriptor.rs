@@ -5,11 +5,11 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
-use nerve_policy::config::{CapSetting, CenterPolicy, Mode, SettingsGrant};
+use nerve_policy::config::{CapSetting, CenterPolicy, Folder, Mode, SettingsGrant};
 use nerve_policy::{CenterEntry, NodeConfig, rules};
 use nerve_proto::descriptor::{
-    Action, Capability, Descriptor, Direction, Effect, EventDecl, Exposure, NodeInfo, Software,
-    StreamDecl, StreamKind,
+    Access, AccessMode, Action, Capability, Descriptor, Direction, Effect, EventDecl, Exposure,
+    FolderAccess, NodeInfo, Software, StreamDecl, StreamKind,
 };
 
 pub const SOFTWARE: &str = "nerve-node";
@@ -45,6 +45,7 @@ fn action(effect: Effect, summary: &str, params: Value, result: Value) -> Action
         summary: summary.into(),
         params,
         result,
+        exposure: None,
     }
 }
 
@@ -546,33 +547,125 @@ struct View {
     confined: bool,
 }
 
-/// The descriptor `entry` sees now; `rev` is derived from its content, so it
-/// changes exactly when the view changes. The center lists what it offers
-/// from it, so an action the policy cannot allow is not in it. `confined` says
-/// whether this machine can confine a command in `folder` mode (Landlock,
-/// a Windows AppContainer); where it cannot, folder mode offers no command.
-/// `provided` are the capabilities the attached providers add
-/// (crate::provider), each cut by the same policy.
+/// What one center may do on this machine now, as its descriptor tells it
+/// (the `access` block): built by the link from that center's own entry
+/// alone, so no other pairing's folders reach it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reach {
+    /// The mode in force now ([`CenterPolicy::mode_at`]).
+    pub mode: Mode,
+    /// When a `folder` or `user` mode ends.
+    pub until_ms: Option<u64>,
+    /// The account this center's commands run as.
+    pub account: Option<String>,
+    /// Whether this machine confines commands in `folder` mode (Landlock, a
+    /// Windows AppContainer, or `nerve-run` held by its own account);
+    /// where it cannot, folder mode offers no command.
+    pub confined: bool,
+    /// The folders the gate and the sandbox go by: the entry's, and the
+    /// built-in ones of `nerve-run` where its commands run as that account.
+    pub folders: Vec<Folder>,
+}
+
+impl Reach {
+    /// `entry`'s reach at `now_ms`. `run_home` is the home of `nerve-run`
+    /// when this center's commands run as that account now, whose built-in
+    /// folders ([`crate::account::built_in`]) the gate adds to the entry's.
+    pub fn of(
+        entry: &CenterEntry,
+        now_ms: u64,
+        account: Option<String>,
+        confined: bool,
+        run_home: Option<&std::path::Path>,
+    ) -> Reach {
+        let mode = entry.policy.mode_at(now_ms);
+        let mut folders = entry.policy.folders.clone();
+        if let Some(home) = run_home {
+            folders.extend(crate::account::built_in(home));
+        }
+        Reach {
+            mode,
+            until_ms: entry.policy.until.filter(|_| mode != Mode::Allowlist),
+            account,
+            confined,
+            folders,
+        }
+    }
+
+    /// The `access` block: in `folder` mode with the folders in the
+    /// center's path form (`windows`: `C:\x` is `/c/x`), one entry per
+    /// place with the flags of every grant of it together; a folder
+    /// without a flag grants nothing and is left out. Folders decide
+    /// nothing in the other modes, so they are not named there.
+    fn access(&self, windows: bool) -> Access {
+        let folder = self.mode == Mode::Folder;
+        let mut folders: Vec<(String, nerve_policy::config::Access)> = Vec::new();
+        for f in self.folders.iter().filter(|_| folder) {
+            if f.access.is_none() {
+                continue;
+            }
+            let path = if windows {
+                nerve_policy::paths::win::to_wire(&f.path)
+            } else {
+                f.path.clone()
+            };
+            match folders.iter_mut().find(|(p, _)| *p == path) {
+                Some((_, a)) => {
+                    a.read |= f.access.read;
+                    a.write |= f.access.write;
+                    a.execute |= f.access.execute;
+                }
+                None => folders.push((path, f.access)),
+            }
+        }
+        Access {
+            mode: match self.mode {
+                Mode::Allowlist => AccessMode::Allowlist,
+                Mode::Folder => AccessMode::Folder,
+                Mode::User => AccessMode::User,
+            },
+            until_ms: self.until_ms,
+            account: self.account.clone(),
+            confined: folder && self.confined,
+            folders: folders
+                .into_iter()
+                .map(|(path, a)| FolderAccess {
+                    path,
+                    access: a.to_string(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The descriptor `entry` sees now, with its `access` from `reach`; `rev`
+/// is derived from its content, so it changes exactly when the view
+/// changes. The center lists what it offers from it, so an action the
+/// policy cannot allow is not in it. Where the machine cannot confine a
+/// command (`reach.confined`), folder mode offers no command. `provided`
+/// are the capabilities the attached providers add (crate::provider), each
+/// cut by the same policy.
 pub fn for_center(
     cfg: &NodeConfig,
     entry: &CenterEntry,
-    now_ms: u64,
-    confined: bool,
+    reach: &Reach,
     provided: &[Capability],
 ) -> Descriptor {
-    build(cfg, entry, now_ms, true, confined, provided)
+    build(cfg, entry, reach, true, provided)
 }
 
 /// Every action a call may name: [`for_center`] without the cut by allow
 /// rules. A call for an action no rule covers still reaches the policy, which
-/// refuses it and writes the audit entry; only hidden ones are unknown.
+/// refuses it and writes the audit entry; only hidden ones are unknown. Its
+/// reach names no account: no center sees it.
 pub fn for_call(
     cfg: &NodeConfig,
     entry: &CenterEntry,
     now_ms: u64,
     provided: &[Capability],
 ) -> Descriptor {
-    build(cfg, entry, now_ms, false, true, provided)
+    let reach = Reach::of(entry, now_ms, None, true, None);
+    build(cfg, entry, &reach, false, provided)
 }
 
 /// The capabilities and their actions that `cap set` switches for `entry`,
@@ -592,9 +685,8 @@ pub fn switchable(cfg: &NodeConfig, entry: &CenterEntry) -> Vec<(String, Vec<Str
 fn build(
     cfg: &NodeConfig,
     entry: &CenterEntry,
-    now_ms: u64,
+    reach: &Reach,
     by_rules: bool,
-    confined: bool,
     provided: &[Capability],
 ) -> Descriptor {
     let mut caps = vec![node_cap()];
@@ -624,19 +716,24 @@ fn build(
             });
         }
     }
-    // Actions the policy cannot allow are left out, so the center builds no
-    // tool the node would refuse; off ones stay and fail `disabled`. A
-    // capability with no action left goes too.
+    // Actions the policy cannot allow are left out, so the center offers
+    // none the node would refuse; off ones stay, marked off, and fail
+    // `disabled`. A capability with no action left goes too.
     let view = View {
-        mode: entry.policy.mode_at(now_ms),
+        mode: reach.mode,
         by_rules,
-        confined,
+        confined: reach.confined,
     };
     for c in &mut caps {
         let id = c.id.clone();
         let provided = c.provider != "node";
         c.actions
             .retain(|a, decl| offered(&entry.policy, view, &id, a, decl.effect, provided));
+        for (a, decl) in &mut c.actions {
+            if entry.policy.cap_setting(&id, Some(a)) == Some(CapSetting::Off) {
+                decl.exposure = Some(Exposure::Off);
+            }
+        }
     }
     caps.retain(|c| {
         !((c.provider != "node" || matches!(c.id.as_str(), "fs" | "exec")) && c.actions.is_empty())
@@ -656,11 +753,13 @@ fn build(
             },
         },
         rev: 0,
+        // The mode is in `access`, which a center reads; the summary stays
+        // the same through a mode change.
         summary: format!(
-            "{platform} machine {name}: files and shell commands, under its owner's policy (mode {}).",
-            entry.policy.mode_at(now_ms).as_str()
+            "{platform} machine {name}: files and shell commands, under its owner's policy."
         ),
         capabilities: caps,
+        access: Some(reach.access(cfg!(windows))),
     };
     d.rev = rev_of(&d);
     d
@@ -683,6 +782,23 @@ mod tests {
     use nerve_policy::config::CenterPolicy;
     use nerve_proto::RpcError;
     use serde_json::Map;
+
+    /// [`super::for_center`] with the reach of `e` at `now_ms`: no account,
+    /// and its own folders only.
+    fn for_center(
+        cfg: &NodeConfig,
+        e: &CenterEntry,
+        now_ms: u64,
+        confined: bool,
+        provided: &[Capability],
+    ) -> Descriptor {
+        super::for_center(
+            cfg,
+            e,
+            &Reach::of(e, now_ms, None, confined, None),
+            provided,
+        )
+    }
 
     fn entry() -> CenterEntry {
         CenterEntry {
@@ -1180,6 +1296,198 @@ mod tests {
         let (p, other) = run(&cfg);
         assert_eq!(p["memory_mb"]["maximum"], 8192);
         assert_ne!(rev, other);
+    }
+
+    fn folder(path: &str, access: &str) -> Folder {
+        Folder {
+            path: path.into(),
+            access: nerve_policy::config::Access::parse(access).unwrap(),
+        }
+    }
+
+    fn folders(d: &Descriptor) -> Vec<(String, String)> {
+        d.access
+            .as_ref()
+            .unwrap()
+            .folders
+            .iter()
+            .map(|f| (f.path.clone(), f.access.clone()))
+            .collect()
+    }
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(p, a)| (p.to_string(), a.to_string()))
+            .collect()
+    }
+
+    /// A center is told its own mode, account and folders, and never
+    /// another pairing's.
+    #[test]
+    fn access_names_only_this_centers_folders() {
+        let mut cfg = NodeConfig::default();
+        let mut a = entry();
+        a.policy.mode = Mode::Folder;
+        a.policy.until = Some(50);
+        a.policy.folders = vec![folder("/home/me/proj", "rw")];
+        let mut b = entry();
+        b.name = "work".into();
+        b.center_id = "c2".into();
+        b.policy.mode = Mode::Folder;
+        b.policy.folders = vec![folder("/home/me/secret", "rwx")];
+        cfg.centers = vec![a.clone(), b];
+        let reach = Reach::of(&a, 10, Some("nerve-run".into()), true, None);
+        let d = super::for_center(&cfg, &a, &reach, &[]);
+        let access = d.access.clone().unwrap();
+        assert_eq!(access.mode, AccessMode::Folder);
+        assert_eq!(access.until_ms, Some(50));
+        assert_eq!(access.account.as_deref(), Some("nerve-run"));
+        assert!(access.confined);
+        assert_eq!(folders(&d), pairs(&[("/home/me/proj", "rw")]));
+        let text = serde_json::to_string(&d).unwrap();
+        assert!(!text.contains("secret"), "{text}");
+        // The mode is told in the access block, not in the summary.
+        assert!(!d.summary.contains("mode"), "{}", d.summary);
+    }
+
+    /// The built-in folders of `nerve-run` are named where the commands run
+    /// as that account, with every flag, together with a grant of the same
+    /// place; folders are named in folder mode only, and one with no flag
+    /// grants nothing.
+    #[test]
+    fn built_in_folders_only_when_separate() {
+        let mut e = entry();
+        e.policy.mode = Mode::Folder;
+        e.policy.folders = vec![
+            folder("/srv/data", "r"),
+            folder("/tmp", "r"),
+            folder("/srv/none", ""),
+        ];
+        let home = std::path::Path::new("/var/lib/nerve-run");
+        let separate = Reach::of(&e, 0, Some("nerve-run".into()), true, Some(home));
+        assert_eq!(
+            folders(&super::for_center(
+                &NodeConfig::default(),
+                &e,
+                &separate,
+                &[]
+            )),
+            pairs(&[
+                ("/srv/data", "r"),
+                ("/tmp", "rwx"),
+                ("/var/tmp", "rwx"),
+                ("/var/lib/nerve-run", "rwx"),
+            ])
+        );
+        let own = Reach::of(&e, 0, Some("me".into()), true, None);
+        let d = super::for_center(&NodeConfig::default(), &e, &own, &[]);
+        assert_eq!(folders(&d), pairs(&[("/srv/data", "r"), ("/tmp", "r")]));
+        // Outside folder mode no folder is named, and nothing is confined.
+        for mode in [Mode::Allowlist, Mode::User] {
+            e.policy.mode = mode;
+            let r = Reach::of(&e, 0, Some("nerve-run".into()), true, Some(home));
+            let d = super::for_center(&NodeConfig::default(), &e, &r, &[]);
+            let a = d.access.unwrap();
+            assert!(a.folders.is_empty(), "{mode:?}");
+            assert!(!a.confined, "{mode:?}");
+            assert_eq!(a.mode.as_str(), mode.as_str());
+        }
+        // A folder mode that ran out is allowlist, with no end to tell.
+        e.policy.mode = Mode::Folder;
+        e.policy.until = Some(5);
+        let r = Reach::of(&e, 5, None, true, None);
+        let a = super::for_center(&NodeConfig::default(), &e, &r, &[])
+            .access
+            .unwrap();
+        assert_eq!((a.mode, a.until_ms), (AccessMode::Allowlist, None));
+        assert!(a.folders.is_empty());
+    }
+
+    /// A Windows node names its folders in the center's form, as its paths
+    /// are given in calls.
+    #[test]
+    fn windows_folders_are_in_wire_form() {
+        let mut e = entry();
+        e.policy.mode = Mode::Folder;
+        e.policy.folders = vec![folder("C:\\Users\\me\\proj", "rwx"), folder("D:\\", "r")];
+        let r = Reach::of(&e, 0, Some("me".into()), false, None);
+        let a = r.access(true);
+        let got: Vec<(&str, &str)> = a
+            .folders
+            .iter()
+            .map(|f| (f.path.as_str(), f.access.as_str()))
+            .collect();
+        assert_eq!(got, [("/c/Users/me/proj", "rwx"), ("/d", "r")]);
+        assert!(!a.confined);
+        // A Unix node's stay as they are.
+        assert_eq!(r.access(false).folders[0].path, "C:\\Users\\me\\proj");
+    }
+
+    /// An action the owner switched off is listed and marked off, so the
+    /// center can tell it from one that is on.
+    #[test]
+    fn an_off_action_is_marked_off() {
+        let cfg = NodeConfig::default();
+        let mut e = entry();
+        e.policy.mode = Mode::User;
+        e.policy.caps.insert("fs.write".into(), CapSetting::Off);
+        let d = for_center(&cfg, &e, 0, true, &[]);
+        let fs = d.capability("fs").unwrap();
+        assert_eq!(fs.exposure, Exposure::On);
+        assert_eq!(fs.actions["write"].exposure, Some(Exposure::Off));
+        assert_eq!(fs.actions["read"].exposure, None);
+        assert_eq!(d.capability("exec").unwrap().actions["run"].exposure, None);
+        // A capability set off marks its actions off as well.
+        e.policy.caps.insert("exec".into(), CapSetting::Off);
+        let d = for_center(&cfg, &e, 0, true, &[]);
+        let exec = d.capability("exec").unwrap();
+        assert_eq!(exec.exposure, Exposure::Off);
+        assert_eq!(exec.actions["run"].exposure, Some(Exposure::Off));
+        // A provider's action likewise.
+        let provided = [provided(Effect::Read)];
+        e.policy.caps.insert("echo.say".into(), CapSetting::Off);
+        let d = for_center(&cfg, &e, 0, true, &provided);
+        assert_eq!(
+            d.capability("echo").unwrap().actions["say"].exposure,
+            Some(Exposure::Off)
+        );
+    }
+
+    /// What the access block names moves the rev, so the node tells the
+    /// center: a folder grant in folder mode, the mode, its end, the
+    /// account. A folder outside folder mode names nothing and leaves it.
+    #[test]
+    fn a_folder_grant_changes_the_rev() {
+        let cfg = NodeConfig::default();
+        let mut e = entry();
+        e.policy.mode = Mode::Folder;
+        let rev = |e: &CenterEntry, account: Option<&str>| {
+            let r = Reach::of(e, 0, account.map(str::to_string), true, None);
+            super::for_center(&cfg, e, &r, &[]).rev
+        };
+        let none = rev(&e, Some("me"));
+        e.policy.folders.push(folder("/home/me/proj", "rw"));
+        let one = rev(&e, Some("me"));
+        assert_ne!(none, one);
+        e.policy.folders[0].access = nerve_policy::config::Access::parse("rwx").unwrap();
+        assert_ne!(rev(&e, Some("me")), one);
+        assert_ne!(rev(&e, Some("nerve-run")), rev(&e, Some("me")));
+        e.policy.until = Some(1000);
+        assert_ne!(
+            rev(&e, Some("me")),
+            rev(
+                &{
+                    let mut x = e.clone();
+                    x.policy.until = None;
+                    x
+                },
+                Some("me")
+            )
+        );
+        e.policy.mode = Mode::User;
+        let user = rev(&e, Some("me"));
+        e.policy.folders.push(folder("/srv", "r"));
+        assert_eq!(rev(&e, Some("me")), user);
     }
 
     #[test]

@@ -515,6 +515,9 @@ pub(crate) struct Shared {
     /// Linux: the installed node's owner ([`NodeOptions::owner`]).
     #[cfg_attr(windows, allow(dead_code))]
     pub owner: Option<String>,
+    /// The name of the account this process runs as, looked up once: a
+    /// node run by hand runs its commands as it.
+    pub own_user: Option<String>,
     /// Linux: what the last sync of the folders' ACLs for `nerve-run` left
     /// (crate::acl); held while one runs, so that two never run at once.
     #[cfg(target_os = "linux")]
@@ -576,6 +579,64 @@ impl Shared {
                 .extend(crate::account::built_in(&a.home));
         }
         entry
+    }
+
+    /// What the center `entry` (the config's, as it is) may do now, for its
+    /// descriptor (crate::descriptor::Reach): from that entry alone, with the
+    /// built-in folders as [`Shared::with_built_in`] adds them for the gate.
+    /// It runs every few seconds for every link, so the account is named
+    /// without a lookup, and `nerve-run`'s home is the last one looked up.
+    pub fn reach(
+        &self,
+        cfg: &NodeConfig,
+        entry: &nerve_policy::CenterEntry,
+    ) -> crate::descriptor::Reach {
+        let now = crate::now_ms();
+        let run_home = self
+            .separate(&entry.policy)
+            .then(|| self.account_seen(cfg, &entry.policy))
+            .flatten()
+            .map(|a| a.home);
+        crate::descriptor::Reach::of(
+            entry,
+            now,
+            self.account_name(cfg, &entry.policy),
+            self.confined(cfg),
+            run_home.as_deref(),
+        )
+    }
+
+    /// The name of the account the commands of a pairing with `policy` run
+    /// as now ([`Shared::command_account`]), without looking it up: whether
+    /// it exists and may be used is the call's business.
+    pub fn account_name(
+        &self,
+        cfg: &NodeConfig,
+        policy: &nerve_policy::config::CenterPolicy,
+    ) -> Option<String> {
+        if !self.service {
+            return self.own_user.clone();
+        }
+        if cfg!(windows) || policy.runs_as_owner(crate::now_ms()) {
+            self.owner_name(cfg)
+        } else {
+            Some(crate::account::RUN_USER.to_string())
+        }
+    }
+
+    /// [`Shared::command_account`] as last looked up, however long ago;
+    /// looked up only when it never was. Not for deciding a call.
+    fn account_seen(
+        &self,
+        cfg: &NodeConfig,
+        policy: &nerve_policy::config::CenterPolicy,
+    ) -> Option<crate::service::Account> {
+        if let Some(name) = self.account_name(cfg, policy)
+            && let Some((_, a)) = lock(&self.account_cache).get(&name)
+        {
+            return a.clone();
+        }
+        self.command_account(cfg, policy).ok().flatten()
     }
 
     /// The accounts the folders' ACLs are for (crate::acl): `nerve-run` and
@@ -1326,6 +1387,7 @@ impl Daemon {
             relay: Default::default(),
             aside: opts.aside,
             owner: opts.owner,
+            own_user: crate::account::own_name(),
             #[cfg(target_os = "linux")]
             acl: Mutex::default(),
             #[cfg(target_os = "linux")]
