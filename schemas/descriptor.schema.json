@@ -42,7 +42,8 @@
             "required": ["path", "access"],
             "properties": {
               "path": {"type": "string"},
-              "access": {"type": "string", "pattern": "^r?w?x?$", "minLength": 1}
+              "access": {"type": "string", "pattern": "^r?w?x?$"},
+              "own": {"type": "boolean", "default": false}
             }
           }
         }

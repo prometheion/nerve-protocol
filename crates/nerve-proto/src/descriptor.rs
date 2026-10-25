@@ -203,7 +203,9 @@ pub struct Access {
     #[serde(default)]
     pub confined: bool,
     /// In `folder` mode: the folders the center's file calls and commands
-    /// may use. Empty in the other modes, where folders decide nothing.
+    /// may use. Only folder mode names them: in `allowlist` mode as
+    /// `nerve-run` they still hold the allowed commands, which this block
+    /// does not tell.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<FolderAccess>,
 }
@@ -214,13 +216,21 @@ pub struct FolderAccess {
     /// Absolute, in the center's path form (`/c/Users/x` for `C:\Users\x`).
     pub path: String,
     /// `r` (read), `w` (write) and `x` (run commands), each at most once,
-    /// in that order.
+    /// in that order. Empty for a folder with no rights inside a granted
+    /// one: where folders nest the deepest one decides, so it closes what
+    /// lies below it.
     pub access: String,
+    /// One of the command account's own folders (its home, `/tmp`,
+    /// `/var/tmp`), which the node adds where the commands run as an
+    /// account of their own, not as the owner: the place for scratch files.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own: bool,
 }
 
 impl FolderAccess {
     /// The flags as read, write and run, or `None` when `access` is not
-    /// one to three of `r`, `w`, `x` in that order.
+    /// up to three of `r`, `w`, `x` in that order. All three false is a
+    /// folder that closes what lies below it.
     pub fn flags(&self) -> Option<(bool, bool, bool)> {
         let mut rest = self.access.as_str();
         let mut take = |c: char| match rest.strip_prefix(c) {
@@ -231,7 +241,7 @@ impl FolderAccess {
             None => false,
         };
         let flags = (take('r'), take('w'), take('x'));
-        (rest.is_empty() && flags != (false, false, false)).then_some(flags)
+        rest.is_empty().then_some(flags)
     }
 }
 
@@ -442,7 +452,8 @@ mod tests {
         assert!(v.get("access").is_none());
         v["access"] = json!({"mode": "folder", "until_ms": 5, "account": "nerve-run",
                              "confined": true, "x-later": 1,
-                             "folders": [{"path": "/c/Users/x", "access": "rw"}]});
+                             "folders": [{"path": "/c/Users/x", "access": "rw"},
+                                         {"path": "/tmp", "access": "rwx", "own": true}]});
         let d: Descriptor = serde_json::from_value(v.clone()).unwrap();
         let a = d.access.clone().unwrap();
         assert_eq!(a.mode, AccessMode::Folder);
@@ -450,8 +461,12 @@ mod tests {
         assert_eq!(a.account.as_deref(), Some("nerve-run"));
         assert!(a.confined);
         assert_eq!(a.folders[0].flags(), Some((true, true, false)));
+        assert!(!a.folders[0].own && a.folders[1].own);
         let back = serde_json::to_value(&d).unwrap();
         assert_eq!(back["access"]["folders"][0]["path"], "/c/Users/x");
+        // `own` is sent only where it holds.
+        assert!(back["access"]["folders"][0].get("own").is_none());
+        assert_eq!(back["access"]["folders"][1]["own"], true);
         for bad in [
             json!({"mode": "later"}),
             json!("folder"),
@@ -476,13 +491,16 @@ mod tests {
             FolderAccess {
                 path: "/a".into(),
                 access: a.into(),
+                own: false,
             }
             .flags()
         };
         assert_eq!(f("rwx"), Some((true, true, true)));
         assert_eq!(f("r"), Some((true, false, false)));
         assert_eq!(f("wx"), Some((false, true, true)));
-        for bad in ["", "xr", "rr", "rwxq", "R"] {
+        // No rights: a folder that closes what lies below it.
+        assert_eq!(f(""), Some((false, false, false)));
+        for bad in ["xr", "rr", "rwxq", "R", " "] {
             assert_eq!(f(bad), None, "{bad}");
         }
     }

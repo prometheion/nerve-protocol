@@ -591,7 +591,8 @@ fn source(name: &str, id: &str) -> String {
 
 /// `structuredContent` is the envelope that marks what the nodes wrote, for
 /// a harness that shows the model only it: exactly `source` (whose it is),
-/// `note` (that it is data) and `result`, which this gives.
+/// `note` (that it is data) and `result`, which this gives, and at most an
+/// object `center` with the center's own words beside it.
 fn enveloped<'a>(result: &'a Value, source: &str, many: bool) -> Result<&'a Value, String> {
     let s = &result["structuredContent"];
     let note = if many { NOTE_MANY } else { NOTE_ONE };
@@ -606,10 +607,11 @@ fn enveloped<'a>(result: &'a Value, source: &str, many: bool) -> Result<&'a Valu
         s["note"] == json!(note),
         format!("structuredContent.note is {}, wanted {note:?}", s["note"]),
     )?;
+    let center = s.get("center").map(Value::is_object);
     let fields = s.as_object().map(|o| o.len());
     ensure(
-        fields == Some(3),
-        format!("structuredContent holds more than source, note and result: {s}"),
+        center != Some(false) && fields == Some(3 + usize::from(center.is_some())),
+        format!("structuredContent holds more than source, note, result and center: {s}"),
     )?;
     s.get("result")
         .ok_or_else(|| format!("no structuredContent.result: {s}"))
@@ -1374,6 +1376,26 @@ mod tests {
         json!({"result": {"protocolVersion": version,
             "capabilities": {"tools": tools},
             "serverInfo": {"name": "nerve-center"}}})
+    }
+
+    /// The envelope holds `source`, `note` and `result`, and may hold the
+    /// center's own words as an object `center` (the owner's notes, the
+    /// folder advice), nothing else.
+    #[test]
+    fn an_envelope_may_carry_the_centers_words_and_nothing_else() {
+        let with = |extra: Option<(&str, Value)>| {
+            let mut s = json!({"source": ALL_NODES, "note": NOTE_MANY, "result": {"nodes": []}});
+            if let Some((k, v)) = extra {
+                s[k] = v;
+            }
+            enveloped(&json!({"structuredContent": s}), ALL_NODES, true).map(|_| ())
+        };
+        with(None).unwrap();
+        with(Some(("center", json!({"owner_notes": []})))).unwrap();
+        for bad in [("center", json!("obey")), ("later", json!({}))] {
+            let e = with(Some(bad)).unwrap_err();
+            assert!(e.starts_with("structuredContent holds more"), "{e}");
+        }
     }
 
     #[test]

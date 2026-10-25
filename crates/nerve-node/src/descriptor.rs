@@ -562,9 +562,12 @@ pub struct Reach {
     /// Windows AppContainer, or `nerve-run` held by its own account);
     /// where it cannot, folder mode offers no command.
     pub confined: bool,
-    /// The folders the gate and the sandbox go by: the entry's, and the
-    /// built-in ones of `nerve-run` where its commands run as that account.
+    /// The folders the owner granted this center.
     pub folders: Vec<Folder>,
+    /// The built-in folders of `nerve-run` where its commands run as that
+    /// account ([`crate::account::built_in`]): the gate and the sandbox add
+    /// them to `folders`, and the block marks them as the account's own.
+    pub own: Vec<Folder>,
 }
 
 impl Reach {
@@ -579,29 +582,43 @@ impl Reach {
         run_home: Option<&std::path::Path>,
     ) -> Reach {
         let mode = entry.policy.mode_at(now_ms);
-        let mut folders = entry.policy.folders.clone();
-        if let Some(home) = run_home {
-            folders.extend(crate::account::built_in(home));
-        }
         Reach {
             mode,
             until_ms: entry.policy.until.filter(|_| mode != Mode::Allowlist),
             account,
             confined,
-            folders,
+            folders: entry.policy.folders.clone(),
+            own: run_home.map(crate::account::built_in).unwrap_or_default(),
         }
     }
 
     /// The `access` block: in `folder` mode with the folders in the
     /// center's path form (`windows`: `C:\x` is `/c/x`), one entry per
-    /// place with the flags of every grant of it together; a folder
-    /// without a flag grants nothing and is left out. Folders decide
-    /// nothing in the other modes, so they are not named there.
+    /// place with the flags of every grant of it together. A folder without
+    /// a flag is named only inside one with a flag, which it closes (the
+    /// deepest folder decides); elsewhere it grants nothing. Only folder
+    /// mode names folders: in allowlist mode as `nerve-run` they still hold
+    /// the allowed commands, which the block does not tell.
     fn access(&self, windows: bool) -> Access {
         let folder = self.mode == Mode::Folder;
-        let mut folders: Vec<(String, nerve_policy::config::Access)> = Vec::new();
-        for f in self.folders.iter().filter(|_| folder) {
-            if f.access.is_none() {
+        let within = |p: &str, b: &str| {
+            if windows {
+                nerve_policy::paths::win::within(p, b)
+            } else {
+                nerve_policy::paths::within(std::path::Path::new(p), std::path::Path::new(b))
+            }
+        };
+        // (the native path, the wire path, the flags, whether it is the
+        // account's own)
+        let mut folders: Vec<(&str, String, nerve_policy::config::Access, bool)> = Vec::new();
+        let all = self.folders.iter().map(|f| (f, false));
+        for (f, own) in all
+            .chain(self.own.iter().map(|f| (f, true)))
+            .filter(|_| folder)
+        {
+            // A name with a control character cannot be shown on one line
+            // as it is, and a line that changed it would name another place.
+            if f.path.chars().any(char::is_control) {
                 continue;
             }
             let path = if windows {
@@ -609,15 +626,27 @@ impl Reach {
             } else {
                 f.path.clone()
             };
-            match folders.iter_mut().find(|(p, _)| *p == path) {
-                Some((_, a)) => {
+            match folders
+                .iter_mut()
+                .find(|(n, _, _, _)| within(n, &f.path) && within(&f.path, n))
+            {
+                Some((_, _, a, o)) => {
                     a.read |= f.access.read;
                     a.write |= f.access.write;
                     a.execute |= f.access.execute;
+                    *o |= own;
                 }
-                None => folders.push((path, f.access)),
+                None => folders.push((&f.path, path, f.access, own)),
             }
         }
+        let granted: Vec<&str> = folders
+            .iter()
+            .filter(|(_, _, a, _)| !a.is_none())
+            .map(|(n, _, _, _)| *n)
+            .collect();
+        folders.retain(|(n, _, a, _)| {
+            !a.is_none() || granted.iter().any(|g| within(n, g) && !within(g, n))
+        });
         Access {
             mode: match self.mode {
                 Mode::Allowlist => AccessMode::Allowlist,
@@ -629,9 +658,10 @@ impl Reach {
             confined: folder && self.confined,
             folders: folders
                 .into_iter()
-                .map(|(path, a)| FolderAccess {
+                .map(|(_, path, a, own)| FolderAccess {
                     path,
                     access: a.to_string(),
+                    own,
                 })
                 .collect(),
         }
@@ -1311,7 +1341,12 @@ mod tests {
             .unwrap()
             .folders
             .iter()
-            .map(|f| (f.path.clone(), f.access.clone()))
+            .map(|f| {
+                (
+                    f.path.clone(),
+                    format!("{}{}", f.access, if f.own { " own" } else { "" }),
+                )
+            })
             .collect()
     }
 
@@ -1351,9 +1386,9 @@ mod tests {
     }
 
     /// The built-in folders of `nerve-run` are named where the commands run
-    /// as that account, with every flag, together with a grant of the same
-    /// place; folders are named in folder mode only, and one with no flag
-    /// grants nothing.
+    /// as that account, with every flag and marked as its own, together
+    /// with a grant of the same place; folders are named in folder mode
+    /// only, and one with no flag outside every granted one grants nothing.
     #[test]
     fn built_in_folders_only_when_separate() {
         let mut e = entry();
@@ -1374,9 +1409,9 @@ mod tests {
             )),
             pairs(&[
                 ("/srv/data", "r"),
-                ("/tmp", "rwx"),
-                ("/var/tmp", "rwx"),
-                ("/var/lib/nerve-run", "rwx"),
+                ("/tmp", "rwx own"),
+                ("/var/tmp", "rwx own"),
+                ("/var/lib/nerve-run", "rwx own"),
             ])
         );
         let own = Reach::of(&e, 0, Some("me".into()), true, None);
@@ -1401,6 +1436,57 @@ mod tests {
             .unwrap();
         assert_eq!((a.mode, a.until_ms), (AccessMode::Allowlist, None));
         assert!(a.folders.is_empty());
+    }
+
+    /// A folder with no rights inside a granted one closes what lies below
+    /// it (the deepest folder decides), so it is named, with no flag; on
+    /// Windows too, where case does not tell places apart.
+    #[test]
+    fn a_closed_folder_inside_a_granted_one_is_named() {
+        let mut e = entry();
+        e.policy.mode = Mode::Folder;
+        e.policy.folders = vec![
+            folder("/home/me/proj", "rwx"),
+            folder("/home/me/proj/secrets", ""),
+            folder("/home/me/projects", ""),
+            folder("/home/me/proj/secrets/open", "r"),
+        ];
+        let r = Reach::of(&e, 0, Some("me".into()), true, None);
+        let d = super::for_center(&NodeConfig::default(), &e, &r, &[]);
+        assert_eq!(
+            folders(&d),
+            pairs(&[
+                ("/home/me/proj", "rwx"),
+                ("/home/me/proj/secrets", ""),
+                ("/home/me/proj/secrets/open", "r"),
+            ])
+        );
+        e.policy.folders = vec![
+            folder("C:\\Work", "rw"),
+            folder("c:\\work\\keys", ""),
+            folder("c:\\WORK", "x"),
+        ];
+        let r = Reach::of(&e, 0, Some("me".into()), false, None);
+        let got: Vec<(String, String)> = r
+            .access(true)
+            .folders
+            .into_iter()
+            .map(|f| (f.path, f.access))
+            .collect();
+        assert_eq!(got, pairs(&[("/c/Work", "rwx"), ("/c/work/keys", "")]));
+    }
+
+    /// A folder whose name holds a control character is left out: the
+    /// center shows each on one line, and a changed name is another place.
+    #[test]
+    fn a_folder_named_with_a_control_character_is_left_out() {
+        let mut e = entry();
+        e.policy.mode = Mode::Folder;
+        e.policy.folders = vec![folder("/srv/a\nb", "rw"), folder("/srv/c\\d", "r")];
+        let r = Reach::of(&e, 0, None, true, None);
+        let d = super::for_center(&NodeConfig::default(), &e, &r, &[]);
+        // A backslash is part of a Unix name, and stays.
+        assert_eq!(folders(&d), pairs(&[("/srv/c\\d", "r")]));
     }
 
     /// A Windows node names its folders in the center's form, as its paths

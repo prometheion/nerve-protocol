@@ -1218,6 +1218,33 @@ mod tests {
         assert!(!APP_JS.contains("...localInstallBlocks("));
     }
 
+    /// The owner's note is counted in UTF-8 bytes, as the center counts it
+    /// (`maxlength` counts characters, and an umlaut takes two bytes): a
+    /// note that is too long is said so and kept in the field, not sent.
+    #[test]
+    fn the_note_field_counts_bytes_as_the_center_does() {
+        assert!(APP_JS.contains(&format!(
+            "const NOTE_MAX = {};",
+            crate::checker::config::NOTE_MAX
+        )));
+        let card = &APP_JS[APP_JS.find("function machineCard(").unwrap()..];
+        let card = &card[..card.find("\n}\n").unwrap()];
+        assert!(
+            card.contains("new TextEncoder().encode(noteIn.value.trim()).length"),
+            "{card}"
+        );
+        let save = &card[card.find("const saveNote = ").unwrap()..];
+        let save = &save[..save.find("\n  });").unwrap()];
+        assert!(
+            save.contains("if (n > NOTE_MAX) { notify(") && save.contains("return; }"),
+            "{save}"
+        );
+        assert!(
+            save.find("return; }").unwrap() < save.find("await saveChecker()").unwrap(),
+            "{save}"
+        );
+    }
+
     /// The node card names each action the center left out with its
     /// reason, from the overview's `broken`.
     #[test]

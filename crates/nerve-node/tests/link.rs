@@ -289,6 +289,63 @@ async fn a_folder_grant_through_the_owner_tells_the_center() {
     node.stop().await;
 }
 
+/// Two centers paired with one node in folder mode, each with a folder of
+/// its own: each one's descriptor, as its link builds it, names only that
+/// center's folder.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_center_is_told_only_its_own_folders() {
+    let dir = tempdir();
+    let mut a = FakeCenter::start(false).await.unwrap();
+    let mut b = FakeCenter::start(false).await.unwrap();
+    let o = options(dir.path());
+    nerve_node::pair::pair(&o.paths, &a.link(), Some("lab"))
+        .await
+        .expect("pair a");
+    nerve_node::pair::pair(&o.paths, &b.link(), Some("work"))
+        .await
+        .expect("pair b");
+    let (proj, secret) = (dir.path().join("proj"), dir.path().join("secret"));
+    for d in [&proj, &secret] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let (proj, secret) = (
+        std::fs::canonicalize(&proj).unwrap(),
+        std::fs::canonicalize(&secret).unwrap(),
+    );
+    owner_edit(&o.paths, |c| {
+        for (e, folder) in c.centers.iter_mut().zip([&proj, &secret]) {
+            e.policy.mode = nerve_policy::Mode::Folder;
+            e.policy.folders = vec![nerve_policy::config::Folder {
+                path: folder.display().to_string(),
+                access: nerve_policy::config::Access::parse("rw").unwrap(),
+            }];
+        }
+    })
+    .await;
+    let node = Daemon::start(o).await.expect("start");
+    for (center, mine, other) in [(&mut a, &proj, &secret), (&mut b, &secret, &proj)] {
+        let mut conn = linked(center).await;
+        let d = conn
+            .call("describe", json!({"detail": "summary"}), WAIT)
+            .await
+            .unwrap()
+            .expect("describe");
+        let folders: Vec<&str> = d["access"]["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["path"].as_str())
+            .collect();
+        assert!(
+            folders.contains(&nerve_policy::paths::to_wire(mine).as_str()),
+            "{d}"
+        );
+        let other = nerve_policy::paths::to_wire(other);
+        assert!(!d.to_string().contains(&other), "{d}");
+    }
+    node.stop().await;
+}
+
 /// No folder and no rule allows the read, so the node refuses it at once: it
 /// does not wait for anyone, and nothing is asked.
 #[tokio::test(flavor = "multi_thread")]

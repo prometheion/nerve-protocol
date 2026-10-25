@@ -1400,11 +1400,11 @@ async fn a_grant_change_needs_a_new_list_of_fs_and_exec_only() {
         assert!(matches!(seen.recv().await, Some(Seen::Invoke(_))));
     }
     let listed = list_text(&e, json!({"node": "box-1", "capability": ["fs.read"]})).await;
+    assert!(listed.contains("\nfolders: /a (rw)\n"), "{listed}");
     assert!(
-        listed.contains("folders: This node is in folder mode"),
+        listed.contains("[end of device content]\nFolders: The node is in folder mode"),
         "{listed}"
     );
-    assert!(listed.contains("/a (rw)"), "{listed}");
 
     // Another end of the mode alone: nothing to list again.
     let until = |n: u64| {

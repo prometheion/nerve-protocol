@@ -2554,6 +2554,126 @@ mod tests {
         }
     }
 
+    /// What each pairing's descriptor tells of the account and the folders,
+    /// as the link builds it: on the installed Linux node a folder pairing
+    /// runs as `nerve-run`, whose home, `/tmp` and `/var/tmp` it names as
+    /// that account's own; an allowlist pairing as `nerve-run` names the
+    /// account and no folder; a user pairing and an allowlist pairing as
+    /// the owner run as the owner, with no built-in folder. A node run by
+    /// hand runs everything as its own user, with no built-in folder.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn each_pairing_is_told_its_account_and_the_accounts_own_folders() {
+        use nerve_policy::config::{CenterPolicy, Folder, Mode};
+        for service in [true, false] {
+            let log = Log::new(Level::Info);
+            let d = tempfile::tempdir().unwrap();
+            let mut o = options(&d, &log);
+            o.full_rights = Some(false);
+            o.exe = Some("/bin/true".into());
+            o.service = Some(service);
+            o.owner = Some("alice".into());
+            let daemon = Daemon::start(o).await.unwrap();
+            let s = daemon.shared.clone();
+            let run_home = d.path().join("nerve-run");
+            // nerve-run and the owner as the account database has them.
+            for (name, uid, home) in [
+                (crate::account::RUN_USER, 4243, run_home.clone()),
+                ("alice", 4242, d.path().join("alice")),
+            ] {
+                lock(&s.account_cache).insert(
+                    name.into(),
+                    (
+                        std::time::Instant::now(),
+                        Some(crate::service::Account {
+                            name: name.into(),
+                            uid,
+                            gid: uid,
+                            comment: String::new(),
+                            home,
+                            groups: vec![uid],
+                        }),
+                    ),
+                );
+            }
+            let cfg = s.config();
+            let told = |mode: Mode, as_owner: bool| {
+                let entry = nerve_policy::CenterEntry {
+                    name: "c".into(),
+                    url: "https://center.example".into(),
+                    pin: None,
+                    center_id: "c".into(),
+                    node_id: "n".into(),
+                    settings: Default::default(),
+                    paused: false,
+                    revoked: false,
+                    unknown: false,
+                    public_key: None,
+                    key_rotations: 0,
+                    pin_rotations: 0,
+                    old_pin: None,
+                    policy: CenterPolicy {
+                        mode,
+                        as_owner,
+                        folders: vec![Folder {
+                            path: "/srv/proj".into(),
+                            access: nerve_policy::config::Access::parse("rw").unwrap(),
+                        }],
+                        ..Default::default()
+                    },
+                };
+                let r = s.reach(&cfg, &entry);
+                let a = crate::descriptor::for_center(&cfg, &entry, &r, &[])
+                    .access
+                    .unwrap();
+                let folders: Vec<String> = a
+                    .folders
+                    .iter()
+                    .map(|f| format!("{} {}{}", f.path, f.access, if f.own { " own" } else { "" }))
+                    .collect();
+                (a.account, folders)
+            };
+            let what = format!("service {service}");
+            let me = crate::account::own_name();
+            let proj = "/srv/proj rw".to_string();
+            if service {
+                assert_eq!(
+                    told(Mode::Folder, false),
+                    (
+                        Some(crate::account::RUN_USER.to_string()),
+                        vec![
+                            proj.clone(),
+                            "/tmp rwx own".into(),
+                            "/var/tmp rwx own".into(),
+                            format!("{} rwx own", run_home.display()),
+                        ]
+                    ),
+                    "{what}"
+                );
+                assert_eq!(
+                    told(Mode::Allowlist, false),
+                    (Some(crate::account::RUN_USER.to_string()), vec![]),
+                    "{what}"
+                );
+                for (mode, as_owner) in [(Mode::User, false), (Mode::Allowlist, true)] {
+                    assert_eq!(
+                        told(mode, as_owner),
+                        (Some("alice".to_string()), vec![]),
+                        "{what}: {mode:?}"
+                    );
+                }
+            } else {
+                assert_eq!(
+                    told(Mode::Folder, false),
+                    (me.clone(), vec![proj]),
+                    "{what}"
+                );
+                assert_eq!(told(Mode::User, false), (me, vec![]), "{what}");
+            }
+            daemon.stop().await;
+        }
+    }
+
     /// The status says of each pairing whether Landlock holds its commands,
     /// and on the installed Linux node without Landlock what nerve-run may
     /// read of the owner's home beyond its folders: with the home open to

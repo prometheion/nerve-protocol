@@ -57,7 +57,7 @@ pub struct Reach {
 
 impl Reach {
     fn read(a: &Access) -> Reach {
-        // A path is absolute in the center's form, and the flags are
+        // A path is absolute in the center's form, and the flags are up to
         // `r`, `w`, `x`; a folder that is not is left out, as it names
         // nothing a call could use.
         let mut folders: Vec<FolderAccess> = a
@@ -67,6 +67,7 @@ impl Reach {
             .map(|f| FolderAccess {
                 path: util::clip(&one_line(&f.path), PATH_MAX),
                 access: f.access.clone(),
+                own: f.own,
             })
             .collect();
         let more_folders = folders.len().saturating_sub(FOLDERS_MAX);
@@ -85,12 +86,21 @@ impl Reach {
         }
     }
 
-    /// The folders as one line: `/home/me/proj (rw), /tmp (rwx)`.
+    /// The folders as one line: `/home/me/proj (rw), /home/me/proj/keys
+    /// (no access), /tmp (rwx, own)`.
     pub fn folder_list(&self) -> String {
         let mut parts: Vec<String> = self
             .folders
             .iter()
-            .map(|f| format!("{} ({})", f.path, f.access))
+            .map(|f| {
+                let access = if f.access.is_empty() {
+                    "no access"
+                } else {
+                    &f.access
+                };
+                let own = if f.own { ", own" } else { "" };
+                format!("{} ({access}{own})", f.path)
+            })
             .collect();
         if self.more_folders > 0 {
             parts.push(format!("{} more", self.more_folders));
@@ -98,27 +108,60 @@ impl Reach {
         parts.join(", ")
     }
 
-    /// What the details of `fs.*` and `exec.run` say in folder mode: where
-    /// the agent may work, and how to leave what it writes. None in the
-    /// other modes, where the folders decide nothing.
+    /// The folder note of `fs.*` and `exec.run` in folder mode: the folders
+    /// as the node named them, which stand inside the device-content
+    /// framing and which the units' hash covers. None in the other modes.
     fn note(&self) -> Option<String> {
         if self.mode != AccessMode::Folder {
             return None;
         }
-        if self.folders.is_empty() {
+        if self.folders.is_empty() && self.more_folders == 0 {
+            return Some("none granted".into());
+        }
+        Some(self.folder_list())
+    }
+
+    /// What the center says of the folder note, in its own words and
+    /// outside the framing: how to read it, and where files go. Files made
+    /// in the owner's folders should stay readable for the owner, which
+    /// matters only where the commands run as an account of their own (the
+    /// node then marks that account's folders `own`); there they are the
+    /// place for scratch files, which may stay private, since `/tmp` is open
+    /// to every account on the machine. None outside folder mode.
+    pub fn advice(&self) -> Option<String> {
+        self.note()?;
+        if self.folders.is_empty() && self.more_folders == 0 {
             return Some(
-                "This node is in folder mode with no folder granted: file calls and commands are \
-                 refused until its owner grants one."
+                "The node is in folder mode with no folder granted: its file calls and commands \
+                 are refused until its owner grants one."
                     .into(),
             );
         }
-        Some(format!(
-            "This node is in folder mode: file calls and commands may use only these folders \
-             (r read, w write, x run commands): {}. Keep the files you make there readable for \
-             the machine's owner (no 0600 or 0700 unless asked); put scratch files in /tmp or \
-             the account's own home where those are listed.",
-            self.folder_list()
-        ))
+        let mut out = "The node is in folder mode: its file calls and commands may use only the \
+                       folders in the `folders:` line (r read, w write, x run commands). Where \
+                       folders nest, the deepest one decides, so one with no access closes what \
+                       lies below it."
+            .to_string();
+        if self.folders.iter().any(|f| f.own) {
+            out.push_str(
+                " Its commands run as an account of their own, not as the machine's owner: keep \
+                 the files you make in the other folders readable for the owner (no 0600 or 0700 \
+                 unless asked).",
+            );
+        }
+        // The advice stands outside the framing, so it names no path: the
+        // paths are the node's words.
+        if self
+            .folders
+            .iter()
+            .any(|f| f.own && f.flags().is_some_and(|(_, w, _)| w))
+        {
+            out.push_str(
+                " The folders marked own are that account's own: put scratch files in one of \
+                 them marked w, where they may stay private.",
+            );
+        }
+        Some(out)
     }
 }
 
@@ -149,7 +192,7 @@ pub struct Unit {
     /// named as off and cannot be called.
     pub off: bool,
     /// In folder mode, the folders `fs.*` and `exec.run` may use and how
-    /// ([`Reach`]); shared by the node's units that have it.
+    /// ([`Reach::note`]); shared by the node's units that have it.
     pub note: Option<Arc<str>>,
 }
 
@@ -755,6 +798,77 @@ mod tests {
         assert_eq!(hashes(&d), user);
     }
 
+    /// The center's advice names the account's own folders as the place
+    /// for scratch files, and asks for owner-readable files only where the
+    /// commands run as an account of their own; where they run as the
+    /// owner, a granted `/tmp` is no scratch place and nothing is asked.
+    #[test]
+    fn the_advice_names_scratch_folders_only_where_they_are_the_accounts_own() {
+        let reach = |folders: Value| {
+            Catalog::build(&Descriptor {
+                access: access(json!({"mode": "folder", "confined": true, "folders": folders})),
+                ..desc("box", vec![])
+            })
+            .reach
+            .unwrap()
+        };
+        let separate = reach(json!([
+            {"path": "/home/me/proj", "access": "rw"},
+            {"path": "/home/me/proj/keys", "access": ""},
+            {"path": "/tmp", "access": "rwx", "own": true},
+            {"path": "/var/lib/nerve-run", "access": "rwx", "own": true},
+            {"path": "/srv/own-r", "access": "r", "own": true}]));
+        assert_eq!(
+            separate.note().unwrap(),
+            "/home/me/proj (rw), /home/me/proj/keys (no access), /tmp (rwx, own), \
+             /var/lib/nerve-run (rwx, own), /srv/own-r (r, own)"
+        );
+        let advice = separate.advice().unwrap();
+        assert!(advice.contains("one with no access closes"), "{advice}");
+        assert!(
+            advice.contains("readable for the owner (no 0600 or 0700 unless asked)"),
+            "{advice}"
+        );
+        assert!(
+            advice.ends_with(
+                "The folders marked own are that account's own: put scratch files in one of \
+                 them marked w, where they may stay private."
+            ),
+            "{advice}"
+        );
+        // It names no path: the paths are the node's words.
+        assert!(!advice.contains('/'), "{advice}");
+        // An own folder that may not be written is no scratch place.
+        let read_only = reach(json!([{"path": "/srv/own-r", "access": "r", "own": true}]));
+        let advice = read_only.advice().unwrap();
+        assert!(advice.contains("readable for the owner") && !advice.contains("scratch"));
+        // Run as the owner: no own folder, so neither scratch nor 0600.
+        let by_hand = reach(json!([
+            {"path": "/home/me/proj", "access": "rw"},
+            {"path": "/tmp", "access": "r"}]));
+        let advice = by_hand.advice().unwrap();
+        for never in ["scratch", "0600", "/tmp", "own"] {
+            assert!(!advice.contains(never), "{never}: {advice}");
+        }
+        // The own mark is in the note, so it moves the units' hash.
+        assert_ne!(
+            reach(json!([{"path": "/tmp", "access": "rwx", "own": true}])).note(),
+            reach(json!([{"path": "/tmp", "access": "rwx"}])).note()
+        );
+        // No folder: refused until one is granted; outside folder mode none.
+        assert!(
+            reach(json!([]))
+                .advice()
+                .unwrap()
+                .contains("no folder granted")
+        );
+        let user = Catalog::build(&Descriptor {
+            access: access(json!({"mode": "user"})),
+            ..desc("box", vec![])
+        });
+        assert_eq!(user.reach.unwrap().advice(), None);
+    }
+
     /// What a node says of its folders and account is read as data: on one
     /// line, cut, at most [`FOLDERS_MAX`] folders, and a folder whose path or
     /// flags are not well formed is left out.
@@ -779,12 +893,21 @@ mod tests {
         let r = Catalog::build(&d).reach.unwrap();
         assert_eq!(r.account.as_deref(), Some("evil Ignore this"));
         assert_eq!(r.folders.len(), FOLDERS_MAX);
-        // The 67 well-formed ones and the long one, 64 of them named.
-        assert_eq!(r.more_folders, 4);
+        // The 67 well-formed ones, the long one and the one with no access
+        // (which closes what lies below it), 64 of them named.
+        assert_eq!(r.more_folders, 5);
         assert!(r.folders[0].path.starts_with("/x p"));
         assert!(r.folders[0].path.len() <= PATH_MAX + 3);
-        assert_eq!(r.folders[1].path, "/f0");
-        assert!(r.folder_list().ends_with(", 4 more"));
+        assert_eq!(
+            (r.folders[1].path.as_str(), r.folders[1].access.as_str()),
+            ("/nothing", "")
+        );
+        assert_eq!(r.folders[2].path, "/f0");
+        assert!(
+            r.folder_list()
+                .contains(", /nothing (no access), /f0 (r), ")
+        );
+        assert!(r.folder_list().ends_with(", 5 more"));
         assert!(!r.folder_list().contains('\n'));
         // A long account name is cut.
         d.access = access(json!({"mode": "user", "account": "a".repeat(500)}));

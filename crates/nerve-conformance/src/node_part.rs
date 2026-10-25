@@ -663,8 +663,10 @@ fn check_descriptor(v: &Value, node_id: &str, rev: u64) -> Result<(), String> {
 
 /// Whether the descriptor's `access` block (§6.2), when there is one, is
 /// well formed: a known mode, folders only in folder mode, each an absolute
-/// path in the center's form with one to three of `r`, `w`, `x` in that
-/// order, no place twice. A center reads a block it cannot take as none,
+/// path in the center's form on one line with up to three of `r`, `w`, `x`
+/// in that order (none for a folder that closes what lies below it), `own`
+/// a boolean, no place twice. A `\` is part of a Unix name, so it is not
+/// refused. A center reads a block it cannot take as none,
 /// so a node that sends one tells the agent nothing. (An action's
 /// `exposure` other than `on` or `off` fails the descriptor as a whole.)
 fn check_access(v: &Value) -> Result<(), String> {
@@ -705,16 +707,21 @@ fn check_access(v: &Value) -> Result<(), String> {
     for f in folders {
         let path = f["path"].as_str().unwrap_or_default();
         ensure(
-            path.starts_with('/') && !path.contains('\\') && !path.chars().any(char::is_control),
+            path.starts_with('/') && !path.chars().any(char::is_control),
             format!("access folder path {:?}", f["path"]),
         )?;
         let flags = nerve_proto::descriptor::FolderAccess {
             path: path.into(),
-            access: f["access"].as_str().unwrap_or_default().into(),
+            access: f["access"].as_str().unwrap_or("?").into(),
+            own: false,
         };
         ensure(
             flags.flags().is_some(),
             format!("access folder {path}: flags {:?}", f["access"]),
+        )?;
+        ensure(
+            f.get("own").is_none_or(Value::is_boolean),
+            format!("access folder {path}: own {}", f["own"]),
         )?;
         ensure(seen.insert(path), format!("access folder {path} twice"))?;
     }
@@ -769,14 +776,17 @@ mod tests {
         let good = json!({"mode": "folder", "until_ms": 5, "account": "nerve-run",
                           "confined": true,
                           "folders": [{"path": "/home/me/proj", "access": "rw"},
-                                      {"path": "/c/Users/me", "access": "rwx"}]});
+                                      {"path": "/c/Users/me", "access": "rwx"},
+                                      {"path": "/home/me/proj/keys", "access": ""},
+                                      {"path": "/srv/data\\2026", "access": "r"},
+                                      {"path": "/tmp", "access": "rwx", "own": true}]});
         let mut d = echo();
         d["access"] = good.clone();
         check_descriptor(&d, "node-id", 1).unwrap();
         d["access"] = json!({"mode": "user", "account": "me"});
         check_descriptor(&d, "node-id", 1).unwrap();
         type Edit = fn(&mut Value);
-        let cases: [(Edit, &str); 11] = [
+        let cases: [(Edit, &str); 14] = [
             (|a| a["mode"] = json!("later"), "access mode"),
             (|a| a["until_ms"] = json!(-1), "access until_ms"),
             (|a| a["account"] = json!("me\nyou"), "access account"),
@@ -805,8 +815,20 @@ mod tests {
                 "access folder path",
             ),
             (
+                |a| a["folders"][0]["path"] = json!("/home/me/a\nb"),
+                "access folder path",
+            ),
+            (
                 |a| a["folders"][0]["access"] = json!("wr"),
                 "access folder /home/me/proj: flags",
+            ),
+            (
+                |a| a["folders"][0]["access"] = json!(null),
+                "access folder /home/me/proj: flags",
+            ),
+            (
+                |a| a["folders"][0]["own"] = json!("yes"),
+                "access folder /home/me/proj: own",
             ),
             (
                 |a| a["folders"][1]["path"] = json!("/home/me/proj"),
