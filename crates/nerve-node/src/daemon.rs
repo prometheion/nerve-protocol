@@ -607,6 +607,11 @@ impl Shared {
         // Without a sandbox, a folder-mode command that runs at all runs as
         // `nerve-run`, held back by that account alone ([`folder_refusal`]).
         reach.held_by_account = !self.sandboxed();
+        // A command on the sudo list runs only while the switch is on, which
+        // it is not by default nor, on Linux, after a restart: the block
+        // tells the list only then. A switch change moves the rev like a
+        // grant. No store lock is held here; `sudo_on` takes it.
+        reach.sudo = reach.sudo && self.sudo_on();
         reach
     }
 
@@ -2253,6 +2258,62 @@ mod every_platform {
                 "{mode:?} as owner {as_owner}"
             );
         }
+        daemon.stop().await;
+    }
+
+    /// The reach tells the sudo list only while the node's sudo switch is
+    /// on: set in the config and a checked password held. Off by default,
+    /// a listed command is refused, so the block does not say it runs.
+    #[tokio::test]
+    async fn the_reach_tells_the_sudo_list_only_while_the_switch_is_on() {
+        use nerve_policy::config::{CenterPolicy, Mode, Sudo};
+        let d = tempfile::tempdir().unwrap();
+        let mut o = NodeOptions::new(NodePaths::new(
+            d.path().join("config"),
+            d.path().join("state"),
+        ));
+        o.home = d.path().to_path_buf();
+        o.ctl = false;
+        o.log = Some(Log::new(Level::Info));
+        o.owner = Some("alice".into());
+        let daemon = Daemon::start(o).await.unwrap();
+        let s = daemon.shared.clone();
+        let entry = nerve_policy::CenterEntry {
+            name: "c".into(),
+            url: "https://center.example".into(),
+            pin: None,
+            center_id: "c".into(),
+            node_id: "n".into(),
+            settings: Default::default(),
+            paused: false,
+            revoked: false,
+            unknown: false,
+            public_key: None,
+            key_rotations: 0,
+            pin_rotations: 0,
+            old_pin: None,
+            policy: CenterPolicy {
+                mode: Mode::Folder,
+                sudo_allow: vec!["sudo apt *".into()],
+                ..Default::default()
+            },
+        };
+        let told = || {
+            let r = s.reach(&s.config(), &entry);
+            crate::descriptor::for_center(&s.config(), &entry, &r, &[])
+        };
+        let off = told();
+        assert!(!off.access.as_ref().unwrap().sudo);
+        lock(&s.store)
+            .set_sudo(nerve_policy::Writer::Local, Sudo::On)
+            .unwrap();
+        // Set in the config, but no password held (a restarted node).
+        assert!(!told().access.unwrap().sudo);
+        *lock(&s.sudo) = Some(crate::sudo::Secret::new("pw".into()));
+        *lock(&s.sudo_for) = s.owner_name(&s.config());
+        let on = told();
+        assert!(on.access.as_ref().unwrap().sudo);
+        assert_ne!(on.rev, off.rev);
         daemon.stop().await;
     }
 }

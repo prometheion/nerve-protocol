@@ -53,8 +53,9 @@ pub struct Reach {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     pub confined: bool,
-    /// The owner's sudo allow list for this center names commands, which
-    /// run by that list alone ([`Access::sudo`]).
+    /// The owner's sudo allow list for this center names commands and the
+    /// node's sudo switch is on, so those run by that list alone
+    /// ([`Access::sudo`]).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub sudo: bool,
     pub folders: Vec<FolderAccess>,
@@ -274,15 +275,21 @@ pub struct Unit {
     /// In folder mode, the folders `fs.*` and `exec.run` may use and how
     /// ([`Reach::note`]); shared by the node's units that have it.
     pub note: Option<Arc<str>>,
+    /// The center's advice on that note ([`Reach::advice`]), for the units
+    /// that have one. The details show it once for all of them; the hash
+    /// covers it, so a sudo list or sandbox that changes what it says asks
+    /// for a new `list` too.
+    pub advice: Option<Arc<str>>,
 }
 
 impl Unit {
     /// What the model was told of this unit, as one number: SHA-256 over
-    /// its name, effect, description, params, result and folder note, cut to
-    /// 53 bits so it is exact as a JSON number. `execute` compares it with
-    /// the one `list` gave the session: a unit that changed must be listed
-    /// again, while a rule, mode or `until` change on the node leaves it
-    /// alone, unless it changes what the folder note says.
+    /// its name, effect, description, params, result, folder note and the
+    /// center's advice on it, cut to 53 bits so it is exact as a JSON
+    /// number. `execute` compares it with the one `list` gave the session: a
+    /// unit that changed must be listed again, while a rule, mode or
+    /// `until` change on the node leaves it alone, unless it changes what
+    /// the folder note or the advice says.
     pub fn hash(&self) -> u64 {
         let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
         // Each part with its length first, so no two units run together
@@ -295,6 +302,7 @@ impl Unit {
             self.params.to_string(),
             self.result.to_string(),
             self.note.as_deref().unwrap_or("").to_string(),
+            self.advice.as_deref().unwrap_or("").to_string(),
         ] {
             ctx.update(&(part.len() as u64).to_be_bytes());
             ctx.update(part.as_bytes());
@@ -334,6 +342,7 @@ impl Catalog {
             ..Catalog::default()
         };
         let note: Option<Arc<str>> = c.reach.as_ref().and_then(Reach::note).map(Into::into);
+        let advice: Option<Arc<str>> = c.reach.as_ref().and_then(Reach::advice).map(Into::into);
         // A capability id given twice would make `cap.action` name two
         // actions: `list` would show one and `execute` might check the
         // other. Neither is offered.
@@ -368,7 +377,7 @@ impl Catalog {
             let provider: Arc<str> = cap.provider.as_str().into();
             // The node's own files and commands are bound by the folders;
             // a provider's capability names no path.
-            let bound = cap.provider == "node" && matches!(cap.id.as_str(), "fs" | "exec");
+            let node = cap.provider == "node";
             if cap.actions.is_empty()
                 && let Some(reason) = whole.clone()
             {
@@ -386,6 +395,10 @@ impl Catalog {
                     continue;
                 }
                 let name = format!("{}.{action}", cap.id);
+                // Of the commands only `exec.run` starts one in a folder:
+                // `exec.signal` names a call, not a path, so a grant leaves
+                // it alone.
+                let bound = node && (cap.id == "fs" || (cap.id == "exec" && action == "run"));
                 if let Some(reason) = whole.clone() {
                     c.broken.push(Broken { name, reason });
                     continue;
@@ -413,6 +426,7 @@ impl Catalog {
                     provider: provider.clone(),
                     off: cap.exposure == Exposure::Off || def.exposure == Some(Exposure::Off),
                     note: note.clone().filter(|_| bound),
+                    advice: advice.clone().filter(|_| bound),
                 });
             }
         }
@@ -547,6 +561,7 @@ mod tests {
                 provider: "node".into(),
                 off: false,
                 note: None,
+                advice: None,
             }
         );
         assert!(c.offers("fs", "write"));
@@ -806,6 +821,7 @@ mod tests {
             provider: "node".into(),
             off: false,
             note: None,
+            advice: None,
         };
         assert_ne!(unit("x1", json!(2)).hash(), unit("x", json!(12)).hash());
     }
@@ -823,7 +839,14 @@ mod tests {
             "box",
             vec![
                 cap("fs", "fs", &[("read", Effect::Read, path())]),
-                cap("exec", "exec", &[("run", Effect::Execute, path())]),
+                cap(
+                    "exec",
+                    "exec",
+                    &[
+                        ("run", Effect::Execute, path()),
+                        ("signal", Effect::Actuate, json!({"type": "object"})),
+                    ],
+                ),
                 cap(
                     "lamp",
                     "",
@@ -834,7 +857,7 @@ mod tests {
         d.capabilities[2].provider = "desk".into();
         let hashes = |d: &Descriptor| -> Vec<u64> {
             let c = Catalog::build(d);
-            ["fs.read", "exec.run", "lamp.get"]
+            ["fs.read", "exec.run", "lamp.get", "exec.signal"]
                 .iter()
                 .map(|u| c.unit(u).unwrap().hash())
                 .collect()
@@ -857,6 +880,10 @@ mod tests {
                 .contains("/a (rw)")
         );
         assert_eq!(c.unit("lamp.get").unwrap().note, None);
+        // `exec.signal` names no folder, so it carries neither the folders
+        // nor the advice.
+        assert_eq!(c.unit("exec.signal").unwrap().note, None);
+        assert_eq!(c.unit("exec.signal").unwrap().advice, None);
         d.access = folder(json!([{"path": "/a", "access": "rw"}]), 9, "me");
         assert_eq!(hashes(&d), one);
         d.access = folder(
@@ -868,6 +895,22 @@ mod tests {
         assert_ne!(two[0], one[0]);
         assert_ne!(two[1], one[1]);
         assert_eq!(two[2], one[2]);
+        assert_eq!(two[3], one[3]);
+        // What the center's advice says counts too: a sudo list that comes
+        // into force, or a sandbox that goes, changes it.
+        let mut a = d.access.clone().unwrap();
+        a.sudo = true;
+        d.access = Some(a.clone());
+        let sudo = hashes(&d);
+        assert_ne!(sudo[0], two[0]);
+        assert_ne!(sudo[1], two[1]);
+        assert_eq!(sudo[2..], two[2..]);
+        a.sudo = false;
+        a.confined = false;
+        d.access = Some(a);
+        let loose = hashes(&d);
+        assert_ne!(loose[1], two[1]);
+        assert_eq!(loose[2..], two[2..]);
         // Out of folder mode the folders decide nothing and no note is told.
         d.access = access(json!({"mode": "user", "account": "me"}));
         let user = hashes(&d);
@@ -1363,6 +1406,7 @@ mod tests {
                 provider: "".into(),
                 off: false,
                 note: None,
+                advice: None,
             })
             .collect();
         let c = Catalog {

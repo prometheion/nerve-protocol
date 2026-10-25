@@ -568,7 +568,9 @@ pub struct Reach {
     /// them confined. Set by the daemon ([`crate::daemon::Shared::reach`]).
     pub held_by_account: bool,
     /// Whether the owner's sudo allow list for this center names commands,
-    /// which run by that list alone, in any folder and unconfined.
+    /// which run by that list alone, in any folder and unconfined, while
+    /// the node's sudo switch is on. The daemon clears it while the switch
+    /// is off ([`crate::daemon::Shared::reach`]).
     pub sudo: bool,
     /// The folders the owner granted this center.
     pub folders: Vec<Folder>,
