@@ -423,6 +423,7 @@ A folder with no flag is not named; the deepest named folder around it
 is marked `closed_below`, as it closes what lies below it (the deepest
 folder decides). A command on the sudo allow list is decided by that list
 alone, so in folder mode the block says when the list names commands
-while the sudo switch is on (`sudo`). It is built from
+while the sudo switch is on and `exec.run` is neither hidden nor off for
+that center (`sudo`). It is built from
 that center's pairing alone. It describes the policy; it decides nothing, and
 every call is still decided as above.

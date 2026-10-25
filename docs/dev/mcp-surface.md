@@ -59,11 +59,12 @@ conversation the model asks for it, like a skill:
   and counts in no statistics.
 - **Schema first.** `execute` runs a unit only after `list(node, capability)`
   gave this session its details, and only while the unit is the same, by a
-  hash over its name, effect, description (as `list` shows it), `params` and
-  `result`. Otherwise
+  hash over its name, effect, description (as `list` shows it), `params`,
+  `result`, and for `fs.*` and `exec.run` in folder mode the folder note and
+  the center's advice on it. Otherwise
   it answers `error list_first` and tells the model which `list` call to
   make. A rule or mode change alone does not change the hash, so it forces no
-  new `list`. The center then checks `args` against `params` and refuses a
+  new `list`, unless it changes the folder note or the advice (below). The center then checks `args` against `params` and refuses a
   misfit with `invalid_args` (`data`: `field`, `expected`) before the node
   gets it. A details answer gives each unit whole or names it for another
   call; only the units given count as listed.
@@ -82,7 +83,11 @@ conversation the model asks for it, like a skill:
   (`access`, [spec/protocol.md](spec/protocol.md) §6.2), cut to the calling
   center by the node. The folders reach the model in `list(node)` and in the
   details of `fs.*` and `exec.run`, whose hash covers that note, so a grant
-  change asks for a new `list` of those units alone.
+  change asks for a new `list` of those units alone. The center's advice on
+  it is hashed per unit: `exec.run`'s also says what holds a command (the
+  sandbox, the sudo list), the file calls' does not, so a sudo or sandbox
+  change asks for a new `list` of `exec.run` alone. The details show the
+  advice once, `exec.run`'s when it is among them.
 - A capability with exposure `off` (or an action marked `off`) is not offered; `list(node)` names it in
   one line, and `execute` of it is `forbidden`. A node the owner disabled in
   the center offers nothing; it stays paired and connected, and `execute` on

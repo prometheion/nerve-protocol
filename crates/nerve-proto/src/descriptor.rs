@@ -207,10 +207,11 @@ pub struct Access {
     #[serde(default)]
     pub confined: bool,
     /// In `folder` mode: the owner's sudo allow list for this center names
-    /// commands and the node's sudo switch is on. Such a command runs by
-    /// that list alone, with full rights: in any folder, and outside the
-    /// folders' limits and the sandbox. While the switch is off it is
-    /// refused, and this is false.
+    /// commands, the node's sudo switch is on, and `exec.run` is neither
+    /// hidden nor off for this center. Such a command runs by that list
+    /// alone, with full rights: in any folder, and outside the folders'
+    /// limits and the sandbox. While the switch is off, or `exec.run` is
+    /// hidden or off, none runs, and this is false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sudo: bool,
     /// In `folder` mode: the folders the center's file calls and commands

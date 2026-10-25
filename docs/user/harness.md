@@ -58,7 +58,7 @@ from `list`, when the model asks:
 |---|---|
 | `list()` | One line per machine: name, id, online, offline or disabled, platform, how many capabilities, the mode this center has there (and until when) and the account its commands run as. After them, the notes you wrote on machines (below) |
 | `list(node: "box-1")` | The mode line, in `folder` mode the folders this center may use with their flags (`/home/me/proj (rw, some folders below allow less), /tmp (rwx, own)`), then one line per capability of that machine: `fs.read`, `fs.write`, `exec.run` …, each with what it does. A machine with very many capabilities gets their names alone, and those that do not fit even then are counted |
-| `list(node: "box-1", capability: ["fs.read"])` | The details: what it does, its effect, its arguments (a JSON schema) and its result. In `folder` mode `fs.*` and `exec.run` add the folders, and the center says how to read them. Where the commands run as `nerve-run`, it asks the model to keep files it makes in your folders readable for you, by keeping their group bits (0640 or 0660, folders 0750 or 0770, not 0600 or 0700 unless asked), and to use the folders marked `own` (`nerve-run`'s home, `/tmp`, `/var/tmp`) for throwaway files only, and to change no program's settings there unless asked: every pairing whose commands run as `nerve-run` shares them, and `/tmp` and `/var/tmp` every account on the machine. The settings and caches its programs keep in `nerve-run`'s home are shared too, so what one pairing leaves there can change what another one's commands do ([modes](modes.md#the-account-nerve-run-linux)). Where the commands run as you, it says neither. Where your sudo list for that center names commands and the node's [sudo switch](sudo.md) is on, it says that those run by that list alone, with full rights, in any folder and outside the sandbox. `capability` is a list, such as `["fs.read", "exec.run"]`. The center takes one name alone too, but a harness that checks calls against the tool's schema refuses it |
+| `list(node: "box-1", capability: ["fs.read"])` | The details: what it does, its effect, its arguments (a JSON schema) and its result. In `folder` mode `fs.*` and `exec.run` add the folders, and the center says how to read them. Where the commands run as `nerve-run`, it asks the model to keep files it makes in your folders readable for you, by keeping their group bits (0640 or 0660, folders 0750 or 0770, not 0600 or 0700 unless asked), and to use the folders marked `own` (`nerve-run`'s home, `/tmp`, `/var/tmp`) for throwaway files only, and to change no program's settings there unless asked: every pairing whose commands run as `nerve-run` shares them, and `/tmp` and `/var/tmp` every account on the machine. The settings and caches its programs keep in `nerve-run`'s home are shared too, so what one pairing leaves there can change what another one's commands do ([modes](modes.md#the-account-nerve-run-linux)). Where the commands run as you, it says neither. Where your sudo list for that center names commands, the node's [sudo switch](sudo.md) is on and `exec.run` is neither hidden nor off for that center, the details of `exec.run` say that those run by that list alone, with full rights, in any folder and outside the sandbox; they say whether a sandbox holds the commands too. The file calls' details say neither, as neither changes what a file call may do. `capability` is a list, such as `["fs.read", "exec.run"]`. The center takes one name alone too, but a harness that checks calls against the tool's schema refuses it |
 
 Only this center's own mode, account and folders are shown: a machine paired
 with several centers tells each one its own, whether that center has the
@@ -100,9 +100,12 @@ a change of a rule, of a mode's end or of the mode alone needs no new `list`.
 What `fs.*` and `exec.run` say of the folders is the exception: in `folder`
 mode a folder you grant, change or take back changes it, and so does
 entering or leaving `folder` mode (also when a `folder --for` time runs
-out), turning the sudo switch on or off where your sudo list for that
-center names commands, and a sandbox that goes or comes back, so the model
-lists those again (and only those). The center remembers
+out), so the model lists those again (and only those). What `exec.run`
+alone says of what holds a command changes too when your sudo list for
+that center starts or stops naming commands, when you turn the sudo
+switch on or off, when you hide or turn off `exec.run` while the list
+names commands, and when a sandbox goes or comes back: the model lists
+`exec.run` again, and the file calls stay listed. The center remembers
 what each session was given, so a new session lists again.
 
 What `list` shows follows what the machines allow:

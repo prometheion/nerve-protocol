@@ -152,7 +152,8 @@ the `result` of the envelope described below.
   node left out for their names counted apart (`N more whose names cannot
   be shown on one line`); with none of either, `Folders: none granted yet`,
   which with `sudo` adds that a command on the sudo list still runs, as
-  the node sends `sudo` only while its sudo switch is on); a
+  the node sends `sudo` only while its sudo switch is on and `exec.run` is
+  callable); a
   disabled node shows
   neither, and a node that offers nothing still shows them, as the mode
   often says why; then one line per unit with its

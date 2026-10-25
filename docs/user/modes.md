@@ -69,7 +69,8 @@ marked as its own; a folder left without rights is not named, and the
 granted folder around it is marked as having folders below it that allow
 less; where the machine runs no `folder` mode command, no folder is shown
 with `x`, and where your sudo list for that center names commands while
-the node's [sudo switch](sudo.md) is on, the agent is told that those run
+the node's [sudo switch](sudo.md) is on and `exec.run` is neither hidden
+nor off for that center, the agent is told that those run
 by that list alone, in any folder and outside the sandbox): `list` shows
 them
 ([harness](harness.md#the-tools-the-model-gets)). Every center is told this
