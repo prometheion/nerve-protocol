@@ -57,8 +57,8 @@ from `list`, when the model asks:
 | Call | Answer |
 |---|---|
 | `list()` | One line per machine: name, id, online, offline or disabled, platform, how many capabilities, the mode this center has there (and until when) and the account its commands run as. After them, the notes you wrote on machines (below) |
-| `list(node: "box-1")` | The mode line, in `folder` mode the folders this center may use with their flags (`/home/me/proj (rw, some folders below closed), /tmp (rwx, own)`), then one line per capability of that machine: `fs.read`, `fs.write`, `exec.run` …, each with what it does. A machine with very many capabilities gets their names alone, and those that do not fit even then are counted |
-| `list(node: "box-1", capability: ["fs.read"])` | The details: what it does, its effect, its arguments (a JSON schema) and its result. In `folder` mode `fs.*` and `exec.run` add the folders, and the center says how to read them. Where the commands run as `nerve-run`, it asks the model to keep files it makes in your folders readable for you, by keeping their group bits (0640 or 0660, folders 0750 or 0770, not 0600 or 0700 unless asked), and to use the folders marked `own` (`nerve-run`'s home, `/tmp`, `/var/tmp`) for throwaway files only: every pairing whose commands run as `nerve-run` shares them, and `/tmp` and `/var/tmp` every account on the machine, so nothing secret should stay there. Where the commands run as you, it says neither. `capability` is a list, such as `["fs.read", "exec.run"]`. The center takes one name alone too, but a harness that checks calls against the tool's schema refuses it |
+| `list(node: "box-1")` | The mode line, in `folder` mode the folders this center may use with their flags (`/home/me/proj (rw, some folders below allow less), /tmp (rwx, own)`), then one line per capability of that machine: `fs.read`, `fs.write`, `exec.run` …, each with what it does. A machine with very many capabilities gets their names alone, and those that do not fit even then are counted |
+| `list(node: "box-1", capability: ["fs.read"])` | The details: what it does, its effect, its arguments (a JSON schema) and its result. In `folder` mode `fs.*` and `exec.run` add the folders, and the center says how to read them. Where the commands run as `nerve-run`, it asks the model to keep files it makes in your folders readable for you, by keeping their group bits (0640 or 0660, folders 0750 or 0770, not 0600 or 0700 unless asked), and to use the folders marked `own` (`nerve-run`'s home, `/tmp`, `/var/tmp`) for throwaway files only, and to change no program's settings there unless asked: every pairing whose commands run as `nerve-run` shares them, and `/tmp` and `/var/tmp` every account on the machine. The settings and caches its programs keep in `nerve-run`'s home are shared too, so what one pairing leaves there can change what another one's commands do ([modes](modes.md#the-account-nerve-run-linux)). Where the commands run as you, it says neither. Where your sudo list for that center names commands, it says that those run by that list alone, with full rights, in any folder and outside the sandbox. `capability` is a list, such as `["fs.read", "exec.run"]`. The center takes one name alone too, but a harness that checks calls against the tool's schema refuses it |
 
 Only this center's own mode, account and folders are shown: a machine paired
 with several centers tells each one its own, whether that center has the
@@ -66,9 +66,14 @@ settings grant or not. The folders are what the machine allows now; it
 still decides every call. Where folders nest, the deepest one decides. A
 folder you left without rights inside a granted one is not named, just as
 the machine's file calls hide it: the granted folder around it is shown with
-`some folders below closed`. Such a folder refuses file calls and commands
+`some folders below allow less`. Such a folder refuses file calls and commands
 that start in it, but a command started in the folder around it still
-reaches it; the center tells the model so. Where Landlock or an AppContainer
+reaches it; the center tells the model so. A folder whose name cannot be
+shown on one line (a line break or another control character in it, a blank
+at either end) is left out and counted, and marks the folder around it the
+same way where it allows less. Where the machine runs no command in
+`folder` mode (the installed Windows node, which starts no AppContainer),
+no folder is shown with `x`. Where Landlock or an AppContainer
 holds the commands, the center says the sandbox keeps them to the folders;
 on the installed Linux node without Landlock it says they reach what
 `nerve-run` may reach.

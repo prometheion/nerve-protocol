@@ -239,7 +239,8 @@ pub struct FolderAccess {
     /// One of the command account's own folders (its home, `/tmp`,
     /// `/var/tmp`), which the node adds where the commands run as an
     /// account of their own, not as the owner. Every pairing whose commands
-    /// run as that account shares them, so they are a place for throwaway
+    /// run as that account shares them, the settings and caches its
+    /// programs keep there included, so they are a place for throwaway
     /// files only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub own: bool,

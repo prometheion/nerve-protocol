@@ -147,8 +147,12 @@ the `result` of the envelope described below.
   (`Mode: folder until …; commands run as nerve-run.`) and, in folder mode,
   one with the folders and their flags (`Folders (r read, w write, x run
   commands; own: the command account's own): /home/me/proj (rw, some
-  folders below closed), /tmp (rwx, own)`; at most 64 folders, the
-  account's own ones kept first and the rest counted); a disabled node shows
+  folders below allow less), /tmp (rwx, own)`; at most 64 folders, the
+  account's own ones kept first and the rest counted, and the folders the
+  node left out for their names counted apart (`N more whose names cannot
+  be shown on one line`); with none of either, `Folders: none granted yet`,
+  which with `sudo` adds that a command on the sudo list still runs); a
+  disabled node shows
   neither, and a node that offers nothing still shows them, as the mode
   often says why; then one line per unit with its
   summary (its description cut at 200 characters), then the units that are
@@ -160,8 +164,8 @@ the `result` of the envelope described below.
   `structuredContent`: `{node, described, access?, capabilities: [{name,
   summary}], off, more, more_off}`, with the names shown, `summary` only when
   the text has it, and the counts of those not shown; `access` is `{mode,
-  until_ms?, account?, confined, folders: [{path, access, own?,
-  closed_below?}], more_folders}`.
+  until_ms?, account?, confined, sudo?, folders: [{path, access, own?,
+  closed_below?}], more_folders, unnamed?}`.
 - `list(node, capability)`: `capability` is a list of at most 32 names (a
   single name as a string is accepted too, though the schema declares the
   array).
@@ -176,17 +180,22 @@ the `result` of the envelope described below.
   only in one marked `x`; where folders nest the deepest one decides; with
   `confined` the machine's sandbox holds what a command reaches to these
   folders (and the system's files), without it the machine does not and
-  a command reaches what its account may reach; a folder marked as having
-  folders below it closed holds folders, not named, where file calls are
-  refused and no command may start, though a command started in a folder
-  around them still reaches them; and, only where a folder is marked `own` (the commands
+  a command reaches what its account may reach; with `sudo`, a command on
+  the owner's sudo list runs by that list alone, with full rights, in any
+  folder and beyond the folders and the sandbox; a folder marked as having
+  folders below it that allow less holds folders, not named, that allow
+  less than it or nothing, where a file call or a command's start may be
+  refused, though a command started in a folder around them still reaches
+  them; and, only where a folder is marked `own` (the commands
   run as an account of their own), that files made in the other folders
   should stay readable for the machine's owner, whose access goes through
   the group bits (0640 or 0660 for files, 0750 or 0770 for folders, not 0600
   or 0700 unless asked), and that an `own` folder marked `w` is for
   throwaway files only: every pairing whose commands run as that account
-  shares it (`/tmp` also every account on the machine), so nothing secret
-  stays there and nothing found there is trusted. Where the commands run as
+  shares it (`/tmp` also every account on the machine), with the settings
+  and caches its programs keep there, so what one pairing leaves there can
+  change what another one's commands do; nothing secret stays there, and no
+  program's settings are changed there unless asked. Where the commands run as
   the owner it says neither. The same advice is under `center` as `{"folders": …}` in
   `structuredContent`. Details are given whole: those that would take the
   answer past 240 KiB (in the text or in `structuredContent`) are named, whole,

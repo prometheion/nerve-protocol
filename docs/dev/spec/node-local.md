@@ -1053,12 +1053,17 @@ link builds it from that center's entry alone, with the built-in folders of
 the sandbox see them, and marked `own`; no other pairing's folders are in
 it. A folder with no flag is never named, as the file calls hide its name
 (`fs.list` leaves it out, a refusal under it reads like any other): the
-deepest granted folder around it is marked `closed_below` instead. A folder
+deepest named folder around it is marked `closed_below` instead. A folder
 whose name would read otherwise on one line (a control character, U+2028 or
-U+2029, a blank at either end) is left out. `confined` is set only where a
+U+2029, a blank at either end) is left out and counted in `unnamed`; where
+it allows less than the deepest named folder around it, that one is marked
+`closed_below` too. `confined` is set only where a
 sandbox holds folder-mode commands: the installed Linux node without
 Landlock runs them, held back by `nerve-run`'s account alone, and sends
-`false`. In
+`false`. Where the node runs no folder-mode command at all (`folder_refusal`
+answers, as on the Windows service), no folder is marked `x`. `sudo` says
+that the center's sudo allow list names commands, which run by that list
+alone, in any folder and unconfined. In
 `allowlist` mode as `nerve-run` the folders still hold the allowed
 commands, but only `folder` mode names them. The account's name needs no
 lookup of its own (the home of `nerve-run` is the last one looked up). The

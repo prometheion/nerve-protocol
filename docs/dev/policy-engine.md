@@ -419,8 +419,10 @@ The descriptor also says what the policy lets this center do now
 ([spec/protocol.md](spec/protocol.md) §6.2): the mode in force and when it
 ends, the account its commands run as, and in folder mode the folders with
 their flags, the built-in ones of `nerve-run` among them and marked `own`.
-A folder with no flag is not named; the deepest granted folder around it
+A folder with no flag is not named; the deepest named folder around it
 is marked `closed_below`, as it closes what lies below it (the deepest
-folder decides). It is built from
+folder decides). A command on the sudo allow list is decided by that list
+alone, so in folder mode the block says when the list names commands
+(`sudo`). It is built from
 that center's pairing alone. It describes the policy; it decides nothing, and
 every call is still decided as above.
