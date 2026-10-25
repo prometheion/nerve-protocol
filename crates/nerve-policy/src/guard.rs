@@ -49,27 +49,46 @@ impl Guard {
     /// by the rules of the shell its text was written for (`script.shell`):
     /// a `powershell -Command` body in a line for sh is PowerShell.
     pub fn refuses(self, script: &Script) -> bool {
+        self.scan(script).0
+    }
+
+    /// [`Guard::refuses`], and whether a word of the script, or of one
+    /// nested in it, names the node's program file. A nested script is read
+    /// once, whatever the depth, so the answer for a pipe does not cost a
+    /// pass over what is in the commands before it for each level.
+    fn scan(self, script: &Script) -> (bool, bool) {
         // What the earlier commands of the pipe the command stands in
         // name: one pass, so a long pipe costs no more than it is long.
         let mut fed = Fed::default();
+        let mut file = false;
         for cmd in &script.commands {
-            if !cmd.piped {
+            // The closer of a group (`{ echo <program>; } | xargs rm`) is a
+            // command of its own, but the pipe goes on through it.
+            if !cmd.piped && !is_closer(cmd) {
                 fed = Fed::default();
             }
-            if self.command(cmd, script.shell, fed) || cmd.inner.iter().any(|s| self.refuses(s)) {
-                return true;
+            let mut nested = false;
+            for inner in &cmd.inner {
+                let (refused, named) = self.scan(inner);
+                if refused {
+                    return (true, true);
+                }
+                nested |= named;
+            }
+            if self.command(cmd, script.shell, fed) {
+                return (true, true);
             }
             match self {
                 Guard::Service => fed.service |= mention(cmd, script.shell.windows()),
-                Guard::Programs => {
+                Guard::Programs if !fed.file => {
                     let spelling = Spelling::of(script.shell);
-                    fed.file =
-                        fed.file || cmd.words.iter().any(|w| is_node_file(&w.text, spelling));
+                    fed.file = nested || cmd.words.iter().any(|w| is_node_file(&w.text, spelling));
+                    file |= fed.file;
                 }
-                Guard::Paths => {}
+                _ => {}
             }
         }
-        false
+        (false, file)
     }
 
     fn command(self, cmd: &Command, shell: Shell, fed: Fed) -> bool {
@@ -96,6 +115,11 @@ impl Guard {
             Guard::Service => run(cmd, shell).is_some_and(|r| stops(&r, cmd, fed.service, win)),
         }
     }
+}
+
+/// Whether a command is the word that ends a group or a block.
+fn is_closer(cmd: &Command) -> bool {
+    matches!(cmd.words.as_slice(), [w] if matches!(w.text.as_str(), "}" | "fi" | "done" | "esac" | "end"))
 }
 
 /// What the earlier commands of a pipe name, for the rule that looks at it.
@@ -236,6 +260,9 @@ const TAKES_PATHS: &[&str] = &[
     "cpi",
     "rename-item",
     "rni",
+    // Takes no data from a pipe: only the path, by property name.
+    "clear-content",
+    "clc",
 ];
 
 /// Whether `r` copies, moves, links, deletes or overwrites the node's
@@ -287,22 +314,26 @@ fn is_node_file(word: &str, spelling: Spelling) -> bool {
     })
 }
 
-/// How much of one word `expand_braces` builds: at most `MAX_GROUPS` groups
-/// and a few times the word's length in bytes (every alternative copies the
-/// rest of the word). What is left stays as written, so a hostile word costs
-/// work in proportion to its length, not to its groups.
+/// How much of one word `expand_braces` builds: a few times the word's
+/// length in bytes, where every alternative copies the rest of the word and
+/// every word built costs [`WORD_COST`] besides. What is left stays as
+/// written, so a hostile word costs work in proportion to its length, not to
+/// its groups. There is no cap on the number of groups besides: every
+/// expansion pays for the words it builds, at least `2 * WORD_COST`, so the
+/// number of expansions, and the depth of the recursion, stay far under the
+/// word's length.
 struct Budget {
-    groups: usize,
     bytes: usize,
 }
 
-const MAX_GROUPS: usize = 64;
+/// What a word built by `expand_braces` costs besides its bytes (its
+/// allocation, and the base name taken from it).
+const WORD_COST: usize = 32;
 
 impl Budget {
     fn of(word: &str) -> Budget {
         Budget {
-            groups: MAX_GROUPS,
-            bytes: 16 * word.len() + 1024,
+            bytes: 16 * word.len() + 256,
         }
     }
 }
@@ -311,46 +342,46 @@ impl Budget {
 /// so on for the groups left. A group without a comma at its top level
 /// (`{}`, `{a..c}`) is not one.
 fn expand_braces(word: &str, out: &mut Vec<String>, budget: &mut Budget) {
-    if budget.groups > 0 {
-        let mut open = 0;
-        let mut depth = 0usize;
-        let mut cuts: Vec<usize> = Vec::new();
-        for (i, c) in word.char_indices() {
-            match c {
-                '{' => {
-                    if depth == 0 {
-                        open = i;
-                        cuts.clear();
-                    }
-                    depth += 1;
+    let mut open = 0;
+    let mut depth = 0usize;
+    let mut cuts: Vec<usize> = Vec::new();
+    for (i, c) in word.char_indices() {
+        match c {
+            '{' => {
+                if depth == 0 {
+                    open = i;
+                    cuts.clear();
                 }
-                ',' if depth == 1 => cuts.push(i),
-                '}' if depth > 0 => {
-                    depth -= 1;
-                    if depth == 0 && !cuts.is_empty() {
-                        // The words this group makes, counted before one is
-                        // built: a group that does not fit stays as written.
-                        let rest = word.len() - (i + 1 - open);
-                        let cost = (cuts.len() + 1) * rest + (i - open - 1) - cuts.len();
-                        if cost > budget.bytes {
-                            break;
-                        }
-                        budget.bytes -= cost;
-                        budget.groups -= 1;
-                        let mut start = open + 1;
-                        for end in cuts.iter().copied().chain([i]) {
-                            let alt = &word[start..end];
-                            let expanded = format!("{}{alt}{}", &word[..open], &word[i + 1..]);
-                            expand_braces(&expanded, out, budget);
-                            start = end + 1;
-                        }
-                        return;
-                    }
-                }
-                _ => {}
+                depth += 1;
             }
+            ',' if depth == 1 => cuts.push(i),
+            '}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 && !cuts.is_empty() {
+                    // The words this group makes, counted before one is
+                    // built: a group that does not fit stays as written.
+                    // Each word costs a fixed amount too, so many short
+                    // alternatives are not free.
+                    let rest = word.len() - (i + 1 - open);
+                    let cost = (cuts.len() + 1) * (rest + WORD_COST) + (i - open - 1) - cuts.len();
+                    if cost > budget.bytes {
+                        break;
+                    }
+                    budget.bytes -= cost;
+                    let mut start = open + 1;
+                    for end in cuts.iter().copied().chain([i]) {
+                        let alt = &word[start..end];
+                        let expanded = format!("{}{alt}{}", &word[..open], &word[i + 1..]);
+                        expand_braces(&expanded, out, budget);
+                        start = end + 1;
+                    }
+                    return;
+                }
+            }
+            _ => {}
         }
     }
+
     out.push(word.to_string());
 }
 
@@ -362,7 +393,14 @@ fn is_service_key(key: &str) -> bool {
     let key = key.trim_end_matches('\\');
     key.match_indices("\\services\\nerve-node").any(|(at, m)| {
         let rest = &key[at + m.len()..];
-        rest.is_empty() || rest.starts_with('\\')
+        // Services of the registry only: a folder `C:\Services\nerve-node`
+        // is a folder.
+        let set = key[..at].rsplit('\\').next().unwrap_or("");
+        let in_registry = set == "currentcontrolset"
+            || set
+                .strip_prefix("controlset")
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        in_registry && (rest.is_empty() || rest.starts_with('\\'))
     })
 }
 
@@ -559,7 +597,8 @@ fn stops(r: &Run, cmd: &Command, fed: bool, win: bool) -> bool {
                 ) && keys.iter().any(|k| is_service_key(k))
             })
         }
-        // The same key through PowerShell's registry provider.
+        // The same key through PowerShell's registry provider, with the
+        // names `Remove-Item` and the other item cmdlets go by.
         "new-itemproperty"
         | "remove-itemproperty"
         | "clear-itemproperty"
@@ -575,6 +614,20 @@ fn stops(r: &Run, cmd: &Command, fed: bool, win: bool) -> bool {
         | "mp"
         | "remove-item"
         | "ri"
+        | "rm"
+        | "del"
+        | "erase"
+        | "rd"
+        | "rmdir"
+        | "clear-item"
+        | "cli"
+        | "rename-item"
+        | "rni"
+        | "ren"
+        | "move-item"
+        | "mi"
+        | "move"
+        | "mv"
         | "new-item"
         | "ni"
             if win =>
@@ -719,7 +772,10 @@ fn pattern_names_node(pattern: &str, win: bool) -> bool {
     // a group's brackets surround one.
     first.split('|').any(|alt| {
         let alt = alt.trim_matches(['^', '$', '(', ')']);
+        // A group before the name stays on it (`debug/(nerve-node`,
+        // `(debug/)?nerve-node`).
         let name = base_name(alt, win);
+        let name = name.trim_start_matches(['(', ')', '?', '^']);
         is_node(name.trim_end_matches(['*', '.', '$', '+', '?']))
     })
 }
@@ -816,6 +872,15 @@ mod tests {
         expand_braces(&word, &mut out, &mut Budget::of(&word));
         let built: usize = out.iter().map(String::len).sum();
         assert!(built <= 20 * word.len() + 2048, "{built}");
+        // Short alternatives are not free either: every word built costs
+        // `WORD_COST` besides its bytes.
+        for word in ["{,}".repeat(7), "{a,b}".repeat(7), "{,}".repeat(2000)] {
+            let mut out = Vec::new();
+            let budget = Budget::of(&word);
+            let allowed = 1 + budget.bytes / WORD_COST;
+            expand_braces(&word, &mut out, &mut Budget::of(&word));
+            assert!(out.len() <= allowed, "{} words of {word:.20}", out.len());
+        }
         // A group that fits is still expanded in full.
         let mut out = Vec::new();
         expand_braces("a{b,c}d{e,f}", &mut out, &mut Budget::of("a{b,c}d{e,f}"));
@@ -830,6 +895,7 @@ mod tests {
             "HKEY_LOCAL_MACHINE/SYSTEM/CurrentControlSet/Services/nerve-node",
             "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\nerve-node\\Parameters",
             "HKLM\\SYSTEM\\CurrentControlSet\\Services\\nerve-node\\Parameters\\x",
+            "HKLM:\\SYSTEM\\ControlSet002\\Services\\nerve-node",
         ] {
             assert!(is_service_key(key), "{key:?}");
         }
@@ -838,6 +904,11 @@ mod tests {
             "HKLM\\SYSTEM\\CurrentControlSet\\Services\\nerve-node.exe",
             "HKLM\\SYSTEM\\CurrentControlSet\\Services\\nerve-node-desktop\\x",
             "HKLM\\SOFTWARE\\nerve-node",
+            // Folders and values that hold the same words are not keys.
+            "C:\\Services\\nerve-node\\logs\\old.log",
+            "C:\\Users\\a\\Services\\nerve-node\\target",
+            "HKLM\\SYSTEM\\ControlSet\\Services\\nerve-node",
+            "\\Services\\nerve-node",
         ] {
             assert!(!is_service_key(key), "{key:?}");
         }
@@ -852,6 +923,8 @@ mod tests {
             "^nerve-node|foo$",
             "(nerve-center|nerve-node)",
             "^(a|nerve-node)$",
+            "target/debug/(nerve-node|nerve-center)",
+            "(target/debug/)?nerve-node",
             "nerve-node|nerve-node-desktop",
         ] {
             assert!(pattern_names_node(p, false), "{p:?}");

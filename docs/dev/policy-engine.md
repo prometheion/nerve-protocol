@@ -121,9 +121,10 @@ text:
   of a file (`FILE_TOOLS`: `tee`, `dd`, `sed`, `chmod`, `curl`, `wget`,
   `Set-Content`, `Out-File`, `gzip`, `objcopy` …) on a file named as the node's programs.
   A word with a brace group is also read expanded in sh and fish
-  (`nerve-node{,.bak}`, bounded to 64 groups and to a few times the word's length in bytes; what is over stays as written), and the tools that take
+  (`nerve-node{,.bak}`, bounded to a few times the word's length in bytes, each word built counting a fixed amount too; what is over stays as written), and the tools that take
   paths (`TAKES_PATHS`, not the writers) are refused when an earlier
-  command of their pipe names the program (`… | xargs rm`, `Get-Item … |
+  command of their pipe names the program, also in a bracket or group of
+  that command (`… | xargs rm`, `Get-Item … | Remove-Item`, `(Get-Item …) |
   Remove-Item`), as `node-service` does with a name.
   Programs that only look at a file (`ls`, `sha256sum`) are not on the
   list, and neither are the ones that write a file in ways a list cannot

@@ -361,6 +361,49 @@ const NODE_ITSELF: &[Case] = &[
         PROGRAMS,
     ),
     ("echo /usr/local/bin/nerve-node | xargs rm", SH, PROGRAMS),
+    // The earlier command of the pipe may hold the path in a bracket.
+    (
+        r##"(Get-Item 'C:\Program Files\Nerve\nerve-node.exe') | Remove-Item -Force"##,
+        PS,
+        PROGRAMS,
+    ),
+    (
+        r##"$(Get-Item 'C:\Program Files\Nerve\nerve-node.exe') | Remove-Item"##,
+        PS,
+        PROGRAMS,
+    ),
+    (
+        r##"@('C:\Program Files\Nerve\nerve-node.exe') | Remove-Item"##,
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "(Get-Command nerve-node).Source | Remove-Item",
+        PS,
+        PROGRAMS,
+    ),
+    ("(echo /usr/local/bin/nerve-node) | xargs rm", SH, PROGRAMS),
+    (
+        "{ echo /usr/local/bin/nerve-node; } | xargs rm",
+        SH,
+        PROGRAMS,
+    ),
+    (
+        r#"readlink -f "$(command -v nerve-node)" | xargs sudo rm -f"#,
+        SH,
+        PROGRAMS,
+    ),
+    // `Clear-Content` takes no data from a pipe, only the path.
+    (
+        r##"Get-Item 'C:\Program Files\Nerve\nerve-node.exe' | Clear-Content"##,
+        PS,
+        PROGRAMS,
+    ),
+    (
+        r##"Get-Item 'C:\Program Files\Nerve\nerve-node.exe' | clc"##,
+        PS,
+        PROGRAMS,
+    ),
     (
         "echo /usr/local/bin/nerve-node | xargs sudo rm -f",
         SH,
@@ -884,6 +927,55 @@ const SERVICE_FORMS: &[Case] = &[
         PS,
         SERVICE,
     ),
+    // The names `Remove-Item` goes by, and the item cmdlets that empty,
+    // rename or move a key.
+    (
+        r"rm HKLM:\SYSTEM\CurrentControlSet\Services\nerve-node\Parameters -Recurse",
+        PS,
+        SERVICE,
+    ),
+    (
+        r"del HKLM:\SYSTEM\ControlSet001\Services\nerve-node\Parameters",
+        PS,
+        SERVICE,
+    ),
+    (
+        r"rd HKLM:\SYSTEM\CurrentControlSet\Services\nerve-node\Parameters",
+        PS,
+        SERVICE,
+    ),
+    (
+        r"Clear-Item HKLM:\SYSTEM\CurrentControlSet\Services\nerve-node",
+        PS,
+        SERVICE,
+    ),
+    (
+        r"cli HKLM:\SYSTEM\CurrentControlSet\Services\nerve-node\Parameters",
+        PS,
+        SERVICE,
+    ),
+    (
+        r"Rename-Item HKLM:\SYSTEM\CurrentControlSet\Services\nerve-node\Parameters -NewName P2",
+        PS,
+        SERVICE,
+    ),
+    (
+        r"Move-Item HKLM:\SYSTEM\CurrentControlSet\Services\nerve-node\Parameters HKLM:\SOFTWARE\x",
+        PS,
+        SERVICE,
+    ),
+    // The path-qualified patterns of the dev daemons.
+    (
+        "pkill -f 'target/debug/(nerve-node|nerve-center)'",
+        SH,
+        SERVICE,
+    ),
+    (
+        "pkill -f 'target/release/(nerve-node|nerve-center)'",
+        SH,
+        SERVICE,
+    ),
+    ("pkill -f '(target/debug/)?nerve-node'", SH, SERVICE),
     // The service by its display name.
     (r#"net stop "Nerve node""#, WIN, SERVICE),
     ("Stop-Service -DisplayName 'Nerve node'", PS, SERVICE),
@@ -1922,6 +2014,43 @@ const DATA: &[Case] = &[
     ("Get-Service -DisplayName 'Nerve node'", PS, None),
     (r#"net start "Nerve node""#, WIN, None),
     ("echo 'Nerve node'", ALL, None),
+    // A folder `Services\nerve-node` is a folder, not the service's key.
+    (r"Remove-Item C:\Services\nerve-node\logs\old.log", PS, None),
+    (
+        r"Remove-Item $env:USERPROFILE\Services\nerve-node\target -Recurse -Force",
+        PS,
+        None,
+    ),
+    (
+        r"New-Item -ItemType Directory C:\Services\nerve-node\backup",
+        PS,
+        None,
+    ),
+    (
+        r"ni C:\Services\nerve-node\logs -ItemType Directory",
+        PS,
+        None,
+    ),
+    (r"rm C:\Services\nerve-node\target -Recurse", PS, None),
+    (
+        r"Move-Item C:\Services\nerve-node\a.log C:\Services\nerve-node\b.log",
+        PS,
+        None,
+    ),
+    (
+        r#"reg add HKCU\Software\Classes\x\shell\open\command /ve /d "C:\Services\nerve-node\run.cmd" /f"#,
+        CMD,
+        None,
+    ),
+    // A pipe into a tool that empties files, from a command that is not the
+    // node's program; and a bracket around the earlier command.
+    (r"Get-ChildItem C:\logs\*.log | Clear-Content", PS, None),
+    (
+        "(cd crates/nerve-node && cargo build) 2>&1 | tee build.log",
+        SH,
+        None,
+    ),
+    ("(Get-ChildItem C:\\logs\\*.log) | Clear-Content", PS, None),
 ];
 
 /// A line the parser cannot read is checked with the text patterns of
@@ -2163,6 +2292,11 @@ fn a_long_pipe_is_checked_in_linear_time() {
             }
         }
     }
+    // Thousands of short brace words, read again at each level of `eval`:
+    // every word built costs, not only its bytes.
+    let words = "{,}{,}{,}{,}{,}{,}{,} ".repeat(2_900);
+    let hostile = format!("{}echo {words}", "eval ".repeat(15));
+    sh_fish[0].find("exec", "run", &hostile);
     assert!(
         start.elapsed() < std::time::Duration::from_secs(3),
         "took {:?}",
