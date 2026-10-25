@@ -6,17 +6,19 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
-use nerve_proto::RpcError;
+use nerve_proto::{ErrorCode, RpcError};
 use nerve_transport::http::{self, Request, Response};
 use nerve_transport::net::BoxIo;
 
+use crate::catalog;
 use crate::center::{CallError, Center, Change, Ran, Session};
+use crate::jobs::{self, NoSignal, Outcome, Stop};
 use crate::link;
 use crate::listing::{self, Answer, Miss};
 use crate::tools::Route;
@@ -356,8 +358,17 @@ impl Engine {
         let Value::Object(call_args) = call_args else {
             unreachable!("the arguments are an object")
         };
+        // The center's own units are served here: nothing goes to the
+        // node or the checker, and nothing is counted.
+        if &*unit.provider == catalog::CENTER {
+            return match fits {
+                Ok(()) => self.job_call(&sess, &route, &call_args).await,
+                Err(e) => call_error(&route, &RpcError::from(e)),
+            };
+        }
         let wait = self.center.call_wait();
         let out = match fits {
+            Ok(()) if is_signal(&unit) => self.signal(&sess, &route, call_args, wait).await,
             Ok(()) => {
                 self.center
                     .run(&sess, &route, call_args, None, Some(wait))
@@ -368,9 +379,196 @@ impl Engine {
         match out {
             Ran::Done(Ok(v)) => device_result(&route, v, false),
             Ran::Done(Err(CallError::Rpc(e))) => call_error(&route, &e),
-            Ran::Job(job) => running(&route, &job, wait),
+            Ran::Job(job) => {
+                // The answer names the calls that follow the job up, with
+                // their args: it counts as their details, so they run
+                // without a `list` first.
+                for u in catalog::center_units() {
+                    sess.listed(&route.node_id, &u.name, u.hash());
+                }
+                running(&route, &job, wait)
+            }
         }
     }
+
+    /// `exec.signal` of a job: the center maps the job's id to the `invoke`
+    /// id of its call, for this session's jobs on this node only, and sends
+    /// it on the link the call runs on. The checker and the node's policy
+    /// decide on it as on any call.
+    async fn signal(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        mut args: Map<String, Value>,
+        wait: Duration,
+    ) -> Ran {
+        let job = match args.remove("job") {
+            Some(Value::String(j)) => j,
+            _ => unreachable!("the params require the job as a string"),
+        };
+        let target = sess
+            .jobs
+            .lock()
+            .unwrap()
+            .signal_target(&job, &route.node_id);
+        let (link, invoke) = match target {
+            Ok(t) => t,
+            Err(why) => {
+                let e = match why {
+                    NoSignal::Unknown => RpcError::new(
+                        ErrorCode::Other("unknown_job".into()),
+                        no_job(&route.node_name, &job, true),
+                    ),
+                    NoSignal::NotCommand(unit) => RpcError::invalid_args(format!(
+                        "job {}: it is a call of {unit}, not a command; exec.signal signals exec.run jobs",
+                        util::clip(&job, 64)
+                    )),
+                    NoSignal::NotSent => RpcError::new(
+                        ErrorCode::Unavailable,
+                        format!(
+                            "job {job}: its call has not reached the node yet; try again in a moment"
+                        ),
+                    ),
+                };
+                // Counted as a refused call of exec.signal, as wrong args are.
+                return Ran::Done(Err(self.center.refused(sess, route, e)));
+            }
+        };
+        args.insert("call".into(), json!(invoke));
+        self.center
+            .run(sess, route, args, Some(link), Some(wait))
+            .await
+    }
+
+    /// `job.status` and `job.cancel`: the session's own jobs on this node.
+    async fn job_call(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        args: &Map<String, Value>,
+    ) -> Value {
+        let job = args.get("job").and_then(Value::as_str).unwrap_or_default();
+        let node = &route.node_id;
+        if route.action == "cancel" {
+            let cancelled = sess.jobs.lock().unwrap().cancel(job, node, Instant::now());
+            return match cancelled {
+                None => text_result(
+                    &format!(
+                        "error unknown_job: {}",
+                        no_job(&route.node_name, job, false)
+                    ),
+                    true,
+                ),
+                Some(Ok((r, ran, stop))) => {
+                    if let Some(stop) = stop {
+                        let _ = stop.send(Stop::Cancelled);
+                    }
+                    let mut v = text_result(
+                        &format!(
+                            "Job {job} ({}) is cancelled after {}: the node was told to stop its call.",
+                            job_what(&r),
+                            util::span(ran)
+                        ),
+                        false,
+                    );
+                    v["structuredContent"] = json!({"job": job, "state": "cancelled"});
+                    v
+                }
+                Some(Err(view)) => {
+                    let state = view.outcome.as_ref().map_or("running", Outcome::state);
+                    let mut v = text_result(
+                        &format!(
+                            "Job {job} ({}) had ended already ({state}): job.status gives its result.",
+                            job_what(&view.route)
+                        ),
+                        false,
+                    );
+                    v["structuredContent"] = json!({"job": job, "state": state});
+                    v
+                }
+            };
+        }
+        // `job.status`, waiting first when asked: at most the call wait, so
+        // no call holds the harness longer than an `execute` does.
+        let asked = args.get("wait_ms").and_then(Value::as_u64).unwrap_or(0);
+        let wait = Duration::from_millis(asked).min(self.center.call_wait());
+        let done = sess.jobs.lock().unwrap().done(job, node);
+        if let Some(mut done) = done.filter(|_| !wait.is_zero()) {
+            let _ = tokio::time::timeout(wait, done.wait_for(|d| *d)).await;
+        }
+        let view = sess.jobs.lock().unwrap().status(job, node, Instant::now());
+        let Some(view) = view else {
+            return text_result(
+                &format!(
+                    "error unknown_job: {}",
+                    no_job(&route.node_name, job, false)
+                ),
+                true,
+            );
+        };
+        let what = job_what(&view.route);
+        let ran = util::span(view.ran);
+        match view.outcome {
+            None => {
+                let mut v = text_result(
+                    &format!(
+                        "Job {job} ({what}) still runs after {ran}. Call job.status again later (wait_ms waits for its end), or job.cancel to stop it."
+                    ),
+                    false,
+                );
+                v["structuredContent"] = json!({"job": job, "state": "running"});
+                v
+            }
+            Some(Outcome::Done { value, cut }) => {
+                let mut v = device_result(&view.route, value, cut);
+                let text = v["content"][0]["text"].as_str().unwrap_or_default();
+                v["content"][0]["text"] = json!(format!(
+                    "Job {job} ({what}) ended after {ran}; its result, given only this once:\n{text}"
+                ));
+                if v["structuredContent"].is_object() {
+                    v["structuredContent"]["center"] = json!({"job": job, "state": "done"});
+                }
+                v
+            }
+            Some(Outcome::Failed(e)) => {
+                let lead = format!("job {job} ({what}) failed after {ran}: ");
+                job_error(&view.route, &e, &lead)
+            }
+            Some(Outcome::Lost) => text_result(
+                &format!(
+                    "error connection_lost: job {job} ({what}) was lost after {ran}: the link to node {} ended before its result came. The node stops a call whose link ends, so it may have done part of its work.",
+                    view.route.node_name
+                ),
+                true,
+            ),
+            Some(Outcome::Dropped { bytes }) => text_result(
+                &format!(
+                    "error too_large: job {job} ({what}) ended after {ran}, but its result ({bytes} bytes) was not kept: a session keeps at most {} MiB of results nobody read yet. Read a job's result soon after it ends.",
+                    jobs::KEPT_MAX / (1024 * 1024)
+                ),
+                true,
+            ),
+        }
+    }
+}
+
+/// Whether `unit` is the node's `exec.signal`, which names a job.
+fn is_signal(unit: &catalog::Unit) -> bool {
+    &*unit.provider == "node" && unit.cap == "exec" && unit.action == "signal"
+}
+
+/// `exec.run on node box-1`: what a job runs, for its answers.
+fn job_what(route: &Route) -> String {
+    format!("{}.{} on node {}", route.cap, route.action, route.node_name)
+}
+
+/// The words for a job id that names no job of this session on this node.
+fn no_job(node: &str, job: &str, running: bool) -> String {
+    let what = if running { "running job" } else { "job" };
+    format!(
+        "node {node} has no {what} {:?} of this session: the id is another session's or wrong, or its result was given already or not read for 10 minutes.",
+        util::clip(job, 64)
+    )
 }
 
 /// A call's result as the model gets it: the node's data, marked as
@@ -400,6 +598,11 @@ fn device_result(route: &Route, v: Value, cut: bool) -> Value {
 
 /// A call's error as the model gets it.
 fn call_error(route: &Route, e: &RpcError) -> Value {
+    job_error(route, e, "")
+}
+
+/// [`call_error`] with `lead` (what the call was) before the words.
+fn job_error(route: &Route, e: &RpcError, lead: &str) -> Value {
     // The node's own words (cut at the link) are said to be its own, so
     // they never read as a refusal of the center.
     let whose = if link::by_node(e) {
@@ -407,7 +610,7 @@ fn call_error(route: &Route, e: &RpcError) -> Value {
     } else {
         String::new()
     };
-    let mut t = format!("error {}: {whose}{}", e.kind().as_str(), e.message);
+    let mut t = format!("error {}: {lead}{whose}{}", e.kind().as_str(), e.message);
     if let Some(d) = e
         .data
         .as_ref()
@@ -853,7 +1056,7 @@ mod tests {
     use super::*;
     use crate::center::Options;
     use crate::store::NodeRecord;
-    use crate::tools::tests::{cap, desc};
+    use crate::tools::tests::{cap, desc, signal_params};
     use nerve_proto::{Effect, Exposure};
 
     fn open(dir: &std::path::Path) -> Center {
@@ -919,7 +1122,7 @@ mod tests {
                     "exec",
                     &[
                         ("run", Effect::Execute, path()),
-                        ("signal", Effect::Actuate, path()),
+                        ("signal", Effect::Actuate, signal_params()),
                     ],
                 ),
                 lamp,
@@ -1028,17 +1231,32 @@ mod tests {
         let all = call(&e, "list", json!({})).await;
         let want = listing::nodes(&c.listed_nodes());
         assert_eq!(text(&all), want.text);
-        assert!(text(&all).contains("- box-1 (id n1): offline, linux/x86_64, 2 capabilities\n"));
+        assert!(text(&all).contains("- box-1 (id n1): offline, linux/x86_64, 5 capabilities\n"));
         assert_eq!(all["structuredContent"], want.data);
         assert_eq!(all["isError"], false);
 
         for node in ["box-1", "n1"] {
             let one = call(&e, "list", json!({"node": node})).await;
             assert_eq!(text(&one), listing::units(&c.offer("box-1").unwrap()).text);
+            let names: Vec<&str> = one["structuredContent"]["result"]["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|u| u["name"].as_str().unwrap())
+                .collect();
             assert_eq!(
-                one["structuredContent"]["result"]["capabilities"],
-                json!([{"name": "exec.run", "summary": "run it"},
-                              {"name": "fs.read", "summary": "read it"}])
+                names,
+                [
+                    "exec.run",
+                    "exec.signal",
+                    "fs.read",
+                    "job.cancel",
+                    "job.status"
+                ]
+            );
+            assert_eq!(
+                one["structuredContent"]["result"]["capabilities"][2],
+                json!({"name": "fs.read", "summary": "read it"})
             );
             assert_eq!(
                 one["structuredContent"]["result"]["off"],
@@ -1078,8 +1296,20 @@ mod tests {
             path()
         );
 
-        // Never the reserved ones, nor what is not offered yet.
-        for hidden in ["settings.set", "exec.signal"] {
+        // `exec.signal` is offered by the job's id.
+        let signal = call(
+            &e,
+            "list",
+            json!({"node": "box-1", "capability": "exec.signal"}),
+        )
+        .await;
+        assert_eq!(
+            signal["structuredContent"]["result"]["capabilities"][0]["params"]["required"],
+            json!(["job", "signal"])
+        );
+
+        // Never the reserved ones, nor one the center left out.
+        for hidden in ["settings.set", "fs.grep"] {
             let r = call(&e, "list", json!({"node": "box-1", "capability": hidden})).await;
             assert_eq!(r["isError"], true, "{hidden}");
             assert!(text(&r).starts_with("error unknown_capability: "), "{r}");
@@ -1206,9 +1436,10 @@ mod tests {
                 json!({"node": "box-1", "capability": "settings.set", "args": {"path": "/"}}),
                 "error unknown_capability: node box-1 offers no \"settings.set\": call list with node \"box-1\" for its capabilities.",
             ),
+            // Offered now, by the job's id: like any unit, after its list.
             (
-                json!({"node": "box-1", "capability": "exec.signal", "args": {"path": "/"}}),
-                "error unknown_capability: node box-1 offers no \"exec.signal\": call list with node \"box-1\" for its capabilities.",
+                json!({"node": "box-1", "capability": "exec.signal", "args": {"job": "j-1", "signal": "term"}}),
+                "error list_first: call list with node \"box-1\" and capability [\"exec.signal\"] first, then execute it with args that fit the params list gives.",
             ),
             (
                 json!({"node": "box-1", "capability": "lamp.on", "args": {"path": "/"}}),

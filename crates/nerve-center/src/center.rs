@@ -3837,6 +3837,40 @@ mod tests {
         assert_eq!(audited(), 1);
     }
 
+    /// A job's `exec.signal` goes only on the link its call runs on: the
+    /// `invoke` id it names is that link's, and on the node's newer link it
+    /// would name another call.
+    #[tokio::test]
+    async fn a_jobs_signal_goes_on_its_own_link_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        c.update(|s| {
+            s.nodes.insert("n1".into(), node_record("n1", "linux"));
+        });
+        online(&c, "n1");
+        let sess = c.new_session("test");
+        let mut route = exec_route("n1");
+        route.action = "signal".into();
+        route.effect = nerve_proto::Effect::Actuate;
+        let mut args = Map::new();
+        args.insert("call".into(), json!(1));
+        args.insert("signal".into(), json!("term"));
+        let old = Arc::new(Link::for_test("n1"));
+        let Ran::Done(Err(CallError::Rpc(e))) =
+            c.run(&sess, &route, args.clone(), Some(old), None).await
+        else {
+            panic!("refused")
+        };
+        assert_eq!(e.kind(), ErrorCode::InvalidArgs, "{}", e.message);
+        assert!(e.message.contains("no longer runs"), "{}", e.message);
+        // On its own link it is sent (and this test link has lost it).
+        let own = c.link("n1");
+        let Ran::Done(Err(CallError::Rpc(e))) = c.run(&sess, &route, args, own, None).await else {
+            panic!("sent")
+        };
+        assert_eq!(e.kind(), ErrorCode::ConnectionLost, "{}", e.message);
+    }
+
     /// The owner's note on a machine is kept on one line, refused when long,
     /// shown by `list()` for that machine only, and outlives the machine's
     /// pairing like its other settings; a note of blanks is no setting.

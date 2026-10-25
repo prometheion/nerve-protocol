@@ -33,9 +33,11 @@ use nerve_proto::{ErrorCode, RpcError};
 
 use crate::daemon::{Shared, lock};
 
-/// The capabilities and profiles that are the node's own: a provider may
-/// not take their names, so no call meant for them reaches it.
-pub const BUILT_IN: &[&str] = &["node", "fs", "exec", "settings", "audit"];
+/// The capabilities and profiles that are the node's own, and the ones the
+/// center serves itself on every node (`job`, `stream`): a provider may not
+/// take their names, so no call meant for them reaches it, and a center
+/// never leaves its capability out for the name.
+pub const BUILT_IN: &[&str] = &["node", "fs", "exec", "settings", "audit", "job", "stream"];
 
 /// How many capabilities one provider may add, and actions one capability
 /// may have: far past what a program offers, and a bound on what every
@@ -384,11 +386,14 @@ fn capabilities(
             return Err(format!("capability {why}"));
         }
         if BUILT_IN.contains(&f.id.as_str()) {
-            return Err(format!("capability {} is the node's own", f.id));
+            return Err(format!(
+                "capability {}: the name is the node's or the center's own",
+                f.id
+            ));
         }
         if BUILT_IN.contains(&f.profile.as_str()) {
             return Err(format!(
-                "capability {}: the profile {} is the node's own",
+                "capability {}: the profile {} is the node's or the center's own",
                 f.id, f.profile
             ));
         }
@@ -675,7 +680,21 @@ mod tests {
             ),
             (
                 json!([{"id": "fs", "actions": {"a": {"effect": "read"}}}]),
-                "node's own",
+                "capability fs: the name is the node's or the center's own",
+            ),
+            // The center serves `job.status` and `job.cancel` on every node,
+            // and keeps `stream` for streams.
+            (
+                json!([{"id": "job", "actions": {"status": {"effect": "read"}}}]),
+                "capability job: the name is the node's or the center's own",
+            ),
+            (
+                json!([{"id": "stream", "actions": {"read": {"effect": "read"}}}]),
+                "capability stream: the name",
+            ),
+            (
+                json!([{"id": "x", "profile": "job", "actions": {"a": {"effect": "read"}}}]),
+                "profile job",
             ),
             (
                 json!([{"id": "x", "profile": "exec", "actions": {"a": {"effect": "read"}}}]),
