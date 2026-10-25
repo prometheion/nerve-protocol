@@ -256,7 +256,8 @@ fn changes_file(r: &Run, spelling: Spelling) -> bool {
 /// whether it was quoted or not.
 fn is_node_file(word: &str, spelling: Spelling) -> bool {
     let Spelling { win, comma, brace } = spelling;
-    if !may_name_node(word, win) {
+    // A brace group can build the name (`nerve-{node,x}`).
+    if !(brace && word.contains('{')) && !may_name_node(word, win) {
         return false;
     }
     let value = match word.split_once('=') {
