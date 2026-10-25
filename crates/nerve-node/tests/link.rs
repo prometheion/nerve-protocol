@@ -308,10 +308,13 @@ async fn each_center_is_told_only_its_own_folders() {
     for d in [&proj, &secret] {
         std::fs::create_dir_all(d).unwrap();
     }
-    let (proj, secret) = (
-        std::fs::canonicalize(&proj).unwrap(),
-        std::fs::canonicalize(&secret).unwrap(),
-    );
+    // Where the folder really is, without Windows' `\\?\` prefix.
+    let real = |p: &Path| {
+        std::path::PathBuf::from(nerve_policy::paths::win::strip_verbatim(
+            &std::fs::canonicalize(p).unwrap().display().to_string(),
+        ))
+    };
+    let (proj, secret) = (real(&proj), real(&secret));
     owner_edit(&o.paths, |c| {
         for (e, folder) in c.centers.iter_mut().zip([&proj, &secret]) {
             e.policy.mode = nerve_policy::Mode::Folder;

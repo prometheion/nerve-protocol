@@ -1153,6 +1153,9 @@ mod tests {
         assert_eq!(got.data["result"]["capabilities"], json!([]));
         assert_eq!(got.data["result"]["off"], json!([]));
         assert_eq!(got.data["result"]["node"]["capabilities"], 0);
+        // Nor its mode, account or folders.
+        assert!(got.data["result"].get("access").is_none(), "{}", got.data);
+        assert!(got.data["result"]["node"].get("mode").is_none());
 
         let got = units(&offer(&record("new", None), true));
         assert_eq!(
