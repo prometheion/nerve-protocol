@@ -360,7 +360,7 @@ impl Engine {
         };
         // The center's own units are served here: nothing goes to the
         // node or the checker, and nothing is counted.
-        if &*unit.provider == catalog::CENTER {
+        if catalog::is_center(&unit) {
             return match fits {
                 Ok(()) => self.job_call(&sess, &route, &call_args).await,
                 Err(e) => call_error(&route, &RpcError::from(e)),
@@ -382,11 +382,20 @@ impl Engine {
             Ran::Job(job) => {
                 // The answer names the calls that follow the job up, with
                 // their args: it counts as their details, so they run
-                // without a `list` first.
-                for u in catalog::center_units() {
+                // without a `list` first. `exec.signal` is named only where
+                // the node offers it now.
+                let mut follow = catalog::center_units();
+                let command = (route.cap.as_str(), route.action.as_str()) == ("exec", "run");
+                if command
+                    && let Ok(Some((_, u))) = self.center.listed_unit(&route.node_id, "exec.signal")
+                    && is_signal(&u)
+                {
+                    follow.push(u);
+                }
+                for u in &follow {
                     sess.listed(&route.node_id, &u.name, u.hash());
                 }
-                running(&route, &job, wait)
+                running(&route, &job, wait, follow.iter().any(is_signal))
             }
         }
     }
@@ -402,9 +411,14 @@ impl Engine {
         mut args: Map<String, Value>,
         wait: Duration,
     ) -> Ran {
+        // The params the center publishes require the job; a node's own
+        // schema decides the rest, so this is checked, not assumed.
         let job = match args.remove("job") {
             Some(Value::String(j)) => j,
-            _ => unreachable!("the params require the job as a string"),
+            _ => {
+                let e = RpcError::invalid_args("job: expected the id of a running job, a string");
+                return Ran::Done(Err(self.center.refused(sess, route, e)));
+            }
         };
         let target = sess
             .jobs
@@ -627,10 +641,11 @@ fn job_error(route: &Route, e: &RpcError, lead: &str) -> Value {
 }
 
 /// The answer of an `execute` whose call became the job `job` after `wait`:
-/// the center's own words, with the calls that follow it up.
-fn running(route: &Route, job: &str, wait: Duration) -> Value {
+/// the center's own words, with the calls that follow it up; `signal` when
+/// the node offers `exec.signal` for it.
+fn running(route: &Route, job: &str, wait: Duration, signal: bool) -> Value {
     let node = &route.node_name;
-    let signal = if (route.cap.as_str(), route.action.as_str()) == ("exec", "run") {
+    let signal = if signal {
         format!(
             " exec.signal with args {{\"job\": {job:?}, \"signal\": \"term\"}} asks its command to stop."
         )

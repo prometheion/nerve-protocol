@@ -31,6 +31,10 @@ pub const DUPLICATE_PING: Duration = Duration::from_secs(3);
 pub const DEAD_AFTER: Duration = Duration::from_secs(45);
 /// How long the center waits for a `describe`, `get` or `settings.set`.
 pub const SHORT_CALL: Duration = Duration::from_secs(30);
+/// The node's call places (its `limits.calls`, 64 for nerve-node) the
+/// agents' calls leave free: the owner's settings changes from the center
+/// and a job's `exec.signal` find a place while jobs hold all the others.
+pub const CALLS_KEPT: usize = 8;
 
 type Reply = Result<Value, RpcError>;
 
@@ -347,12 +351,30 @@ impl Link {
         method: &str,
         params: Value,
     ) -> Result<(u64, oneshot::Receiver<Reply>), RpcError> {
+        self.start_within(method, params, usize::MAX).await
+    }
+
+    /// [`Link::start`], refused with `busy` when `most` requests wait for
+    /// their reply already.
+    pub async fn start_within(
+        &self,
+        method: &str,
+        params: Value,
+        most: usize,
+    ) -> Result<(u64, oneshot::Receiver<Reply>), RpcError> {
         if self.is_closed() {
             return Err(lost());
         }
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
+        let id = {
+            let mut pending = self.pending.lock().unwrap();
+            if pending.len() >= most {
+                return Err(RpcError::new(ErrorCode::Busy, "too many calls in flight"));
+            }
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            pending.insert(id, tx);
+            id
+        };
         let text = Message::request(id, method, params).encode();
         if !self.send_text(text).await {
             self.pending.lock().unwrap().remove(&id);

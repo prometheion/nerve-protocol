@@ -553,12 +553,22 @@ fn signal_by_job(params: &Value) -> Result<Value, String> {
         json!({"type": "string", "minLength": 1,
                "description": "The id of a running job of this session, from execute (like j-...)."}),
     );
-    if let Some(Value::Array(req)) = p.get_mut("required") {
-        for r in req.iter_mut().filter(|r| *r == "call") {
-            *r = json!("job");
-        }
-    }
+    // The job is required whatever the node said of its call: a signal
+    // without one would name nothing to the center.
+    let mut req: Vec<Value> = match p.get("required") {
+        Some(Value::Array(r)) => r.iter().filter(|r| *r != "call").cloned().collect(),
+        _ => Vec::new(),
+    };
+    req.insert(0, json!("job"));
+    p["required"] = Value::Array(req);
     Ok(p)
+}
+
+/// Whether `u` is one of the units the center serves itself. Told by its
+/// capability, never by its provider: a node names its providers, but a
+/// capability of a center's name is left out of its catalog.
+pub fn is_center(u: &Unit) -> bool {
+    CENTER_CAPS.contains(&u.cap.as_str())
 }
 
 /// The units the center serves itself on every node: `job.status` and
@@ -790,6 +800,34 @@ mod tests {
             json!({"enum": ["term", "kill", "int"]})
         );
         assert!(signal.description.contains("job"), "{}", signal.description);
+        // The job is required also where the node's call was not, so no
+        // signal reaches the center without one.
+        for required in [Some(json!(["signal"])), None] {
+            let mut p = signal_params();
+            match required {
+                Some(r) => p["required"] = r,
+                None => {
+                    p.as_object_mut().unwrap().remove("required");
+                }
+            }
+            let d = desc(
+                "box",
+                vec![cap("exec", "exec", &[("signal", Effect::Actuate, p)])],
+            );
+            let c = Catalog::build(&d);
+            let req = &c.unit("exec.signal").unwrap().params["required"];
+            assert_eq!(req[0], "job", "{req}");
+            assert!(!req.as_array().unwrap().contains(&json!("call")), "{req}");
+        }
+        // The center's units are told by their capability: a provider a
+        // node named `center` is the node's.
+        let mut lamp = cap("lamp", "", &[("on", Effect::Actuate, path())]);
+        lamp.provider = CENTER.into();
+        let c = Catalog::build(&desc("box", vec![lamp]));
+        let on = c.unit("lamp.on").unwrap();
+        assert_eq!(&*on.provider, CENTER);
+        assert!(!is_center(on));
+        assert!(is_center(c.unit("job.status").unwrap()));
         // One that names no call cannot be offered by job.
         let d = desc(
             "box",

@@ -26,7 +26,7 @@ use crate::checker::{
     ModelSource, NodeSettings, NodeSwitch, Scope,
 };
 use crate::jobs::{self, Jobs, Stop};
-use crate::link::{Link, SHORT_CALL};
+use crate::link::{CALLS_KEPT, Link, SHORT_CALL};
 use crate::listing;
 use crate::pairing::{Codes, Outcome};
 use crate::store::{KeyRotation, NodeRecord, OldKey, Store};
@@ -1599,12 +1599,24 @@ impl Center {
     }
 
     /// Switches a node off or on for the agent. The link stays as it is;
-    /// only `list` and the call path look at the flag.
+    /// `list` and the call path look at the flag, and the calls that run on
+    /// the node (jobs too) are stopped: the owner who disables a machine
+    /// wants the agent's work there to end, not to run on unseen.
     pub fn set_disabled(&self, node_id: &str, disabled: bool) -> Result<(), String> {
         self.update(|s| {
             s.nodes.get_mut(node_id).ok_or("no such node")?.disabled = disabled;
             Ok::<(), String>(())
         })?;
+        if disabled {
+            let sessions: Vec<Arc<Session>> =
+                self.sessions.lock().unwrap().values().cloned().collect();
+            for sess in sessions {
+                let stops = sess.jobs.lock().unwrap().stop_on(node_id);
+                for stop in stops {
+                    let _ = stop.send(Stop::Disabled);
+                }
+            }
+        }
         self.note(
             Level::Info,
             Some(node_id),
@@ -2466,7 +2478,7 @@ impl Center {
         wait: Option<Duration>,
     ) -> Ran {
         let id = jobs::new_id();
-        let started = sess.jobs.lock().unwrap().start(&id, route);
+        let started = sess.jobs.lock().unwrap().start(&id, route, on.is_some());
         let (mut result, stop) = match started {
             Ok(s) => s,
             Err(e) => return Ran::Done(Err(self.refused(sess, route, e))),
@@ -2533,10 +2545,11 @@ impl Center {
                 // A result kept for its job is forgotten after a while when
                 // nobody reads it; the session may be gone by then.
                 let weak = Arc::downgrade(sess);
+                let id = id.to_string();
                 tokio::spawn(async move {
                     tokio::time::sleep(jobs::KEEP_FOR).await;
                     if let Some(s) = weak.upgrade() {
-                        s.jobs.lock().unwrap().prune(Instant::now());
+                        s.jobs.lock().unwrap().expire(&id);
                     }
                 });
             }
@@ -2679,12 +2692,34 @@ impl Center {
         let ctx = json!({"session": sess.id});
         sess.nodes.lock().unwrap().insert(route.node_id.clone());
         link.sessions.lock().unwrap().insert(sess.id.clone());
+        // The agents' calls leave a few of the node's call places free, for
+        // the owner's settings changes from the center and for a job's
+        // `exec.signal`: jobs of many sessions could fill them all.
+        let most = link.limits.calls as usize;
+        let most = if on.is_some() {
+            most
+        } else {
+            most.saturating_sub(CALLS_KEPT).max(1)
+        };
         let (id, rx) = link
-            .start(
+            .start_within(
                 msg::method::INVOKE,
                 json!({"cap": route.cap, "action": route.action, "args": args, "ctx": ctx}),
+                most,
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                if e.kind() != ErrorCode::Busy {
+                    return e;
+                }
+                RpcError::new(
+                    ErrorCode::Busy,
+                    format!(
+                        "node {} runs {} calls already, the most the center sends it for agents: try again when one ended, or stop a job of this session with job.cancel",
+                        route.node_name, most
+                    ),
+                )
+            })?;
         sess.jobs.lock().unwrap().sent(job, &link, id);
         let mut waiting = Waiting {
             link: Some(link),
@@ -3869,6 +3904,40 @@ mod tests {
             panic!("sent")
         };
         assert_eq!(e.kind(), ErrorCode::ConnectionLost, "{}", e.message);
+    }
+
+    /// The result of a job nobody reads is forgotten after `KEEP_FOR` by a
+    /// timer of its own: no later call of the session is needed for it.
+    #[tokio::test(start_paused = true)]
+    async fn an_unread_jobs_result_is_forgotten_without_another_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        c.update(|s| {
+            s.nodes.insert("n1".into(), node_record("n1", "linux"));
+        });
+        online(&c, "n1");
+        let sess = c.new_session("test");
+        // With no wait the call is a job before its task runs; it ends at
+        // once, since this test link has lost it.
+        let ran = c
+            .run(
+                &sess,
+                &exec_route("n1"),
+                Map::new(),
+                None,
+                Some(Duration::ZERO),
+            )
+            .await;
+        assert!(matches!(ran, Ran::Job(_)), "{ran:?}");
+        while sess.jobs.lock().unwrap().running() > 0 {
+            tokio::task::yield_now().await;
+        }
+        let held = || sess.jobs.lock().unwrap().held();
+        assert_eq!(held(), 1, "its result is kept");
+        tokio::time::sleep(jobs::KEEP_FOR - Duration::from_secs(1)).await;
+        assert_eq!(held(), 1, "for ten minutes");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(held(), 0, "then forgotten");
     }
 
     /// The owner's note on a machine is kept on one line, refused when long,

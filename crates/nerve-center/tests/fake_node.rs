@@ -177,7 +177,8 @@ enum Seen {
 
 /// Answers the center like a node: describe, sub, invoke (echoing the
 /// arguments; the command `hang` is never answered, `slow` and the path
-/// `slow` are answered after [`SLOW`], `refuse` is forbidden, `boom` fails,
+/// `slow` are answered after [`SLOW`], `slowboom` fails after it, `refuse`
+/// is forbidden, `boom` fails,
 /// `plain` answers a bare string, `long` and `quotes` long ones), and
 /// reports what it saw.
 fn serve(ws: WebSocketStream<BoxIo>, desc: Value) -> mpsc::UnboundedReceiver<Seen> {
@@ -258,15 +259,23 @@ fn serve_changing(
                         let _ = tx.send(Seen::Hang(serde_json::to_value(&id).unwrap()));
                         continue;
                     }
+                    let boom = m == method::INVOKE && params["args"]["command"] == "slowboom";
                     if m == method::INVOKE
-                        && (params["args"]["command"] == "slow" || params["args"]["path"] == "slow")
+                        && (params["args"]["command"] == "slow"
+                            || params["args"]["path"] == "slow"
+                            || boom)
                     {
                         let _ = tx.send(Seen::Invoke(Value::Object(params.clone())));
                         let later = later.clone();
                         tokio::spawn(async move {
                             tokio::time::sleep(SLOW).await;
-                            let r = json!({"content": "slow and done", "encoding": "utf-8"});
-                            let _ = later.send(Message::result(id, r));
+                            let reply = if boom {
+                                Message::error(Some(id), RpcError::internal("the build broke"))
+                            } else {
+                                let r = json!({"content": "slow and done", "encoding": "utf-8"});
+                                Message::result(id, r)
+                            };
+                            let _ = later.send(reply);
                         });
                         continue;
                     }
@@ -2598,7 +2607,8 @@ async fn job_center(dir: &std::path::Path) -> Running {
 
 /// box-1 on a center whose call wait is [`WAIT`], with an engine that was
 /// given the details of exec.run and fs.read; what the node sees, and the
-/// task that serves it, which drops its link when it is aborted.
+/// task that serves it, which drops its link when it is aborted. The node
+/// offers exec.signal.
 async fn job_box(
     r: &Running,
 ) -> (
@@ -2607,15 +2617,39 @@ async fn job_box(
     mpsc::UnboundedReceiver<Seen>,
     tokio::task::JoinHandle<()>,
 ) {
-    let key = NodeKey::generate().unwrap();
-    assert_eq!(pair(r, &key, "box-1").await.0, 200);
-    let (ws, _) = handshake(r, &key).await;
-    let mut d = descriptor(&key, "box-1");
+    let (e, node, seen, task, _) = job_box_with(r, json!({}), with_signal).await;
+    (e, node, seen, task)
+}
+
+/// The node's exec.signal added to its description `d`.
+fn with_signal(d: &mut Value) {
     d["capabilities"][1]["actions"]["signal"] = json!({"effect": "actuate", "summary": "Signals.",
         "params": {"type": "object", "properties": {"call": {"type": "integer", "minimum": 0},
                    "signal": {"enum": ["term", "kill", "int"]}},
                    "required": ["call", "signal"], "additionalProperties": false}});
-    let (seen, task) = serve_task(ws, d);
+}
+
+/// [`job_box`] with `hello` added to the node's hello and its description
+/// changed by `edit`; also the handle that describes it anew.
+async fn job_box_with(
+    r: &Running,
+    hello: Value,
+    edit: impl FnOnce(&mut Value),
+) -> (
+    Arc<Engine>,
+    String,
+    mpsc::UnboundedReceiver<Seen>,
+    tokio::task::JoinHandle<()>,
+    Described,
+) {
+    let key = NodeKey::generate().unwrap();
+    assert_eq!(pair(r, &key, "box-1").await.0, 200);
+    let (ws, _) = handshake_with(r, &key, hello).await;
+    let mut d = descriptor(&key, "box-1");
+    edit(&mut d);
+    let (change, changes) = mpsc::unbounded_channel();
+    let desc = Arc::new(Mutex::new(d));
+    let (seen, task) = serve_changing(ws, desc.clone(), changes);
     described(&r.center).await;
     let e = Arc::new(Engine::new(&r.center, "test"));
     list_text(
@@ -2623,7 +2657,7 @@ async fn job_box(
         json!({"node": "box-1", "capability": ["exec.run", "fs.read"]}),
     )
     .await;
-    (e, key.node_id(), seen, task)
+    (e, key.node_id(), seen, task, (desc, change))
 }
 
 /// The reply of one `execute` as the request `id`.
@@ -2644,6 +2678,24 @@ fn job_of(reply: &Value) -> String {
     assert!(job.starts_with("j-"), "{job}");
     assert!(text.contains(&format!("became job {job}")), "{text}");
     job
+}
+
+/// The `job.status` answer of `job` once it ended: the call wait is
+/// short, so it waits for the end in steps.
+async fn job_ended(e: &Engine, job: &str) -> Value {
+    for _ in 0..50 {
+        let got = execute_as(
+            e,
+            json!("status"),
+            "job.status",
+            json!({"job": job, "wait_ms": 100}),
+        )
+        .await;
+        if !said(&got).0.contains("still runs") {
+            return got;
+        }
+    }
+    panic!("job {job} never ended")
 }
 
 /// The next thing the fake node saw, within a few seconds.
@@ -2740,15 +2792,17 @@ async fn an_mcp_cancel_after_the_job_id_does_not_cancel_it() {
 }
 
 /// A session runs at most 16 calls at once: the 17th is refused before it
-/// reaches the node, and says how to free a place.
+/// reaches the node, and says how to free a place and which jobs run. A
+/// job's exec.signal still goes through.
 #[tokio::test]
 async fn the_seventeenth_job_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let r = job_center(dir.path()).await;
     let (e, _node, mut seen, _task) = job_box(&r).await;
+    let mut jobs = Vec::new();
     for i in 0..16 {
         let reply = execute_as(&e, json!(i), "exec.run", json!({"command": "hang"})).await;
-        job_of(&reply);
+        jobs.push(job_of(&reply));
         let Seen::Hang(_) = next_seen(&mut seen).await else {
             panic!("no invoke")
         };
@@ -2761,7 +2815,27 @@ async fn the_seventeenth_job_is_refused() {
         "{text}"
     );
     assert!(text.contains("job.cancel"), "{text}");
+    for job in &jobs {
+        assert!(
+            text.contains(&format!("{job} (exec.run on node box-1, for ")),
+            "{job}: {text}"
+        );
+    }
     nothing_more(&mut seen).await;
+    // The job answer counted as exec.signal's details, and a signal has
+    // places of its own.
+    let sig = execute_as(
+        &e,
+        json!(17),
+        "exec.signal",
+        json!({"job": jobs[0], "signal": "int"}),
+    )
+    .await;
+    assert!(!said(&sig).1, "{sig}");
+    let Seen::Invoke(inv) = next_seen(&mut seen).await else {
+        panic!("no signal")
+    };
+    assert_eq!(inv["action"], "signal");
     // Another session has places of its own.
     let other = Engine::new(&r.center, "test");
     list_text(&other, json!({"node": "box-1", "capability": ["exec.run"]})).await;
@@ -2810,13 +2884,95 @@ async fn a_dropped_link_marks_jobs_lost() {
     task.abort();
     let sess = e.session();
     wait_for(|| (sess.jobs.lock().unwrap().running() == 0).then_some(())).await;
-    let v = sess
-        .jobs
-        .lock()
-        .unwrap()
-        .status(&job, &node, std::time::Instant::now())
-        .unwrap();
-    assert_eq!(v.outcome, Some(nerve_center::jobs::Outcome::Lost));
+    assert!(
+        sess.jobs.lock().unwrap().done(&job, &node).is_none(),
+        "it ended"
+    );
+    let got = execute_as(&e, json!(2), "job.status", json!({"job": job})).await;
+    let (text, err) = said(&got);
+    assert!(err, "{got}");
+    assert!(
+        text.starts_with(&format!(
+            "error connection_lost: job {job} (exec.run on node box-1) was lost after "
+        )),
+        "{text}"
+    );
+    assert!(
+        text.ends_with(": the link to node box-1 ended before its result came. The node stops a call whose link ends, so it may have done part of its work."),
+        "{text}"
+    );
+    r.stop().await;
+}
+
+/// A job the node fails, and one whose result was not kept, end as errors
+/// that say which job it was.
+#[tokio::test]
+async fn a_failed_or_dropped_job_is_an_error_of_that_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = job_box(&r).await;
+    let job = job_of(&execute_as(&e, json!(1), "exec.run", json!({"command": "slowboom"})).await);
+    let Seen::Invoke(_) = next_seen(&mut seen).await else {
+        panic!("no invoke")
+    };
+    let got = job_ended(&e, &job).await;
+    let (text, err) = said(&got);
+    assert!(err, "{got}");
+    assert!(
+        text.starts_with(&format!(
+            "error internal: job {job} (exec.run on node box-1) failed after "
+        )),
+        "{text}"
+    );
+    assert!(
+        text.ends_with(": node box-1 answered: the build broke"),
+        "{text}"
+    );
+
+    // Results past what a session keeps: the last is named, not kept.
+    let sess = e.session();
+    let route = nerve_center::tools::Route {
+        node_id: node.clone(),
+        node_name: "box-1".into(),
+        cap: "exec".into(),
+        action: "run".into(),
+        effect: nerve_proto::Effect::Execute,
+    };
+    let big = "x".repeat(nerve_center::jobs::RESULT_TEXT);
+    let dropped = {
+        let mut jobs = sess.jobs.lock().unwrap();
+        let mut i = 0;
+        loop {
+            let id = format!("j-big{i}");
+            let _ = jobs.start(&id, &route, false).unwrap();
+            jobs.detach(&id);
+            jobs.finish(&id, Ok(json!(big)), std::time::Instant::now());
+            if jobs.kept() + big.len() > nerve_center::jobs::KEPT_MAX {
+                let id = "j-over";
+                let _ = jobs.start(id, &route, false).unwrap();
+                jobs.detach(id);
+                jobs.finish(id, Ok(json!(big)), std::time::Instant::now());
+                break id;
+            }
+            i += 1;
+        }
+    };
+    let got = execute_as(&e, json!(3), "job.status", json!({"job": dropped})).await;
+    let (text, err) = said(&got);
+    assert!(err, "{got}");
+    assert!(
+        text.starts_with(&format!(
+            "error too_large: job {dropped} (exec.run on node box-1) ended after "
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "but its result ({} bytes) was not kept: a session keeps at most 4 MiB",
+            big.len()
+        )),
+        "{text}"
+    );
     r.stop().await;
 }
 
@@ -3101,5 +3257,265 @@ async fn another_session_cannot_see_cancel_or_signal_a_job() {
     assert_eq!(e.session().jobs.lock().unwrap().running(), 1);
     let mine = execute_as(&e, json!(3), "job.status", json!({"job": job})).await;
     assert!(said(&mine).0.contains("still runs"), "{mine}");
+    r.stop().await;
+}
+
+/// The job answer names exec.signal only where the node offers it: a model
+/// told to call it on a node without it would only be refused.
+#[tokio::test]
+async fn the_job_answer_names_exec_signal_only_where_it_is_offered() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, _node, mut seen, _task, _) = job_box_with(&r, json!({}), |_| {}).await;
+    let reply = execute_as(&e, json!(1), "exec.run", json!({"command": "hang"})).await;
+    let job = job_of(&reply);
+    let (text, _) = said(&reply);
+    assert!(text.contains("\"job.cancel\""), "{text}");
+    assert!(!text.contains("exec.signal"), "{text}");
+    let Seen::Hang(_) = next_seen(&mut seen).await else {
+        panic!("no invoke")
+    };
+    let sig = execute_as(
+        &e,
+        json!(2),
+        "exec.signal",
+        json!({"job": job, "signal": "term"}),
+    )
+    .await;
+    assert!(
+        said(&sig).0.starts_with("error unknown_capability: "),
+        "{sig}"
+    );
+    nothing_more(&mut seen).await;
+    r.stop().await;
+}
+
+/// `job.status` and `job.cancel` outlive the node's offer: a node whose
+/// owner turned everything off while a job runs (or whose `until` passed)
+/// still lets the session read and stop its job.
+#[tokio::test]
+async fn a_job_can_be_read_and_cancelled_after_the_offer_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, _node, mut seen, _task, desc) = job_box_with(&r, json!({}), with_signal).await;
+    let job = job_of(&execute_as(&e, json!(1), "exec.run", json!({"command": "hang"})).await);
+    let Seen::Hang(invoke) = next_seen(&mut seen).await else {
+        panic!("no invoke")
+    };
+    let mut off = desc.0.lock().unwrap().clone();
+    off["rev"] = json!(2);
+    for c in off["capabilities"].as_array_mut().unwrap() {
+        c["exposure"] = json!("off");
+    }
+    describe_anew(&r.center, &desc, off, |c| {
+        c.offer("box-1")
+            .is_some_and(|o| o.units.iter().all(|u| u.cap == "job") && !o.off.is_empty())
+    })
+    .await;
+    let status = execute_as(&e, json!(2), "job.status", json!({"job": job})).await;
+    assert!(said(&status).0.contains("still runs"), "{status}");
+    let cancel = execute_as(&e, json!(3), "job.cancel", json!({"job": job})).await;
+    assert_eq!(
+        cancel["result"]["structuredContent"],
+        json!({"job": job, "state": "cancelled"}),
+        "{cancel}"
+    );
+    let Seen::Cancel(id) = next_seen(&mut seen).await else {
+        panic!("the node got no cancel")
+    };
+    assert_eq!(id, invoke);
+    r.stop().await;
+}
+
+/// Disabling a node stops the calls that run there, jobs too: the node is
+/// told to cancel them. Once it is enabled again, `job.status` says why the
+/// job ended.
+#[tokio::test]
+async fn disabling_a_node_stops_its_jobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = job_box(&r).await;
+    let job = job_of(&execute_as(&e, json!(1), "exec.run", json!({"command": "hang"})).await);
+    let Seen::Hang(invoke) = next_seen(&mut seen).await else {
+        panic!("no invoke")
+    };
+    r.center.set_disabled(&node, true).unwrap();
+    let Seen::Cancel(id) = next_seen(&mut seen).await else {
+        panic!("the node got no cancel")
+    };
+    assert_eq!(id, invoke);
+    let sess = e.session();
+    wait_for(|| (sess.jobs.lock().unwrap().running() == 0).then_some(())).await;
+    let off = execute_as(&e, json!(2), "job.status", json!({"job": job})).await;
+    assert!(said(&off).0.starts_with("error unavailable: "), "{off}");
+    r.center.set_disabled(&node, false).unwrap();
+    let got = execute_as(&e, json!(3), "job.status", json!({"job": job})).await;
+    let (text, err) = said(&got);
+    assert!(err, "{got}");
+    assert!(
+        text.starts_with(&format!(
+            "error cancelled: job {job} (exec.run on node box-1) failed after "
+        )),
+        "{text}"
+    );
+    assert!(
+        text.ends_with(": the node was disabled in the center"),
+        "{text}"
+    );
+    r.stop().await;
+}
+
+/// A provider a node named `center` is the node's like any other: its
+/// calls go to the node, not to the center's own units.
+#[tokio::test]
+async fn a_provider_named_center_is_the_nodes() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, _node, mut seen, _task, _) = job_box_with(&r, json!({}), |d| {
+        d["capabilities"].as_array_mut().unwrap().push(json!(
+            {"id": "lamp", "profile": "", "provider": "center", "exposure": "on",
+             "summary": "A lamp.",
+             "actions": {"on": {"effect": "actuate", "summary": "Switches it on.",
+                                "params": {"type": "object", "properties": {}}}}}));
+    })
+    .await;
+    list_text(&e, json!({"node": "box-1", "capability": ["lamp.on"]})).await;
+    let got = execute_as(&e, json!(1), "lamp.on", json!({})).await;
+    assert!(!said(&got).1, "{got}");
+    let Seen::Invoke(inv) = next_seen(&mut seen).await else {
+        panic!("the node got no call")
+    };
+    assert_eq!(
+        (&inv["cap"], &inv["action"]),
+        (&json!("lamp"), &json!("on"))
+    );
+    r.stop().await;
+}
+
+/// The agents' calls leave some of a node's call places free, across all
+/// sessions: past that a call is refused before the node, while the
+/// owner's settings change and a job's exec.signal still reach it.
+#[tokio::test]
+async fn jobs_leave_the_node_room_for_the_owner_and_signals() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    // A node of 10 places: the agents get 2.
+    let (e, node, mut seen, _task, _) =
+        job_box_with(&r, json!({"limits": {"calls": 10}}), with_signal).await;
+    let other = Engine::new(&r.center, "test");
+    let third = Engine::new(&r.center, "test");
+    for s in [&other, &third] {
+        list_text(s, json!({"node": "box-1", "capability": ["exec.run"]})).await;
+    }
+    let job = job_of(&execute_as(&e, json!(1), "exec.run", json!({"command": "hang"})).await);
+    job_of(&execute_as(&other, json!(1), "exec.run", json!({"command": "hang"})).await);
+    for _ in 0..2 {
+        let Seen::Hang(_) = next_seen(&mut seen).await else {
+            panic!("no invoke")
+        };
+    }
+    let full = execute_as(&third, json!(1), "exec.run", json!({"command": "hang"})).await;
+    let (text, err) = said(&full);
+    assert!(err, "{full}");
+    assert!(
+        text.starts_with("error busy: node box-1 runs 2 calls already"),
+        "{text}"
+    );
+    nothing_more(&mut seen).await;
+    r.center
+        .set_node_settings(&node, json!({}), json!(1))
+        .await
+        .unwrap();
+    let Seen::Invoke(inv) = next_seen(&mut seen).await else {
+        panic!("no settings call")
+    };
+    assert_eq!(inv["cap"], "settings");
+    let sig = execute_as(
+        &e,
+        json!(2),
+        "exec.signal",
+        json!({"job": job, "signal": "term"}),
+    )
+    .await;
+    assert!(!said(&sig).1, "{sig}");
+    let Seen::Invoke(inv) = next_seen(&mut seen).await else {
+        panic!("no signal")
+    };
+    assert_eq!(inv["action"], "signal");
+    r.stop().await;
+}
+
+/// A link the node resumes keeps its jobs: the job's exec.signal still
+/// names its call there, and its result comes as it would have.
+#[tokio::test]
+async fn a_resumed_link_keeps_its_jobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let key = NodeKey::generate().unwrap();
+    assert_eq!(pair(&r, &key, "box-1").await.0, 200);
+    let (mut ws, welcome) = handshake_with(
+        &r,
+        &key,
+        json!({"resume": {"link": link_id('a'), "got": 0}}),
+    )
+    .await;
+    assert_eq!(resume_of(&welcome), json!({"resumed": false, "got": 0}));
+    let mut d = descriptor(&key, "box-1");
+    with_signal(&mut d);
+    let (id, m, _) = request(&mut ws).await;
+    assert_eq!(m, method::DESCRIBE);
+    send(&mut ws, Message::result(id, d.clone())).await;
+    described(&r.center).await;
+    let e = Arc::new(Engine::new(&r.center, "test"));
+    list_text(&e, json!({"node": "box-1", "capability": ["exec.run"]})).await;
+    let job = job_of(&execute_as(&e, json!(1), "exec.run", json!({"command": "make"})).await);
+    let (invoke, m, _) = request(&mut ws).await;
+    assert_eq!(m, method::INVOKE);
+    drop(ws);
+    let c = r.center.clone();
+    let node = key.node_id();
+    wait_for(|| c.link(&node).is_none().then_some(())).await;
+
+    let (mut ws, welcome) = handshake_with(
+        &r,
+        &key,
+        json!({"resume": {"link": link_id('a'), "got": 2}}),
+    )
+    .await;
+    assert_eq!(resume_of(&welcome)["resumed"], true);
+    let (id, m, _) = request(&mut ws).await;
+    assert_eq!(m, method::DESCRIBE);
+    send(&mut ws, Message::result(id, d)).await;
+    wait_for(|| c.link(&node).map(|_| ())).await;
+    assert_eq!(e.session().jobs.lock().unwrap().running(), 1);
+
+    let sig = tokio::spawn({
+        let e = e.clone();
+        let job = job.clone();
+        async move {
+            execute_as(
+                &e,
+                json!(2),
+                "exec.signal",
+                json!({"job": job, "signal": "term"}),
+            )
+            .await
+        }
+    });
+    let (id, m, p) = request(&mut ws).await;
+    assert_eq!(m, method::INVOKE);
+    assert_eq!(
+        p["args"],
+        json!({"call": serde_json::to_value(&invoke).unwrap(), "signal": "term"})
+    );
+    send(&mut ws, Message::result(id, json!({}))).await;
+    assert!(!said(&sig.await.unwrap()).1);
+    let out = json!({"exit_code": null, "signal": "term", "stdout": "built", "stderr": "",
+                     "truncated": false});
+    send(&mut ws, Message::result(invoke, out)).await;
+    let got = job_ended(&e, &job).await;
+    let (text, err) = said(&got);
+    assert!(!err, "{got}");
+    assert!(text.contains("\"stdout\": \"built\""), "{text}");
     r.stop().await;
 }

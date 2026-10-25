@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::catalog::{Reach, Unit};
+use crate::catalog::{self, Reach, Unit};
 use crate::store::NodeRecord;
 use crate::util;
 
@@ -203,6 +203,12 @@ pub fn offer(n: &NodeRecord, online: bool) -> Offer {
 pub fn unit(n: &NodeRecord, name: &str) -> Result<Unit, Miss> {
     if n.disabled {
         return Err(Miss::Disabled);
+    }
+    // The center's own units follow up the session's jobs, which outlive
+    // the node's offer: a node that offers nothing any more (its owner's
+    // `until` passed, or they turned everything off) still has them.
+    if let Some(u) = catalog::center_units().into_iter().find(|u| u.name == name) {
+        return Ok(u);
     }
     let Some(u) = n.catalog.unit(name) else {
         if n.catalog.broken(name).is_some() {

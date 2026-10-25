@@ -35,6 +35,9 @@ pub const CALL_WAIT_MIN: Duration = Duration::from_millis(10);
 pub const CALL_WAIT_MAX: Duration = Duration::from_secs(600);
 /// The most calls of one session that run at once, jobs or not.
 pub const RUNNING_MAX: usize = 16;
+/// The places beyond [`RUNNING_MAX`] only `exec.signal` of a job may take:
+/// a session whose places all hold commands can still ask one to stop.
+pub const SIGNAL_ROOM: usize = 4;
 /// The most bytes of finished results one session keeps.
 pub const KEPT_MAX: usize = 4 * 1024 * 1024;
 /// How long a finished result is kept when nobody reads it.
@@ -54,6 +57,8 @@ pub enum Stop {
     Cancelled,
     /// The session ended.
     SessionEnded,
+    /// The node's owner disabled it in the center.
+    Disabled,
 }
 
 impl Stop {
@@ -63,6 +68,7 @@ impl Stop {
             Stop::Abandoned => "the harness cancelled the call",
             Stop::Cancelled => "the job was cancelled",
             Stop::SessionEnded => "the session ended",
+            Stop::Disabled => "the node was disabled in the center",
         };
         RpcError::new(ErrorCode::Cancelled, why)
     }
@@ -203,12 +209,14 @@ impl Jobs {
 
     /// Starts the call `id` of `route`: the receiver of its result (until
     /// it becomes a job) and the one that stops its task. Refused when the
-    /// session has [`RUNNING_MAX`] calls running, or has ended.
+    /// session has [`RUNNING_MAX`] calls running (a `signal` of a job has
+    /// [`SIGNAL_ROOM`] more), or has ended.
     #[allow(clippy::type_complexity)]
     pub fn start(
         &mut self,
         id: &str,
         route: &Route,
+        signal: bool,
     ) -> Result<
         (
             oneshot::Receiver<Result<Value, RpcError>>,
@@ -219,11 +227,14 @@ impl Jobs {
         if self.ended {
             return Err(Stop::SessionEnded.error());
         }
-        if self.running() >= RUNNING_MAX {
+        let most = RUNNING_MAX + if signal { SIGNAL_ROOM } else { 0 };
+        if self.running() >= most {
             return Err(RpcError::new(
                 ErrorCode::Busy,
                 format!(
-                    "this session has {RUNNING_MAX} calls running, the most it may: wait for one with job.status, or stop one with job.cancel"
+                    "this session has {} calls running, the most it may: wait for one with job.status, or stop one with job.cancel.{}",
+                    self.running(),
+                    self.named(Instant::now())
                 ),
             ));
         }
@@ -243,6 +254,33 @@ impl Jobs {
             },
         );
         Ok((result, stopped))
+    }
+
+    /// The session's running jobs, oldest first, as a refusal names them:
+    /// a model whose context lost their ids finds them again here.
+    fn named(&self, now: Instant) -> String {
+        let mut jobs: Vec<(&String, &Entry)> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| e.job && e.end.is_none())
+            .collect();
+        if jobs.is_empty() {
+            return String::new();
+        }
+        jobs.sort_by_key(|(_, e)| e.started);
+        let named: Vec<String> = jobs
+            .iter()
+            .map(|(id, e)| {
+                format!(
+                    "{id} ({}.{} on node {}, for {})",
+                    e.route.cap,
+                    e.route.action,
+                    e.route.node_name,
+                    util::span(now.saturating_duration_since(e.started))
+                )
+            })
+            .collect();
+        format!(" Its running jobs: {}.", named.join(", "))
     }
 
     /// The call `id` was sent on `link` as the `invoke` `invoke`.
@@ -321,6 +359,20 @@ impl Jobs {
         for id in old {
             self.forget(&id);
         }
+    }
+
+    /// Forgets the result of the job `id` once it ended and nobody read
+    /// it: the timer started at its end calls this after [`KEEP_FOR`].
+    pub fn expire(&mut self, id: &str) {
+        if self.entries.get(id).is_some_and(|e| e.end.is_some()) {
+            self.forget(id);
+        }
+    }
+
+    /// How many calls and kept results the session holds.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> usize {
+        self.entries.len()
     }
 
     fn forget(&mut self, id: &str) {
@@ -410,6 +462,17 @@ impl Jobs {
         e.sent.clone().ok_or(NoSignal::NotSent)
     }
 
+    /// The senders that stop the running calls on the node `node_id`, jobs
+    /// or not. The calls stay: each ends with the error of its stop, which
+    /// a waiting `execute` or `job.status` then gives.
+    pub fn stop_on(&mut self, node_id: &str) -> Vec<oneshot::Sender<Stop>> {
+        self.entries
+            .values_mut()
+            .filter(|e| e.route.node_id == node_id && e.end.is_none())
+            .filter_map(|e| e.stop.take())
+            .collect()
+    }
+
     /// The session ended: no call starts any more, every finished result is
     /// dropped, and the senders that stop the running calls are given back.
     pub fn end(&mut self) -> Vec<oneshot::Sender<Stop>> {
@@ -473,7 +536,7 @@ mod tests {
     fn a_job_keeps_its_result_for_one_read() {
         let mut j = Jobs::default();
         let now = Instant::now();
-        let (mut rx, _stop) = j.start("j-1", &route("n1", "exec.run")).unwrap();
+        let (mut rx, _stop) = j.start("j-1", &route("n1", "exec.run"), false).unwrap();
         assert!(j.detach("j-1"));
         assert!(!j.detach("j-1"), "a job is detached once");
         assert_eq!(j.running(), 1);
@@ -494,7 +557,7 @@ mod tests {
         assert!(j.status("j-1", "n1", now).is_none(), "read once");
         assert_eq!(j.kept(), 0);
 
-        let (_rx, _stop) = j.start("j-2", &route("n1", "fs.read")).unwrap();
+        let (_rx, _stop) = j.start("j-2", &route("n1", "fs.read"), false).unwrap();
         let (w, r) = j.finish("j-2", Ok(json!("x")), now).expect("handed over");
         assert!(w.send(r).is_ok());
         assert!(j.status("j-2", "n1", now).is_none(), "never a job");
@@ -507,7 +570,7 @@ mod tests {
     fn a_job_is_seen_on_its_node_only() {
         let mut j = Jobs::default();
         let now = Instant::now();
-        let _a = j.start("j-1", &route("n1", "exec.run")).unwrap();
+        let _a = j.start("j-1", &route("n1", "exec.run"), false).unwrap();
         assert!(j.status("j-1", "n1", now).is_none(), "not a job yet");
         assert!(j.detach("j-1"));
         assert!(j.status("j-1", "n2", now).is_none());
@@ -526,14 +589,35 @@ mod tests {
         let mut held = Vec::new();
         for i in 0..RUNNING_MAX {
             let id = format!("j-{i}");
-            held.push(j.start(&id, &route("n1", "exec.run")).unwrap());
+            held.push(j.start(&id, &route("n1", "exec.run"), false).unwrap());
             assert!(j.detach(&id));
         }
-        let e = j.start("j-x", &route("n1", "exec.run")).unwrap_err();
+        let e = j.start("j-x", &route("n1", "exec.run"), false).unwrap_err();
         assert_eq!(e.kind(), ErrorCode::Busy);
         assert!(e.message.contains("job.cancel"), "{}", e.message);
+        // The refusal names the running jobs, so a model that lost their
+        // ids can stop one.
+        assert!(e.message.contains(" Its running jobs: j-"), "{}", e.message);
+        for id in ["j-0", "j-15"] {
+            assert!(
+                e.message
+                    .contains(&format!("{id} (exec.run on node n1, for ")),
+                "{}",
+                e.message
+            );
+        }
+        // A signal of a job has a few places more.
+        let signal = route("n1", "exec.signal");
+        for i in 0..SIGNAL_ROOM {
+            held.push(j.start(&format!("s-{i}"), &signal, true).unwrap());
+        }
+        let e = j.start("s-x", &signal, true).unwrap_err();
+        assert_eq!(e.kind(), ErrorCode::Busy);
+        for i in 0..SIGNAL_ROOM {
+            j.finish(&format!("s-{i}"), Ok(json!({})), now);
+        }
         j.finish("j-0", Ok(json!({})), now);
-        held.push(j.start("j-x", &route("n1", "exec.run")).unwrap());
+        held.push(j.start("j-x", &route("n1", "exec.run"), false).unwrap());
     }
 
     /// Finished results take at most `KEPT_MAX` bytes; one past it is
@@ -546,7 +630,7 @@ mod tests {
         let mut i = 0;
         loop {
             let id = format!("j-{i}");
-            let _ = j.start(&id, &route("n1", "exec.run")).unwrap();
+            let _ = j.start(&id, &route("n1", "exec.run"), false).unwrap();
             j.detach(&id);
             j.finish(&id, Ok(json!(big)), now);
             let v = j.entries[&id].end.as_ref().unwrap().0.clone();
@@ -571,7 +655,7 @@ mod tests {
     fn an_unread_result_is_forgotten_after_ten_minutes() {
         let mut j = Jobs::default();
         let now = Instant::now();
-        let _ = j.start("j-1", &route("n1", "exec.run")).unwrap();
+        let _ = j.start("j-1", &route("n1", "exec.run"), false).unwrap();
         j.detach("j-1");
         j.finish("j-1", Ok(json!("done")), now);
         j.prune(now + KEEP_FOR - Duration::from_secs(1));
@@ -586,11 +670,11 @@ mod tests {
     fn stopping_and_the_sessions_end() {
         let mut j = Jobs::default();
         let now = Instant::now();
-        let (_r1, mut s1) = j.start("j-1", &route("n1", "exec.run")).unwrap();
+        let (_r1, mut s1) = j.start("j-1", &route("n1", "exec.run"), false).unwrap();
         assert!(j.abandon("j-1").unwrap().send(Stop::Abandoned).is_ok());
         assert_eq!(s1.try_recv().unwrap(), Stop::Abandoned);
         assert_eq!(j.running(), 0);
-        let (_r2, _s2) = j.start("j-2", &route("n1", "exec.run")).unwrap();
+        let (_r2, _s2) = j.start("j-2", &route("n1", "exec.run"), false).unwrap();
         j.detach("j-2");
         assert!(
             j.abandon("j-2").is_none(),
@@ -603,9 +687,9 @@ mod tests {
         drop(stop);
         assert!(j.status("j-2", "n1", now).is_none());
 
-        let (_r3, mut s3) = j.start("j-3", &route("n1", "exec.run")).unwrap();
+        let (_r3, mut s3) = j.start("j-3", &route("n1", "exec.run"), false).unwrap();
         j.detach("j-3");
-        let _ = j.start("j-4", &route("n1", "exec.run")).unwrap();
+        let _ = j.start("j-4", &route("n1", "exec.run"), false).unwrap();
         j.detach("j-4");
         j.finish("j-4", Ok(json!("x")), now);
         let Some(Err(v)) = j.cancel("j-4", "n1", now) else {
@@ -619,7 +703,9 @@ mod tests {
         assert_eq!((j.running(), j.kept()), (0, 0));
         assert!(j.status("j-4", "n1", now).is_none());
         assert_eq!(
-            j.start("j-5", &route("n1", "exec.run")).unwrap_err().kind(),
+            j.start("j-5", &route("n1", "exec.run"), false)
+                .unwrap_err()
+                .kind(),
             ErrorCode::Cancelled
         );
     }
