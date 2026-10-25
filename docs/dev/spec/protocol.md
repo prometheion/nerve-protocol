@@ -579,8 +579,14 @@ over the center's message limit: the call fails with `too_large` instead.
    {"id": "fs", "profile": "fs", "provider": "node", "exposure": "on",
     "summary": "…",
     "actions": {"read": {"effect": "read", "summary": "…",
-                         "params": {JSON Schema}, "result": {JSON Schema}}},
-    "events": {}, "state": null, "streams": {}}]}
+                         "params": {JSON Schema}, "result": {JSON Schema}},
+                "write": {"effect": "write", "exposure": "off", …}},
+    "events": {}, "state": null, "streams": {}}],
+ "access": {"mode": "folder", "until_ms": 1792936800000, "account": "nerve-run",
+            "confined": true,
+            "folders": [{"path": "/home/me/proj", "access": "rw",
+                         "closed_below": true},
+                        {"path": "/tmp", "access": "rwx", "own": true}]}}
 ```
 
 - Capability ids and action names are 1 to 64 bytes of ASCII letters,
@@ -598,11 +604,17 @@ over the center's message limit: the call fails with `too_large` instead.
   node decides every call either way.
 - Exposure: `on`, `off`. A capability that is `hidden` for a center is
   absent from that center's descriptor; `off` is listed with exposure `off`.
+  An action the owner switched off while its capability stays on carries
+  `"exposure": "off"` itself (absent means on); a call of it fails
+  `disabled`. The actions of a capability that is `off` carry it too.
+- `access` says what this center may do on the node now (§6.2). It is
+  for that center alone, like the rest of the descriptor.
 - The descriptor is filtered per center. `rev` changes whenever that center's
   view changes; the node then sends `node/descriptor_changed {rev}` and the
   center fetches the descriptor again.
 - `detail: "summary"` drops `params`, `result` and schemas;
   `"capability"` returns only `cap`, in full; `"full"` returns everything.
+  `access` is in every detail.
 
 ### 6.1 Schemas
 
@@ -667,6 +679,28 @@ fills it in. An argument that may be left out and whose
 `invalid_args` whose `data` holds `field`, the dotted path to what does not
 fit (`sudo.sealed`, `entries[2].name`, empty for the arguments as a whole),
 and `expected`, in words (`an integer from 1 to 600`).
+
+### 6.2 What the center may do (`access`)
+
+The node tells each center its own mode and folders, so the agent behind it
+does not have to guess paths and collect refusals. The block is built from
+that center's pairing alone: no other center's mode, account or folders are
+ever in it.
+
+| Field | |
+|---|---|
+| `mode` | `allowlist`, `folder` or `user`: the mode in force now (a `folder` or `user` mode whose `until` has passed is `allowlist`) |
+| `until_ms` | when a `folder` or `user` mode ends, in milliseconds since the epoch; absent when it does not end, and in `allowlist` mode |
+| `account` | the account this center's commands run as: `nerve-run` or the owner on the installed node, the node's own user on a node run by hand; absent when the node cannot name it |
+| `confined` | in `folder` mode: whether a sandbox (Landlock, a Windows AppContainer) holds the commands to the folders. `false` where folder mode runs no command (no folder is marked `x` then, and `exec.run` is offered only for the sudo allow list), and where the commands run but only the account they run as holds them back (the installed Linux node without Landlock runs them as `nerve-run`, which reaches what that account may reach, more than the folders; `exec.run` tells them apart). Always `false` in the other modes. A sandbox holds what a command reaches to the folders that grant something: a folder closed below a granted one refuses file calls and a command's start in it, but a command started around it still reaches it. A command on the sudo allow list is never held: see `sudo` |
+| `sudo` | in `folder` mode: `true` when the owner's sudo allow list for this center names commands, the node's sudo switch is on and `exec.run` is neither hidden nor off for this center. Such a command runs by that list alone, with full rights: in any folder, whatever the folders' flags, outside the sandbox. Absent (`false`) when the list is empty, while the switch is off or `exec.run` is hidden or off (no listed command runs then), and in the other modes |
+| `folders` | in `folder` mode only: the folders the center's file calls and commands may use, each `{path, access, own?, closed_below?}`. `path` is absolute in the center's form (`/c/Users/me` for `C:\Users\me`) and reads the same on one line: a folder whose name holds a control character or a line or paragraph separator (U+2028, U+2029), or starts or ends with a blank, is left out, as a center that showed it changed would name another place. `access` is one to three of `r` (read), `w` (write) and `x` (run commands) in that order. A folder with no flag is never named, as the node's file calls hide its name too. Where folders nest, the deepest one decides, so such a folder inside a granted one closes what lies below it: the deepest named folder around it carries `closed_below: true`. So does the deepest named folder around a folder left out for its name that allows less than it. Where the machine runs no folder-mode command, no folder carries `x`, and a folder with `x` alone is closed. `own: true` marks the command account's own folders: where the commands run as `nerve-run`, its built-in folders (`/tmp`, `/var/tmp` and its home, all `rwx`). Every pairing whose commands run as that account shares them (and `/tmp`, `/var/tmp` every account on the machine), the settings and caches its programs keep in its home included, so what one pairing leaves there can change what another one's commands do: they are a place for throwaway files, not private ones. A node sends `own` only there, so a block with an `own` folder says the commands do not run as the owner. A place is named once, with the flags of all its grants together. Absent or empty in the other modes: only folder mode names folders. In `allowlist` mode as `nerve-run` they still hold the allowed commands (node-local.md), which the block does not tell |
+| `unnamed` | in `folder` mode: how many folders that grant something are left out of `folders` for their names (above). Absent when none, so a block with no folder and no count grants none |
+
+A grant, a mode or its end, or another account changes the block and so
+`rev` (§6). It describes the policy as it is now; the node still decides
+every call (§5). A center reads the block tolerantly: one it cannot read is
+taken as absent, and the rest of the descriptor stays.
 
 ## 7. Profiles
 

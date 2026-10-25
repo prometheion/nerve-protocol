@@ -56,9 +56,31 @@ from `list`, when the model asks:
 
 | Call | Answer |
 |---|---|
-| `list()` | One line per machine: name, id, online, offline or disabled, platform, how many capabilities |
-| `list(node: "box-1")` | One line per capability of that machine: `fs.read`, `fs.write`, `exec.run` …, each with what it does. A machine with very many capabilities gets their names alone, and those that do not fit even then are counted |
-| `list(node: "box-1", capability: ["fs.read"])` | The details: what it does, its effect, its arguments (a JSON schema) and its result. `capability` is a list, such as `["fs.read", "exec.run"]`. The center takes one name alone too, but a harness that checks calls against the tool's schema refuses it |
+| `list()` | One line per machine: name, id, online, offline or disabled, platform, how many capabilities, the mode this center has there (and until when) and the account its commands run as. After them, the notes you wrote on machines (below) |
+| `list(node: "box-1")` | The mode line, in `folder` mode the folders this center may use with their flags (`/home/me/proj (rw, some folders below allow less), /tmp (rwx, own)`), then one line per capability of that machine: `fs.read`, `fs.write`, `exec.run` …, each with what it does. A machine with very many capabilities gets their names alone, and those that do not fit even then are counted |
+| `list(node: "box-1", capability: ["fs.read"])` | The details: what it does, its effect, its arguments (a JSON schema) and its result. In `folder` mode `fs.*` and `exec.run` add the folders, and the center says how to read them. Where the commands run as `nerve-run`, it asks the model to keep files it makes in your folders readable for you, by keeping their group bits (0640 or 0660, folders 0750 or 0770, not 0600 or 0700 unless asked), and to use the folders marked `own` (`nerve-run`'s home, `/tmp`, `/var/tmp`) for throwaway files only, and to change no program's settings there unless asked: every pairing whose commands run as `nerve-run` shares them, and `/tmp` and `/var/tmp` every account on the machine. The settings and caches its programs keep in `nerve-run`'s home are shared too, so what one pairing leaves there can change what another one's commands do ([modes](modes.md#the-account-nerve-run-linux)). Where the commands run as you, it says neither. Where your sudo list for that center names commands, the node's [sudo switch](sudo.md) is on and `exec.run` is neither hidden nor off for that center, the details of `exec.run` say that those run by that list alone, with full rights, in any folder and outside the sandbox; they say whether a sandbox holds the commands too. The file calls' details say neither, as neither changes what a file call may do. `capability` is a list, such as `["fs.read", "exec.run"]`. The center takes one name alone too, but a harness that checks calls against the tool's schema refuses it |
+
+Only this center's own mode, account and folders are shown: a machine paired
+with several centers tells each one its own, whether that center has the
+settings grant or not. The folders are what the machine allows now; it
+still decides every call. Where folders nest, the deepest one decides. A
+folder you left without rights inside a granted one is not named, just as
+the machine's file calls hide it: the granted folder around it is shown with
+`some folders below allow less`. Such a folder refuses file calls and commands
+that start in it, but a command started in the folder around it still
+reaches it; the center tells the model so. A folder whose name cannot be
+shown on one line (a line break or another control character in it, a blank
+at either end) is left out and counted, and marks the folder around it the
+same way where it allows less. Where the machine runs no command in
+`folder` mode (the installed Windows node, which starts no AppContainer),
+no folder is shown with `x`. Where Landlock or an AppContainer
+holds the commands, the center says the sandbox keeps them to the folders;
+on the installed Linux node without Landlock it says they reach what
+`nerve-run` may reach.
+
+Your note on a machine (**Action checker › Per machine** in the web UI, at
+most 400 bytes) is shown by `list()` after the machines, as your words, for
+example `- box-1: test VM; its databases hold throwaway data`.
 
 `execute` takes the machine, the capability and its arguments:
 
@@ -74,7 +96,16 @@ JSON Schema (`parametersJsonSchema`) or rewrite them.
 
 The model must ask `list` for a capability's details before it runs it. A
 capability whose arguments or description changed since must be listed again;
-a change of a rule or a mode alone needs no new `list`. The center remembers
+a change of a rule, of a mode's end or of the mode alone needs no new `list`.
+What `fs.*` and `exec.run` say of the folders is the exception: in `folder`
+mode a folder you grant, change or take back changes it, and so does
+entering or leaving `folder` mode (also when a `folder --for` time runs
+out), so the model lists those again (and only those). What `exec.run`
+alone says of what holds a command changes too when your sudo list for
+that center starts or stops naming commands, when you turn the sudo
+switch on or off, when you hide or turn off `exec.run` while the list
+names commands, and when a sandbox goes or comes back: the model lists
+`exec.run` again, and the file calls stay listed. The center remembers
 what each session was given, so a new session lists again.
 
 What `list` shows follows what the machines allow:
@@ -82,8 +113,8 @@ What `list` shows follows what the machines allow:
 - In `allowlist` mode a capability appears only when an allow rule covers it.
   `folder` and `user` mode show the capabilities without rules. Add a rule or
   pick a mode on the machine, and the next `list` shows them.
-- A capability you turned off (`cap set … off`) is named in one line as
-  turned off, and the model cannot run it.
+- A capability or a single action you turned off (`cap set … off`) is named
+  in one line as turned off, and the model cannot run it.
 - A machine you disabled in the center is shown as disabled, with no
   capabilities.
 - A paired machine that is offline is shown as offline, with what it offered

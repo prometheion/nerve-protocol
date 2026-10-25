@@ -11,10 +11,16 @@ nerve-node center ls                      # shows "settings write" or "settings 
 
 With several centers, add `--center <name>`.
 
+Every center, with the grant or without, is told its own pairing's mode,
+until when it holds, the account its commands run as and, in `folder` mode,
+its folders (a folder you closed inside one is not named, only that some
+folder below is closed): the agent needs them to know where it may work
+([modes](modes.md#folders)). It is never told another center's.
+
 ## What a center with the grant can do
 
-- Read and change its own pairing's policy: mode (up to `user`), folders,
-  rules, capability switches.
+- Change its own pairing's policy, and read the rest of it: mode (up to
+  `user`), folders, rules, capability switches.
 - Add rules with the web UI's Audit buttons.
 - Edit the machine's settings as JSON in the web UI, Settings.
 - Pause the node's link.

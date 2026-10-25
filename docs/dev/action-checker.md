@@ -289,7 +289,10 @@ Per node (owner's decision of 2026-10-18): a `BlockEntry` has a `node_id`
 (`None` for every node) and `off_for`, the node ids an entry for every node is
 switched off for (`BlockEntry::applies_to`); an `AllowRule` has its `node_id`
 as before. `CheckerConfig::nodes` maps a node id to `NodeSettings`, a
-`NodeSwitch` (`inherit`, `on`, `off`) for the blocklist and one for the model;
+`NodeSwitch` (`inherit`, `on`, `off`) for the blocklist and one for the model,
+and the owner's `note` on the machine (one line, at most `NOTE_MAX` = 400
+bytes, checked by `apply_checker_config`), which `list()` shows the agent and
+the checker does not read yet (#140);
 `blocklist_for`/`model_for` resolve it against the center's switch and say
 which one it was (`Scope::Global` or `Scope::Node`). Every decision carries
 that scope: of the entry or allow rule that matched, else of the switch that

@@ -36,7 +36,7 @@ pub const LIST_TOOL: &str = "list";
 pub const EXECUTE_TOOL: &str = "execute";
 
 const INSTRUCTIONS: &str = "These two tools act on machines (nodes) paired with this Nerve center. \
-`list` shows what they offer: list() the nodes, list(node) one node's capabilities, \
+`list` shows what they offer: list() the nodes, list(node) one node's capabilities and the folders you may use there, \
 list(node, capability) the details of one capability or a list of them. \
 `execute` runs one capability on one node, with args that fit the params `list` gave for it. \
 Call `list` for a capability's details before you execute it, and again when `execute` says so. \
@@ -418,8 +418,8 @@ pub fn tools() -> Value {
             "name": LIST_TOOL,
             "title": "List Nerve machines and capabilities",
             "description": "Shows what the machines (nodes) paired with this Nerve center offer, in three levels. \
-    list() lists the nodes: name, id, online/offline/disabled, platform and how many capabilities each offers. \
-    list(node) lists one node's capabilities, one line each: name and what it does. \
+    list() lists the nodes: name, id, online/offline/disabled, platform, how many capabilities each offers, your mode there and the account your commands run as. \
+    list(node) lists one node's capabilities, one line each: name and what it does, and in folder mode the folders you may use (r read, w write, x run commands). \
     list(node, capability) gives the details of one capability, or of a list of them: description, effect, params (a JSON schema) and the result. \
     Get the details of a capability before you execute it. \
     Example: {\"node\": \"build-box\", \"capability\": [\"fs.read\", \"exec.run\"]}",

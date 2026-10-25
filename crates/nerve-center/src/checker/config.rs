@@ -163,14 +163,24 @@ impl NodeSwitch {
     }
 }
 
+/// The longest owner's note on a machine, in bytes: a few sentences, as
+/// every `list()` of every harness carries it, and a small checker model
+/// has a short question (#140).
+pub const NOTE_MAX: usize = 400;
+
 /// One node's own settings. Taint stays a center-wide switch, and a node's
 /// model "on" uses the center's one model and its settings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct NodeSettings {
     #[serde(default)]
     pub blocklist: NodeSwitch,
     #[serde(default)]
     pub model: NodeSwitch,
+    /// The owner's note on the machine ("test VM; its databases hold
+    /// throwaway data"), on one line and at most [`NOTE_MAX`] bytes. `list()`
+    /// shows it to the agent; it is the owner's word, never a node's.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
 }
 
 /// A saved allow rule of the checker: the same `<scope>:<pattern>` syntax,
@@ -1255,13 +1265,14 @@ mod tests {
             NodeSettings {
                 blocklist: NodeSwitch::Inherit,
                 model: NodeSwitch::On,
+                ..Default::default()
             },
         );
         assert!(c.model_wanted());
         assert_eq!(c.model_for("n1"), (true, Scope::Node));
         assert_eq!(c.model_for("n2"), (false, Scope::Global));
         assert_eq!(
-            serde_json::to_value(c.nodes["n1"]).unwrap(),
+            serde_json::to_value(&c.nodes["n1"]).unwrap(),
             serde_json::json!({"blocklist": "inherit", "model": "on"})
         );
     }
@@ -1323,6 +1334,7 @@ mod tests {
             NodeSettings {
                 blocklist: NodeSwitch::Inherit,
                 model: NodeSwitch::On,
+                ..Default::default()
             },
         );
         c.local_installed(true, LocalModel::D1_3b);

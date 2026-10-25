@@ -1047,12 +1047,40 @@ before and allow rules do not matter, except a sense or actuate action such
 as `exec.signal`, which is shown there only when the owner set it to `on`,
 and in `folder` mode a provider's action, which names no folder (step 7);
 deny rules never hide an action.
-`off` actions stay listed (exposure `off`), `hidden` ones and the actions
+`off` actions stay listed (exposure `off`, on the capability or, for an
+action switched off alone, on the action), `hidden` ones and the actions
 left out here are absent, and a capability with no action left is absent.
-`settings` and `audit` follow their own rules. The descriptor's `rev` follows
-its content, so adding or removing a rule that changes the set sends
-`node/descriptor_changed`; a call naming an action that is not shown still
-reaches the policy and is refused and audited.
+`settings` and `audit` follow their own rules.
+
+The descriptor also tells the center what it may do (protocol.md §6.2,
+`access`): its mode now and its end, the account its commands run as, and in
+`folder` mode its folders with their flags, in the center's path form. The
+link builds it from that center's entry alone, with the built-in folders of
+`nerve-run` added where its commands run as that account, as the gate and
+the sandbox see them, and marked `own`; no other pairing's folders are in
+it. A folder with no flag is never named, as the file calls hide its name
+(`fs.list` leaves it out, a refusal under it reads like any other): the
+deepest named folder around it is marked `closed_below` instead. A folder
+whose name would read otherwise on one line (a control character, U+2028 or
+U+2029, a blank at either end) is left out and counted in `unnamed`; where
+it allows less than the deepest named folder around it, that one is marked
+`closed_below` too. `confined` is set only where a
+sandbox holds folder-mode commands: the installed Linux node without
+Landlock runs them, held back by `nerve-run`'s account alone, and sends
+`false`. Where the node runs no folder-mode command at all (`folder_refusal`
+answers, as on the Windows service), no folder is marked `x`. `sudo` says
+that the center's sudo allow list names commands, `exec.run` is neither
+hidden nor off for that center (`Reach::of`) and the sudo switch is on
+(`Shared::sudo_on`: set and a checked password held), so they run by that
+list alone, in any folder and unconfined; with the switch off, or
+`exec.run` hidden or off, none runs, and the block does not say so. A switch change moves the rev. In
+`allowlist` mode as `nerve-run` the folders still hold the allowed
+commands, but only `folder` mode names them. The account's name needs no
+lookup of its own (the home of `nerve-run` is the last one looked up). The
+descriptor's `rev` follows its content, so adding or removing a
+rule that changes the set, a folder grant, a mode change or another account
+sends `node/descriptor_changed`; a call naming an action that is not shown
+still reaches the policy and is refused and audited.
 
 ## 4. The sudo switch
 

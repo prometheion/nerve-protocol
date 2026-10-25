@@ -43,6 +43,11 @@ pub fn descriptor(node_id: &str, name: &str) -> Descriptor {
     .expect("the echo descriptor is well formed")
 }
 
+/// The account the harness nodes say their commands run as.
+pub const ACCESS_ACCOUNT: &str = "conformance-run";
+/// The folder the harness nodes say the center may read and write.
+pub const ACCESS_FOLDER: &str = "/conformance/work";
+
 /// The descriptor the harness part's nodes offer: the echo node's, plus
 /// `mirror`, an `echo` twin with a write action, and actions of `node`,
 /// `settings` and `audit`, which a center must never offer a harness.
@@ -69,6 +74,9 @@ pub fn harness_descriptor(node_id: &str, name: &str) -> Descriptor {
         json!({"id": "audit", "exposure": "on", "summary": "Not a tool.",
         "actions": {"list": {"effect": "read", "summary": "Never offered to a harness."}}}),
     );
+    // What the center may do there (§6.2), which `list(node)` tells.
+    d["access"] = json!({"mode": "folder", "account": ACCESS_ACCOUNT,
+        "folders": [{"path": ACCESS_FOLDER, "access": "rw"}]});
     serde_json::from_value(d).expect("the harness descriptor is well formed")
 }
 

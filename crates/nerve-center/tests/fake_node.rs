@@ -1367,6 +1367,91 @@ async fn a_policy_edit_alone_does_not() {
     r.stop().await;
 }
 
+/// A folder grant changes what the details of `fs.*` and `exec.run` say,
+/// so those must be listed again; a provider's unit, which no folder binds,
+/// and a change of the mode's end alone need no new list.
+#[tokio::test]
+async fn a_grant_change_needs_a_new_list_of_fs_and_exec_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(dir.path()).await;
+    let key = NodeKey::generate().unwrap();
+    assert_eq!(pair(&r, &key, "box-1").await.0, 200);
+    let (ws, _) = handshake(&r, &key).await;
+    let with = |folders: Value, until: u64| {
+        let mut d = descriptor(&key, "box-1");
+        d["capabilities"].as_array_mut().unwrap().push(json!(
+            {"id": "lamp", "provider": "desk", "exposure": "on", "summary": "A lamp.",
+             "actions": {"get": {"effect": "read", "params": {"type": "object"}}}}));
+        d["access"] = json!({"mode": "folder", "until_ms": until, "account": "nerve-run",
+                             "confined": true, "folders": folders});
+        d
+    };
+    let (mut seen, node) = serve_described(ws, with(json!([{"path": "/a", "access": "rw"}]), 5));
+    let c = r.center.clone();
+    described(&c).await;
+    let e = Engine::new(&r.center, "test");
+    for (unit, args) in [
+        ("fs.read", json!({"path": "/a/x"})),
+        ("exec.run", json!({"command": "ls"})),
+        ("lamp.get", json!({})),
+    ] {
+        let done = run(&e, "box-1", unit, args).await;
+        assert!(!said(&done).1, "{done}");
+        assert!(matches!(seen.recv().await, Some(Seen::Invoke(_))));
+    }
+    let listed = list_text(&e, json!({"node": "box-1", "capability": ["fs.read"]})).await;
+    assert!(listed.contains("\nfolders: /a (rw)\n"), "{listed}");
+    assert!(
+        listed.contains("[end of device content]\nFolders: The node is in folder mode"),
+        "{listed}"
+    );
+
+    // Another end of the mode alone: nothing to list again.
+    let until = |n: u64| {
+        move |c: &Center| {
+            c.offer("box-1")
+                .and_then(|o| o.reach)
+                .is_some_and(|r| r.until_ms == Some(n))
+        }
+    };
+    describe_anew(
+        &c,
+        &node,
+        with(json!([{"path": "/a", "access": "rw"}]), 9),
+        until(9),
+    )
+    .await;
+    let done = execute_only(&e, "box-1", "fs.read", json!({"path": "/a/x"})).await;
+    assert!(!said(&done).1, "{done}");
+    assert!(matches!(seen.recv().await, Some(Seen::Invoke(_))));
+
+    // A new grant: fs.read and exec.run must be listed again, lamp.get not.
+    let grant = json!([{"path": "/a", "access": "rw"}, {"path": "/b", "access": "r"}]);
+    let two = |c: &Center| {
+        c.offer("box-1")
+            .and_then(|o| o.reach)
+            .is_some_and(|r| r.folders.len() == 2)
+    };
+    describe_anew(&c, &node, with(grant, 9), two).await;
+    for unit in ["fs.read", "exec.run"] {
+        let args = if unit == "fs.read" {
+            json!({"path": "/a/x"})
+        } else {
+            json!({"command": "ls"})
+        };
+        let (text, err) = said(&execute_only(&e, "box-1", unit, args).await);
+        assert!(err, "{unit}");
+        assert_eq!(text, list_again(unit));
+    }
+    nothing_more(&mut seen).await;
+    let done = execute_only(&e, "box-1", "lamp.get", json!({})).await;
+    assert!(!said(&done).1, "{done}");
+    assert!(matches!(seen.recv().await, Some(Seen::Invoke(_))));
+    let listed = list_text(&e, json!({"node": "box-1", "capability": ["fs.read"]})).await;
+    assert!(listed.contains("/a (rw), /b (r)"), "{listed}");
+    r.stop().await;
+}
+
 /// The node's own capabilities (`settings`, `node`, `audit`) are never
 /// listed at any level, and `execute` of them never reaches the node.
 #[tokio::test]

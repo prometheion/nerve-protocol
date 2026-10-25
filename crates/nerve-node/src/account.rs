@@ -419,6 +419,14 @@ pub fn own_uid() -> u32 {
     nerve_transport::net::euid()
 }
 
+/// The name of the account this process runs as, when it can be told.
+pub fn own_name() -> Option<String> {
+    #[cfg(windows)]
+    return crate::win_user::current_user().ok();
+    #[cfg(not(windows))]
+    name_of(own_uid())
+}
+
 /// Whether this process may switch to another account: root, or a process
 /// with CAP_SETUID and CAP_SETGID in effect, as the installed service. On
 /// Windows: SYSTEM, or a process that holds the privileges to start a

@@ -657,7 +657,94 @@ fn check_descriptor(v: &Value, node_id: &str, rev: u64) -> Result<(), String> {
     for c in &d.capabilities {
         ensure(ids.insert(&c.id), format!("capability {} twice", c.id))?;
     }
+    check_access(v)?;
     check_schemas(&d)
+}
+
+/// Whether the descriptor's `access` block (§6.2), when there is one, is
+/// well formed: a known mode, folders only in folder mode, each an absolute
+/// path in the center's form that reads the same on one line (a center
+/// would show another one shown changed) with one to three of `r`, `w`, `x`
+/// in that order (a closed folder is not named), `own` and `closed_below`
+/// booleans, no place twice; `sudo` a boolean and `unnamed` a count, each
+/// set only in folder mode. A `\` is part of a Unix name, so it is not
+/// refused. A center reads a block it cannot take as none,
+/// so a node that sends one tells the agent nothing. (An action's
+/// `exposure` other than `on` or `off` fails the descriptor as a whole.)
+fn check_access(v: &Value) -> Result<(), String> {
+    let Some(a) = v.get("access") else {
+        return Ok(());
+    };
+    let a = a.as_object().ok_or("access is not an object")?;
+    let mode = a.get("mode").and_then(Value::as_str).unwrap_or_default();
+    ensure(
+        matches!(mode, "allowlist" | "folder" | "user"),
+        format!("access mode {:?}", a.get("mode")),
+    )?;
+    if let Some(u) = a.get("until_ms") {
+        ensure(u.is_u64(), format!("access until_ms {u}"))?;
+    }
+    if let Some(n) = a.get("account") {
+        let n = n.as_str().unwrap_or_default();
+        ensure(
+            !n.is_empty() && !n.chars().any(char::is_control),
+            format!("access account {n:?}"),
+        )?;
+    }
+    if let Some(c) = a.get("confined") {
+        ensure(
+            c.as_bool().is_some_and(|c| !c || mode == "folder"),
+            format!("access confined {c} in {mode} mode"),
+        )?;
+    }
+    if let Some(s) = a.get("sudo") {
+        ensure(
+            s.as_bool().is_some_and(|s| !s || mode == "folder"),
+            format!("access sudo {s} in {mode} mode"),
+        )?;
+    }
+    if let Some(n) = a.get("unnamed") {
+        ensure(
+            n.as_u64().is_some_and(|n| n == 0 || mode == "folder"),
+            format!("access unnamed {n} in {mode} mode"),
+        )?;
+    }
+    let folders = match a.get("folders") {
+        None => return Ok(()),
+        Some(f) => f.as_array().ok_or("access folders is not a list")?,
+    };
+    ensure(
+        folders.is_empty() || mode == "folder",
+        format!("access names folders in {mode} mode"),
+    )?;
+    let mut seen = std::collections::BTreeSet::new();
+    for f in folders {
+        let path = f["path"].as_str().unwrap_or_default();
+        ensure(
+            path.starts_with('/') && nerve_proto::descriptor::plain_line(path),
+            format!("access folder path {:?}", f["path"]),
+        )?;
+        let flags = nerve_proto::descriptor::FolderAccess {
+            path: path.into(),
+            access: f["access"].as_str().unwrap_or("?").into(),
+            own: false,
+            closed_below: false,
+        };
+        ensure(
+            flags.flags().is_some(),
+            format!("access folder {path}: flags {:?}", f["access"]),
+        )?;
+        ensure(
+            f.get("own").is_none_or(Value::is_boolean),
+            format!("access folder {path}: own {}", f["own"]),
+        )?;
+        ensure(
+            f.get("closed_below").is_none_or(Value::is_boolean),
+            format!("access folder {path}: closed_below {}", f["closed_below"]),
+        )?;
+        ensure(seen.insert(path), format!("access folder {path} twice"))?;
+    }
+    Ok(())
 }
 
 /// Whether every schema of `d` keeps to the subset (§6): a center leaves out
@@ -699,6 +786,127 @@ mod tests {
     #[test]
     fn a_descriptor_whose_schemas_keep_to_the_subset_passes() {
         check_descriptor(&echo(), "node-id", 1).unwrap();
+    }
+
+    /// A well-formed access block passes; each way of getting it wrong
+    /// fails with what is wrong.
+    #[test]
+    fn the_access_block_must_be_well_formed() {
+        let good = json!({"mode": "folder", "until_ms": 5, "account": "nerve-run",
+                          "confined": true, "sudo": true, "unnamed": 2,
+                          "folders": [{"path": "/home/me/proj", "access": "rw",
+                                       "closed_below": true},
+                                      {"path": "/c/Users/me", "access": "rwx"},
+                                      {"path": "/srv/data\\2026", "access": "r"},
+                                      {"path": "/tmp", "access": "rwx", "own": true}]});
+        let mut d = echo();
+        d["access"] = good.clone();
+        check_descriptor(&d, "node-id", 1).unwrap();
+        d["access"] = json!({"mode": "user", "account": "me"});
+        check_descriptor(&d, "node-id", 1).unwrap();
+        type Edit = fn(&mut Value);
+        let cases: [(Edit, &str); 23] = [
+            (|a| a["mode"] = json!("later"), "access mode"),
+            (|a| a["until_ms"] = json!(-1), "access until_ms"),
+            (|a| a["account"] = json!("me\nyou"), "access account"),
+            (|a| a["account"] = json!(""), "access account"),
+            (
+                |a| {
+                    a["mode"] = json!("user");
+                    a["folders"] = json!([]);
+                    a["confined"] = json!(true)
+                },
+                "access confined",
+            ),
+            (
+                |a| {
+                    a["mode"] = json!("user");
+                    a["confined"] = json!(false)
+                },
+                "access sudo",
+            ),
+            (
+                |a| {
+                    a["mode"] = json!("user");
+                    a["confined"] = json!(false);
+                    a["sudo"] = json!(false)
+                },
+                "access unnamed",
+            ),
+            (
+                |a| {
+                    a["mode"] = json!("user");
+                    a["confined"] = json!(false);
+                    a["sudo"] = json!(false);
+                    a["unnamed"] = json!(0)
+                },
+                "access names folders in user mode",
+            ),
+            (|a| a["sudo"] = json!("yes"), "access sudo"),
+            (|a| a["unnamed"] = json!(-1), "access unnamed"),
+            (
+                |a| a["folders"][0]["path"] = json!("home/me"),
+                "access folder path",
+            ),
+            (
+                |a| a["folders"][0]["path"] = json!("C:\\Users"),
+                "access folder path",
+            ),
+            (
+                |a| a["folders"][0]["path"] = json!("/home/me/a\nb"),
+                "access folder path",
+            ),
+            (
+                |a| a["folders"][0]["path"] = json!("/home/me/a\u{2028}b"),
+                "access folder path",
+            ),
+            (
+                |a| a["folders"][0]["path"] = json!("/home/me/a "),
+                "access folder path",
+            ),
+            (
+                |a| a["folders"][0]["path"] = json!("/home/me/a\u{2029}"),
+                "access folder path",
+            ),
+            (
+                |a| a["folders"][0]["access"] = json!("wr"),
+                "access folder /home/me/proj: flags",
+            ),
+            (
+                |a| a["folders"][0]["access"] = json!(null),
+                "access folder /home/me/proj: flags",
+            ),
+            (
+                |a| a["folders"][0]["access"] = json!(""),
+                "access folder /home/me/proj: flags",
+            ),
+            (
+                |a| a["folders"][0]["own"] = json!("yes"),
+                "access folder /home/me/proj: own",
+            ),
+            (
+                |a| a["folders"][0]["closed_below"] = json!(1),
+                "access folder /home/me/proj: closed_below",
+            ),
+            (
+                |a| a["folders"][1]["path"] = json!("/home/me/proj"),
+                "access folder /home/me/proj twice",
+            ),
+            (|a| *a = json!("folder"), "access is not an object"),
+        ];
+        for (edit, want) in cases {
+            let mut d = echo();
+            d["access"] = good.clone();
+            edit(&mut d["access"]);
+            let e = check_descriptor(&d, "node-id", 1).unwrap_err();
+            assert!(e.starts_with(want), "{want}: {e}");
+        }
+        let mut d = echo();
+        d["capabilities"][1]["actions"]["say"]["exposure"] = json!("hidden");
+        let e = check_descriptor(&d, "node-id", 1).unwrap_err();
+        assert!(e.starts_with("not a descriptor"), "{e}");
+        d["capabilities"][1]["actions"]["say"]["exposure"] = json!("off");
+        check_descriptor(&d, "node-id", 1).unwrap();
     }
 
     #[test]

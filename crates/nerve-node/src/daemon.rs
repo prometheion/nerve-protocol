@@ -515,6 +515,9 @@ pub(crate) struct Shared {
     /// Linux: the installed node's owner ([`NodeOptions::owner`]).
     #[cfg_attr(windows, allow(dead_code))]
     pub owner: Option<String>,
+    /// The name of the account this process runs as, looked up once: a
+    /// node run by hand runs its commands as it.
+    pub own_user: Option<String>,
     /// Linux: what the last sync of the folders' ACLs for `nerve-run` left
     /// (crate::acl); held while one runs, so that two never run at once.
     #[cfg(target_os = "linux")]
@@ -576,6 +579,73 @@ impl Shared {
                 .extend(crate::account::built_in(&a.home));
         }
         entry
+    }
+
+    /// What the center `entry` (the config's, as it is) may do now, for its
+    /// descriptor (crate::descriptor::Reach): from that entry alone, with the
+    /// built-in folders as [`Shared::with_built_in`] adds them for the gate.
+    /// It runs every few seconds for every link, so the account is named
+    /// without a lookup, and `nerve-run`'s home is the last one looked up.
+    pub fn reach(
+        &self,
+        cfg: &NodeConfig,
+        entry: &nerve_policy::CenterEntry,
+    ) -> crate::descriptor::Reach {
+        let now = crate::now_ms();
+        let run_home = self
+            .separate(&entry.policy)
+            .then(|| self.account_seen(cfg, &entry.policy))
+            .flatten()
+            .map(|a| a.home);
+        let mut reach = crate::descriptor::Reach::of(
+            entry,
+            now,
+            self.account_name(cfg, &entry.policy),
+            self.confined(cfg),
+            run_home.as_deref(),
+        );
+        // Without a sandbox, a folder-mode command that runs at all runs as
+        // `nerve-run`, held back by that account alone ([`folder_refusal`]).
+        reach.held_by_account = !self.sandboxed();
+        // A command on the sudo list runs only while the switch is on, which
+        // it is not by default nor, on Linux, after a restart: the block
+        // tells the list only then. A switch change moves the rev like a
+        // grant. No store lock is held here; `sudo_on` takes it.
+        reach.sudo = reach.sudo && self.sudo_on();
+        reach
+    }
+
+    /// The name of the account the commands of a pairing with `policy` run
+    /// as now ([`Shared::command_account`]), without looking it up: whether
+    /// it exists and may be used is the call's business.
+    pub fn account_name(
+        &self,
+        cfg: &NodeConfig,
+        policy: &nerve_policy::config::CenterPolicy,
+    ) -> Option<String> {
+        if !self.service {
+            return self.own_user.clone();
+        }
+        if cfg!(windows) || policy.runs_as_owner(crate::now_ms()) {
+            self.owner_name(cfg)
+        } else {
+            Some(crate::account::RUN_USER.to_string())
+        }
+    }
+
+    /// [`Shared::command_account`] as last looked up, however long ago;
+    /// looked up only when it never was. Not for deciding a call.
+    fn account_seen(
+        &self,
+        cfg: &NodeConfig,
+        policy: &nerve_policy::config::CenterPolicy,
+    ) -> Option<crate::service::Account> {
+        if let Some(name) = self.account_name(cfg, policy)
+            && let Some((_, a)) = lock(&self.account_cache).get(&name)
+        {
+            return a.clone();
+        }
+        self.command_account(cfg, policy).ok().flatten()
     }
 
     /// The accounts the folders' ACLs are for (crate::acl): `nerve-run` and
@@ -824,11 +894,17 @@ impl Shared {
         account: impl FnOnce() -> Option<crate::service::Account>,
     ) -> Option<&'static str> {
         folder_refusal(
-            self.confinement.available() && self.exe.is_some(),
+            self.sandboxed(),
             self.service,
             cfg.machine.secret_storage,
             account,
         )
+    }
+
+    /// Whether a sandbox can hold folder-mode commands to the folders here:
+    /// Landlock or an AppContainer, and a program to start them through.
+    fn sandboxed(&self) -> bool {
+        self.confinement.available() && self.exe.is_some()
     }
 
     /// Whether the commands of a pairing with `policy` run under Landlock
@@ -1326,6 +1402,7 @@ impl Daemon {
             relay: Default::default(),
             aside: opts.aside,
             owner: opts.owner,
+            own_user: crate::account::own_name(),
             #[cfg(target_os = "linux")]
             acl: Mutex::default(),
             #[cfg(target_os = "linux")]
@@ -2126,6 +2203,123 @@ fn given_in_home(cfg: &NodeConfig, home: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
+/// Tests that run on every platform; the module below is Unix only.
+#[cfg(test)]
+mod every_platform {
+    use super::*;
+
+    /// The installed node names the account each pairing's commands run as
+    /// without a lookup: on Windows always the owner (`machine.user`), whose
+    /// commands run in an AppContainer, never `nerve-run`, which does not
+    /// exist there; elsewhere `nerve-run` unless the pairing runs as the
+    /// owner. Runs on every platform, so each half is checked where it holds.
+    #[tokio::test]
+    async fn the_installed_node_names_the_command_account_of_each_pairing() {
+        use nerve_policy::config::{CenterPolicy, Mode};
+        let d = tempfile::tempdir().unwrap();
+        let mut o = NodeOptions::new(NodePaths::new(
+            d.path().join("config"),
+            d.path().join("state"),
+        ));
+        o.home = d.path().to_path_buf();
+        o.ctl = false;
+        o.log = Some(Log::new(Level::Info));
+        o.full_rights = Some(false);
+        o.service = Some(true);
+        o.owner = Some("alice".into());
+        let daemon = Daemon::start(o).await.unwrap();
+        let s = daemon.shared.clone();
+        let mut cfg = s.config();
+        cfg.machine.user = Some("alice".into());
+        let named = |mode: Mode, as_owner: bool| {
+            s.account_name(
+                &cfg,
+                &CenterPolicy {
+                    mode,
+                    as_owner,
+                    ..Default::default()
+                },
+            )
+        };
+        let run = if cfg!(windows) {
+            "alice"
+        } else {
+            crate::account::RUN_USER
+        };
+        for (mode, as_owner, want) in [
+            (Mode::Folder, false, run),
+            (Mode::Allowlist, false, run),
+            (Mode::Allowlist, true, "alice"),
+            (Mode::User, false, "alice"),
+        ] {
+            assert_eq!(
+                named(mode, as_owner).as_deref(),
+                Some(want),
+                "{mode:?} as owner {as_owner}"
+            );
+        }
+        daemon.stop().await;
+    }
+
+    /// The reach tells the sudo list only while the node's sudo switch is
+    /// on: set in the config and a checked password held. Off by default,
+    /// a listed command is refused, so the block does not say it runs.
+    #[tokio::test]
+    async fn the_reach_tells_the_sudo_list_only_while_the_switch_is_on() {
+        use nerve_policy::config::{CenterPolicy, Mode, Sudo};
+        let d = tempfile::tempdir().unwrap();
+        let mut o = NodeOptions::new(NodePaths::new(
+            d.path().join("config"),
+            d.path().join("state"),
+        ));
+        o.home = d.path().to_path_buf();
+        o.ctl = false;
+        o.log = Some(Log::new(Level::Info));
+        // Not elevated, also where the test runs elevated (a Windows CI).
+        o.full_rights = Some(false);
+        o.owner = Some("alice".into());
+        let daemon = Daemon::start(o).await.unwrap();
+        let s = daemon.shared.clone();
+        let entry = nerve_policy::CenterEntry {
+            name: "c".into(),
+            url: "https://center.example".into(),
+            pin: None,
+            center_id: "c".into(),
+            node_id: "n".into(),
+            settings: Default::default(),
+            paused: false,
+            revoked: false,
+            unknown: false,
+            public_key: None,
+            key_rotations: 0,
+            pin_rotations: 0,
+            old_pin: None,
+            policy: CenterPolicy {
+                mode: Mode::Folder,
+                sudo_allow: vec!["sudo apt *".into()],
+                ..Default::default()
+            },
+        };
+        let told = || {
+            let r = s.reach(&s.config(), &entry);
+            crate::descriptor::for_center(&s.config(), &entry, &r, &[])
+        };
+        let off = told();
+        assert!(!off.access.as_ref().unwrap().sudo);
+        lock(&s.store)
+            .set_sudo(nerve_policy::Writer::Local, Sudo::On)
+            .unwrap();
+        // Set in the config, but no password held (a restarted node).
+        assert!(!told().access.unwrap().sudo);
+        *lock(&s.sudo) = Some(crate::sudo::Secret::new("pw".into()));
+        *lock(&s.sudo_for) = s.owner_name(&s.config());
+        let on = told();
+        assert!(on.access.as_ref().unwrap().sudo);
+        assert_ne!(on.rev, off.rev);
+        daemon.stop().await;
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -2488,6 +2682,172 @@ mod tests {
             let daemon = Daemon::start(o).await.unwrap();
             let st = daemon.status();
             assert_eq!(st["owner_is_root"], root, "{owner:?}: {st}");
+            daemon.stop().await;
+        }
+    }
+
+    /// What each pairing's descriptor tells of the account and the folders,
+    /// as the link builds it: on the installed Linux node a folder pairing
+    /// runs as `nerve-run`, whose home, `/tmp` and `/var/tmp` it names as
+    /// that account's own; an allowlist pairing as `nerve-run` names the
+    /// account and no folder; a user pairing and an allowlist pairing as
+    /// the owner run as the owner, with no built-in folder. A node run by
+    /// hand runs everything as its own user, with no built-in folder.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn each_pairing_is_told_its_account_and_the_accounts_own_folders() {
+        use nerve_policy::config::{CenterPolicy, Folder, Mode};
+        for service in [true, false] {
+            let log = Log::new(Level::Info);
+            let d = tempfile::tempdir().unwrap();
+            let mut o = options(&d, &log);
+            o.full_rights = Some(false);
+            o.exe = Some("/bin/true".into());
+            o.service = Some(service);
+            o.owner = Some("alice".into());
+            let daemon = Daemon::start(o).await.unwrap();
+            let s = daemon.shared.clone();
+            let run_home = d.path().join("nerve-run");
+            // nerve-run and the owner as the account database has them.
+            for (name, uid, home) in [
+                (crate::account::RUN_USER, 4243, run_home.clone()),
+                ("alice", 4242, d.path().join("alice")),
+            ] {
+                lock(&s.account_cache).insert(
+                    name.into(),
+                    (
+                        std::time::Instant::now(),
+                        Some(crate::service::Account {
+                            name: name.into(),
+                            uid,
+                            gid: uid,
+                            comment: String::new(),
+                            home,
+                            groups: vec![uid],
+                        }),
+                    ),
+                );
+            }
+            let cfg = s.config();
+            let told = |mode: Mode, as_owner: bool| {
+                let entry = nerve_policy::CenterEntry {
+                    name: "c".into(),
+                    url: "https://center.example".into(),
+                    pin: None,
+                    center_id: "c".into(),
+                    node_id: "n".into(),
+                    settings: Default::default(),
+                    paused: false,
+                    revoked: false,
+                    unknown: false,
+                    public_key: None,
+                    key_rotations: 0,
+                    pin_rotations: 0,
+                    old_pin: None,
+                    policy: CenterPolicy {
+                        mode,
+                        as_owner,
+                        folders: vec![Folder {
+                            path: "/srv/proj".into(),
+                            access: nerve_policy::config::Access::parse("rw").unwrap(),
+                        }],
+                        ..Default::default()
+                    },
+                };
+                let r = s.reach(&cfg, &entry);
+                let a = crate::descriptor::for_center(&cfg, &entry, &r, &[])
+                    .access
+                    .unwrap();
+                let folders: Vec<String> = a
+                    .folders
+                    .iter()
+                    .map(|f| format!("{} {}{}", f.path, f.access, if f.own { " own" } else { "" }))
+                    .collect();
+                (a.account, folders)
+            };
+            let what = format!("service {service}");
+            let me = crate::account::own_name();
+            let proj = "/srv/proj rw".to_string();
+            if service {
+                assert_eq!(
+                    told(Mode::Folder, false),
+                    (
+                        Some(crate::account::RUN_USER.to_string()),
+                        vec![
+                            proj.clone(),
+                            "/tmp rwx own".into(),
+                            "/var/tmp rwx own".into(),
+                            format!("{} rwx own", run_home.display()),
+                        ]
+                    ),
+                    "{what}"
+                );
+                assert_eq!(
+                    told(Mode::Allowlist, false),
+                    (Some(crate::account::RUN_USER.to_string()), vec![]),
+                    "{what}"
+                );
+                for (mode, as_owner) in [(Mode::User, false), (Mode::Allowlist, true)] {
+                    assert_eq!(
+                        told(mode, as_owner),
+                        (Some("alice".to_string()), vec![]),
+                        "{what}: {mode:?}"
+                    );
+                }
+            } else {
+                assert_eq!(
+                    told(Mode::Folder, false),
+                    (me.clone(), vec![proj]),
+                    "{what}"
+                );
+                assert_eq!(told(Mode::User, false), (me, vec![]), "{what}");
+            }
+            daemon.stop().await;
+        }
+    }
+
+    /// The installed node without Landlock holds folder-mode commands back
+    /// by their account alone, so the reach it tells a center says so (and
+    /// the block does not call them confined); with Landlock it does not.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_reach_says_where_only_the_account_holds_commands() {
+        use nerve_policy::config::{CenterPolicy, Mode};
+        for (landlock, held) in [(Some(6), false), (None, true)] {
+            let log = Log::new(Level::Info);
+            let d = tempfile::tempdir().unwrap();
+            let mut o = options(&d, &log);
+            o.full_rights = Some(false);
+            o.exe = Some("/bin/true".into());
+            o.service = Some(true);
+            o.owner = Some("alice".into());
+            o.confinement = Some(Confinement {
+                landlock_abi: landlock,
+                appcontainer: false,
+            });
+            let daemon = Daemon::start(o).await.unwrap();
+            let s = daemon.shared.clone();
+            let entry = nerve_policy::CenterEntry {
+                name: "c".into(),
+                url: "https://center.example".into(),
+                pin: None,
+                center_id: "c".into(),
+                node_id: "n".into(),
+                settings: Default::default(),
+                paused: false,
+                revoked: false,
+                unknown: false,
+                public_key: None,
+                key_rotations: 0,
+                pin_rotations: 0,
+                old_pin: None,
+                policy: CenterPolicy {
+                    mode: Mode::Folder,
+                    ..Default::default()
+                },
+            };
+            let r = s.reach(&s.config(), &entry);
+            assert_eq!(r.held_by_account, held, "landlock {landlock:?}");
             daemon.stop().await;
         }
     }

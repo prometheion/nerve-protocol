@@ -2082,13 +2082,22 @@ impl Center {
             .collect()
     }
 
-    /// The nodes as `list()` shows them.
+    /// The nodes as `list()` shows them, each with the owner's note on it.
     pub fn listed_nodes(&self) -> Vec<listing::NodeLine> {
         let online = self.online_ids();
         self.read(|s| {
             s.nodes
                 .values()
-                .map(|n| listing::line(n, online.contains(&n.id)))
+                .map(|n| {
+                    let mut line = listing::line(n, online.contains(&n.id));
+                    line.note = s
+                        .checker
+                        .nodes
+                        .get(&n.id)
+                        .map(|x| x.note.clone())
+                        .filter(|t| !t.is_empty());
+                    line
+                })
                 .collect()
         })
     }
@@ -2847,8 +2856,23 @@ impl Center {
         if cfg.model.instructions.trim().is_empty() {
             return Err("the model question needs instructions".into());
         }
-        // A node that follows the center in both is the same as one with no
-        // settings: keep the state free of them.
+        // The owner's note is one line of a few sentences: `list()` gives it
+        // to every harness on one line, and a long one would cost every
+        // session the tokens.
+        for (id, n) in &mut cfg.nodes {
+            n.note = listing::one_line(&n.note);
+            if n.note.len() > checker::config::NOTE_MAX {
+                let name = Some(self.node_name(id)).filter(|n| !n.is_empty());
+                return Err(format!(
+                    "the note on machine {} is {} bytes long; at most {} fit",
+                    name.as_deref().unwrap_or(id),
+                    n.note.len(),
+                    checker::config::NOTE_MAX
+                ));
+            }
+        }
+        // A node that follows the center in both and has no note is the
+        // same as one with no settings: keep the state free of them.
         cfg.nodes.retain(|_, n| *n != NodeSettings::default());
         // Keep in memory what a restart reads back from the stored part.
         cfg.settle_blocklist();
@@ -3656,6 +3680,71 @@ mod tests {
         assert_eq!(audited(), 1);
     }
 
+    /// The owner's note on a machine is kept on one line, refused when long,
+    /// shown by `list()` for that machine only, and outlives the machine's
+    /// pairing like its other settings; a note of blanks is no setting.
+    #[test]
+    fn the_owners_note_shows_for_its_node_only_and_survives_forget() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        c.update(|s| {
+            s.nodes.insert("n1".into(), node_record("n1", "linux"));
+            s.nodes.insert("n2".into(), node_record("n2", "linux"));
+        });
+        let with = |id: &str, note: &str| {
+            let mut cfg = c.read(|s| s.checker.clone());
+            cfg.nodes.insert(
+                id.into(),
+                NodeSettings {
+                    note: note.into(),
+                    ..Default::default()
+                },
+            );
+            cfg
+        };
+        c.apply_checker_config(with("n1", "  test VM;\nits databases hold throwaway data "))
+            .unwrap();
+        let notes = || -> Vec<(String, Option<String>)> {
+            c.listed_nodes()
+                .into_iter()
+                .map(|n| (n.id, n.note))
+                .collect()
+        };
+        let n1 = Some("test VM; its databases hold throwaway data".to_string());
+        assert_eq!(
+            notes(),
+            [("n1".to_string(), n1.clone()), ("n2".to_string(), None)]
+        );
+        // Too long is refused as a whole, and names the machine.
+        let e = c
+            .apply_checker_config(with("n2", &"x".repeat(checker::config::NOTE_MAX + 1)))
+            .unwrap_err();
+        assert!(e.contains("machine n2") && e.contains("at most 400"), "{e}");
+        assert_eq!(notes()[1].1, None);
+        let mut both = with("n2", &"x".repeat(checker::config::NOTE_MAX));
+        both.nodes.insert(
+            "n3".into(),
+            NodeSettings {
+                note: " \n ".into(),
+                ..Default::default()
+            },
+        );
+        c.apply_checker_config(both).unwrap();
+        let kept = c.read(|s| s.checker.nodes.clone());
+        assert_eq!(kept.keys().collect::<Vec<_>>(), ["n1", "n2"]);
+        // Unpaired and paired again, the machine has its note back.
+        c.forget("n1", "test");
+        assert_eq!(notes().len(), 1);
+        assert_eq!(
+            c.read(|s| s.checker.nodes["n1"].note.clone()),
+            n1.clone().unwrap()
+        );
+        c.update(|s| {
+            s.nodes.insert("n1".into(), node_record("n1", "linux"));
+        });
+        assert_eq!(notes()[0], ("n1".to_string(), n1));
+    }
+
     /// A block entry for one node and a global entry switched off for
     /// another: each node gets what the owner set for it, and the audit says
     /// whether the entry was the global one or the node's. A posted config
@@ -3756,6 +3845,7 @@ mod tests {
                 NodeSettings {
                     blocklist: NodeSwitch::Inherit,
                     model: NodeSwitch::On,
+                    ..Default::default()
                 },
             );
         });
@@ -3907,6 +3997,7 @@ mod tests {
                     NodeSettings {
                         blocklist: NodeSwitch::Off,
                         model: NodeSwitch::On,
+                        ..Default::default()
                     },
                 );
             });
@@ -3914,12 +4005,13 @@ mod tests {
             until("the model to be ready", || local_ready(&c)).await;
             c.remove_checker_model().await.unwrap();
             assert!(c.local_model_status().is_none());
-            let n1 = c.read(|s| s.checker.nodes.get("n1").copied());
+            let n1 = c.read(|s| s.checker.nodes.get("n1").cloned());
             assert_eq!(
                 n1,
                 Some(NodeSettings {
                     blocklist: NodeSwitch::Off,
                     model: NodeSwitch::Inherit,
+                    ..Default::default()
                 })
             );
         })

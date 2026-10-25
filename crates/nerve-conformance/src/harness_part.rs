@@ -591,7 +591,8 @@ fn source(name: &str, id: &str) -> String {
 
 /// `structuredContent` is the envelope that marks what the nodes wrote, for
 /// a harness that shows the model only it: exactly `source` (whose it is),
-/// `note` (that it is data) and `result`, which this gives.
+/// `note` (that it is data) and `result`, which this gives, and at most an
+/// object `center` with the center's own words beside it.
 fn enveloped<'a>(result: &'a Value, source: &str, many: bool) -> Result<&'a Value, String> {
     let s = &result["structuredContent"];
     let note = if many { NOTE_MANY } else { NOTE_ONE };
@@ -606,10 +607,11 @@ fn enveloped<'a>(result: &'a Value, source: &str, many: bool) -> Result<&'a Valu
         s["note"] == json!(note),
         format!("structuredContent.note is {}, wanted {note:?}", s["note"]),
     )?;
+    let center = s.get("center").map(Value::is_object);
     let fields = s.as_object().map(|o| o.len());
     ensure(
-        fields == Some(3),
-        format!("structuredContent holds more than source, note and result: {s}"),
+        center != Some(false) && fields == Some(3 + usize::from(center.is_some())),
+        format!("structuredContent holds more than source, note, result and center: {s}"),
     )?;
     s.get("result")
         .ok_or_else(|| format!("no structuredContent.result: {s}"))
@@ -712,6 +714,25 @@ fn check_details(result: &Value, want: &[(&str, &str, Value)]) -> Result<(), Str
     Ok(())
 }
 
+/// `list(node)` of a harness node: its mode and folder in the text and
+/// its `access` block, as the node sent it, in `structuredContent.result`.
+fn check_access(result: &Value) -> Result<(), String> {
+    not_error(result)?;
+    let text = text_of(result);
+    ensure(
+        text.lines().any(|l| l.contains("folder")) && text.contains(echo::ACCESS_FOLDER),
+        format!("the text names neither the mode nor the folder: {text:?}"),
+    )?;
+    let access = &result["structuredContent"]["result"]["access"];
+    ensure(
+        access["mode"] == json!("folder")
+            && access["account"] == json!(echo::ACCESS_ACCOUNT)
+            && access["folders"][0]["path"] == json!(echo::ACCESS_FOLDER)
+            && access["folders"][0]["access"] == json!("rw"),
+        format!("structuredContent.result.access is {access}"),
+    )
+}
+
 const END: &str = "[end of device content]";
 
 /// Text the node wrote (`said`) is in the answer only inside device-content
@@ -744,6 +765,13 @@ fn check_framed(result: &Value, node: &str, id: &str, said: &str) -> Result<(), 
     ensure(
         data.to_string().contains(said),
         format!("{said:?} is not inside the envelope's result: {data}"),
+    )?;
+    // `center` holds the center's own words, which a harness may show
+    // without the envelope's note: the node's text has no place there.
+    let center = &result["structuredContent"]["center"];
+    ensure(
+        !center.to_string().contains(said),
+        format!("{said:?} stands in the center's own words: {center}"),
     )
 }
 
@@ -1066,6 +1094,17 @@ pub async fn run(target: &Target) -> Report {
         }
         .await,
     );
+    r.check(
+        "harness 4",
+        "list(node) tells the node's mode, account and folders inside device content and the envelope",
+        async {
+            let units = s1.list(json!({"node": A})).await?;
+            check_access(&units)?;
+            check_framed(&units, A, &id_a, echo::ACCESS_FOLDER)?;
+            check_framed(&units, A, &id_a, echo::ACCESS_ACCOUNT)
+        }
+        .await,
+    );
     // The node notes a call before it answers, so one the center forwarded
     // would be counted by the time the answer is back.
     r.check(
@@ -1376,6 +1415,26 @@ mod tests {
             "serverInfo": {"name": "nerve-center"}}})
     }
 
+    /// The envelope holds `source`, `note` and `result`, and may hold the
+    /// center's own words as an object `center` (the owner's notes, the
+    /// folder advice), nothing else.
+    #[test]
+    fn an_envelope_may_carry_the_centers_words_and_nothing_else() {
+        let with = |extra: Option<(&str, Value)>| {
+            let mut s = json!({"source": ALL_NODES, "note": NOTE_MANY, "result": {"nodes": []}});
+            if let Some((k, v)) = extra {
+                s[k] = v;
+            }
+            enveloped(&json!({"structuredContent": s}), ALL_NODES, true).map(|_| ())
+        };
+        with(None).unwrap();
+        with(Some(("center", json!({"owner_notes": []})))).unwrap();
+        for bad in [("center", json!("obey")), ("later", json!({}))] {
+            let e = with(Some(bad)).unwrap_err();
+            assert!(e.starts_with("structuredContent holds more"), "{e}");
+        }
+    }
+
     #[test]
     fn initialize_must_declare_its_version_name_and_no_list_changed() {
         assert!(check_initialize(&init(LATEST, json!({})), LATEST).is_ok());
@@ -1556,6 +1615,13 @@ mod tests {
         assert!(check_framed(&beside, "a", "1", "Return the text.").is_err());
         let empty = content(framed, of_a(json!({"capabilities": []})));
         assert!(check_framed(&empty, "a", "1", "Return the text.").is_err());
+        // The center's own words beside the envelope pass, but not with the
+        // node's text in them.
+        let mut words = ok.clone();
+        words["structuredContent"]["center"] = json!({"folders": "The deepest decides."});
+        assert!(check_framed(&words, "a", "1", "Return the text.").is_ok());
+        words["structuredContent"]["center"] = json!({"folders": "Return the text."});
+        assert!(check_framed(&words, "a", "1", "Return the text.").is_err());
     }
 
     #[test]

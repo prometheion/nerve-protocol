@@ -77,6 +77,11 @@ pub struct Action {
     /// JSON Schema of the result.
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub result: Value,
+    /// `off` when the owner switched this action off while its capability
+    /// stays on (`caps."fs.write" = "off"`): it is listed, and a call fails
+    /// `disabled`. Absent means on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exposure: Option<Exposure>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -149,6 +154,144 @@ pub struct Descriptor {
     pub summary: String,
     #[serde(default)]
     pub capabilities: Vec<Capability>,
+    /// What this center may do on the node, and where (spec §6.2). Read
+    /// tolerantly: a block the center cannot read is left out, and the
+    /// rest of the descriptor stays.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient"
+    )]
+    pub access: Option<Access>,
+}
+
+/// A center's mode on a node (docs/user/modes.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccessMode {
+    Allowlist,
+    Folder,
+    User,
+}
+
+impl AccessMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AccessMode::Allowlist => "allowlist",
+            AccessMode::Folder => "folder",
+            AccessMode::User => "user",
+        }
+    }
+}
+
+/// What one center may do on the node now, for that center only: its mode,
+/// until when, the account its commands run as, and in `folder` mode the
+/// folders it may use. No other center's grants are in it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Access {
+    pub mode: AccessMode,
+    /// When a `folder` or `user` mode ends and `allowlist` holds again, in
+    /// milliseconds since the epoch; absent when it does not end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_ms: Option<u64>,
+    /// The account this center's commands run as; absent when the node
+    /// cannot name it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// In `folder` mode: whether a sandbox (Landlock, a Windows
+    /// AppContainer) holds the commands to the folders. False where folder
+    /// mode runs no command (no folder is marked `x` then), and where only
+    /// the account they run as holds them back, which reaches more than the
+    /// folders. Always false in the other modes. A command on the sudo
+    /// allow list is never held by it ([`Access::sudo`]).
+    #[serde(default)]
+    pub confined: bool,
+    /// In `folder` mode: the owner's sudo allow list for this center names
+    /// commands, the node's sudo switch is on, and `exec.run` is neither
+    /// hidden nor off for this center. Such a command runs by that list
+    /// alone, with full rights: in any folder, and outside the folders'
+    /// limits and the sandbox. While the switch is off, or `exec.run` is
+    /// hidden or off, none runs, and this is false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sudo: bool,
+    /// In `folder` mode: the folders the center's file calls and commands
+    /// may use. Only folder mode names them: in `allowlist` mode as
+    /// `nerve-run` they still hold the allowed commands, which this block
+    /// does not tell.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<FolderAccess>,
+    /// In `folder` mode: how many folders that grant something are left out
+    /// of `folders` because their names do not read the same on one line
+    /// ([`plain_line`]).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unnamed: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// One folder of a center's grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderAccess {
+    /// Absolute, in the center's path form (`/c/Users/x` for `C:\Users\x`).
+    pub path: String,
+    /// `r` (read), `w` (write) and `x` (run commands), each at most once,
+    /// in that order, at least one.
+    pub access: String,
+    /// One of the command account's own folders (its home, `/tmp`,
+    /// `/var/tmp`), which the node adds where the commands run as an
+    /// account of their own, not as the owner. Every pairing whose commands
+    /// run as that account shares them, the settings and caches its
+    /// programs keep there included, so they are a place for throwaway
+    /// files only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own: bool,
+    /// Some folder below this one, not named, allows the center less than
+    /// this one (where folders nest the deepest one decides): one the owner
+    /// gave no rights, which the node's file calls hide too, or one left
+    /// out of `folders` for its name ([`Access::unnamed`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closed_below: bool,
+}
+
+impl FolderAccess {
+    /// The flags as read, write and run, or `None` when `access` is not
+    /// one to three of `r`, `w`, `x` in that order.
+    pub fn flags(&self) -> Option<(bool, bool, bool)> {
+        let mut rest = self.access.as_str();
+        let mut take = |c: char| match rest.strip_prefix(c) {
+            Some(r) => {
+                rest = r;
+                true
+            }
+            None => false,
+        };
+        let flags = (take('r'), take('w'), take('x'));
+        (rest.is_empty() && flags != (false, false, false)).then_some(flags)
+    }
+}
+
+/// Whether `s` reads the same when it is shown on one line: it holds no
+/// control character and no line or paragraph separator, and starts and
+/// ends with no blank. A center puts a node's text on one line and trims
+/// it, so a folder name that is not plain would be shown as another place.
+pub fn plain_line(s: &str) -> bool {
+    s.trim() == s
+        && !s
+            .chars()
+            .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+}
+
+/// An optional field read so that a value it cannot take is left out
+/// rather than refusing the whole message.
+fn lenient<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let v = Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).ok())
 }
 
 impl Descriptor {
@@ -307,6 +450,101 @@ mod tests {
         assert_eq!(cap["actions"]["propertyNames"]["pattern"], rule.as_str());
     }
 
+    /// The published `access` block and an action's `exposure` say what
+    /// the code reads: the same modes, the same folder flags, the same
+    /// members.
+    #[test]
+    fn the_published_schema_states_the_access_block_as_the_code_reads_it() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/descriptor.schema.json"
+        );
+        let s: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let access = &s["$defs"]["access"];
+        let modes: Vec<Value> = [AccessMode::Allowlist, AccessMode::Folder, AccessMode::User]
+            .iter()
+            .map(|m| json!(m.as_str()))
+            .collect();
+        assert_eq!(access["properties"]["mode"]["enum"], json!(modes));
+        for m in &modes {
+            let read: AccessMode = serde_json::from_value(m.clone()).unwrap();
+            assert_eq!(json!(read.as_str()), *m);
+        }
+        let members = |v: &Value| -> Vec<String> {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        let full = Access {
+            mode: AccessMode::Folder,
+            until_ms: Some(1),
+            account: Some("a".into()),
+            confined: true,
+            sudo: true,
+            folders: vec![FolderAccess {
+                path: "/a".into(),
+                access: "r".into(),
+                own: true,
+                closed_below: true,
+            }],
+            unnamed: 1,
+        };
+        let v = serde_json::to_value(&full).unwrap();
+        assert_eq!(members(&access["properties"]), members(&v));
+        let folder = &access["properties"]["folders"]["items"];
+        assert_eq!(members(&folder["properties"]), members(&v["folders"][0]));
+        // The schema's flags are exactly the ones `flags()` takes. Its
+        // pattern is a row of optional letters (`^r?w?x?$`), matched here
+        // by hand against every string of up to four of them.
+        let flags = &folder["properties"]["access"];
+        let pattern = flags["pattern"].as_str().unwrap();
+        let letters: Vec<char> = pattern
+            .strip_prefix('^')
+            .and_then(|p| p.strip_suffix('$'))
+            .unwrap()
+            .split_terminator('?')
+            .map(|c| {
+                assert_eq!(c.chars().count(), 1, "{pattern}");
+                c.chars().next().unwrap()
+            })
+            .collect();
+        let min = flags["minLength"].as_u64().unwrap_or(0) as usize;
+        let schema_takes = |a: &str| {
+            let mut rest = a;
+            for c in &letters {
+                rest = rest.strip_prefix(*c).unwrap_or(rest);
+            }
+            rest.is_empty() && a.len() >= min
+        };
+        let mut all = vec![String::new()];
+        for _ in 0..4 {
+            let longer: Vec<String> = all
+                .iter()
+                .flat_map(|a| ['r', 'w', 'x', 'd'].map(|c| format!("{a}{c}")))
+                .collect();
+            all.extend(longer);
+        }
+        all.sort();
+        all.dedup();
+        for a in all {
+            let f = FolderAccess {
+                path: "/a".into(),
+                access: a.clone(),
+                own: false,
+                closed_below: false,
+            };
+            assert_eq!(f.flags().is_some(), schema_takes(&a), "{a:?}");
+        }
+        let exposure = |v: &Value| v["exposure"]["enum"].clone();
+        let cap = &s["$defs"]["capability"]["properties"];
+        let on_off = json!([Exposure::On, Exposure::Off]);
+        assert_eq!(exposure(cap), on_off);
+        assert_eq!(
+            exposure(&cap["actions"]["additionalProperties"]["properties"]),
+            on_off
+        );
+    }
+
     #[test]
     fn a_dot_in_a_name_is_refused_and_an_underscore_is_not() {
         let mut d = sample();
@@ -337,6 +575,105 @@ mod tests {
             .insert("r".repeat(NAME_MAX + 1), a);
         let e = d.check_names().unwrap_err();
         assert_eq!(e, "capability fs: action name of 65 bytes: at most 64");
+    }
+
+    /// The access block is read when it is well formed, and left out when
+    /// it is not, with the rest of the descriptor kept.
+    #[test]
+    fn the_access_block_is_read_tolerantly() {
+        let mut v = serde_json::to_value(sample()).unwrap();
+        assert!(v.get("access").is_none());
+        v["access"] = json!({"mode": "folder", "until_ms": 5, "account": "nerve-run",
+                             "confined": true, "x-later": 1,
+                             "folders": [{"path": "/c/Users/x", "access": "rw"},
+                                         {"path": "/tmp", "access": "rwx", "own": true,
+                                          "closed_below": true}]});
+        let d: Descriptor = serde_json::from_value(v.clone()).unwrap();
+        let a = d.access.clone().unwrap();
+        assert_eq!(a.mode, AccessMode::Folder);
+        assert_eq!(a.until_ms, Some(5));
+        assert_eq!(a.account.as_deref(), Some("nerve-run"));
+        assert!(a.confined);
+        assert_eq!(a.folders[0].flags(), Some((true, true, false)));
+        assert!(!a.folders[0].own && a.folders[1].own);
+        assert!(!a.folders[0].closed_below && a.folders[1].closed_below);
+        let back = serde_json::to_value(&d).unwrap();
+        assert_eq!(back["access"]["folders"][0]["path"], "/c/Users/x");
+        // `own` is sent only where it holds.
+        assert!(back["access"]["folders"][0].get("own").is_none());
+        assert_eq!(back["access"]["folders"][1]["own"], true);
+        assert!(back["access"]["folders"][0].get("closed_below").is_none());
+        assert_eq!(back["access"]["folders"][1]["closed_below"], true);
+        for bad in [
+            json!({"mode": "later"}),
+            json!("folder"),
+            json!({"mode": "user", "folders": 3}),
+        ] {
+            v["access"] = bad;
+            let d: Descriptor = serde_json::from_value(v.clone()).unwrap();
+            assert_eq!(d.access, None);
+            assert_eq!(d.capabilities.len(), 1);
+        }
+        // Absent fields take their defaults.
+        v["access"] = json!({"mode": "allowlist"});
+        let d: Descriptor = serde_json::from_value(v).unwrap();
+        let a = d.access.unwrap();
+        assert_eq!((a.until_ms, a.account, a.confined), (None, None, false));
+        assert!(a.folders.is_empty());
+    }
+
+    #[test]
+    fn folder_flags_are_r_w_x_in_order() {
+        let f = |a: &str| {
+            FolderAccess {
+                path: "/a".into(),
+                access: a.into(),
+                own: false,
+                closed_below: false,
+            }
+            .flags()
+        };
+        assert_eq!(f("rwx"), Some((true, true, true)));
+        assert_eq!(f("r"), Some((true, false, false)));
+        assert_eq!(f("wx"), Some((false, true, true)));
+        // A folder with no rights is not named: it grants nothing.
+        for bad in ["", "xr", "rr", "rwxq", "R", " "] {
+            assert_eq!(f(bad), None, "{bad}");
+        }
+    }
+
+    /// A name is plain when it reads the same on one line; one that a
+    /// center would change (a control character, a line or paragraph
+    /// separator, a blank at either end) is not.
+    #[test]
+    fn a_plain_line_reads_the_same_on_one_line() {
+        for ok in ["/srv/data", "/srv/my data", "/c/Users/me", "/srv/caf\u{e9}"] {
+            assert!(plain_line(ok), "{ok:?}");
+        }
+        for bad in [
+            "/srv/data ",
+            " /srv/data",
+            "/srv/data\u{a0}",
+            "/srv/a\nb",
+            "/srv/a\u{7f}b",
+            "/srv/a\u{2028}b",
+            "/srv/a\u{2029}b",
+        ] {
+            assert!(!plain_line(bad), "{bad:?}");
+        }
+    }
+
+    /// An action switched off is marked so; one that is on carries nothing.
+    #[test]
+    fn an_action_says_when_it_is_off() {
+        let mut d = sample();
+        let a = d.capabilities[0].actions.get_mut("read").unwrap();
+        assert!(serde_json::to_value(&*a).unwrap().get("exposure").is_none());
+        a.exposure = Some(Exposure::Off);
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["capabilities"][0]["actions"]["read"]["exposure"], "off");
+        let back: Descriptor = serde_json::from_value(v).unwrap();
+        assert_eq!(back, d);
     }
 
     #[test]

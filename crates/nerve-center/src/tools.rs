@@ -45,6 +45,7 @@ pub(crate) mod tests {
                             summary: format!("{n} it"),
                             params: p.clone(),
                             result: Value::Null,
+                            exposure: None,
                         },
                     )
                 })
@@ -71,6 +72,7 @@ pub(crate) mod tests {
             rev: 1,
             summary: String::new(),
             capabilities: caps,
+            access: None,
         }
     }
 }

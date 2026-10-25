@@ -779,6 +779,10 @@ function dayCard(d) {
 
 // ---- Audit ----
 
+// The longest owner's note on a machine, in UTF-8 bytes, as the center
+// takes it (checker::config::NOTE_MAX).
+const NOTE_MAX = 400;
+
 const DECISIONS = {
   allowed: { ic: "ok", tone: "ok", pill: "up" },
   denied: { ic: "ban", tone: "danger", pill: "down" },
@@ -1168,12 +1172,37 @@ function machineCard(cfg, m) {
     await saveChecker();
   });
 
+  // The owner's note: the owner's own words about the machine, which list()
+  // shows the agent. The center keeps it on one line.
+  // The center counts the note in UTF-8 bytes, and `maxlength` counts
+  // characters: an umlaut or a dash takes more than one byte, so the field
+  // counts bytes itself and keeps a note that is too long rather than
+  // sending it.
+  const noteBytes = () => new TextEncoder().encode(noteIn.value.trim()).length;
+  const noteLeft = el("span", { class: "meta" });
+  const showLeft = () => {
+    const n = noteBytes();
+    noteLeft.textContent = n > NOTE_MAX ? `${n - NOTE_MAX} bytes too long` : `${NOTE_MAX - n} bytes left`;
+  };
+  const noteIn = el("input", { class: "input", type: "text", maxlength: String(NOTE_MAX), value: own.note || "", placeholder: "test VM; its databases hold throwaway data", "aria-label": `Note on ${m.name}`, "data-focus": `node:${m.id}:note`, oninput: showLeft });
+  showLeft();
+  const saveNote = act(async () => {
+    const n = noteBytes();
+    if (n > NOTE_MAX) { notify(`The note is ${n} bytes long; at most ${NOTE_MAX} fit.`, "error"); return; }
+    cfg.nodes[m.id] = { ...own, note: noteIn.value.trim() };
+    await saveChecker();
+  });
+
   const word = (v) => (v === "on" ? "on here" : "off here");
   const body = el("div", { class: "body" },
     el("div", { class: "form-row" },
       switchPicker("blocklist", "Blocklist", cfg.blocklist_on),
       switchPicker("model", "Decision model", cfg.model_on)),
     el("p", { class: "meta" }, "The model on here uses the center's one model and its settings below. Taint is for every machine."),
+    el("h4", { class: "sub-head" }, "Your note on this machine"),
+    el("p", { class: "meta" }, "A few words for the agent, such as what the machine is for. list() shows them to every harness of this center as your words, next to the machine. One line, at most 400 bytes."),
+    el("div", { class: "form-row" }, el("label", { class: "field grow" }, el("span", { class: "label" }, "Note"), noteIn, noteLeft)),
+    el("div", { class: "actions" }, btn("Save note", "primary", saveNote, null, `node:${m.id}:note:save`)),
     el("h4", { class: "sub-head" }, "Block entries for this machine only"),
     entries.length ? el("div", { class: "list" }, entries.map(([e, i]) => blockRow(cfg, e, i, m.id))) : el("p", { class: "meta" }, "None."),
     el("div", { class: "form-row" }, el("label", { class: "field grow" }, el("span", { class: "label" }, "Add a rule for this machine"), ruleIn)),
@@ -1189,6 +1218,7 @@ function machineCard(cfg, m) {
       m.paired ? null : pill("down", "not paired"),
       own.blocklist && own.blocklist !== "inherit" ? pill(own.blocklist === "on" ? "up" : "warn", `blocklist ${word(own.blocklist)}`) : null,
       own.model && own.model !== "inherit" ? pill(own.model === "on" ? "up" : "warn", `model ${word(own.model)}`) : null,
+      own.note ? pill("", "note") : null,
       entries.length ? pill("", plural(entries.length, "own entry", "own entries")) : null,
       offs.length ? pill("warn", `${offs.length} switched off`) : null,
       icon("chev", "sm chev")),

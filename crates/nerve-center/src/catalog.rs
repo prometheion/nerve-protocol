@@ -16,7 +16,9 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use nerve_proto::descriptor::bad_member_name;
+use nerve_proto::descriptor::{
+    Access, AccessMode, Exposure, FolderAccess, bad_member_name, plain_line,
+};
 use nerve_proto::schema::{self, Role};
 use nerve_proto::{Descriptor, Effect};
 
@@ -31,6 +33,242 @@ pub const DESCRIPTION_MAX: usize = 2048;
 /// The longest capability or action name, in bytes: a node refuses a
 /// longer one, and the center leaves out its capability or action.
 pub use nerve_proto::descriptor::NAME_MAX;
+
+/// The most folders a listing names; the rest are counted.
+pub const FOLDERS_MAX: usize = 64;
+/// The longest folder path a listing repeats, in bytes.
+const PATH_MAX: usize = 1024;
+/// The longest account name a listing repeats, in bytes.
+const ACCOUNT_MAX: usize = 64;
+
+/// What the node told this center it may do there (its descriptor's
+/// `access`), as the center read it: well-formed folders only, each named as
+/// the node wrote it (cut when long), at most [`FOLDERS_MAX`] of them, the
+/// account's own ones kept first.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Reach {
+    pub mode: AccessMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub until_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    pub confined: bool,
+    /// The owner's sudo allow list for this center names commands and the
+    /// node's sudo switch is on, so those run by that list alone
+    /// ([`Access::sudo`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sudo: bool,
+    pub folders: Vec<FolderAccess>,
+    /// The folders past [`FOLDERS_MAX`], not named.
+    pub more_folders: usize,
+    /// The granted folders the node left out for their names
+    /// ([`Access::unnamed`]).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unnamed: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+impl Reach {
+    fn read(a: &Access) -> Reach {
+        // A path is absolute in the center's form, and the flags are one to
+        // three of `r`, `w`, `x`; a folder that is not is left out, as it
+        // names nothing a call could use. So is a path that would read
+        // otherwise on one line: shown changed, it would name another place.
+        let mut folders: Vec<FolderAccess> = a
+            .folders
+            .iter()
+            .filter(|f| f.path.starts_with('/') && plain_line(&f.path) && f.flags().is_some())
+            .map(|f| FolderAccess {
+                path: util::clip(&f.path, PATH_MAX),
+                access: f.access.clone(),
+                own: f.own,
+                closed_below: f.closed_below,
+            })
+            .collect();
+        let all = folders.len();
+        // Past the limit the account's own folders are kept before the
+        // others, in the node's order: the advice turns on them, and a node
+        // lists them after the owner's grants.
+        let mut own_room = folders.iter().filter(|f| f.own).count().min(FOLDERS_MAX);
+        let mut other_room = FOLDERS_MAX - own_room;
+        folders.retain(|f| {
+            let room = if f.own {
+                &mut own_room
+            } else {
+                &mut other_room
+            };
+            let keep = *room > 0;
+            *room = room.saturating_sub(1);
+            keep
+        });
+        let more_folders = all - folders.len();
+        Reach {
+            mode: a.mode,
+            until_ms: a.until_ms,
+            account: a
+                .account
+                .as_deref()
+                .map(|n| util::clip(&one_line(n), ACCOUNT_MAX))
+                .filter(|n| !n.is_empty()),
+            confined: a.confined,
+            sudo: a.sudo,
+            folders,
+            more_folders,
+            unnamed: a.unnamed,
+        }
+    }
+
+    /// The folders as one line: `/home/me/proj (rw, some folders below
+    /// allow less), /tmp (rwx, own)`.
+    pub fn folder_list(&self) -> String {
+        let mut parts: Vec<String> = self
+            .folders
+            .iter()
+            .map(|f| {
+                let own = if f.own { ", own" } else { "" };
+                let closed = if f.closed_below {
+                    ", some folders below allow less"
+                } else {
+                    ""
+                };
+                format!("{} ({}{own}{closed})", f.path, f.access)
+            })
+            .collect();
+        if self.more_folders > 0 {
+            parts.push(format!("{} more", self.more_folders));
+        }
+        if self.unnamed > 0 {
+            parts.push(format!(
+                "{} more whose names cannot be shown on one line",
+                self.unnamed
+            ));
+        }
+        parts.join(", ")
+    }
+
+    /// Whether the node named or counted no folder at all.
+    pub fn no_folder(&self) -> bool {
+        self.folders.is_empty() && self.more_folders == 0 && self.unnamed == 0
+    }
+
+    /// The folder note of `fs.*` and `exec.run` in folder mode: the folders
+    /// as the node named them, which stand inside the device-content
+    /// framing and which the units' hash covers. None in the other modes.
+    fn note(&self) -> Option<String> {
+        if self.mode != AccessMode::Folder {
+            return None;
+        }
+        if self.no_folder() {
+            return Some("none granted".into());
+        }
+        Some(self.folder_list())
+    }
+
+    /// What the center says of the folder note, in its own words and
+    /// outside the framing: how to read it, what holds the commands, and
+    /// where files go. Only file calls and a command's start follow the
+    /// folders exactly: a sandbox holds what a command reaches to the
+    /// folders that grant something, closed ones below them included, and
+    /// without one (`confined` false) only its account holds it. A command
+    /// on the sudo allow list is held by neither. Files made
+    /// in the owner's folders should stay readable for the owner, which
+    /// matters only where the commands run as an account of their own (the
+    /// node then marks that account's folders `own`). Those folders are
+    /// shared by every pairing whose commands run as that account, and
+    /// `/tmp` by every account on the machine, the settings and caches its
+    /// programs keep there included, so they are for throwaway files only.
+    /// None outside folder mode.
+    pub fn advice(&self) -> Option<String> {
+        self.advice_on(true)
+    }
+
+    /// The advice for the file calls alone: [`Reach::advice`] without what
+    /// holds a command (the sandbox, the sudo list), which no file call
+    /// depends on. `fs.*` carry it, so a sudo or sandbox change does not
+    /// ask for a new `list` of them.
+    pub fn file_advice(&self) -> Option<String> {
+        self.advice_on(false)
+    }
+
+    fn advice_on(&self, commands: bool) -> Option<String> {
+        self.note()?;
+        if self.no_folder() && !commands {
+            return Some(
+                "The node is in folder mode with no folder granted: its file calls are refused \
+                 until its owner grants one."
+                    .into(),
+            );
+        }
+        if self.no_folder() {
+            return Some(if self.sudo {
+                "The node is in folder mode with no folder granted: its file calls are refused \
+                 until its owner grants one, and so are its commands, except one on the owner's \
+                 sudo list for you, which runs by that list alone, with full rights."
+            } else {
+                "The node is in folder mode with no folder granted: its file calls and commands \
+                 are refused until its owner grants one."
+            }
+            .into());
+        }
+        let mut out = "The node is in folder mode: its file calls may use only the folders in \
+                       the `folders:` line (r read, w write, x run commands)"
+            .to_string();
+        if commands {
+            out.push_str(", and a command may start only in one marked x");
+        }
+        out.push_str(". Where folders nest, the deepest one decides.");
+        if commands {
+            out.push_str(if self.confined {
+                " The machine's sandbox holds what a command reaches to these folders and the \
+                 system's files."
+            } else {
+                " The machine does not hold what a command reaches to these folders: where it \
+                 runs commands, they reach what the account they run as may reach."
+            });
+        }
+        if commands && self.sudo {
+            out.push_str(
+                " A command on the owner's sudo list for you runs by that list alone, with full \
+                 rights: in any folder, and beyond the folders and the sandbox.",
+            );
+        }
+        if self.folders.iter().any(|f| f.closed_below) {
+            out.push_str(
+                " A folder marked \"some folders below allow less\" holds folders, not named, \
+                 that allow less than it or nothing, where a file call or a command's start may \
+                 be refused; a command started in a folder around them still reaches them.",
+            );
+        }
+        if self.folders.iter().any(|f| f.own) {
+            out.push_str(
+                " Its commands run as an account of their own, not as the machine's owner, \
+                 whose access to the files they make goes through the group bits: keep those, \
+                 0640 or 0660 for files and 0750 or 0770 for folders, not 0600 or 0700 unless \
+                 asked.",
+            );
+        }
+        // The advice stands outside the framing, so it names no path: the
+        // paths are the node's words.
+        if self
+            .folders
+            .iter()
+            .any(|f| f.own && f.flags().is_some_and(|(_, w, _)| w))
+        {
+            out.push_str(
+                " The folders marked own belong to that account, and every pairing whose \
+                 commands run as it shares them (a temporary folder also every account on the \
+                 machine), with the settings and caches its programs keep there: what one \
+                 pairing leaves there can change what another one's commands do. Use one \
+                 marked w for throwaway files only, keep nothing secret there, and change no \
+                 program's settings there unless asked.",
+            );
+        }
+        Some(out)
+    }
+}
 
 /// One action a node offers, with schemas that passed the subset check.
 #[derive(Debug, Clone, PartialEq)]
@@ -55,14 +293,28 @@ pub struct Unit {
     /// `node` for a built-in capability, else the provider's name, shared by
     /// the capability's units.
     pub provider: Arc<str>,
+    /// The node's owner switched it, or its whole capability, off: it is
+    /// named as off and cannot be called.
+    pub off: bool,
+    /// In folder mode, the folders `fs.*` and `exec.run` may use and how
+    /// ([`Reach::note`]); shared by the node's units that have it.
+    pub note: Option<Arc<str>>,
+    /// The center's advice on that note, for the units that have one:
+    /// [`Reach::advice`] for `exec.run`, [`Reach::file_advice`] for `fs.*`.
+    /// The details show the fullest one once for all of them; the hash
+    /// covers it, so a sudo list or sandbox that changes what `exec.run`'s
+    /// says asks for a new `list` of it, not of the file calls.
+    pub advice: Option<Arc<str>>,
 }
 
 impl Unit {
     /// What the model was told of this unit, as one number: SHA-256 over
-    /// its name, effect, description, params and result, cut to 53 bits so it
-    /// is exact as a JSON number. `execute` compares it with the one `list`
-    /// gave the session: a unit that changed must be listed again, while a
-    /// rule, mode or `until` change on the node leaves it alone.
+    /// its name, effect, description, params, result, folder note and the
+    /// center's advice on it, cut to 53 bits so it is exact as a JSON
+    /// number. `execute` compares it with the one `list` gave the session: a
+    /// unit that changed must be listed again, while a rule, mode or
+    /// `until` change on the node leaves it alone, unless it changes what
+    /// the folder note or the advice says.
     pub fn hash(&self) -> u64 {
         let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
         // Each part with its length first, so no two units run together
@@ -74,6 +326,8 @@ impl Unit {
             self.description.to_string(),
             self.params.to_string(),
             self.result.to_string(),
+            self.note.as_deref().unwrap_or("").to_string(),
+            self.advice.as_deref().unwrap_or("").to_string(),
         ] {
             ctx.update(&(part.len() as u64).to_be_bytes());
             ctx.update(part.as_bytes());
@@ -101,11 +355,24 @@ pub struct Broken {
 pub struct Catalog {
     pub units: Vec<Unit>,
     pub broken: Vec<Broken>,
+    /// What the node told this center it may do there; none when it did
+    /// not say.
+    pub reach: Option<Reach>,
 }
 
 impl Catalog {
     pub fn build(d: &Descriptor) -> Catalog {
-        let mut c = Catalog::default();
+        let mut c = Catalog {
+            reach: d.access.as_ref().map(Reach::read),
+            ..Catalog::default()
+        };
+        let note: Option<Arc<str>> = c.reach.as_ref().and_then(Reach::note).map(Into::into);
+        let advice: Option<Arc<str>> = c.reach.as_ref().and_then(Reach::advice).map(Into::into);
+        let file_advice: Option<Arc<str>> = c
+            .reach
+            .as_ref()
+            .and_then(Reach::file_advice)
+            .map(Into::into);
         // A capability id given twice would make `cap.action` name two
         // actions: `list` would show one and `execute` might check the
         // other. Neither is offered.
@@ -138,6 +405,9 @@ impl Catalog {
             let whole = cap_outside_subset(cap);
             let cap_description = described(&cap.summary);
             let provider: Arc<str> = cap.provider.as_str().into();
+            // The node's own files and commands are bound by the folders;
+            // a provider's capability names no path.
+            let node = cap.provider == "node";
             if cap.actions.is_empty()
                 && let Some(reason) = whole.clone()
             {
@@ -155,6 +425,10 @@ impl Catalog {
                     continue;
                 }
                 let name = format!("{}.{action}", cap.id);
+                // Of the commands only `exec.run` starts one in a folder:
+                // `exec.signal` names a call, not a path, so a grant leaves
+                // it alone.
+                let bound = node && (cap.id == "fs" || (cap.id == "exec" && action == "run"));
                 if let Some(reason) = whole.clone() {
                     c.broken.push(Broken { name, reason });
                     continue;
@@ -180,6 +454,16 @@ impl Catalog {
                     params,
                     result: def.result.clone(),
                     provider: provider.clone(),
+                    off: cap.exposure == Exposure::Off || def.exposure == Some(Exposure::Off),
+                    note: note.clone().filter(|_| bound),
+                    // Only `exec.run` carries what holds a command, so a
+                    // sudo or sandbox change leaves the file calls alone.
+                    advice: if cap.id == "fs" {
+                        file_advice.clone()
+                    } else {
+                        advice.clone()
+                    }
+                    .filter(|_| bound),
                 });
             }
         }
@@ -312,6 +596,9 @@ mod tests {
                 params: path(),
                 result: Value::Null,
                 provider: "node".into(),
+                off: false,
+                note: None,
+                advice: None,
             }
         );
         assert!(c.offers("fs", "write"));
@@ -569,8 +856,367 @@ mod tests {
             params,
             result: Value::Null,
             provider: "node".into(),
+            off: false,
+            note: None,
+            advice: None,
         };
         assert_ne!(unit("x1", json!(2)).hash(), unit("x", json!(12)).hash());
+    }
+
+    fn access(v: Value) -> Option<nerve_proto::descriptor::Access> {
+        Some(serde_json::from_value(v).unwrap())
+    }
+
+    /// The folder note goes into the hash of the node's own `fs.*` and
+    /// `exec.run` only: a grant changes theirs and no other unit's, and the
+    /// mode's end or the account, which the note does not name, none.
+    #[test]
+    fn a_grant_changes_the_hash_of_fs_and_exec_units_only() {
+        let mut d = desc(
+            "box",
+            vec![
+                cap("fs", "fs", &[("read", Effect::Read, path())]),
+                cap(
+                    "exec",
+                    "exec",
+                    &[
+                        ("run", Effect::Execute, path()),
+                        ("signal", Effect::Actuate, json!({"type": "object"})),
+                    ],
+                ),
+                cap(
+                    "lamp",
+                    "",
+                    &[("get", Effect::Read, json!({"type": "object"}))],
+                ),
+            ],
+        );
+        d.capabilities[2].provider = "desk".into();
+        let hashes = |d: &Descriptor| -> Vec<u64> {
+            let c = Catalog::build(d);
+            ["fs.read", "exec.run", "lamp.get", "exec.signal"]
+                .iter()
+                .map(|u| c.unit(u).unwrap().hash())
+                .collect()
+        };
+        let folder = |folders: Value, until: u64, account: &str| {
+            access(
+                json!({"mode": "folder", "until_ms": until, "account": account,
+                          "confined": true, "folders": folders}),
+            )
+        };
+        d.access = folder(json!([{"path": "/a", "access": "rw"}]), 5, "nerve-run");
+        let one = hashes(&d);
+        let c = Catalog::build(&d);
+        assert!(
+            c.unit("fs.read")
+                .unwrap()
+                .note
+                .as_deref()
+                .unwrap()
+                .contains("/a (rw)")
+        );
+        assert_eq!(c.unit("lamp.get").unwrap().note, None);
+        // `exec.signal` names no folder, so it carries neither the folders
+        // nor the advice.
+        assert_eq!(c.unit("exec.signal").unwrap().note, None);
+        assert_eq!(c.unit("exec.signal").unwrap().advice, None);
+        d.access = folder(json!([{"path": "/a", "access": "rw"}]), 9, "me");
+        assert_eq!(hashes(&d), one);
+        d.access = folder(
+            json!([{"path": "/a", "access": "rw"}, {"path": "/b", "access": "r"}]),
+            9,
+            "me",
+        );
+        let two = hashes(&d);
+        assert_ne!(two[0], one[0]);
+        assert_ne!(two[1], one[1]);
+        assert_eq!(two[2], one[2]);
+        assert_eq!(two[3], one[3]);
+        // What the center's advice says of commands counts for `exec.run`
+        // only: a sudo list that comes into force, or a sandbox that goes,
+        // changes its hash and leaves the file calls' alone.
+        let mut a = d.access.clone().unwrap();
+        a.sudo = true;
+        d.access = Some(a.clone());
+        let sudo = hashes(&d);
+        assert_eq!(sudo[0], two[0]);
+        assert_ne!(sudo[1], two[1]);
+        assert_eq!(sudo[2..], two[2..]);
+        a.sudo = false;
+        a.confined = false;
+        d.access = Some(a.clone());
+        let loose = hashes(&d);
+        assert_eq!(loose[0], two[0]);
+        assert_ne!(loose[1], two[1]);
+        assert_eq!(loose[2..], two[2..]);
+        // With no folder granted the same holds.
+        a.folders.clear();
+        d.access = Some(a.clone());
+        let bare = hashes(&d);
+        a.sudo = true;
+        d.access = Some(a);
+        let bare_sudo = hashes(&d);
+        assert_eq!(bare_sudo[0], bare[0]);
+        assert_ne!(bare_sudo[1], bare[1]);
+        // Out of folder mode the folders decide nothing and no note is told.
+        d.access = access(json!({"mode": "user", "account": "me"}));
+        let user = hashes(&d);
+        assert_ne!(user[0], two[0]);
+        assert_eq!(user[2], one[2]);
+        assert_eq!(Catalog::build(&d).unit("fs.read").unwrap().note, None);
+        d.access = None;
+        assert_eq!(hashes(&d), user);
+    }
+
+    /// The center's advice names the account's own folders as the place
+    /// for throwaway files, shared with every pairing of that account, and
+    /// asks for owner-readable files (the group bits kept) only where the
+    /// commands run as an account of their own; where they run as the
+    /// owner, a granted `/tmp` is no such place and nothing is asked.
+    #[test]
+    fn the_advice_names_scratch_folders_only_where_they_are_the_accounts_own() {
+        let reach = |folders: Value| {
+            Catalog::build(&Descriptor {
+                access: access(json!({"mode": "folder", "confined": true, "folders": folders})),
+                ..desc("box", vec![])
+            })
+            .reach
+            .unwrap()
+        };
+        let separate = reach(json!([
+            {"path": "/home/me/proj", "access": "rw", "closed_below": true},
+            {"path": "/home/me/proj/keys", "access": ""},
+            {"path": "/tmp", "access": "rwx", "own": true},
+            {"path": "/var/lib/nerve-run", "access": "rwx", "own": true},
+            {"path": "/srv/own-r", "access": "r", "own": true}]));
+        assert_eq!(
+            separate.note().unwrap(),
+            "/home/me/proj (rw, some folders below allow less), /tmp (rwx, own), \
+             /var/lib/nerve-run (rwx, own), /srv/own-r (r, own)"
+        );
+        let advice = separate.advice().unwrap();
+        // A folder below that allows less (closed, or left out for its
+        // name) may refuse file calls and a command's start, not a command
+        // that started around it.
+        assert!(
+            advice.contains(
+                "A folder marked \"some folders below allow less\" holds folders, not named, \
+                 that allow less than it or nothing, where a file call or a command's start may \
+                 be refused; a command started in a folder around them still reaches them."
+            ),
+            "{advice}"
+        );
+        assert!(!advice.contains("every call"), "{advice}");
+        // The block says a sandbox holds the commands.
+        assert!(
+            advice.contains(
+                "The machine's sandbox holds what a command reaches to these folders and the \
+                 system's files."
+            ),
+            "{advice}"
+        );
+        // What keeps the owner in is the group bits: the advice names the
+        // modes to use, not only the ones to avoid.
+        assert!(
+            advice.contains(
+                "goes through the group bits: keep those, 0640 or 0660 for files and 0750 or \
+                 0770 for folders, not 0600 or 0700 unless asked."
+            ),
+            "{advice}"
+        );
+        // The own folders are shared, the settings its programs keep there
+        // too, so they are for throwaway files and never called private.
+        assert!(
+            advice.ends_with(
+                "The folders marked own belong to that account, and every pairing whose \
+                 commands run as it shares them (a temporary folder also every account on the \
+                 machine), with the settings and caches its programs keep there: what one \
+                 pairing leaves there can change what another one's commands do. Use one \
+                 marked w for throwaway files only, keep nothing secret there, and change no \
+                 program's settings there unless asked."
+            ),
+            "{advice}"
+        );
+        assert!(!advice.contains("sudo"), "{advice}");
+        assert!(!advice.contains("private"), "{advice}");
+        // It names no path: the paths are the node's words.
+        assert!(!advice.contains('/'), "{advice}");
+        // An own folder that may not be written is no place for throwaway files.
+        let read_only = reach(json!([{"path": "/srv/own-r", "access": "r", "own": true}]));
+        let advice = read_only.advice().unwrap();
+        assert!(advice.contains("group bits") && !advice.contains("throwaway"));
+        assert!(!advice.contains("closed"), "{advice}");
+        // Run as the owner: no own folder, so neither throwaway files nor
+        // file modes.
+        let by_hand = reach(json!([
+            {"path": "/home/me/proj", "access": "rw"},
+            {"path": "/tmp", "access": "r"}]));
+        let advice = by_hand.advice().unwrap();
+        for never in ["throwaway", "0600", "/tmp", "own"] {
+            assert!(!advice.contains(never), "{never}: {advice}");
+        }
+        // Where no sandbox holds the commands, the advice does not say one
+        // does: they reach what their account may reach.
+        let held = Catalog::build(&Descriptor {
+            access: access(json!({"mode": "folder", "confined": false,
+                                  "folders": [{"path": "/srv/proj", "access": "rwx"}]})),
+            ..desc("box", vec![])
+        })
+        .reach
+        .unwrap()
+        .advice()
+        .unwrap();
+        assert!(!held.contains("sandbox"), "{held}");
+        assert!(
+            held.contains(
+                "The machine does not hold what a command reaches to these folders: where it \
+                 runs commands, they reach what the account they run as may reach."
+            ),
+            "{held}"
+        );
+        // The own mark is in the note, so it moves the units' hash.
+        assert_ne!(
+            reach(json!([{"path": "/tmp", "access": "rwx", "own": true}])).note(),
+            reach(json!([{"path": "/tmp", "access": "rwx"}])).note()
+        );
+        // No folder: refused until one is granted; outside folder mode none.
+        assert!(
+            reach(json!([]))
+                .advice()
+                .unwrap()
+                .contains("no folder granted")
+        );
+        // A command on the sudo list runs by that list alone, beyond the
+        // folders, the folders' `x` and the sandbox.
+        let sudo = |folders: Value| {
+            Catalog::build(&Descriptor {
+                access: access(json!({"mode": "folder", "confined": true, "sudo": true,
+                                      "folders": folders})),
+                ..desc("box", vec![])
+            })
+            .reach
+            .unwrap()
+            .advice()
+            .unwrap()
+        };
+        assert!(sudo(json!([{"path": "/srv", "access": "rw"}])).contains(
+            "A command on the owner's sudo list for you runs by that list alone, with full \
+                 rights: in any folder, and beyond the folders and the sandbox."
+        ));
+        assert!(sudo(json!([])).contains(
+            "and so are its commands, except one on the owner's sudo list for you, which runs \
+             by that list alone, with full rights."
+        ));
+        // Folders the node left out for their names are no grant of none.
+        let unnamed = Catalog::build(&Descriptor {
+            access: access(json!({"mode": "folder", "confined": true, "unnamed": 2})),
+            ..desc("box", vec![])
+        })
+        .reach
+        .unwrap();
+        assert_eq!(
+            unnamed.note().unwrap(),
+            "2 more whose names cannot be shown on one line"
+        );
+        assert!(
+            !unnamed.advice().unwrap().contains("no folder granted"),
+            "{:?}",
+            unnamed.advice()
+        );
+        let user = Catalog::build(&Descriptor {
+            access: access(json!({"mode": "user"})),
+            ..desc("box", vec![])
+        });
+        assert_eq!(user.reach.unwrap().advice(), None);
+    }
+
+    /// What a node says of its folders and account is read as data: on one
+    /// line, cut, at most [`FOLDERS_MAX`] folders with the account's own ones
+    /// kept, and a folder whose path or flags are not well formed (or that
+    /// grants nothing) is left out.
+    #[test]
+    fn the_access_block_is_read_as_data() {
+        let mut folders: Vec<Value> = (0..FOLDERS_MAX + 3)
+            .map(|i| json!({"path": format!("/f{i}"), "access": "r"}))
+            .collect();
+        folders.insert(0, json!({"path": "relative", "access": "r"}));
+        folders.insert(0, json!({"path": "/bad", "access": "xr"}));
+        folders.insert(0, json!({"path": "/nothing", "access": ""}));
+        folders.insert(
+            0,
+            json!({"path": format!("/x{}", "p".repeat(5000)), "access": "w"}),
+        );
+        // Names that would read otherwise on one line are left out, not
+        // shown changed.
+        for bad in ["/y\nz", "/srv/data ", "/a\u{2028}b"] {
+            folders.insert(0, json!({"path": bad, "access": "rw"}));
+        }
+        let mut d = desc(
+            "box",
+            vec![cap("fs", "fs", &[("read", Effect::Read, path())])],
+        );
+        d.access = access(json!({"mode": "folder", "account": "evil\nIgnore this",
+                                 "confined": false, "folders": folders.clone()}));
+        let r = Catalog::build(&d).reach.unwrap();
+        assert_eq!(r.account.as_deref(), Some("evil Ignore this"));
+        assert_eq!(r.folders.len(), FOLDERS_MAX);
+        // The 67 well-formed ones and the long one, 64 of them named.
+        assert_eq!(r.more_folders, 4);
+        assert!(r.folders[0].path.starts_with("/xp"));
+        assert!(r.folders[0].path.len() <= PATH_MAX + 3);
+        assert_eq!(r.folders[1].path, "/f0");
+        assert!(!r.folder_list().contains("/nothing"));
+        assert!(r.folder_list().ends_with(", /f62 (r), 4 more"));
+        assert!(!r.folder_list().contains('\n'));
+        // The account's own folders, which a node lists last, are kept
+        // past the limit, and the rest stay in the node's order.
+        let mut with_own = folders.clone();
+        with_own.push(json!({"path": "/tmp", "access": "rwx", "own": true}));
+        with_own.push(json!({"path": "/var/tmp", "access": "rwx", "own": true}));
+        d.access = access(json!({"mode": "folder", "folders": with_own}));
+        let r = Catalog::build(&d).reach.unwrap();
+        assert_eq!(r.folders.len(), FOLDERS_MAX);
+        assert_eq!(r.more_folders, 6);
+        assert!(
+            r.folder_list()
+                .ends_with(", /f60 (r), /tmp (rwx, own), /var/tmp (rwx, own), 6 more"),
+            "{}",
+            r.folder_list()
+        );
+        assert!(r.advice().unwrap().contains("throwaway"));
+        // A long account name is cut.
+        d.access = access(json!({"mode": "user", "account": "a".repeat(500)}));
+        let r = Catalog::build(&d).reach.unwrap();
+        assert!(r.account.unwrap().len() <= ACCOUNT_MAX + 3);
+        // An action the owner switched off, or its whole capability, is off.
+        let mut d = desc(
+            "box",
+            vec![
+                cap(
+                    "fs",
+                    "fs",
+                    &[
+                        ("read", Effect::Read, path()),
+                        ("write", Effect::Write, path()),
+                    ],
+                ),
+                cap(
+                    "lamp",
+                    "",
+                    &[("get", Effect::Read, json!({"type": "object"}))],
+                ),
+            ],
+        );
+        d.capabilities[0].actions.get_mut("write").unwrap().exposure =
+            Some(nerve_proto::Exposure::Off);
+        d.capabilities[1].exposure = nerve_proto::Exposure::Off;
+        let c = Catalog::build(&d);
+        let off: Vec<bool> = ["fs.read", "fs.write", "lamp.get"]
+            .iter()
+            .map(|u| c.unit(u).unwrap().off)
+            .collect();
+        assert_eq!(off, [false, true, true]);
     }
 
     /// The units of a capability without summaries of their own share its
@@ -757,6 +1403,7 @@ mod tests {
                 summary: String::new(),
                 params: Value::Null,
                 result: json!({"type": "object", long.clone(): 1}),
+                exposure: None,
             },
         );
         let mut door = cap("door", "", &[("open", Effect::Actuate, path())]);
@@ -805,11 +1452,15 @@ mod tests {
                 params: Value::Null,
                 result: Value::Null,
                 provider: "".into(),
+                off: false,
+                note: None,
+                advice: None,
             })
             .collect();
         let c = Catalog {
             units,
             broken: Vec::new(),
+            reach: None,
         };
         let started = std::time::Instant::now();
         for u in &c.units {
@@ -837,7 +1488,12 @@ mod tests {
             }))
             .unwrap();
             e.policy.mode = mode;
-            let d = nerve_node::descriptor::for_center(&NodeConfig::default(), &e, 0, true, &[]);
+            let d = nerve_node::descriptor::for_center(
+                &NodeConfig::default(),
+                &e,
+                &nerve_node::descriptor::Reach::of(&e, 0, None, true, None),
+                &[],
+            );
             let c = Catalog::build(&d);
             assert_eq!(c.broken, [], "{mode:?}");
             // In allowlist mode without rules the node offers nothing yet.
