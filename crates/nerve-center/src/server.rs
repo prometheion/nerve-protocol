@@ -89,6 +89,7 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
         log: nerve_transport::log::global(),
         log_level: args.log,
     })?;
+    center.set_call_wait(args.call_wait);
     // Whatever else a message carries, this token is never in the log.
     center.log().set_secret("harness-token", token.as_deref());
 

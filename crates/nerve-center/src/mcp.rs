@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
@@ -15,9 +16,10 @@ use nerve_proto::RpcError;
 use nerve_transport::http::{self, Request, Response};
 use nerve_transport::net::BoxIo;
 
-use crate::center::{CallError, Center, Change, Session};
+use crate::center::{CallError, Center, Change, Ran, Session};
 use crate::link;
 use crate::listing::{self, Answer, Miss};
+use crate::tools::Route;
 use crate::util;
 
 /// The revision this server speaks; older ones a client asks for are
@@ -354,60 +356,97 @@ impl Engine {
         let Value::Object(call_args) = call_args else {
             unreachable!("the arguments are an object")
         };
+        let wait = self.center.call_wait();
         let out = match fits {
-            Ok(()) => self.center.call(&sess, &route, call_args).await,
-            Err(e) => Err(self.center.refused(&sess, &route, RpcError::from(e))),
+            Ok(()) => {
+                self.center
+                    .run(&sess, &route, call_args, None, Some(wait))
+                    .await
+            }
+            Err(e) => Ran::Done(Err(self.center.refused(&sess, &route, RpcError::from(e)))),
         };
         match out {
-            Ok(v) => {
-                let body = match &v {
-                    Value::String(s) => s.clone(),
-                    other => serde_json::to_string_pretty(other).unwrap_or_default(),
-                };
-                let text = listing::framed(
-                    &format!("node {:?}, {}.{}", route.node_name, route.cap, route.action),
-                    false,
-                    &util::clip(&body, RESULT_TEXT),
-                );
-                // `structuredContent` carries the node's data in the same
-                // marking as the text, for a harness that shows only it;
-                // a result too long for the text is left to the cut text,
-                // so no harness hands the model more than that.
-                let mut r = text_result(&text, false);
-                if body.len() <= RESULT_TEXT && structured_fits(&v) {
-                    r["structuredContent"] = listing::envelope(
-                        &listing::source(&route.node_name, &route.node_id),
-                        false,
-                        v,
-                    );
-                }
-                r
-            }
-            Err(CallError::Rpc(e)) => {
-                // The node's own words (cut at the link) are said to be its
-                // own, so they never read as a refusal of the center.
-                let whose = if link::by_node(&e) {
-                    format!("node {} answered: ", route.node_name)
-                } else {
-                    String::new()
-                };
-                let mut t = format!("error {}: {whose}{}", e.kind().as_str(), e.message);
-                if let Some(d) = e
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("reason"))
-                    .and_then(Value::as_str)
-                {
-                    t.push_str(&format!(" ({d})"));
-                }
-                // On one line, whoever wrote the words: a node's message, a
-                // provider's, or a field of the node's schema in the center's
-                // own `invalid_args`. A line break would let a later line read
-                // as another refusal of the center's.
-                text_result(&listing::one_line(&t), true)
-            }
+            Ran::Done(Ok(v)) => device_result(&route, v, false),
+            Ran::Done(Err(CallError::Rpc(e))) => call_error(&route, &e),
+            Ran::Job(job) => running(&route, &job, wait),
         }
     }
+}
+
+/// A call's result as the model gets it: the node's data, marked as
+/// content from that machine in the text and in `structuredContent`.
+/// `cut` when it is the cut text of a longer result.
+fn device_result(route: &Route, v: Value, cut: bool) -> Value {
+    let body = match &v {
+        Value::String(s) => s.clone(),
+        other => serde_json::to_string_pretty(other).unwrap_or_default(),
+    };
+    let text = listing::framed(
+        &format!("node {:?}, {}.{}", route.node_name, route.cap, route.action),
+        false,
+        &util::clip(&body, RESULT_TEXT),
+    );
+    // `structuredContent` carries the node's data in the same marking as
+    // the text, for a harness that shows only it; a result too long for the
+    // text is left to the cut text, so no harness hands the model more than
+    // that.
+    let mut r = text_result(&text, false);
+    if !cut && body.len() <= RESULT_TEXT && structured_fits(&v) {
+        r["structuredContent"] =
+            listing::envelope(&listing::source(&route.node_name, &route.node_id), false, v);
+    }
+    r
+}
+
+/// A call's error as the model gets it.
+fn call_error(route: &Route, e: &RpcError) -> Value {
+    // The node's own words (cut at the link) are said to be its own, so
+    // they never read as a refusal of the center.
+    let whose = if link::by_node(e) {
+        format!("node {} answered: ", route.node_name)
+    } else {
+        String::new()
+    };
+    let mut t = format!("error {}: {whose}{}", e.kind().as_str(), e.message);
+    if let Some(d) = e
+        .data
+        .as_ref()
+        .and_then(|d| d.get("reason"))
+        .and_then(Value::as_str)
+    {
+        t.push_str(&format!(" ({d})"));
+    }
+    // On one line, whoever wrote the words: a node's message, a provider's,
+    // or a field of the node's schema in the center's own `invalid_args`. A
+    // line break would let a later line read as another refusal of the
+    // center's.
+    text_result(&listing::one_line(&t), true)
+}
+
+/// The answer of an `execute` whose call became the job `job` after `wait`:
+/// the center's own words, with the calls that follow it up.
+fn running(route: &Route, job: &str, wait: Duration) -> Value {
+    let node = &route.node_name;
+    let signal = if (route.cap.as_str(), route.action.as_str()) == ("exec", "run") {
+        format!(
+            " exec.signal with args {{\"job\": {job:?}, \"signal\": \"term\"}} asks its command to stop."
+        )
+    } else {
+        String::new()
+    };
+    let text = format!(
+        "{}.{} on node {node} still runs after {}, so it became job {job}: it runs on. \
+         Call execute with node {node:?}, capability \"job.status\" and args {{\"job\": {job:?}}} for its state, \
+         or its result once it ended (\"wait_ms\" in args waits for its end, up to {} per call); \
+         capability \"job.cancel\" with the same args stops it.{signal}",
+        route.cap,
+        route.action,
+        util::span(wait),
+        util::span(wait),
+    );
+    let mut r = text_result(&text, false);
+    r["structuredContent"] = json!({"job": job, "state": "running"});
+    r
 }
 
 /// The two tools as `tools/list` shows them: flat schemas, each with one

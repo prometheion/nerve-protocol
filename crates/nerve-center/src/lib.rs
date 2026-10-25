@@ -18,6 +18,7 @@ pub mod catalog;
 pub mod center;
 pub mod checker;
 pub mod config;
+pub mod jobs;
 pub mod link;
 pub mod listen;
 pub mod listing;
