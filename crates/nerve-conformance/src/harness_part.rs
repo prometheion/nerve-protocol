@@ -904,16 +904,27 @@ fn check_unknown_tool(reply: &Value) -> Result<(), String> {
 }
 
 /// An `execute` whose call ran past the call wait: answered at once, not
-/// as an error, with `structuredContent` exactly `{job, state: "running"}`
-/// and a text that names the job and `job.status`. Gives the job's id.
+/// as an error, with `structuredContent` exactly `{job, state: "running",
+/// next}` and a text that names the job and `job.status`; `next` names
+/// them too, for a harness that shows the model only `structuredContent`.
+/// Gives the job's id.
 fn check_job(result: &Value) -> Result<String, String> {
     not_error(result)?;
-    let job = check_job_state(result, None, "running")?;
-    let text = text_of(result);
-    ensure(
-        text.contains(&job) && text.contains("job.status"),
-        format!("the text names neither the job nor job.status: {text:?}"),
-    )?;
+    let next = result["structuredContent"]["next"]
+        .as_str()
+        .ok_or_else(|| format!("structuredContent has no next: {result}"))?
+        .to_string();
+    let mut bare = result.clone();
+    if let Some(s) = bare["structuredContent"].as_object_mut() {
+        s.remove("next");
+    }
+    let job = check_job_state(&bare, None, "running")?;
+    for (what, text) in [("the text", text_of(result)), ("next", next)] {
+        ensure(
+            text.contains(&job) && text.contains("job.status"),
+            format!("{what} names neither the job nor job.status: {text:?}"),
+        )?;
+    }
     Ok(job)
 }
 
@@ -1911,29 +1922,43 @@ mod tests {
     }
 
     /// A call that became a job is answered as one: not an error, exactly
-    /// `{job, state}` in `structuredContent`, its id and `job.status` in the
-    /// text.
+    /// `{job, state, next}` in `structuredContent`, its id and `job.status`
+    /// in the text and in `next`.
     #[test]
     fn a_job_is_answered_with_its_id_and_state() {
         let text =
             "echo.wait on node a still runs after 1 s, so it became job j-1: call job.status";
-        let ok = content(text, json!({"job": "j-1", "state": "running"}));
+        let next = "call job.status of j-1";
+        let ok = content(
+            text,
+            json!({"job": "j-1", "state": "running", "next": next}),
+        );
         assert_eq!(check_job(&ok), Ok("j-1".to_string()));
         let mut err = ok.clone();
         err["isError"] = json!(true);
         assert!(check_job(&err).is_err());
         for bad in [
-            json!({"job": "j-1"}),
-            json!({"job": "", "state": "running"}),
-            json!({"job": "j-1", "state": "done"}),
-            json!({"job": "j-1", "state": "running", "more": 1}),
+            json!({"job": "j-1", "next": next}),
+            json!({"job": "", "state": "running", "next": next}),
+            json!({"job": "j-1", "state": "done", "next": next}),
+            json!({"job": "j-1", "state": "running", "next": next, "more": 1}),
+            json!({"job": "j-1", "state": "running"}),
+            json!({"job": "j-1", "state": "running", "next": 1}),
             json!({"text": "a result"}),
         ] {
             assert!(check_job(&content(text, bad.clone())).is_err(), "{bad}");
         }
-        // The text names the job and how to follow it up.
+        // The text and `next` name the job and how to follow it up.
         for text in ["it became a job; call job.status", "it became job j-1"] {
-            let unnamed = content(text, json!({"job": "j-1", "state": "running"}));
+            let unnamed = content(
+                text,
+                json!({"job": "j-1", "state": "running", "next": next}),
+            );
+            assert!(check_job(&unnamed).is_err(), "{text}");
+            let unnamed = content(
+                "it became job j-1: call job.status",
+                json!({"job": "j-1", "state": "running", "next": text}),
+            );
             assert!(check_job(&unnamed).is_err(), "{text}");
         }
         let cancelled = content("cancelled", json!({"job": "j-1", "state": "cancelled"}));

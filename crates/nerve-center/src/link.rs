@@ -31,12 +31,35 @@ pub const DUPLICATE_PING: Duration = Duration::from_secs(3);
 pub const DEAD_AFTER: Duration = Duration::from_secs(45);
 /// How long the center waits for a `describe`, `get` or `settings.set`.
 pub const SHORT_CALL: Duration = Duration::from_secs(30);
-/// The node's call places (its `limits.calls`, 64 for nerve-node) the
-/// agents' calls leave free: the owner's settings changes from the center
-/// and a job's `exec.signal` find a place while jobs hold all the others.
+/// The most of the node's call places (its `limits.calls`, 64 for
+/// nerve-node) the agents' calls leave free: the owner's settings changes
+/// from the center and a job's `exec.signal` find a place while jobs hold
+/// all the others.
 pub const CALLS_KEPT: usize = 8;
 
+/// How many of a node's `calls` places the agents' calls leave free: a
+/// quarter, at most [`CALLS_KEPT`], so a node with few places still runs
+/// most of the agents' calls (64 keeps 8, 8 keeps 2, 4 keeps 1).
+pub fn calls_kept(calls: usize) -> usize {
+    CALLS_KEPT.min(calls / 4)
+}
+
 type Reply = Result<Value, RpcError>;
+
+/// A request's id in `pending` that is not queued yet: dropped with the
+/// id still set, it takes the id out again.
+struct Unsent<'a> {
+    link: &'a Link,
+    id: Option<u64>,
+}
+
+impl Drop for Unsent<'_> {
+    fn drop(&mut self) {
+        if let Some(id) = self.id {
+            self.link.pending.lock().unwrap().remove(&id);
+        }
+    }
+}
 
 enum Out {
     Frame(WsMessage),
@@ -375,11 +398,18 @@ impl Link {
             pending.insert(id, tx);
             id
         };
+        // Until the request is queued the caller may be dropped (a stop
+        // while the queue is full): then no reply or cancel would ever
+        // clear the id, and it would hold a call place for good.
+        let mut unsent = Unsent {
+            link: self,
+            id: Some(id),
+        };
         let text = Message::request(id, method, params).encode();
         if !self.send_text(text).await {
-            self.pending.lock().unwrap().remove(&id);
             return Err(lost());
         }
+        unsent.id = None;
         Ok((id, rx))
     }
 
@@ -1038,4 +1068,36 @@ async fn handle(center: &Center, link: &Arc<Link>, m: Message) -> Option<ByeReas
         },
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A quarter of the node's places is kept, at most eight, so a node
+    /// with few places still runs most of the agents' calls.
+    #[test]
+    fn the_kept_places_scale_with_the_nodes_limit() {
+        let kept: Vec<_> = [64, 16, 8, 4, 2, 0].map(calls_kept).into();
+        assert_eq!(kept, [8, 4, 2, 1, 0, 0]);
+        assert_eq!(calls_kept(1000), CALLS_KEPT);
+    }
+
+    /// A call dropped while its request waits for room in the send queue
+    /// leaves no pending id behind: it would hold one of the node's call
+    /// places for the rest of the link's life.
+    #[tokio::test]
+    async fn a_call_dropped_before_its_request_left_keeps_no_place() {
+        let (out, mut rx) = mpsc::channel(1);
+        let link = Link::new("n1", String::new(), false, Limits::default(), out, None);
+        let (id, _reply) = link.start("invoke", json!({})).await.unwrap();
+        assert_eq!((id, link.waiting()), (1, 1));
+        // The queue holds that one frame and is full now: the next call
+        // waits for room until it is dropped.
+        let held =
+            tokio::time::timeout(Duration::from_millis(50), link.start("invoke", json!({}))).await;
+        assert!(held.is_err(), "the queue had room");
+        assert_eq!(link.waiting(), 1);
+        assert!(rx.try_recv().is_ok());
+    }
 }

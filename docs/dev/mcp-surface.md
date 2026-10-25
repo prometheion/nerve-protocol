@@ -150,7 +150,7 @@ by the job's id. Jobs are the session's own: another session's id names
 nothing. `job.status` and `job.cancel` work on every node that is not
 disabled, also once its offer dropped to nothing; disabling a node stops its
 jobs. A session runs at most 16 calls at once, and the agents' calls of all
-sessions leave 8 of a node's call places free. Details:
+sessions leave a quarter of a node's call places free, at most 8. Details:
 [harness spec §4.4](spec/harness.md#44-jobs).
 
 ## Sessions

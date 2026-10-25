@@ -109,7 +109,9 @@ never appears in a capability id or action name (protocol §6), while `_` and
   the policy that limits it.
 - `exec.signal` is offered by the job's id: `params` name `job` where the
   node's name `call`, the `invoke` id only the center knows (§4.4), and
-  `job` is required whatever the node said of `call`.
+  `job` is required whatever the node said of `call`. It is told by its
+  name, whatever `provider` the node wrote, so no session names another
+  session's call by its raw id.
 - Beside a node's own units, when it offers at least one that is not off,
   `list` shows the center's own `job.status` and `job.cancel` (§4.4).
   `execute` finds them on every node that is not disabled, also once its
@@ -123,7 +125,7 @@ never appears in a capability id or action name (protocol §6), while `_` and
   `error forbidden`.
 - A node the owner disabled in the center offers nothing: it stays paired and
   connected, `list` marks it `disabled`, and `execute` on it is
-  `error unavailable`.
+  `error unavailable`. The calls that run there stop, jobs too (§4.4).
 - The node cuts the descriptor to what the policy can allow (node-local §3),
   so `list` offers only an action a call may get through: in default deny,
   `fs` and `exec` actions without a covering allow rule are absent from the
@@ -330,7 +332,9 @@ own `invalid_args` names): a line break in them becomes a space.
 (`--call-wait`, 20 s by default). A call still running then becomes a
 **job** of the session: `execute` answers at once, not as an error, with a
 text that names the job, the calls that follow it up and their args, and
-`structuredContent` `{"job": "j-…", "state": "running"}`. The call runs on.
+`structuredContent` `{"job": "j-…", "state": "running", "next": "…"}`, where
+`next` repeats the text's part on those calls: some harnesses show the model
+only `structuredContent`. The call runs on.
 The center owns it, not the request, so a `notifications/cancelled` for that
 request no longer reaches it (§5). A harness gives up on a tool call after a
 while, often a minute: the call wait stays below that, so no tool call of the
@@ -347,7 +351,7 @@ and they count in no statistics:
 
 - `job.status` waits up to `wait_ms` for the job's end, never longer than
   the call wait. A running job is `Job j-… (exec.run on node box-1) still
-  runs after 42 s. …` with `{"job", "state": "running"}`. A job that ended
+  runs after 42 s. …` with `{"job", "state": "running", "next"}`. A job that ended
   gives its result as `execute` would (§4.3), after a line that names the
   job, with the center's `{"job", "state": "done"}` as `center` beside the
   envelope. A failure is `error <code>: job j-… (exec.run on node box-1)
@@ -373,9 +377,10 @@ and they count in no statistics:
   unit, node, how long), so a model that lost their ids can stop one. A
   job's `exec.signal` has 4 places beyond the 16. The node's own limit
   (`limits.calls` of its hello, 64 for nerve-node) holds for all sessions
-  together: the agents' calls leave 8 of those places free, for the owner's
-  settings changes from the center and for `exec.signal`, and a call past
-  that is `error busy: node box-1 runs 56 calls already, …` before the node.
+  together: the agents' calls leave a quarter of those places free, at most
+  8 (64 keeps 8, 8 keeps 2, 4 keeps 1), for the owner's settings changes
+  from the center and for `exec.signal`, and a call past that is
+  `error busy: node box-1 runs 56 calls already, …` before the node.
   Finished results are kept in
   memory only, each cut as a result is (256 KiB), at most 4 MiB per session
   (a result past that is not kept: `job.status` says `error too_large`),
@@ -422,7 +427,8 @@ Served by `nerve-center` itself at `--ui`. Tabs: overview (alerts, machines
 with rename, disable and remove and the actions the center left out with
 their reasons (§4.1), pairing, sessions). A disabled machine stays
 paired and connected, but the agent is offered none of its capabilities and
-calls to it are refused (`POST /api/nodes/disable`, §4.1). Further tabs: statistics, audit (for every entry with a known
+calls to it are refused, and the calls that run there stop, jobs too
+(`POST /api/nodes/disable`, §4.1, §4.4). Further tabs: statistics, audit (for every entry with a known
 target, a command, a path or another action: Allow, Allow as wildcard, Deny
 and Deny as wildcard, only with the node's settings grant; each only adds a
 rule to the node's `policy.allow` or `policy.deny`, a sudo command's allow to

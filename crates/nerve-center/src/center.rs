@@ -26,7 +26,7 @@ use crate::checker::{
     ModelSource, NodeSettings, NodeSwitch, Scope,
 };
 use crate::jobs::{self, Jobs, Stop};
-use crate::link::{CALLS_KEPT, Link, SHORT_CALL};
+use crate::link::{Link, SHORT_CALL, calls_kept};
 use crate::listing;
 use crate::pairing::{Codes, Outcome};
 use crate::store::{KeyRotation, NodeRecord, OldKey, Store};
@@ -2699,7 +2699,7 @@ impl Center {
         let most = if on.is_some() {
             most
         } else {
-            most.saturating_sub(CALLS_KEPT).max(1)
+            (most - calls_kept(most)).max(1)
         };
         let (id, rx) = link
             .start_within(

@@ -463,8 +463,7 @@ impl Catalog {
                 // The node's `exec.signal` names its call by the `invoke` id,
                 // which only the center knows: the agent names the job, and
                 // the center maps it (docs/dev/spec/harness.md §4.4).
-                let signal = node && cap.id == "exec" && action == "signal";
-                let (params, own) = if signal {
+                let (params, own) = if is_signal(&cap.id, action) {
                     match signal_by_job(&params) {
                         Ok(p) => (p, Some(described(SIGNAL_SUMMARY))),
                         Err(reason) => {
@@ -569,6 +568,14 @@ fn signal_by_job(params: &Value) -> Result<Value, String> {
 /// capability of a center's name is left out of its catalog.
 pub fn is_center(u: &Unit) -> bool {
     CENTER_CAPS.contains(&u.cap.as_str())
+}
+
+/// Whether `cap.action` is the node's `exec.signal`, which names its call by
+/// the `invoke` id: the agent names the job, and the center maps it. Told by
+/// its name, whatever provider the node wrote: the provider is the node's
+/// word, and a raw `call` would reach other sessions' commands.
+pub fn is_signal(cap: &str, action: &str) -> bool {
+    (cap, action) == ("exec", "signal")
 }
 
 /// The units the center serves itself on every node: `job.status` and
@@ -792,6 +799,7 @@ mod tests {
 
         let signal = c.unit("exec.signal").unwrap();
         assert_eq!(&*signal.provider, "node");
+        assert!(is_signal(&signal.cap, &signal.action));
         assert_eq!(signal.params["required"], json!(["job", "signal"]));
         assert_eq!(signal.params["properties"]["job"]["type"], "string");
         assert!(signal.params["properties"].get("call").is_none());
@@ -828,6 +836,22 @@ mod tests {
         assert_eq!(&*on.provider, CENTER);
         assert!(!is_center(on));
         assert!(is_center(c.unit("job.status").unwrap()));
+        // Told by its name: the node's `exec.signal` names a job also where
+        // the node wrote another provider, so no session signals a call by
+        // its raw id.
+        let mut exec = cap(
+            "exec",
+            "exec",
+            &[("signal", Effect::Actuate, signal_params())],
+        );
+        exec.provider = "p".into();
+        let c = Catalog::build(&desc("box", vec![exec]));
+        let other = c.unit("exec.signal").unwrap();
+        assert_eq!(&*other.provider, "p");
+        assert_eq!(other.params["required"], json!(["job", "signal"]));
+        assert!(other.params["properties"].get("call").is_none());
+        assert!(is_signal(&other.cap, &other.action));
+        assert!(!is_signal("lamp", "signal"));
         // One that names no call cannot be offered by job.
         let d = desc(
             "box",

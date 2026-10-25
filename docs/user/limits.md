@@ -58,6 +58,8 @@ a result past that is not kept. These are fixed in the center.
 The node's own limit of 64 calls at once per center holds for all sessions
 together. The center keeps 8 of those for itself: the agents' calls take at
 most 56, and one past that is refused with `busy` before it reaches the node.
+A machine that announces fewer places (another implementation of the node)
+keeps a quarter of them, so one with 8 leaves the agents 6.
 So saving the machine's settings from the center, and a job's `exec.signal`,
 still work while agents' jobs hold every other place.
 

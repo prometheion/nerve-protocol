@@ -8,6 +8,7 @@ use std::time::Duration;
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use nerve_center::center::Center;
+use nerve_center::checker::config::ModelSource;
 use nerve_center::config::Args;
 use nerve_center::mcp::Engine;
 use nerve_center::server::{self, Running};
@@ -2677,6 +2678,14 @@ fn job_of(reply: &Value) -> String {
     let job = sc["job"].as_str().expect("a job id").to_string();
     assert!(job.starts_with("j-"), "{job}");
     assert!(text.contains(&format!("became job {job}")), "{text}");
+    // The calls that follow the job up are in `structuredContent` too, for
+    // a harness that shows the model only that.
+    let next = sc["next"].as_str().expect("the next calls");
+    assert!(text.ends_with(next), "{text}");
+    assert!(
+        next.contains("\"job.status\"") && next.contains(&job),
+        "{next}"
+    );
     job
 }
 
@@ -3038,9 +3047,13 @@ async fn job_status_waits_and_gives_the_result_once() {
         )),
         "{text}"
     );
+    let next = format!(
+        "Call job.status with args {{\"job\": {job:?}}} again later (wait_ms waits for its end), or job.cancel with the same args to stop it."
+    );
+    assert!(text.ends_with(&next), "{text}");
     assert_eq!(
         r1["result"]["structuredContent"],
-        json!({"job": job, "state": "running"})
+        json!({"job": job, "state": "running", "next": next})
     );
     let done = status(job.clone(), 5_000).await;
     let (text, err) = said(&done);
@@ -3204,6 +3217,39 @@ async fn exec_signal_goes_to_the_call_of_the_job() {
             .starts_with("error unknown_job: node box-1 has no running job \"j-nope\""),
         "{wrong}"
     );
+    nothing_more(&mut seen).await;
+    r.stop().await;
+}
+
+/// A job's exec.signal is a call like any other: the action checker decides
+/// on it before the node. With the decision model on and out of reach it
+/// fails closed, so the signal is refused and the node never gets it.
+#[tokio::test]
+async fn the_checker_decides_on_a_jobs_signal() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, _node, mut seen, _task) = job_box(&r).await;
+    let job = job_of(&execute_as(&e, json!(1), "exec.run", json!({"command": "hang"})).await);
+    let Seen::Hang(_) = next_seen(&mut seen).await else {
+        panic!("no invoke")
+    };
+    r.center.update(|s| {
+        s.checker.model_on = true;
+        // An endpoint source with no URL: nothing to reach.
+        s.checker.model.source = ModelSource::Endpoint;
+        s.checker.model.endpoint_url = String::new();
+    });
+    r.center.rebuild_checker();
+    let sig = execute_as(
+        &e,
+        json!(2),
+        "exec.signal",
+        json!({"job": job, "signal": "term"}),
+    )
+    .await;
+    let (text, err) = said(&sig);
+    assert!(err, "{sig}");
+    assert!(text.starts_with("error forbidden: "), "{text}");
     nothing_more(&mut seen).await;
     r.stop().await;
 }
@@ -3394,22 +3440,25 @@ async fn a_provider_named_center_is_the_nodes() {
 
 /// The agents' calls leave some of a node's call places free, across all
 /// sessions: past that a call is refused before the node, while the
-/// owner's settings change and a job's exec.signal still reach it.
+/// owner's settings change and a job's exec.signal still reach it. The
+/// share kept scales with the node's limit, so a small node still runs most
+/// of the agents' calls.
 #[tokio::test]
 async fn jobs_leave_the_node_room_for_the_owner_and_signals() {
     let dir = tempfile::tempdir().unwrap();
     let r = job_center(dir.path()).await;
-    // A node of 10 places: the agents get 2.
+    // A node of 4 places: one is kept, the agents get 3.
     let (e, node, mut seen, _task, _) =
-        job_box_with(&r, json!({"limits": {"calls": 10}}), with_signal).await;
+        job_box_with(&r, json!({"limits": {"calls": 4}}), with_signal).await;
     let other = Engine::new(&r.center, "test");
     let third = Engine::new(&r.center, "test");
     for s in [&other, &third] {
         list_text(s, json!({"node": "box-1", "capability": ["exec.run"]})).await;
     }
     let job = job_of(&execute_as(&e, json!(1), "exec.run", json!({"command": "hang"})).await);
+    job_of(&execute_as(&e, json!(3), "exec.run", json!({"command": "hang"})).await);
     job_of(&execute_as(&other, json!(1), "exec.run", json!({"command": "hang"})).await);
-    for _ in 0..2 {
+    for _ in 0..3 {
         let Seen::Hang(_) = next_seen(&mut seen).await else {
             panic!("no invoke")
         };
@@ -3418,7 +3467,7 @@ async fn jobs_leave_the_node_room_for_the_owner_and_signals() {
     let (text, err) = said(&full);
     assert!(err, "{full}");
     assert!(
-        text.starts_with("error busy: node box-1 runs 2 calls already"),
+        text.starts_with("error busy: node box-1 runs 3 calls already"),
         "{text}"
     );
     nothing_more(&mut seen).await;

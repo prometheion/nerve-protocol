@@ -150,7 +150,7 @@ JSON is a failure of the check, not an empty result.
 | 4 | a change to another capability of the node needs no new `list` |
 | 4 | `list()` says a node that left is offline, and its capabilities stay listed |
 | 4 | `execute` on a node that is offline is `error unavailable` |
-| 4.4 | a call that runs past the call wait is answered at once, not as an error, with `structuredContent` exactly `{job, state: "running"}` and a text that names the job and `job.status` |
+| 4.4 | a call that runs past the call wait is answered at once, not as an error, with `structuredContent` exactly `{job, state: "running", next}` and a text that names the job and `job.status`, as `next` does |
 | 4.4 | `job.status` gives a job's result once it ended, as device content with the center's `{job, state: "done"}` beside the envelope, and only once (then `error unknown_job`); the node is not told to cancel the call |
 | 4.4 | another session's `job.status` and `job.cancel` of the job are `error unknown_job`, and the node is not told to cancel it |
 | 4.4 | `job.cancel` stops a running job (`{job, state: "cancelled"}`), and the node is told to `cancel` its call |

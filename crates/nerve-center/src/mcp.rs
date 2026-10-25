@@ -524,13 +524,16 @@ impl Engine {
         let ran = util::span(view.ran);
         match view.outcome {
             None => {
+                let next = format!(
+                    "Call job.status with args {{\"job\": {job:?}}} again later (wait_ms waits for its end), or job.cancel with the same args to stop it."
+                );
                 let mut v = text_result(
-                    &format!(
-                        "Job {job} ({what}) still runs after {ran}. Call job.status again later (wait_ms waits for its end), or job.cancel to stop it."
-                    ),
+                    &format!("Job {job} ({what}) still runs after {ran}. {next}"),
                     false,
                 );
-                v["structuredContent"] = json!({"job": job, "state": "running"});
+                // Also in `structuredContent`: some harnesses show the model
+                // only that, and it must still learn how to go on.
+                v["structuredContent"] = json!({"job": job, "state": "running", "next": next});
                 v
             }
             Some(Outcome::Done { value, cut }) => {
@@ -568,7 +571,7 @@ impl Engine {
 
 /// Whether `unit` is the node's `exec.signal`, which names a job.
 fn is_signal(unit: &catalog::Unit) -> bool {
-    &*unit.provider == "node" && unit.cap == "exec" && unit.action == "signal"
+    catalog::is_signal(&unit.cap, &unit.action)
 }
 
 /// `exec.run on node box-1`: what a job runs, for its answers.
@@ -652,18 +655,22 @@ fn running(route: &Route, job: &str, wait: Duration, signal: bool) -> Value {
     } else {
         String::new()
     };
-    let text = format!(
-        "{}.{} on node {node} still runs after {}, so it became job {job}: it runs on. \
-         Call execute with node {node:?}, capability \"job.status\" and args {{\"job\": {job:?}}} for its state, \
+    let next = format!(
+        "Call execute with node {node:?}, capability \"job.status\" and args {{\"job\": {job:?}}} for its state, \
          or its result once it ended (\"wait_ms\" in args waits for its end, up to {} per call); \
          capability \"job.cancel\" with the same args stops it.{signal}",
+        util::span(wait),
+    );
+    let text = format!(
+        "{}.{} on node {node} still runs after {}, so it became job {job}: it runs on. {next}",
         route.cap,
         route.action,
         util::span(wait),
-        util::span(wait),
     );
     let mut r = text_result(&text, false);
-    r["structuredContent"] = json!({"job": job, "state": "running"});
+    // Also in `structuredContent`: some harnesses show the model only that,
+    // and it must still learn which calls follow the job up.
+    r["structuredContent"] = json!({"job": job, "state": "running", "next": next});
     r
 }
 
