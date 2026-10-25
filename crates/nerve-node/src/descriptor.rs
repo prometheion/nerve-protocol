@@ -595,10 +595,13 @@ impl Reach {
     /// The `access` block: in `folder` mode with the folders in the
     /// center's path form (`windows`: `C:\x` is `/c/x`), one entry per
     /// place with the flags of every grant of it together. A folder without
-    /// a flag is named only inside one with a flag, which it closes (the
-    /// deepest folder decides); elsewhere it grants nothing. Only folder
-    /// mode names folders: in allowlist mode as `nerve-run` they still hold
-    /// the allowed commands, which the block does not tell.
+    /// a flag is never named: the node's file calls hide its name (a listing
+    /// leaves it out, a refusal under it reads like any other), so the block
+    /// does not give it away either. Where it lies inside a granted folder,
+    /// which it closes (the deepest folder decides), the deepest such folder
+    /// is marked `closed_below`. Only folder mode names folders: in
+    /// allowlist mode as `nerve-run` they still hold the allowed commands,
+    /// which the block does not tell.
     fn access(&self, windows: bool) -> Access {
         let folder = self.mode == Mode::Folder;
         let within = |p: &str, b: &str| {
@@ -616,11 +619,6 @@ impl Reach {
             .chain(self.own.iter().map(|f| (f, true)))
             .filter(|_| folder)
         {
-            // A name with a control character cannot be shown on one line
-            // as it is, and a line that changed it would name another place.
-            if f.path.chars().any(char::is_control) {
-                continue;
-            }
             let path = if windows {
                 nerve_policy::paths::win::to_wire(&f.path)
             } else {
@@ -639,14 +637,21 @@ impl Reach {
                 None => folders.push((&f.path, path, f.access, own)),
             }
         }
-        let granted: Vec<&str> = folders
-            .iter()
-            .filter(|(_, _, a, _)| !a.is_none())
-            .map(|(n, _, _, _)| *n)
-            .collect();
-        folders.retain(|(n, _, a, _)| {
-            !a.is_none() || granted.iter().any(|g| within(n, g) && !within(g, n))
-        });
+        let below = |n: &str, b: &str| within(n, b) && !within(b, n);
+        let mut closed_below = vec![false; folders.len()];
+        for (c, _, _, _) in folders.iter().filter(|(_, _, a, _)| a.is_none()) {
+            let around: Vec<usize> = (0..folders.len())
+                .filter(|&g| !folders[g].2.is_none() && below(c, folders[g].0))
+                .collect();
+            // The granted folders around it nest, so the deepest one is the
+            // one no other lies below.
+            if let Some(&g) = around
+                .iter()
+                .find(|&&g| !around.iter().any(|&o| below(folders[o].0, folders[g].0)))
+            {
+                closed_below[g] = true;
+            }
+        }
         Access {
             mode: match self.mode {
                 Mode::Allowlist => AccessMode::Allowlist,
@@ -658,10 +663,16 @@ impl Reach {
             confined: folder && self.confined,
             folders: folders
                 .into_iter()
-                .map(|(_, path, a, own)| FolderAccess {
+                .zip(closed_below)
+                // A name with a control character cannot be shown on one
+                // line as it is, and a line that changed it would name
+                // another place.
+                .filter(|((n, _, a, _), _)| !a.is_none() && !n.chars().any(char::is_control))
+                .map(|((_, path, a, own), closed_below)| FolderAccess {
                     path,
                     access: a.to_string(),
                     own,
+                    closed_below,
                 })
                 .collect(),
         }
@@ -1438,42 +1449,66 @@ mod tests {
         assert!(a.folders.is_empty());
     }
 
-    /// A folder with no rights inside a granted one closes what lies below
-    /// it (the deepest folder decides), so it is named, with no flag; on
-    /// Windows too, where case does not tell places apart.
+    /// A folder with no rights is never named, as the node's file calls
+    /// hide its name too. Inside a granted one it closes what lies below
+    /// it (the deepest folder decides), so the deepest granted folder
+    /// around it says that something below is closed; on Windows too,
+    /// where case does not tell places apart.
     #[test]
-    fn a_closed_folder_inside_a_granted_one_is_named() {
+    fn a_closed_folder_is_not_named_and_its_granted_folder_says_so() {
         let mut e = entry();
         e.policy.mode = Mode::Folder;
         e.policy.folders = vec![
+            folder("/home/me/docs", "r"),
+            folder("/home/me/docs/medical", ""),
             folder("/home/me/proj", "rwx"),
-            folder("/home/me/proj/secrets", ""),
+            folder("/home/me/proj/app", "rw"),
+            folder("/home/me/proj/app/secrets", ""),
             folder("/home/me/projects", ""),
-            folder("/home/me/proj/secrets/open", "r"),
+            folder("/home/me/proj/app/secrets/open", "r"),
+            folder("/home/me/cfg", "r"),
+            folder("/home/me/cfg/a\nb", ""),
         ];
         let r = Reach::of(&e, 0, Some("me".into()), true, None);
         let d = super::for_center(&NodeConfig::default(), &e, &r, &[]);
+        let marked = |d: &Descriptor| -> Vec<(String, String, bool)> {
+            d.access
+                .as_ref()
+                .unwrap()
+                .folders
+                .iter()
+                .map(|f| (f.path.clone(), f.access.clone(), f.closed_below))
+                .collect()
+        };
+        let s = |p: &str, a: &str, c: bool| (p.to_string(), a.to_string(), c);
         assert_eq!(
-            folders(&d),
-            pairs(&[
-                ("/home/me/proj", "rwx"),
-                ("/home/me/proj/secrets", ""),
-                ("/home/me/proj/secrets/open", "r"),
-            ])
+            marked(&d),
+            vec![
+                s("/home/me/docs", "r", true),
+                s("/home/me/proj", "rwx", false),
+                s("/home/me/proj/app", "rw", true),
+                s("/home/me/proj/app/secrets/open", "r", false),
+                // A closed name that could not be shown still closes.
+                s("/home/me/cfg", "r", true),
+            ]
         );
+        let text = serde_json::to_string(&d).unwrap();
+        for never in ["medical", "secrets\"", "projects", "a\\nb"] {
+            assert!(!text.contains(never), "{never}: {text}");
+        }
         e.policy.folders = vec![
             folder("C:\\Work", "rw"),
             folder("c:\\work\\keys", ""),
             folder("c:\\WORK", "x"),
         ];
         let r = Reach::of(&e, 0, Some("me".into()), false, None);
-        let got: Vec<(String, String)> = r
+        let got: Vec<(String, String, bool)> = r
             .access(true)
             .folders
             .into_iter()
-            .map(|f| (f.path, f.access))
+            .map(|f| (f.path, f.access, f.closed_below))
             .collect();
-        assert_eq!(got, pairs(&[("/c/Work", "rwx"), ("/c/work/keys", "")]));
+        assert_eq!(got, vec![s("/c/Work", "rwx", true)]);
     }
 
     /// A folder whose name holds a control character is left out: the

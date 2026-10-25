@@ -216,21 +216,25 @@ pub struct FolderAccess {
     /// Absolute, in the center's path form (`/c/Users/x` for `C:\Users\x`).
     pub path: String,
     /// `r` (read), `w` (write) and `x` (run commands), each at most once,
-    /// in that order. Empty for a folder with no rights inside a granted
-    /// one: where folders nest the deepest one decides, so it closes what
-    /// lies below it.
+    /// in that order, at least one.
     pub access: String,
     /// One of the command account's own folders (its home, `/tmp`,
     /// `/var/tmp`), which the node adds where the commands run as an
-    /// account of their own, not as the owner: the place for scratch files.
+    /// account of their own, not as the owner. Every pairing whose commands
+    /// run as that account shares them, so they are a place for throwaway
+    /// files only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub own: bool,
+    /// Some folder below this one is closed to the center (the owner gave
+    /// it no rights, and where folders nest the deepest one decides). The
+    /// closed folder is not named: the node's file calls hide its name too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closed_below: bool,
 }
 
 impl FolderAccess {
     /// The flags as read, write and run, or `None` when `access` is not
-    /// up to three of `r`, `w`, `x` in that order. All three false is a
-    /// folder that closes what lies below it.
+    /// one to three of `r`, `w`, `x` in that order.
     pub fn flags(&self) -> Option<(bool, bool, bool)> {
         let mut rest = self.access.as_str();
         let mut take = |c: char| match rest.strip_prefix(c) {
@@ -241,7 +245,7 @@ impl FolderAccess {
             None => false,
         };
         let flags = (take('r'), take('w'), take('x'));
-        rest.is_empty().then_some(flags)
+        (rest.is_empty() && flags != (false, false, false)).then_some(flags)
     }
 }
 
@@ -412,6 +416,99 @@ mod tests {
         assert_eq!(cap["actions"]["propertyNames"]["pattern"], rule.as_str());
     }
 
+    /// The published `access` block and an action's `exposure` say what
+    /// the code reads: the same modes, the same folder flags, the same
+    /// members.
+    #[test]
+    fn the_published_schema_states_the_access_block_as_the_code_reads_it() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/descriptor.schema.json"
+        );
+        let s: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let access = &s["$defs"]["access"];
+        let modes: Vec<Value> = [AccessMode::Allowlist, AccessMode::Folder, AccessMode::User]
+            .iter()
+            .map(|m| json!(m.as_str()))
+            .collect();
+        assert_eq!(access["properties"]["mode"]["enum"], json!(modes));
+        for m in &modes {
+            let read: AccessMode = serde_json::from_value(m.clone()).unwrap();
+            assert_eq!(json!(read.as_str()), *m);
+        }
+        let members = |v: &Value| -> Vec<String> {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        let full = Access {
+            mode: AccessMode::Folder,
+            until_ms: Some(1),
+            account: Some("a".into()),
+            confined: true,
+            folders: vec![FolderAccess {
+                path: "/a".into(),
+                access: "r".into(),
+                own: true,
+                closed_below: true,
+            }],
+        };
+        let v = serde_json::to_value(&full).unwrap();
+        assert_eq!(members(&access["properties"]), members(&v));
+        let folder = &access["properties"]["folders"]["items"];
+        assert_eq!(members(&folder["properties"]), members(&v["folders"][0]));
+        // The schema's flags are exactly the ones `flags()` takes. Its
+        // pattern is a row of optional letters (`^r?w?x?$`), matched here
+        // by hand against every string of up to four of them.
+        let flags = &folder["properties"]["access"];
+        let pattern = flags["pattern"].as_str().unwrap();
+        let letters: Vec<char> = pattern
+            .strip_prefix('^')
+            .and_then(|p| p.strip_suffix('$'))
+            .unwrap()
+            .split_terminator('?')
+            .map(|c| {
+                assert_eq!(c.chars().count(), 1, "{pattern}");
+                c.chars().next().unwrap()
+            })
+            .collect();
+        let min = flags["minLength"].as_u64().unwrap_or(0) as usize;
+        let schema_takes = |a: &str| {
+            let mut rest = a;
+            for c in &letters {
+                rest = rest.strip_prefix(*c).unwrap_or(rest);
+            }
+            rest.is_empty() && a.len() >= min
+        };
+        let mut all = vec![String::new()];
+        for _ in 0..4 {
+            let longer: Vec<String> = all
+                .iter()
+                .flat_map(|a| ['r', 'w', 'x', 'd'].map(|c| format!("{a}{c}")))
+                .collect();
+            all.extend(longer);
+        }
+        all.sort();
+        all.dedup();
+        for a in all {
+            let f = FolderAccess {
+                path: "/a".into(),
+                access: a.clone(),
+                own: false,
+                closed_below: false,
+            };
+            assert_eq!(f.flags().is_some(), schema_takes(&a), "{a:?}");
+        }
+        let exposure = |v: &Value| v["exposure"]["enum"].clone();
+        let cap = &s["$defs"]["capability"]["properties"];
+        let on_off = json!([Exposure::On, Exposure::Off]);
+        assert_eq!(exposure(cap), on_off);
+        assert_eq!(
+            exposure(&cap["actions"]["additionalProperties"]["properties"]),
+            on_off
+        );
+    }
+
     #[test]
     fn a_dot_in_a_name_is_refused_and_an_underscore_is_not() {
         let mut d = sample();
@@ -453,7 +550,8 @@ mod tests {
         v["access"] = json!({"mode": "folder", "until_ms": 5, "account": "nerve-run",
                              "confined": true, "x-later": 1,
                              "folders": [{"path": "/c/Users/x", "access": "rw"},
-                                         {"path": "/tmp", "access": "rwx", "own": true}]});
+                                         {"path": "/tmp", "access": "rwx", "own": true,
+                                          "closed_below": true}]});
         let d: Descriptor = serde_json::from_value(v.clone()).unwrap();
         let a = d.access.clone().unwrap();
         assert_eq!(a.mode, AccessMode::Folder);
@@ -462,11 +560,14 @@ mod tests {
         assert!(a.confined);
         assert_eq!(a.folders[0].flags(), Some((true, true, false)));
         assert!(!a.folders[0].own && a.folders[1].own);
+        assert!(!a.folders[0].closed_below && a.folders[1].closed_below);
         let back = serde_json::to_value(&d).unwrap();
         assert_eq!(back["access"]["folders"][0]["path"], "/c/Users/x");
         // `own` is sent only where it holds.
         assert!(back["access"]["folders"][0].get("own").is_none());
         assert_eq!(back["access"]["folders"][1]["own"], true);
+        assert!(back["access"]["folders"][0].get("closed_below").is_none());
+        assert_eq!(back["access"]["folders"][1]["closed_below"], true);
         for bad in [
             json!({"mode": "later"}),
             json!("folder"),
@@ -492,15 +593,15 @@ mod tests {
                 path: "/a".into(),
                 access: a.into(),
                 own: false,
+                closed_below: false,
             }
             .flags()
         };
         assert_eq!(f("rwx"), Some((true, true, true)));
         assert_eq!(f("r"), Some((true, false, false)));
         assert_eq!(f("wx"), Some((false, true, true)));
-        // No rights: a folder that closes what lies below it.
-        assert_eq!(f(""), Some((false, false, false)));
-        for bad in ["xr", "rr", "rwxq", "R", " "] {
+        // A folder with no rights is not named: it grants nothing.
+        for bad in ["", "xr", "rr", "rwxq", "R", " "] {
             assert_eq!(f(bad), None, "{bad}");
         }
     }
