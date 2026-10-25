@@ -375,8 +375,10 @@ and they count in no statistics:
   that is no command `error invalid_args`. The job answer names
   `exec.signal` only where the node offers it.
 - Limits per session: at most 16 calls run at once, jobs or not; the 17th is
-  `error busy`, reaches no node, and names the session's running jobs (id,
-  unit, node, how long), so a model that lost their ids can stop one. A
+  `error busy` and reaches no node. Every `busy` answer to a session (its
+  own 16, the center's places on the link below, the node's own `busy`)
+  names the session's running jobs (id, unit, node, how long), so a model
+  that lost their ids can stop one. A
   job's `exec.signal` has 4 places beyond the 16. The node's own limit
   (`limits.calls` of its hello, 64 for nerve-node) holds for all sessions
   together: the agents' calls leave a quarter of those places free, at most
@@ -384,8 +386,8 @@ and they count in no statistics:
   from the center and for `exec.signal`, and a call past that is
   `error busy: node box-1 runs 56 calls already, …` before the node.
   Finished results are kept in
-  memory only, each cut as a result is (256 KiB), at most 4 MiB per session
-  (a result past that is not kept: `job.status` says `error too_large`, or
+  memory only, each cut as a result is (256 KiB), at most 4 MiB per session,
+  kept and counted as their compact JSON text (a result past that is not kept: `job.status` says `error too_large`, or
   for a failure its own code),
   until they are read or for 10 minutes.
 - A job counts in the statistics, taints the session (the action checker's

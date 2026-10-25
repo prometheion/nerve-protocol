@@ -179,7 +179,7 @@ enum Seen {
 /// Answers the center like a node: describe, sub, invoke (echoing the
 /// arguments; the command `hang` is never answered, `slow` and the path
 /// `slow` are answered after [`SLOW`], `slowboom` fails after it, `refuse`
-/// is forbidden, `boom` fails,
+/// is forbidden, `busy` is busy, `boom` fails,
 /// `plain` answers a bare string, `long` and `quotes` long ones), and
 /// reports what it saw.
 fn serve(ws: WebSocketStream<BoxIo>, desc: Value) -> mpsc::UnboundedReceiver<Seen> {
@@ -285,6 +285,10 @@ fn serve_changing(
                         .flatten();
                     let failure = match command {
                         Some("refuse") => Some(RpcError::forbidden("no allow rule matches refuse")),
+                        Some("busy") => Some(RpcError::new(
+                            nerve_proto::ErrorCode::Busy,
+                            "16 commands are running already",
+                        )),
                         Some("boom") => {
                             Some(RpcError::internal("the node could not start the command"))
                         }
@@ -2852,6 +2856,38 @@ async fn the_seventeenth_job_is_refused() {
     r.stop().await;
 }
 
+/// A `busy` of the node names the session's running jobs too: the node's
+/// command places are shared by every center, one session's jobs can fill
+/// them, and a model that lost the ids must still be able to stop one.
+#[tokio::test]
+async fn a_nodes_busy_names_the_sessions_running_jobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, _node, mut seen, _task) = job_box(&r).await;
+    let busy = "error busy: node box-1 answered: 16 commands are running already";
+    let reply = execute_as(&e, json!(1), "exec.run", json!({"command": "busy"})).await;
+    assert_eq!(said(&reply), (busy.to_string(), true), "no jobs to name");
+    let job = job_of(&execute_as(&e, json!(2), "exec.run", json!({"command": "hang"})).await);
+    let Seen::Hang(_) = next_seen(&mut seen).await else {
+        panic!("no invoke")
+    };
+    let reply = execute_as(&e, json!(3), "exec.run", json!({"command": "busy"})).await;
+    let (text, err) = said(&reply);
+    assert!(err, "{reply}");
+    assert!(
+        text.starts_with(&format!(
+            "{busy}. This session's running jobs: {job} (exec.run on node box-1, for "
+        )),
+        "{text}"
+    );
+    // Another session's answer names none of them.
+    let other = Engine::new(&r.center, "test");
+    list_text(&other, json!({"node": "box-1", "capability": ["exec.run"]})).await;
+    let reply = execute_as(&other, json!(1), "exec.run", json!({"command": "busy"})).await;
+    assert_eq!(said(&reply), (busy.to_string(), true));
+    r.stop().await;
+}
+
 /// The end of a session cancels its running jobs on the node and drops
 /// what it kept.
 #[tokio::test]
@@ -2948,6 +2984,8 @@ async fn a_failed_or_dropped_job_is_an_error_of_that_job() {
         effect: nerve_proto::Effect::Execute,
     };
     let big = "x".repeat(nerve_center::jobs::RESULT_TEXT);
+    // A result is kept as its JSON text: a string with its quotes.
+    let size = big.len() + 2;
     let dropped = {
         let mut jobs = sess.jobs.lock().unwrap();
         let mut i = 0;
@@ -2956,7 +2994,7 @@ async fn a_failed_or_dropped_job_is_an_error_of_that_job() {
             let _ = jobs.start(&id, &route, false).unwrap();
             jobs.detach(&id);
             jobs.finish(&id, Ok(json!(big)), std::time::Instant::now());
-            if jobs.kept() + big.len() > nerve_center::jobs::KEPT_MAX {
+            if jobs.kept() + size > nerve_center::jobs::KEPT_MAX {
                 let id = "j-over";
                 let _ = jobs.start(id, &route, false).unwrap();
                 jobs.detach(id);
@@ -2982,8 +3020,7 @@ async fn a_failed_or_dropped_job_is_an_error_of_that_job() {
     );
     assert!(
         text.contains(&format!(
-            "but its result ({} bytes) was not kept: a session keeps at most 4 MiB",
-            big.len()
+            "but its result ({size} bytes) was not kept: a session keeps at most 4 MiB"
         )),
         "{text}"
     );
@@ -3588,6 +3625,21 @@ async fn jobs_leave_the_node_room_for_the_owner_and_signals() {
     assert!(err, "{full}");
     assert!(
         text.starts_with("error busy: node box-1 runs 3 calls already"),
+        "{text}"
+    );
+    assert!(!text.contains("running jobs"), "it has none: {text}");
+    // A session with jobs is told which, to stop one.
+    let full = execute_as(&e, json!(4), "exec.run", json!({"command": "hang"})).await;
+    let (text, err) = said(&full);
+    assert!(err, "{full}");
+    assert!(
+        text.starts_with("error busy: node box-1 runs 3 calls already"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "job.cancel. This session's running jobs: {job} (exec.run on node box-1, for "
+        )),
         "{text}"
     );
     nothing_more(&mut seen).await;

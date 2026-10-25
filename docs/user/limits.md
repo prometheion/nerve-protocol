@@ -50,11 +50,21 @@ in the params `list` gives for `exec.run`.
 Beside the limits of each command, the center bounds what one agent session
 keeps busy: at most 16 calls run at once, also the ones that became jobs
 ([long calls](harness.md#long-calls-become-jobs)), and a 17th is refused with
-`busy` until one ends or is stopped; the refusal names the session's running
-jobs. A job's `exec.signal` still goes through then. Results of finished jobs
-are kept in the center's memory, at most 4 MiB per session and for 10 minutes;
-a result past that is not kept (a job that failed still says that it failed,
-and why in one word). These are fixed in the center.
+`busy` until one ends or is stopped. Every `busy` answer to a session names
+its running jobs, whatever was full, so an agent that lost their ids can stop
+one. A job's `exec.signal` still goes through then. Results of finished jobs
+are kept in the center's memory, at most 4 MiB per session (counted as their
+JSON text, which is how they are kept) and for 10 minutes; a result past that
+is not kept (a job that failed still says that it failed, and why in one
+word). These are fixed in the center.
+
+A job that runs a command holds one of the machine's command places until the
+command ends: `limits.max_running`, 16 by default, for all centers together.
+One session's 16 jobs can take all of them, and then every command on that
+machine is refused with `busy`, also those of other sessions and other
+centers, until a command ends, times out or is stopped. Stop jobs nobody
+waits for with `job.cancel`; ending the session in the web UI stops all of
+its jobs.
 
 The node's own limit of 64 calls at once per center holds for all sessions
 together. The center keeps 8 of those for itself: the agents' calls take at

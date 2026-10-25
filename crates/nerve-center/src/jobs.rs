@@ -95,45 +95,30 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// The outcome of a call's result `r`, with the bytes it keeps.
-    fn of(r: Result<Value, RpcError>) -> (Outcome, usize) {
+    /// The outcome of a call's result `r`.
+    fn of(r: Result<Value, RpcError>) -> Outcome {
         match r {
             Ok(v) => {
+                // Cut as `execute` would show it: by its text, pretty.
                 let body = match &v {
                     Value::String(s) => s.clone(),
                     other => serde_json::to_string_pretty(other).unwrap_or_default(),
                 };
                 if body.len() > RESULT_TEXT {
-                    let text = util::clip(&body, RESULT_TEXT);
-                    let n = text.len();
-                    (
-                        Outcome::Done {
-                            value: Value::String(text),
-                            cut: true,
-                        },
-                        n,
-                    )
+                    Outcome::Done {
+                        value: Value::String(util::clip(&body, RESULT_TEXT)),
+                        cut: true,
+                    }
                 } else {
-                    (
-                        Outcome::Done {
-                            value: v,
-                            cut: false,
-                        },
-                        body.len(),
-                    )
+                    Outcome::Done {
+                        value: v,
+                        cut: false,
+                    }
                 }
             }
             // The link's own `connection_lost`, not one the node wrote.
-            Err(e) if e.kind() == ErrorCode::ConnectionLost && !link::by_node(&e) => {
-                (Outcome::Lost, 0)
-            }
-            Err(e) => {
-                let n = e.message.len()
-                    + e.data
-                        .as_ref()
-                        .map_or(0, |d| serde_json::to_string(d).map_or(0, |s| s.len()));
-                (Outcome::Failed(e), n)
-            }
+            Err(e) if e.kind() == ErrorCode::ConnectionLost && !link::by_node(&e) => Outcome::Lost,
+            Err(e) => Outcome::Failed(e),
         }
     }
 
@@ -145,6 +130,84 @@ impl Outcome {
                 failed: Some(_), ..
             } => "failed",
             Outcome::Lost => "lost",
+        }
+    }
+}
+
+/// How a finished job's outcome is kept until it is read: the node's data
+/// as compact JSON text, which is what [`KEPT_MAX`] counts. A parsed
+/// `Value` takes many times its text in memory (every element a `Value`,
+/// every object a map), so a bound on text would not bound it;
+/// `job.status` parses the text back, once.
+#[derive(Debug, PartialEq)]
+enum Kept {
+    Done {
+        json: String,
+        cut: bool,
+    },
+    Failed {
+        code: i64,
+        message: String,
+        data: Option<String>,
+    },
+    /// `Lost` or `Dropped`: nothing of the node's.
+    Bare(Outcome),
+}
+
+impl Kept {
+    fn of(o: Outcome) -> Kept {
+        // Sized to the text, so the bytes counted are the bytes held.
+        let text = |v: &Value| {
+            let mut t = serde_json::to_string(v).unwrap_or_default();
+            t.shrink_to_fit();
+            t
+        };
+        match o {
+            Outcome::Done { value, cut } => Kept::Done {
+                json: text(&value),
+                cut,
+            },
+            Outcome::Failed(e) => {
+                let mut message = e.message;
+                message.shrink_to_fit();
+                Kept::Failed {
+                    code: e.code,
+                    message,
+                    data: e.data.as_ref().map(text),
+                }
+            }
+            o => Kept::Bare(o),
+        }
+    }
+
+    /// The bytes it keeps.
+    fn bytes(&self) -> usize {
+        match self {
+            Kept::Done { json, .. } => json.len(),
+            Kept::Failed { message, data, .. } => {
+                message.len() + data.as_ref().map_or(0, String::len)
+            }
+            Kept::Bare(_) => 0,
+        }
+    }
+
+    /// The outcome, parsed back.
+    fn outcome(&self) -> Outcome {
+        match self {
+            Kept::Done { json, cut } => Outcome::Done {
+                value: serde_json::from_str(json).unwrap_or_default(),
+                cut: *cut,
+            },
+            Kept::Failed {
+                code,
+                message,
+                data,
+            } => Outcome::Failed(RpcError {
+                code: *code,
+                message: message.clone(),
+                data: data.as_deref().and_then(|d| serde_json::from_str(d).ok()),
+            }),
+            Kept::Bare(o) => o.clone(),
         }
     }
 }
@@ -162,8 +225,8 @@ struct Entry {
     stop: Option<oneshot::Sender<Stop>>,
     /// The link and `invoke` id the call was sent with, for `exec.signal`.
     sent: Option<(Arc<Link>, u64)>,
-    /// How it ended, when, and the bytes its result keeps.
-    end: Option<(Outcome, Instant, usize)>,
+    /// How it ended, and when.
+    end: Option<(Kept, Instant)>,
     /// Set to true when it ends, for `job.status` waiting on it.
     done: watch::Sender<bool>,
 }
@@ -239,9 +302,8 @@ impl Jobs {
             return Err(RpcError::new(
                 ErrorCode::Busy,
                 format!(
-                    "this session has {} calls running, the most it may: wait for one with job.status, or stop one with job.cancel.{}",
+                    "this session has {} calls running, the most it may: wait for one with job.status, or stop one with job.cancel.",
                     self.running(),
-                    self.named(Instant::now())
                 ),
             ));
         }
@@ -263,9 +325,10 @@ impl Jobs {
         Ok((result, stopped))
     }
 
-    /// The session's running jobs, oldest first, as a refusal names them:
-    /// a model whose context lost their ids finds them again here.
-    fn named(&self, now: Instant) -> String {
+    /// The session's running jobs, oldest first, as a `busy` answer names
+    /// them (empty when none runs): a model whose context lost their ids
+    /// finds them again there, to free a place with `job.cancel`.
+    pub fn named(&self, now: Instant) -> String {
         let mut jobs: Vec<(&String, &Entry)> = self
             .entries
             .iter()
@@ -287,7 +350,7 @@ impl Jobs {
                 )
             })
             .collect();
-        format!(" Its running jobs: {}.", named.join(", "))
+        format!("This session's running jobs: {}.", named.join(", "))
     }
 
     /// The call `id` was sent on `link` as the `invoke` `invoke`.
@@ -339,18 +402,19 @@ impl Jobs {
             self.entries.remove(id);
             return Some((w, r));
         }
-        let (mut outcome, mut bytes) = Outcome::of(r);
+        let outcome = Outcome::of(r);
+        let failed = match &outcome {
+            Outcome::Failed(e) => Some(e.kind()),
+            _ => None,
+        };
+        let mut kept = Kept::of(outcome);
+        let bytes = kept.bytes();
         if self.kept + bytes > KEPT_MAX {
-            let failed = match outcome {
-                Outcome::Failed(e) => Some(e.kind()),
-                _ => None,
-            };
-            outcome = Outcome::Dropped { bytes, failed };
-            bytes = 0;
+            kept = Kept::Bare(Outcome::Dropped { bytes, failed });
         }
-        self.kept += bytes;
+        self.kept += kept.bytes();
         e.stop = None;
-        e.end = Some((outcome, now, bytes));
+        e.end = Some((kept, now));
         e.done.send_replace(true);
         None
     }
@@ -363,7 +427,7 @@ impl Jobs {
             .filter(|(_, e)| {
                 e.end
                     .as_ref()
-                    .is_some_and(|(_, at, _)| now.saturating_duration_since(*at) >= KEEP_FOR)
+                    .is_some_and(|(_, at)| now.saturating_duration_since(*at) >= KEEP_FOR)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -388,9 +452,9 @@ impl Jobs {
 
     fn forget(&mut self, id: &str) {
         if let Some(e) = self.entries.remove(id)
-            && let Some((_, _, bytes)) = e.end
+            && let Some((kept, _)) = e.end
         {
-            self.kept -= bytes;
+            self.kept -= kept.bytes();
         }
     }
 
@@ -407,9 +471,9 @@ impl Jobs {
             ran: e
                 .end
                 .as_ref()
-                .map_or(now, |(_, at, _)| *at)
+                .map_or(now, |(_, at)| *at)
                 .saturating_duration_since(e.started),
-            outcome: e.end.as_ref().map(|(o, _, _)| o.clone()),
+            outcome: e.end.as_ref().map(|(k, _)| k.outcome()),
         };
         if view.outcome.is_some() {
             self.forget(id);
@@ -442,11 +506,11 @@ impl Jobs {
             .entries
             .get(id)
             .filter(|e| e.job && e.route.node_id == node_id)?;
-        if let Some((o, at, _)) = &e.end {
+        if let Some((k, at)) = &e.end {
             return Some(Err(View {
                 route: e.route.clone(),
                 ran: at.saturating_duration_since(e.started),
-                outcome: Some(o.clone()),
+                outcome: Some(k.outcome()),
             }));
         }
         let e = self.entries.remove(id)?;
@@ -614,15 +678,17 @@ mod tests {
         let e = j.start("j-x", &route("n1", "exec.run"), false).unwrap_err();
         assert_eq!(e.kind(), ErrorCode::Busy);
         assert!(e.message.contains("job.cancel"), "{}", e.message);
-        // The refusal names the running jobs, so a model that lost their
-        // ids can stop one.
-        assert!(e.message.contains(" Its running jobs: j-"), "{}", e.message);
+        // `execute` adds the running jobs to every `busy` answer, so a
+        // model that lost their ids can stop one.
+        let named = j.named(now);
+        assert!(
+            named.starts_with("This session's running jobs: j-"),
+            "{named}"
+        );
         for id in ["j-0", "j-15"] {
             assert!(
-                e.message
-                    .contains(&format!("{id} (exec.run on node n1, for ")),
-                "{}",
-                e.message
+                named.contains(&format!("{id} (exec.run on node n1, for ")),
+                "{named}"
             );
         }
         // A signal of a job has a few places more.
@@ -652,7 +718,7 @@ mod tests {
             let _ = j.start(&id, &route("n1", "exec.run"), false).unwrap();
             j.detach(&id);
             j.finish(&id, Ok(json!(big)), now);
-            let v = j.entries[&id].end.as_ref().unwrap().0.clone();
+            let v = j.entries[&id].end.as_ref().unwrap().0.outcome();
             if let Outcome::Dropped { bytes, failed } = v {
                 assert!(bytes > RESULT_TEXT && bytes < RESULT_TEXT + 8);
                 assert_eq!(failed, None);
@@ -667,14 +733,15 @@ mod tests {
             assert!(i < 100, "never dropped");
         }
         assert!(j.kept() <= KEPT_MAX, "{}", j.kept());
-        assert_eq!(i, KEPT_MAX / (RESULT_TEXT + 3));
+        // Each is kept as its JSON text: the cut text and its quotes.
+        assert_eq!(i, KEPT_MAX / (RESULT_TEXT + 5));
         // A failure past the bound keeps its code, so it still reads as
         // failed, not as a call that ended well.
         let _ = j.start("j-f", &route("n1", "exec.run"), false).unwrap();
         j.detach("j-f");
         let e = RpcError::new(ErrorCode::Forbidden, "x".repeat(RESULT_TEXT));
         j.finish("j-f", Err(e), now);
-        let v = j.entries["j-f"].end.as_ref().unwrap().0.clone();
+        let v = j.entries["j-f"].end.as_ref().unwrap().0.outcome();
         assert!(
             matches!(
                 v,
@@ -686,6 +753,51 @@ mod tests {
             "{v:?}"
         );
         assert_eq!(v.state(), "failed");
+    }
+
+    /// A result of many small objects is kept as its compact JSON text, and
+    /// counted at that text: its parsed form takes many times as much
+    /// memory, which the bound would not see. A failure's data is kept the
+    /// same way. Both read back as they came.
+    #[test]
+    fn a_result_is_kept_and_counted_as_its_text() {
+        let mut j = Jobs::default();
+        let now = Instant::now();
+        let v = json!((0..2000).map(|i| json!({"a": i})).collect::<Vec<_>>());
+        let compact = serde_json::to_string(&v).unwrap();
+        let _ = j.start("j-1", &route("n1", "exec.run"), false).unwrap();
+        j.detach("j-1");
+        j.finish("j-1", Ok(v.clone()), now);
+        let Some((Kept::Done { json, cut: false }, _)) = &j.entries["j-1"].end else {
+            panic!("not kept as text")
+        };
+        assert_eq!(json, &compact);
+        assert_eq!(json.capacity(), json.len(), "sized to its text");
+        assert_eq!(j.kept(), compact.len());
+
+        let mut e = RpcError::new(ErrorCode::Internal, "it broke");
+        e.data = Some(json!({"from": "node", "rows": v}));
+        let data = serde_json::to_string(e.data.as_ref().unwrap()).unwrap();
+        let _ = j.start("j-2", &route("n1", "exec.run"), false).unwrap();
+        j.detach("j-2");
+        j.finish("j-2", Err(e.clone()), now);
+        let Some((Kept::Failed { data: Some(d), .. }, _)) = &j.entries["j-2"].end else {
+            panic!("not kept as text")
+        };
+        assert_eq!(d, &data);
+        assert_eq!(j.kept(), compact.len() + "it broke".len() + data.len());
+
+        let read = j.status("j-1", "n1", now).unwrap().outcome;
+        assert_eq!(
+            read,
+            Some(Outcome::Done {
+                value: v,
+                cut: false
+            })
+        );
+        let read = j.status("j-2", "n1", now).unwrap().outcome;
+        assert_eq!(read, Some(Outcome::Failed(e)));
+        assert_eq!(j.kept(), 0);
     }
 
     /// A finished result nobody reads is forgotten after `KEEP_FOR`.
@@ -753,10 +865,10 @@ mod tests {
     #[test]
     fn a_link_loss_is_lost_and_a_nodes_error_a_failure() {
         let lost = RpcError::new(ErrorCode::ConnectionLost, "the link to the node ended");
-        assert_eq!(Outcome::of(Err(lost)).0, Outcome::Lost);
+        assert_eq!(Outcome::of(Err(lost)), Outcome::Lost);
         let mut by_node = RpcError::new(ErrorCode::ConnectionLost, "x");
         by_node.data = Some(json!({"from": "node"}));
-        assert_eq!(Outcome::of(Err(by_node)).0.state(), "failed");
+        assert_eq!(Outcome::of(Err(by_node)).state(), "failed");
     }
 
     #[test]

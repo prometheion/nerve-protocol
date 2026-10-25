@@ -378,7 +378,7 @@ impl Engine {
         };
         match out {
             Ran::Done(Ok(v)) => device_result(&route, v, false),
-            Ran::Done(Err(CallError::Rpc(e))) => call_error(&route, &e),
+            Ran::Done(Err(CallError::Rpc(e))) => job_error(&route, &e, "", &busy_jobs(&sess, &e)),
             Ran::Job(job) => {
                 // The answer names the calls that follow the job up, with
                 // their args: it counts as their details, so they run
@@ -549,7 +549,7 @@ impl Engine {
             }
             Some(Outcome::Failed(e)) => {
                 let lead = format!("job {job} ({what}) failed after {ran}: ");
-                job_error(&view.route, &e, &lead)
+                job_error(&view.route, &e, &lead, &busy_jobs(sess, &e))
             }
             Some(Outcome::Lost) => text_result(
                 &format!(
@@ -624,11 +624,24 @@ fn device_result(route: &Route, v: Value, cut: bool) -> Value {
 
 /// A call's error as the model gets it.
 fn call_error(route: &Route, e: &RpcError) -> Value {
-    job_error(route, e, "")
+    job_error(route, e, "", "")
 }
 
-/// [`call_error`] with `lead` (what the call was) before the words.
-fn job_error(route: &Route, e: &RpcError, lead: &str) -> Value {
+/// The session's running jobs, for a `busy` answer to it, whoever is full:
+/// the session's own places, the center's on the link, or the machine's
+/// command places, which every center's commands share. One session's jobs
+/// can hold all of those, and a model whose context lost their ids could
+/// not free one with `job.cancel` otherwise.
+fn busy_jobs(sess: &Session, e: &RpcError) -> String {
+    if e.kind() != ErrorCode::Busy {
+        return String::new();
+    }
+    sess.jobs.lock().unwrap().named(Instant::now())
+}
+
+/// [`call_error`] with `lead` (what the call was) before the words, and
+/// `tail`, the center's own, after them.
+fn job_error(route: &Route, e: &RpcError, lead: &str, tail: &str) -> Value {
     // The node's own words (cut at the link) are said to be its own, so
     // they never read as a refusal of the center.
     let whose = if link::by_node(e) {
@@ -644,6 +657,10 @@ fn job_error(route: &Route, e: &RpcError, lead: &str) -> Value {
         .and_then(Value::as_str)
     {
         t.push_str(&format!(" ({d})"));
+    }
+    if !tail.is_empty() {
+        t.push_str(if t.ends_with('.') { " " } else { ". " });
+        t.push_str(tail);
     }
     // On one line, whoever wrote the words: a node's message, a provider's,
     // or a field of the node's schema in the center's own `invalid_args`. A

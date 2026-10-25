@@ -225,8 +225,9 @@ machine like any call. A job belongs to its session: another session cannot
 read, stop or signal it. `job.status` and `job.cancel` keep working when the
 machine offers nothing any more while a job runs (its `until` passed, you
 turned everything off); **Disable** in the center stops the machine's jobs.
-A session runs at most 16 calls at once, and the refusal of a 17th names its
-running jobs ([limits](limits.md#calls-of-one-agent-session)). A finished
+A session runs at most 16 calls at once, and every `busy` answer to it, the
+refusal of a 17th too, names its running jobs
+([limits](limits.md#calls-of-one-agent-session)). A finished
 job's result is kept in the center's memory only, until it is read once, for
 10 minutes, or until the session ends, and at most 4 MiB of results per
 session. When the machine's link drops and does not come back, its jobs are
