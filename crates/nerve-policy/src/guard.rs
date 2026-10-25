@@ -93,9 +93,11 @@ fn is_node(name: &str) -> bool {
 
 /// The programs that copy, move, link, delete, overwrite or change a file:
 /// the file tools proper, the writers (`tee`, `dd`, `sed`), the downloaders
-/// (`curl -o`, `wget -O`, `Invoke-WebRequest -OutFile`) and those that
-/// change its mode or owner. The programs that only look at a file are not
-/// here.
+/// (`curl -o`, `wget -O`, `Invoke-WebRequest -OutFile`), the packers and
+/// binary editors (`gzip`, `upx`, `objcopy`) and those that change its mode
+/// or owner. The programs that only look at a file are not here, and a
+/// program that is not on the list (an interpreter, a .NET call) is not
+/// seen when it writes the file.
 const FILE_TOOLS: &[&str] = &[
     "rm",
     "mv",
@@ -145,6 +147,17 @@ const FILE_TOOLS: &[&str] = &[
     "icacls",
     "takeown",
     "attrib",
+    "clear-content",
+    "clc",
+    "start-bitstransfer",
+    "certutil",
+    "gzip",
+    "xz",
+    "bzip2",
+    "zstd",
+    "upx",
+    "objcopy",
+    "patchelf",
 ];
 
 /// Whether `r` copies, moves, links, deletes or overwrites the node's
@@ -210,7 +223,9 @@ const PATHS: &[(&str, bool)] = &[
 
 /// For every byte position of `word`: whether a blank stands before it in
 /// the same region of the word. The regions are the word itself and each
-/// `$( … )` or pair of backticks in it. A path after a blank is a sentence
+/// `$( … )` or pair of backticks in it; a region starts with the blank state
+/// of the one it opens in, since a backtick in a word is often only
+/// Markdown inline code in a sentence. A path after a blank is a sentence
 /// (a commit message, the text of a here-document), not a path the command
 /// opens; `$(echo $HOME)/…` has no blank outside its substitution, so it
 /// stays a path. The commands of a substitution are checked on their own.
@@ -228,7 +243,7 @@ fn blank_before(word: &str) -> Vec<bool> {
         out[i] = blank[top.0];
         match c {
             '(' if prev == '$' => {
-                blank.push(false);
+                blank.push(blank[top.0]);
                 open.push((blank.len() - 1, false));
             }
             ')' if !top.1 && open.len() > 1 => {
@@ -238,7 +253,7 @@ fn blank_before(word: &str) -> Vec<bool> {
                 open.pop();
             }
             '`' => {
-                blank.push(false);
+                blank.push(blank[top.0]);
                 open.push((blank.len() - 1, true));
             }
             c if c.is_whitespace() => blank[top.0] = true,

@@ -61,7 +61,7 @@ impl Shell {
             Shell::PowerShell
         } else if lower.ends_with("cmd.exe") || lower == "cmd" {
             Shell::Cmd
-        } else if base_name(program, false) == "fish" {
+        } else if base_name(program, true) == "fish" {
             Shell::Fish
         } else {
             Shell::Sh
@@ -511,6 +511,13 @@ impl<'b> Parser<'b> {
                             }
                         }
                         cmd.inner.push(inner);
+                        continue;
+                    }
+                    if self.shell == Shell::Cmd && is_for_source(&cmd.words) {
+                        // `for /f … in ('command')` runs the command.
+                        if let Some(text) = self.cmd_for_source()? {
+                            cmd.inner.push(self.nested(&text, Shell::Cmd)?);
+                        }
                         continue;
                     }
                     let at_pattern = self.cases > 0 && self.pattern;
@@ -1432,6 +1439,34 @@ impl<'b> Parser<'b> {
         Ok(Tok::Word(w, Vec::new()))
     }
 
+    /// The text in the brackets of `for /f … in ( … )` after its `(`: the
+    /// command in single quotes (or backticks), which `for` runs. A bare
+    /// or double-quoted text is a file name or a string, not a command.
+    fn cmd_for_source(&mut self) -> Result<Option<String>, Unparsed> {
+        let mut text = String::new();
+        let mut quoted = false;
+        loop {
+            match self.bump() {
+                None => return Err(Unparsed::because("a group is not closed")),
+                Some('"') => {
+                    quoted = !quoted;
+                    text.push('"');
+                }
+                Some(')') if !quoted => break,
+                // The escape goes when the text is read for the command.
+                Some('^') if !quoted => text.extend(self.bump()),
+                Some(c) => text.push(c),
+            }
+        }
+        let text = text.trim();
+        let command = ['\'', '`'].into_iter().find_map(|q| {
+            text.strip_prefix(q)
+                .and_then(|t| t.strip_suffix(q))
+                .map(str::to_string)
+        });
+        Ok(command)
+    }
+
     // ---- the text a command runs ----
 
     /// Reads what `cmd` runs as a shell: the text after `sh -c`,
@@ -1613,10 +1648,18 @@ fn su_command(args: &[Word]) -> Option<Option<String>> {
                 None => continue,
             }
         } else if let Some(group) = t.strip_prefix('-') {
-            match group.split_once('c') {
-                Some((_, "")) => return Some(args.get(at + 1).map(|w| w.text.clone())),
-                Some((_, text)) => text.to_string(),
-                None => continue,
+            // The first option of the group that takes a value takes the rest
+            // of the group (`-s/usr/bin/bash`): only a `c` that is that
+            // option is `-c`.
+            match group
+                .char_indices()
+                .find(|(_, c)| matches!(c, 'c' | 'g' | 'G' | 's' | 'w'))
+            {
+                Some((i, 'c')) if group.len() == i + 1 => {
+                    return Some(args.get(at + 1).map(|w| w.text.clone()));
+                }
+                Some((i, 'c')) => group[i + 1..].to_string(),
+                _ => continue,
             }
         } else {
             continue;
@@ -1962,6 +2005,12 @@ fn unwrap(cmd: &Command, shell: Shell) -> Result<Option<Run>, Wrapped> {
             i += 1;
             continue;
         }
+        if shell == Shell::Cmd && !w.quoted && t.len() > 1 && t.starts_with('@') {
+            // cmd takes `@` before any command, also after `do` and after
+            // the condition of an `if`.
+            words[i].text.remove(0);
+            continue;
+        }
         if shell == Shell::Sh && !w.quoted && t == "coproc" {
             // `coproc NAME { cmd; }` and `coproc cmd`.
             i += if words.get(i + 2).is_some_and(|n| n.text.starts_with('{')) {
@@ -2125,6 +2174,10 @@ fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
         "loaduserprofile",
         "usenewenvironment",
     ];
+    // The common parameters that are switches. `-Verb` is a parameter of its
+    // own and a prefix of `-Verbose`, so a prefix of these counts only from
+    // four letters on, and never `verb`.
+    const COMMON: &[&str] = &["verbose", "debug", "whatif", "confirm"];
     let mut file = None;
     let mut list = None;
     let (mut file_named, mut list_named) = (false, false);
@@ -2155,7 +2208,9 @@ fn start_process(rest: &[Word]) -> Option<Vec<Word>> {
             Some((p, _)) => (p, w.text[1..].split_once(':').map(|(_, v)| v)),
             None => (param, None),
         };
-        if SWITCHES.iter().any(|s| s.starts_with(param)) {
+        if SWITCHES.iter().any(|s| s.starts_with(param))
+            || (param.len() >= 4 && param != "verb" && COMMON.iter().any(|s| s.starts_with(param)))
+        {
             continue;
         }
         let value = match attached {
@@ -2285,6 +2340,18 @@ fn cmd_if(rest: &[Word]) -> usize {
         Some(x) if x.contains("==") => n + 1,
         _ => n + 3,
     }
+}
+
+/// Whether the words so far are `for /f … in`, whose `( … )` holds a
+/// command.
+fn is_for_source(words: &[Word]) -> bool {
+    words
+        .first()
+        .is_some_and(|w| w.text.eq_ignore_ascii_case("for"))
+        && words.iter().any(|w| w.text.eq_ignore_ascii_case("/f"))
+        && words
+            .last()
+            .is_some_and(|w| w.text.eq_ignore_ascii_case("in"))
 }
 
 fn is_assignment(word: &str) -> bool {
@@ -2494,6 +2561,77 @@ mod tests {
             let got = ran(line, Shell::PowerShell);
             assert_eq!(got, Some((name.to_string(), args.to_string())), "{line}");
         }
+    }
+
+    /// The common parameters `-Verbose` and `-Debug` take no value, `-Verb`
+    /// does.
+    #[test]
+    fn start_process_common_switches_take_no_value() {
+        for (line, name, args) in [
+            ("Start-Process -Verbose x status", "x", "status"),
+            ("Start-Process -Debug x status", "x", "status"),
+            (
+                "Start-Process -WhatIf -Confirm:$false x status",
+                "x",
+                "status",
+            ),
+            ("Start-Process -Verbo x status", "x", "status"),
+            ("Start-Process -Verb RunAs x status", "x", "status"),
+        ] {
+            let got = ran(line, Shell::PowerShell);
+            assert_eq!(got, Some((name.to_string(), args.to_string())), "{line}");
+        }
+    }
+
+    /// `su -c` is found as the first option of its group that takes a
+    /// value, not inside the value of another one.
+    #[test]
+    fn su_reads_c_only_as_an_option_of_its_own() {
+        let text = |l: &str| {
+            let s = parse(l, Shell::Sh).unwrap();
+            su_command(&s.commands[0].words[1..])
+        };
+        let some = |t: &str| Some(Some(t.to_string()));
+        assert_eq!(text("su -c x root"), some("x"));
+        assert_eq!(text("su -lc x root"), some("x"));
+        assert_eq!(text("su -cx root"), some("x"));
+        assert_eq!(text("su --command=x root"), some("x"));
+        assert_eq!(text("su -s/usr/local/bin/bash -c x root"), some("x"));
+        assert_eq!(text("su -Gdocker -c x root"), some("x"));
+        assert_eq!(text("su -s /bin/sh -c x root"), some("x"));
+        assert_eq!(text("su -s/usr/local/bin/bash root"), None);
+        assert_eq!(text("su -Gdocker root"), None);
+    }
+
+    /// cmd takes `@` before any command, and `for /f` runs the command in
+    /// the quotes of its brackets.
+    #[test]
+    fn cmd_at_sign_and_for_source() {
+        for line in [
+            "for %i in (1) do @sc stop x",
+            "if exist x @sc stop x",
+            "@sc stop x",
+        ] {
+            let got = ran_last(line, Shell::Cmd);
+            assert_eq!(got.as_deref(), Some("sc"), "{line}");
+        }
+        for line in [
+            "for /f %i in ('sc stop x') do @echo %i",
+            "for /F \"delims=\" %i in ('x & sc stop x') do @echo %i",
+            "for /f \"usebackq\" %i in (`sc stop x`) do @echo %i",
+            "for /f %i in ('sc stop x ^& y') do @echo %i",
+        ] {
+            let all = words(line, Shell::Cmd);
+            assert!(
+                all.iter().any(|c| c.first().is_some_and(|w| w == "sc")),
+                "{line}: {all:?}"
+            );
+        }
+        // A file name and a string are not commands.
+        let all = words("for /f %i in (sc.txt) do @echo %i", Shell::Cmd);
+        assert!(all.iter().all(|c| c[0] != "sc.txt" && c[0] != "sc"));
+        let all = words("for /f %i in (\"sc stop x\") do @echo %i", Shell::Cmd);
+        assert!(all.iter().all(|c| c[0] != "sc"), "{all:?}");
     }
 
     /// Only a `u` that is an option of its own names the user of `runuser`;
@@ -3142,6 +3280,10 @@ mod tests {
         assert_eq!(Shell::of_program("/usr/bin/fish"), Shell::Fish);
         assert_eq!(Shell::of_program("fish"), Shell::Fish);
         assert_eq!(Shell::of_program("/usr/bin/fishfood"), Shell::Sh);
+        assert_eq!(
+            Shell::of_program("C:\\msys64\\usr\\bin\\fish.exe"),
+            Shell::Fish
+        );
         assert_eq!(
             words("set v (a b); c", Shell::Fish),
             w(&[&["set", "v"], &["a", "b"], &["c"]])

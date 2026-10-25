@@ -116,9 +116,10 @@ text:
   names the node's programs, and `cp`, `mv`, `rm`, `install`, `ln` and the
   other tools that copy, delete, overwrite, download into or change the mode
   of a file (`FILE_TOOLS`: `tee`, `dd`, `sed`, `chmod`, `curl`, `wget`,
-  `Set-Content`, `Out-File` …) on a file named as the node's programs.
+  `Set-Content`, `Out-File`, `gzip`, `objcopy` …) on a file named as the node's programs.
   Programs that only look at a file (`ls`, `sha256sum`) are not on the
-  list. Each
+  list, and neither are the ones that write a file in ways a list cannot
+  cover (an interpreter, a .NET call). Each
   `Script` knows the shell it was read as, so a `powershell -Command` body in
   a line for sh is checked as PowerShell.
 

@@ -41,7 +41,7 @@ node itself. `rule ls deny` shows them; remove any you do not want.
 
 | Rule | Refuses |
 |---|---|
-| `guard:node-programs` | A command that runs `nerve-node` or `nerve-node-desktop`, by its name or a path, `.exe` too; and one that copies, moves, links, deletes or overwrites their files (`cp`, `mv`, `rm`, `install`, `ln`, `Remove-Item`, `del`, a redirection onto the file, `tee`, `dd`, `sed`, `chmod`, `curl -o`, `wget -O`, `Invoke-WebRequest -OutFile`, `Set-Content`, `Out-File` …), since replacing the program changes the node |
+| `guard:node-programs` | A command that runs `nerve-node` or `nerve-node-desktop`, by its name or a path, `.exe` too; and one that copies, moves, links, deletes or overwrites their files (`cp`, `mv`, `rm`, `install`, `ln`, `Remove-Item`, `del`, a redirection onto the file, `tee`, `dd`, `sed`, `chmod`, `curl -o`, `wget -O`, `Invoke-WebRequest -OutFile`, `Start-BitsTransfer`, `certutil`, `Set-Content`, `Clear-Content`, `Out-File`, `gzip`, `upx`, `objcopy` …), since replacing the program changes the node; only the listed programs count, so another program or a .NET call that writes the file is not seen |
 | `guard:node-paths` | A command that names the node's socket or pipes or its config and state folders (`/run/nerve-node`, `/etc/nerve`, `/var/lib/nerve`, `~/.config/nerve`, `~/.local/state/nerve`, `%ProgramData%\Nerve`) |
 | `guard:node-service` | A command that stops, restarts, disables or kills the node's service or process, as the node's own `service stop` would |
 | `fs.write:…` (five rules) | A write into those folders |
@@ -65,7 +65,8 @@ is a guarded command:
 - behind a program that runs another: `sudo` (with its options), `env`,
   `runuser -u`,
   `timeout`, `nohup`, `nice`, `ionice`, `time`, `stdbuf`, `xargs`, `exec`, a
-  path to the program, and on Windows `&`, `Start-Process` and cmd's `start`.
+  path to the program, and on Windows `&`, `Start-Process` and cmd's `start`,
+  `@`, `if`, `for … do` and the command in `for /f … in ('…')`.
 
 fish is read as a shell of its own: its `( … )` is a command substitution
 (`echo (nerve-node status)` is refused) and `and`, `or` and `not` start a

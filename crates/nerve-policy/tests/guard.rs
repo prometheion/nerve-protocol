@@ -303,6 +303,36 @@ const NODE_ITSELF: &[Case] = &[
         PS,
         PATHS,
     ),
+    (
+        r"Clear-Content 'C:\Program Files\Nerve\nerve-node.exe'",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "Start-BitsTransfer -Source https://x.test/n -Destination 'C:\\Program Files\\Nerve\\nerve-node.exe'",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "certutil -urlcache -f https://x.test/n \"C:\\Program Files\\Nerve\\nerve-node.exe\"",
+        WIN,
+        PROGRAMS,
+    ),
+    ("gzip /usr/local/bin/nerve-node", SH, PROGRAMS),
+    ("xz /usr/local/bin/nerve-node", SH, PROGRAMS),
+    ("bzip2 /usr/local/bin/nerve-node", SH, PROGRAMS),
+    ("zstd /usr/local/bin/nerve-node", SH, PROGRAMS),
+    ("upx --best /usr/local/bin/nerve-node", SH, PROGRAMS),
+    (
+        "objcopy --strip-debug /usr/local/bin/nerve-node",
+        SH,
+        PROGRAMS,
+    ),
+    (
+        "patchelf --set-interpreter /lib/x /usr/local/bin/nerve-node",
+        SH,
+        PROGRAMS,
+    ),
 ];
 
 /// The forms of #154 that stopped, restarted, disabled or killed the node's
@@ -1217,6 +1247,95 @@ const NESTED: &[Case] = &[
         PS,
         SERVICE,
     ),
+    // r6-2: the common parameters are switches, `-Verb` is not.
+    (
+        "Start-Process -Verbose \"C:\\Program Files\\Nerve\\nerve-node.exe\" status",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "Start-Process -Debug 'C:\\Program Files\\Nerve\\nerve-node.exe' status",
+        PS,
+        PROGRAMS,
+    ),
+    (
+        "Start-Process -Verbose -Verb RunAs -FilePath sc.exe stop,nerve-node",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process -WhatIf:$false -Confirm:$false sc.exe stop,nerve-node",
+        PS,
+        SERVICE,
+    ),
+    (
+        "Start-Process -Verb RunAs sc.exe stop,nerve-node",
+        PS,
+        SERVICE,
+    ),
+    // r6-3: `-c` is not looked for in the value of another option of `su`.
+    (
+        "su -s/usr/local/bin/bash -c 'systemctl stop nerve-node' root",
+        SH,
+        SERVICE,
+    ),
+    (
+        "runuser -s/usr/local/bin/bash -c 'systemctl stop nerve-node' root",
+        SH,
+        SERVICE,
+    ),
+    (
+        "sudo su -s/usr/local/bin/bash -c 'systemctl stop nerve-node'",
+        SH,
+        SERVICE,
+    ),
+    (
+        "su -Gdocker -c 'systemctl stop nerve-node' root",
+        SH,
+        SERVICE,
+    ),
+    ("su -lc 'systemctl stop nerve-node' root", SH, SERVICE),
+    // r6-5: cmd takes `@` before any command, and `for /f` runs its source.
+    ("for %i in (1) do @sc stop nerve-node", CMD, SERVICE),
+    ("if exist x @net stop nerve-node", CMD, SERVICE),
+    (
+        "for /l %i in (1,1,2) do @taskkill /im nerve-node.exe /f",
+        CMD,
+        SERVICE,
+    ),
+    (
+        "cmd /c \"for %i in (1) do @sc stop nerve-node\"",
+        PS,
+        SERVICE,
+    ),
+    (
+        "for /f \"delims=\" %i in ('nerve-node status') do @echo %i",
+        CMD,
+        PROGRAMS,
+    ),
+    (
+        "for /f %i in ('sc stop nerve-node') do @echo %i",
+        CMD,
+        SERVICE,
+    ),
+    (
+        "for /f \"usebackq\" %i in (`sc stop nerve-node`) do @echo %i",
+        CMD,
+        SERVICE,
+    ),
+    (
+        "for /F %i in ('echo a ^& sc stop nerve-node') do @echo %i",
+        CMD,
+        SERVICE,
+    ),
+    // r6-1: a path is still a path behind a substitution, with no blank
+    // before it outside the substitution.
+    ("cat `echo /etc/nerve/node.toml`", SH, PATHS),
+    (
+        "Get-Content \"$($env:ProgramData)\\Nerve\\config\\node.toml\"",
+        PS,
+        PATHS,
+    ),
 ];
 
 /// Lines that only mention the node or its commands, in quotes, in a
@@ -1345,6 +1464,92 @@ const DATA: &[Case] = &[
     // The part before the blank in a substitution is still a path.
     ("cat \"$(echo $HOME)/.config/nerve/node.toml\"", SH, PATHS),
     ("cat $(echo /etc/nerve/node.toml)", SH, PATHS),
+    // r6-1: Markdown inline code in a sentence names a path as data.
+    (
+        "git commit -m \"$(cat <<'EOF'\nMove the socket to `/run/nerve-node`\n\nCo-Authored-By: x\nEOF\n)\"",
+        SH,
+        None,
+    ),
+    (
+        "git commit -m \"$(cat <<'EOF'\nThe config is `/etc/nerve/node.toml` and `/var/lib/nerve/state`\nEOF\n)\"",
+        SH,
+        None,
+    ),
+    (
+        "git commit -m \"$(cat <<'EOF'\nOwner pipe `//./pipe/nerve-node-owner`\nEOF\n)\"",
+        SH,
+        None,
+    ),
+    (
+        "gh pr create --title x --body \"$(cat <<'EOF'\n- the config lives in `~/.config/nerve/node.toml`\nEOF\n)\"",
+        SH,
+        None,
+    ),
+    (
+        "git commit -m 'Move the socket to `/run/nerve-node`'",
+        &[Shell::Sh, Shell::PowerShell],
+        None,
+    ),
+    (
+        "git commit -m 'Move the socket to `/run/nerve-node`'",
+        FISH,
+        None,
+    ),
+    (
+        "git commit -m \"Move the socket to \\`/run/nerve-node\\`\"",
+        SH,
+        None,
+    ),
+    (
+        "gh pr comment 1 --body 'See `~/.local/state/nerve/audit.jsonl`'",
+        SH,
+        None,
+    ),
+    ("echo 'Paths: `/etc/nerve`, `/run/nerve-node`'", SH, None),
+    (
+        "git commit -m \"Move the socket to ``/run/nerve-node``\"",
+        PS,
+        None,
+    ),
+    (
+        "git commit -m 'Config in `C:\\ProgramData\\Nerve\\config`'",
+        PS,
+        None,
+    ),
+    (
+        "git commit -m 'Use `$env:ProgramData\\Nerve` for the config'",
+        PS,
+        None,
+    ),
+    (
+        "gh pr create --title x --body @'\nSee `C:\\ProgramData\\Nerve\\config\\node.toml`\n'@",
+        PS,
+        None,
+    ),
+    // r6-3
+    ("su -s/usr/local/bin/bash -c 'ls' root", SH, None),
+    ("su -Gdocker -c 'ls' root", SH, None),
+    // r6-2
+    (
+        "Start-Process -Verbose -Verb RunAs notepad.exe nerve-node.txt",
+        PS,
+        None,
+    ),
+    // r6-5
+    (
+        "for /f \"delims=\" %i in ('git log') do @echo %i",
+        CMD,
+        None,
+    ),
+    ("for /f %i in (nerve-node.txt) do @echo %i", CMD, None),
+    (
+        "for /f %i in (\"nerve-node status\") do @echo %i",
+        CMD,
+        None,
+    ),
+    ("for %i in (1) do @echo nerve-node", CMD, None),
+    // r6-4
+    ("gzip -l /usr/local/share/doc/x.gz", SH, None),
 ];
 
 /// A line the parser cannot read is checked with the text patterns of
