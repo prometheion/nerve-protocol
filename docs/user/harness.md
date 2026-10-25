@@ -66,7 +66,12 @@ settings grant or not. The folders are what the machine allows now; it
 still decides every call. Where folders nest, the deepest one decides. A
 folder you left without rights inside a granted one is not named, just as
 the machine's file calls hide it: the granted folder around it is shown with
-`some folders below closed`.
+`some folders below closed`. Such a folder refuses file calls and commands
+that start in it, but a command started in the folder around it still
+reaches it; the center tells the model so. Where Landlock or an AppContainer
+holds the commands, the center says the sandbox keeps them to the folders;
+on the installed Linux node without Landlock it says they reach what
+`nerve-run` may reach.
 
 Your note on a machine (**Action checker › Per machine** in the web UI, at
 most 400 bytes) is shown by `list()` after the machines, as your words, for

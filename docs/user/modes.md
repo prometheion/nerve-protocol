@@ -83,7 +83,10 @@ are not shown, though they still hold the commands that run as `nerve-run`.
 
 Quote `'=rx'` so zsh leaves it alone. `folder add` on a path that is listed
 already replaces its rights. `folder set` leaves a folder with no rights in
-the list. `folder rm` removes it.
+the list. `folder rm` removes it. Inside a granted folder, a folder with no
+rights closes what lies below it to file calls and to commands that start
+there, but a command started in the folder around it still reaches it: the
+sandbox is built from the folders that grant something.
 
 ### A folder keeps the place you added
 

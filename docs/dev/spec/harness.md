@@ -172,9 +172,14 @@ the `result` of the envelope described below.
   add a line `folders:` with the folder note: the folders and their flags as
   in `list(node)` (`none granted` when there are none). After the framing a
   line `Folders: …` gives the center's advice on them, in its own words and
-  naming no path: where folders nest the deepest one decides, and a folder
-  marked as having folders below it closed holds folders, not named, that
-  refuse every call; and, only where a folder is marked `own` (the commands
+  naming no path: file calls use only these folders and a command starts
+  only in one marked `x`; where folders nest the deepest one decides; with
+  `confined` the machine's sandbox holds what a command reaches to these
+  folders (and the system's files), without it the machine does not and
+  a command reaches what its account may reach; a folder marked as having
+  folders below it closed holds folders, not named, where file calls are
+  refused and no command may start, though a command started in a folder
+  around them still reaches them; and, only where a folder is marked `own` (the commands
   run as an account of their own), that files made in the other folders
   should stay readable for the machine's owner, whose access goes through
   the group bits (0640 or 0660 for files, 0750 or 0770 for folders, not 0600

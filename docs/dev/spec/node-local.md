@@ -1054,7 +1054,11 @@ the sandbox see them, and marked `own`; no other pairing's folders are in
 it. A folder with no flag is never named, as the file calls hide its name
 (`fs.list` leaves it out, a refusal under it reads like any other): the
 deepest granted folder around it is marked `closed_below` instead. A folder
-whose name holds a control character is left out. In
+whose name would read otherwise on one line (a control character, U+2028 or
+U+2029, a blank at either end) is left out. `confined` is set only where a
+sandbox holds folder-mode commands: the installed Linux node without
+Landlock runs them, held back by `nerve-run`'s account alone, and sends
+`false`. In
 `allowlist` mode as `nerve-run` the folders still hold the allowed
 commands, but only `folder` mode names them. The account's name needs no
 lookup of its own (the home of `nerve-run` is the last one looked up). The
