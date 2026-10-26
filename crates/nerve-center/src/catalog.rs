@@ -182,9 +182,11 @@ impl Reach {
     /// What the center says of the folder note, in its own words and
     /// outside the framing: how to read it, how far a read goes, what holds
     /// the commands, and where files go. Where the node reads as the command
-    /// account (`reads_by_account`), a read goes as far as that account may
-    /// read and only writes and a command's start keep to the folders;
-    /// elsewhere every path a call names does. A sandbox holds what a
+    /// account (`reads_by_account`), a file call reads in the `r` folders
+    /// and, outside every folder, what is open to every account, and only
+    /// writes and a command's start keep to the folders; elsewhere every
+    /// path a call names does. The advice of a command (this one) says
+    /// nothing of file calls' reads, which a command does not get. A sandbox holds what a
     /// command reaches to the folders that grant something, closed ones
     /// below them included, and without one (`confined` false) only its
     /// account holds it. A command on the sudo allow list is held by
@@ -212,16 +214,16 @@ impl Reach {
     fn advice_on(&self, commands: bool) -> Option<String> {
         self.note()?;
         // Where the node reads as the command account, the folders hold
-        // only what is written and run.
-        const READS: &str = "a call may read whatever the account its commands run as may read \
-                             on the machine, in the folders or not, except protected paths and \
-                             the node's own files";
+        // only what a file call writes and where a command starts; outside
+        // them a file call reads what every account may.
+        const OPEN: &str = "what is open to every account on the machine, except protected \
+                            paths and the node's own files";
         let reads = self.reads_by_account;
         if self.no_folder() && !commands {
             return Some(if reads {
                 format!(
-                    "The node is in folder mode with no folder granted: {READS}; it may write \
-                     nothing until its owner grants a folder."
+                    "The node is in folder mode with no folder granted: a call may read {OPEN}; \
+                     it may write nothing until its owner grants a folder."
                 )
             } else {
                 "The node is in folder mode with no folder granted: its calls that name paths \
@@ -229,37 +231,45 @@ impl Reach {
                     .into()
             });
         }
-        if self.no_folder() {
-            let (head, refused) = if reads {
-                (format!("{READS}; "), "its writes")
-            } else {
-                (String::new(), "its calls that name paths")
-            };
+        if self.no_folder() && reads {
             return Some(if self.sudo {
-                format!(
-                    "The node is in folder mode with no folder granted: {head}{refused} are \
-                     refused until its owner grants one, and so are its commands, except one on \
-                     the owner's sudo list for you, which runs by that list alone, with full \
-                     rights."
-                )
+                "The node is in folder mode with no folder granted: its commands are refused \
+                 until its owner grants one, except one on the owner's sudo list for you, which \
+                 runs by that list alone, with full rights."
+                    .into()
             } else {
-                format!(
-                    "The node is in folder mode with no folder granted: {head}{refused} and its \
-                     commands are refused until its owner grants one."
-                )
+                "The node is in folder mode with no folder granted: its commands are refused \
+                 until its owner grants one."
+                    .into()
             });
         }
-        let mut out = if reads {
+        if self.no_folder() {
+            return Some(if self.sudo {
+                "The node is in folder mode with no folder granted: its calls that name paths \
+                 are refused until its owner grants one, and so are its commands, except one on \
+                 the owner's sudo list for you, which runs by that list alone, with full rights."
+            } else {
+                "The node is in folder mode with no folder granted: its calls that name paths and \
+                 its commands are refused until its owner grants one."
+            }
+            .into());
+        }
+        let mut out = if reads && commands {
+            "The node is in folder mode: a command may start only in a folder of the \
+             `folders:` line marked x (r read, w write, x run commands)"
+                .to_string()
+        } else if reads {
             format!(
-                "The node is in folder mode: {READS}. A call may write only in the folders of \
-                 the `folders:` line marked w (r read, w write, x run commands)"
+                "The node is in folder mode: a call may read in the folders of the `folders:` \
+                 line marked r and, outside every folder, {OPEN}. A call may write only in the \
+                 folders marked w (r read, w write, x run commands)"
             )
         } else {
             "The node is in folder mode: its calls may name paths only in the folders of the \
              `folders:` line (r read, w write, x run commands)"
                 .to_string()
         };
-        if commands {
+        if commands && !reads {
             out.push_str(", and a command may start only in one marked x");
         }
         out.push_str(". Where folders nest, the deepest one decides.");
@@ -1360,22 +1370,34 @@ mod tests {
                 .unwrap(),
             )
         };
-        let reads = "a call may read whatever the account its commands run as may read on the \
-                     machine, in the folders or not, except protected paths and the node's own \
-                     files";
+        let open = "what is open to every account on the machine, except protected paths and \
+                    the node's own files";
         let granted = json!([{"path": "/a", "access": "rw"}]);
         let r = reach(true, granted.clone(), false);
-        for a in [r.advice().unwrap(), r.file_advice().unwrap()] {
-            assert!(
-                a.starts_with(&format!(
-                    "The node is in folder mode: {reads}. A call may write only in the folders \
-                     of the `folders:` line marked w (r read, w write, x run commands)"
-                )),
-                "{a}"
-            );
-        }
+        let a = r.file_advice().unwrap();
+        assert!(
+            a.starts_with(&format!(
+                "The node is in folder mode: a call may read in the folders of the `folders:` \
+                 line marked r and, outside every folder, {open}. A call may write only in the \
+                 folders marked w (r read, w write, x run commands). Where folders nest, the \
+                 deepest one decides."
+            )),
+            "{a}"
+        );
+        // A command gets none of that: it starts in an `x` folder, and the
+        // sandbox holds what it reaches.
+        let a = r.advice().unwrap();
+        assert!(
+            a.starts_with(
+                "The node is in folder mode: a command may start only in a folder of the \
+                 `folders:` line marked x (r read, w write, x run commands). Where folders \
+                 nest, the deepest one decides. The machine's sandbox holds"
+            ),
+            "{a}"
+        );
+        assert!(!a.contains(open), "{a}");
         let by_folders = reach(false, granted, false);
-        assert!(!by_folders.advice().unwrap().contains(reads));
+        assert!(!by_folders.advice().unwrap().contains(open));
         assert!(
             by_folders
                 .file_advice()
@@ -1386,22 +1408,20 @@ mod tests {
         assert_eq!(
             reach(true, json!([]), false).file_advice().unwrap(),
             format!(
-                "The node is in folder mode with no folder granted: {reads}; it may write \
-                 nothing until its owner grants a folder."
+                "The node is in folder mode with no folder granted: a call may read {open}; it \
+                 may write nothing until its owner grants a folder."
             )
         );
         assert_eq!(
             reach(true, json!([]), false).advice().unwrap(),
-            format!(
-                "The node is in folder mode with no folder granted: {reads}; its writes and its \
-                 commands are refused until its owner grants one."
-            )
+            "The node is in folder mode with no folder granted: its commands are refused until \
+             its owner grants one."
         );
         assert!(
             reach(true, json!([]), true)
                 .advice()
                 .unwrap()
-                .contains("its writes are refused until its owner grants one, and so are its commands, except one on")
+                .contains("its commands are refused until its owner grants one, except one on")
         );
         // The hash of the units that take paths, and only theirs.
         let mut d = desc(

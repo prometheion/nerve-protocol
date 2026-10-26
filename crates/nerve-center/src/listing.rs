@@ -553,8 +553,8 @@ fn reach_lines(r: Option<&Reach>) -> String {
         };
         if r.reads_by_account {
             out.push_str(
-                "Reads: whatever the account its commands run as may read, in the folders or \
-                 not; writes and commands keep to the folders.\n",
+                "Reads: in the folders marked r, and outside every folder what is open to \
+                 every account on the machine; writes and commands keep to the folders.\n",
             );
         }
         if r.no_folder() && r.sudo {
@@ -1148,15 +1148,16 @@ mod tests {
     }
 
     /// Where the node reads as the command account, `list(node)` says that
-    /// a read goes as far as that account may read, and with no folder
-    /// granted that only writes and commands are refused.
+    /// a read goes to the `r` folders and, outside every folder, to what is
+    /// open to every account, and with no folder granted that only writes
+    /// and commands are refused.
     #[test]
     fn list_node_says_how_far_a_read_goes() {
         let mut node = box_node();
         let mut access = folder_access();
         access["reads_by_account"] = json!(true);
-        let reads = "Reads: whatever the account its commands run as may read, in the folders \
-                     or not; writes and commands keep to the folders.\n";
+        let reads = "Reads: in the folders marked r, and outside every folder what is open to \
+                     every account on the machine; writes and commands keep to the folders.\n";
         let with = |node: &mut NodeRecord, access: &Value| {
             let mut d = node.descriptor.clone().unwrap();
             d.access = Some(serde_json::from_value(access.clone()).unwrap());
