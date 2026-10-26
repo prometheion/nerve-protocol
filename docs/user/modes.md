@@ -62,7 +62,8 @@ their flags decide, as everywhere: a read needs `r`, and a folder you closed
 inside one with `r` stays closed. Outside every folder of that center, a call
 whose effect is `read` may read what every account on the machine may read: a file others
 may read, in folders others may enter all the way down (`/etc/hostname`, most
-of `/usr`). It reads nothing of yours that is closed to other accounts, also
+of `/usr`), or such a folder. A device, a pipe or a socket there is refused,
+and the node does not open it to check. It reads nothing of yours that is closed to other accounts, also
 where the node lets `nerve-run` pass through your home to a folder you gave,
 nothing another center was given unless it is open to everyone, no protected
 path and none of the node's own files (its keys, config and state), which are

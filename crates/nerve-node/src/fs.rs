@@ -108,23 +108,76 @@ struct WriteArgs {
     if_match: Option<String>,
 }
 
+/// Why [`readable`] says no.
+#[derive(Debug, PartialEq)]
+pub enum Unreadable {
+    /// The account may not open it for reading.
+    Closed,
+    /// It is neither a file nor a folder (a device, a FIFO, a socket). No
+    /// read of `fs` opens one, and opening one does things of its own: a
+    /// serial port's lines change, which resets the board on it, and a
+    /// writer that waits on a FIFO goes on and then breaks. So it is never
+    /// opened to ask.
+    NotFile,
+}
+
 /// Whether this thread's file access may read `path`: as the account
 /// [`crate::link::act_as`] gives it, where a call reads as its command
-/// account. It opens the path for reading (a folder too) without waiting on
-/// a pipe or taking a terminal, and closes it again. A path that does not
-/// exist passes: nothing can be read there, and the call says so itself.
-pub fn readable(path: &Path) -> bool {
-    let mut open = std::fs::OpenOptions::new();
-    open.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        open.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
+/// account. A file or a folder is opened for reading and closed again; on
+/// Linux it is first opened without reading it (`O_PATH`) and asked what it
+/// is, and only then opened, through that same entry ([`reopen`]), so what
+/// is opened is what was asked. A path that does not exist passes: nothing
+/// can be read there, and the call says so itself.
+#[cfg(target_os = "linux")]
+pub fn readable(path: &Path) -> Result<(), Unreadable> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| Unreadable::Closed)?;
+    // Through libc, not `OpenOptions`: on musl the standard library takes
+    // O_PATH out of the flags (crate::service's `chown_entry` says more).
+    // SAFETY: a valid C string; the new descriptor is owned below.
+    let fd = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    if fd < 0 {
+        let e = std::io::Error::last_os_error();
+        return match e.kind() {
+            std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(Unreadable::Closed),
+        };
     }
-    match open.open(path) {
-        Ok(_) => true,
-        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    // SAFETY: open returned a fresh descriptor nothing else owns.
+    let held = std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+    match held.metadata() {
+        Ok(m) if m.is_file() || m.is_dir() => {}
+        Ok(_) => return Err(Unreadable::NotFile),
+        Err(_) => return Err(Unreadable::Closed),
     }
+    reopen(&held).map(drop).map_err(|_| Unreadable::Closed)
+}
+
+/// [`readable`] where no command account reads (crate::fs::open_to_all
+/// says no to all there): the type is asked first, then the path opened.
+#[cfg(not(target_os = "linux"))]
+pub fn readable(path: &Path) -> Result<(), Unreadable> {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_file() || m.is_dir() => {}
+        Ok(_) => return Err(Unreadable::NotFile),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(Unreadable::Closed),
+    }
+    std::fs::File::open(path)
+        .map(drop)
+        .map_err(|_| Unreadable::Closed)
+}
+
+/// Opens for reading the file or folder `held` holds, opened without
+/// reading it (`O_PATH`). Through `/proc/self/fd` the kernel checks the
+/// rights of the file itself again, as the account this thread's file
+/// access acts as, and it is the very file held, whatever was put at its
+/// path meanwhile.
+#[cfg(target_os = "linux")]
+fn reopen(held: &std::fs::File) -> std::io::Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    std::fs::File::open(format!("/proc/self/fd/{}", held.as_raw_fd()))
 }
 
 /// Whether `path` is open to every account on this machine by its mode
@@ -172,8 +225,8 @@ pub fn open_to_all(_: &Path) -> bool {
 /// ([`crate::link::act_as`]). `Err` says why not. The path must be open to
 /// every account ([`open_to_all`]), so the entries the node put on for the
 /// folders (another pairing's, the pass-through on the owner's folders above
-/// them) reach no further than the folders, and one the account may open
-/// ([`readable`]). The node's own process is not the account's, though its
+/// them) reach no further than the folders, and a file or a folder the
+/// account may open ([`readable`]). The node's own process is not the account's, though its
 /// files under `/proc` look open to all: the kernel lets the node's threads
 /// read them whatever account they act as. A `provider` reads with the
 /// owner's rights, so a folder handed to it here would let it read below as
@@ -202,10 +255,16 @@ pub fn may_read_outside(path: &Path, provider: bool) -> Result<(), String> {
              provider would read below it with the owner's rights"
                 .into(),
         )
-    } else if !readable(path) {
-        Err("the account this center's commands run as may not read a path this call reads".into())
     } else {
-        Ok(())
+        readable(path).map_err(|why| match why {
+            Unreadable::Closed => {
+                "the account this center's commands run as may not read a path this call reads"
+                    .into()
+            }
+            Unreadable::NotFile => "a path this call reads is in no folder that allows reading, \
+                                    and is neither a file nor a folder"
+                .into(),
+        })
     }
 }
 
@@ -634,11 +693,12 @@ fn split(path: &Path) -> Result<(&Path, &std::ffi::OsStr), RpcError> {
 fn read(path: &Path, offset: u64, length: Option<u64>) -> Result<Value, RpcError> {
     let (dir, name) = split(path)?;
     let dir = Dir::open(dir).map_err(|e| open_error(path, e))?;
-    let mut f = dir.open_file(name).map_err(|e| open_error(path, e))?;
+    let not_file = || io_error(format!("{} is not a file", path.display()));
+    let mut f = dir
+        .open_file(name)
+        .map_err(|e| open_error(path, e))?
+        .ok_or_else(not_file)?;
     let m = f.metadata().map_err(io_error)?;
-    if !m.is_file() {
-        return Err(io_error(format!("{} is not a file", path.display())));
-    }
     let size = m.len();
     let want = length.unwrap_or(u64::MAX).min(READ_MAX);
     f.seek(SeekFrom::Start(offset.min(size)))
@@ -767,7 +827,8 @@ fn write(path: &Path, content: &[u8], if_match: Option<&str>) -> Result<Value, R
     let (dir, name) = split(path)?;
     let dir = Dir::open(dir).map_err(|e| open_error(path, e))?;
     let current = match dir.open_file(name) {
-        Ok(mut f) => {
+        Ok(None) => return Err(io_error(format!("{} is not a file", path.display()))),
+        Ok(Some(mut f)) => {
             let perm = f.metadata().map_err(io_error)?.permissions();
             Some((digest(&mut f).map_err(io_error)?, perm))
         }
@@ -879,10 +940,34 @@ impl Dir {
         Ok(Dir { fd })
     }
 
-    /// `name` for reading. Non-blocking, so a FIFO put there cannot hold the
-    /// call; a regular file reads the same either way.
-    fn open_file(&self, name: &std::ffi::OsStr) -> std::io::Result<std::fs::File> {
-        Dir::at(Some(&self.fd), name, libc::O_RDONLY | libc::O_NONBLOCK).map(Into::into)
+    /// `name` for reading, if it is a file (`None` if it is something
+    /// else). It is first opened without reading it (`O_PATH`) and asked
+    /// what it is, and only a file is opened, through that same entry
+    /// ([`reopen`]): opening a device or a FIFO does things of its own
+    /// ([`Unreadable::NotFile`]).
+    #[cfg(target_os = "linux")]
+    fn open_file(&self, name: &std::ffi::OsStr) -> std::io::Result<Option<std::fs::File>> {
+        let held = std::fs::File::from(Dir::at(Some(&self.fd), name, libc::O_PATH)?);
+        let m = held.metadata()?;
+        // With O_PATH, O_NOFOLLOW opens a symlink itself instead of failing;
+        // it fails as an open for reading would.
+        if m.is_symlink() {
+            return Err(std::io::Error::from_raw_os_error(libc::ELOOP));
+        }
+        if !m.is_file() {
+            return Ok(None);
+        }
+        reopen(&held).map(Some)
+    }
+
+    /// `name` for reading, if it is a file. Non-blocking, so a FIFO put
+    /// there cannot hold the call; a regular file reads the same either way.
+    #[cfg(not(target_os = "linux"))]
+    fn open_file(&self, name: &std::ffi::OsStr) -> std::io::Result<Option<std::fs::File>> {
+        let f: std::fs::File =
+            Dir::at(Some(&self.fd), name, libc::O_RDONLY | libc::O_NONBLOCK)?.into();
+        let file = f.metadata()?.is_file();
+        Ok(file.then_some(f))
     }
 
     fn create_new(&self, name: &std::ffi::OsStr) -> std::io::Result<std::fs::File> {
@@ -929,8 +1014,10 @@ impl Dir {
         })
     }
 
-    fn open_file(&self, name: &std::ffi::OsStr) -> std::io::Result<std::fs::File> {
-        std::fs::File::open(self.path.join(name))
+    fn open_file(&self, name: &std::ffi::OsStr) -> std::io::Result<Option<std::fs::File>> {
+        let f = std::fs::File::open(self.path.join(name))?;
+        let file = f.metadata()?.is_file();
+        Ok(file.then_some(f))
     }
 
     fn create_new(&self, name: &std::ffi::OsStr) -> std::io::Result<std::fs::File> {
@@ -975,9 +1062,9 @@ mod tests {
         nerve_policy::paths::to_wire(p)
     }
 
-    /// `readable` opens what this thread's account may read, a folder too,
-    /// without waiting on a pipe; a path that does not exist passes, and one
-    /// the account may not open does not.
+    /// `readable` opens what this thread's account may read, a file or a
+    /// folder; a path that does not exist passes, one the account may not
+    /// open does not, and a pipe is not even opened.
     #[cfg(unix)]
     #[test]
     fn readable_says_what_the_account_may_open() {
@@ -985,19 +1072,85 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let file = d.path().join("a.txt");
         std::fs::write(&file, "x").unwrap();
-        assert!(readable(&file));
-        assert!(readable(d.path()));
-        assert!(readable(&d.path().join("missing/b")));
-        // A pipe with no writer would block an open without O_NONBLOCK.
+        assert_eq!(readable(&file), Ok(()));
+        assert_eq!(readable(d.path()), Ok(()));
+        assert_eq!(readable(&d.path().join("missing/b")), Ok(()));
         let fifo = d.path().join("pipe");
         let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
-        assert!(readable(&fifo));
+        assert_eq!(readable(&fifo), Err(Unreadable::NotFile));
         // Root opens anything, so the closed file says nothing there.
         if unsafe { libc::geteuid() } != 0 {
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o200)).unwrap();
-            assert!(!readable(&file));
+            assert_eq!(readable(&file), Err(Unreadable::Closed));
         }
+    }
+
+    /// A FIFO open to all at `path`, and a writer that waits in its `open`
+    /// for a reader; the receiver hears once that open returned.
+    #[cfg(target_os = "linux")]
+    fn a_writer_waits_on(
+        path: &Path,
+    ) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<()>) {
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o666) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let at = path.to_path_buf();
+        let writer = std::thread::spawn(move || {
+            let _f = std::fs::OpenOptions::new().write(true).open(at).unwrap();
+            tx.send(()).unwrap();
+        });
+        (writer, rx)
+    }
+
+    /// Lets the writer of [`a_writer_waits_on`] go, and says whether it was
+    /// still waiting.
+    #[cfg(target_os = "linux")]
+    fn still_waiting(
+        path: &Path,
+        (writer, rx): (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<()>),
+    ) -> bool {
+        use std::os::unix::fs::OpenOptionsExt;
+        let waiting = rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err();
+        let _r = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+            .unwrap();
+        writer.join().unwrap();
+        waiting
+    }
+
+    /// Neither the folder-mode check of a read outside the folders nor
+    /// `read` and `write` open what is not a file: a writer waiting on a
+    /// FIFO stays waiting (as a serial port's lines stay as they are).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn what_is_not_a_file_is_never_opened() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let fifo = d.path().join("pipe");
+        let writer = a_writer_waits_on(&fifo);
+        let why = may_read_outside(&fifo, false).unwrap_err();
+        assert!(
+            why.contains("neither a file nor a folder")
+                && !why.contains(&*d.path().to_string_lossy()),
+            "{why}"
+        );
+        assert!(still_waiting(&fifo, writer), "the check opened the pipe");
+        std::fs::remove_file(&fifo).unwrap();
+        let writer = a_writer_waits_on(&fifo);
+        let e = run("read", json!({"path": wire(&fifo)})).unwrap_err();
+        assert!(e.message.contains("is not a file"), "{e:?}");
+        let e = run("write", json!({"path": wire(&fifo), "content": "x"})).unwrap_err();
+        assert!(e.message.contains("is not a file"), "{e:?}");
+        assert!(
+            still_waiting(&fifo, writer),
+            "the read or the write opened the pipe"
+        );
     }
 
     /// A path is open to every account only where each folder above it

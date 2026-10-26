@@ -249,7 +249,10 @@ there, so there is nothing to signal.
   (`fs::open_to_all`: `o+x` on each folder above it, `o+r` on it), so the
   ACL entries the node put on for the folders (another pairing's grants, the
   pass-through on the owner's folders above a grant) reach no further than
-  those folders, and it must open (`fs::readable`). The node's own process
+  those folders, and it must be a file or a folder that opens (`fs::readable`,
+  which asks what it is through an `O_PATH` handle first and opens only a file
+  or a folder, through that handle: opening a device or a FIFO has effects of
+  its own). The node's own process
   under `/proc` is refused first (`fs::own_process`): its files there are
   `0444`, and the kernel lets the node's threads read them whatever fsuid
   they switched to. `fs::may_read_outside` holds these checks. For a provider, which

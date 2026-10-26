@@ -892,7 +892,10 @@ pairing's grants, and the pass-through on the owner's folders above a grant;
 those belong to the folders, not to the account, so they open nothing to a
 file call outside them. Before such a call the node asks, as `nerve-run`,
 whether the path is open to every account and whether it may open it for
-reading (a path that does not exist passes). The node's own entry under
+reading (a path that does not exist passes). Only a file or a folder passes,
+and the node asks what it is before it opens it, so a device, a FIFO or a
+socket is never opened (opening one can reset the board on a serial port, or
+let a waiting writer go on). The node's own entry under
 `/proc` (`/proc/self`, `/proc/thread-self`, `/proc/<pid>` of the node or one
 of its threads, and a `/proc/<pid>` that does not exist, which a thread the
 node starts for the read may take) is refused before that: its files there
