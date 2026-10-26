@@ -75,12 +75,12 @@ center reads, or the node refuses the whole change and names the field.
 8. Releasing a protected path: a center may add to `protected.extra`, not
    remove from it or change `protected.allow`, and its folders may not widen
    access at a protected place ([policy engine](policy-engine.md#protected-paths)).
-9. Turning a `sense` action on, by `caps` or an allow rule, or by taking away
-   an `off` or `hidden` entry or a deny rule that keeps it off; and doing so
-   for a capability no attached provider offers now, or for an action an
-   offered capability does not have now, which may sense once it comes. A
-   center can switch these off, never on, so it cannot take away its own deny
-   rule for such a capability either.
+9. Turning a `sense` or `actuate` action on, by `caps` or an allow rule, or
+   by taking away an `off` or `hidden` entry or a deny rule that keeps it off;
+   and doing so for a capability no attached provider offers now, or for an
+   action an offered capability does not have now, which may sense or actuate
+   once it comes. A center can switch these off, never on, so it cannot take
+   away its own deny rule for such a capability either.
 10. The programs that may attach as capability providers,
     `providers.allowed` ([node-local §7](spec/node-local.md#7-capability-providers)).
 

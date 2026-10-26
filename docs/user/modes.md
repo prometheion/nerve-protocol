@@ -26,7 +26,7 @@ effect, which `list` shows the agent):
 
 | Effect | `allowlist` | `folder` | `user` |
 |---|---|---|---|
-| `read` | an allow rule | allowed; each path it reads needs an `r` folder, or on the installed Linux node, outside every folder, one open to every account ([below](#reading-in-folder-mode)) | allowed |
+| `read` | an allow rule | allowed; each path it reads needs an `r` folder, or on the installed Linux node, outside every folder, one open to every account ([below](#reading-in-folder-mode)); with no path, only where you set it `on` | allowed |
 | `write` | an allow rule | each path it writes in a `w` folder (and each it reads in an `r` one); with no path, only where you set it `on` | allowed |
 | `execute` | an allow rule | `exec.run`: its working directory in an `x` folder. Another capability: each of its paths in a folder with `x` and the flag for what it does there; with no path, only where you set it `on` | allowed |
 | `sense`, `actuate` | an allow rule | only where you set it `on`, and each of its paths in the folders as above | only where you set it `on` |
@@ -36,7 +36,7 @@ allows only what names no path, and sensing and acting on the world, whose
 paths stay in the folders too. A write whose only paths are ones it reads
 names no place it writes, so it counts as a write with no path. Deny rules,
 `off`, `hidden`, [protected paths](protected-paths.md) and the node's own
-files win in every mode.
+files win in every mode, for the paths a capability names.
 
 A capability names its paths by marking them in its schema
 (`x-nerve-path`): `fs` marks its `path`, `exec.run` its `cwd`, and a program's
@@ -45,7 +45,13 @@ call's do: the folders, the [rules](rules.md#rule-syntax), protected paths and
 the node's own files judge them, and the [audit log](audit.md) names them. A
 folder handed to a program counts with everything below it, since the program
 may read or write there: it is refused when a protected path, the node's own
-files or, in `folder` mode, a folder you gave less lies below it.
+files, a place a deny rule of that capability names or, in `folder` mode, a
+folder you gave less lies below it. The node sees only the paths a program
+marks: an argument it does not mark is not a path to the node, so a program's
+action that marks none (it may still read files where it likes, with your
+rights) needs `on` in `folder` mode, whatever it does. A program that reads or
+writes files should mark its path arguments; switch an action `off` that takes
+a path without the marker.
 
 ### Reading in folder mode
 
@@ -59,7 +65,8 @@ of `/usr`). It reads nothing of yours that is closed to other accounts, also
 where the node lets `nerve-run` pass through your home to a folder you gave,
 nothing another center was given unless it is open to everyone, no protected
 path and none of the node's own files (its keys, config and state), which are
-closed to `nerve-run`. Writing and commands stay in the folders. A program
+closed to `nerve-run`, nor the node's own process under `/proc`. Writing and
+commands stay in the folders. A program
 that reads a path for a call ([provider](providers.md)) gets the call outside
 the folders only for a file open to every account, never for a folder, since
 it would read below it with your rights. With
@@ -68,7 +75,8 @@ than a file call: the system's folders and its `r` and `x` folders.
 
 A node you run yourself, and Windows, read with your own rights, so there
 `folder` mode reads only in the folders with `r`. A read that names no path
-(a program's action that lists the lamps it knows) is allowed everywhere.
+(a program's action that lists the lamps it knows) runs only where you set it
+`on`: the node cannot see where such a program reads.
 
 ## Set the mode
 

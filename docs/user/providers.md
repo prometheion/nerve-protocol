@@ -50,7 +50,7 @@ A provider's capability is decided like any other, by what it does
 | Mode | A provider's action runs when |
 |---|---|
 | `allowlist` | an allow rule names it: `nerve-node config add center.<name>.policy.allow 'lamp.on'`, or `'lamp'` for all its actions |
-| `folder` | it reads; it writes or runs something at paths that lie in your folders ([below](#paths-it-takes)); or you set it on: `nerve-node cap set lamp on` (one that names no path lies in no folder, a write whose only paths are ones it reads names no place it writes, and one that senses or acts on the world needs `on` anyway, its paths in your folders too) |
+| `folder` | it reads, writes or runs something at paths it marks ([below](#paths-it-takes)) that the folders allow; or you set it on: `nerve-node cap set lamp on` (one that names no path lies in no folder, a read included, a write whose only paths are ones it reads names no place it writes, and one that senses or acts on the world needs `on` anyway, its paths in your folders too) |
 | `user` | always, except one that senses or acts on the world, which needs `on` |
 
 Deny rules and `off` and `hidden` work as for `fs` and `exec`. A call to an
@@ -85,16 +85,35 @@ account may read ([reading in folder mode](modes.md#reading-in-folder-mode)),
 and only for a file. A link is followed to where it leads, so one in your
 folder that leads out is refused. The program gets the path as the node
 resolved it, links followed, so it works where the node looked. Only the
-top-level arguments can be marked, each a string. A write or a run whose
-marked path the call leaves out names no folder: it needs `on`, as an action
-without paths does.
+top-level arguments can be marked, each a string. A call whose marked path
+it leaves out names no folder: it needs `on`, as an action without paths
+does.
+
+The node sees only the marked arguments. One the program does not mark is
+not a path to the node: no folder, rule, protected path or own file of the
+node holds it, and the program reads or writes there with your rights. So in
+`folder` mode an action that marks no path needs `on`, a read too. A program
+that reads or writes files should mark every path argument; one written
+before the marker existed marks none. Switch an action `off` that takes a
+path without the marker, or set it `on` only if you would let it read and
+write anywhere you can.
 
 A folder given as a path counts with everything below it, since the program
 may read or write anywhere in it: the call is refused when a protected path
-that no folder releases, the node's own files or, in `folder` mode, a folder
-you gave less lies below it. An `fs:` rule covers `fs` calls only: to keep
-every capability out of a place, deny it for each one that takes paths
-(`notes:~/private/*`), or make it a [protected path](protected-paths.md).
+that no folder releases, the node's own files, a place a deny rule of that
+capability names (`notes:~/private/*` refuses `notes` the folder `~` too) or,
+in `folder` mode, a folder you gave less lies below it. The refusal names the
+folder handed over, not what lies below it. An `fs:` rule covers `fs` calls
+only: to keep every capability out of a place, deny it for each one that
+takes paths (`notes:~/private/*`), or make it a [protected
+path](protected-paths.md).
+
+A folder a program writes in is not checked for the places whose writes
+run code later, as an `fs.write` is (`.git`, `.envrc`, `.vscode`, `.idea`):
+the program may make them anywhere below it, so the node cannot check them
+before the call. An `fs.write` there is refused; a program that unpacks or
+syncs into a folder of yours can write them. Let such an action run only
+where every folder with `w` can take that, or switch it `off`.
 
 The node checks the path when the call comes; the program reads or writes it
 afterwards with your rights, so a link swapped in between is not caught.

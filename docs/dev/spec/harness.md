@@ -200,7 +200,8 @@ the `result` of the envelope described below.
   words and naming no path: with `reads_by_account`, that a call may read
   in the folders marked `r` and, outside every folder, what is open to every
   account on the machine, except protected paths and the node's own files,
-  and may write only in the folders marked `w` (`exec.run`'s advice says
+  that an action of any capability but `fs` may name a file there, never a
+  folder, and may write only in the folders marked `w` (`exec.run`'s advice says
   none of that, only that a command starts in a folder marked `x`), else
   that calls may name paths only in these folders and that a command starts
   only in one marked `x` (`exec.run`'s advice only); where folders nest the deepest one decides; with

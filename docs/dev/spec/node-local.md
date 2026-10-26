@@ -892,7 +892,11 @@ pairing's grants, and the pass-through on the owner's folders above a grant;
 those belong to the folders, not to the account, so they open nothing to a
 file call outside them. Before such a call the node asks, as `nerve-run`,
 whether the path is open to every account and whether it may open it for
-reading (a path that does not exist passes); for a provider, which reads
+reading (a path that does not exist passes). The node's own entry under
+`/proc` (`/proc/self`, `/proc/thread-self`, `/proc/<pid>` of the node or one
+of its threads) is refused before that: its files there are open to all by
+their mode, and the kernel lets the node's threads read them whatever
+account they act as, which no process of `nerve-run` could. For a provider, which reads
 with the owner's rights, the path must also be no folder, as it would read
 below it. The node's own folders, protected paths, deny rules and `off` and
 `hidden` still win. Writes and commands keep to the folders, and a write or
@@ -900,8 +904,10 @@ execute call that also reads a path needs `r` for it. Landlock, where
 present, holds a command of `nerve-run` to less (the system's folders and its
 folders); a file call is not run under it. A node run by hand and Windows
 read with the node's own or the owner's rights, so there every path a call
-reads needs a folder with `r`. A call that reads and names no path is
-allowed in folder mode on every node.
+reads needs a folder with `r`. A call that names no path, a read included,
+needs `on` in folder mode on every node: every `fs` action names its path,
+so such a call is a program's (§7), which reads where the node cannot see,
+with the owner's rights.
 
 `deny` rules count in every mode and a matching deny always wins. A rule
 matches the whole target: `exec.run:rm *` refuses `rm -rf x`, but not
@@ -1572,10 +1578,20 @@ arguments its schema marks with `x-nerve-path` (top-level strings, `read` or
 under `account::FsAs`), as an `fs` call's path is: the folders, the rules,
 the protected paths and the node's own folders judge them, and the audit
 entry names them (joined by `, `); a path that does not resolve is refused
-with `bad_path` and audited with the text given. A path argument counts with
+with `bad_path` and audited with the text given, once the node acts as
+itself again (the command account may not write the node's log). A path argument counts with
 what lies below it, as the program may read or write there: a protected
-entry below it that no folder releases for its access, or in folder mode a
-folder below it without that flag, refuses the call. A marked argument left
+entry below it that no folder releases for its access, a place below it
+that a deny rule of the action's scope may cover (the rule's pattern up to
+its first wildcard lies below the path, or the path below it and a wildcard
+follows), or in folder mode a folder below it without that flag, refuses the
+call. The refusal names the path handed over, not the protected entry or the
+folder below it, which the center is not shown. What a program writes below
+a folder is not checked for the places whose writes run code later (`.git`,
+`.envrc`, `.vscode`, `.idea`), as an `fs.write` is: the program may make
+them anywhere below it. An argument the schema does not mark is no path to
+the node, which the policy cannot judge; in folder mode an action with no
+marked path needs `on` (§2, Modes). A marked argument left
 out or `null` names no path; with none, the target is `<cap>.<action>`. Only an allowed
 call whose arguments fit reaches the provider, with each marked path as the
 node resolved it, as one line:

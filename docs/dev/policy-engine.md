@@ -60,7 +60,7 @@ steps in order.
 | 2 | The call touches the node's own folders: any path of a call (an `fs` call's, an action's marked path arguments), a working directory, a path a command line names plainly | `forbidden`. No rule, mode, folder or release lifts this |
 | 3 | The capability or action is `off` or `hidden` | `disabled` (a call of an `off` action is audited too) |
 | 4 | A `sudo` command and the sudo switch is off | `forbidden` |
-| 5 | A deny rule matches | `forbidden`, in every mode |
+| 5 | A deny rule matches; for a path handed to a program (not `fs`, not a command), also one that may match below it (`RuleSet::find_below`) | `forbidden`, in every mode |
 | 6 | The mode decides, by the [effect table](#the-effect-table). A `sudo` command: the sudo list. `allowlist`: an allow rule for every target. `folder`: the folders' flags, and for a read the command account's reach where the node reads as it. `user`: allowed | Allowed or `forbidden` |
 | 7 | A protected path is touched | `forbidden`, whatever allowed the call |
 
@@ -169,19 +169,29 @@ it. Allow rules are not looked at there.
 Every capability is decided by its effect, the node's own and what a
 [capability provider](spec/node-local.md#7-capability-providers) adds alike.
 An action names paths by marking arguments in its schema (`x-nerve-path`,
-`nerve_proto::schema::path_args`); the node resolves them into `Target`s. A
-write or execute action that names no path lies in no folder: `folder` mode
-allows it only where the owner set it `on`, and so is a write whose only
+`nerve_proto::schema::path_args`); the node resolves them into `Target`s. An
+action that names no path lies in no folder: `folder` mode allows it only
+where the owner set it `on`, whatever its effect, and so is a write whose only
 paths are ones it reads (`decide` asks the table as for no path then, and the
-descriptor offers it so). A read is allowed there with or without paths.
+descriptor offers it so). Every `fs` action names its path, so a read with no
+path is a program's, which the node cannot hold: an argument the program does
+not mark is no path to the node, and the program reads with the owner's
+rights.
 
 A path handed to a capability other than `fs` and not a command (a
 provider's) counts with what lies below it, since the program may read or
 write there; `fs` walks skip such places themselves (`works_below`). Such a
 path is refused when a node-own folder lies below it (with the own-folder
-check, first), when a protected entry below it is not released for its
-access (`Protected::entry_below`), or in `folder` mode when a folder below it
-lacks the flag (`closed_below`).
+check, first), when a deny rule of its scope may match below it (step 5,
+`RuleSet::find_below`: the pattern's text up to its first wildcard lies
+below the path, or the path below that text and a wildcard follows), when a
+protected entry below it is not released for its access
+(`Protected::entry_below`), or in `folder` mode when a folder below it lacks
+the flag (`closed_below`). The last two refusals do not name what lies
+below: the agent is shown no closed folder and no extra protected path. The
+tool-config check (writes to `.git`, `.envrc`, `.vscode`, `.idea`) looks at
+the path itself only, since a program may make those anywhere below a folder
+it writes in.
 
 ### The effect table
 
@@ -198,8 +208,7 @@ there, so there is nothing to signal.
 |---|---|---|---|
 | `read` with paths | an allow rule | every path in a folder with the matching flag (a path it reads: see `Reads` below) | allowed |
 | `write`, `execute` with paths | an allow rule | every path in a folder with the matching flag (a command's working directory in one with `x`; another execute call's paths also in one with `x`) | allowed |
-| `read` without a path | an allow rule | allowed | allowed |
-| `write`, `execute` without a path | an allow rule | `on` | allowed |
+| `read`, `write`, `execute` without a path | an allow rule | `on` | allowed |
 | `sense`, `actuate` | an allow rule | `on`, and every path in a folder with the matching flag | `on` |
 
 - `paths` is `PathArgs::None` for an action with no path, no working directory
@@ -225,13 +234,16 @@ there, so there is nothing to signal.
   (`fs::open_to_all`: `o+x` on each folder above it, `o+r` on it), so the
   ACL entries the node put on for the folders (another pairing's grants, the
   pass-through on the owner's folders above a grant) reach no further than
-  those folders, and it must open (`fs::readable`). For a provider, which
+  those folders, and it must open (`fs::readable`). The node's own process
+  under `/proc` is refused first (`fs::own_process`): its files there are
+  `0444`, and the kernel lets the node's threads read them whatever fsuid
+  they switched to. `fs::may_read_outside` holds these checks. For a provider, which
   reads with the owner's rights, it must also be no folder, as the provider
   would read below it. A write or execute call that reads a path still needs
   `r` there. The link picks `Account` where the account was found and
   `Shared::separate` holds; the walk of `grep`, `find` and `list` asks
-  `read_reach` of each entry with `fs::open_to_all`, as the gate does, and
-  the descriptor's `access` block says `reads_by_account`.
+  `read_reach` of each entry with `fs::open_to_all` and `fs::own_process`, as
+  the gate does, and the descriptor's `access` block says `reads_by_account`.
 
 Each path of a call is a `Target` with an access: `Read` needs `r`, `Write`
 needs `w`, and `Run` needs `x`. `Run` is the working directory of `exec.run`.

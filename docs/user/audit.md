@@ -25,7 +25,10 @@ The reason says what is missing. Use it to write the rule you want
 `fs` call's, or the paths a program's capability takes, joined by `, `; a
 path that does not resolve is refused as given, with `bad_path`); a call to
 a capability you switched `off` is a refusal too, with the path or command
-line an `fs` or `exec.run` call names as its target:
+line an `fs` or `exec.run` call names as its target. An `fs` path the node did
+not resolve is the target only where it is written as a resolved one is
+(absolute, no `.` or `..` part), since a rule made of it would match nothing
+otherwise; else the target is empty and the reason names the path:
 
 ```
 1791834531650  lab  notes.open  notes.open  forbidden: notes.open is off

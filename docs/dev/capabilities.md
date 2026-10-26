@@ -104,10 +104,12 @@ it takes by marking top-level string arguments of its `params` with
 marks its `path` and `exec.run` its `cwd`. In `folder` mode a read is
 allowed, each path it reads in an `r` folder (on the installed Linux node,
 outside every folder, one open to every account); a write or a run is
-allowed when every marked path lies in a folder with the matching flag, and
-needs `on` when it names none (a write: no path it writes); a `sense` or
-`actuate` action needs `on`, and its marked paths stay in the folders too. A
-path the node is handed for another program counts with what lies below it.
+allowed when every marked path lies in a folder with the matching flag; a
+read, write or run needs `on` when it names none (a write: no path it
+writes), since an argument it does not mark is no path to the node; a
+`sense` or `actuate` action needs `on`, and its marked paths stay in the
+folders too. A path the node is handed for another program counts with what
+lies below it, deny rules of that capability included.
 
 ## Built-in profiles
 
