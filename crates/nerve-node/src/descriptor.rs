@@ -1405,15 +1405,11 @@ mod tests {
                             let allowed =
                                 decide(&e.policy, &env(confined), &call) == Decision::Allow;
                             assert_eq!(shown_on(&d, "echo", "say"), allowed, "{what}");
-                            let want =
-                                !matches!(setting, Some(CapSetting::Off | CapSetting::Hidden))
-                                    && match need(mode, effect, PathArgs::None, setting) {
-                                        Need::Allowed => true,
-                                        Need::AllowRule => {
-                                            allow.len() == 1 && allow[0] != "echo.other"
-                                        }
-                                        Need::InFolders | Need::NeedsOn | Need::Off => false,
-                                    };
+                            let want = match need(mode, effect, PathArgs::None, setting) {
+                                Need::Allowed => true,
+                                Need::AllowRule => allow.len() == 1 && allow[0] != "echo.other",
+                                Need::InFolders | Need::NeedsOn | Need::Off => false,
+                            };
                             assert_eq!(allowed, want, "{what}");
                             rows += 1;
                         }
@@ -1433,14 +1429,11 @@ mod tests {
                             let covered = allow.len() == 1 && allow[0] != "fs.stat";
                             let by_table = |all_in_folders| {
                                 let paths = PathArgs::Some { all_in_folders };
-                                !matches!(setting, Some(CapSetting::Off | CapSetting::Hidden))
-                                    && match need(mode, effect, paths, setting) {
-                                        Allowed => {
-                                            confined || cap != "exec" || mode != Mode::Folder
-                                        }
-                                        AllowRule => covered,
-                                        InFolders | NeedsOn | Off => false,
-                                    }
+                                match need(mode, effect, paths, setting) {
+                                    Allowed => confined || cap != "exec" || mode != Mode::Folder,
+                                    AllowRule => covered,
+                                    InFolders | NeedsOn | Off => false,
+                                }
                             };
                             assert_eq!(shown_on(&d, cap, action), by_table(true), "{what}");
                             for (path, all_in_folders) in [("/w", true), ("/elsewhere", false)] {
