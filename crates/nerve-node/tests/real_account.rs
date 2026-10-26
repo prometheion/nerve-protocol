@@ -4,9 +4,10 @@
 //! and nothing else of the owner's; the owner socket refuses it; `folder rm`
 //! takes the ACL off; `uninstall` removes the account, its home and every
 //! entry, also on what nerve-run made, which becomes the owner's (issue
-//! #142). A file call reads what nerve-run may read, as nerve-run, beyond
-//! the folders but never the node's own files, and writes only in them
-//! (issue #152). Where the kernel has no Landlock, folder mode runs as nerve-run all
+//! #142). A file call reads, as nerve-run, beyond the folders what every
+//! account may read, but not the owner's files that only the node's
+//! pass-through entry lets nerve-run reach, nor the node's own files, and
+//! writes only in the folders (issue #152). Where the kernel has no Landlock, folder mode runs as nerve-run all
 //! the same, and the node says what that leaves of the owner's home open.
 //! The owner runs `setup` without sudo, its answers passed on. An allowed sudo
 //! command of nerve-run runs as root without the owner's password, in its
