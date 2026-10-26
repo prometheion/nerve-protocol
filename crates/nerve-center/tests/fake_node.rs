@@ -192,8 +192,10 @@ enum Seen {
 /// for that half second, `talkmute`, whose `stream.close` is never
 /// answered, and `talkgap`, which also drops 5 bytes and prints 100 more;
 /// `talkbig`, which prints [`BIG`] bytes more of quotes and line breaks at
-/// once, `talknever`, whose stream never opens, `talksilent`, whose
-/// `stream.open` is never answered, `talksudo`, whose stream is
+/// once, `talkbin` [`BIG`] bytes that are not UTF-8, `talknever`, whose
+/// stream never opens, `talksilent`, whose `stream.open` is never answered,
+/// `talkslow`, whose first `stream.open` is answered after [`SLOW_OPEN`],
+/// `talksudo`, whose stream is
 /// `unavailable`, and `talkrefuse`, whose stream is refused with
 /// [`NODE_WORDS`]),
 /// and reports what it saw.
@@ -235,18 +237,20 @@ async fn describe_anew(c: &Center, node: &Described, d: Value, ready: impl Fn(&C
 }
 
 /// Whether the fake node's `talk` command ends: `talk`, `talkodd`, and
-/// `talktimeout` and `talkcut`, which print the same but whose result is the
-/// error `timeout` and a result cut by the node, and `talkgone`, whose
-/// stream never opens.
+/// `talktimeout`, `talkcut` and `talklong`, which print the same but whose
+/// result is the error `timeout`, a result cut by the node and one too long
+/// for the center to keep whole, and `talkgone`, whose stream never opens.
 fn talk_ends(talk: &str) -> bool {
     matches!(
         talk,
-        "talk" | "talkodd" | "talktimeout" | "talkcut" | "talkgone"
+        "talk" | "talkodd" | "talktimeout" | "talkcut" | "talklong" | "talkgone"
     )
 }
 
 /// How long the fake node takes to answer a `slow` call.
 const SLOW: Duration = Duration::from_millis(600);
+/// How long a `talkslow` command's first `stream.open` waits for its answer.
+const SLOW_OPEN: Duration = Duration::from_secs(2);
 /// How much a `talkbig` command prints at once.
 const BIG: usize = 300 * 1024;
 /// How long a `talk` command runs.
@@ -271,6 +275,8 @@ fn serve_changing(
             Default::default();
         // Streams whose `stream.close` the node never answers.
         let mut muted = std::collections::HashSet::new();
+        // The `talkslow` calls whose first `stream.open` was answered late.
+        let mut slowed = std::collections::HashSet::new();
         let mut next_sid = 7u64;
         loop {
             let m = tokio::select! {
@@ -336,6 +342,11 @@ fn serve_changing(
                                     json!({"exit_code": 0, "stdout": "one\n", "stderr": "",
                                            "truncated": true}),
                                 ),
+                                "talklong" => Message::result(
+                                    id,
+                                    json!({"exit_code": 0, "stderr": "",
+                                           "stdout": "x".repeat(nerve_center::jobs::RESULT_TEXT)}),
+                                ),
                                 _ => Message::result(id, r),
                             };
                             let _ = later.send(reply);
@@ -370,6 +381,16 @@ fn serve_changing(
                         if talk == "talksilent" {
                             continue;
                         }
+                        if talk == "talkslow" && slowed.insert(call) {
+                            let later = later.clone();
+                            let sid = next_sid;
+                            next_sid += 1;
+                            tokio::spawn(async move {
+                                tokio::time::sleep(SLOW_OPEN).await;
+                                let _ = later.send(Message::result(id, json!({"sid": sid})));
+                            });
+                            continue;
+                        }
                         if talk == "talkbusy" && at.elapsed() < Duration::from_millis(500) {
                             let e = RpcError::new(
                                 nerve_proto::ErrorCode::Busy,
@@ -385,22 +406,26 @@ fn serve_changing(
                             muted.insert(sid);
                         }
                         send(&mut ws, Message::result(id, json!({"sid": sid}))).await;
-                        let frame = move |seq: u32, data: &str| {
+                        let frame = move |seq: u32, data: &[u8]| {
                             let f = nerve_proto::frame::stream_frame(sid as u32, seq, data.into());
                             WsMessage::binary(f.encode().unwrap())
                         };
-                        let _ = raw.send(frame(0, "one\n"));
+                        let _ = raw.send(frame(0, b"one\n"));
                         if talk == "talkbig" {
                             let big = "\"\n".repeat(BIG / 2);
                             for (i, chunk) in big.as_bytes().chunks(16 * 1024).enumerate() {
-                                let chunk = std::str::from_utf8(chunk).unwrap();
+                                let _ = raw.send(frame(i as u32 + 1, chunk));
+                            }
+                        }
+                        if talk == "talkbin" {
+                            for (i, chunk) in vec![0xff; BIG].chunks(16 * 1024).enumerate() {
                                 let _ = raw.send(frame(i as u32 + 1, chunk));
                             }
                         }
                         if talk == "talkgap" {
                             let gap = nerve_proto::frame::Frame::gap(sid as u32, 1, 5);
                             let _ = raw.send(WsMessage::binary(gap.encode().unwrap()));
-                            let _ = raw.send(frame(2, &"y".repeat(100)));
+                            let _ = raw.send(frame(2, "y".repeat(100).as_bytes()));
                         }
                         let raw = raw.clone();
                         tokio::spawn(async move {
@@ -408,7 +433,7 @@ fn serve_changing(
                             if !talk_ends(&talk) {
                                 return;
                             }
-                            let _ = raw.send(frame(1, "two\n"));
+                            let _ = raw.send(frame(1, b"two\n"));
                             tokio::time::sleep(Duration::from_millis(300)).await;
                             let reason = if talk == "talkodd" {
                                 NODE_WORDS
@@ -4027,22 +4052,29 @@ async fn a_commands_output_streams_while_its_job_runs() {
 }
 
 /// A job's result that lacks output its stream holds (the command timed
-/// out, or the node cut its result) leaves the stream: the answer names it,
-/// and it still reads to its end. The job's answer says to read the stream
-/// before the result.
+/// out, the node or the center cut its result, the result was not kept, the
+/// link dropped) leaves the stream: the answer names it, and it still reads
+/// to its end. The job's answer says to read the stream before the result.
 #[tokio::test]
 async fn a_result_without_all_the_output_leaves_its_stream() {
     let dir = tempfile::tempdir().unwrap();
     let r = job_center(dir.path()).await;
-    let (e, _node, _seen, _task) = job_box(&r).await;
+    let (e, node, _seen, task) = job_box(&r).await;
+    let sess = e.session();
     for (n, (command, words)) in [
         ("talktimeout", "error timeout: job"),
         ("talkcut", "ended after"),
+        ("talklong", "ended after"),
+        ("talk", "was not kept"),
     ]
     .into_iter()
     .enumerate()
     {
         let reply = execute_as(&e, json!(n), "exec.run", json!({"command": command})).await;
+        if command == "talk" {
+            // The session's kept results leave no room for this one's.
+            fill_kept(&sess, &node);
+        }
         let job = job_of(&reply);
         let stream = stream_of(&reply);
         let next = reply["result"]["structuredContent"]["next"]
@@ -4072,7 +4104,66 @@ async fn a_result_without_all_the_output_leaves_its_stream() {
         }
         assert_eq!(got, "one\ntwo\n", "{command}");
     }
+
+    // The link drops while the command runs: the stream keeps what came.
+    let reply = execute_as(&e, json!(9), "exec.run", json!({"command": "talkhang"})).await;
+    let job = job_of(&reply);
+    let stream = stream_of(&reply);
+    wait_for(|| {
+        let found = sess
+            .streams
+            .lock()
+            .unwrap()
+            .get(&stream, &node, std::time::Instant::now())
+            .0;
+        found.filter(|f| f.ring.held() > 0).map(|_| ())
+    })
+    .await;
+    task.abort();
+    wait_for(|| (sess.jobs.lock().unwrap().running() == 0).then_some(())).await;
+    let lost = job_ended(&e, &job).await;
+    let (text, _) = said(&lost);
+    assert!(text.contains("was lost after"), "{text}");
+    assert!(
+        text.contains(&format!("Its output stream {stream} still holds")),
+        "{text}"
+    );
+    let read = read_stream(&e, &stream, 0).await;
+    let data = &read["result"]["structuredContent"]["result"];
+    assert_eq!(
+        (&data["text"], &data["eof"]),
+        (&json!("one\n"), &json!(true))
+    );
     r.stop().await;
+}
+
+/// Fills the kept results of `sess` until the next result of a few dozen
+/// bytes no longer fits.
+fn fill_kept(sess: &nerve_center::center::Session, node: &str) {
+    let route = nerve_center::tools::Route {
+        node_id: node.to_string(),
+        node_name: "box-1".into(),
+        cap: "exec".into(),
+        action: "run".into(),
+        effect: nerve_proto::Effect::Execute,
+    };
+    let mut jobs = sess.jobs.lock().unwrap();
+    let big = nerve_center::jobs::RESULT_TEXT;
+    let mut i = 0;
+    loop {
+        // A result is kept as its JSON text: a string with its quotes.
+        let room = nerve_center::jobs::KEPT_MAX - jobs.kept();
+        let size = big.min(room - 2 - 5);
+        let id = format!("j-fill{i}");
+        let _ = jobs.start(&id, &route, false).unwrap();
+        jobs.detach(&id);
+        jobs.finish(&id, Ok(json!("x".repeat(size))), std::time::Instant::now());
+        if size < big {
+            assert_eq!(nerve_center::jobs::KEPT_MAX - jobs.kept(), 5);
+            return;
+        }
+        i += 1;
+    }
 }
 
 /// A read of the most bytes stays within what one answer hands the model:
@@ -4126,6 +4217,103 @@ async fn a_big_read_stays_within_what_an_answer_holds() {
     r.stop().await;
 }
 
+/// Output that is not UTF-8 grows into replacement characters: a read of
+/// the most bytes still stays within what one answer holds, and the reads
+/// together give every byte the node sent.
+#[tokio::test]
+async fn a_big_read_of_bytes_that_are_not_utf8_stays_within_an_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, _seen, _task) = job_box(&r).await;
+    let reply = execute_as(&e, json!(1), "exec.run", json!({"command": "talkbin"})).await;
+    let stream = stream_of(&reply);
+    let sess = e.session();
+    wait_for(|| {
+        let found = sess
+            .streams
+            .lock()
+            .unwrap()
+            .get(&stream, &node, std::time::Instant::now())
+            .0;
+        found.filter(|f| f.ring.held() > BIG).map(|_| ())
+    })
+    .await;
+    let read = |n: usize| {
+        execute_as(
+            &e,
+            json!("read"),
+            "stream.read",
+            json!({"stream": stream, "max_bytes": n}),
+        )
+    };
+    let big = read(nerve_center::streams::READ_MAX).await;
+    let (text, err) = said(&big);
+    assert!(!err, "{big}");
+    assert!(
+        text.len() <= nerve_center::listing::TEXT_MAX,
+        "{}",
+        text.len()
+    );
+    // The first read's size, from its words; the rest from the data.
+    let first: usize = text
+        .split_once("): ")
+        .and_then(|(_, t)| t.split_once(" bytes;"))
+        .and_then(|(n, _)| n.parse().ok())
+        .unwrap_or_else(|| panic!("{}", &text[..200]));
+    assert!(first > 200 * 1024, "{first}");
+    let mut rest = 0;
+    loop {
+        let got = read(64 * 1024).await;
+        let t = got["result"]["structuredContent"]["result"]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{got}"))
+            .len();
+        if t == 0 {
+            break;
+        }
+        rest += t;
+    }
+    // "one\n", then every byte as a replacement character of 3 bytes.
+    assert_eq!(first + rest, 4 + 3 * BIG);
+    r.stop().await;
+}
+
+/// A node whose answers to `stream.open` come late, past the wait for
+/// them, holds up the streams of its link only until they come: a job
+/// started meanwhile still streams.
+#[tokio::test]
+async fn a_node_that_answers_late_still_streams() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, _seen, _task) = job_box(&r).await;
+    let link = r.center.link(&node).unwrap();
+    r.center
+        .set_stream_waits(Duration::from_millis(50), Duration::from_secs(60));
+    let mut streams = Vec::new();
+    for n in 0..nerve_center::link::UNANSWERED_MAX {
+        let reply = execute_as(&e, json!(n), "exec.run", json!({"command": "talkslow"})).await;
+        streams.push(stream_of(&reply));
+    }
+    wait_for(|| (link.unanswered_opens() == nerve_center::link::UNANSWERED_MAX).then_some(()))
+        .await;
+    let reply = execute_as(&e, json!(9), "exec.run", json!({"command": "talkhang"})).await;
+    streams.push(stream_of(&reply));
+    for stream in streams {
+        let mut got = String::new();
+        for _ in 0..80 {
+            let read = read_stream(&e, &stream, 100).await;
+            let data = &read["result"]["structuredContent"]["result"];
+            assert_ne!(data["eof"], true, "{read}");
+            got.push_str(data["text"].as_str().unwrap_or_default());
+            if !got.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(got, "one\n", "{stream}");
+    }
+    r.stop().await;
+}
+
 /// Each way a job's stream gives up says why in the stream, in the
 /// center's words: the node does not stream the command (a sudo command),
 /// the command ended before it ran there, it did not start there in time,
@@ -4154,8 +4342,8 @@ async fn a_stream_that_cannot_open_says_why() {
         ),
         (
             "talksilent",
-            60_000,
-            "it ended (the node did not answer earlier requests for a stream",
+            600,
+            "it ended (the node did not answer requests for a stream in time",
         ),
     ]
     .into_iter()

@@ -212,7 +212,7 @@ impl Ring {
         .await;
     }
 
-    /// Takes up to `max` bytes as text, up to the next gap: the text a read
+    /// Takes up to `max` bytes of text, up to the next gap: the text a read
     /// gives has nothing missing inside it. A character the cut would split
     /// stays for the next read, unless nothing more can come.
     pub fn read(&self, max: usize) -> Read {
@@ -222,20 +222,13 @@ impl Ring {
             .gaps
             .front()
             .map_or(s.buf.len(), |(p, _)| (p - s.at) as usize);
+        // The text is never shorter than its bytes.
         let n = upto.min(max);
-        let mut bytes: Vec<u8> = s.buf.drain(..n).collect();
         // Before a gap nothing comes that could finish a character.
-        let last = (s.end.is_some() && s.buf.is_empty()) || (n == upto && !s.gaps.is_empty());
-        if !last && let Err(e) = std::str::from_utf8(&bytes) {
-            // Only a split at the end is held back; a bad byte elsewhere
-            // reads as a replacement character, as it would anyway.
-            if e.error_len().is_none() {
-                let rest = bytes.split_off(e.valid_up_to());
-                for b in rest.into_iter().rev() {
-                    s.buf.push_front(b);
-                }
-            }
-        }
+        let last = (s.end.is_some() && n == s.buf.len()) || (n == upto && !s.gaps.is_empty());
+        let head: Vec<u8> = s.buf.range(..n).copied().collect();
+        let took = text_cut(&head, max, last);
+        let bytes: Vec<u8> = s.buf.drain(..took).collect();
         s.at += bytes.len() as u64;
         let eof = s.end.is_some() && s.buf.is_empty() && s.gaps.is_empty();
         Read {
@@ -245,6 +238,40 @@ impl Ring {
             why: s.end.as_ref().filter(|_| eof).map(|(w, _)| w.clone()),
         }
     }
+}
+
+/// How many of `bytes` one read takes: as many as make at most `max` bytes
+/// of text, where each run of bytes that is not UTF-8 reads as one
+/// replacement character of 3 bytes (a Unix node sends a command's bytes as
+/// they are). The start of a character at the end stays for the next read,
+/// unless it is the `last` that can come: the end is checked on its own, so
+/// a bad byte before it does not let the character be split.
+fn text_cut(bytes: &[u8], max: usize, last: bool) -> usize {
+    let (mut took, mut size) = (0, 0);
+    for chunk in bytes.utf8_chunks() {
+        let valid = chunk.valid();
+        if size + valid.len() > max {
+            let mut k = max - size;
+            while !valid.is_char_boundary(k) {
+                k -= 1;
+            }
+            return took + k;
+        }
+        took += valid.len();
+        size += valid.len();
+        let bad = chunk.invalid();
+        if bad.is_empty() {
+            continue;
+        }
+        let start = took + bad.len() == bytes.len()
+            && std::str::from_utf8(bad).is_err_and(|e| e.error_len().is_none());
+        if (start && !last) || size + char::REPLACEMENT_CHARACTER.len_utf8() > max {
+            return took;
+        }
+        took += bad.len();
+        size += char::REPLACEMENT_CHARACTER.len_utf8();
+    }
+    took
 }
 
 impl RingState {
@@ -481,6 +508,8 @@ pub async fn open_on_node(
     let (open_wait, start_wait) = waits;
     let mut pause = Duration::from_millis(50);
     let mut sent_at: Option<Instant> = None;
+    // The last request went unanswered, or could not be sent for those.
+    let mut unanswered = false;
     loop {
         // Closed meanwhile: by the agent, the job's result read, the session's end.
         if ring.ended() {
@@ -509,18 +538,29 @@ pub async fn open_on_node(
                     pause = (pause * 2).min(Duration::from_secs(1));
                     continue;
                 }
-                if link.unanswered_opens() >= crate::link::UNANSWERED_MAX {
-                    ring.end("the node did not answer earlier requests for a stream; job.status gives its output with the result");
-                    return;
-                }
                 let since = *sent_at.get_or_insert_with(Instant::now);
                 if since.elapsed() >= start_wait {
-                    ring.end("its command did not start on the node in time to be streamed; job.status gives its output with the result");
+                    ring.end(if unanswered {
+                        "the node did not answer requests for a stream in time; job.status gives its output with the result"
+                    } else {
+                        "its command did not start on the node in time to be streamed; job.status gives its output with the result"
+                    });
                     return;
+                }
+                // The node left requests unanswered: a slow link may still
+                // bring their answers, which frees them; until then the link
+                // gets no more, and this wait counts as the command's start.
+                if link.unanswered_opens() >= crate::link::UNANSWERED_MAX {
+                    unanswered = true;
+                    tokio::time::sleep(pause).await;
+                    pause = (pause * 2).min(Duration::from_secs(1));
+                    continue;
                 }
                 let params = json!({"cap": "exec", "stream": "output", "params": {"call": call},
                                     "ctx": {"session": session}});
-                match link.open_stream(params, ring.clone(), open_wait).await {
+                let tried = link.open_stream(params, ring.clone(), open_wait).await;
+                unanswered = matches!(&tried, Err(e) if e.kind() == ErrorCode::Timeout);
+                match tried {
                     Ok(sid) => {
                         let kept = sess
                             .upgrade()
@@ -688,6 +728,34 @@ mod tests {
         r.end("ended");
         let last = r.read(READ_MAX);
         assert_eq!((last.text.as_str(), last.eof), ("\u{fffd}", true));
+
+        // A bad byte earlier in the read does not let the end be split.
+        let r = Ring::default();
+        r.push(b"\xffab\xc3");
+        assert_eq!(r.read(READ_MAX).text, "\u{fffd}ab");
+        r.push(b"\xbc rest");
+        assert_eq!(r.read(READ_MAX).text, "\u{fc} rest");
+    }
+
+    /// Bytes that are not UTF-8 grow into replacement characters: a read
+    /// gives at most `max` bytes of text all the same, and what it leaves
+    /// stays for the next one.
+    #[test]
+    fn a_read_of_bytes_that_are_not_utf8_stays_within_its_max() {
+        let r = Ring::default();
+        r.push(&[0xff; 300]);
+        r.push("ok \u{fc}".as_bytes());
+        r.end("ended");
+        let mut text = String::new();
+        loop {
+            let got = r.read(READ_MIN);
+            assert!(got.text.len() <= READ_MIN, "{}", got.text.len());
+            text.push_str(&got.text);
+            if got.eof {
+                break;
+            }
+        }
+        assert_eq!(text, "\u{fffd}".repeat(300) + "ok \u{fc}");
     }
 
     /// A read that waits returns once something comes, or when its wait is
