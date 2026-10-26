@@ -461,9 +461,9 @@ read, no checker, no statistics):
 - An id that names no stream of this session on that node (another
   session's, one closed or dropped, a wrong one) is `error unknown_stream`,
   for reading and closing alike.
-- A sudo command's output is not streamed: its stderr carries sudo's prompts,
-  which only its result is stripped of; the node answers its `stream.open`
-  with `unavailable`. Any other command's stream is stripped of the sudo
+- A sudo command's output is not streamed (also one the node runs as root for
+  `nerve-run`): its stderr carries sudo's prompts, which only its result is
+  stripped of; the node answers its `stream.open` with `unavailable`. Any other command's stream is stripped of the sudo
   password the node holds, as every frame is (node-local.md §4).
 
 **Events.** The harness learns of what happens on a machine by polling, not

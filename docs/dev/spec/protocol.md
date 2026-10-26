@@ -787,7 +787,8 @@ concurrently.
   writes) and sent as UTF-8, once the output proved not to be UTF-8; a cut
   never starts a frame inside a character of a pipe's output. Every copy of
   the sudo password the node holds is replaced as in any frame (§7.4.1), also
-  one that two reads of the pipe cut. A sudo command's output is not
+  one that two reads of the pipe cut. A sudo command's output (also one the
+  node runs as root for a pairing whose commands run as `nerve-run`) is not
   streamed: its `stream.open` is `unavailable`. A center may ask for the
   stream of a call the node does not run yet again later.
 
