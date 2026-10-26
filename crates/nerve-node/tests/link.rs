@@ -688,6 +688,7 @@ fn session_run(command: &str, session: &str) -> Value {
 }
 
 /// `stream.open` of `exec`'s `output` for the call `call`, in `session`.
+#[cfg(unix)]
 fn output_of(call: u64, session: Option<&str>) -> Value {
     let mut p = json!({"cap": "exec", "stream": "output", "params": {"call": call}});
     if let Some(s) = session {

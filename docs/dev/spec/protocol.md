@@ -779,7 +779,9 @@ concurrently.
   before is a gap) and carries everything after, also past the result's cap;
   it ends with the command. A node keeps at most 1 MiB the link did not take
   yet per stream and sends a gap for what it drops: the command never waits
-  for its stream. A sudo command's output is not streamed.
+  for its stream. Output that is not UTF-8 is sent as the result reads it: on
+  Windows decoded from the console's code page (what Windows PowerShell 5.1
+  writes) and sent as UTF-8. A sudo command's output is not streamed.
 
 ### 7.4 `settings` (only with the settings grant `write`)
 

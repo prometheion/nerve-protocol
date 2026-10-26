@@ -367,6 +367,30 @@ fn decode(bytes: &[u8], cut: bool) -> String {
     output_text(bytes, cut, other)
 }
 
+/// A chunk of a command's output for its `output` stream, as UTF-8 where
+/// its result would read it so: on Windows bytes that are not UTF-8 are
+/// taken in the console's code page, as [`output_text`] does (Windows
+/// PowerShell 5.1 writes that). A chunk that only ends inside a UTF-8
+/// character stays as it is; the center joins it with the next one.
+pub fn stream_bytes(b: Vec<u8>) -> Vec<u8> {
+    #[cfg(windows)]
+    if let Err(e) = std::str::from_utf8(&b)
+        && e.error_len().is_some()
+    {
+        return decode(&b, false).into_bytes();
+    }
+    b
+}
+
+/// The most of a command's output one stream frame takes before
+/// [`stream_bytes`]: a byte of a code page can take three in UTF-8, and a
+/// frame carries at most [`nerve_proto::frame::MAX_PAYLOAD`].
+pub const STREAM_CHUNK: usize = if cfg!(windows) {
+    nerve_proto::frame::MAX_PAYLOAD / 3
+} else {
+    nerve_proto::frame::MAX_PAYLOAD
+};
+
 /// The Landlock rules for a command of a center in `folders` mode: it reads
 /// the system and its `r` folders, writes its `w` folders, runs programs from
 /// the system and its `x` folders ([`folder_sets`]). The node's own folders
@@ -3458,6 +3482,15 @@ mod text_tests {
         assert_eq!(output_text(b"a\xFFb", false, |_| None), "a\u{FFFD}b");
     }
 
+    /// A stream's chunk of UTF-8 stays as it is, also one that ends inside
+    /// a character, which the next chunk completes.
+    #[test]
+    fn a_streams_utf8_goes_as_it_is() {
+        let text = "Grüße".as_bytes().to_vec();
+        assert_eq!(stream_bytes(text.clone()), text);
+        assert_eq!(stream_bytes(text[..3].to_vec()), text[..3]);
+    }
+
     /// The `exec.run` text names the shell and, for Windows PowerShell 5.1,
     /// how to chain commands there.
     #[test]
@@ -3808,6 +3841,29 @@ mod windows_tests {
                 "{spelled} was followed"
             );
         }
+    }
+
+    /// What PowerShell printed in the console's code page goes into the
+    /// output stream as UTF-8, like its result.
+    #[tokio::test]
+    async fn powershell_output_streams_with_its_umlauts() {
+        let d = tempfile::tempdir().unwrap();
+        let c = call(
+            "Write-Output 'Grüße'; [Console]::Error.WriteLine('Größe')",
+            d.path(),
+            Duration::from_secs(60),
+        );
+        let tap = std::sync::Arc::new(crate::tap::Tap::default());
+        let o = RunOptions {
+            tap: Some(tap.clone()),
+            ..opts()
+        };
+        run(&c, &o, |_| {}).await.unwrap();
+        let crate::tap::Chunk::Data(d) = tap.reader().next(STREAM_CHUNK).await else {
+            panic!("no output")
+        };
+        let text = String::from_utf8(stream_bytes(d)).unwrap();
+        assert!(text.contains("Grüße") && text.contains("Größe"), "{text:?}");
     }
 
     #[test]

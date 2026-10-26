@@ -433,7 +433,8 @@ read, no checker, no statistics):
   `structuredContent` is the envelope (§4.3) with `result` `{text, eof,
   dropped?}`, and the center's `{stream, job, eof, next?}` as `center`. A
   character a cut would split waits for the next read. The bytes are read as
-  UTF-8 (a byte that is not is a replacement character).
+  UTF-8 (a byte that is not is a replacement character); a Windows node sends
+  output in the console's code page as UTF-8 (protocol.md §7.3).
 - The center keeps at most 1 MiB per stream that was not read; past it the
   oldest bytes go, and the next read says how many (`dropped`, and `N bytes
   were dropped before this text: …`). The node keeps at most 1 MiB the link

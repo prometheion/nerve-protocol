@@ -1358,8 +1358,8 @@ impl Link {
     async fn pump(&self, sid: u32, reader: Arc<crate::tap::Reader>) {
         let mut seq = 0u32;
         loop {
-            let f = match reader.next(frame::MAX_PAYLOAD).await {
-                crate::tap::Chunk::Data(d) => frame::stream_frame(sid, seq, d),
+            let f = match reader.next(exec::STREAM_CHUNK).await {
+                crate::tap::Chunk::Data(d) => frame::stream_frame(sid, seq, exec::stream_bytes(d)),
                 crate::tap::Chunk::Gap(n) => Frame::gap(sid, seq, n),
                 crate::tap::Chunk::End => break,
             };
