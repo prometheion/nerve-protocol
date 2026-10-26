@@ -503,8 +503,9 @@ fn by_mode(
         Need::AllowRule => by_allow_rules(policy, env, call, targets, reasons),
         Need::Allowed => {
             // Folder mode runs a command only where it can be confined to
-            // the folders.
-            let unconfined = (mode == Mode::Folder && call.effect == Effect::Execute)
+            // the folders it holds; an action with no path the owner set on
+            // holds none.
+            let unconfined = (mode == Mode::Folder && call.effect == Effect::Execute && !pathless)
                 .then_some(env.unconfined)
                 .flatten();
             if let Some(why) = unconfined {
@@ -808,8 +809,13 @@ mod tests {
                                 now_ms: NOW,
                             };
                             let want = match effect_rule(mode, effect, paths, setting) {
+                                // A command in folder mode also needs to be
+                                // confined; an action with no path is none.
                                 Allowed => {
-                                    confined || mode != Mode::Folder || effect != Effect::Execute
+                                    confined
+                                        || mode != Mode::Folder
+                                        || effect != Effect::Execute
+                                        || paths == PathArgs::None
                                 }
                                 AllowRule => matches!(allow, ["echo.say"] | ["echo"]),
                                 InFolders | NeedsOn => false,
