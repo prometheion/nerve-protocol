@@ -1590,8 +1590,19 @@ that a deny rule of the action's scope may cover (the rule's pattern up to
 its first wildcard lies below the path, or the path below it and a wildcard
 follows), or in folder mode a folder below it without that flag, refuses the
 call. An `execute` action runs where its paths are, so for it the entries
-and folders below need `x` as well, as the path itself does. The refusal names the path handed over, not the protected entry or the
-folder below it, which the center is not shown. What a program writes below
+and folders below need `x` as well, as the path itself does. The refusal names the path handed over, not the protected entry, the
+folder or the deny rule below it, which the center is not shown. A program
+follows links, which the node's own walks never do: once the call is
+allowed, the node walks each such path as the command account (and each
+folder a link there leads to, once), and judges the place each link leads to
+as a path of the call with the same access; one the call may not reach
+refuses it, and the refusal names the path handed over and the link, not
+where it leads. A link that leads nowhere counts only for a write, at the
+place it names; a link the node cannot follow, or more than 200 000 entries,
+refuse the call. A marked path to write that is itself a link is refused
+with `bad_path`, since the program would act on the place it leads to. In
+folder mode, where commands cannot be confined (§2), an `execute` action
+with paths is refused as `exec.run` is, and not offered. What a program writes below
 a folder is not checked for the places whose writes run code later (`.git`,
 `.envrc`, `.vscode`, `.idea`), as an `fs.write` is: the program may make
 them anywhere below it. An argument the schema does not mark is no path to
@@ -1599,7 +1610,9 @@ the node, which the policy cannot judge; in folder mode an action with no
 marked path needs `on` (§2, Modes). A marked argument left
 out or `null` names no path; with none, the target is `<cap>.<action>`. Only an allowed
 call whose arguments fit reaches the provider, with each marked path as the
-node resolved it, as one line:
+node resolved it; the arguments must fit again with the resolved paths, and a
+resolved path must be valid Unicode, so the program is handed the path judged
+(else `bad_path`). As one line:
 
 ```json
 {"id": 7, "method": "invoke", "params": {"cap": "lamp", "action": "on", "args": {}}}
@@ -1616,7 +1629,7 @@ answer. The provider learns nothing of the center: not its name, its session
 or its policy.
 
 The path is checked when the call comes; the provider uses it afterwards
-with the owner's rights, so a link swapped in between is not caught. A
+with the owner's rights, so a link put in or swapped in between is not caught. A
 provider is a program the owner allowed and trusts.
 
 A center with the settings grant may add allow rules and `on` entries for a

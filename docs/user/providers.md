@@ -77,14 +77,20 @@ marks with `x-nerve-path`, `"read"` or `"write"`:
 
 The node then judges each such path as it judges an `fs` call's: in `folder`
 mode a path read needs an `r` folder and one written a `w` folder (one that
-runs something also `x`); [rules](rules.md#rule-syntax) match the path
+runs something also `x`, and only where the machine can confine commands: where
+it cannot, `x` lets nothing start, so `folder` mode neither offers nor runs a
+program's `execute` action with paths, as it runs no command); [rules](rules.md#rule-syntax) match the path
 (`notes:~/private/*`); protected paths and the node's own files are refused;
 and the [audit log](audit.md) names the path, also one that does not resolve.
 On the installed Linux node a read outside every folder goes where every
 account may read ([reading in folder mode](modes.md#reading-in-folder-mode)),
-and only for a file. A link is followed to where it leads, so one in your
-folder that leads out is refused. The program gets the path as the node
-resolved it, links followed, so it works where the node looked. Only the
+and only for a file. A path given that is a link is followed to where it
+leads and judged there. A path to write that is itself a link is refused
+(`bad_path`): the program would remove, rename or write the place it leads
+to, which you did not name, so name that place instead. The program gets the
+path as the node resolved it, links followed, so it works where the node
+looked; a path that resolves to a name that is not valid Unicode, or to one
+the program's own schema does not take, is refused (`bad_path`). Only the
 top-level arguments can be marked, each a string. A call whose marked path
 it leaves out names no folder: it needs `on`, as an action without paths
 does.
@@ -108,7 +114,17 @@ path released without `x`, refuses the call too. The refusal names the
 folder handed over, not what lies below it. A file holds nothing below it:
 `notes:~/proj/*.env` refuses `notes` the folder `~/proj`, but not
 `~/proj/readme.md`. A path a write names that does not exist yet counts as a
-folder, since the program may make one there. An `fs:` rule covers `fs` calls
+folder, since the program may make one there.
+
+A program follows the links in a folder it is handed, which the node's own
+walks never do. So before the call the node looks for them, as the command
+account: each link below the folder, and below a folder a link leads to, is
+judged where it leads, as if the call named that place, and one that leads
+where the call may not go (outside the folders, to a protected path, to a
+place a deny rule names) refuses the call. The refusal names the link, not
+where it leads. A link that leads nowhere counts only for a write, at the
+place it names. A folder with more than 200 000 entries below it is refused,
+since the node cannot check them all. An `fs:` rule covers `fs` calls
 only: to keep every capability out of a place, deny it for each one that
 takes paths (`notes:~/private/*`), or make it a [protected
 path](protected-paths.md).
@@ -121,7 +137,8 @@ syncs into a folder of yours can write them. Let such an action run only
 where every folder with `w` can take that, or switch it `off`.
 
 The node checks the path when the call comes; the program reads or writes it
-afterwards with your rights, so a link swapped in between is not caught.
+afterwards with your rights, so a link put in or swapped in between is not
+caught: a command with `w` in a folder can make one.
 Allow only programs you trust.
 
 When the program exits, its capabilities leave what `list` shows the centers,

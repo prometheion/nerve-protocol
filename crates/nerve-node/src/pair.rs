@@ -30,7 +30,8 @@ pub fn preview(link: &PairLink, name: Option<&str>) -> String {
     }
     s.push_str(
         "Defaults for this center:\n  \
-         mode folder (only the folders you give it, none yet)\n  \
+         mode folder (writes and commands only in the folders you give it, none yet;\n  \
+         \x20 on the installed node a read may also go where every account may read)\n  \
          settings off (the center cannot change this node's settings)\n  \
          the guard (deny rules that keep its commands off this node itself)\n",
     );

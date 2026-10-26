@@ -652,7 +652,8 @@ in the subset when:
   reads or writes. Only on an argument, a property of the arguments
   schema's root: the node resolves each such argument of a call and decides
   the call by those paths as it does an `fs` call's, node-local.md §3, so a
-  marker deeper down would mark a path nobody checks).
+  marker deeper down would mark a path nobody checks. The program gets each
+  path resolved, and the arguments must fit its schema with it too).
 - A keyword fits its type: `properties`, `required` and
   `additionalProperties` need `object`; `items`, `minItems` and `maxItems`
   `array`; `minLength`, `maxLength` and `x-nerve-path` `string`; the

@@ -35,6 +35,9 @@ names its reason. One the machine gave reads
 | `the config is saved, but the folder grants do not follow it` | Windows: a folder's permissions could not be changed | See the reason. The node tries again when it starts and before each command |
 | `… is protected (…)` | The path is [protected](protected-paths.md) | Grant a folder at it, with the right it needs |
 | `… is denied (…)` | A deny rule matches | `nerve-node rule rm deny …` |
+| `… holds a place that is denied` | A program was handed a folder, and a deny rule of its capability names a place below it | Hand it a folder beside that place, or `nerve-node rule ls deny` |
+| `… holds a link (…) that leads where this call may not reach` | A program was handed a folder that holds a link to a place the call may not use: outside the folders, a protected path or a denied place ([providers](providers.md#paths-it-takes)) | Hand it a folder without that link, or remove the link if you did not mean it |
+| `… is a link; name the place it leads to` | A program was asked to write at a path that is a link, which would act on the place the link leads to | Name that place, or remove the link yourself |
 | `… belongs to the node itself; no rule or mode reaches it` | The call touched the node's config or state folder | Nothing opens these |
 | `sudo is off on this node` | A `sudo` command, and the switch is off | [Turn sudo on](sudo.md) |
 | `a sudo command runs only when the sudo allow list names it` | The sudo list lacks it | `nerve-node rule add sudo '<command>'` |

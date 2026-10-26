@@ -1700,11 +1700,48 @@ impl Link {
                         return Ok(());
                     };
                     let path = WirePath::parse(given).map_err(|e| (given, e))?;
-                    args.insert(
-                        field.clone(),
-                        Value::String(nerve_policy::paths::to_wire(&path.real)),
-                    );
                     let write = *mark == PathMark::Write;
+                    // The program gets the path resolved, so where the path
+                    // given is itself a link, a write there (a removal, a
+                    // rename) would act on the place it leads to, which the
+                    // agent never named.
+                    let own: std::path::PathBuf = path.given.components().collect();
+                    if write
+                        && std::fs::symlink_metadata(&own).is_ok_and(|m| m.file_type().is_symlink())
+                    {
+                        return Err((
+                            given,
+                            crate::fs::bad_path(format!(
+                                "{given} is a link; name the place it leads to"
+                            )),
+                        ));
+                    }
+                    // It is handed the path judged, character for character:
+                    // a name that is no Unicode would reach it as another.
+                    let Some(real) = path
+                        .real
+                        .to_str()
+                        .map(|_| nerve_policy::paths::to_wire(&path.real))
+                    else {
+                        return Err((
+                            given,
+                            crate::fs::bad_path(format!(
+                                "{given} leads to a name the program cannot be handed as it is"
+                            )),
+                        ));
+                    };
+                    args.insert(field.clone(), Value::String(real.clone()));
+                    // Its schema holds the path as it is handed, too.
+                    nerve_proto::schema::validate(&action.params, &Value::Object(args.clone()))
+                        .map_err(|_| {
+                            (
+                                given,
+                                crate::fs::bad_path(format!(
+                                    "{given} leads to {real}, which {}.{} does not take",
+                                    inv.cap, inv.action
+                                )),
+                            )
+                        })?;
                     targets.push(Target {
                         holds: crate::fs::holds(&path.real, write),
                         path: path.real,
@@ -1730,6 +1767,12 @@ impl Link {
                     .collect::<Vec<_>>()
                     .join(", ")
             };
+            // A program's execute action runs in the folders marked `x`
+            // where folder-mode commands could run: where they cannot be
+            // confined, `x` lets nothing start (crate::daemon::folder_refusal).
+            let unconfined = (effect == Effect::Execute)
+                .then(|| self.shared.unconfined_as(&cfg, || known.clone()))
+                .flatten();
             self.gate(
                 &entry,
                 &inv,
@@ -1739,7 +1782,7 @@ impl Link {
                 None,
                 target,
                 known.as_ref(),
-                None,
+                unconfined,
             )?;
             // A missing account stops the call once it is decided and
             // audited, as for `fs`.
@@ -1967,7 +2010,22 @@ impl Link {
                 shell: self.shell_for(command),
                 reads,
             };
-            nerve_policy::decide(&entry.policy, &env, &call)
+            let decision = nerve_policy::decide(&entry.policy, &env, &call);
+            // A program handed a folder follows the links in it: where they
+            // lead is judged too, once the call is allowed, so a folder the
+            // call may not use is never walked.
+            if decision == Decision::Allow
+                && nerve_policy::works_below(&call)
+                && targets.iter().any(|t| t.holds)
+            {
+                match crate::fs::links_below(targets, crate::fs::LINKS_LIMIT) {
+                    Ok(links) => nerve_policy::refuse_links(&entry.policy, &env, &call, &links)
+                        .map_or(decision, Decision::Forbidden),
+                    Err(why) => Decision::Forbidden(why),
+                }
+            } else {
+                decision
+            }
         };
         let audit = |decision: &str, code: Option<&str>, reason: Option<&str>| {
             self.audit(inv, &target, decision, code, reason)

@@ -46,7 +46,8 @@ the node's own files judge them, and the [audit log](audit.md) names them. A
 folder handed to a program counts with everything below it, since the program
 may read or write there: it is refused when a protected path, the node's own
 files, a place a deny rule of that capability names or, in `folder` mode, a
-folder you gave less lies below it. The node sees only the paths a program
+folder you gave less lies below it, and when a link below it leads where the
+call may not go. The node sees only the paths a program
 marks: an argument it does not mark is not a path to the node, so a program's
 action that marks none (it may still read files where it likes, with your
 rights) needs `on` in `folder` mode, whatever it does. A program that reads or

@@ -217,10 +217,9 @@ pub struct Access {
     /// In `folder` mode: the node reads as `account`, so a call that reads
     /// may read, besides the folders with `r`, what is open to every account
     /// on the machine outside every folder; writes and commands keep to the
-    /// folders. False where a read keeps to
-    /// the folders with `r` (the node then reads with its own or the
-    /// owner's rights). Protected paths and the node's own files stay
-    /// closed either way.
+    /// folders. False where a read keeps to the folders with `r` (the node
+    /// then reads with its own or the owner's rights). Protected paths and
+    /// the node's own files stay closed either way.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reads_by_account: bool,
     /// In `folder` mode: the folders the center's file calls and commands

@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use nerve_policy::paths::{parse_device_path, resolve, to_wire};
-use nerve_policy::{PathAccess, Target};
+use nerve_policy::{Link, PathAccess, Target};
 use nerve_proto::rpc::params;
 use nerve_proto::{ErrorCode, RpcError};
 
@@ -29,6 +29,8 @@ const MAX_LIMIT: usize = 5000;
 const WALK_LIMIT: usize = 200_000;
 /// Entries `list` returns at most.
 const LIST_MAX: usize = 10_000;
+/// Entries [`links_below`] looks at at most, as many as a walk visits.
+pub const LINKS_LIMIT: usize = WALK_LIMIT;
 
 pub fn bad_path(msg: impl Into<String>) -> RpcError {
     RpcError::new(ErrorCode::Other("bad_path".into()), msg)
@@ -211,6 +213,95 @@ pub fn holds(path: &Path, write: bool) -> bool {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => write,
         Err(_) => true,
     }
+}
+
+/// The links that lie below the paths of `targets` that may hold others
+/// ([`Target::holds`]), and where each leads, for a call that hands them to
+/// a program (nerve_policy::works_below). The node's own walks never follow
+/// a link, but a program does, so each place a link leads to is judged as
+/// a path of the call (nerve_policy::refuse_links). A link that leads to a
+/// folder is looked into as well. Asked as the account the paths were
+/// resolved as; a folder it may not read is left out, as the walks leave it.
+/// A link that leads nowhere is left out where the call reads (nothing is
+/// there to read), and judged at the place it names where the call writes,
+/// since a write through it makes that place. `Err` says why the node
+/// cannot tell where they all lead: more than `limit` entries, or a link it
+/// cannot follow.
+pub fn links_below(targets: &[Target], limit: usize) -> Result<Vec<Link>, String> {
+    let mut links = Vec::new();
+    let mut seen = 0usize;
+    for (handed, t) in targets.iter().enumerate().filter(|(_, t)| t.holds) {
+        let write = t.access == PathAccess::Write;
+        let given = to_wire(&t.path);
+        // The folders to look into: the path itself, then each folder a
+        // link leads to that lies in none looked into already.
+        let mut roots = vec![t.path.clone()];
+        let mut walked: Vec<PathBuf> = Vec::new();
+        while let Some(root) = roots.pop() {
+            if walked.iter().any(|w| nerve_policy::paths::within(&root, w)) {
+                continue;
+            }
+            walked.push(root.clone());
+            let mut stack = vec![root];
+            while let Some(dir) = stack.pop() {
+                let Ok(rd) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for e in rd.filter_map(Result::ok) {
+                    seen += 1;
+                    if seen > limit {
+                        return Err(format!(
+                            "{given} holds more than {limit} entries; the node cannot check \
+                             where the links in it lead"
+                        ));
+                    }
+                    let at = e.path();
+                    let Ok(ft) = e.file_type() else {
+                        continue;
+                    };
+                    if ft.is_dir() {
+                        stack.push(at);
+                        continue;
+                    }
+                    if !ft.is_symlink() {
+                        continue;
+                    }
+                    let cannot = || {
+                        format!(
+                            "{given} holds a link ({}) the node cannot follow",
+                            to_wire(&at)
+                        )
+                    };
+                    let to = match resolve(&at) {
+                        Ok(to) => to,
+                        Err(nerve_policy::paths::PathError::DanglingSymlink(_)) if !write => {
+                            continue;
+                        }
+                        Err(nerve_policy::paths::PathError::DanglingSymlink(_)) => {
+                            let named = std::fs::read_link(&at).map_err(|_| cannot())?;
+                            let named = at.parent().map_or(named.clone(), |p| p.join(&named));
+                            resolve(&named).map_err(|_| cannot())?
+                        }
+                        Err(_) => return Err(cannot()),
+                    };
+                    let holds = holds(&to, write);
+                    if holds {
+                        roots.push(to.clone());
+                    }
+                    links.push(Link {
+                        handed,
+                        at,
+                        to: Target {
+                            path: to,
+                            access: t.access,
+                            holds,
+                        },
+                    });
+                }
+            }
+        }
+    }
+    Ok(links)
 }
 
 /// Whether `path` lies in the node's own entry of `/proc`: `/proc/self`,
@@ -976,6 +1067,72 @@ mod tests {
             assert!(!holds(&file, write));
             assert_eq!(holds(&missing, write), write);
         }
+    }
+
+    /// The links below a folder handed to a program, and where they lead:
+    /// a link to a folder is looked into, each folder once; a link that
+    /// leads nowhere counts only for a write, at the place it names. Too
+    /// many entries, and nothing can be told.
+    #[cfg(unix)]
+    #[test]
+    fn the_links_below_a_handed_folder_are_found() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().canonicalize().unwrap();
+        let (proj, out) = (root.join("proj"), root.join("out"));
+        for p in [proj.join("sub/deep"), out.join("inner")] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        std::fs::write(out.join("secret"), "s").unwrap();
+        symlink(out.join("secret"), proj.join("sub/deep/env")).unwrap();
+        symlink(&out, proj.join("out")).unwrap();
+        symlink(out.join("inner/../secret"), out.join("inner/again")).unwrap();
+        // Back into the folder: nothing new to look into.
+        symlink(&proj, proj.join("sub/up")).unwrap();
+        symlink(root.join("gone/new"), proj.join("dangling")).unwrap();
+        let target = |access| Target {
+            path: proj.clone(),
+            access,
+            holds: true,
+        };
+        let found = |access| {
+            let mut v: Vec<(PathBuf, PathBuf, bool)> = links_below(&[target(access)], LINKS_LIMIT)
+                .unwrap()
+                .into_iter()
+                .map(|l| {
+                    assert_eq!((l.handed, l.to.access), (0, access));
+                    (l.at, l.to.path, l.to.holds)
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        let mut read = vec![
+            (proj.join("out"), out.clone(), true),
+            (proj.join("sub/deep/env"), out.join("secret"), false),
+            (proj.join("sub/up"), proj.clone(), true),
+            (out.join("inner/again"), out.join("secret"), false),
+        ];
+        read.sort();
+        assert_eq!(found(PathAccess::Read), read);
+        let mut write = read.clone();
+        write.push((proj.join("dangling"), root.join("gone/new"), true));
+        write.sort();
+        assert_eq!(found(PathAccess::Write), write);
+        // A file holds nothing to look into.
+        let file = Target {
+            path: out.join("secret"),
+            access: PathAccess::Read,
+            holds: false,
+        };
+        assert_eq!(links_below(&[file], LINKS_LIMIT).unwrap(), []);
+        // Cut short: refused, never judged by the part looked at.
+        let e = links_below(&[target(PathAccess::Read)], 3).unwrap_err();
+        assert!(e.contains("holds more than 3 entries"), "{e}");
+        // A link it cannot follow: a loop.
+        symlink(proj.join("loop"), proj.join("loop")).unwrap();
+        let e = links_below(&[target(PathAccess::Read)], LINKS_LIMIT).unwrap_err();
+        assert!(e.contains("holds a link") && e.contains("loop"), "{e}");
     }
 
     #[test]

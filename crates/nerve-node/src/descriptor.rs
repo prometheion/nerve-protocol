@@ -529,6 +529,11 @@ fn offered(
     if cap == "exec" && mode == Mode::Folder && !confined && policy.sudo_allow.is_empty() {
         return false;
     }
+    // A program's execute action with paths runs in the folders marked `x`,
+    // and so, like a command, not where none can be confined.
+    if cap != "exec" && effect == Effect::Execute && paths && mode == Mode::Folder && !confined {
+        return false;
+    }
     let paths = if paths {
         PathArgs::Some {
             all_in_folders: true,
@@ -690,7 +695,8 @@ impl Reach {
             }
         }
         // A machine that cannot confine a folder-mode command refuses it
-        // ([`crate::daemon::folder_refusal`]), so `x` lets nothing start.
+        // ([`crate::daemon::folder_refusal`]), and a program's execute action
+        // with paths as well, so `x` lets nothing start.
         if !self.confined {
             for (_, _, a, _) in &mut folders {
                 a.execute = false;
@@ -1500,11 +1506,13 @@ mod tests {
                                     PathArgs::Some { all_in_folders }
                                 };
                                 match need(mode, effect, paths, setting) {
+                                    // Folder mode runs no command and no
+                                    // program's execute action with paths
+                                    // where it cannot confine commands.
                                     Allowed => {
                                         confined
                                             || effect != Effect::Execute
                                             || mode != Mode::Folder
-                                            || cap != "exec"
                                     }
                                     AllowRule => covered,
                                     InFolders | NeedsOn | Off => false,
@@ -1540,10 +1548,6 @@ mod tests {
                                     cwd: run.then_some(std::path::Path::new(&path)),
                                     now_ms: 0,
                                 };
-                                // A provider's action is no command the
-                                // machine confines: the link asks no
-                                // confinement of it.
-                                let confined = confined || cap != "exec";
                                 let want = by_table(all_in_folders);
                                 let allowed =
                                     decide(&e.policy, &env(confined), &call) == Decision::Allow;

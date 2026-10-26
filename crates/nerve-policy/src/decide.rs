@@ -443,7 +443,7 @@ fn own_folder<'p>(env: &'p Env, call: &Call) -> Option<&'p Path> {
 /// and a command, whose working directory the sandbox and the guard hold.
 /// A folder given to such a call counts as everything in it, so whatever
 /// lies below it that the call may not touch refuses the call.
-fn works_below(call: &Call) -> bool {
+pub fn works_below(call: &Call) -> bool {
     call.cap != crate::rules::FS && call.command.is_none()
 }
 
@@ -513,11 +513,10 @@ pub fn decide(policy: &CenterPolicy, env: &Env, call: &Call) -> Decision {
     if works_below(call) {
         for t in call.targets.iter().filter(|t| t.holds) {
             let text = to_wire(&t.path);
-            if let Some(rule) = deny.find_below(call.cap, call.action, &text) {
-                let rule = crate::rules::escape_controls(rule);
-                return Decision::Forbidden(format!(
-                    "{text} holds a place that is denied ({rule})"
-                ));
+            // As for the other places below it, the refusal does not name
+            // the rule: the rule names that place.
+            if deny.find_below(call.cap, call.action, &text).is_some() {
+                return Decision::Forbidden(format!("{text} holds a place that is denied"));
             }
         }
     }
@@ -621,6 +620,45 @@ pub fn decide(policy: &CenterPolicy, env: &Env, call: &Call) -> Decision {
     } else {
         Decision::Forbidden(reasons.join("; "))
     }
+}
+
+/// A link that lies below a path a call hands to a program
+/// ([`works_below`]), and where it leads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    /// Which of the call's targets it lies below.
+    pub handed: usize,
+    /// Where the link itself lies.
+    pub at: PathBuf,
+    /// Where it leads, resolved, with the access of the path it lies below.
+    pub to: Target,
+}
+
+/// Why `call`, which [`decide`] allowed, is refused for one of `links`. The
+/// checks below a handed path go by the names there, but a program follows
+/// a link to where it leads: each place a link leads to must be one the
+/// call could name itself. The refusal names the link, which lies where the
+/// call already reaches, not where it leads: the agent is never shown a
+/// protected path or a folder it may not reach that way.
+pub fn refuse_links(
+    policy: &CenterPolicy,
+    env: &Env,
+    call: &Call,
+    links: &[Link],
+) -> Option<String> {
+    links.iter().find_map(|l| {
+        let one = Call {
+            targets: std::slice::from_ref(&l.to),
+            ..*call
+        };
+        (decide(policy, env, &one) != Decision::Allow).then(|| {
+            format!(
+                "{} holds a link ({}) that leads where this call may not reach",
+                to_wire(&call.targets[l.handed].path),
+                to_wire(&l.at)
+            )
+        })
+    })
 }
 
 /// A sudo command runs only when the sudo allow list names it, in every mode.
@@ -1717,12 +1755,12 @@ mod tests {
         let work = t("/h/work", false);
         assert_eq!(
             denied(&p, &marked("search", Effect::Read, &work)),
-            "/h/work holds a place that is denied (notes:/h/work/clients/*)"
+            "/h/work holds a place that is denied"
         );
         let proj = t("/h/proj", true);
         assert_eq!(
             denied(&p, &marked("save", Effect::Write, &proj)),
-            "/h/proj holds a place that is denied (notes.save:~/proj/keep/*)"
+            "/h/proj holds a place that is denied"
         );
         // Beside the denied place, and for another capability, it holds no more.
         assert_eq!(
@@ -1741,6 +1779,58 @@ mod tests {
             run(&p, &env, &marked("search", Effect::Read, &work)),
             "refused"
         );
+    }
+
+    /// A program handed a folder follows the links in it, so each place a
+    /// link there leads to is judged as if the call named it: the folders,
+    /// the protected paths and the deny rules hold there, in every mode.
+    /// The refusal names the link, not where it leads.
+    #[test]
+    fn a_link_below_a_handed_folder_is_judged_where_it_leads() {
+        let x = T::new();
+        let env = x.env(true);
+        let link = |to: &str| Link {
+            handed: 0,
+            at: "/h/proj/link".into(),
+            to: t(to, false).remove(0),
+        };
+        let proj = t("/h/proj", false);
+        let call = marked("search", Effect::Read, &proj);
+        for mode in MODES {
+            let mut p = policy(mode);
+            p.folders = vec![Folder {
+                path: "/h/proj".into(),
+                access: acc("rw"),
+            }];
+            p.allow = rules(&["notes"]);
+            p.deny = rules(&["notes:~/secrets/*"]);
+            assert_eq!(decide(&p, &env, &call), Decision::Allow, "{mode:?}");
+            let refused = |to: &str| refuse_links(&p, &env, &call, &[link(to)]);
+            // In the folder, and in allowlist and user mode anywhere the
+            // call may go.
+            assert_eq!(refused("/h/proj/sub"), None, "{mode:?}");
+            assert_eq!(
+                refused("/elsewhere/a").is_some(),
+                mode == Mode::Folder,
+                "{mode:?}"
+            );
+            for to in ["/h/.ssh/id_test", "/h/secrets/app.env"] {
+                assert_eq!(
+                    refused(to).as_deref(),
+                    Some(
+                        "/h/proj holds a link (/h/proj/link) that leads where this call may not reach"
+                    ),
+                    "{mode:?} {to}"
+                );
+            }
+            // A folder a link leads to counts with what lies below it.
+            assert!(refused("/h").is_some(), "{mode:?}");
+            // The first refused link refuses the call.
+            assert!(
+                refuse_links(&p, &env, &call, &[link("/h/proj/a"), link("/h/.ssh")]).is_some(),
+                "{mode:?}"
+            );
+        }
     }
 
     /// A file holds nothing, so a deny rule that names places below a

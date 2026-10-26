@@ -1075,13 +1075,231 @@ async fn a_deny_rule_below_a_folder_leaves_the_files_there_alone() {
             .await
             .unwrap()
             .expect_err("refused");
-        assert!(
-            e.message
-                .contains("holds a place that is denied (files:**/.env)"),
-            "{action} {}: {}",
-            at.display(),
-            e.message
+        assert_eq!(
+            e.message,
+            format!("{} holds a place that is denied", at.display()),
+            "{action}"
         );
+    }
+    served.abort();
+    daemon.stop().await;
+}
+
+/// A program is handed no more than the node judged. It follows the links
+/// in a folder it is handed, so where they lead counts too; a path to write
+/// that is itself a link is refused, since the program would act on the
+/// place it leads to; the path handed must still fit the program's schema
+/// and read as the one judged. Where folder-mode commands cannot be
+/// confined (this test's node runs them unconfined), a program's execute
+/// action is neither offered nor run in an `x` folder.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_program_is_handed_no_more_than_the_node_judged() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+    let wire = |p: &Path| p.display().to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let (work, outside) = (root.join("work"), root.join("outside"));
+    let ssh = root.join("home/.ssh");
+    for d in [
+        work.join("plain"),
+        work.join("env"),
+        work.join("keys"),
+        work.join("inner"),
+        work.join("chain"),
+        work.join("relay"),
+        work.join("new"),
+        outside.clone(),
+        ssh.clone(),
+    ] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(work.join("plain/a.txt"), "a").unwrap();
+    std::fs::write(outside.join("secret.txt"), "s").unwrap();
+    std::fs::write(ssh.join("id_test"), "k").unwrap();
+    symlink(outside.join("secret.txt"), work.join("env/.env")).unwrap();
+    symlink(&ssh, work.join("keys/ssh")).unwrap();
+    symlink(work.join("plain"), work.join("inner/data")).unwrap();
+    // A link to a folder in the folders that holds a link out.
+    symlink(work.join("relay"), work.join("chain/next")).unwrap();
+    symlink(&outside, work.join("relay/out")).unwrap();
+    // Nothing is there to read, but a write through it makes the place.
+    symlink(outside.join("made.txt"), work.join("new/made")).unwrap();
+    // A name that is no Unicode, and a link to it.
+    let odd = work
+        .join("plain")
+        .join(std::ffi::OsStr::from_bytes(b"odd\xff"));
+    std::fs::write(&odd, "o").unwrap();
+    symlink(&odd, work.join("odd")).unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let folders = vec![nerve_policy::config::Folder {
+        path: work.display().to_string(),
+        access: nerve_policy::config::Access::parse("rwx").unwrap(),
+    }];
+    let daemon = node(&root, &center, &me(), |p| {
+        p.mode = nerve_policy::Mode::Folder;
+        p.folders = folders.clone();
+    })
+    .await;
+    let mut conn = linked(&mut center).await;
+    let path = |mark: &str| {
+        json!({"type": "object", "required": ["path"],
+               "properties": {"path": {"type": "string", "x-nerve-path": mark}}})
+    };
+    let only = wire(&work.join("inner/data"));
+    let caps = json!([{"id": "files", "summary": "Files of the desk.", "actions": {
+        "open": {"effect": "read", "params": path("read")},
+        "save": {"effect": "write", "params": path("write")},
+        "build": {"effect": "execute", "params": path("read")},
+        "pick": {"effect": "read", "params": {"type": "object", "required": ["path"],
+            "properties": {"path": {"type": "string", "x-nerve-path": "read", "enum": [only]}}}}}}]);
+    let (mut p, first) = hello_with(&daemon.paths().ctl_socket(), caps).await;
+    assert_eq!(first["ok"]["broken"], json!([]), "{first}");
+    descriptor_changed(&mut conn).await;
+    let d = conn
+        .call("describe", json!({"detail": "full"}), WAIT)
+        .await
+        .unwrap()
+        .unwrap();
+    let files = d["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "files")
+        .expect("files is listed")
+        .clone();
+    let offered: Vec<&String> = files["actions"].as_object().unwrap().keys().collect();
+    assert_eq!(offered, ["open", "pick", "save"]);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let got = seen.clone();
+    let served = tokio::spawn(async move {
+        while let Some(call) = p.next().await {
+            got.lock()
+                .unwrap()
+                .push(call["params"]["args"]["path"].clone());
+            p.send(json!({"id": call["id"], "ok": call["params"]["args"]}))
+                .await;
+        }
+    });
+    let call = |action: &str, at: &str| json!({"cap": "files", "action": action, "args": {"path": at}, "ctx": {}});
+    let allowed = [
+        ("open", wire(&work.join("plain"))),
+        ("open", wire(&work.join("inner"))),
+        ("open", wire(&work.join("new"))),
+        ("save", wire(&work.join("plain"))),
+        // Through a link to read it is the place it leads to.
+        ("open", wire(&work.join("inner/data"))),
+    ];
+    for (action, at) in &allowed {
+        conn.call("invoke", call(action, at), WAIT)
+            .await
+            .unwrap()
+            .unwrap_or_else(|e| panic!("{action} {at}: {}", e.message));
+    }
+    let link = |dir: &str, name: &str| {
+        format!(
+            "{} holds a link ({}) that leads where this call may not reach",
+            wire(&work.join(dir)),
+            wire(&work.join(dir).join(name))
+        )
+    };
+    let refused = [
+        (
+            "open",
+            wire(&work.join("env")),
+            "forbidden",
+            link("env", ".env"),
+        ),
+        (
+            "open",
+            wire(&work.join("keys")),
+            "forbidden",
+            link("keys", "ssh"),
+        ),
+        (
+            "open",
+            wire(&work.join("chain")),
+            "forbidden",
+            format!(
+                "{} holds a link ({}) that leads where this call may not reach",
+                wire(&work.join("chain")),
+                wire(&work.join("relay/out"))
+            ),
+        ),
+        (
+            "save",
+            wire(&work.join("new")),
+            "forbidden",
+            link("new", "made"),
+        ),
+        (
+            "save",
+            wire(&work.join("inner/data")),
+            "bad_path",
+            format!(
+                "{} is a link; name the place it leads to",
+                wire(&work.join("inner/data"))
+            ),
+        ),
+        (
+            "pick",
+            only.clone(),
+            "bad_path",
+            format!(
+                "{only} leads to {}, which files.pick does not take",
+                wire(&work.join("plain"))
+            ),
+        ),
+        (
+            "open",
+            wire(&work.join("odd")),
+            "bad_path",
+            format!(
+                "{} leads to a name the program cannot be handed as it is",
+                wire(&work.join("odd"))
+            ),
+        ),
+        (
+            "build",
+            wire(&work.join("plain")),
+            "forbidden",
+            String::new(),
+        ),
+    ];
+    for (action, at, code, why) in &refused {
+        let e = conn
+            .call("invoke", call(action, at), WAIT)
+            .await
+            .unwrap()
+            .expect_err("refused");
+        assert_eq!(code_of(&e), *code, "{action} {at}: {}", e.message);
+        if why.is_empty() {
+            assert!(e.message.contains("cannot be confined"), "{}", e.message);
+        } else {
+            assert_eq!(&e.message, why, "{action} {at}");
+        }
+    }
+    // Only the allowed calls reached it, with the paths it was handed.
+    let mut want: Vec<Value> = allowed.iter().map(|(_, at)| json!(at)).collect();
+    want[4] = json!(wire(&work.join("plain")));
+    assert_eq!(*seen.lock().unwrap(), want);
+    // Each refusal is in the audit, with the path given.
+    let audit: Vec<(String, String)> = std::fs::read_to_string(daemon.paths().audit_log())
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e["cap"] == "files" && e["decision"] == "forbidden")
+        .map(|e| {
+            (
+                e["target"].as_str().unwrap().to_string(),
+                e["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(audit.len(), refused.len(), "{audit:#?}");
+    for ((target, reason), (_, at, _, why)) in audit.iter().zip(&refused) {
+        assert_eq!(target, at);
+        assert!(why.is_empty() || reason == why, "{reason}");
     }
     served.abort();
     daemon.stop().await;
