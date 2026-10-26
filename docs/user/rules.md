@@ -237,7 +237,9 @@ covers the capability it names only: `fs:~/private/*` does not keep a
 that folder. Deny each such capability too, or make the place a
 [protected path](protected-paths.md), which every capability respects. A
 program handed a folder works below it, so a deny rule of its capability that
-may cover a place below that folder refuses the folder as well; an `fs` walk
+may cover a place below that folder refuses the folder as well (and a new
+path it would write to, where it may make a folder; a file it is handed holds
+nothing below it); an `fs` walk
 (`grep`, `find`, `list`) skips the denied place instead. A path rule covers
 only the paths a program marks as such. An unknown rule shape is refused
 when you add it.

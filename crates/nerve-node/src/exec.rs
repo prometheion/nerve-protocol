@@ -106,6 +106,7 @@ impl RunCall {
         vec![Target {
             path: self.cwd.clone(),
             access: PathAccess::Run,
+            holds: true,
         }]
     }
 }

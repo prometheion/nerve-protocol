@@ -497,8 +497,8 @@ fn exposure(entry: &CenterEntry, id: &str) -> Option<Exposure> {
 /// An action that names paths (`paths`: `fs`, `exec.run`, a provider's
 /// action whose schema marks some with `x-nerve-path`) names them per call,
 /// so it is offered where a call with its paths in the folders is allowed.
-/// One that names none lies in no folder: `folder` mode offers a read then,
-/// and a write or a command only where the owner set it to on. A write
+/// One that names none lies in no folder: `folder` mode offers it only where
+/// the owner set it to on, a read too. A write
 /// whose marked paths are all ones it reads names no place it writes, and
 /// counts as one with none (`paths` false).
 fn offered(
@@ -1528,6 +1528,7 @@ mod tests {
                                 let targets = [Target {
                                     path: path.clone().into(),
                                     access,
+                                    holds: true,
                                 }];
                                 let run = cap == "exec";
                                 let call = Call {

@@ -82,6 +82,7 @@ fn at(p: &str, write: bool) -> Vec<Target> {
         } else {
             PathAccess::Read
         },
+        holds: true,
     }]
 }
 
@@ -90,6 +91,7 @@ fn cwd_at(p: &str) -> Vec<Target> {
     vec![Target {
         path: p.into(),
         access: PathAccess::Run,
+        holds: true,
     }]
 }
 

@@ -200,6 +200,19 @@ pub fn may_read_outside(path: &Path, provider: bool) -> Result<(), String> {
     }
 }
 
+/// Whether `path`, handed to a program, may hold other paths it reaches
+/// (nerve_policy::decide::Target::holds): a folder, or for a `write` a path
+/// that does not exist yet, where the program may make one. Asked as the
+/// account the path was resolved as. What cannot be told counts as a
+/// folder, so the checks below it err wide.
+pub fn holds(path: &Path, write: bool) -> bool {
+    match std::fs::metadata(path) {
+        Ok(m) => m.is_dir(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => write,
+        Err(_) => true,
+    }
+}
+
 /// Whether `path` lies in the node's own entry of `/proc`: `/proc/self`,
 /// `/proc/thread-self`, or `/proc/<n>` where `n` is the node or one of its
 /// threads (a thread's entry is there too, though `/proc` does not list it).
@@ -353,6 +366,7 @@ impl FsCall {
             } else {
                 PathAccess::Read
             },
+            holds: true,
         }]
     }
 
@@ -938,6 +952,21 @@ mod tests {
                 let why = r.unwrap_err();
                 assert!(why.contains("the node's own process"), "{why}");
             }
+        }
+    }
+
+    /// A folder holds other paths, a file does not, and a missing path only
+    /// where a write may make a folder there.
+    #[test]
+    fn a_folder_holds_paths_a_file_does_not() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("a.txt");
+        std::fs::write(&file, "x").unwrap();
+        let missing = d.path().join("missing");
+        for write in [false, true] {
+            assert!(holds(d.path(), write));
+            assert!(!holds(&file, write));
+            assert_eq!(holds(&missing, write), write);
         }
     }
 

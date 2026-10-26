@@ -1672,8 +1672,10 @@ impl Link {
             // The arguments its schema marks as paths are the call's rule
             // targets, resolved as the command account would see them, as an
             // `fs` call's are: the folders, the rules and the protected and
-            // own paths judge them. The provider gets each path as resolved,
-            // so it works where the policy looked. An action with no path
+            // own paths judge them. Only one that may hold other paths (a
+            // folder, or where a write may make one) is judged by what lies
+            // below it too. The provider gets each path as resolved, so it
+            // works where the policy looked. An action with no path
             // has `cap.action` as its target, and looks nobody up.
             let account = if marked.is_empty() {
                 Ok(None)
@@ -1702,11 +1704,14 @@ impl Link {
                         field.clone(),
                         Value::String(nerve_policy::paths::to_wire(&path.real)),
                     );
+                    let write = *mark == PathMark::Write;
                     targets.push(Target {
+                        holds: crate::fs::holds(&path.real, write),
                         path: path.real,
-                        access: match mark {
-                            PathMark::Read => PathAccess::Read,
-                            PathMark::Write => PathAccess::Write,
+                        access: if write {
+                            PathAccess::Write
+                        } else {
+                            PathAccess::Read
                         },
                     });
                     Ok(())

@@ -39,6 +39,12 @@ pub enum Decision {
 pub struct Target {
     pub path: PathBuf,
     pub access: PathAccess,
+    /// Whether other paths may lie below this one: a folder, or a path
+    /// that does not exist yet where the call writes, since the program may
+    /// make a folder there. A file holds nothing, so a call that works below
+    /// its paths ([`works_below`]) is not judged by what may lie below a
+    /// file. `true` where the node does not know, which errs wide.
+    pub holds: bool,
 }
 
 /// What a call does at one of its paths. Each needs its own folder flag:
@@ -426,7 +432,7 @@ fn own_folder<'p>(env: &'p Env, call: &Call) -> Option<&'p Path> {
         .or_else(|| {
             call.targets
                 .iter()
-                .filter(|_| works_below(call))
+                .filter(|t| works_below(call) && t.holds)
                 .find_map(|t| env.protected.own_below(&t.path))
         })
 }
@@ -502,13 +508,15 @@ pub fn decide(policy: &CenterPolicy, env: &Env, call: &Call) -> Decision {
     // A program handed a folder works below it, so a deny rule of its own
     // that covers a place there refuses the folder as well; the node's own
     // walks skip such places instead.
+    // A file holds no place, so a rule that names files below its folder
+    // (`notes:~/proj/*.env`) leaves the other files there alone.
     if works_below(call) {
-        for t in targets.iter().filter(|t| t.path) {
-            if let Some(rule) = deny.find_below(call.cap, call.action, &t.text) {
+        for t in call.targets.iter().filter(|t| t.holds) {
+            let text = to_wire(&t.path);
+            if let Some(rule) = deny.find_below(call.cap, call.action, &text) {
                 let rule = crate::rules::escape_controls(rule);
                 return Decision::Forbidden(format!(
-                    "{} holds a place that is denied ({rule})",
-                    t.text
+                    "{text} holds a place that is denied ({rule})"
                 ));
             }
         }
@@ -541,7 +549,7 @@ pub fn decide(policy: &CenterPolicy, env: &Env, call: &Call) -> Decision {
         // gave less. The refusal does not name what lies below: the agent
         // is never shown a closed folder or the owner's extra protected
         // paths, and naming the parent must not tell it them.
-        let below = works_below(call) && t.access != PathAccess::Run;
+        let below = works_below(call) && t.holds && t.access != PathAccess::Run;
         if below
             && entry.is_none()
             && env
@@ -1028,6 +1036,7 @@ mod tests {
                         Effect::Execute => PathAccess::Run,
                         _ => PathAccess::Read,
                     },
+                    holds: true,
                 }]
             };
             let (inside_t, outside_t) = (at("/w/rw/a"), at("/elsewhere/a"));
@@ -1203,10 +1212,12 @@ mod tests {
             Target {
                 path: "/w/rw/out".into(),
                 access: PathAccess::Write,
+                holds: true,
             },
             Target {
                 path: "/elsewhere/a".into(),
                 access: PathAccess::Read,
+                holds: true,
             },
         ];
         assert_eq!(
@@ -1666,6 +1677,54 @@ mod tests {
         );
     }
 
+    /// A file holds nothing, so a deny rule that names places below a
+    /// folder leaves the other files there alone, in every mode; the folder
+    /// above them is still refused.
+    #[test]
+    fn a_file_handed_to_a_provider_holds_no_place_below_it() {
+        let x = T::new();
+        let env = x.env(true);
+        let file = |p: &str, write: bool| {
+            let mut t = t(p, write);
+            t[0].holds = false;
+            t
+        };
+        for mode in MODES {
+            let mut p = policy(mode);
+            p.folders = vec![Folder {
+                path: "/h/proj".into(),
+                access: acc("rw"),
+            }];
+            p.allow = rules(&["notes"]);
+            for rule in [
+                "notes:~/proj/*.env",
+                "notes:**/.env",
+                "notes:/h/proj/*/secrets/*",
+            ] {
+                p.deny = rules(&[rule]);
+                for (action, effect, path, write) in [
+                    ("open", Effect::Read, "/h/proj/readme.md", false),
+                    ("open", Effect::Read, "/h/proj/src/main.rs", false),
+                    ("save", Effect::Write, "/h/proj/new.txt", true),
+                ] {
+                    let what = format!("{mode:?} {rule} {path}");
+                    let at = file(path, write);
+                    assert_eq!(
+                        run(&p, &env, &marked(action, effect, &at)),
+                        "allow",
+                        "{what}"
+                    );
+                    let at = t(path, write);
+                    assert_eq!(
+                        run(&p, &env, &marked(action, effect, &at)),
+                        "refused",
+                        "{what} as a folder"
+                    );
+                }
+            }
+        }
+    }
+
     const MODES: [Mode; 3] = [Mode::Allowlist, Mode::Folder, Mode::User];
 
     struct T {
@@ -1749,6 +1808,7 @@ mod tests {
             } else {
                 PathAccess::Read
             },
+            holds: true,
         }]
     }
 
@@ -1757,6 +1817,7 @@ mod tests {
         vec![Target {
             path: p.into(),
             access: PathAccess::Run,
+            holds: true,
         }]
     }
 
@@ -1959,6 +2020,7 @@ mod tests {
         let at = |path: &str, access| Target {
             path: path.into(),
             access,
+            holds: true,
         };
         let read_there = [
             at("/h/.ssh/config", PathAccess::Read),
@@ -2020,6 +2082,7 @@ mod tests {
         let at = |path: &str, access| Target {
             path: path.into(),
             access,
+            holds: true,
         };
         let cases = [
             (vec![at("/w/rw", PathAccess::Run)], Decision::Allow),

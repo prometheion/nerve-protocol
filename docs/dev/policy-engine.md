@@ -180,8 +180,11 @@ rights.
 
 A path handed to a capability other than `fs` and not a command (a
 provider's) counts with what lies below it, since the program may read or
-write there; `fs` walks skip such places themselves (`works_below`). Such a
-path is refused when a node-own folder lies below it (with the own-folder
+write there; `fs` walks skip such places themselves (`works_below`). Only a
+path that may hold others counts so (`Target::holds`): the node sets it from
+what is there as it resolves the path, a folder, or for a write a path that
+does not exist yet; a file is judged by itself alone, so `notes:**/.env`
+refuses no file handed to `notes` but a `.env`. Such a path is refused when a node-own folder lies below it (with the own-folder
 check, first), when a deny rule of its scope may match below it (step 5,
 `RuleSet::find_below`: the pattern's text up to its first wildcard lies
 below the path, or the path below that text and a wildcard follows), when a

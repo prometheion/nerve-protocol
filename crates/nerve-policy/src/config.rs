@@ -840,8 +840,10 @@ pub struct Folder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CapSetting {
-    /// Allows sense and actuate actions, which no mode allows; for the other
-    /// actions the mode still decides.
+    /// Allows sense and actuate actions, which no mode allows, and in
+    /// `folder` mode an action that names no path (the folders cannot allow
+    /// one); for the other actions the mode still decides. It never lets a
+    /// call out of the folders.
     On,
     /// Refused.
     Off,

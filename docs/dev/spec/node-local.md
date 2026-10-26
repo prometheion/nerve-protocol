@@ -1579,8 +1579,11 @@ under `account::FsAs`), as an `fs` call's path is: the folders, the rules,
 the protected paths and the node's own folders judge them, and the audit
 entry names them (joined by `, `); a path that does not resolve is refused
 with `bad_path` and audited with the text given, once the node acts as
-itself again (the command account may not write the node's log). A path argument counts with
-what lies below it, as the program may read or write there: a protected
+itself again (the command account may not write the node's log). A path argument that may hold
+other paths counts with what lies below it, as the program may read or write
+there. That is a folder, or a path a write names that does not exist yet (the
+program may make a folder there), or one the node cannot look at; a file holds
+nothing, and is judged by itself alone. For such a path, a protected
 entry below it that no folder releases for its access, a place below it
 that a deny rule of the action's scope may cover (the rule's pattern up to
 its first wildcard lies below the path, or the path below it and a wildcard

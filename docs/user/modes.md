@@ -59,14 +59,14 @@ On the node [installed as a service](service.md) on Linux, the node reads a
 `folder` mode center's files as `nerve-run`. Inside the folders of that center
 their flags decide, as everywhere: a read needs `r`, and a folder you closed
 inside one with `r` stays closed. Outside every folder of that center, a call
-that reads may read what every account on the machine may read: a file others
+whose effect is `read` may read what every account on the machine may read: a file others
 may read, in folders others may enter all the way down (`/etc/hostname`, most
 of `/usr`). It reads nothing of yours that is closed to other accounts, also
 where the node lets `nerve-run` pass through your home to a folder you gave,
 nothing another center was given unless it is open to everyone, no protected
 path and none of the node's own files (its keys, config and state), which are
-closed to `nerve-run`, nor the node's own process under `/proc`. Writing and
-commands stay in the folders. A program
+closed to `nerve-run`, nor the node's own process under `/proc`. Writing,
+commands, and a path a write or a run reads stay in the folders. A program
 that reads a path for a call ([provider](providers.md)) gets the call outside
 the folders only for a file open to every account, never for a folder, since
 it would read below it with your rights. With

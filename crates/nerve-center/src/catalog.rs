@@ -183,8 +183,9 @@ impl Reach {
     /// outside the framing: how to read it, how far a read goes, what holds
     /// the commands, and where files go. Where the node reads as the command
     /// account (`reads_by_account`), a file call reads in the `r` folders
-    /// and, outside every folder, what is open to every account, and only
-    /// writes and a command's start keep to the folders; elsewhere every
+    /// and, if its effect is read, outside every folder what is open to
+    /// every account; writes, a command's start and the reads of other
+    /// calls keep to the folders; elsewhere every
     /// path a call names does. The advice of a command (this one) says
     /// nothing of file calls' reads, which a command does not get. A sandbox holds what a
     /// command reaches to the folders that grant something, closed ones
@@ -214,8 +215,9 @@ impl Reach {
     fn advice_on(&self, commands: bool) -> Option<String> {
         self.note()?;
         // Where the node reads as the command account, the folders hold
-        // only what a file call writes and where a command starts; outside
-        // them a file call reads what every account may. A program other
+        // only what a call writes, where a command starts and what a call
+        // that is no read reads; outside them a read reads what every
+        // account may. A program other
         // than the node reads with the owner's rights, so the node hands it
         // no folder there.
         const OPEN: &str = "what is open to every account on the machine, except protected \
@@ -227,8 +229,9 @@ impl Reach {
         if self.no_folder() && !commands {
             return Some(if reads {
                 format!(
-                    "The node is in folder mode with no folder granted: a call may read {OPEN}; \
-                     it may write nothing until its owner grants a folder. {NO_FOLDER}"
+                    "The node is in folder mode with no folder granted: a call whose effect is \
+                     read may read {OPEN}; any other call that names a path is refused until its \
+                     owner grants a folder. {NO_FOLDER}"
                 )
             } else {
                 "The node is in folder mode with no folder granted: its calls that name paths \
@@ -266,8 +269,9 @@ impl Reach {
         } else if reads {
             format!(
                 "The node is in folder mode: a call may read in the folders of the `folders:` \
-                 line marked r and, outside every folder, {OPEN}. {NO_FOLDER} A call may write \
-                 only in the folders marked w (r read, w write, x run commands)"
+                 line marked r, and one whose effect is read also, outside every folder, {OPEN}. \
+                 {NO_FOLDER} A call may write only in the folders marked w (r read, w write, x \
+                 run commands)"
             )
         } else {
             "The node is in folder mode: its calls may name paths only in the folders of the \
@@ -1363,8 +1367,9 @@ mod tests {
     }
 
     /// Where the node reads as the command account, the advice says that a
-    /// read goes as far as that account may read and only writes and
-    /// commands keep to the folders, granted or none; the hash of the units
+    /// call whose effect is read goes as far as that account may read, and
+    /// writes, commands and the reads of other calls keep to the folders,
+    /// granted or none; the hash of the units
     /// that take paths moves with it, and no other.
     #[test]
     fn the_advice_says_how_far_a_read_goes() {
@@ -1388,9 +1393,9 @@ mod tests {
         assert!(
             a.starts_with(&format!(
                 "The node is in folder mode: a call may read in the folders of the `folders:` \
-                 line marked r and, outside every folder, {open}. {never} A call may write only \
-                 in the folders marked w (r read, w write, x run commands). Where folders nest, \
-                 the deepest one decides."
+                 line marked r, and one whose effect is read also, outside every folder, \
+                 {open}. {never} A call may write only in the folders marked w (r read, w \
+                 write, x run commands). Where folders nest, the deepest one decides."
             )),
             "{a}"
         );
@@ -1418,8 +1423,9 @@ mod tests {
         assert_eq!(
             reach(true, json!([]), false).file_advice().unwrap(),
             format!(
-                "The node is in folder mode with no folder granted: a call may read {open}; it \
-                 may write nothing until its owner grants a folder. {never}"
+                "The node is in folder mode with no folder granted: a call whose effect is \
+                 read may read {open}; any other call that names a path is refused until its \
+                 owner grants a folder. {never}"
             )
         );
         assert_eq!(

@@ -108,8 +108,9 @@ allowed when every marked path lies in a folder with the matching flag; a
 read, write or run needs `on` when it names none (a write: no path it
 writes), since an argument it does not mark is no path to the node; a
 `sense` or `actuate` action needs `on`, and its marked paths stay in the
-folders too. A path the node is handed for another program counts with what
-lies below it, deny rules of that capability included.
+folders too. A folder the node is handed for another program (or a path a
+write would make) counts with what lies below it, deny rules of that
+capability included; a file does not.
 
 ## Built-in profiles
 

@@ -103,7 +103,10 @@ may read or write anywhere in it: the call is refused when a protected path
 that no folder releases, the node's own files, a place a deny rule of that
 capability names (`notes:~/private/*` refuses `notes` the folder `~` too) or,
 in `folder` mode, a folder you gave less lies below it. The refusal names the
-folder handed over, not what lies below it. An `fs:` rule covers `fs` calls
+folder handed over, not what lies below it. A file holds nothing below it:
+`notes:~/proj/*.env` refuses `notes` the folder `~/proj`, but not
+`~/proj/readme.md`. A path a write names that does not exist yet counts as a
+folder, since the program may make one there. An `fs:` rule covers `fs` calls
 only: to keep every capability out of a place, deny it for each one that
 takes paths (`notes:~/private/*`), or make it a [protected
 path](protected-paths.md).

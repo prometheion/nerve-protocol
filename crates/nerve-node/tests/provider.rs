@@ -983,6 +983,106 @@ async fn a_path_taking_provider_is_held_to_the_folders() {
         (&off["target"], &off["code"]),
         (&json!(""), &json!("disabled"))
     );
+    // An off command is in the audit with its command line, which an
+    // `exec` rule is written for.
+    owner_edit(&paths, |c| {
+        c.centers[0]
+            .policy
+            .caps
+            .insert("exec.run".into(), nerve_policy::config::CapSetting::Off);
+    })
+    .await;
+    let run = json!({"cap": "exec", "action": "run",
+                     "args": {"command": "echo off", "cwd": in_work}, "ctx": {}});
+    let e = conn
+        .call("invoke", run, WAIT)
+        .await
+        .unwrap()
+        .expect_err("off");
+    assert_eq!(code_of(&e), "disabled", "{}", e.message);
+    let off = std::fs::read_to_string(paths.audit_log())
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .rfind(|e| e["cap"] == "exec")
+        .expect("the off command is audited");
+    assert_eq!(
+        (&off["action"], &off["target"], &off["code"]),
+        (&json!("run"), &json!("echo off"), &json!("disabled")),
+        "{off}"
+    );
+    served.abort();
+    daemon.stop().await;
+}
+
+/// A file handed to a provider holds nothing below it, so a deny rule that
+/// names places below its folder (`files:**/.env`) refuses the folder and a
+/// path a write may make a folder at, not the files beside those places.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deny_rule_below_a_folder_leaves_the_files_there_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("readme.md"), "r").unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let folders = vec![nerve_policy::config::Folder {
+        path: work.display().to_string(),
+        access: nerve_policy::config::Access::parse("rw").unwrap(),
+    }];
+    let daemon = node(&root, &center, &me(), |p| {
+        p.mode = nerve_policy::Mode::Folder;
+        p.folders = folders.clone();
+        p.deny = vec!["files:**/.env".into()];
+    })
+    .await;
+    let mut conn = linked(&mut center).await;
+    let path = |mark: &str| {
+        json!({"type": "object", "required": ["path"],
+                                   "properties": {"path": {"type": "string", "x-nerve-path": mark}}})
+    };
+    let caps = json!([{"id": "files", "summary": "Files of the desk.", "actions": {
+        "open": {"effect": "read", "params": path("read")},
+        "save": {"effect": "write", "params": path("write")}}}]);
+    let (mut p, first) = hello_with(&daemon.paths().ctl_socket(), caps).await;
+    assert_eq!(first["ok"]["broken"], json!([]), "{first}");
+    descriptor_changed(&mut conn).await;
+    let served = tokio::spawn(async move {
+        while let Some(call) = p.next().await {
+            p.send(json!({"id": call["id"], "ok": call["params"]["args"]}))
+                .await;
+        }
+    });
+    let call = |action: &str, at: &Path| {
+        json!({"cap": "files", "action": action,
+                                                "args": {"path": at.display().to_string()}, "ctx": {}})
+    };
+    // A file, there to read or write, and one a read finds missing.
+    for (action, at) in [
+        ("open", work.join("readme.md")),
+        ("save", work.join("readme.md")),
+        ("open", work.join("missing.md")),
+    ] {
+        conn.call("invoke", call(action, &at), WAIT)
+            .await
+            .unwrap()
+            .unwrap_or_else(|e| panic!("{action} {}: {}", at.display(), e.message));
+    }
+    // The folder, and a new path the program may make a folder at.
+    for (action, at) in [("open", work.clone()), ("save", work.join("new"))] {
+        let e = conn
+            .call("invoke", call(action, &at), WAIT)
+            .await
+            .unwrap()
+            .expect_err("refused");
+        assert!(
+            e.message
+                .contains("holds a place that is denied (files:**/.env)"),
+            "{action} {}: {}",
+            at.display(),
+            e.message
+        );
+    }
     served.abort();
     daemon.stop().await;
 }
