@@ -756,6 +756,18 @@ mod tests {
             }
         }
         assert_eq!(text, "\u{fffd}".repeat(300) + "ok \u{fc}");
+        // A bad byte makes the text longer than its bytes, so the cut can
+        // land inside a character that comes after it: it stays whole for
+        // the next read.
+        let r = Ring::default();
+        r.push(&[0xff]);
+        r.push(&[b'a'; READ_MIN - 4]);
+        r.push("\u{fc} rest".as_bytes());
+        r.end("ended");
+        let first = r.read(READ_MIN);
+        assert!(first.text.len() <= READ_MIN, "{}", first.text.len());
+        assert!(first.text.ends_with('a'), "{}", first.text);
+        assert_eq!(r.read(READ_MIN).text, "\u{fc} rest");
     }
 
     /// A read that waits returns once something comes, or when its wait is
