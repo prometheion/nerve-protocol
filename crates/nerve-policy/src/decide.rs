@@ -1519,13 +1519,14 @@ mod tests {
         // The node's own walks skip such places, so `fs` is not refused.
         assert_eq!(decide(&p, &env, &fs_read(&home)), Decision::Allow);
         // A folder that releases the protected entry for reads lets it be
-        // read, and only read.
+        // read, and only read. The entry is under `~`, which is absolute on
+        // every platform; `/data/keys` is not on Windows, and is left out.
         let prot = Protected::new(
             &Platform::Unix,
             Path::new("/h"),
             &[],
             &ProtectedOptions {
-                extra: vec!["/data/keys".into()],
+                extra: vec!["~/data/keys".into()],
                 ..Default::default()
             },
         );
@@ -1534,16 +1535,16 @@ mod tests {
             ..x.env(true)
         };
         p.folders = vec![Folder {
-            path: "/data".into(),
+            path: "/h/data".into(),
             access: acc("rw"),
         }];
-        let data = t("/data", false);
+        let data = t("/h/data", false);
         assert_eq!(
             decide(&p, &env, &marked("search", Effect::Read, &data)),
-            Decision::Forbidden("/data holds a protected path".into())
+            Decision::Forbidden("/h/data holds a protected path".into())
         );
         p.folders.push(Folder {
-            path: "/data/keys".into(),
+            path: "/h/data/keys".into(),
             access: acc("r"),
         });
         assert_eq!(
@@ -1551,8 +1552,12 @@ mod tests {
             Decision::Allow
         );
         assert_eq!(
-            decide(&p, &env, &marked("save", Effect::Write, &t("/data", true))),
-            Decision::Forbidden("/data holds a protected path".into())
+            decide(
+                &p,
+                &env,
+                &marked("save", Effect::Write, &t("/h/data", true))
+            ),
+            Decision::Forbidden("/h/data holds a protected path".into())
         );
     }
 
