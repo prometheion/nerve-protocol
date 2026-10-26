@@ -404,17 +404,23 @@ and they count in no statistics:
 ### 4.5 Streams and events
 
 A job of `exec.run` streams its command's output. When the call becomes a
-job, the center opens the command's `output` stream on the node
-(`stream.open {cap: "exec", stream: "output", params: {call}, ctx: {session}}`,
-protocol.md §5.1, §7.3) for the calling session, and the job's answer names
-it: `Its output so far and as it comes: capability "stream.read" with args
-{"stream": "s-…"} …`, also in `next`, and `structuredContent` carries
-`"stream": "s-…"`. The node sends the end of what the command printed so far,
-then what it prints, stdout and stderr in the order it read them; the result
-still carries the output as before. When no stream could be opened (the
-session holds 16 already, the node refused, the job ended meanwhile) the
-answer says so and why: `Its output is not streamed (…); job.status gives it
-with the result.` The answer counts as the details of `stream.read` and
+job, its answer names a stream for the calling session: `Its output so far
+and as it comes: capability "stream.read" with args {"stream": "s-…"} …`,
+also in `next`, and `structuredContent` carries `"stream": "s-…"`. The center
+opens the command's `output` stream on the node (`stream.open {cap: "exec",
+stream: "output", params: {call}, ctx: {session}}`, protocol.md §5.1, §7.3)
+once the call was sent and the command runs there: while the node has no such
+command yet (the checker or a call place held the call, or the node is
+still setting the command up) it asks again, for up to a minute after the
+call was sent; neither the answer nor any read waits for that. The node sends
+the end of what the command printed so far, then what it prints, stdout and
+stderr in the order it read them; the result still carries the output as
+before. When the stream cannot be opened (the job ended first, the node
+refused, the command did not start within that minute) it ends, and a read
+says why in the center's words: `it ended (the node refused to open it
+(busy))`. Only when the session holds 16 streams that still run, or it ended,
+does the answer name none: `Its output is not streamed (…); job.status gives
+it with the result.` The answer counts as the details of `stream.read` and
 `stream.close` (§4.3), as of `job.*`.
 
 The center serves two more units of its own, like `job.*` (no node call for a
@@ -432,26 +438,33 @@ read, no checker, no statistics):
   ended); this is the last of it.`), then the text framed as device content.
   `structuredContent` is the envelope (§4.3) with `result` `{text, eof,
   dropped?}`, and the center's `{stream, job, eof, next?}` as `center`. A
-  character a cut would split waits for the next read. The bytes are read as
-  UTF-8 (a byte that is not is a replacement character); a Windows node sends
+  character a cut would split waits for the next read, and a wait goes on
+  while the stream holds only the start of one. The bytes are read as UTF-8
+  (a byte that is not is a replacement character); a Windows node sends
   output in the console's code page as UTF-8 (protocol.md §7.3).
+- A read that gives output taints the session (the action checker's taint,
+  §4.4): it is outside content, as the job's result is when it ends.
 - The center keeps at most 1 MiB per stream that was not read; past it the
   oldest bytes go, and the next read says how many (`dropped`, and `N bytes
-  were dropped before this text: …`). The node keeps at most 1 MiB the link
-  did not carry yet and says the same of what it drops; the command is never
-  held up by its stream.
+  were dropped before this text: …`, which names every cause). The node keeps
+  at most 1 MiB the link did not carry yet and says the same of what it
+  drops, and a stream opened after its command printed more than the node
+  keeps of it starts with the end of that and the count of what came before;
+  the command is never held up by its stream.
 - A stream is kept in memory only. It goes with `stream.close` (the node is
-  told to stop it if it still runs there), when its job's result is read
-  through `job.status`, with the session, and 10 minutes after it ended
-  unread. A session holds at most 16; a 17th goes in place of the oldest that
+  told to stop it if it still runs there, without waiting for its answer),
+  when its job's result is read through `job.status`, with the session, and
+  10 minutes after it ended unread. A session holds at most 16; a 17th goes in place of the oldest that
   ended, or is not opened. A link that drops ends its streams on both sides,
   also when the link resumes (their frames are not counted, protocol.md §4.9):
   a read then gives what came and `it ended (the link to the node dropped)`.
 - An id that names no stream of this session on that node (another
   session's, one closed or dropped, a wrong one) is `error unknown_stream`,
   for reading and closing alike.
-- A sudo command's output is not streamed: frames are not scrubbed of the
-  sudo password the way the text of a result is.
+- A sudo command's output is not streamed: its stderr carries sudo's prompts,
+  which only its result is stripped of; the node answers its `stream.open`
+  with `unavailable`. Any other command's stream is stripped of the sudo
+  password the node holds, as every frame is (node-local.md §4).
 
 **Events.** The harness learns of what happens on a machine by polling, not
 by MCP notifications (HTTP has no server-sent events here, and many

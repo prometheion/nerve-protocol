@@ -237,8 +237,9 @@ lost; a link the machine resumes keeps them.
 
 ### A command's output while it runs
 
-When a command becomes a job, the center also opens its output as a
-**stream**, and the job's answer names it:
+When a command becomes a job, its output also comes as a **stream**, and the
+job's answer names it. The center opens it on the machine as soon as the
+command runs there, also when that takes a while:
 
 ```
 … Its output so far and as it comes: capability "stream.read" with args {"stream": "s-8hd1…"} ("wait_ms" waits for more); "stream.close" with the same args ends the stream.
@@ -254,7 +255,9 @@ The model can follow a build or a test run this way and stop it with
 the command printed before it opened. The result of the job still carries the
 whole output (up to the machine's output limit), so reading the stream is
 never needed. The center polls nothing on its own: the model asks with
-`stream.read`, and no MCP notification is sent.
+`stream.read`, and no MCP notification is sent. Output read from a stream
+taints the session for the action checker, as the job's result does when it
+ends.
 
 A stream belongs to its session, as its job does. The center keeps at most
 1 MiB of a stream that was not read, in memory only; when more comes, the
@@ -263,7 +266,8 @@ streams. A stream goes when it is closed, when the job's result is read with
 `job.status`, when the session ends, and 10 minutes after it ended unread.
 When the machine's link drops, its streams end (also when the link resumes):
 `stream.read` gives what came and says so. A `sudo` command's output is not
-streamed; it comes in the result.
+streamed; it comes in the result. Every other stream is stripped of the sudo
+password the machine holds, as its results are.
 
 ## Sessions
 

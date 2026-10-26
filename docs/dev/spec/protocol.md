@@ -569,7 +569,10 @@ u8 kind | u8 flags | u32 id | u32 seq | payload (at most 65536 bytes)
 - kind 3: media, reserved. In version "0" it is refused (`protocol_error`).
 
 Each side keeps at most 64 frames queued for sending; a full queue pushes back
-on the producer.
+on the producer. Stream frames wait apart from the other frames and go only
+while none of those waits, so a stream that outruns the link never holds up
+pings, acks, events or answers; a stream's `stream.close` goes after its last
+frame.
 
 ### 5.5 Limits
 
@@ -781,7 +784,12 @@ concurrently.
   yet per stream and sends a gap for what it drops: the command never waits
   for its stream. Output that is not UTF-8 is sent as the result reads it: on
   Windows decoded from the console's code page (what Windows PowerShell 5.1
-  writes) and sent as UTF-8. A sudo command's output is not streamed.
+  writes) and sent as UTF-8, once the output proved not to be UTF-8; a cut
+  never starts a frame inside a character of a pipe's output. Every copy of
+  the sudo password the node holds is replaced as in any frame (§7.4.1), also
+  one that two reads of the pipe cut. A sudo command's output is not
+  streamed: its `stream.open` is `unavailable`. A center may ask for the
+  stream of a call the node does not run yet again later.
 
 ### 7.4 `settings` (only with the settings grant `write`)
 

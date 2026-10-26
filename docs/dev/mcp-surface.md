@@ -156,11 +156,13 @@ sessions leave a quarter of a node's call places free, at most 8. Details:
 
 ## Streams and events
 
-A command that became a job streams its output: the center opens the
-command's `output` stream on the node for the session (`stream.open` with
-`ctx.session`) and names it in the job's answer. `stream.read` gives what
-came since the last read, framed as the node's content, and waits for more
-when asked (at most the call wait); `stream.close` ends it. The center keeps
+A command that became a job streams its output: the job's answer names a
+stream, and the center opens the command's `output` stream on the node for
+the session (`stream.open` with `ctx.session`) once the command runs there,
+asking again while it does not yet. `stream.read` gives what came since the
+last read, framed as the node's content, taints the session when it gives
+output, and waits for more when asked (at most the call wait);
+`stream.close` ends it without waiting for the node. The center keeps
 at most 1 MiB per stream that was not read, drops the oldest past it and
 says how much; streams are the session's own, at most 16, in memory only,
 and go on close, when the job's result is read, with the session, or when
