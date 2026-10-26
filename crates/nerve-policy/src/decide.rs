@@ -1186,6 +1186,12 @@ mod tests {
         // A command runs in its working directory whatever access its call
         // site gave that path, or none: `r` does not release it.
         let cwd_as_read = [at("/h/.ssh", PathAccess::Read)];
+        // The protected entry is joined from parts, so Windows shows it with
+        // its own separator.
+        let protected_text = format!(
+            "/h/.ssh is protected ({})",
+            Path::new("/h").join(".ssh").display()
+        );
         for targets in [&cwd_as_read[..], &[][..]] {
             let c = Call {
                 cwd: Some(Path::new("/h/.ssh")),
@@ -1195,7 +1201,7 @@ mod tests {
             let d = decide(&p, &env, &c);
             assert_eq!(
                 d,
-                Decision::Forbidden("/h/.ssh is protected (/h/.ssh)".into()),
+                Decision::Forbidden(protected_text.clone()),
                 "{targets:?}"
             );
             // `x` does.
@@ -1206,7 +1212,7 @@ mod tests {
             p.folders.clear();
             assert_eq!(
                 decide(&p, &env, &c),
-                Decision::Forbidden("/h/.ssh is protected (/h/.ssh)".into()),
+                Decision::Forbidden(protected_text.clone()),
                 "{targets:?}"
             );
         }
