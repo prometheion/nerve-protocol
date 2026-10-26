@@ -28,6 +28,9 @@ use crate::link::Link;
 
 /// The most bytes one stream keeps that the model did not read yet.
 pub const RING_BYTES: usize = 1024 * 1024;
+/// The most places in one ring where the node said it dropped bytes; past
+/// it a new gap takes in the last one and the text between them.
+const GAPS_MAX: usize = 64;
 /// The most streams one session holds.
 pub const STREAMS_MAX: usize = 16;
 /// What `stream.read` gives when `max_bytes` is not set.
@@ -128,6 +131,17 @@ impl Ring {
                 && *p == pos
             {
                 *m += n;
+            } else if s.gaps.len() >= GAPS_MAX {
+                // The text since the last gap goes with this one: a node
+                // that drops a byte after every byte it sends must not make
+                // a ring hold more than its bytes.
+                let last = s.gaps.back().map_or(pos, |g| g.0);
+                let since = (pos - last) as usize;
+                let keep = s.buf.len() - since;
+                s.buf.truncate(keep);
+                if let Some(g) = s.gaps.back_mut() {
+                    g.1 += since as u64 + n;
+                }
             } else {
                 s.gaps.push_back((pos, n));
             }
@@ -606,6 +620,32 @@ mod tests {
         assert_eq!((a.text.as_str(), a.dropped), ("\u{fffd}", 4));
         let b = r.read(READ_MAX);
         assert_eq!((b.text.as_str(), b.dropped), ("x", 1));
+    }
+
+    /// A node that drops a little after every byte it sends cannot make a
+    /// ring hold more than its bytes: past [`GAPS_MAX`] places, the text
+    /// between two gaps is dropped with them, and the reads still count
+    /// every byte.
+    #[test]
+    fn a_ring_keeps_few_gaps() {
+        let r = Ring::default();
+        for _ in 0..10_000 {
+            r.push(b"x");
+            r.gap(1);
+        }
+        assert!(r.state.lock().unwrap().gaps.len() <= GAPS_MAX);
+        let (mut text, mut dropped) = (0, 0);
+        r.end("the command ended");
+        loop {
+            let got = r.read(READ_MAX);
+            text += got.text.len() as u64;
+            dropped += got.dropped;
+            if got.eof {
+                break;
+            }
+        }
+        assert_eq!(text + dropped, 20_000);
+        assert!(text >= GAPS_MAX as u64 - 1, "{text}");
     }
 
     /// A character the read would split waits for the next one.
