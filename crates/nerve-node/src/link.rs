@@ -2348,7 +2348,7 @@ impl<'a> Running<'a> {
         let tap = streamed.then(|| {
             let shared = Arc::downgrade(&self.link.shared);
             let secret: crate::tap::Held =
-                Box::new(move || shared.upgrade().and_then(|s| s.held_secret()));
+                Arc::new(move || shared.upgrade().and_then(|s| s.held_secret()));
             Arc::new(crate::tap::Tap::new(Some(secret), exec::other_text()))
         });
         lock(&self.link.taps).insert(self.id.clone(), tap.clone());

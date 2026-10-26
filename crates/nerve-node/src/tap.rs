@@ -11,7 +11,10 @@
 //! output that is not UTF-8 is read in the console's code page, and every
 //! copy of the sudo password the node holds is replaced, as in any frame
 //! (crate::sudo). Both work on what each pipe printed, across its reads: a
-//! character or a copy that a read cut waits for the next one.
+//! character or a copy that a read cut waits for the next one. The password
+//! is replaced once more as a stream sends, with the one the node holds
+//! then, as text frames are: output kept for a stream may have been printed
+//! before sudo was turned on.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, Weak};
@@ -40,7 +43,7 @@ pub enum Pipe {
 pub type Decode = fn(&[u8]) -> Option<String>;
 
 /// Gives the sudo password the node holds now.
-pub(crate) type Held = Box<dyn Fn() -> Option<Secret> + Send + Sync>;
+pub(crate) type Held = Arc<dyn Fn() -> Option<Secret> + Send + Sync>;
 
 /// One running command's output, stdout and stderr in the order the node
 /// read them, as text the way its result reads it and without the sudo
@@ -59,9 +62,6 @@ struct Inner {
     readers: Vec<Weak<Reader>>,
     ended: bool,
     pipes: [Carry; 2],
-    /// Whether the output is in the code page (`Some(true)`) or UTF-8, once
-    /// a read told them apart.
-    code_page: Option<bool>,
 }
 
 /// What a pipe's last read left for its next one.
@@ -71,6 +71,10 @@ struct Carry {
     raw: Vec<u8>,
     /// Text that may be the start of a copy of the password.
     held: Vec<u8>,
+    /// Whether the pipe prints in the code page (`Some(true)`) or UTF-8,
+    /// once a read told them apart; each pipe on its own, as the result
+    /// reads them.
+    code_page: Option<bool>,
 }
 
 /// One stream's view of a [`Tap`]: what it still has to send.
@@ -78,6 +82,7 @@ struct Carry {
 pub struct Reader {
     pending: Mutex<Pending>,
     more: Notify,
+    secret: Option<Held>,
 }
 
 #[derive(Default)]
@@ -85,6 +90,11 @@ struct Pending {
     data: VecDeque<u8>,
     dropped: u64,
     ended: bool,
+    /// Taken from `data` and scrubbed, to go next.
+    ready: VecDeque<u8>,
+    /// Taken from `data`, and maybe the start of a copy of the password:
+    /// it waits for what follows.
+    held: Vec<u8>,
 }
 
 /// What a stream sends next.
@@ -115,6 +125,29 @@ fn cut_char(b: &mut Vec<u8>) -> Vec<u8> {
     }
 }
 
+/// `text`, after what `held` kept of the text before it, without any copy
+/// in `copies`. Text at its end that may start a copy is kept in `held` for
+/// what follows, unless this is the `last` of it.
+fn scrub_held(held: &mut Vec<u8>, text: Vec<u8>, copies: &[String], last: bool) -> Vec<u8> {
+    let mut data = std::mem::take(held);
+    data.extend(text);
+    for c in copies {
+        data = replace(&data, c.as_bytes(), REDACTED.as_bytes());
+    }
+    if !last {
+        let starts = |k: usize| {
+            copies
+                .iter()
+                .any(|c| k < c.len() && c.as_bytes().starts_with(&data[data.len() - k..]))
+        };
+        let most = copies.iter().map(String::len).max().unwrap_or(1) - 1;
+        if let Some(k) = (1..=most.min(data.len())).rev().find(|&k| starts(k)) {
+            *held = data.split_off(data.len() - k);
+        }
+    }
+    data
+}
+
 fn replace(hay: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(hay.len());
     let mut i = 0;
@@ -137,6 +170,37 @@ impl Pending {
         if over > 0 {
             self.data.drain(..over);
             self.dropped += over as u64 + skip_cut(&mut self.data);
+        }
+    }
+
+    /// The next chunk of at most `max` bytes, without any copy in `copies`;
+    /// none while there is nothing to send. What was taken from `data`
+    /// before a gap goes before it.
+    fn take(&mut self, max: usize, copies: &[String]) -> Option<Chunk> {
+        loop {
+            if !self.ready.is_empty() {
+                let n = self.ready.len().min(max);
+                return Some(Chunk::Data(self.ready.drain(..n).collect()));
+            }
+            let flush = self.dropped > 0 || (self.data.is_empty() && self.ended);
+            if flush && !self.held.is_empty() {
+                // What it waited for was dropped, or never comes.
+                let out = scrub_held(&mut self.held, Vec::new(), copies, true);
+                self.ready.extend(out);
+                continue;
+            }
+            if self.dropped > 0 {
+                return Some(Chunk::Gap(std::mem::take(&mut self.dropped)));
+            }
+            if !self.data.is_empty() {
+                let n = self.data.len().min(max);
+                let text: Vec<u8> = self.data.drain(..n).collect();
+                let last = self.data.is_empty() && self.ended;
+                let out = scrub_held(&mut self.held, text, copies, last);
+                self.ready.extend(out);
+                continue;
+            }
+            return self.ended.then_some(Chunk::End);
         }
     }
 }
@@ -170,21 +234,21 @@ impl Inner {
                 .unwrap_or_else(|| String::from_utf8_lossy(d).into_owned())
                 .into_bytes()
         };
-        if self.code_page == Some(true) {
+        if carry.code_page == Some(true) {
             return decoded(&data);
         }
         match std::str::from_utf8(&data) {
             Err(e) if e.error_len().is_some() => {
-                if self.code_page == Some(false) {
+                if carry.code_page == Some(false) {
                     return String::from_utf8_lossy(&data).into_owned().into_bytes();
                 }
-                self.code_page = Some(true);
+                carry.code_page = Some(true);
                 decoded(&data)
             }
             _ => {
                 carry.raw = cut_char(&mut data);
                 if !data.is_ascii() {
-                    self.code_page = Some(false);
+                    carry.code_page = Some(false);
                 }
                 data
             }
@@ -194,25 +258,8 @@ impl Inner {
     /// `text` of `pipe` without any copy of `secret`. Text that may start a
     /// copy waits for the pipe's next read, unless it is the `last`.
     fn scrub(&mut self, pipe: Pipe, text: Vec<u8>, secret: Option<&Secret>, last: bool) -> Vec<u8> {
-        let carry = &mut self.pipes[pipe as usize];
-        let mut data = std::mem::take(&mut carry.held);
-        data.extend(text);
         let copies = secret.map_or_else(Vec::new, |s| crate::sudo::copies(s.expose()));
-        for c in &copies {
-            data = replace(&data, c.as_bytes(), REDACTED.as_bytes());
-        }
-        if !last {
-            let starts = |k: usize| {
-                copies
-                    .iter()
-                    .any(|c| k < c.len() && c.as_bytes().starts_with(&data[data.len() - k..]))
-            };
-            let most = copies.iter().map(String::len).max().unwrap_or(1) - 1;
-            if let Some(k) = (1..=most.min(data.len())).rev().find(|&k| starts(k)) {
-                carry.held = data.split_off(data.len() - k);
-            }
-        }
-        data
+        scrub_held(&mut self.pipes[pipe as usize].held, text, &copies, last)
     }
 
     /// The command printed `b` (text, scrubbed).
@@ -295,7 +342,10 @@ impl Tap {
     /// a gap), then what the command prints from now on.
     pub fn reader(&self) -> Arc<Reader> {
         let mut t = lock(&self.inner);
-        let r = Arc::new(Reader::default());
+        let r = Arc::new(Reader {
+            secret: self.secret.clone(),
+            ..Reader::default()
+        });
         {
             let mut p = lock(&r.pending);
             p.dropped = t.printed - t.tail.len() as u64;
@@ -310,22 +360,15 @@ impl Tap {
 }
 
 impl Reader {
-    /// The next chunk to send, at most `max` bytes of data; waits until
-    /// there is one.
+    /// The next chunk to send, at most `max` bytes of data, without the
+    /// sudo password the node holds now; waits until there is one.
     pub async fn next(&self, max: usize) -> Chunk {
         loop {
-            {
-                let mut p = lock(&self.pending);
-                if p.dropped > 0 {
-                    return Chunk::Gap(std::mem::take(&mut p.dropped));
-                }
-                if !p.data.is_empty() {
-                    let n = p.data.len().min(max);
-                    return Chunk::Data(p.data.drain(..n).collect());
-                }
-                if p.ended {
-                    return Chunk::End;
-                }
+            // Taken before the stream's lock: the password has its own.
+            let secret = self.secret.as_ref().and_then(|f| f());
+            let copies = secret.map_or_else(Vec::new, |s| crate::sudo::copies(s.expose()));
+            if let Some(c) = lock(&self.pending).take(max, &copies) {
+                return c;
             }
             // A push in between left its permit: this does not miss it.
             self.more.notified().await;
@@ -416,7 +459,7 @@ mod tests {
     const PW: &str = "pw-7c1e\"x";
 
     fn with_password() -> Tap {
-        Tap::new(Some(Box::new(|| Some(Secret::new(PW.into())))), None)
+        Tap::new(Some(Arc::new(|| Some(Secret::new(PW.into())))), None)
     }
 
     /// No copy of the sudo password goes out, also not one that two reads
@@ -443,6 +486,60 @@ mod tests {
         // The tail a late stream gets is scrubbed too.
         let (_, late) = text_of(&t.reader()).await;
         assert!(!late.contains(PW) && late.contains("[redacted]"), "{late}");
+    }
+
+    /// A password the node holds only after the command printed it does not
+    /// go either: not in the tail a later stream starts with, nor in what
+    /// waited for a slow stream, also where the stream's chunks cut it.
+    #[tokio::test]
+    async fn a_password_held_later_never_streams() {
+        let pw: Arc<Mutex<Option<&str>>> = Arc::default();
+        let now = pw.clone();
+        let t = Tap::new(
+            Some(Arc::new(move || lock(&now).map(|p| Secret::new(p.into())))),
+            None,
+        );
+        let early = t.reader();
+        t.push(Pipe::Out, b"history: echo pw-7c1e\"x | sudo -S id\n");
+        *lock(&pw) = Some(PW);
+        let late = t.reader();
+        t.push(Pipe::Out, b"more\n");
+        t.end();
+        // Small chunks cut the copy: its start waits for the rest.
+        let mut text = Vec::new();
+        loop {
+            match early.next(4).await {
+                Chunk::Data(d) => {
+                    assert!(d.len() <= 4);
+                    text.extend(d);
+                }
+                Chunk::Gap(n) => panic!("gap {n}"),
+                Chunk::End => break,
+            }
+        }
+        let text = String::from_utf8(text).unwrap();
+        assert_eq!(text, "history: echo [redacted] | sudo -S id\nmore\n");
+        let (_, text) = text_of(&late).await;
+        assert_eq!(text, "history: echo [redacted] | sudo -S id\nmore\n");
+    }
+
+    /// Each pipe is read in its own encoding, as the result reads it: one
+    /// pipe in the code page leaves the other's UTF-8 as it is, and the
+    /// other way round.
+    #[tokio::test]
+    async fn each_pipe_keeps_its_own_encoding() {
+        let latin1: Decode = |b| Some(b.iter().map(|&c| char::from(c)).collect());
+        let t = Tap::new(None, Some(latin1));
+        let r = t.reader();
+        t.push(Pipe::Err, b"ausf\xFChrbaren\n");
+        t.push(Pipe::Out, "Müller ✓\n".as_bytes());
+        t.push(Pipe::Err, b"Gr\xF6\xDFe\n");
+        t.push(Pipe::Out, "Größe\n".as_bytes());
+        t.end();
+        assert_eq!(
+            text_of(&r).await,
+            (0, "ausführbaren\nMüller ✓\nGröße\nGröße\n".into())
+        );
     }
 
     /// A character a read cuts waits for the rest from the same pipe; on a
