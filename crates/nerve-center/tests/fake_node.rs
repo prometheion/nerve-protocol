@@ -3524,18 +3524,23 @@ async fn the_checker_decides_on_a_jobs_signal() {
     r.stop().await;
 }
 
-/// `job.status` and `job.cancel` are the center's own: they pass no action
-/// checker and count in no statistics. With the decision model on and out
-/// of reach, which refuses every checked call, the agent still reads and
+/// `job.status`, `job.cancel`, `stream.read` and `stream.close` are the
+/// center's own: they pass no action checker and count in no statistics.
+/// With the decision model on and out of reach, which refuses every checked
+/// call, the agent still reads and closes its job's stream, and reads and
 /// stops its job.
 #[tokio::test]
 async fn the_centers_job_units_pass_no_checker_and_count_nowhere() {
     let dir = tempfile::tempdir().unwrap();
     let r = job_center(dir.path()).await;
     let (e, _node, mut seen, _task) = job_box(&r).await;
-    let job = job_of(&execute_as(&e, json!(1), "exec.run", json!({"command": "hang"})).await);
+    let reply = execute_as(&e, json!(1), "exec.run", json!({"command": "talkhang"})).await;
+    let (job, stream) = (job_of(&reply), stream_of(&reply));
     let Seen::Hang(invoke) = next_seen(&mut seen).await else {
         panic!("no invoke")
+    };
+    let Seen::StreamOpen(_) = next_seen(&mut seen).await else {
+        panic!("no stream.open")
     };
     r.center.update(|s| {
         s.checker.model_on = true;
@@ -3544,6 +3549,17 @@ async fn the_centers_job_units_pass_no_checker_and_count_nowhere() {
         s.checker.model.endpoint_url = String::new();
     });
     r.center.rebuild_checker();
+    let read = read_stream(&e, &stream, 1000).await;
+    assert!(!said(&read).1, "{read}");
+    assert_eq!(
+        read["result"]["structuredContent"]["result"]["text"], "one\n",
+        "{read}"
+    );
+    let closed = execute_as(&e, json!(2), "stream.close", json!({"stream": stream})).await;
+    assert!(!said(&closed).1, "{closed}");
+    let Seen::StreamClose(_) = next_seen(&mut seen).await else {
+        panic!("the node was not told")
+    };
     let status = execute_as(&e, json!(2), "job.status", json!({"job": job})).await;
     let (text, err) = said(&status);
     assert!(!err, "{status}");
@@ -3564,7 +3580,7 @@ async fn the_centers_job_units_pass_no_checker_and_count_nowhere() {
     nothing_more(&mut seen).await;
     let stats = r.center.stats_json();
     let calls = &stats["nodes"]["box-1"]["calls"];
-    for unit in ["job.status", "job.cancel"] {
+    for unit in ["job.status", "job.cancel", "stream.read", "stream.close"] {
         assert!(calls[unit].is_null(), "{unit}: {stats}");
     }
     r.stop().await;
@@ -3698,17 +3714,22 @@ async fn the_job_answer_names_exec_signal_only_where_it_is_offered() {
     r.stop().await;
 }
 
-/// `job.status` and `job.cancel` outlive the node's offer: a node whose
-/// owner turned everything off while a job runs (or whose `until` passed)
-/// still lets the session read and stop its job.
+/// `job.status`, `job.cancel` and `stream.read` outlive the node's offer:
+/// a node whose owner turned everything off while a job runs (or whose
+/// `until` passed) still lets the session read its output, and read and
+/// stop its job.
 #[tokio::test]
 async fn a_job_can_be_read_and_cancelled_after_the_offer_is_gone() {
     let dir = tempfile::tempdir().unwrap();
     let r = job_center(dir.path()).await;
     let (e, _node, mut seen, _task, desc) = job_box_with(&r, json!({}), with_signal).await;
-    let job = job_of(&execute_as(&e, json!(1), "exec.run", json!({"command": "hang"})).await);
+    let reply = execute_as(&e, json!(1), "exec.run", json!({"command": "talkhang"})).await;
+    let (job, stream) = (job_of(&reply), stream_of(&reply));
     let Seen::Hang(invoke) = next_seen(&mut seen).await else {
         panic!("no invoke")
+    };
+    let Seen::StreamOpen(_) = next_seen(&mut seen).await else {
+        panic!("no stream.open")
     };
     let mut off = desc.0.lock().unwrap().clone();
     off["rev"] = json!(2);
@@ -3720,6 +3741,11 @@ async fn a_job_can_be_read_and_cancelled_after_the_offer_is_gone() {
             .is_some_and(|o| o.units.iter().all(|u| u.cap == "job") && !o.off.is_empty())
     })
     .await;
+    let read = read_stream(&e, &stream, 1000).await;
+    assert_eq!(
+        read["result"]["structuredContent"]["result"]["text"], "one\n",
+        "{read}"
+    );
     let status = execute_as(&e, json!(2), "job.status", json!({"job": job})).await;
     assert!(said(&status).0.contains("still runs"), "{status}");
     let cancel = execute_as(&e, json!(3), "job.cancel", json!({"job": job})).await;
