@@ -901,6 +901,30 @@ async fn a_path_taking_provider_is_held_to_the_folders() {
         .unwrap();
     assert_eq!(unresolved["code"], "bad_path", "{unresolved}");
 
+    // An `fs` path that does not resolve is in the audit too.
+    let fs_read =
+        |at: &str| json!({"cap": "fs", "action": "read", "args": {"path": at}, "ctx": {}});
+    let e = conn
+        .call("invoke", fs_read("not/absolute"), WAIT)
+        .await
+        .unwrap()
+        .expect_err("refused");
+    assert_eq!(code_of(&e), "bad_path", "{}", e.message);
+    let fs_audit = || -> Vec<Value> {
+        std::fs::read_to_string(paths.audit_log())
+            .unwrap()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|e| e["cap"] == "fs")
+            .collect()
+    };
+    let last = fs_audit().pop().expect("the refusal is audited");
+    assert_eq!(
+        (&last["target"], &last["code"]),
+        (&json!("not/absolute"), &json!("bad_path")),
+        "{last}"
+    );
+
     // An off `fs` call is in the audit with the path it names, as an
     // allowed one would be, not with the action's name, which the audit's
     // rule buttons would make a rule of.
@@ -912,21 +936,12 @@ async fn a_path_taking_provider_is_held_to_the_folders() {
     })
     .await;
     let e = conn
-        .call(
-            "invoke",
-            json!({"cap": "fs", "action": "read", "args": {"path": in_work}, "ctx": {}}),
-            WAIT,
-        )
+        .call("invoke", fs_read(&in_work), WAIT)
         .await
         .unwrap()
         .expect_err("off");
     assert_eq!(code_of(&e), "disabled", "{}", e.message);
-    let off: Value = std::fs::read_to_string(paths.audit_log())
-        .unwrap()
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .rfind(|e| e["cap"] == "fs")
-        .unwrap();
+    let off = fs_audit().pop().unwrap();
     assert_eq!(
         (&off["action"], &off["target"], &off["code"]),
         (&json!("read"), &json!(in_work), &json!("disabled")),
