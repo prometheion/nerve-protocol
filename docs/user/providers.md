@@ -102,7 +102,9 @@ A folder given as a path counts with everything below it, since the program
 may read or write anywhere in it: the call is refused when a protected path
 that no folder releases, the node's own files, a place a deny rule of that
 capability names (`notes:~/private/*` refuses `notes` the folder `~` too) or,
-in `folder` mode, a folder you gave less lies below it. The refusal names the
+in `folder` mode, a folder you gave less lies below it. An `execute` action
+runs its program there, so for it a folder below without `x`, or a protected
+path released without `x`, refuses the call too. The refusal names the
 folder handed over, not what lies below it. A file holds nothing below it:
 `notes:~/proj/*.env` refuses `notes` the folder `~/proj`, but not
 `~/proj/readme.md`. A path a write names that does not exist yet counts as a

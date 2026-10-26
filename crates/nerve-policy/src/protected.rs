@@ -1279,12 +1279,29 @@ impl Protected {
     /// access, as [`Protected::check`] judges a call at the entry itself: a
     /// program handed `dir` would reach it.
     pub fn entry_below(&self, dir: &Path, write: bool, folders: &[Folder]) -> Option<&Path> {
+        let needs = |a: Access| if write { a.write } else { a.read };
+        self.entry_below_for(dir, write, folders, needs)
+    }
+
+    /// [`Protected::entry_below`] for a program that runs below `dir`: a
+    /// folder releases an entry there only with `x`.
+    pub fn entry_below_run(&self, dir: &Path, folders: &[Folder]) -> Option<&Path> {
+        self.entry_below_for(dir, false, folders, |a| a.execute)
+    }
+
+    fn entry_below_for(
+        &self,
+        dir: &Path,
+        write: bool,
+        folders: &[Folder],
+        needs: impl Fn(Access) -> bool,
+    ) -> Option<&Path> {
         let folded = fold(dir);
         self.listed(write)
             .find(|e| {
                 self.inside(e, &folded)
                     && !self.inside(&folded, e)
-                    && self.check(e, write, folders).is_some()
+                    && self.check_for(e, write, folders, &needs).is_some()
             })
             .map(PathBuf::as_path)
     }

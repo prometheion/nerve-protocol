@@ -26,7 +26,7 @@ The reason says what is missing. Use it to write the rule you want
 path that does not resolve is refused as given, with `bad_path`); a call to
 a capability you switched `off` is a refusal too, with the path or command
 line an `fs` or `exec.run` call names as its target. An `fs` path the node did
-not resolve is the target only where it is written as a resolved one is
+not resolve is the target only where it is written as a resolved one
 (absolute, no `.` or `..` part), since a rule made of it would match nothing
 otherwise; else the target is empty and the reason names the path:
 

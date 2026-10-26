@@ -741,9 +741,12 @@ pub fn details(o: &Offer, asked: &[String]) -> Answer {
     let mut later = Vec::new();
     // How to read the `folders:` lines is the center's advice, not the
     // node's data: it stands outside the framing and the `result`. It is
-    // given once, `exec.run`'s when it is detailed, since that one adds
-    // what holds a command to what the file calls' says.
-    let mut advice: Option<&str> = None;
+    // given once: a unit's own, or where `exec.run` is detailed with other
+    // calls that carry advice, the one that says what holds both. A
+    // command's advice alone leaves out how far a file call reads where
+    // the node reads as the command account.
+    let mut file_advice: Option<&str> = None;
+    let mut command_advice: Option<&str> = None;
     for u in &found {
         let mut entry = json!({"name": u.name, "description": &*u.description,
             "effect": u.effect.as_str(), "params": u.params, "result": u.result,
@@ -789,10 +792,17 @@ pub fn details(o: &Offer, asked: &[String]) -> Answer {
         body.push_str(&block);
         data_len += entry_len;
         entries.push(entry);
-        if u.advice.is_some() && (advice.is_none() || u.cap == "exec") {
-            advice = u.advice.as_deref();
+        if u.cap == "exec" {
+            command_advice = command_advice.or(u.advice.as_deref());
+        } else {
+            file_advice = file_advice.or(u.advice.as_deref());
         }
     }
+    let all = o.reach.as_ref().and_then(Reach::all_advice);
+    let advice = match (file_advice, command_advice) {
+        (Some(_), Some(c)) => all.as_deref().or(Some(c)),
+        (f, c) => c.or(f),
+    };
     if !later.is_empty() {
         // These are the node's own names, which the next call must give
         // exactly: they are quoted whole, not cut as the model's names are.
@@ -1182,6 +1192,51 @@ mod tests {
         // Without it nothing is said of reads.
         let got = units(&offer(&box_node(), true));
         assert!(!got.text.contains("Reads:"), "{}", got.text);
+    }
+
+    /// Details of file calls and `exec.run` together, where the node reads
+    /// as the command account, say how far each reaches: the command's
+    /// advice alone leaves out the file calls' reads and writes.
+    #[test]
+    fn details_of_file_calls_and_a_command_say_how_far_each_reaches() {
+        let mut access = folder_access();
+        access["reads_by_account"] = json!(true);
+        let with = |access: &Value| {
+            let mut d = box_node().descriptor.unwrap();
+            d.access = Some(serde_json::from_value(access.clone()).unwrap());
+            record("box-1", Some(d))
+        };
+        let reads = "one whose effect is read also, outside every folder";
+        let node = with(&access);
+        let o = offer(&node, true);
+        let both = details(&o, &["fs.read".into(), "exec.run".into()]);
+        for part in [
+            reads,
+            "A call may write only in the folders marked w, and a command may start only in one \
+             marked x",
+            "never a folder",
+            "The machine's sandbox holds what a command reaches",
+        ] {
+            assert!(both.text.contains(part), "{part}: {}", both.text);
+            assert!(
+                both.data["center"]["folders"]
+                    .as_str()
+                    .unwrap()
+                    .contains(part),
+                "{part}"
+            );
+        }
+        let alone = details(&o, &["exec.run".into()]);
+        assert!(!alone.text.contains(reads), "{}", alone.text);
+        access["folders"] = json!([]);
+        let node = with(&access);
+        let both = details(&offer(&node, true), &["exec.run".into(), "fs.read".into()]);
+        for part in [
+            "a call whose effect is read may read",
+            "and so are its commands",
+        ] {
+            assert!(both.text.contains(part), "{part}: {}", both.text);
+        }
     }
 
     /// With no folder named, the folders line says whether the node left

@@ -894,9 +894,10 @@ file call outside them. Before such a call the node asks, as `nerve-run`,
 whether the path is open to every account and whether it may open it for
 reading (a path that does not exist passes). The node's own entry under
 `/proc` (`/proc/self`, `/proc/thread-self`, `/proc/<pid>` of the node or one
-of its threads) is refused before that: its files there are open to all by
-their mode, and the kernel lets the node's threads read them whatever
-account they act as, which no process of `nerve-run` could. For a provider, which reads
+of its threads, and a `/proc/<pid>` that does not exist, which a thread the
+node starts for the read may take) is refused before that: its files there
+are open to all by their mode, and the kernel lets the node's threads read
+them whatever account they act as, which no process of `nerve-run` could. For a provider, which reads
 with the owner's rights, the path must also be no folder, as it would read
 below it. The node's own folders, protected paths, deny rules and `off` and
 `hidden` still win. Writes and commands keep to the folders, and a write or
@@ -1012,12 +1013,12 @@ answer. For each call the node takes the center's policy and, in this order:
 7. In `folder` and `user` mode the mode itself decides (§Modes), by the
    call's effect, the same for every capability. `allow` rules are not
    looked at. `user` mode allows read, write and execute, sense and actuate
-   only with `on`. `folder` mode allows a read (its paths as §Modes says);
-   a write or an execute call when it names at least one path and every one
-   lies in a folder with the flag for what the call does there (`exec.run`:
-   its working directory in an `x` folder; another execute call: each path
-   in an `x` folder as well); a write or execute call that names no path
-   lies in no folder, so it needs `on`; sense and actuate need `on`. `on`
+   only with `on`. `folder` mode allows a read that names its paths (as
+   §Modes says), and a write or an execute call when it names at least one
+   path and every one lies in a folder with the flag for what the call does
+   there (`exec.run`: its working directory in an `x` folder; another
+   execute call: each path in an `x` folder as well); a read, write or
+   execute call that names no path lies in no folder, so it needs `on`; sense and actuate need `on`. `on`
    allows nothing whose paths lie outside the folders.
 8. Protected paths (keys, shell profiles and the built-in list) are refused
    whatever allowed the call, `user` mode too. On Windows the built-in list
@@ -1092,7 +1093,7 @@ only some paths or commands, and each call is still decided as above.
 runs by that list alone. In `folder` and `user` mode the actions are shown as
 before and allow rules do not matter, except a sense or actuate action such
 as `exec.signal`, which is shown there only when the owner set it to `on`,
-and in `folder` mode a write or execute action that names no path (a
+and in `folder` mode a read, write or execute action that names no path (a
 provider's whose schema marks none), which needs `on` too (step 7); an
 action that takes paths is shown where a call with its paths in the folders
 would be allowed; deny rules never hide an action.
@@ -1561,7 +1562,7 @@ capability in every center's descriptor with
 `provider: <name>` and cuts it by that center's policy as its own (§3): `caps`
 hides it or turns it off; in `allowlist` mode an action is shown only when an
 allow rule covers it; in `folder` mode by its effect and paths as any other
-(a write or execute action that names no path only where it is set `on`);
+(a read, write or execute action that names no path only where it is set `on`);
 sense and actuate only with `on`. The descriptor's `rev` changes, so every center gets
 `node/descriptor_changed`. `status` lists the attached providers, each with
 the actions left out and why (`provider desk: lamp.dim left out: <reason>`;
@@ -1588,7 +1589,8 @@ entry below it that no folder releases for its access, a place below it
 that a deny rule of the action's scope may cover (the rule's pattern up to
 its first wildcard lies below the path, or the path below it and a wildcard
 follows), or in folder mode a folder below it without that flag, refuses the
-call. The refusal names the path handed over, not the protected entry or the
+call. An `execute` action runs where its paths are, so for it the entries
+and folders below need `x` as well, as the path itself does. The refusal names the path handed over, not the protected entry or the
 folder below it, which the center is not shown. What a program writes below
 a folder is not checked for the places whose writes run code later (`.git`,
 `.envrc`, `.vscode`, `.idea`), as an `fs.write` is: the program may make

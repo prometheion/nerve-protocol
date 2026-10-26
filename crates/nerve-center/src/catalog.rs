@@ -200,7 +200,7 @@ impl Reach {
     /// programs keep there included, so they are for throwaway files only.
     /// None outside folder mode.
     pub fn advice(&self) -> Option<String> {
-        self.advice_on(true)
+        self.advice_on(false, true)
     }
 
     /// The advice for the calls that name paths but start no command:
@@ -209,10 +209,18 @@ impl Reach {
     /// capabilities' path-taking actions carry it, so a sudo or sandbox
     /// change does not ask for a new `list` of them.
     pub fn file_advice(&self) -> Option<String> {
-        self.advice_on(false)
+        self.advice_on(true, false)
     }
 
-    fn advice_on(&self, commands: bool) -> Option<String> {
+    /// The advice for an answer that details file calls and `exec.run`
+    /// together: [`Reach::advice`], and where the node reads as the command
+    /// account also what [`Reach::file_advice`] says of reads and writes,
+    /// which the command's advice leaves out.
+    pub fn all_advice(&self) -> Option<String> {
+        self.advice_on(true, true)
+    }
+
+    fn advice_on(&self, files: bool, commands: bool) -> Option<String> {
         self.note()?;
         // Where the node reads as the command account, the folders hold
         // only what a call writes, where a command starts and what a call
@@ -239,6 +247,19 @@ impl Reach {
                     .into()
             });
         }
+        if self.no_folder() && reads && files {
+            let sudo = if self.sudo {
+                ", except one on the owner's sudo list for you, which runs by that list alone, \
+                 with full rights"
+            } else {
+                ""
+            };
+            return Some(format!(
+                "The node is in folder mode with no folder granted: a call whose effect is read \
+                 may read {OPEN}; any other call that names a path is refused until its owner \
+                 grants a folder, and so are its commands{sudo}. {NO_FOLDER}"
+            ));
+        }
         if self.no_folder() && reads {
             return Some(if self.sudo {
                 "The node is in folder mode with no folder granted: its commands are refused \
@@ -262,7 +283,14 @@ impl Reach {
             }
             .into());
         }
-        let mut out = if reads && commands {
+        let mut out = if reads && commands && files {
+            format!(
+                "The node is in folder mode: a call may read in the folders of the `folders:` \
+                 line marked r, and one whose effect is read also, outside every folder, {OPEN}. \
+                 {NO_FOLDER} A call may write only in the folders marked w, and a command may \
+                 start only in one marked x (r read, w write, x run commands)"
+            )
+        } else if reads && commands {
             "The node is in folder mode: a command may start only in a folder of the \
              `folders:` line marked x (r read, w write, x run commands)"
                 .to_string()

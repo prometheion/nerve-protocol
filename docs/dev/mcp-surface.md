@@ -87,7 +87,9 @@ conversation the model asks for it, like a skill:
   it is hashed per unit: `exec.run`'s also says what holds a command (the
   sandbox, the sudo list), the file calls' does not, so a sudo or sandbox
   change asks for a new `list` of `exec.run` alone. The details show the
-  advice once, `exec.run`'s when it is among them.
+  advice once: `exec.run`'s when it is among them, and when other calls with
+  advice are too, one that says what holds both (with `reads_by_account`
+  the file calls' reads and writes, then where a command starts).
 - A capability with exposure `off` (or an action marked `off`) is not offered; `list(node)` names it in
   one line, and `execute` of it is `forbidden`. A node the owner disabled in
   the center offers nothing; it stays paired and connected, and `execute` on

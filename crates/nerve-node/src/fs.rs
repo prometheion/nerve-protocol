@@ -216,6 +216,9 @@ pub fn holds(path: &Path, write: bool) -> bool {
 /// Whether `path` lies in the node's own entry of `/proc`: `/proc/self`,
 /// `/proc/thread-self`, or `/proc/<n>` where `n` is the node or one of its
 /// threads (a thread's entry is there too, though `/proc` does not list it).
+/// A `/proc/<n>` that does not exist counts as the node's as well: the
+/// thread the node starts for the read may take that id before it opens
+/// the path, and nothing else can be read there.
 #[cfg(target_os = "linux")]
 pub fn own_process(path: &Path) -> bool {
     let Ok(rest) = path.strip_prefix("/proc") else {
@@ -229,7 +232,9 @@ pub fn own_process(path: &Path) -> bool {
         return true;
     }
     first.parse::<u32>().is_ok_and(|n| {
-        n == std::process::id() || Path::new("/proc/self/task").join(&*first).exists()
+        n == std::process::id()
+            || Path::new("/proc/self/task").join(&*first).exists()
+            || !Path::new("/proc").join(&*first).exists()
     })
 }
 
@@ -948,6 +953,9 @@ mod tests {
                 may_read_outside(Path::new("/proc/self/maps"), false),
                 may_read_outside(Path::new("/proc/thread-self/stat"), false),
                 thread,
+                // No process or thread has this id (it lies above every
+                // `pid_max`); the node's next thread could take an unused one.
+                may_read_outside(Path::new("/proc/4294967295/maps"), false),
             ] {
                 let why = r.unwrap_err();
                 assert!(why.contains("the node's own process"), "{why}");

@@ -535,13 +535,21 @@ pub fn decide(policy: &CenterPolicy, env: &Env, call: &Call) -> Decision {
 
     // Narrowing that holds in every mode.
     // A folder releases a protected path only for the access the call needs
-    // there: a read `r`, a write `w`, a command in it `x`.
+    // there: a read `r`, a write `w`, a command in it `x`. A program's
+    // execute action runs where its paths are, whatever its marker says, so
+    // it needs `x` there as well.
+    let runs = call.effect == Effect::Execute && call.command.is_none() && call.cwd.is_none();
     for t in call.targets {
         let write = t.access == PathAccess::Write;
         let entry = if t.access == PathAccess::Run {
             env.protected.check_run(&t.path, &policy.folders)
         } else {
-            env.protected.check(&t.path, write, &policy.folders)
+            env.protected
+                .check(&t.path, write, &policy.folders)
+                .or_else(|| {
+                    runs.then(|| env.protected.check_run(&t.path, &policy.folders))
+                        .flatten()
+                })
         };
         // A path handed to a program that works below it reaches what lies
         // there too: a protected entry below it, unless a folder releases
@@ -550,24 +558,33 @@ pub fn decide(policy: &CenterPolicy, env: &Env, call: &Call) -> Decision {
         // is never shown a closed folder or the owner's extra protected
         // paths, and naming the parent must not tell it them.
         let below = works_below(call) && t.holds && t.access != PathAccess::Run;
-        if below
-            && entry.is_none()
-            && env
-                .protected
+        let entry_below = || {
+            env.protected
                 .entry_below(&t.path, write, &policy.folders)
-                .is_some()
-        {
+                .or_else(|| {
+                    runs.then(|| env.protected.entry_below_run(&t.path, &policy.folders))
+                        .flatten()
+                })
+        };
+        let closed = || {
+            let by_marker = closed_below(&policy.folders, &t.path, t.access)
+                .map(|_| if write { "writing" } else { "reading" });
+            by_marker.or_else(|| {
+                (runs && closed_below(&policy.folders, &t.path, PathAccess::Run).is_some())
+                    .then_some("running")
+            })
+        };
+        if below && entry.is_none() && entry_below().is_some() {
             allowed = false;
             reasons.push(format!("{} holds a protected path", t.path.display()));
         } else if below
             && mode == Mode::Folder
-            && closed_below(&policy.folders, &t.path, t.access).is_some()
+            && let Some(what) = closed()
         {
             allowed = false;
             reasons.push(format!(
-                "{} holds a folder that does not allow {}",
-                t.path.display(),
-                if write { "writing" } else { "reading" }
+                "{} holds a folder that does not allow {what}",
+                t.path.display()
             ));
         }
         if let Some(entry) = entry {
@@ -1570,6 +1587,55 @@ mod tests {
             ),
             Decision::Forbidden("/h/data holds a protected path".into())
         );
+        // A program's execute action runs below the folder it is handed,
+        // whatever its marker: a folder or an entry there needs `x` too.
+        let run = |p: &CenterPolicy, target: &[Target]| {
+            decide(p, &env, &marked("make", Effect::Execute, target))
+        };
+        p.folders = vec![
+            Folder {
+                path: "/h/data".into(),
+                access: acc("rwx"),
+            },
+            Folder {
+                path: "/h/data/keys".into(),
+                access: acc("rw"),
+            },
+        ];
+        assert_eq!(
+            run(&p, &data),
+            Decision::Forbidden("/h/data holds a protected path".into())
+        );
+        let mut user = p.clone();
+        user.mode = Mode::User;
+        assert_eq!(
+            run(&user, &t("/h/data/keys", false)),
+            Decision::Forbidden("/h/data/keys is protected (/h/data/keys)".into())
+        );
+        p.folders[1].access = acc("rwx");
+        assert_eq!(run(&p, &data), Decision::Allow);
+        let env = x.env(true);
+        let run = |p: &CenterPolicy, target: &[Target]| {
+            decide(p, &env, &marked("make", Effect::Execute, target))
+        };
+        p.folders = vec![
+            Folder {
+                path: "/h/proj".into(),
+                access: acc("rwx"),
+            },
+            Folder {
+                path: "/h/proj/vendor".into(),
+                access: acc("rw"),
+            },
+        ];
+        for write in [false, true] {
+            assert_eq!(
+                run(&p, &t("/h/proj", write)),
+                Decision::Forbidden("/h/proj holds a folder that does not allow running".into())
+            );
+        }
+        p.folders[1].access = acc("rwx");
+        assert_eq!(run(&p, &t("/h/proj", false)), Decision::Allow);
     }
 
     /// A path argument of any action meets the rules as an `fs` path does:

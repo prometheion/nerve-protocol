@@ -190,7 +190,9 @@ check, first), when a deny rule of its scope may match below it (step 5,
 below the path, or the path below that text and a wildcard follows), when a
 protected entry below it is not released for its access
 (`Protected::entry_below`), or in `folder` mode when a folder below it lacks
-the flag (`closed_below`). The last two refusals do not name what lies
+the flag (`closed_below`). A program's `execute` action runs there, so for it
+the entry below and the path itself need a release with `x` as well
+(`entry_below_run`, `check_run`), and a folder below needs `x`. The last two refusals do not name what lies
 below: the agent is shown no closed folder and no extra protected path. The
 tool-config check (writes to `.git`, `.envrc`, `.vscode`, `.idea`) looks at
 the path itself only, since a program may make those anywhere below a folder
