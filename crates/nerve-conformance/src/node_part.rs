@@ -271,6 +271,9 @@ const SUDO_ON_CHECKS: &[(&str, &str)] = &[
 ];
 
 const ALLOWED: &str = "echo nerve-conformance-allowed";
+/// How long [`streams_output`] asks for the stream of a command the node
+/// does not run yet.
+const START_WAIT: Duration = Duration::from_secs(5);
 /// A command that prints three lines over a second, in `sh` and in
 /// PowerShell.
 const STREAMED_SH: &str = "for i in 1 2 3; do echo line $i; sleep 0.3; done";
@@ -368,8 +371,30 @@ async fn streams_output(conn: &mut Conn, command: &str) -> Result<(), String> {
         p
     };
     let mut others = Vec::new();
-    // Not before the command runs; a short command may also have ended.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // A node may hold a command a while before it runs it (its folders'
+    // access, a sandbox to set up); until then its stream is `invalid_args`,
+    // as a center sees it, and asked for again.
+    let started = tokio::time::Instant::now();
+    let sid = loop {
+        let id = conn
+            .request(method::STREAM_OPEN, open(Some("conformance-1")))
+            .await?;
+        match conn.answer(id, WAIT, &mut others).await? {
+            Ok(v) => break v["sid"].as_u64().ok_or("stream.open answered no sid")?,
+            Err(e) if e.kind() == ErrorCode::InvalidArgs && started.elapsed() < START_WAIT => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e) => {
+                return Err(format!(
+                    "stream.open for its own session: error {} ({})",
+                    code_of(&e),
+                    e.message
+                ));
+            }
+        }
+    };
+    // Now that the command runs, another session's and no session's are
+    // refused as one that does not run.
     for session in [Some("conformance-2"), None] {
         let id = conn.request(method::STREAM_OPEN, open(session)).await?;
         expect_code(
@@ -378,19 +403,19 @@ async fn streams_output(conn: &mut Conn, command: &str) -> Result<(), String> {
         )
         .map_err(|e| format!("stream.open for another session: {e}"))?;
     }
-    let id = conn
-        .request(method::STREAM_OPEN, open(Some("conformance-1")))
-        .await?;
-    let sid = ok(conn.answer(id, WAIT, &mut others).await)?["sid"]
-        .as_u64()
-        .ok_or("stream.open answered no sid")?;
     let mut frames = conn.take_frames();
-    let mut ran = others.iter().any(|m| answers(m, run));
+    // What came while the answers were waited for comes first.
+    let mut came: std::collections::VecDeque<_> = others.into();
+    let mut ran = false;
     let mut closed = false;
     let deadline = tokio::time::Instant::now() + WAIT;
     while !(ran && closed) {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        match conn.recv(left).await {
+        let next = match came.pop_front() {
+            Some(m) => crate::wire::Recv::Msg(m),
+            None => conn.recv(left).await,
+        };
+        match next {
             crate::wire::Recv::Frame(f) => frames.push(f),
             crate::wire::Recv::Msg(m) if answers(&m, run) => ran = true,
             crate::wire::Recv::Msg(nerve_proto::Message::Request {
@@ -904,6 +929,64 @@ mod tests {
 
     fn echo() -> Value {
         serde_json::to_value(crate::echo::descriptor("node-id", "echo-node")).unwrap()
+    }
+
+    /// A node that runs a command only some time after its `invoke` passes
+    /// the stream check: its stream is asked for again until the command
+    /// runs, and only then are other sessions' asked for.
+    #[tokio::test]
+    async fn the_stream_check_waits_for_a_command_that_starts_late() {
+        use nerve_proto::{Message, RpcError};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let node = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut c = Conn::new(tokio_tungstenite::accept_async(tcp).await.unwrap());
+            let mut run = None;
+            loop {
+                let crate::wire::Recv::Msg(Message::Request {
+                    id,
+                    method: m,
+                    params,
+                }) = c.recv(WAIT).await
+                else {
+                    continue;
+                };
+                if m == method::INVOKE {
+                    run = Some((id, tokio::time::Instant::now()));
+                    continue;
+                }
+                let Some((call, at)) = run.clone() else {
+                    continue;
+                };
+                // Not running for 400 ms, and another session's never is.
+                let own = params.get("ctx").map(|c| &c["session"]) == Some(&json!("conformance-1"));
+                if !own || at.elapsed() < Duration::from_millis(400) {
+                    let e = RpcError::invalid_args("no running command 1 of this session");
+                    c.send(&Message::error(Some(id), e)).await.unwrap();
+                    continue;
+                }
+                c.send(&Message::result(id, json!({"sid": 5})))
+                    .await
+                    .unwrap();
+                let f =
+                    nerve_proto::frame::stream_frame(5, 0, b"line 1\nline 2\nline 3\n".to_vec());
+                c.send_binary(f.encode().unwrap()).await.unwrap();
+                let close = json!({"sid": 5, "reason": "ended"});
+                c.send(&Message::request(5, method::STREAM_CLOSE, close))
+                    .await
+                    .unwrap();
+                let out = json!({"exit_code": 0, "stdout": "", "stderr": "", "truncated": false});
+                c.send(&Message::result(call, out)).await.unwrap();
+            }
+        });
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (ws, _) = tokio_tungstenite::client_async(format!("ws://{addr}/"), tcp)
+            .await
+            .unwrap();
+        let mut conn = Conn::new(ws);
+        streams_output(&mut conn, "late").await.unwrap();
+        node.abort();
     }
 
     #[test]

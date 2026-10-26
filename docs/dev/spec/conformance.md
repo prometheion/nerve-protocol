@@ -103,7 +103,7 @@ With a `Setup::folder`, before `bye revoked`:
 | 7.2 | fs read returns what fs write wrote, with the same etag |
 | 7.2 | fs read outside the allowed folder is `forbidden` |
 | 7.3 | exec run of a command an allow rule names runs |
-| 7.3 | a running command's `output` stream is refused to another session and to none (`invalid_args`); for its own session it gives three printed lines in order as kind-2 frames (seq from 0, no gap), then the node's `stream.close` with reason `ended` |
+| 7.3 | a running command's `output` stream, asked for its own session (again while it is `invalid_args`, up to 5 s: a node may take a while to start the command), gives three printed lines in order as kind-2 frames (seq from 0, no gap), then the node's `stream.close` with reason `ended`; once it runs, the stream is refused to another session and to none (`invalid_args`) |
 | 7.3 | a deny rule wins over an allow rule from the next call on |
 | 7.3 | exec run of a command nothing allows is `forbidden` |
 | 7.5 | a refusal emits `audit` `decision` `forbidden` |
