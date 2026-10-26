@@ -1686,18 +1686,18 @@ impl Link {
             }
             let mut args = inv.args.clone();
             let mut targets = Vec::new();
-            {
+            // One that does not resolve as the account (a place it may not
+            // look into, the node's own folders) is refused and in the audit
+            // as any refusal, with the path given. The entry is written once
+            // the switch is over: the account may not write the node's log.
+            let resolved = {
                 let _as = act_as(known.as_ref())?;
-                for (field, mark) in &marked {
+                marked.iter().try_for_each(|(field, mark)| {
                     // Left out (or null, which its schema may allow): no path.
                     let Some(Value::String(given)) = inv.args.get(field) else {
-                        continue;
+                        return Ok(());
                     };
-                    // One that does not resolve as the account (a place it
-                    // may not look into, the node's own folders) is refused
-                    // and in the audit as any refusal, with the path given.
-                    let path = WirePath::parse(given)
-                        .inspect_err(|e| self.audit_bad_path(&inv, given, e))?;
+                    let path = WirePath::parse(given).map_err(|e| (given, e))?;
                     args.insert(
                         field.clone(),
                         Value::String(nerve_policy::paths::to_wire(&path.real)),
@@ -1709,8 +1709,13 @@ impl Link {
                             PathMark::Write => PathAccess::Write,
                         },
                     });
-                }
-            }
+                    Ok(())
+                })
+            };
+            resolved.map_err(|(given, e)| {
+                self.audit_bad_path(&inv, given, &e);
+                e
+            })?;
             let target = if targets.is_empty() {
                 format!("{}.{}", inv.cap, inv.action)
             } else {
@@ -1775,14 +1780,17 @@ impl Link {
                 if self.shared.separate(&entry.policy) {
                     self.acls_ready(&cfg).await?;
                 }
-                let call = {
+                // A path that does not resolve is in the audit once the
+                // switch is over, as for a provider's.
+                let parsed = {
                     let _as = act_as(known.as_ref())?;
-                    FsCall::parse(a, &inv.args).inspect_err(|e| {
-                        if let Some(Value::String(given)) = inv.args.get("path") {
-                            self.audit_bad_path(&inv, given, e);
-                        }
-                    })?
+                    FsCall::parse(a, &inv.args)
                 };
+                let call = parsed.inspect_err(|e| {
+                    if let Some(Value::String(given)) = inv.args.get("path") {
+                        self.audit_bad_path(&inv, given, e);
+                    }
+                })?;
                 // Taken before the gate: whenever the gate judged by the
                 // folders, the walk below does too, even if `until` passes
                 // in between. Where the node reads as the command account,
@@ -1815,10 +1823,11 @@ impl Link {
                     // through such a folder to a folder with `r` inside it,
                     // and finds only the files there. In no folder, where
                     // the account holds the reads, the walk keeps to what is
-                    // open to every account as the gate does; what that
-                    // account may not open the walk cannot read anyway.
+                    // open to every account and out of the node's own
+                    // process as the gate does; what that account may not
+                    // open the walk cannot read anyway.
                     let open = |p: &std::path::Path| {
-                        if crate::fs::open_to_all(p) {
+                        if crate::fs::open_to_all(p) && !crate::fs::own_process(p) {
                             Ok(())
                         } else {
                             Err(String::new())
@@ -1931,34 +1940,10 @@ impl Link {
         // The policy looks at the paths as the account (crate::account::FsAs);
         // the audit entry below is the node's own again. `~` is the owner's.
         // Where the node reads as the command account, a path read in no
-        // folder in folder mode must be open to every account, so the
-        // entries the node put on for the folders (another pairing's, the
-        // pass-through on the owner's folders above them) reach no further
-        // than the folders, and one that account may open; both are asked
-        // under the same switch. A provider reads with the owner's rights,
-        // so a folder handed to it there would let it read below as the
-        // owner whatever is closed to others.
+        // folder in folder mode is asked of that account under the same
+        // switch (crate::fs::may_read_outside).
         let provider = inv.cap != "fs";
-        let may_read = |p: &std::path::Path| {
-            if !crate::fs::open_to_all(p) {
-                Err(format!(
-                    "{} is in no folder that allows reading, and not open to every account on this machine",
-                    p.display()
-                ))
-            } else if provider && p.is_dir() {
-                Err(format!(
-                    "{} is a folder outside the folders that allow reading: a provider would read below it with the owner's rights",
-                    p.display()
-                ))
-            } else if !crate::fs::readable(p) {
-                Err(format!(
-                    "the account this center's commands run as may not read {}",
-                    p.display()
-                ))
-            } else {
-                Ok(())
-            }
-        };
+        let may_read = |p: &std::path::Path| crate::fs::may_read_outside(p, provider);
         let reads = if self.reads_by_account(entry, account) {
             Reads::Account(&may_read)
         } else {
@@ -2001,10 +1986,17 @@ impl Link {
     /// Writes the refusal of a call whose path `given` did not resolve
     /// (`e`, a `bad_path`) to the audit log, with the path as given: an
     /// attempt at a place the account may not look into is in the log as
-    /// any refusal. Any other error is about the arguments, not a place.
+    /// any refusal. Any other error is about the arguments, not a place. An
+    /// `fs` entry names it only where it is as plain as a resolved path
+    /// ([`plain_path`]); the reason names it either way.
     fn audit_bad_path(&self, inv: &Invoke, given: &str, e: &RpcError) {
         if e.kind().as_str() == "bad_path" {
-            self.audit(inv, given, "forbidden", Some("bad_path"), Some(&e.message));
+            let target = if inv.cap == "fs" {
+                plain_path(given)
+            } else {
+                given
+            };
+            self.audit(inv, target, "forbidden", Some("bad_path"), Some(&e.message));
         }
     }
 
@@ -2542,11 +2534,11 @@ impl Drop for Running<'_> {
 }
 
 /// The audit target of a call to an off action, from its arguments as
-/// given: the path an `fs` call names and the command line of `exec.run`,
-/// as an allowed call's target names them, else `cap.action`, the target of
-/// a call that names neither. An `fs` or `exec.run` call without that
-/// argument has none, so the audit's rule buttons make no rule of the
-/// action's name.
+/// given: the path an `fs` call names (where it is plain, [`plain_path`])
+/// and the command line of `exec.run`, as an allowed call's target names
+/// them, else `cap.action`, the target of a call that names neither. An
+/// `fs` or `exec.run` call without that argument has none, so the audit's
+/// rule buttons make no rule of the action's name.
 fn off_target(inv: &Invoke) -> String {
     let arg = |k: &str| {
         inv.args
@@ -2556,10 +2548,25 @@ fn off_target(inv: &Invoke) -> String {
             .to_string()
     };
     match (inv.cap.as_str(), inv.action.as_str()) {
-        ("fs", _) => arg("path"),
+        ("fs", _) => plain_path(&arg("path")).to_string(),
         ("exec", "run") => arg("command"),
         _ => format!("{}.{}", inv.cap, inv.action),
     }
+}
+
+/// `given`, an `fs` path the node did not resolve, where it is written as a
+/// resolved path is (absolute, no `.` or `..` part, no empty one), else
+/// nothing. The audit's rule buttons make an `fs` rule of an entry's target
+/// and rules meet resolved paths only, so a rule made of `a/../b` would
+/// match nothing; an entry with no target gets no buttons.
+fn plain_path(given: &str) -> &str {
+    let plain = given == "/"
+        || given.starts_with('/')
+            && given[1..]
+                .split('/')
+                .all(|part| !matches!(part, "" | "." | ".."))
+            && !(cfg!(windows) && given.contains('\\'));
+    if plain { given } else { "" }
 }
 
 /// The shell a command line runs in, by the shell the machine is set to

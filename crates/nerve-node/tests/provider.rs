@@ -733,12 +733,15 @@ async fn a_path_taking_provider_is_held_to_the_folders() {
         "open": {"effect": "read", "params": one("path", path("read", json!("string")), &["path"])},
         "save": {"effect": "write", "params": one("path", path("write", json!("string")), &["path"])},
         "tidy": {"effect": "write",
-                 "params": one("path", path("write", json!(["string", "null"])), &[])}}}]);
+                 "params": one("path", path("write", json!(["string", "null"])), &[])},
+        "peek": {"effect": "read", "params": one("path", json!({"type": "string"}), &["path"])}}}]);
     let (mut p, first) = hello_with(&daemon.paths().ctl_socket(), caps).await;
     assert_eq!(first["ok"]["broken"], json!([]), "{first}");
     descriptor_changed(&mut conn).await;
-    // The marker is published, and folder mode offers all three: a call
-    // with its paths in the folders, or `tidy` with none and `on`, could run.
+    // The marker is published, and folder mode offers three: a call with
+    // its paths in the folders, or `tidy` with none and `on`, could run.
+    // `peek` marks no path, so the node could not hold where the program
+    // reads: like any read that names no path, it needs `on`.
     let d = conn
         .call("describe", json!({"detail": "full"}), WAIT)
         .await
@@ -801,7 +804,7 @@ async fn a_path_taking_provider_is_held_to_the_folders() {
         ),
         // The provider would read below a folder it is handed, the
         // protected entries in it (`.ssh` and the like) too.
-        ("open", wire(&root.join("home")), ", which is protected"),
+        ("open", wire(&root.join("home")), "holds a protected path"),
     ];
     for (action, at, why) in &refused {
         let e = conn
@@ -819,6 +822,16 @@ async fn a_path_taking_provider_is_held_to_the_folders() {
         .unwrap()
         .expect_err("refused");
     assert!(e.message.contains("touches no folder"), "{}", e.message);
+    let e = conn
+        .call("invoke", call("peek", json!(secret)), WAIT)
+        .await
+        .unwrap()
+        .expect_err("refused");
+    assert!(
+        e.message.contains("files.peek touches no folder"),
+        "{}",
+        e.message
+    );
     // A path that does not resolve is refused, and in the audit as given.
     let e = conn
         .call("invoke", call("open", json!("not/absolute")), WAIT)
@@ -886,6 +899,7 @@ async fn a_path_taking_provider_is_held_to_the_folders() {
     // The link is named as the file it leads to.
     want[4].1 = secret.clone();
     want.push(("tidy".into(), "files.tidy".into(), "forbidden".into()));
+    want.push(("peek".into(), "files.peek".into(), "forbidden".into()));
     want.push(("open".into(), "not/absolute".into(), "forbidden".into()));
     want.extend(
         allowed
@@ -901,15 +915,12 @@ async fn a_path_taking_provider_is_held_to_the_folders() {
         .unwrap();
     assert_eq!(unresolved["code"], "bad_path", "{unresolved}");
 
-    // An `fs` path that does not resolve is in the audit too.
+    // An `fs` path that does not resolve is in the audit too. Its target
+    // is the path where it is as plain as a resolved one, which the audit's
+    // rule buttons can make a rule of; else there is none, and the reason
+    // names it.
     let fs_read =
         |at: &str| json!({"cap": "fs", "action": "read", "args": {"path": at}, "ctx": {}});
-    let e = conn
-        .call("invoke", fs_read("not/absolute"), WAIT)
-        .await
-        .unwrap()
-        .expect_err("refused");
-    assert_eq!(code_of(&e), "bad_path", "{}", e.message);
     let fs_audit = || -> Vec<Value> {
         std::fs::read_to_string(paths.audit_log())
             .unwrap()
@@ -918,12 +929,28 @@ async fn a_path_taking_provider_is_held_to_the_folders() {
             .filter(|e| e["cap"] == "fs")
             .collect()
     };
-    let last = fs_audit().pop().expect("the refusal is audited");
-    assert_eq!(
-        (&last["target"], &last["code"]),
-        (&json!("not/absolute"), &json!("bad_path")),
-        "{last}"
-    );
+    std::os::unix::fs::symlink(root.join("gone"), work.join("dangling")).unwrap();
+    let dangling = wire(&work.join("dangling/a.txt"));
+    let roundabout = wire(&work.join("missing/../a.txt"));
+    for (at, target) in [
+        ("not/absolute", ""),
+        (roundabout.as_str(), ""),
+        (dangling.as_str(), dangling.as_str()),
+    ] {
+        let e = conn
+            .call("invoke", fs_read(at), WAIT)
+            .await
+            .unwrap()
+            .expect_err("refused");
+        assert_eq!(code_of(&e), "bad_path", "{}", e.message);
+        assert!(e.message.contains(at), "{}", e.message);
+        let last = fs_audit().pop().expect("the refusal is audited");
+        assert_eq!(
+            (&last["target"], &last["code"], &last["reason"]),
+            (&json!(target), &json!("bad_path"), &json!(e.message)),
+            "{last}"
+        );
+    }
 
     // An off `fs` call is in the audit with the path it names, as an
     // allowed one would be, not with the action's name, which the audit's
@@ -946,6 +973,15 @@ async fn a_path_taking_provider_is_held_to_the_folders() {
         (&off["action"], &off["target"], &off["code"]),
         (&json!("read"), &json!(in_work), &json!("disabled")),
         "{off}"
+    );
+    conn.call("invoke", fs_read(&roundabout), WAIT)
+        .await
+        .unwrap()
+        .expect_err("off");
+    let off = fs_audit().pop().unwrap();
+    assert_eq!(
+        (&off["target"], &off["code"]),
+        (&json!(""), &json!("disabled"))
     );
     served.abort();
     daemon.stop().await;

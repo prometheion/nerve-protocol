@@ -215,15 +215,20 @@ impl Reach {
         self.note()?;
         // Where the node reads as the command account, the folders hold
         // only what a file call writes and where a command starts; outside
-        // them a file call reads what every account may.
+        // them a file call reads what every account may. A program other
+        // than the node reads with the owner's rights, so the node hands it
+        // no folder there.
         const OPEN: &str = "what is open to every account on the machine, except protected \
                             paths and the node's own files";
+        const NO_FOLDER: &str = "An action of any capability but fs may name a file there, \
+                                 never a folder: its program would read below it with the \
+                                 owner's rights.";
         let reads = self.reads_by_account;
         if self.no_folder() && !commands {
             return Some(if reads {
                 format!(
                     "The node is in folder mode with no folder granted: a call may read {OPEN}; \
-                     it may write nothing until its owner grants a folder."
+                     it may write nothing until its owner grants a folder. {NO_FOLDER}"
                 )
             } else {
                 "The node is in folder mode with no folder granted: its calls that name paths \
@@ -261,8 +266,8 @@ impl Reach {
         } else if reads {
             format!(
                 "The node is in folder mode: a call may read in the folders of the `folders:` \
-                 line marked r and, outside every folder, {OPEN}. A call may write only in the \
-                 folders marked w (r read, w write, x run commands)"
+                 line marked r and, outside every folder, {OPEN}. {NO_FOLDER} A call may write \
+                 only in the folders marked w (r read, w write, x run commands)"
             )
         } else {
             "The node is in folder mode: its calls may name paths only in the folders of the \
@@ -427,6 +432,7 @@ impl Catalog {
             .as_ref()
             .and_then(Reach::file_advice)
             .map(Into::into);
+
         // A capability id given twice would make `cap.action` name two
         // actions: `list` would show one and `execute` might check the
         // other. Neither is offered.
@@ -1372,15 +1378,19 @@ mod tests {
         };
         let open = "what is open to every account on the machine, except protected paths and \
                     the node's own files";
+        // A program other than the node's `fs` is never handed a folder
+        // outside the folders.
+        let never = "An action of any capability but fs may name a file there, never a folder: \
+                     its program would read below it with the owner's rights.";
         let granted = json!([{"path": "/a", "access": "rw"}]);
         let r = reach(true, granted.clone(), false);
         let a = r.file_advice().unwrap();
         assert!(
             a.starts_with(&format!(
                 "The node is in folder mode: a call may read in the folders of the `folders:` \
-                 line marked r and, outside every folder, {open}. A call may write only in the \
-                 folders marked w (r read, w write, x run commands). Where folders nest, the \
-                 deepest one decides."
+                 line marked r and, outside every folder, {open}. {never} A call may write only \
+                 in the folders marked w (r read, w write, x run commands). Where folders nest, \
+                 the deepest one decides."
             )),
             "{a}"
         );
@@ -1409,7 +1419,7 @@ mod tests {
             reach(true, json!([]), false).file_advice().unwrap(),
             format!(
                 "The node is in folder mode with no folder granted: a call may read {open}; it \
-                 may write nothing until its owner grants a folder."
+                 may write nothing until its owner grants a folder. {never}"
             )
         );
         assert_eq!(

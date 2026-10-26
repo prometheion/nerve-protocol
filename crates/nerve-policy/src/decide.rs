@@ -121,8 +121,7 @@ pub enum Need {
 ///
 /// | effect | `allowlist` | `folder` | `user` |
 /// |---|---|---|---|
-/// | read | allow rule | allowed; its paths in the folders | allowed |
-/// | write, execute | allow rule | paths in the folders; no path: `on` | allowed |
+/// | read, write, execute | allow rule | paths in the folders; no path: `on` | allowed |
 /// | sense, actuate | allow rule | `on`, and its paths in the folders | `on` |
 ///
 /// "In the folders" is each path in a folder whose flag allows what the
@@ -159,13 +158,13 @@ pub fn effect_rule(
         // No mode allows these; only the owner's `on` does.
         (Mode::Folder | Mode::User, Effect::Sense | Effect::Actuate, _) => on,
         (Mode::User, Effect::Read | Effect::Write | Effect::Execute, _) => Need::Allowed,
-        // Folder mode lets the agent read; only what it writes and runs is
-        // held to the folders.
-        (Mode::Folder, Effect::Read, PathArgs::None) => Need::Allowed,
         // An action that names no path lies in no folder, so the folders
         // cannot allow it: without this an empty list of paths would pass
-        // the folder check for every write.
-        (Mode::Folder, Effect::Write | Effect::Execute, PathArgs::None) => on,
+        // the folder check for every write. A read that names none is a
+        // program's (every `fs` call names its path), which reads with the
+        // owner's rights where the node cannot see: the protected paths
+        // and the node's own files would not hold for it.
+        (Mode::Folder, Effect::Read | Effect::Write | Effect::Execute, PathArgs::None) => on,
         (
             Mode::Folder,
             Effect::Read | Effect::Write | Effect::Execute,
@@ -500,6 +499,20 @@ pub fn decide(policy: &CenterPolicy, env: &Env, call: &Call) -> Decision {
             return Decision::Forbidden(format!("{} is denied ({rule})", name(call, &t.text)));
         }
     }
+    // A program handed a folder works below it, so a deny rule of its own
+    // that covers a place there refuses the folder as well; the node's own
+    // walks skip such places instead.
+    if works_below(call) {
+        for t in targets.iter().filter(|t| t.path) {
+            if let Some(rule) = deny.find_below(call.cap, call.action, &t.text) {
+                let rule = crate::rules::escape_controls(rule);
+                return Decision::Forbidden(format!(
+                    "{} holds a place that is denied ({rule})",
+                    t.text
+                ));
+            }
+        }
+    }
 
     let mode = policy.mode_at(call.now_ms);
     let mut reasons = Vec::new();
@@ -525,27 +538,27 @@ pub fn decide(policy: &CenterPolicy, env: &Env, call: &Call) -> Decision {
         // A path handed to a program that works below it reaches what lies
         // there too: a protected entry below it, unless a folder releases
         // that entry, and in `folder` mode a folder below it that the owner
-        // gave less.
+        // gave less. The refusal does not name what lies below: the agent
+        // is never shown a closed folder or the owner's extra protected
+        // paths, and naming the parent must not tell it them.
         let below = works_below(call) && t.access != PathAccess::Run;
         if below
             && entry.is_none()
-            && let Some(inner) = env.protected.entry_below(&t.path, write, &policy.folders)
+            && env
+                .protected
+                .entry_below(&t.path, write, &policy.folders)
+                .is_some()
         {
             allowed = false;
-            reasons.push(format!(
-                "{} holds {}, which is protected",
-                t.path.display(),
-                inner.display()
-            ));
+            reasons.push(format!("{} holds a protected path", t.path.display()));
         } else if below
             && mode == Mode::Folder
-            && let Some(f) = closed_below(&policy.folders, &t.path, t.access)
+            && closed_below(&policy.folders, &t.path, t.access).is_some()
         {
             allowed = false;
             reasons.push(format!(
-                "{} holds {}, a folder that does not allow {}",
+                "{} holds a folder that does not allow {}",
                 t.path.display(),
-                f.path,
                 if write { "writing" } else { "reading" }
             ));
         }
@@ -905,9 +918,9 @@ mod tests {
     }
 
     /// The effect table for an action that names no path (a provider's, or
-    /// one whose marked paths the call left out): folder mode allows a read,
-    /// and a write or a command only where the owner set it on, as it does a
-    /// sense or actuate action; user mode allows read, write and execute as
+    /// one whose marked paths the call left out): folder mode allows it only
+    /// where the owner set it on, whatever its effect, as the folders cannot
+    /// hold it; user mode allows read, write and execute as
     /// for the built-in capabilities; allowlist mode needs an allow rule on
     /// `cap.action`. A deny rule wins in every mode.
     #[test]
@@ -935,14 +948,10 @@ mod tests {
         ];
         for effect in effects {
             let mut p = policy(Mode::Folder);
-            if effect == Effect::Read {
-                assert_eq!(decide_as(&p, effect), Decision::Allow, "{effect:?}");
-            } else {
-                let Decision::Forbidden(why) = decide_as(&p, effect) else {
-                    panic!("{effect:?} passed folder mode without on");
-                };
-                assert!(why.contains("echo.say"), "{why}");
-            }
+            let Decision::Forbidden(why) = decide_as(&p, effect) else {
+                panic!("{effect:?} passed folder mode without on");
+            };
+            assert!(why.contains("echo.say"), "{why}");
             p.caps.insert("echo.say".into(), CapSetting::On);
             assert_eq!(decide_as(&p, effect), Decision::Allow, "{effect:?}");
             // A deny rule still wins.
@@ -988,7 +997,7 @@ mod tests {
             (Mode::Allowlist, Effect::Execute, AllowRule, AllowRule, AllowRule),
             (Mode::Allowlist, Effect::Sense, AllowRule, AllowRule, AllowRule),
             (Mode::Allowlist, Effect::Actuate, AllowRule, AllowRule, AllowRule),
-            (Mode::Folder, Effect::Read, Allowed, Allowed, InFolders),
+            (Mode::Folder, Effect::Read, NeedsOn, Allowed, InFolders),
             (Mode::Folder, Effect::Write, NeedsOn, Allowed, InFolders),
             (Mode::Folder, Effect::Execute, NeedsOn, Allowed, InFolders),
             (Mode::Folder, Effect::Sense, NeedsOn, NeedsOn, InFolders),
@@ -1484,17 +1493,12 @@ mod tests {
         else {
             panic!("a folder holding a protected entry was handed over");
         };
-        assert!(
-            why.starts_with("/h holds /h/.") && why.ends_with(", which is protected"),
-            "{why}"
-        );
+        assert_eq!(why, "/h holds a protected path");
         // A folder with less below it.
         let proj = t("/h/proj", false);
         assert_eq!(
             decide(&p, &env, &marked("search", Effect::Read, &proj)),
-            Decision::Forbidden(
-                "/h/proj holds /h/proj/secret, a folder that does not allow reading".into()
-            )
+            Decision::Forbidden("/h/proj holds a folder that does not allow reading".into())
         );
         assert_eq!(
             decide(
@@ -1536,7 +1540,7 @@ mod tests {
         let data = t("/data", false);
         assert_eq!(
             decide(&p, &env, &marked("search", Effect::Read, &data)),
-            Decision::Forbidden("/data holds /data/keys, which is protected".into())
+            Decision::Forbidden("/data holds a protected path".into())
         );
         p.folders.push(Folder {
             path: "/data/keys".into(),
@@ -1548,7 +1552,7 @@ mod tests {
         );
         assert_eq!(
             decide(&p, &env, &marked("save", Effect::Write, &t("/data", true))),
-            Decision::Forbidden("/data holds /data/keys, which is protected".into())
+            Decision::Forbidden("/data holds a protected path".into())
         );
     }
 
@@ -1594,6 +1598,66 @@ mod tests {
         assert_eq!(
             run(&p, &env, &marked("open", Effect::Read, &secret)),
             if cfg!(windows) { "refused" } else { "allow" }
+        );
+    }
+
+    /// A deny rule of a capability holds below a folder handed to it: the
+    /// program works there, so the folder above the denied place is refused
+    /// too, in every mode, for reads and writes. The node's own `fs` walks
+    /// skip the denied place instead.
+    #[test]
+    fn a_deny_rule_holds_below_a_folder_handed_to_a_provider() {
+        let x = T::new();
+        let env = x.env(true);
+        let mut p = policy(Mode::Folder);
+        p.folders = vec![
+            Folder {
+                path: "/h/work".into(),
+                access: acc("r"),
+            },
+            Folder {
+                path: "/h/proj".into(),
+                access: acc("rw"),
+            },
+        ];
+        p.deny = rules(&["notes:/h/work/clients/*", "notes.save:~/proj/keep/*"]);
+        let denied = |p: &CenterPolicy, c: &Call| match decide(p, &env, c) {
+            Decision::Forbidden(why) => why,
+            d => panic!("{d:?}"),
+        };
+        assert_eq!(
+            denied(
+                &p,
+                &marked("search", Effect::Read, &t("/h/work/clients/a.txt", false))
+            ),
+            "/h/work/clients/a.txt is denied (notes:/h/work/clients/*)"
+        );
+        let work = t("/h/work", false);
+        assert_eq!(
+            denied(&p, &marked("search", Effect::Read, &work)),
+            "/h/work holds a place that is denied (notes:/h/work/clients/*)"
+        );
+        let proj = t("/h/proj", true);
+        assert_eq!(
+            denied(&p, &marked("save", Effect::Write, &proj)),
+            "/h/proj holds a place that is denied (notes.save:~/proj/keep/*)"
+        );
+        // Beside the denied place, and for another capability, it holds no more.
+        assert_eq!(
+            run(
+                &p,
+                &env,
+                &marked("search", Effect::Read, &t("/h/work/other", false))
+            ),
+            "allow"
+        );
+        assert_eq!(run(&p, &env, &fs_read(&work)), "allow");
+        // An allow rule above the denied place does not let it through.
+        p.mode = Mode::Allowlist;
+        p.allow = rules(&["notes.search:/h/work/*"]);
+        assert_eq!(
+            run(&p, &env, &marked("search", Effect::Read, &work)),
+            "refused"
         );
     }
 

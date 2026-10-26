@@ -162,6 +162,70 @@ pub fn open_to_all(_: &Path) -> bool {
     false
 }
 
+/// Whether a call in folder mode may read `path`, which lies in no folder
+/// of its pairing, where the node reads as the command account
+/// (nerve_policy::decide::Reads::Account); asked as that account
+/// ([`crate::link::act_as`]). `Err` says why not. The path must be open to
+/// every account ([`open_to_all`]), so the entries the node put on for the
+/// folders (another pairing's, the pass-through on the owner's folders above
+/// them) reach no further than the folders, and one the account may open
+/// ([`readable`]). The node's own process is not the account's, though its
+/// files under `/proc` look open to all: the kernel lets the node's threads
+/// read them whatever account they act as. A `provider` reads with the
+/// owner's rights, so a folder handed to it here would let it read below as
+/// the owner whatever is closed to others.
+pub fn may_read_outside(path: &Path, provider: bool) -> Result<(), String> {
+    if own_process(path) {
+        Err(format!(
+            "{} belongs to the node's own process; no mode reaches it",
+            path.display()
+        ))
+    } else if !open_to_all(path) {
+        Err(format!(
+            "{} is in no folder that allows reading, and not open to every account on this machine",
+            path.display()
+        ))
+    } else if provider && path.is_dir() {
+        Err(format!(
+            "{} is a folder outside the folders that allow reading: a provider would read below it with the owner's rights",
+            path.display()
+        ))
+    } else if !readable(path) {
+        Err(format!(
+            "the account this center's commands run as may not read {}",
+            path.display()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Whether `path` lies in the node's own entry of `/proc`: `/proc/self`,
+/// `/proc/thread-self`, or `/proc/<n>` where `n` is the node or one of its
+/// threads (a thread's entry is there too, though `/proc` does not list it).
+#[cfg(target_os = "linux")]
+pub fn own_process(path: &Path) -> bool {
+    let Ok(rest) = path.strip_prefix("/proc") else {
+        return false;
+    };
+    let Some(first) = rest.components().next() else {
+        return false;
+    };
+    let first = first.as_os_str().to_string_lossy();
+    if first == "self" || first == "thread-self" {
+        return true;
+    }
+    first.parse::<u32>().is_ok_and(|n| {
+        n == std::process::id() || Path::new("/proc/self/task").join(&*first).exists()
+    })
+}
+
+/// Only Linux has a command account the node reads as.
+#[cfg(not(target_os = "linux"))]
+pub fn own_process(_: &Path) -> bool {
+    false
+}
+
 /// One parsed `fs` call.
 pub enum FsCall {
     Stat(WirePath),
@@ -812,6 +876,69 @@ mod tests {
         assert!(open_to_all(&file));
         assert!(!open_to_all(&home));
         mode(&home, 0o755);
+    }
+
+    /// A read in no folder, where the node reads as the command account,
+    /// goes only where the path is open to every account and that account
+    /// may open it, never into the node's own process, and a provider is
+    /// never handed a folder there.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_outside_the_folders_goes_where_all_may_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap()
+        };
+        let d = tempfile::tempdir().unwrap();
+        mode(d.path(), 0o755);
+        let file = d.path().join("a.txt");
+        std::fs::write(&file, "x").unwrap();
+        mode(&file, 0o644);
+        assert_eq!(may_read_outside(&file, false), Ok(()));
+        assert_eq!(may_read_outside(&file, true), Ok(()));
+        assert_eq!(may_read_outside(&d.path().join("missing"), true), Ok(()));
+        assert_eq!(may_read_outside(d.path(), false), Ok(()));
+        let why = may_read_outside(d.path(), true).unwrap_err();
+        assert!(why.contains("a provider would read below it"), "{why}");
+        mode(&file, 0o600);
+        let why = may_read_outside(&file, false).unwrap_err();
+        assert!(why.contains("not open to every account"), "{why}");
+        // Others may read it, its owner may not; root opens anything.
+        if unsafe { libc::geteuid() } != 0 {
+            mode(&file, 0o004);
+            let why = may_read_outside(&file, false).unwrap_err();
+            assert!(why.contains("may not read"), "{why}");
+        }
+        mode(&file, 0o644);
+        #[cfg(target_os = "linux")]
+        {
+            // The node's own process: its map is open to all by its mode,
+            // and any of its threads' entries leads there too.
+            let own = PathBuf::from(format!("/proc/{}/maps", std::process::id()));
+            assert!(open_to_all(&own));
+            let thread = std::thread::spawn(move || {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let t = std::thread::spawn(move || {
+                    tx.send(unsafe { libc::gettid() }).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                });
+                let tid = rx.recv().unwrap();
+                let r = may_read_outside(&PathBuf::from(format!("/proc/{tid}/stat")), false);
+                t.join().unwrap();
+                r
+            })
+            .join()
+            .unwrap();
+            for r in [
+                may_read_outside(&own, false),
+                may_read_outside(Path::new("/proc/self/maps"), false),
+                may_read_outside(Path::new("/proc/thread-self/stat"), false),
+                thread,
+            ] {
+                let why = r.unwrap_err();
+                assert!(why.contains("the node's own process"), "{why}");
+            }
+        }
     }
 
     #[test]

@@ -442,6 +442,24 @@ except OSError as e:
             .is_err_and(|e| e.contains("belongs to the node") || e.contains("Permission denied")),
         "{own:?}"
     );
+    // The node's own process is not nerve-run's, though its files under
+    // `/proc` are open to all by their mode: the kernel would let the node's
+    // thread read them whatever account it acts as.
+    for own in ["/proc/self/maps", "/proc/thread-self/stat"] {
+        let r = fs_call(&mut conn, "read", at(Path::new(own))).await;
+        assert!(
+            r.as_ref()
+                .is_err_and(|e| e.contains("the node's own process")),
+            "{own}: {r:?}"
+        );
+    }
+    let r = fs_call(
+        &mut conn,
+        "grep",
+        json!({"path": "/proc/self", "pattern": "x"}),
+    )
+    .await;
+    assert!(r.is_err(), "{r:?}");
     let write = fs_call(
         &mut conn,
         "write",
@@ -490,6 +508,12 @@ except OSError as e:
         })
     };
     assert!(decided(&public.join("open.txt"), "allowed"), "{audit}");
+    // Also a path that does not resolve as nerve-run: the node writes the
+    // entry as itself, not as the account, which may not write its log.
+    assert!(
+        decided(Path::new("/etc/nerve/node.toml"), "forbidden"),
+        "{audit}"
+    );
     assert!(decided(&base.join("open.txt"), "forbidden"), "{audit}");
     assert!(decided(&base.join("closed.txt"), "forbidden"), "{audit}");
     let _ = std::fs::remove_dir_all(&public);

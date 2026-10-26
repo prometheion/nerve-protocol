@@ -183,6 +183,9 @@ struct Compiled {
     /// The globs a path target is matched with: `~/` resolved and, on
     /// Windows, without case, whatever the scope.
     path_globs: Vec<GlobMatcher>,
+    /// The pattern as a path target reads it (`~/` resolved), which
+    /// [`RuleSet::find_below`] looks at.
+    path_pattern: Option<String>,
     /// A rule of the guard: it matches parsed commands, not the text.
     guard: Option<Guard>,
 }
@@ -212,6 +215,7 @@ impl RuleSet {
                         pattern: None,
                         globs: Vec::new(),
                         path_globs: Vec::new(),
+                        path_pattern: None,
                         guard: Some(guard),
                     });
                 }
@@ -240,6 +244,7 @@ impl RuleSet {
                     pattern: pattern.map(|p| expand_home(p, &home, path)),
                     globs,
                     path_globs,
+                    path_pattern: pattern.map(|p| expand_home(p, &home, true)),
                     guard: None,
                 })
             })
@@ -285,6 +290,44 @@ impl RuleSet {
             .iter()
             .filter(|r| r.guard.is_none() && r.covers(cap, action))
             .find(|r| r.path_globs.is_empty() || r.path_globs.iter().any(|g| g.is_match(target)))
+            .map(|r| r.text.as_str())
+    }
+
+    /// The first rule that may cover a path strictly below the folder `dir`
+    /// of `cap.action`, a path argument as [`RuleSet::find_path`] reads one:
+    /// a program handed `dir` works below it. A rule may cover such a path
+    /// where the text its pattern starts with, up to its first wildcard,
+    /// lies below `dir`, or `dir` below that text when a wildcard follows. That is wider than the pattern, which is the
+    /// side to err on: the rule is the owner's "no".
+    pub fn find_below(&self, cap: &str, action: &str, dir: &str) -> Option<&str> {
+        let fold = |s: &str| {
+            if cfg!(windows) {
+                s.replace('\\', "/").to_lowercase()
+            } else {
+                s.to_string()
+            }
+        };
+        let dir = fold(dir);
+        let below = if dir.ends_with('/') {
+            dir
+        } else {
+            format!("{dir}/")
+        };
+        self.rules
+            .iter()
+            .filter(|r| r.guard.is_none() && r.covers(cap, action))
+            .find(|r| {
+                let Some(pattern) = &r.path_pattern else {
+                    // A rule without a pattern covers every path.
+                    return true;
+                };
+                let pattern = fold(pattern);
+                let wild = pattern.find(['*', '?', '[', '{']);
+                let fixed = &pattern[..wild.unwrap_or(pattern.len())];
+                // A pattern with no wildcard names one path; after its
+                // first wildcard it may go on with anything below.
+                fixed.starts_with(&below) || wild.is_some() && below.starts_with(fixed)
+            })
             .map(|r| r.text.as_str())
     }
 
@@ -890,6 +933,45 @@ mod tests {
             cfg!(windows)
         );
         assert!(s.find("notes", "open", "/w/secret/a").is_none());
+    }
+
+    /// A rule covers what lies below a folder where its pattern may go on
+    /// below it: its fixed start lies there, or the folder lies below that
+    /// start and a wildcard follows.
+    #[test]
+    fn a_rule_may_cover_a_place_below_a_folder() {
+        let s = set(&["notes:~/work/clients/*", "notes:/h/data/key.pem"]);
+        for dir in ["/h", "/h/work", "/h/work/", "/h/work/clients", "/h/data"] {
+            assert!(s.find_below("notes", "search", dir).is_some(), "{dir}");
+        }
+        for dir in [
+            "/h/workshop",
+            "/h/other",
+            "/h/data/key.pem",
+            "/h/work/clientele",
+        ] {
+            assert!(s.find_below("notes", "search", dir).is_none(), "{dir}");
+        }
+        assert!(s.find_below("files", "search", "/h").is_none());
+        // A wildcard may go on with anything: one in the middle of a name,
+        // or one before any folder.
+        let s = set(&["notes:/h/wo*", "sync:**/.env"]);
+        assert!(s.find_below("notes", "search", "/h/work/a").is_some());
+        assert!(s.find_below("notes", "search", "/h/other").is_none());
+        assert!(s.find_below("sync", "pull", "/srv/proj").is_some());
+        // A rule of the whole scope covers every path.
+        assert!(set(&["notes"]).find_below("notes", "x", "/").is_some());
+        // The guard's rules never cover a path.
+        assert!(
+            set(&["guard:node-paths"])
+                .find_below("exec", "run", "/")
+                .is_none()
+        );
+        let s = set(&["notes:/W/Secret/*"]);
+        assert_eq!(
+            s.find_below("notes", "search", "/w").is_some(),
+            cfg!(windows)
+        );
     }
 
     #[test]

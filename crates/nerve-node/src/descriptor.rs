@@ -1385,7 +1385,7 @@ mod tests {
             (Mode::Allowlist, Effect::Execute, AllowRule, AllowRule, AllowRule),
             (Mode::Allowlist, Effect::Sense, AllowRule, AllowRule, AllowRule),
             (Mode::Allowlist, Effect::Actuate, AllowRule, AllowRule, AllowRule),
-            (Mode::Folder, Effect::Read, Allowed, Allowed, InFolders),
+            (Mode::Folder, Effect::Read, NeedsOn, Allowed, InFolders),
             (Mode::Folder, Effect::Write, NeedsOn, Allowed, InFolders),
             (Mode::Folder, Effect::Execute, NeedsOn, Allowed, InFolders),
             (Mode::Folder, Effect::Sense, NeedsOn, NeedsOn, InFolders),
