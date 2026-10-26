@@ -60,7 +60,7 @@ fn harness_part_passes_against_nerve_center() {
     let report = block_on(harness_part::run(&target));
     assert!(report.ok(), "{report}");
     // Every check ran; a count that shrinks silently would hide a lost check.
-    assert_eq!(report.outcomes.len(), 46, "{report}");
+    assert_eq!(report.outcomes.len(), 47, "{report}");
 }
 
 fn with(mut args: Value, more: Value) -> Value {

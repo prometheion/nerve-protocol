@@ -74,6 +74,12 @@ pub fn harness_descriptor(node_id: &str, name: &str) -> Descriptor {
                    "properties": {"ms": {"type": "integer", "minimum": 0, "maximum": WAIT_MAX_MS}},
                    "required": ["ms"], "additionalProperties": false},
         "result": {"type": "object", "properties": {"waited": {"type": "integer"}}}});
+    // A result that is a string, the node's own lines, which a center puts
+    // into its framing by lines (harness.md §4.3).
+    let mut lines = say.clone();
+    lines["summary"] = json!("Return the text as a string.");
+    lines["result"] = json!({"type": "string"});
+    caps[1]["actions"]["lines"] = lines;
     // The three capabilities a center must never offer, each with an action
     // that would otherwise be listed.
     caps[0]["actions"] =
@@ -260,6 +266,15 @@ pub fn handle(m: &str, p: &Map<String, Value>, d: &Descriptor) -> Result<Value, 
                             Ok(json!({"waited": ms}))
                         }
                         _ => Err(RpcError::invalid_args("wait takes {ms}")),
+                    }
+                }
+                ("echo", "lines")
+                    if d.capability("echo")
+                        .is_some_and(|c| c.actions.contains_key("lines")) =>
+                {
+                    match inv.args.get("text").and_then(Value::as_str) {
+                        Some(t) if inv.args.len() == 1 => Ok(json!(t)),
+                        _ => Err(RpcError::invalid_args("lines takes {text}")),
                     }
                 }
                 ("echo", "fail") => Err(RpcError::new(
