@@ -52,9 +52,25 @@ of evasion forms, and a change is judged by two things: ordinary mistakes are
 caught, ordinary work is not refused.
 
 An entry is `<scope>:<pattern>` in the node's rule syntax. `exec.run` patterns
-match the commands `normalize::commands` pulls from the command line; `fs`
+match the commands `normalize::parse` pulls from the command line; `fs`
 patterns are path globs (a leading `~` becomes `*`, since the center does not
-know the node's home); any other `cap.action` matches that scope.
+know the node's home); any other `cap` or `cap.action` is written without a
+pattern and matches that whole scope. `Rule::parse` refuses a pattern there
+(`exec:<pattern>` with a pointer to `exec.run:`), since the call carries
+nothing it could match until argument rules come (#152, C1); before, such an
+entry was kept and never matched.
+
+A call of any capability but `fs` meets the `fs` entries with its path
+arguments: `CallInfo.paths` holds the values of the arguments the unit's
+schema marks `x-nerve-path` (`center.rs` `CheckerUnit`, from the catalog), and
+`Rule::matches_path` matches each against the `fs` entries for every action
+and for `fs.read` or `fs.write` by its mark, with the same `path_glob` and
+`normalize_path` as an `fs` call's path. Allow rules are not matched against
+path arguments: they only skip the model. The checker's target (in the audit
+entry and the model's state) is then the paths, joined by `, ` as the node's
+audit names them. `checker_json` lists under `unpublished` the owner's entries
+and allow rules whose capability or action no paired node's descriptor has (for
+a rule of one node, that node), and the page shows them in a warning.
 
 For `exec.run` an entry is a **structured command pattern** (`program` glob,
 the short and long flags that must all be present, and operand globs that must
@@ -106,7 +122,21 @@ Windows root deletes, which have the whole-line twin. On Windows this includes
 `Format-Volume`, `bcdedit`, `diskpart` and the force-push, so the splitter
 reads a PowerShell here-string as it reads a POSIX here-document (below).
 
-`normalize` splits on separators and subshell parentheses, pulls `$( )`,
+`normalize::parse` reads the line twice and keeps the commands of both:
+nerve-policy's parser (`nerve_policy::command`, the node's guard reads with it,
+#159), each command at any depth as `command::run` unwraps it (the commands it
+read before it gave out, for a line it cannot read), and the module's own text
+splitter (`walk`), whose commands come first. The parser sees behind more
+wrappers (`timeout`, `runuser -u`, `env -S`, `su -c`, `eval`, `busybox`, cmd's
+`call` and `if`, `Invoke-Expression` of a literal, `coproc`, `. prog`). The
+splitter is kept for what the parser reads otherwise or not at all: the lines
+of a here-document or a PowerShell here-string written to a file, a `\` before
+a CRLF, cmd's `start ""` written in PowerShell, a chain of starters past the
+parser's unwrap bound, and a line it cannot read. A run of both over the eval
+set and the guard's table found no line the splitter alone refused that the
+two together let through, and no ordinary line newly refused.
+
+The splitter splits on separators and subshell parentheses, pulls `$( )`,
 backticks, process substitution, `sh -c` (`c` anywhere in the flag word:
 `-lc`, `-ce`, `-c -e`), `cmd /c` and `powershell -Command` bodies, and
 here-strings fed to a shell; it strips wrappers and shell keywords, reads the
@@ -162,7 +192,8 @@ The center sends:
 
 ```json
 {"model"?: "<name>",
- "state": {"capability": "exec", "action": "run", "target": "<command>",
+ "state": {"capability": "exec", "action": "run", "effect": "execute",
+           "description": "<clipped>", "target": "<command>",
            "os": "linux", "tainted": false, "args": "<clipped>"},
  "questions": {"danger": {"type": "noul",
    "instructions": "<fixed by the center>",
@@ -171,7 +202,13 @@ The center sends:
 
 and reads `answers.danger.noul`, the probability of `true` (dangerous). The
 question is fixed by the center; the command text is only ever in `state`, so a
-crafted command cannot change the question. Errors `401`, `422`, `429`, `501`
+crafted command cannot change the question. `checker::model_state` builds the
+state: `effect` is the unit's, `description` the capability's summary and the
+action's own (`CheckerUnit::of`, from the descriptor and the catalog), cut at
+`STATE_DESCRIPTION_MAX` (400 bytes); the target is the command, an `fs` path,
+another capability's path arguments, or `<cap>.<action>`; `args` is the whole
+argument object as JSON, cut at 2000 bytes. The description is node-written
+text, so it sits in the state beside the command, never in the question. Errors `401`, `422`, `429`, `501`
 (not a decision model) and `529` are treated as "no usable answer"; a
 connection or timeout error as "unreachable". Both fail closed by default.
 

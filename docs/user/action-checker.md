@@ -78,6 +78,18 @@ Entries are in the machine's own rule syntax, `<scope>:<pattern>`:
 - `exec.run:rm -rf /*` — a command. The program (in any letter case), then
   the flags that must be present, then an operand pattern.
 - `fs.write:/etc/sudoers` — a write to a path. `~` stands for any user's home.
+  `fs.read:` holds a read of a path, `fs:` both. These entries also hold the
+  paths of every other capability: an argument a program marks as a path it
+  reads or writes ([providers](providers.md#paths-it-takes)) is matched like
+  an `fs.read` or `fs.write` call's path, so `fs.write:~/.ssh/authorized_keys`
+  also refuses a notes program's `notes.save` into that file.
+- `lamp.set`, or `lamp` for all its actions — any other capability, named
+  whole. A pattern after it (`lamp.set:office`) is refused for now: it would
+  have nothing to match until rules on a capability's arguments come.
+  `exec:rm *` is refused too; a command pattern goes on `exec.run`
+  (`exec.run:rm *`). The page warns about your own entries and allow rules
+  that name a capability no paired machine offers, such as a misspelt one:
+  they match no call.
 - `cmd-re:` for a regular expression over **each command** of the line, e.g.
   `exec.run:cmd-re:^terraform destroy( |$)`. The checker pulls the commands
   apart (see below) and writes each one as `program arg1 arg2 …`: the
@@ -134,8 +146,15 @@ mentions one of them is not refused. One exception: a shell's quoted `-c` body
 the shell's name stands, so a note that writes out such a whole line, shell and
 quotes included, is refused too.
 
-The matcher does not just look at the raw string. For a command it splits the
-line into its commands (at `;`, `&&`, `||`, `|`, newlines, inside `$( )`,
+The matcher does not just look at the raw string. It reads a command line
+twice, and a command either reading finds counts. The first is the parser the
+machine's own guard reads commands with
+([rules](rules.md#the-guard-against-changing-the-node)), which also sees
+the command behind `timeout`, `runuser`, `env -S`, `su -c`, `eval`,
+`busybox`, cmd's `call` and `if`, and PowerShell's `Invoke-Expression` of a
+quoted command. The second is the checker's own simpler splitter, which keeps
+what the parser reads differently or cannot read. It splits the line into its
+commands (at `;`, `&&`, `||`, `|`, newlines, inside `$( )`,
 backticks and `sh -c '…'` / `cmd /c` / `powershell -Command` bodies), strips
 wrappers (`sudo`, `env A=B`, `nohup`, `time`, `nice`, `xargs`, …), reads the
 program that `Start-Process` (also with `-Verb RunAs`) or `start` runs as a
@@ -304,7 +323,13 @@ list show which sessions are tainted.
 
 ## What the model is told
 
-The state sent to the model is the call: its capability and action, the command
-or path, the other arguments cut to a bounded size, the machine's OS, and
-whether the session is tainted. The center never sends file contents or command
-output to the model, and the question is fixed by the center.
+The state sent to the model is the call: its capability and action, its effect
+(`read`, `write`, `execute`, `sense` or `actuate`), what the machine says the
+capability and the action do (their descriptions, cut to a few sentences), the
+command or path (for another capability, the paths its arguments name, else its
+name), the arguments cut to a bounded size, the machine's OS, and whether the
+session is tainted. The description is written by the machine, or by the
+program that provides the capability, so it is data the model weighs like the
+command, not an instruction: a description that calls an action harmless does
+not make it so. The center never sends file contents or command output to the
+model, and the question is fixed by the center.
