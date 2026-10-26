@@ -799,6 +799,9 @@ async fn a_path_taking_provider_is_held_to_the_folders() {
             wire(&work.join("link")),
             "outside the folders that allow reading",
         ),
+        // The provider would read below a folder it is handed, the
+        // protected entries in it (`.ssh` and the like) too.
+        ("open", wire(&root.join("home")), ", which is protected"),
     ];
     for (action, at, why) in &refused {
         let e = conn
@@ -816,6 +819,13 @@ async fn a_path_taking_provider_is_held_to_the_folders() {
         .unwrap()
         .expect_err("refused");
     assert!(e.message.contains("touches no folder"), "{}", e.message);
+    // A path that does not resolve is refused, and in the audit as given.
+    let e = conn
+        .call("invoke", call("open", json!("not/absolute")), WAIT)
+        .await
+        .unwrap()
+        .expect_err("refused");
+    assert_eq!(code_of(&e), "bad_path", "{}", e.message);
     for (action, at, resolved) in allowed {
         let v = conn
             .call("invoke", call(action, json!(at)), WAIT)
@@ -876,6 +886,7 @@ async fn a_path_taking_provider_is_held_to_the_folders() {
     // The link is named as the file it leads to.
     want[4].1 = secret.clone();
     want.push(("tidy".into(), "files.tidy".into(), "forbidden".into()));
+    want.push(("open".into(), "not/absolute".into(), "forbidden".into()));
     want.extend(
         allowed
             .iter()
@@ -884,6 +895,43 @@ async fn a_path_taking_provider_is_held_to_the_folders() {
     want.push(("open".into(), "files.open".into(), "forbidden".into()));
     assert_eq!(entries, want, "{audit:#?}");
     assert_eq!(audit.last().unwrap()["code"], "disabled");
+    let unresolved = audit
+        .iter()
+        .find(|e| e["target"] == "not/absolute")
+        .unwrap();
+    assert_eq!(unresolved["code"], "bad_path", "{unresolved}");
+
+    // An off `fs` call is in the audit with the path it names, as an
+    // allowed one would be, not with the action's name, which the audit's
+    // rule buttons would make a rule of.
+    owner_edit(&paths, |c| {
+        c.centers[0]
+            .policy
+            .caps
+            .insert("fs.read".into(), nerve_policy::config::CapSetting::Off);
+    })
+    .await;
+    let e = conn
+        .call(
+            "invoke",
+            json!({"cap": "fs", "action": "read", "args": {"path": in_work}, "ctx": {}}),
+            WAIT,
+        )
+        .await
+        .unwrap()
+        .expect_err("off");
+    assert_eq!(code_of(&e), "disabled", "{}", e.message);
+    let off: Value = std::fs::read_to_string(paths.audit_log())
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .rfind(|e| e["cap"] == "fs")
+        .unwrap();
+    assert_eq!(
+        (&off["action"], &off["target"], &off["code"]),
+        (&json!("read"), &json!(in_work), &json!("disabled")),
+        "{off}"
+    );
     served.abort();
     daemon.stop().await;
 }

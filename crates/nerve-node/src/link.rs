@@ -1652,8 +1652,11 @@ impl Link {
                 == Some(nerve_policy::config::CapSetting::Off);
         if off {
             // Refused before anything else, and in the audit as any refusal.
+            // Its target is what an allowed call's would name, as far as the
+            // arguments say it without resolving anything: the audit's rule
+            // buttons make a rule of it.
             let why = format!("{}.{} is off", inv.cap, inv.action);
-            let target = format!("{}.{}", inv.cap, inv.action);
+            let target = off_target(&inv);
             self.audit(&inv, &target, "forbidden", Some("disabled"), Some(&why));
             return Err(RpcError::new(ErrorCode::Disabled, why));
         }
@@ -1690,7 +1693,11 @@ impl Link {
                     let Some(Value::String(given)) = inv.args.get(field) else {
                         continue;
                     };
-                    let path = WirePath::parse(given)?;
+                    // One that does not resolve as the account (a place it
+                    // may not look into, the node's own folders) is refused
+                    // and in the audit as any refusal, with the path given.
+                    let path = WirePath::parse(given)
+                        .inspect_err(|e| self.audit_bad_path(&inv, given, e))?;
                     args.insert(
                         field.clone(),
                         Value::String(nerve_policy::paths::to_wire(&path.real)),
@@ -1770,15 +1777,19 @@ impl Link {
                 }
                 let call = {
                     let _as = act_as(known.as_ref())?;
-                    FsCall::parse(a, &inv.args)?
+                    FsCall::parse(a, &inv.args).inspect_err(|e| {
+                        if let Some(Value::String(given)) = inv.args.get("path") {
+                            self.audit_bad_path(&inv, given, e);
+                        }
+                    })?
                 };
                 // Taken before the gate: whenever the gate judged by the
                 // folders, the walk below does too, even if `until` passes
                 // in between. Where the node reads as the command account,
-                // that account's own access holds the reads instead
+                // that account's access holds the reads in no folder
                 // (nerve_policy::decide::Reads), as in the gate.
-                let by_folders = entry.policy.mode_at(crate::now_ms()) == Mode::Folder
-                    && !self.reads_by_account(&entry, known.as_ref());
+                let by_folders = entry.policy.mode_at(crate::now_ms()) == Mode::Folder;
+                let by_account = by_folders && self.reads_by_account(&entry, known.as_ref());
                 let unconfined = self.shared.unconfined_as(&cfg, || known.clone());
                 self.gate(
                     &entry,
@@ -1802,14 +1813,29 @@ impl Link {
                     // walk, so a folder without `r` inside one with `r` is
                     // sealed to grep, find and list too. A walk still passes
                     // through such a folder to a folder with `r` inside it,
-                    // and finds only the files there.
+                    // and finds only the files there. In no folder, where
+                    // the account holds the reads, the walk keeps to what is
+                    // open to every account as the gate does; what that
+                    // account may not open the walk cannot read anyway.
+                    let open = |p: &std::path::Path| {
+                        if crate::fs::open_to_all(p) {
+                            Ok(())
+                        } else {
+                            Err(String::new())
+                        }
+                    };
+                    let reads = if by_account {
+                        Reads::Account(&open)
+                    } else {
+                        Reads::Folders
+                    };
                     let skip = |p: &std::path::Path, through: bool| {
                         protected.check(p, false, &folders).is_some()
                             || deny
                                 .find("fs", &action, &nerve_policy::paths::to_wire(p))
                                 .is_some()
                             || by_folders
-                                && !nerve_policy::folder_reach(&folders, p, false)
+                                && !nerve_policy::read_reach(&folders, p, reads)
                                 && !(through && nerve_policy::readable_below(&folders, p))
                     };
                     call.run(&skip)
@@ -1904,10 +1930,35 @@ impl Link {
         };
         // The policy looks at the paths as the account (crate::account::FsAs);
         // the audit entry below is the node's own again. `~` is the owner's.
-        // Where the node reads as the command account, a path read in
-        // folder mode goes as far as that account may read, which is asked
-        // under the same switch (crate::fs::readable).
-        let may_read = |p: &std::path::Path| crate::fs::readable(p);
+        // Where the node reads as the command account, a path read in no
+        // folder in folder mode must be open to every account, so the
+        // entries the node put on for the folders (another pairing's, the
+        // pass-through on the owner's folders above them) reach no further
+        // than the folders, and one that account may open; both are asked
+        // under the same switch. A provider reads with the owner's rights,
+        // so a folder handed to it there would let it read below as the
+        // owner whatever is closed to others.
+        let provider = inv.cap != "fs";
+        let may_read = |p: &std::path::Path| {
+            if !crate::fs::open_to_all(p) {
+                Err(format!(
+                    "{} is in no folder that allows reading, and not open to every account on this machine",
+                    p.display()
+                ))
+            } else if provider && p.is_dir() {
+                Err(format!(
+                    "{} is a folder outside the folders that allow reading: a provider would read below it with the owner's rights",
+                    p.display()
+                ))
+            } else if !crate::fs::readable(p) {
+                Err(format!(
+                    "the account this center's commands run as may not read {}",
+                    p.display()
+                ))
+            } else {
+                Ok(())
+            }
+        };
         let reads = if self.reads_by_account(entry, account) {
             Reads::Account(&may_read)
         } else {
@@ -1944,6 +1995,16 @@ impl Link {
                 audit("forbidden", Some("forbidden"), Some(&why));
                 Err(RpcError::forbidden(why))
             }
+        }
+    }
+
+    /// Writes the refusal of a call whose path `given` did not resolve
+    /// (`e`, a `bad_path`) to the audit log, with the path as given: an
+    /// attempt at a place the account may not look into is in the log as
+    /// any refusal. Any other error is about the arguments, not a place.
+    fn audit_bad_path(&self, inv: &Invoke, given: &str, e: &RpcError) {
+        if e.kind().as_str() == "bad_path" {
+            self.audit(inv, given, "forbidden", Some("bad_path"), Some(&e.message));
         }
     }
 
@@ -2477,6 +2538,27 @@ impl Drop for Running<'_> {
         }
         self.link.shared.running.fetch_sub(1, Ordering::SeqCst);
         self.link.check_status();
+    }
+}
+
+/// The audit target of a call to an off action, from its arguments as
+/// given: the path an `fs` call names and the command line of `exec.run`,
+/// as an allowed call's target names them, else `cap.action`, the target of
+/// a call that names neither. An `fs` or `exec.run` call without that
+/// argument has none, so the audit's rule buttons make no rule of the
+/// action's name.
+fn off_target(inv: &Invoke) -> String {
+    let arg = |k: &str| {
+        inv.args
+            .get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    match (inv.cap.as_str(), inv.action.as_str()) {
+        ("fs", _) => arg("path"),
+        ("exec", "run") => arg("command"),
+        _ => format!("{}.{}", inv.cap, inv.action),
     }
 }
 

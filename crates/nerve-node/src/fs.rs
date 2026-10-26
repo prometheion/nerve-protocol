@@ -123,6 +123,45 @@ pub fn readable(path: &Path) -> bool {
     }
 }
 
+/// Whether `path` is open to every account on this machine by its mode
+/// bits: each folder above it lets others pass (`o+x`) and it lets them read
+/// (`o+r`). The command account reaches more than that only through what
+/// the node gives it for the folders (their entries, and the pass-through
+/// on the owner's folders above them: crate::acl), and through its own
+/// folders; those belong to the folders, so a read in no folder goes only
+/// where this says yes. A part of the path that does not exist passes, as in
+/// [`readable`]: nothing can be read there. Asked as the account
+/// ([`crate::link::act_as`]), a folder it cannot even look into says no.
+#[cfg(unix)]
+pub fn open_to_all(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    // The mode bits others have at `p`, or `None` where nothing is.
+    let others = |p: &Path| match std::fs::metadata(p) {
+        Ok(m) => Some(Some(m.permissions().mode() & 0o007)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(None),
+        Err(_) => None,
+    };
+    let passes = path.ancestors().skip(1).all(|dir| match others(dir) {
+        Some(Some(bits)) => bits & 0o001 != 0,
+        Some(None) => true,
+        None => false,
+    });
+    passes
+        && match others(path) {
+            Some(Some(bits)) => bits & 0o004 != 0,
+            Some(None) => true,
+            None => false,
+        }
+}
+
+/// No platform but Unix has a command account of its own
+/// (nerve_policy::decide::Reads::Account is Linux only), so nothing counts
+/// as open to it.
+#[cfg(not(unix))]
+pub fn open_to_all(_: &Path) -> bool {
+    false
+}
+
 /// One parsed `fs` call.
 pub enum FsCall {
     Stat(WirePath),
@@ -710,6 +749,69 @@ mod tests {
     /// A local path the way the center sends it (`/c/...` on Windows).
     fn wire(p: &Path) -> String {
         nerve_policy::paths::to_wire(p)
+    }
+
+    /// `readable` opens what this thread's account may read, a folder too,
+    /// without waiting on a pipe; a path that does not exist passes, and one
+    /// the account may not open does not.
+    #[cfg(unix)]
+    #[test]
+    fn readable_says_what_the_account_may_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("a.txt");
+        std::fs::write(&file, "x").unwrap();
+        assert!(readable(&file));
+        assert!(readable(d.path()));
+        assert!(readable(&d.path().join("missing/b")));
+        // A pipe with no writer would block an open without O_NONBLOCK.
+        let fifo = d.path().join("pipe");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+        assert!(readable(&fifo));
+        // Root opens anything, so the closed file says nothing there.
+        if unsafe { libc::geteuid() } != 0 {
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o200)).unwrap();
+            assert!(!readable(&file));
+        }
+    }
+
+    /// A path is open to every account only where each folder above it
+    /// lets others pass and it lets them read: a file others may read in a
+    /// folder they may not enter (an owner's home that is 750) is not.
+    #[cfg(unix)]
+    #[test]
+    fn open_to_all_goes_by_the_others_bits_on_the_whole_way() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap()
+        };
+        let d = tempfile::tempdir().unwrap();
+        mode(d.path(), 0o755);
+        let home = d.path().join("home");
+        let docs = home.join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let file = docs.join("a.txt");
+        std::fs::write(&file, "x").unwrap();
+        mode(&home, 0o755);
+        mode(&docs, 0o755);
+        mode(&file, 0o644);
+        assert!(open_to_all(&file));
+        assert!(open_to_all(&docs));
+        assert!(open_to_all(&docs.join("missing")));
+        mode(&file, 0o640);
+        assert!(!open_to_all(&file));
+        mode(&file, 0o644);
+        // A folder on the way others may not pass closes all below it.
+        mode(&home, 0o750);
+        assert!(!open_to_all(&file));
+        assert!(!open_to_all(&docs));
+        assert!(!open_to_all(&docs.join("missing")));
+        // Listing it is reading it: `o+x` alone does not open a folder.
+        mode(&home, 0o711);
+        assert!(open_to_all(&file));
+        assert!(!open_to_all(&home));
+        mode(&home, 0o755);
     }
 
     #[test]

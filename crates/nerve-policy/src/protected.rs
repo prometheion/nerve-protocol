@@ -1148,6 +1148,16 @@ impl Protected {
             })
     }
 
+    /// The node's own folder that lies strictly below `dir`: a program
+    /// handed `dir` would reach it.
+    pub fn own_below(&self, dir: &Path) -> Option<&Path> {
+        let folded = fold(dir);
+        self.own
+            .iter()
+            .find(|o| self.inside(o, &folded) && !self.inside(&folded, o))
+            .map(PathBuf::as_path)
+    }
+
     /// The own folder whose name `text` holds, followed by anything but
     /// more of a file name (`nerve-notes` is not `nerve`).
     fn names_own(&self, text: &str) -> Option<&Path> {
@@ -1262,6 +1272,21 @@ impl Protected {
         let folded = fold(dir);
         self.listed(write)
             .any(|e| self.inside(e, &folded) && !self.inside(&folded, e))
+    }
+
+    /// A protected entry strictly below `dir` (with `write`, one protected
+    /// for writes counts too) that `folders` do not release for that
+    /// access, as [`Protected::check`] judges a call at the entry itself: a
+    /// program handed `dir` would reach it.
+    pub fn entry_below(&self, dir: &Path, write: bool, folders: &[Folder]) -> Option<&Path> {
+        let folded = fold(dir);
+        self.listed(write)
+            .find(|e| {
+                self.inside(e, &folded)
+                    && !self.inside(&folded, e)
+                    && self.check(e, write, folders).is_some()
+            })
+            .map(PathBuf::as_path)
     }
 
     /// The deepest of `folders` that holds `path`, by this list's path rules

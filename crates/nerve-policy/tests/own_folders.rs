@@ -109,7 +109,7 @@ fn a_read_held_by_the_account_never_reaches_the_nodes_own_folders() {
         ..Default::default()
     };
     let prot = protected(&p);
-    let anything = |_: &Path| true;
+    let anything = |_: &Path| Ok(());
     let env = Env {
         home: Path::new("/h"),
         protected: &prot,

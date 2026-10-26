@@ -9,8 +9,9 @@
 //! command with the sudo switch off, and anything a deny rule matches, is
 //! forbidden whatever else says; then a sudo command needs the sudo allow
 //! list, and any other call the mode: allow rules in `allowlist` mode, the
-//! folders in `folder` mode (a read there also what the command account may
-//! read, where the node reads as it: [`Reads`]), the user's own reach in
+//! folders in `folder` mode (a read outside them also what the command
+//! account may read without them, where the node reads as it: [`Reads`]),
+//! the user's own reach in
 //! `user` mode. A call no mode and no rule allows is refused at once, and so
 //! is one that touches a protected path, whatever allowed it.
 
@@ -58,8 +59,9 @@ pub enum PathArgs {
     None,
     /// Paths, and whether every one lies in a folder whose flag allows what
     /// the call does there, and an execute call's working directory in one
-    /// with `x`. A path a read call reads counts as in the folders where the
-    /// command account holds it ([`Reads::Account`]).
+    /// with `x`. A path a read call reads that lies in no folder at all
+    /// counts as in them where the command account holds it
+    /// ([`Reads::Account`]).
     Some { all_in_folders: bool },
 }
 
@@ -71,11 +73,15 @@ pub enum Reads<'a> {
     /// by hand, Windows), which reach further than the folders.
     Folders,
     /// The command account's own file access (`nerve-run` on the installed
-    /// Linux node): the node reads as that account, so a read call may read
-    /// any path `may_read` says that account may read, in the folders or
-    /// not. `may_read` is asked of every path a call reads, as a provider
+    /// Linux node): the node reads as that account. Inside the folders their
+    /// flags still decide, the deepest one as for any path, so a folder the
+    /// owner closed stays closed. A path in no folder may be read where
+    /// `may_read` says so (`Ok`), else it gives the reason (`Err`): the node
+    /// asks whether the account reaches it without the entries the node put
+    /// on for it, which are the folders' and not the account's own.
+    /// `may_read` is asked of each such path a call reads, as a provider
     /// reads it with the owner's rights, not with the account's.
-    Account(&'a dyn Fn(&Path) -> bool),
+    Account(&'a dyn Fn(&Path) -> Result<(), String>),
 }
 
 impl std::fmt::Debug for Reads<'_> {
@@ -117,12 +123,14 @@ pub enum Need {
 /// |---|---|---|---|
 /// | read | allow rule | allowed; its paths in the folders | allowed |
 /// | write, execute | allow rule | paths in the folders; no path: `on` | allowed |
-/// | sense, actuate | allow rule | `on` | `on` |
+/// | sense, actuate | allow rule | `on`, and its paths in the folders | `on` |
 ///
 /// "In the folders" is each path in a folder whose flag allows what the
-/// call does there; a path a read call reads counts as in them where the
-/// command account holds the read ([`Reads::Account`]), which [`decide`]
-/// then asks of that account. `on` never widens what the folders refuse.
+/// call does there; a path a read call reads that lies in no folder counts
+/// as in them where the command account holds the read ([`Reads::Account`]),
+/// which [`decide`] then asks of that account. `on` never widens what the
+/// folders refuse. A write that names only paths it reads names no place it
+/// writes, so [`decide`] asks the table as for a write with no path.
 /// `off` and `hidden` give [`Need::Off`] in every cell ([`decide`] disables
 /// such a call before it asks); the sudo allow list decides beside the
 /// table, and a command in `folder` mode also needs to be confined.
@@ -139,6 +147,15 @@ pub fn effect_rule(
     };
     match (mode, effect, paths) {
         (Mode::Allowlist, _, _) => Need::AllowRule,
+        // `on` lets a sense or actuate action run, and its paths stay in the
+        // folders as any other call's.
+        (
+            Mode::Folder,
+            Effect::Sense | Effect::Actuate,
+            PathArgs::Some {
+                all_in_folders: false,
+            },
+        ) => Need::InFolders,
         // No mode allows these; only the owner's `on` does.
         (Mode::Folder | Mode::User, Effect::Sense | Effect::Actuate, _) => on,
         (Mode::User, Effect::Read | Effect::Write | Effect::Execute, _) => Need::Allowed,
@@ -314,6 +331,19 @@ pub fn folder_reach(folders: &[Folder], path: &Path, write: bool) -> bool {
     reaches(folders, path, access)
 }
 
+/// Whether `folder` mode lets a read call read `path`, as [`decide`] judges
+/// a path such a call reads: the deepest folder that holds it decides by its
+/// `r`, and a path in no folder is read only where the command account holds
+/// the reads and `may_read` lets it ([`Reads::Account`]). A walk (`grep`,
+/// `find`, `list`) asks it of every entry, so the walk and a direct read
+/// cannot disagree.
+pub fn read_reach(folders: &[Folder], path: &Path, reads: Reads) -> bool {
+    match inside_folder(folders, path) {
+        Some(f) => f.access.read,
+        None => matches!(reads, Reads::Account(may_read) if may_read(path).is_ok()),
+    }
+}
+
 /// Whether the deepest folder that holds `path` has the flag `access` needs.
 fn reaches(folders: &[Folder], path: &Path, access: PathAccess) -> bool {
     inside_folder(folders, path).is_some_and(|f| match access {
@@ -382,7 +412,8 @@ fn name(call: &Call, target: &str) -> String {
 }
 
 /// The node's own folder `call` touches: one of its paths, its working
-/// directory, or a path its command line names plainly.
+/// directory, or a path its command line names plainly; for a call that
+/// works below its paths ([`works_below`]), one that lies below one of them.
 fn own_folder<'p>(env: &'p Env, call: &Call) -> Option<&'p Path> {
     call.targets
         .iter()
@@ -393,6 +424,37 @@ fn own_folder<'p>(env: &'p Env, call: &Call) -> Option<&'p Path> {
             call.command
                 .and_then(|c| env.protected.own_in_command(c, call.cwd))
         })
+        .or_else(|| {
+            call.targets
+                .iter()
+                .filter(|_| works_below(call))
+                .find_map(|t| env.protected.own_below(&t.path))
+        })
+}
+
+/// Whether `call` hands its paths to a program that may read or write below
+/// them as well: any capability's but the node's own `fs`, whose walks
+/// (`grep`, `find`, `list`) skip what a direct call there would be refused,
+/// and a command, whose working directory the sandbox and the guard hold.
+/// A folder given to such a call counts as everything in it, so whatever
+/// lies below it that the call may not touch refuses the call.
+fn works_below(call: &Call) -> bool {
+    call.cap != crate::rules::FS && call.command.is_none()
+}
+
+/// A folder of `folders` strictly below `dir` whose flag does not allow
+/// `access`: a call that works below `dir` ([`works_below`]) would reach it.
+fn closed_below<'f>(folders: &'f [Folder], dir: &Path, access: PathAccess) -> Option<&'f Folder> {
+    folders.iter().find(|f| {
+        let path = Path::new(&f.path);
+        within(path, dir)
+            && !within(dir, path)
+            && !match access {
+                PathAccess::Read => f.access.read,
+                PathAccess::Write => f.access.write,
+                PathAccess::Run => f.access.execute,
+            }
+    })
 }
 
 /// Decides `call` under `policy`.
@@ -460,6 +522,33 @@ pub fn decide(policy: &CenterPolicy, env: &Env, call: &Call) -> Decision {
         } else {
             env.protected.check(&t.path, write, &policy.folders)
         };
+        // A path handed to a program that works below it reaches what lies
+        // there too: a protected entry below it, unless a folder releases
+        // that entry, and in `folder` mode a folder below it that the owner
+        // gave less.
+        let below = works_below(call) && t.access != PathAccess::Run;
+        if below
+            && entry.is_none()
+            && let Some(inner) = env.protected.entry_below(&t.path, write, &policy.folders)
+        {
+            allowed = false;
+            reasons.push(format!(
+                "{} holds {}, which is protected",
+                t.path.display(),
+                inner.display()
+            ));
+        } else if below
+            && mode == Mode::Folder
+            && let Some(f) = closed_below(&policy.folders, &t.path, t.access)
+        {
+            allowed = false;
+            reasons.push(format!(
+                "{} holds {}, a folder that does not allow {}",
+                t.path.display(),
+                f.path,
+                if write { "writing" } else { "reading" }
+            ));
+        }
         if let Some(entry) = entry {
             allowed = false;
             reasons.push(format!(
@@ -586,7 +675,13 @@ fn by_mode(
     } else {
         outside_folders(policy, call, env.reads)
     };
-    let paths = if pathless {
+    // A write that names only paths it reads names no place it writes: the
+    // folders cannot say where it writes, so it needs `on` as a write with
+    // no path does, and a path it reads outside them still refuses it.
+    let writes_nowhere = call.effect == Effect::Write
+        && call.command.is_none()
+        && !call.targets.iter().any(|t| t.access == PathAccess::Write);
+    let paths = if pathless || writes_nowhere && outside.is_none() {
         PathArgs::None
     } else {
         PathArgs::Some {
@@ -608,19 +703,22 @@ fn by_mode(
                 return false;
             }
             // Where the command account holds what folder mode reads, a path
-            // read for the call must be one that account may read: the node
-            // reads it as that account, a provider with the owner's rights.
+            // a read call reads in no folder must be one that account may
+            // read: the node reads it as that account, a provider with the
+            // owner's rights.
             if mode == Mode::Folder
+                && call.effect == Effect::Read
                 && let Reads::Account(may_read) = env.reads
-                && let Some(t) = call
+                && let Some(why) = call
                     .targets
                     .iter()
-                    .find(|t| t.access == PathAccess::Read && !may_read(&t.path))
+                    .filter(|t| {
+                        t.access == PathAccess::Read
+                            && inside_folder(&policy.folders, &t.path).is_none()
+                    })
+                    .find_map(|t| may_read(&t.path).err())
             {
-                reasons.push(format!(
-                    "the account this center's commands run as may not read {}",
-                    t.path.display()
-                ));
+                reasons.push(why);
                 return false;
             }
             true
@@ -633,8 +731,12 @@ fn by_mode(
                     call.cap,
                     call.action
                 ),
-                _ => format!(
+                _ if pathless => format!(
                     "{}.{} touches no folder; folder mode allows it only where it is set to on",
+                    call.cap, call.action
+                ),
+                _ => format!(
+                    "{}.{} names no folder it writes to; folder mode allows it only where it is set to on",
                     call.cap, call.action
                 ),
             });
@@ -665,9 +767,10 @@ fn by_mode(
 /// provider's) runs where its paths are, so each of them needs `x` as well.
 /// Every call needs each target in a folder with the flag its access needs
 /// (each flag stands alone: writing needs `w` and no `r`, reading `r` and no
-/// `w`). A path a read call reads needs no folder where the command account
-/// holds the read (`reads`); a write or an execute call that reads a path
-/// still needs `r` there.
+/// `w`). A path a read call reads that lies in no folder at all is left to
+/// the command account where it holds the read (`reads`, asked by
+/// [`by_mode`]); inside a folder the deepest one decides as for every path,
+/// and a write or an execute call that reads a path still needs `r` there.
 fn outside_folders(policy: &CenterPolicy, call: &Call, reads: Reads) -> Option<PathAccess> {
     let folders = &policy.folders;
     let runs_at = |p: &Path| reaches(folders, p, PathAccess::Run);
@@ -682,7 +785,11 @@ fn outside_folders(policy: &CenterPolicy, call: &Call, reads: Reads) -> Option<P
     let by_account = call.effect == Effect::Read && matches!(reads, Reads::Account(_));
     call.targets
         .iter()
-        .filter(|t| !(by_account && t.access == PathAccess::Read))
+        .filter(|t| {
+            !(by_account
+                && t.access == PathAccess::Read
+                && inside_folder(folders, &t.path).is_none())
+        })
         .find(|t| !reaches(folders, &t.path, t.access))
         .map(|t| t.access)
 }
@@ -867,8 +974,9 @@ mod tests {
     /// `decide` following it for every effect, mode, `on`, allow rule,
     /// confinement and hold on reads: with no path, with its paths in the
     /// folders, and with one outside them. Where the command account holds
-    /// the reads, a read call's path outside the folders counts as in them
-    /// if that account may read it, and is refused if it may not.
+    /// the reads, a read call's path in no folder counts as in them if that
+    /// account may read it, and is refused if it may not; a path inside the
+    /// folders is theirs to decide.
     #[test]
     fn every_call_is_decided_by_the_effect_table() {
         use Need::{AllowRule, Allowed, InFolders, NeedsOn};
@@ -883,15 +991,16 @@ mod tests {
             (Mode::Folder, Effect::Read, Allowed, Allowed, InFolders),
             (Mode::Folder, Effect::Write, NeedsOn, Allowed, InFolders),
             (Mode::Folder, Effect::Execute, NeedsOn, Allowed, InFolders),
-            (Mode::Folder, Effect::Sense, NeedsOn, NeedsOn, NeedsOn),
-            (Mode::Folder, Effect::Actuate, NeedsOn, NeedsOn, NeedsOn),
+            (Mode::Folder, Effect::Sense, NeedsOn, NeedsOn, InFolders),
+            (Mode::Folder, Effect::Actuate, NeedsOn, NeedsOn, InFolders),
             (Mode::User, Effect::Read, Allowed, Allowed, Allowed),
             (Mode::User, Effect::Write, Allowed, Allowed, Allowed),
             (Mode::User, Effect::Execute, Allowed, Allowed, Allowed),
             (Mode::User, Effect::Sense, NeedsOn, NeedsOn, NeedsOn),
             (Mode::User, Effect::Actuate, NeedsOn, NeedsOn, NeedsOn),
         ];
-        let (may, may_not) = (|_: &Path| true, |_: &Path| false);
+        let may = |_: &Path| Ok(());
+        let may_not = |p: &Path| Err(format!("may not read {}", p.display()));
         let holds = [
             Reads::Folders,
             Reads::Account(&may),
@@ -966,8 +1075,8 @@ mod tests {
                                 cwd: command.map(|t| t.path.as_path()),
                                 now_ms: NOW,
                             };
-                            // A read call's path the account holds counts as
-                            // in the folders.
+                            // A read call's path in no folder that the
+                            // account holds counts as in the folders.
                             let account = matches!(reads, Reads::Account(_));
                             let paths = match paths {
                                 PathArgs::Some { .. } if account && effect == Effect::Read => {
@@ -980,16 +1089,20 @@ mod tests {
                             let want = match effect_rule(mode, effect, paths, setting) {
                                 // A command in folder mode also needs to be
                                 // confined; an action with no path is none.
-                                // A path read where the account holds reads
-                                // must be one it may read.
+                                // A path a read call reads in no folder, where
+                                // the account holds reads, must be one it may
+                                // read.
                                 Allowed => {
                                     (confined
                                         || mode != Mode::Folder
                                         || effect != Effect::Execute
                                         || paths == PathArgs::None)
                                         && !(mode == Mode::Folder
-                                            && matches!(reads, Reads::Account(f) if !f(Path::new("/")))
-                                            && targets.iter().any(|t| t.access == PathAccess::Read))
+                                            && effect == Effect::Read
+                                            && matches!(reads, Reads::Account(f) if f(Path::new("/")).is_err())
+                                            && targets.iter().any(|t| {
+                                                inside_folder(&p.folders, &t.path).is_none()
+                                            }))
                                 }
                                 AllowRule => matches!(allow, ["echo.say"] | ["echo"]),
                                 InFolders | NeedsOn | Need::Off => false,
@@ -1027,14 +1140,16 @@ mod tests {
 
     /// Where the folders hold what folder mode reads, a path read outside
     /// the folders with `r` is refused, `on` or not. Where the command
-    /// account holds it, the read goes as far as that account may read, and
-    /// no further; a write or a command that reads a path still needs `r`
-    /// there, and protected paths and deny rules win either way.
+    /// account holds it, a read in no folder goes as far as that account may
+    /// read, and no further, while the folders still decide inside them; a
+    /// write or a command that reads a path still needs `r` there, and
+    /// protected paths and deny rules win either way.
     #[test]
     fn a_read_path_outside_the_r_folders_is_refused() {
         let x = T::new();
         let folders = x.env(true);
-        let (may, may_not) = (|_: &Path| true, |_: &Path| false);
+        let may = |_: &Path| Ok(());
+        let may_not = |p: &Path| Err(format!("not open to every account: {}", p.display()));
         let account = Env {
             reads: Reads::Account(&may),
             ..x.env(true)
@@ -1065,10 +1180,14 @@ mod tests {
             Decision::Allow
         );
         assert_eq!(
+            decide(&p, &closed, &marked("open", Effect::Read, &outside)),
+            Decision::Forbidden("not open to every account: /elsewhere/a".into())
+        );
+        // Inside the folders the account is not asked: the folder decides,
+        // and the node reads there as the account all the same.
+        assert_eq!(
             decide(&p, &closed, &marked("open", Effect::Read, &in_ro)),
-            Decision::Forbidden(
-                "the account this center's commands run as may not read /w/ro/a".into()
-            )
+            Decision::Allow
         );
         // A write that reads a path still needs `r` for it.
         let both = [
@@ -1206,6 +1325,233 @@ mod tests {
         }
     }
 
+    /// `on` lets a sense or actuate action run in folder mode, and its
+    /// paths stay in the folders as any call's: one outside them refuses
+    /// it, `on` or not.
+    #[test]
+    fn a_sense_or_actuate_path_stays_in_the_folders_with_on() {
+        let x = T::new();
+        let env = x.env(true);
+        for effect in [Effect::Sense, Effect::Actuate] {
+            let mut p = policy(Mode::Folder);
+            p.caps.insert("notes".into(), CapSetting::On);
+            assert_eq!(
+                decide(&p, &env, &marked("snap", effect, &t("/w/rw/a", true))),
+                Decision::Allow,
+                "{effect:?}"
+            );
+            assert_eq!(
+                decide(&p, &env, &marked("snap", effect, &t("/elsewhere/a", true))),
+                Decision::Forbidden("outside the folders that allow writing".into()),
+                "{effect:?}"
+            );
+            assert_eq!(
+                decide(&p, &env, &marked("snap", effect, &t("/elsewhere/a", false))),
+                Decision::Forbidden("outside the folders that allow reading".into()),
+                "{effect:?}"
+            );
+            // In user mode the folders hold nothing: `on` decides.
+            p.mode = Mode::User;
+            assert_eq!(
+                decide(&p, &env, &marked("snap", effect, &t("/elsewhere/a", true))),
+                Decision::Allow,
+                "{effect:?}"
+            );
+        }
+    }
+
+    /// A folder the owner closed (no flag, or no `r`) inside a folder with
+    /// `r` stays closed to reads where the command account holds them: the
+    /// deepest folder decides, though the account may read there. A walk
+    /// asks the same ([`read_reach`]).
+    #[test]
+    fn a_closed_folder_stays_closed_where_the_account_holds_reads() {
+        let x = T::new();
+        let may = |_: &Path| Ok(());
+        let account = Env {
+            reads: Reads::Account(&may),
+            ..x.env(true)
+        };
+        let mut p = policy(Mode::Folder);
+        p.deny.clear();
+        p.folders.push(Folder {
+            path: "/w/rw/secret".into(),
+            access: Access::NONE,
+        });
+        p.folders.push(Folder {
+            path: "/w/rw/drop".into(),
+            access: acc("w"),
+        });
+        for path in ["/w/rw/secret/prod.env", "/w/rw/drop/a"] {
+            let at = t(path, false);
+            for c in [fs_read(&at), marked("open", Effect::Read, &at)] {
+                assert_eq!(
+                    decide(&p, &account, &c),
+                    Decision::Forbidden("outside the folders that allow reading".into()),
+                    "{path}"
+                );
+            }
+            assert!(!read_reach(&p.folders, Path::new(path), account.reads));
+        }
+        for path in ["/w/rw/a", "/elsewhere/a"] {
+            assert_eq!(
+                decide(&p, &account, &fs_read(&t(path, false))),
+                Decision::Allow
+            );
+            assert!(read_reach(&p.folders, Path::new(path), account.reads));
+        }
+        // Where the folders hold reads, a path in no folder is not read.
+        assert!(!read_reach(
+            &p.folders,
+            Path::new("/elsewhere/a"),
+            Reads::Folders
+        ));
+    }
+
+    /// A write that names only paths it reads names no place it writes: it
+    /// needs `on` as a write with no path does, and its read paths stay in
+    /// the `r` folders with `on`.
+    #[test]
+    fn a_write_that_names_only_read_paths_needs_on() {
+        let x = T::new();
+        let env = x.env(true);
+        let mut p = policy(Mode::Folder);
+        let from = t("/w/ro/a.md", false);
+        assert_eq!(
+            decide(&p, &env, &marked("import", Effect::Write, &from)),
+            Decision::Forbidden(
+                "notes.import names no folder it writes to; folder mode allows it only where it is set to on"
+                    .into()
+            )
+        );
+        p.caps.insert("notes.import".into(), CapSetting::On);
+        assert_eq!(
+            decide(&p, &env, &marked("import", Effect::Write, &from)),
+            Decision::Allow
+        );
+        assert_eq!(
+            decide(
+                &p,
+                &env,
+                &marked("import", Effect::Write, &t("/elsewhere/a.md", false))
+            ),
+            Decision::Forbidden("outside the folders that allow reading".into())
+        );
+    }
+
+    /// A path handed to a provider counts with what lies below it, which the
+    /// provider may read or write as it likes: a folder that holds the
+    /// node's own folders, a protected entry no folder releases, or in
+    /// folder mode a folder the owner gave less is refused. The node's own
+    /// `fs` walks skip such places instead, so its calls are not refused.
+    #[test]
+    fn a_folder_handed_to_a_provider_counts_with_what_lies_below_it() {
+        let prot = Protected::new(
+            &Platform::Unix,
+            Path::new("/h"),
+            &[PathBuf::from("/h/.config/nerve")],
+            &ProtectedOptions::default(),
+        );
+        let x = T::new();
+        let env = Env {
+            protected: &prot,
+            ..x.env(true)
+        };
+        let mut p = policy(Mode::Folder);
+        p.folders = vec![
+            Folder {
+                path: "/h".into(),
+                access: acc("rw"),
+            },
+            Folder {
+                path: "/h/proj/secret".into(),
+                access: acc("w"),
+            },
+        ];
+        let home = t("/h", false);
+        let Decision::Forbidden(why) = decide(&p, &env, &marked("search", Effect::Read, &home))
+        else {
+            panic!("a folder holding the node's own was handed over");
+        };
+        assert!(
+            why.contains("/h/.config/nerve belongs to the node"),
+            "{why}"
+        );
+        // Without the own folder below it, a protected entry (`.ssh` and
+        // the like) refuses it.
+        let env = x.env(true);
+        let Decision::Forbidden(why) = decide(&p, &env, &marked("search", Effect::Read, &home))
+        else {
+            panic!("a folder holding a protected entry was handed over");
+        };
+        assert!(
+            why.starts_with("/h holds /h/.") && why.ends_with(", which is protected"),
+            "{why}"
+        );
+        // A folder with less below it.
+        let proj = t("/h/proj", false);
+        assert_eq!(
+            decide(&p, &env, &marked("search", Effect::Read, &proj)),
+            Decision::Forbidden(
+                "/h/proj holds /h/proj/secret, a folder that does not allow reading".into()
+            )
+        );
+        assert_eq!(
+            decide(
+                &p,
+                &env,
+                &marked("save", Effect::Write, &t("/h/proj", true))
+            ),
+            Decision::Allow
+        );
+        assert_eq!(
+            decide(
+                &p,
+                &env,
+                &marked("search", Effect::Read, &t("/h/proj/other", false))
+            ),
+            Decision::Allow
+        );
+        // The node's own walks skip such places, so `fs` is not refused.
+        assert_eq!(decide(&p, &env, &fs_read(&home)), Decision::Allow);
+        // A folder that releases the protected entry for reads lets it be
+        // read, and only read.
+        let prot = Protected::new(
+            &Platform::Unix,
+            Path::new("/h"),
+            &[],
+            &ProtectedOptions {
+                extra: vec!["/data/keys".into()],
+                ..Default::default()
+            },
+        );
+        let env = Env {
+            protected: &prot,
+            ..x.env(true)
+        };
+        p.folders = vec![Folder {
+            path: "/data".into(),
+            access: acc("rw"),
+        }];
+        let data = t("/data", false);
+        assert_eq!(
+            decide(&p, &env, &marked("search", Effect::Read, &data)),
+            Decision::Forbidden("/data holds /data/keys, which is protected".into())
+        );
+        p.folders.push(Folder {
+            path: "/data/keys".into(),
+            access: acc("r"),
+        });
+        assert_eq!(
+            decide(&p, &env, &marked("search", Effect::Read, &data)),
+            Decision::Allow
+        );
+        assert_eq!(
+            decide(&p, &env, &marked("save", Effect::Write, &t("/data", true))),
+            Decision::Forbidden("/data holds /data/keys, which is protected".into())
+        );
+    }
+
     /// A path argument of any action meets the rules as an `fs` path does:
     /// `~/` is the owner's home, and on Windows a path rule ignores case.
     #[test]
@@ -1319,6 +1665,11 @@ mod tests {
             cwd: None,
             now_ms: NOW,
         }
+    }
+
+    /// An `fs.read` of `targets`.
+    fn fs_read(targets: &[Target]) -> Call<'_> {
+        call(Effect::Read, targets, None)
     }
 
     fn t(p: &str, write: bool) -> Vec<Target> {

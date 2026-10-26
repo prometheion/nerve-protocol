@@ -498,7 +498,9 @@ fn exposure(entry: &CenterEntry, id: &str) -> Option<Exposure> {
 /// action whose schema marks some with `x-nerve-path`) names them per call,
 /// so it is offered where a call with its paths in the folders is allowed.
 /// One that names none lies in no folder: `folder` mode offers a read then,
-/// and a write or a command only where the owner set it to on.
+/// and a write or a command only where the owner set it to on. A write
+/// whose marked paths are all ones it reads names no place it writes, and
+/// counts as one with none (`paths` false).
 fn offered(
     policy: &CenterPolicy,
     view: View,
@@ -853,7 +855,13 @@ fn build(
         let id = c.id.clone();
         let node = c.provider == "node";
         c.actions.retain(|a, decl| {
-            let paths = node || !nerve_proto::schema::path_args(&decl.params).is_empty();
+            let marks = nerve_proto::schema::path_args(&decl.params);
+            let paths = node
+                || if decl.effect == Effect::Write {
+                    marks.iter().any(|(_, m)| *m == PathMark::Write)
+                } else {
+                    !marks.is_empty()
+                };
             offered(&entry.policy, view, &id, a, decl.effect, paths)
         });
         for (a, decl) in &mut c.actions {
@@ -1338,7 +1346,7 @@ mod tests {
             shell: nerve_policy::command::Shell::Sh,
             reads: nerve_policy::decide::Reads::Folders,
         };
-        let may = |_: &std::path::Path| true;
+        let may = |_: &std::path::Path| Ok(());
         let by_account = |confined: bool| Env {
             reads: nerve_policy::decide::Reads::Account(&may),
             ..env(confined)
@@ -1380,8 +1388,8 @@ mod tests {
             (Mode::Folder, Effect::Read, Allowed, Allowed, InFolders),
             (Mode::Folder, Effect::Write, NeedsOn, Allowed, InFolders),
             (Mode::Folder, Effect::Execute, NeedsOn, Allowed, InFolders),
-            (Mode::Folder, Effect::Sense, NeedsOn, NeedsOn, NeedsOn),
-            (Mode::Folder, Effect::Actuate, NeedsOn, NeedsOn, NeedsOn),
+            (Mode::Folder, Effect::Sense, NeedsOn, NeedsOn, InFolders),
+            (Mode::Folder, Effect::Actuate, NeedsOn, NeedsOn, InFolders),
             (Mode::User, Effect::Read, Allowed, Allowed, Allowed),
             (Mode::User, Effect::Write, Allowed, Allowed, Allowed),
             (Mode::User, Effect::Execute, Allowed, Allowed, Allowed),
@@ -1480,8 +1488,17 @@ mod tests {
                             );
                             let d = for_center(&cfg, &e, 0, confined, &provided);
                             let covered = allow.len() == 1 && allow[0] != other;
+                            // A write whose only path is one it reads names
+                            // no place it writes: the table's no-path cell,
+                            // while its path is in the folders.
+                            let writes_nowhere =
+                                effect == Effect::Write && mark == Some(PathMark::Read);
                             let by_table = |all_in_folders| {
-                                let paths = PathArgs::Some { all_in_folders };
+                                let paths = if writes_nowhere && all_in_folders {
+                                    PathArgs::None
+                                } else {
+                                    PathArgs::Some { all_in_folders }
+                                };
                                 match need(mode, effect, paths, setting) {
                                     Allowed => {
                                         confined

@@ -390,10 +390,21 @@ except OSError as e:
         let shown = r.as_ref().map(out).unwrap_or_else(|e| e.clone());
         assert!(!shown.contains("secret"), "{f}: {shown}");
     }
-    // Folder mode reads what nerve-run may read, as nerve-run: beyond the
-    // folders a file of the owner's open to others and one of the system,
-    // but neither one closed to it nor the node's own. It writes only in
-    // its folders. The descriptor says so, and the audit names each path.
+    // Folder mode reads, as nerve-run, beyond the folders what is open to
+    // every account: a file of the system, and one of the owner's in a
+    // folder everyone may enter, but not one closed to others, nor one
+    // open to them in the owner's home that only the node's pass-through
+    // entry lets nerve-run into, nor the node's own. It writes only in its
+    // folders. The descriptor says so, and the audit names each path.
+    let public = PathBuf::from("/srv/nerve-real-public");
+    let _ = std::fs::remove_dir_all(&public);
+    std::fs::create_dir_all(&public).unwrap();
+    std::fs::write(public.join("open.txt"), "public-secret\n").unwrap();
+    std::fs::write(public.join("closed.txt"), "closed-secret\n").unwrap();
+    chown(&public);
+    chmod(&public, "755");
+    chmod(&public.join("open.txt"), "644");
+    chmod(&public.join("closed.txt"), "600");
     let d = conn
         .call("describe", json!({"detail": "summary"}), WAIT)
         .await
@@ -401,25 +412,27 @@ except OSError as e:
         .unwrap();
     assert_eq!(d["access"]["reads_by_account"], true, "{d}");
     let at = |p: &Path| json!({"path": p.display().to_string()});
-    let r = fs_call(&mut conn, "read", at(&base.join("open.txt")))
+    let r = fs_call(&mut conn, "read", at(&public.join("open.txt")))
         .await
         .unwrap();
-    assert_eq!(
-        r["content"],
-        "open-secret
-",
-        "{r}"
-    );
+    assert_eq!(r["content"], "public-secret\n", "{r}");
     assert!(
         fs_call(&mut conn, "read", at(Path::new("/etc/hostname")))
             .await
             .is_ok()
     );
-    let closed = fs_call(&mut conn, "read", at(&base.join("closed.txt"))).await;
-    assert!(
-        closed.as_ref().is_err_and(|e| e.contains("may not read")),
-        "{closed:?}"
-    );
+    for closed in [
+        public.join("closed.txt"),
+        base.join("open.txt"),
+        base.join("closed.txt"),
+    ] {
+        let r = fs_call(&mut conn, "read", at(&closed)).await;
+        assert!(
+            r.as_ref()
+                .is_err_and(|e| e.contains("not open to every account")),
+            "{closed:?}: {r:?}"
+        );
+    }
     // The node's own folder is closed to nerve-run: the path does not even
     // resolve as that account, and the policy would refuse it anyway.
     let own = fs_call(&mut conn, "read", at(Path::new("/etc/nerve/node.toml"))).await;
@@ -441,21 +454,27 @@ except OSError as e:
         "{write:?}"
     );
     assert!(!base.join("new.txt").exists());
-    // A walk finds what nerve-run may read, and passes over the rest.
-    let r = fs_call(
-        &mut conn,
-        "grep",
-        json!({"path": base.display().to_string(), "pattern": "secret"}),
-    )
-    .await
-    .unwrap();
+    // A walk finds what is open to every account, and passes over the
+    // rest; the owner's home is not walked at all.
+    let grep = |at: &Path| json!({"path": at.display().to_string(), "pattern": "secret"});
+    let r = fs_call(&mut conn, "grep", grep(&public)).await.unwrap();
     let found: Vec<&str> = r["matches"]
         .as_array()
         .unwrap()
         .iter()
         .filter_map(|m| m["path"].as_str())
         .collect();
-    assert_eq!(found, [base.join("open.txt").display().to_string()], "{r}");
+    assert_eq!(
+        found,
+        [public.join("open.txt").display().to_string()],
+        "{r}"
+    );
+    let r = fs_call(&mut conn, "grep", grep(&base)).await;
+    assert!(
+        r.as_ref()
+            .is_err_and(|e| e.contains("not open to every account")),
+        "{r:?}"
+    );
     let audit = std::fs::read_to_string(
         nerve_node::NodePaths::new("/etc/nerve", "/var/lib/nerve/state").audit_log(),
     )
@@ -469,8 +488,10 @@ except OSError as e:
             })
         })
     };
-    assert!(decided(&base.join("open.txt"), "allowed"), "{audit}");
+    assert!(decided(&public.join("open.txt"), "allowed"), "{audit}");
+    assert!(decided(&base.join("open.txt"), "forbidden"), "{audit}");
     assert!(decided(&base.join("closed.txt"), "forbidden"), "{audit}");
+    let _ = std::fs::remove_dir_all(&public);
     assert!(decided(&base.join("new.txt"), "forbidden"), "{audit}");
     // No socket in a folder of the owner's own.
     let r = run(&mut conn, &proj, "python3 dial.py").await.unwrap();

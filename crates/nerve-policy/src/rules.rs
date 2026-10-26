@@ -29,7 +29,7 @@ use crate::guard::Guard;
 use crate::paths::to_wire;
 
 /// The capability whose targets are all paths.
-const FS: &str = "fs";
+pub(crate) const FS: &str = "fs";
 
 /// Whether `s` is `cap` or `cap.action`: the shape of a `caps` key.
 pub fn valid_scope(s: &str) -> bool {
