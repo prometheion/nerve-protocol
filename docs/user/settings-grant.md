@@ -14,8 +14,9 @@ With several centers, add `--center <name>`.
 Every center, with the grant or without, is told its own pairing's mode,
 until when it holds, the account its commands run as and, in `folder` mode,
 its folders (a folder you closed inside one is not named, only that some
-folder below is closed): the agent needs them to know where it may work
-([modes](modes.md#folders)). It is never told another center's.
+folder below is closed) and whether it may read what `nerve-run` may read:
+the agent needs them to know where it may work
+([modes](modes.md#what-each-mode-allows)). It is never told another center's.
 
 ## What a center with the grant can do
 
@@ -55,11 +56,12 @@ No grant lets a center change:
   that yours do not
 - the audit log
 - the programs that may add capabilities ([providers](providers.md))
-- turning on what senses (a camera, a microphone): an allow rule or an `on`
-  switch for it, and taking away an `off` or `hidden` switch or a deny rule
-  that keeps it off. The same holds for a capability no program offers now,
-  or an action an offered one lacks, as the machine cannot tell yet whether it
-  senses
+- turning on a [program's capability](providers.md) that senses (a camera,
+  a microphone) or acts on the world (a lamp, a lock): an allow rule or an
+  `on` switch for it, and taking away an `off` or `hidden` switch or a deny
+  rule that keeps it off. The same holds for a capability no program offers
+  now, or an action an offered one lacks, as the machine cannot tell yet what
+  it does
 
 A change that touches one of these is refused as a whole, and the refusal names
 the field.

@@ -44,24 +44,51 @@ still make the allowed one attach for it. Allow only programs you trust.
 
 ## Allow its capabilities
 
-A provider's capability is decided like any other ([modes](modes.md),
-[rules](rules.md)):
+A provider's capability is decided like any other, by what it does
+([modes](modes.md#what-each-mode-allows), [rules](rules.md)):
 
 | Mode | A provider's action runs when |
 |---|---|
 | `allowlist` | an allow rule names it: `nerve-node config add center.<name>.policy.allow 'lamp.on'`, or `'lamp'` for all its actions |
-| `folder` | you set it on: `nerve-node cap set lamp on` (it lies in no folder) |
+| `folder` | it reads; it writes or runs something at paths that lie in your folders ([below](#paths-it-takes)); or you set it on: `nerve-node cap set lamp on` (one that names no path lies in no folder, and one that senses or acts on the world needs `on` anyway) |
 | `user` | always, except one that senses or acts on the world, which needs `on` |
 
-Deny rules and `off` and `hidden` work as for `fs` and `exec`. A center with
-the [settings grant](settings-grant.md) can allow a provider's action itself
-while the provider is attached, except one that senses (a camera, a
-microphone): only you turn those on, and only you take away an `off` switch
-or a deny rule that keeps one off. While no provider offers a capability
-or one of its actions, only you can allow it or turn it on, as the node
-cannot tell yet what it does. An entry a center wrote while the capability
-did not sense stays when a new version of the program makes it sense: after
-such an update, check `nerve-node rule ls allow` and `nerve-node cap ls`.
+Deny rules and `off` and `hidden` work as for `fs` and `exec`. A call to an
+action that is `off` is refused with `disabled` and written to the audit log.
+A center with the [settings grant](settings-grant.md) can allow a provider's
+action itself while the provider is attached, except one that senses (a
+camera, a microphone) or acts on the world (a lamp, a lock): only you turn
+those on, and only you take away an `off` switch or a deny rule that keeps
+one off. While no provider offers a capability or one of its actions, only
+you can allow it or turn it on, as the node cannot tell yet what it does. An
+entry a center wrote while the capability did neither stays when a new
+version of the program makes it sense or act: after such an update, check
+`nerve-node rule ls allow` and `nerve-node cap ls`.
+
+## Paths it takes
+
+An action that reads or writes files names them as arguments its schema
+marks with `x-nerve-path`, `"read"` or `"write"`:
+
+```json
+"params": {"type": "object", "required": ["path"],
+           "properties": {"path": {"type": "string", "x-nerve-path": "read"}}}
+```
+
+The node then judges each such path as it judges an `fs` call's: in `folder`
+mode a path read needs an `r` folder and one written a `w` folder (one that
+runs something also `x`); [rules](rules.md#rule-syntax) match the path
+(`notes:~/private/*`); protected paths and the node's own files are refused;
+and the [audit log](audit.md) names the path. A link is followed to where it
+leads, so one in your folder that leads out is refused. The program gets the
+path as the node resolved it, links followed, so it works where the node
+looked. Only the top-level arguments can be marked, each a string. A write
+or a run whose marked path the call leaves out names no folder: it needs
+`on`, as an action without paths does.
+
+The node checks the path when the call comes; the program reads or writes it
+afterwards with your rights, so a link swapped in between is not caught.
+Allow only programs you trust.
 
 When the program exits, its capabilities leave what `list` shows the centers,
 and a call that was waiting for it fails with `unavailable`.

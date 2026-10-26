@@ -873,8 +873,8 @@ fn provider_part_passes_against_nerve_node() {
     }));
     assert!(report.ok(), "{report}");
     // Every check ran; a count that shrinks silently would hide a lost check.
-    assert_eq!(report.outcomes.len(), 14, "{report}");
-    assert_eq!(provider_part::CHECKS.len(), 14);
+    assert_eq!(report.outcomes.len(), 15, "{report}");
+    assert_eq!(provider_part::CHECKS.len(), 15);
     drop(node);
 }
 

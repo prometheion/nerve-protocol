@@ -187,10 +187,12 @@ settings grant `write`, allows the program that runs the part
 (`std::env::current_exe()`) in `providers.allowed` under `Setup::provider`,
 and starts the node; `Setup::socket` is its control socket. The part writes its
 own policy with `settings.set` (`user` mode and a deny rule for `echo.shout`
-before the provider comes, allow rules for `echo.say` and `echo.fail` once it
-is there) and attaches an `echo` provider with the actions `say` (a string
-`text`), `shout`, `fail` and `odd`, whose schema has a `oneOf` and so is
-outside the subset of protocol.md §6.1. Every check names node-local §7.
+before the provider comes, allow rules for `echo.say`, `echo.fail` and
+`echo.peek:/nerve-conformance/inside/*` once it is there) and attaches an
+`echo` provider with the actions `say` (a string `text`), `shout`, `fail`,
+`odd`, whose schema has a `oneOf` and so is outside the subset of
+protocol.md §6.1, and `peek`, whose `path` is marked `x-nerve-path: "read"`.
+Every check names node-local §7.
 
 | Check |
 |---|
@@ -206,6 +208,7 @@ outside the subset of protocol.md §6.1. Every check names node-local §7.
 | a provider's error comes back with its code |
 | a call the policy refuses never reaches the provider |
 | a call whose arguments do not fit the action's schema is `invalid_args` and never reaches the provider |
+| a path argument keeps its `x-nerve-path` marker, and the node decides the call by that path (one below the allowed folder reaches the provider with it, one elsewhere is `forbidden` and never does) |
 | when the provider exits its capability leaves the descriptor |
 | a call to a provider that left is `unknown_capability` |
 

@@ -57,11 +57,11 @@ steps in order.
 | # | Step | Result |
 |---|---|---|
 | 1 | The command line is over 64 KiB | `forbidden` |
-| 2 | The call touches the node's own folders: any path of an `fs` call, a working directory, a path a command line names plainly | `forbidden`. No rule, mode, folder or release lifts this |
-| 3 | The capability or action is `off` or `hidden` | `disabled` |
+| 2 | The call touches the node's own folders: any path of a call (an `fs` call's, an action's marked path arguments), a working directory, a path a command line names plainly | `forbidden`. No rule, mode, folder or release lifts this |
+| 3 | The capability or action is `off` or `hidden` | `disabled` (a call of an `off` action is audited too) |
 | 4 | A `sudo` command and the sudo switch is off | `forbidden` |
 | 5 | A deny rule matches | `forbidden`, in every mode |
-| 6 | The mode decides. A `sudo` command: the sudo list. `allowlist`: an allow rule for every target. `folder`: the folders' flags. `user`: allowed | Allowed or `forbidden` |
+| 6 | The mode decides, by the [effect table](#the-effect-table). A `sudo` command: the sudo list. `allowlist`: an allow rule for every target. `folder`: the folders' flags, and for a read the command account's reach where the node reads as it. `user`: allowed | Allowed or `forbidden` |
 | 7 | A protected path is touched | `forbidden`, whatever allowed the call |
 
 The order only narrows. Step 6 is the only one that allows, and steps 1 to 5 and
@@ -71,6 +71,12 @@ The order only narrows. Step 6 is the only one that allows, and steps 1 to 5 and
 
 A rule is `<scope>` or `<scope>:<pattern>`. The pattern is a glob over the
 call's target: the whole command line, the resolved path, or `<cap>.<action>`.
+A path target is any path a call names: an `fs` call's, and the arguments any
+other action's schema marks with `x-nerve-path`. `decide` tries a path target
+with `RuleSet::find_path`, which reads every scope's pattern as a path (`~/`
+is the owner's home, and on Windows case does not count), so a deny rule
+`notes:~/private/*` covers a provider's path as `fs:~/private/*` covers a
+file call's.
 
 - A rule matches the whole target. `exec.run:rm *` refuses `rm -rf x`. It does
   not see `rm` inside `git status; rm -rf x` or in `/bin/rm`.
@@ -152,17 +158,21 @@ check. The center's action checker has its own splitter
 - **`folder`.** The folders' flags decide. Reads need `r`, writes need `w`,
   commands need `x` on their working directory. The deepest folder that holds
   a path decides. Commands are confined where the platform can confine them.
+  Where the node reads as the command account (`Reads::Account`, below), a
+  read goes as far as that account may read instead.
 - **`user`.** Everything the user could do, protected paths aside. Commands are
   not confined.
 
 `folder` and `user` mode give full access in their area, and deny rules narrow
 it. Allow rules are not looked at there.
 
-An action that names no path and no command, which is what a [capability
-provider](spec/node-local.md#7-capability-providers) adds, lies in no folder:
-`folder` mode allows it only where the owner set it `on`. `user` mode allows
-it as it allows the node's own actions, and `allowlist` mode by an allow rule
-on `<cap>.<action>`.
+Every capability is decided by its effect, the node's own and what a
+[capability provider](spec/node-local.md#7-capability-providers) adds alike.
+An action names paths by marking arguments in its schema (`x-nerve-path`,
+`nerve_proto::schema::path_args`); the node resolves them into `Target`s. A
+write or execute action that names no path lies in no folder: `folder` mode
+allows it only where the owner set it `on`. A read is allowed there with or
+without paths.
 
 ### The effect table
 
@@ -177,8 +187,10 @@ there, so there is nothing to signal.
 
 | Effect | `allowlist` | `folder` | `user` |
 |---|---|---|---|
-| `read`, `write`, `execute` with paths | an allow rule | every path in a folder with the matching flag (for `execute` also the working directory in one with `x`) | allowed |
-| `read`, `write`, `execute` without a path | an allow rule | `on` | allowed |
+| `read` with paths | an allow rule | every path in a folder with the matching flag (a path it reads: see `Reads` below) | allowed |
+| `write`, `execute` with paths | an allow rule | every path in a folder with the matching flag (a command's working directory in one with `x`; another execute call's paths also in one with `x`) | allowed |
+| `read` without a path | an allow rule | allowed | allowed |
+| `write`, `execute` without a path | an allow rule | `on` | allowed |
 | `sense`, `actuate` | an allow rule | `on` | `on` |
 
 - `paths` is `PathArgs::None` for an action with no path, no working directory
@@ -193,6 +205,17 @@ there, so there is nothing to signal.
 - Around the table, `off` and `hidden` (step 3, before the table is asked),
   deny rules (step 5) and protected paths (step 7) win as before. A sudo command goes by the sudo list
   instead. In `folder` mode a command also needs confinement.
+- `Env::reads` says what holds a read in `folder` mode. `Reads::Folders`: a
+  path read needs an `r` folder. `Reads::Account(may_read)`: the node reads
+  as the command account (the installed Linux node, `nerve-run`), so a
+  `Read` target of a read call counts as in the folders, and `decide` then
+  asks `may_read` of every `Read` target of the call; the node answers it as
+  that account (`fs::readable` under `act_as`), which is what keeps a
+  provider, which reads with the owner's rights, to what `nerve-run` may
+  read. A write or execute call that reads a path still needs `r` there. The
+  link picks `Account` where the account was found and `Shared::separate`
+  holds, the walk of `grep`, `find` and `list` then skips nothing by the
+  folders, and the descriptor's `access` block says `reads_by_account`.
 
 Each path of a call is a `Target` with an access: `Read` needs `r`, `Write`
 needs `w`, and `Run` needs `x`. `Run` is the working directory of `exec.run`.
@@ -200,13 +223,15 @@ The same access picks the protected check: a `Run` target is released only by
 a folder with `x`. A command's working directory is held to `x` whatever
 access its call gives that path.
 
-For the descriptor, `fs` and `exec.run` ask the table with
-`all_in_folders: true`, since they name their paths per call: they are
-offered where a call with its paths in the folders would be allowed. A
-provider's action asks with `PathArgs::None`. `node`, `settings` and `audit`
-are not governed by the policy and are always offered. The test
+For the descriptor, `fs`, `exec.run` and any action whose schema marks a
+path ask the table with `all_in_folders: true`, since they name their paths
+per call: they are offered where a call with its paths in the folders would
+be allowed. A provider's action that marks no path asks with
+`PathArgs::None`. `node`, `settings` and `audit` are not governed by the
+policy and are always offered. The test
 `what_is_offered_follows_the_effect_table` (nerve-node `descriptor.rs`) runs
-every mode, effect, setting, allow rule and confinement against `decide`.
+every mode, effect, setting, allow rule and confinement, and a provider's
+action with a read or a write path, against `decide`.
 
 ## Protected paths
 
@@ -525,8 +550,10 @@ action a call could get through.
 
 The descriptor also says what the policy lets this center do now
 ([spec/protocol.md](spec/protocol.md) §6.2): the mode in force and when it
-ends, the account its commands run as, and in folder mode the folders with
-their flags, the built-in ones of `nerve-run` among them and marked `own`.
+ends, the account its commands run as, and in folder mode whether a read
+goes as far as that account may read (`reads_by_account`) and the folders
+with their flags, the built-in ones of `nerve-run` among them and marked
+`own`.
 A folder with no flag is not named; the deepest named folder around it
 is marked `closed_below`, as it closes what lies below it (the deepest
 folder decides). A command on the sudo allow list is decided by that list

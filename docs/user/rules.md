@@ -218,7 +218,8 @@ A rule is `<scope>` or `<scope>:<pattern>`.
 | Target of | Is |
 |---|---|
 | `exec.run` | The whole command line |
-| every `fs` action | The resolved path. `~/` is your home. On Windows the form is `/c/Users/x` |
+| every `fs` action | The resolved path. `~/` is your home. On Windows the form is `/c/Users/x`, and case does not count |
+| any other action that takes paths | Each resolved path it takes (the arguments its schema marks with `x-nerve-path`), read as an `fs` path is |
 | any other action | `<cap>.<action>` |
 
 | Rule | Covers |
@@ -227,6 +228,7 @@ A rule is `<scope>` or `<scope>:<pattern>`.
 | `exec.run:git *` | `git` and anything after it |
 | `fs.read:/home/u/notes/*` | Reading the folder and below (not `list` or `grep`) |
 | `fs:~/private/*` | Every `fs` action on the folder and below |
+| `notes:~/private/*` | Every action of the capability `notes` that takes a path there |
 | `exec` | Every `exec` action, so every command |
 
 Commands and paths never mix: `fs:/tmp/*` is not a command rule. An unknown

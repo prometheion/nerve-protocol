@@ -530,7 +530,7 @@ fn lines(o: &Offer, taken: usize) -> Lines {
 
 /// The lines of `list(node)` that say what this center may do on the
 /// node: its mode, until when and the account, and in folder mode the
-/// folders. Empty when the node did not say.
+/// folders and how far a read goes. Empty when the node did not say.
 fn reach_lines(r: Option<&Reach>) -> String {
     let Some(r) = r else {
         return String::new();
@@ -544,13 +544,28 @@ fn reach_lines(r: Option<&Reach>) -> String {
     }
     out.push_str(".\n");
     if r.mode == nerve_proto::descriptor::AccessMode::Folder {
-        if r.no_folder() && r.sudo {
+        // Where the node reads as the command account, only writes wait
+        // for a folder.
+        let calls = if r.reads_by_account {
+            "writes"
+        } else {
+            "file calls"
+        };
+        if r.reads_by_account {
             out.push_str(
-                "Folders: none granted yet, so file calls are refused, and commands unless the \
-                 owner's sudo list names them.\n",
+                "Reads: whatever the account its commands run as may read, in the folders or \
+                 not; writes and commands keep to the folders.\n",
             );
+        }
+        if r.no_folder() && r.sudo {
+            out.push_str(&format!(
+                "Folders: none granted yet, so {calls} are refused, and commands unless the \
+                 owner's sudo list names them.\n"
+            ));
         } else if r.no_folder() {
-            out.push_str("Folders: none granted yet, so file calls and commands are refused.\n");
+            out.push_str(&format!(
+                "Folders: none granted yet, so {calls} and commands are refused.\n"
+            ));
         } else {
             let own = if r.folders.iter().any(|f| f.own) {
                 "; own: the command account's own"
@@ -732,8 +747,22 @@ pub fn details(o: &Offer, asked: &[String]) -> Answer {
         let mut entry = json!({"name": u.name, "description": &*u.description,
             "effect": u.effect.as_str(), "params": u.params, "result": u.result,
             "result_description": result_text(&u.result)});
-        // The folder note of `fs.*` and `exec.run` in folder mode, which
-        // the unit's hash covers.
+        // The arguments its schema marks as paths, with what it does
+        // there: the node holds them to the folders and the rules. As JSON,
+        // so a field's name stays on its line.
+        let marked = nerve_proto::schema::path_args(&u.params);
+        let paths = if marked.is_empty() {
+            String::new()
+        } else {
+            let map: serde_json::Map<String, Value> = marked
+                .iter()
+                .map(|(field, mark)| (field.clone(), json!(mark.as_str())))
+                .collect();
+            entry["paths"] = Value::Object(map.clone());
+            format!("paths: {}\n", Value::Object(map))
+        };
+        // The folder note of the units that take paths in folder mode,
+        // which the unit's hash covers.
         let folders = match &u.note {
             Some(n) => {
                 entry["folders"] = json!(&**n);
@@ -742,7 +771,7 @@ pub fn details(o: &Offer, asked: &[String]) -> Answer {
             None => String::new(),
         };
         let block = format!(
-            "capability: {}\ndescription: {}\neffect: {}\nparams: {}\nresult: {}\n{folders}\n",
+            "capability: {}\ndescription: {}\neffect: {}\nparams: {}\n{paths}result: {}\n{folders}\n",
             u.name,
             u.description,
             u.effect.as_str(),
@@ -1019,8 +1048,10 @@ mod tests {
     use crate::tools::tests::{cap, desc, signal_params};
     use nerve_proto::Effect;
 
+    /// The arguments of `fs.read`: one path it reads.
     fn path() -> Value {
-        json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]})
+        json!({"type": "object", "properties": {"path": {"type": "string", "x-nerve-path": "read"}},
+               "required": ["path"]})
     }
 
     /// What `list(node)` says of `exec.signal` and of the center's units.
@@ -1114,6 +1145,40 @@ mod tests {
         json!({"mode": "folder", "until_ms": 1_792_936_800_000_u64, "account": "nerve-run",
                "confined": true, "folders": [{"path": "/home/me/proj", "access": "rw"},
                                              {"path": "/tmp", "access": "rwx", "own": true}]})
+    }
+
+    /// Where the node reads as the command account, `list(node)` says that
+    /// a read goes as far as that account may read, and with no folder
+    /// granted that only writes and commands are refused.
+    #[test]
+    fn list_node_says_how_far_a_read_goes() {
+        let mut node = box_node();
+        let mut access = folder_access();
+        access["reads_by_account"] = json!(true);
+        let reads = "Reads: whatever the account its commands run as may read, in the folders \
+                     or not; writes and commands keep to the folders.\n";
+        let with = |node: &mut NodeRecord, access: &Value| {
+            let mut d = node.descriptor.clone().unwrap();
+            d.access = Some(serde_json::from_value(access.clone()).unwrap());
+            *node = record("box-1", Some(d));
+        };
+        with(&mut node, &access);
+        let got = units(&offer(&node, true));
+        assert!(got.text.contains(reads), "{}", got.text);
+        assert_eq!(got.data["result"]["access"]["reads_by_account"], true);
+        access["folders"] = json!([]);
+        with(&mut node, &access);
+        let got = units(&offer(&node, true));
+        assert!(
+            got.text.contains(&format!(
+                "{reads}Folders: none granted yet, so writes and commands are refused.\n"
+            )),
+            "{}",
+            got.text
+        );
+        // Without it nothing is said of reads.
+        let got = units(&offer(&box_node(), true));
+        assert!(!got.text.contains("Reads:"), "{}", got.text);
     }
 
     /// With no folder named, the folders line says whether the node left
@@ -1342,9 +1407,9 @@ mod tests {
     /// The folder note of `fs.*` and `exec.run` on [`box_node`].
     const FOLDERS: &str = "/home/me/proj (rw), /tmp (rwx, own)";
     /// The center's advice on it, outside the framing.
-    const ADVICE: &str = "The node is in folder mode: its file calls may use only the folders \
-        in the `folders:` line (r read, w write, x run commands), and a command may start only \
-        in one marked x. Where folders nest, the deepest one decides. The machine's sandbox \
+    const ADVICE: &str = "The node is in folder mode: its calls may name paths only in the \
+        folders of the `folders:` line (r read, w write, x run commands), and a command may \
+        start only in one marked x. Where folders nest, the deepest one decides. The machine's sandbox \
         holds what a command reaches to these folders and the system's files. Its commands run \
         as an account of their own, not as the machine's owner, whose access to the files they \
         make goes through the group bits: keep those, 0640 or 0660 for files and 0750 or 0770 \
@@ -1356,8 +1421,8 @@ mod tests {
         settings there unless asked.";
     /// The advice of the file calls alone: [`ADVICE`] without what holds a
     /// command.
-    const FILE_ADVICE: &str = "The node is in folder mode: its file calls may use only the \
-        folders in the `folders:` line (r read, w write, x run commands). Where folders nest, \
+    const FILE_ADVICE: &str = "The node is in folder mode: its calls may name paths only in the \
+        folders of the `folders:` line (r read, w write, x run commands). Where folders nest, \
         the deepest one decides. Its commands run as an account of their own, not as the \
         machine's owner, whose access to the files they make goes through the group bits: keep \
         those, 0640 or 0660 for files and 0750 or 0770 for folders, not 0600 or 0700 unless \
@@ -1383,14 +1448,16 @@ mod tests {
              capability: fs.read\n\
              description: A file's content.\n\
              effect: read\n\
-             params: {\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}\n\
+             params: {\"properties\":{\"path\":{\"type\":\"string\",\"x-nerve-path\":\"read\"}},\"required\":[\"path\"],\"type\":\"object\"}\n\
+             paths: {\"path\":\"read\"}\n\
              result: an object with content, etag and size\n\
              folders: {FOLDERS}\n\
              \n\
              capability: exec.run\n\
              description: exec summary\n\
              effect: execute\n\
-             params: {\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}\n\
+             params: {\"properties\":{\"path\":{\"type\":\"string\",\"x-nerve-path\":\"read\"}},\"required\":[\"path\"],\"type\":\"object\"}\n\
+             paths: {\"path\":\"read\"}\n\
              result: not described\n\
              folders: {FOLDERS}\n\
              [end of device content]\n\
@@ -1404,7 +1471,7 @@ mod tests {
             json!({"name": "fs.read", "description": "A file's content.",
                    "effect": "read", "params": path(),
                    "result": o.units.iter().find(|u| u.name == "fs.read").unwrap().result, "result_description": "an object with content, etag and size",
-                   "folders": FOLDERS})
+                   "paths": {"path": "read"}, "folders": FOLDERS})
         );
         assert_eq!(got.data["result"]["capabilities"][1]["name"], "exec.run");
         assert_eq!(got.data["result"]["capabilities"][1]["result"], Value::Null);

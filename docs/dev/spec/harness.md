@@ -166,7 +166,10 @@ the `result` of the envelope described below.
   be shown on one line`); with none of either, `Folders: none granted yet`,
   which with `sudo` adds that a command on the sudo list still runs, as
   the node sends `sudo` only while its sudo switch is on and `exec.run` is
-  callable); a
+  callable); with `reads_by_account`, before the folders a line `Reads:
+  whatever the account its commands run as may read, in the folders or not;
+  writes and commands keep to the folders.`, and with no folder `Folders:
+  none granted yet` names writes, not file calls, as refused; a
   disabled node shows
   neither, and a node that offers nothing still shows them, as the mode
   often says why; then one line per unit with its
@@ -179,20 +182,27 @@ the `result` of the envelope described below.
   `structuredContent`: `{node, described, access?, capabilities: [{name,
   summary}], off, more, more_off}`, with the names shown, `summary` only when
   the text has it, and the counts of those not shown; `access` is `{mode,
-  until_ms?, account?, confined, sudo?, folders: [{path, access, own?,
-  closed_below?}], more_folders, unnamed?}`.
+  until_ms?, account?, confined, sudo?, reads_by_account?, folders: [{path,
+  access, own?, closed_below?}], more_folders, unnamed?}`.
 - `list(node, capability)`: `capability` is a list of at most 32 names (a
   single name as a string is accepted too, though the schema declares the
   array).
   For each offered unit: its name, description (the action's summary, else
   the capability's, on one line and cut at 2 KiB), effect, `params` (the JSON
   schema, compact) and its result (in words; the schema in
-  `structuredContent`). The node's own `fs.*` and `exec.run` in folder mode
-  add a line `folders:` with the folder note: the folders and their flags as
-  in `list(node)` (`none granted` when there are none). After the framing a
-  line `Folders: …` gives the center's advice on them, in its own words and
-  naming no path: file calls use only these folders and a command starts
-  only in one marked `x`; where folders nest the deepest one decides; with
+  `structuredContent`). A unit whose schema marks arguments as paths
+  (`x-nerve-path`, protocol.md §6.1) adds a line `paths:` with them as JSON
+  (`{"path":"read"}`; `paths` in `structuredContent`). Every such unit
+  (`fs.*`, `exec.run`, a provider's action with a marked path) in folder
+  mode adds a line `folders:` with the folder note: the folders and their
+  flags as in `list(node)` (`none granted` when there are none). After the
+  framing a line `Folders: …` gives the center's advice on them, in its own
+  words and naming no path: with `reads_by_account`, that a call may read
+  whatever the account its commands run as may read, in the folders or not,
+  except protected paths and the node's own files, and may write only in
+  the folders marked `w`, else that calls may name paths only in these
+  folders; that a command starts only in one marked `x` (`exec.run`'s
+  advice only); where folders nest the deepest one decides; with
   `confined` the machine's sandbox holds what a command reaches to these
   folders (and the system's files), without it the machine does not and
   a command reaches what its account may reach; with `sudo`, a command on

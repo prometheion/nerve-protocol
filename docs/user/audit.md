@@ -21,7 +21,13 @@ action, the target and the decision. A refusal adds its reason.
 ```
 
 The reason says what is missing. Use it to write the rule you want
-([rules](rules.md)).
+([rules](rules.md)). The target of a call that names paths is its path (an
+`fs` call's, or the paths a program's capability takes, joined by `, `); a
+call to a capability you switched `off` is a refusal too:
+
+```
+1791834531650  lab  notes.open  notes.open  forbidden: notes.open is off
+```
 
 A command killed for its memory limit gets a second line, `killed`, with the
 reason ([limits](limits.md)):

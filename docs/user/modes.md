@@ -5,7 +5,7 @@ Every pairing has a mode. It sets how much that center may do on the machine.
 | Mode | What is allowed | Commands on the installed Linux node |
 |---|---|---|
 | `allowlist` | Only what an [allow rule](rules.md) names | As `nerve-run`, held to the folders you grant; or as you, if you say so (as root where [root is the owner](service.md#root-as-the-owner)) |
-| `folder` (default for a new pairing) | Full access inside the folders you grant, by their rights | As `nerve-run`, held to those folders |
+| `folder` (default for a new pairing) | Writing and commands inside the folders you grant, by their rights; reading there too, and on the installed Linux node wherever `nerve-run` may read ([below](#what-each-mode-allows)) | As `nerve-run`, held to those folders |
 | `user` | Everything you could do yourself | As you, not confined (as root where [root is the owner](service.md#root-as-the-owner)) |
 
 From most to least locked down: `allowlist`, `folder`, `user`. On the node
@@ -17,6 +17,48 @@ Windows, run every command as the account that runs the node.
 [Deny rules](rules.md#deny-a-command) and [protected paths](protected-paths.md)
 apply in every mode. A call that nothing allows is refused at once. Nothing
 waits for an answer.
+
+## What each mode allows
+
+A mode allows the same for every capability, the node's own (`fs`, `exec`)
+and those a [program adds](providers.md), by what the capability does (its
+effect, which `list` shows the agent):
+
+| Effect | `allowlist` | `folder` | `user` |
+|---|---|---|---|
+| `read` | an allow rule | allowed; each path it reads needs an `r` folder, or on the installed Linux node one `nerve-run` may read ([below](#reading-in-folder-mode)) | allowed |
+| `write` | an allow rule | each path it writes in a `w` folder (and each it reads in an `r` one); with no path, only where you set it `on` | allowed |
+| `execute` | an allow rule | `exec.run`: its working directory in an `x` folder. Another capability: each of its paths in a folder with `x` and the flag for what it does there; with no path, only where you set it `on` | allowed |
+| `sense`, `actuate` | an allow rule | only where you set it `on` | only where you set it `on` |
+
+`on` (`nerve-node cap set lamp on`) never lets a call out of the folders: it
+allows only what names no path, and sensing and acting on the world. Deny
+rules, `off`, `hidden`, [protected paths](protected-paths.md) and the node's
+own files win in every mode.
+
+A capability names its paths by marking them in its schema
+(`x-nerve-path`): `fs` marks its `path`, `exec.run` its `cwd`, and a program's
+capability the arguments it reads or writes. Those paths count as an `fs`
+call's do: the folders, the [rules](rules.md#rule-syntax), protected paths and
+the node's own files judge them, and the [audit log](audit.md) names them.
+
+### Reading in folder mode
+
+On the node [installed as a service](service.md) on Linux, the node reads a
+`folder` mode center's files as `nerve-run`. So a call that reads may read
+whatever `nerve-run` may read: its home, `/tmp`, `/var/tmp`, the files every
+account on the machine may read, and the folders you give it. It reads
+nothing of yours that is closed to other accounts, no protected path and none
+of the node's own files (its keys, config and state), which are closed to
+`nerve-run`. Writing and commands stay in the folders. A program that reads a
+path for a call ([provider](providers.md)) gets the call only when `nerve-run`
+may read that path. With [Landlock](#the-account-nerve-run-linux), a command
+of `nerve-run` reads less than a file call: the system's folders and its
+`r` and `x` folders.
+
+A node you run yourself, and Windows, read with your own rights, so there
+`folder` mode reads only in the folders with `r`. A read that names no path
+(a program's action that lists the lamps it knows) is allowed everywhere.
 
 ## Set the mode
 
@@ -52,9 +94,9 @@ A folder gives rights. Each right is its own flag:
 
 | Flag | Allows |
 |---|---|
-| `r` | Read: `fs` stat, list, read, grep, find |
-| `w` | Write files |
-| `x` | Run commands whose working directory is in the folder |
+| `r` | Read: `fs` stat, list, read, grep, find, and the paths another capability reads |
+| `w` | Write files: `fs.write`, and the paths another capability writes |
+| `x` | Run commands whose working directory is in the folder, and capabilities that run something at their paths |
 
 The flags do not imply each other. A write needs `w` and not `r`. A read needs
 `r` and not `w`. A command needs `x` and not `r`. A folder covers everything
@@ -64,7 +106,8 @@ Folders count in `folder` mode. In `allowlist` mode as `nerve-run` they are
 the sandbox the allowed commands run in; the allow rules decide what runs.
 
 The agent is told each center's own mode and account, and in `folder` mode
-its folders with their flags (the built-in ones of `nerve-run` among them,
+whether it may read what `nerve-run` may read, and its folders with their
+flags (the built-in ones of `nerve-run` among them,
 marked as its own; a folder left without rights is not named, and the
 granted folder around it is marked as having folders below it that allow
 less; where the machine runs no `folder` mode command, no folder is shown

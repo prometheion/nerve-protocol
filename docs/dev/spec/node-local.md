@@ -835,14 +835,18 @@ change, the commands that take something away say what ends now.
   through. `folders` do not decide; on the installed Linux node, where its
   commands run as `nerve-run` (unless `as_owner`), they and the built-in
   `/tmp`, `/var/tmp` and the account's home are its Landlock sandbox.
-- **folder** (the mode a new pairing starts in): full access inside the
-  `folders` and, on the installed Linux node, the built-in `/tmp`,
-  `/var/tmp` and `nerve-run`'s home (and everything below them),
-  by their flags. `access` is three independent flags, any combination
+- **folder** (the mode a new pairing starts in): reading, writing and
+  commands inside the `folders` and, on the installed Linux node, the
+  built-in `/tmp`, `/var/tmp` and `nerve-run`'s home (and everything below
+  them), by their flags; where the node reads as `nerve-run` (the installed
+  Linux node), reading also wherever that account may read (below).
+  `access` is three independent flags, any combination
   (`"r"`, `"w"`, `"x"`, `"rw"`, `"rx"`, `"wx"`, `"rwx"`, `""` for none; the
-  letters in any order, each once). `r` allows the read actions of `fs`
-  inside it, `w` the write actions, `x` commands with a working directory in
-  it. The flags do not imply each other: a write needs `w` and no `r`, a read
+  letters in any order, each once). `r` allows reading a path a call names
+  (the read actions of `fs`, a path argument marked `read`) inside it, `w`
+  writing one (`fs.write`, a path argument marked `write`), `x` commands with
+  a working directory in it and an execute action of a provider at its paths.
+  The flags do not imply each other: a write needs `w` and no `r`, a read
   `r` and no `w`, a command `x` and no `r`. Where folders nest, the deepest
   one that holds a path decides for it. Commands are confined where the
   platform can confine them; where it cannot (Linux without Landlock), a
@@ -875,21 +879,41 @@ owner changes them. A limit is opt-in (`until`, or `nerve-node mode set user
 --for HOURS`). When it runs out, the center is back in `allowlist`, the default
 deny mode, not in `folder`.
 
+Reading in folder mode where the node reads as the command account: the
+installed Linux node does a center's file calls as `nerve-run`
+(`account::FsAs`), so a call that reads may read whatever that account may
+read, in the folders or not: its home, `/tmp`, `/var/tmp`, what every account
+may read, and the folders it is given by ACL (§1). Before such a call the
+node asks, as `nerve-run`, whether it may read each path the call reads (it
+opens it for reading; a path that does not exist passes), so that a provider,
+which reads with the owner's rights, gets no path `nerve-run` could not
+read. The node's own folders, protected paths, deny rules and `off` and
+`hidden` still win. Writes and commands keep to the folders, and a write or
+execute call that also reads a path needs `r` for it. Landlock, where
+present, holds a command of `nerve-run` to less (the system's folders and its
+folders); a file call is not run under it. A node run by hand and Windows
+read with the node's own or the owner's rights, so there every path a call
+reads needs a folder with `r`. A call that reads and names no path is
+allowed in folder mode on every node.
+
 `deny` rules count in every mode and a matching deny always wins. A rule
 matches the whole target: `exec.run:rm *` refuses `rm -rf x`, but not
 `git status; rm -rf x` or `/bin/rm -rf x`. Sense and
 actuate actions are allowed by no full-access mode, only by the owner's
 `caps` entry `on`; in `allowlist` mode an allow rule allows them (a center
-may not add one for a sense capability itself).
+may not add one for a provider's capability that senses or actuates
+itself, §7). `on` allows nothing else that a mode refuses: a call with
+paths outside the folders stays refused.
 
 ### Rules
 
 A rule in `allow` and `deny` is `<scope>` or `<scope>:<pattern>`. The scope is
 a capability or `cap.action`, as in `caps`. The pattern is a glob over the
 call's target: the whole command line for `exec.run`, the resolved path for
-every `fs` action (in the center's form, `/c/Users/x` on Windows; `~/` is the
-owner's home), and
-`<cap>.<action>` for any other action. `*` matches across `/` and spaces. A
+every `fs` action and for each path argument of any other action (one its
+schema marks with `x-nerve-path`, protocol.md §6.1), in the center's form
+(`/c/Users/x` on Windows, matched without case; `~/` is the owner's home),
+and `<cap>.<action>` for any other action. `*` matches across `/` and spaces. A
 rule without a pattern covers every target of its scope. A pattern ending in
 ` *` also matches the bare program, one ending in `/*` the folder itself.
 Commands and paths never mix: `fs:/tmp/*` is no command rule.
@@ -908,6 +932,7 @@ documentation of rules for what each refuses.
 | `fs.read:/home/u/notes/*` | reading the folder and below (the action, not `list` or `grep`) |
 | `fs:~/private/*` | every fs action on the folder and below |
 | `camera.snap`, `camera` | that action, or every action of the capability |
+| `notes:~/private/*` | every action of `notes` with a path argument there |
 
 The four buttons of the center's audit view and `nerve-node rule add allow|deny|sudo
 <command> [--wildcard]` write exactly these forms: exact (`exec.run:git status`) or
@@ -936,7 +961,8 @@ answer. For each call the node takes the center's policy and, in this order:
 0. An `exec.run` command line over 64 KiB is `forbidden` first, before
    anything is checked. A call that touches the node's own folders (§1) is
    `forbidden` before anything else is looked at; no rule, mode, folder or release lifts that.
-   It looks at every path of an `fs` call (resolved), at the working
+   It looks at every path of a call (an `fs` call's, an action's marked
+   path arguments; resolved), at the working
    directory of `exec.run`, and at paths the command line names plainly
    (absolute, or from `~/`, `$HOME/`, `${HOME}/`). The line is compared
    without case, with `\` and `/` alike on Windows, with `seg/..` and
@@ -960,18 +986,23 @@ answer. For each call the node takes the center's policy and, in this order:
    a program outside it (`docs/user/modes.md`).
 1. A `locked` node (after `panic`) keeps no links and runs nothing; a paused,
    revoked or unknown center is not dialled.
-2. The capability setting: `off` refuses (`disabled`), `hidden` leaves it
-   out of the descriptor.
+2. The capability setting: `off` refuses (`disabled`, written to the audit
+   log as any refusal), `hidden` leaves it out of the descriptor.
 3. A sudo command (§4) with the sudo switch off: `forbidden`.
 4. A matching `deny` rule: `forbidden`, in every mode.
 5. A sudo command is allowed only when `sudo_allow` names it, in every mode.
 6. Any other call in `allowlist` mode is allowed only when an `allow` rule
    matches (every path of the call needs one).
-7. In `folder` and `user` mode the mode itself decides (§Modes). `allow`
-   rules are not looked at. An action that names no path and no command (a
-   provider's, §7) lies in no folder: `folder` mode allows it only where the
-   owner set it `on`, whatever its effect; `user` mode allows it as it allows
-   `fs` and `exec`, sense and actuate only with `on`.
+7. In `folder` and `user` mode the mode itself decides (§Modes), by the
+   call's effect, the same for every capability. `allow` rules are not
+   looked at. `user` mode allows read, write and execute, sense and actuate
+   only with `on`. `folder` mode allows a read (its paths as §Modes says);
+   a write or an execute call when it names at least one path and every one
+   lies in a folder with the flag for what the call does there (`exec.run`:
+   its working directory in an `x` folder; another execute call: each path
+   in an `x` folder as well); a write or execute call that names no path
+   lies in no folder, so it needs `on`; sense and actuate need `on`. `on`
+   allows nothing whose paths lie outside the folders.
 8. Protected paths (keys, shell profiles and the built-in list) are refused
    whatever allowed the call, `user` mode too. On Windows the built-in list
    also holds `%ProgramData%\ssh` (the OpenSSH server's config, host keys
@@ -1045,8 +1076,10 @@ only some paths or commands, and each call is still decided as above.
 runs by that list alone. In `folder` and `user` mode the actions are shown as
 before and allow rules do not matter, except a sense or actuate action such
 as `exec.signal`, which is shown there only when the owner set it to `on`,
-and in `folder` mode a provider's action, which names no folder (step 7);
-deny rules never hide an action.
+and in `folder` mode a write or execute action that names no path (a
+provider's whose schema marks none), which needs `on` too (step 7); an
+action that takes paths is shown where a call with its paths in the folders
+would be allowed; deny rules never hide an action.
 `off` actions stay listed (exposure `off`, on the capability or, for an
 action switched off alone, on the action), `hidden` ones and the actions
 left out here are absent, and a capability with no action left is absent.
@@ -1073,7 +1106,10 @@ that the center's sudo allow list names commands, `exec.run` is neither
 hidden nor off for that center (`Reach::of`) and the sudo switch is on
 (`Shared::sudo_on`: set and a checked password held), so they run by that
 list alone, in any folder and unconfined; with the switch off, or
-`exec.run` hidden or off, none runs, and the block does not say so. A switch change moves the rev. In
+`exec.run` hidden or off, none runs, and the block does not say so.
+`reads_by_account` says that in folder mode the node reads as the command
+account (the installed Linux node, `Shared::separate`), so a read goes as
+far as that account may read (§Modes). A switch change moves the rev. In
 `allowlist` mode as `nerve-run` the folders still hold the allowed
 commands, but only `folder` mode names them. The account's name needs no
 lookup of its own (the home of `nerve-run` is the last one looked up). The
@@ -1508,8 +1544,9 @@ provider may answer one call before it reads the next. The node lists each
 capability in every center's descriptor with
 `provider: <name>` and cuts it by that center's policy as its own (§3): `caps`
 hides it or turns it off; in `allowlist` mode an action is shown only when an
-allow rule covers it; in `folder` mode only where it is set `on`; sense and
-actuate only with `on`. The descriptor's `rev` changes, so every center gets
+allow rule covers it; in `folder` mode by its effect and paths as any other
+(a write or execute action that names no path only where it is set `on`);
+sense and actuate only with `on`. The descriptor's `rev` changes, so every center gets
 `node/descriptor_changed`. `status` lists the attached providers, each with
 the actions left out and why (`provider desk: lamp.dim left out: <reason>`;
 `status --json` has them as `broken`), and the node logs each one as a
@@ -1519,9 +1556,15 @@ A center's call to such an action is first checked against the action's
 `params`: arguments that do not fit are refused with `invalid_args`, whose
 `data` names the `field` and what was `expected` (protocol.md §6.1), before
 the policy and without an audit entry. Then it is decided and audited by the
-node like any other, with `<cap>.<action>` as its rule target, deny rules and
-`caps` included. Only an allowed call whose arguments fit reaches the
-provider, as one line:
+node like any other, deny rules and `caps` included. Its rule targets are the
+arguments its schema marks with `x-nerve-path` (top-level strings, `read` or
+`write`), each resolved as the command account sees it (`WirePath::parse`
+under `account::FsAs`), as an `fs` call's path is: the folders, the rules,
+the protected paths and the node's own folders judge them, and the audit
+entry names them (joined by `, `). A marked argument left out or `null`
+names no path; with none, the target is `<cap>.<action>`. Only an allowed
+call whose arguments fit reaches the provider, with each marked path as the
+node resolved it, as one line:
 
 ```json
 {"id": 7, "method": "invoke", "params": {"cap": "lamp", "action": "on", "args": {}}}
@@ -1537,18 +1580,23 @@ the node sends `{"method": "cancel", "params": {"id": 7}}` and drops a late
 answer. The provider learns nothing of the center: not its name, its session
 or its policy.
 
+The path is checked when the call comes; the provider uses it afterwards
+with the owner's rights, so a link swapped in between is not caught. A
+provider is a program the owner allowed and trusts.
+
 A center with the settings grant may add allow rules and `on` entries for a
 provider's capability like for any other, and take away `off` and `hidden`
-entries and deny rules, except for one that senses, one that no attached
-provider offers now, and an action (`cap.action`) that an offered capability
-does not have now: the node knows the effects only of what
-an attached provider offers, so what it does not know may sense once it comes.
+entries and deny rules, except for one that senses or actuates, one that no
+attached provider offers now, and an action (`cap.action`) that an offered
+capability does not have now: the node knows the effects only of what an
+attached provider offers, so what it does not know may sense or actuate once
+it comes.
 Only the owner adds or takes away those entries (`settings.set` refuses the
 document with `forbidden`), so a center cannot drop its own deny rule for such
 a capability either. What stays open: an `on` entry or an allow rule for a
 capability or for one of its actions, written while it did not sense, still
-counts when a provider later offers it with a sense action under the same
-name (a new version of the program that makes `screen.info` sense). The node
+counts when a provider later offers it with a sense or actuate action under
+the same name (a new version of the program that makes `screen.info` sense). The node
 cannot tell a center's entry from the owner's then; the owner checks the
 entries after such an update.
 
