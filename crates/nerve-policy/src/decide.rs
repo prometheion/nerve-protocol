@@ -1711,7 +1711,11 @@ mod tests {
         user.mode = Mode::User;
         assert_eq!(
             run(&user, &t("/h/data/keys", false)),
-            Decision::Forbidden("/h/data/keys is protected (/h/data/keys)".into())
+            // The entry is `~` joined with the rest, in the platform's form.
+            Decision::Forbidden(format!(
+                "/h/data/keys is protected ({})",
+                Path::new("/h").join("data/keys").display()
+            ))
         );
         p.folders[1].access = acc("rwx");
         assert_eq!(run(&p, &data), Decision::Allow);
