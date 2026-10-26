@@ -344,6 +344,50 @@ async fn a_cancel_reaches_the_provider_and_a_leaving_provider_fails_its_calls() 
     daemon.stop().await;
 }
 
+/// A change the center makes to its own policy with `settings.set`, in a
+/// document of its own (`allow=<rule>` or `caps=<key>` for `on`): the
+/// answer.
+async fn center_sets(
+    conn: &mut Conn<TcpStream>,
+    change: &str,
+) -> Result<Value, nerve_proto::RpcError> {
+    let got = conn
+        .call(
+            "get",
+            json!({"cap": "settings", "keys": ["document", "version"]}),
+            WAIT,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut doc = got["document"].clone();
+    let (key, value) = change.split_once('=').unwrap();
+    match key {
+        "allow" => doc["policy"]["allow"] = json!([value]),
+        _ => doc["policy"]["caps"] = json!({value: "on"}),
+    }
+    conn.call(
+        "invoke",
+        json!({"cap": "settings", "action": "set", "ctx": {},
+               "args": {"document": doc, "if_version": got["version"]}}),
+        WAIT,
+    )
+    .await
+    .unwrap()
+}
+
+/// The answer of `settings.set` refuses a change only the owner may make.
+fn only_the_owner(r: Result<Value, nerve_proto::RpcError>) {
+    let e = r.expect_err("refused");
+    assert_eq!(code_of(&e), "forbidden");
+    assert!(
+        e.message
+            .contains("only the owner can turn on what senses or actuates"),
+        "{}",
+        e.message
+    );
+}
+
 /// A center with the settings grant may not allow or turn on a capability
 /// that senses, nor one no provider offers now, nor an action an offered
 /// capability does not have now, which may sense once it comes: only the
@@ -367,44 +411,9 @@ async fn a_center_may_not_allow_a_sensing_provider_itself() {
     let daemon = Daemon::start(o).await.unwrap();
     let mut conn = linked(&mut center).await;
 
-    // Each change in its own document; the answer of settings.set.
-    async fn set(conn: &mut Conn<TcpStream>, change: &str) -> Result<Value, nerve_proto::RpcError> {
-        let got = conn
-            .call(
-                "get",
-                json!({"cap": "settings", "keys": ["document", "version"]}),
-                WAIT,
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        let mut doc = got["document"].clone();
-        let (key, value) = change.split_once('=').unwrap();
-        match key {
-            "allow" => doc["policy"]["allow"] = json!([value]),
-            _ => doc["policy"]["caps"] = json!({value: "on"}),
-        }
-        conn.call(
-            "invoke",
-            json!({"cap": "settings", "action": "set", "ctx": {},
-                   "args": {"document": doc, "if_version": got["version"]}}),
-            WAIT,
-        )
-        .await
-        .unwrap()
-    }
-    let refused = |r: Result<Value, nerve_proto::RpcError>| {
-        let e = r.expect_err("refused");
-        assert_eq!(code_of(&e), "forbidden");
-        assert!(
-            e.message.contains("only the owner can turn sensing on"),
-            "{}",
-            e.message
-        );
-    };
     // Nothing offers `camera` yet: a center cannot arm it before it comes.
     for change in ["allow=camera.snap", "caps=camera"] {
-        refused(set(&mut conn, change).await);
+        only_the_owner(center_sets(&mut conn, change).await);
     }
 
     let token =
@@ -431,15 +440,56 @@ async fn a_center_may_not_allow_a_sensing_provider_itself() {
         "allow=lamp.snap",
         "caps=lamp.snap",
     ] {
-        refused(set(&mut conn, change).await);
+        only_the_owner(center_sets(&mut conn, change).await);
     }
     let paths: PathBuf = daemon.paths().config_file();
     assert!(!std::fs::read_to_string(&paths).unwrap().contains("camera"));
     assert!(!std::fs::read_to_string(&paths).unwrap().contains("snap"));
     // The lamp is offered and does not sense: its action and the whole of it.
-    set(&mut conn, "allow=lamp.on").await.expect("allowed");
+    center_sets(&mut conn, "allow=lamp.on")
+        .await
+        .expect("allowed");
     assert!(std::fs::read_to_string(&paths).unwrap().contains("lamp.on"));
-    set(&mut conn, "caps=lamp").await.expect("allowed");
+    center_sets(&mut conn, "caps=lamp").await.expect("allowed");
+    daemon.stop().await;
+}
+
+/// Actuating is the owner's call as sensing is: a center with the settings
+/// grant may not turn on or allow a capability with an action that
+/// actuates (a lamp, a lock), nor one of its actions. One that only reads,
+/// it may.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_center_may_not_turn_actuate_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let o = options(dir.path());
+    nerve_node::pair::pair(&o.paths, &center.link(), Some("lab"))
+        .await
+        .unwrap();
+    owner_edit(&o.paths, |c| {
+        c.centers[0].settings = SettingsGrant::Write;
+        c.providers.allowed = vec![AllowedProvider {
+            name: "desk".into(),
+            exe: me(),
+        }];
+    })
+    .await;
+    let daemon = Daemon::start(o).await.unwrap();
+    let mut conn = linked(&mut center).await;
+    let caps = json!([{"id": "lamp", "actions": {"set": {"effect": "actuate"},
+                                                 "get": {"effect": "read"}}},
+                      {"id": "notes", "actions": {"get": {"effect": "read"}}}]);
+    let (_p, first) = hello_with(&daemon.paths().ctl_socket(), caps).await;
+    assert!(first.get("ok").is_some(), "{first}");
+    for change in ["caps=lamp", "caps=lamp.set", "allow=lamp", "allow=lamp.set"] {
+        only_the_owner(center_sets(&mut conn, change).await);
+    }
+    let config = daemon.paths().config_file();
+    assert!(!std::fs::read_to_string(&config).unwrap().contains("lamp"));
+    center_sets(&mut conn, "caps=notes").await.expect("allowed");
+    center_sets(&mut conn, "allow=notes.get")
+        .await
+        .expect("allowed");
     daemon.stop().await;
 }
 

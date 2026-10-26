@@ -246,7 +246,8 @@ fn nerve_center_and_nerve_node_work_together() {
     );
     assert_ne!(status, 200, "{v}");
     assert!(
-        v.to_string().contains("only the owner can turn sensing on"),
+        v.to_string()
+            .contains("only the owner can turn on what senses or actuates"),
         "{v}"
     );
     assert_eq!(

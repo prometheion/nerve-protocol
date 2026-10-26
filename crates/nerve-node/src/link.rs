@@ -1849,6 +1849,7 @@ impl Link {
                 unconfined,
                 sudo: self.shared.sudo_on(),
                 shell: self.shell_for(command),
+                reads: nerve_policy::decide::Reads::Folders,
             };
             nerve_policy::decide(&entry.policy, &env, &call)
         };

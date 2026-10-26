@@ -97,6 +97,48 @@ fn own_refusal(d: &Decision) -> bool {
     matches!(d, Decision::Forbidden(why) if why.contains("belongs to the node"))
 }
 
+/// Where the command account holds what folder mode reads, a read goes
+/// as far as that account may read, and the node's own folders are
+/// refused before that is asked: even an account that could read them
+/// (here one that may read anything) gets nothing of them, through `fs` or
+/// a provider's path argument.
+#[test]
+fn a_read_held_by_the_account_never_reaches_the_nodes_own_folders() {
+    let p = CenterPolicy {
+        mode: Mode::Folder,
+        ..Default::default()
+    };
+    let prot = protected(&p);
+    let anything = |_: &Path| true;
+    let env = Env {
+        home: Path::new("/h"),
+        protected: &prot,
+        unconfined: None,
+        sudo: false,
+        shell: Shell::Sh,
+        reads: nerve_policy::decide::Reads::Account(&anything),
+    };
+    for path in [
+        "/h/.config/nerve/node.toml",
+        "/h/.config/nerve",
+        "/h/.local/state/nerve/config.key",
+    ] {
+        let targets = at(path, false);
+        let provided = Call {
+            cap: "notes",
+            action: "open",
+            ..fs(Effect::Read, &targets)
+        };
+        for c in [fs(Effect::Read, &targets), provided] {
+            let d = decide(&p, &env, &c);
+            assert!(own_refusal(&d), "{c:?}: {d:?}");
+        }
+    }
+    // Beside them the account's reach decides.
+    let d = decide(&p, &env, &fs(Effect::Read, &at("/h/notes.txt", false)));
+    assert_eq!(d, Decision::Allow);
+}
+
 #[test]
 fn nothing_reaches_the_nodes_own_folders() {
     for mode in [Mode::Allowlist, Mode::Folder, Mode::User] {
@@ -108,6 +150,7 @@ fn nothing_reaches_the_nodes_own_folders() {
             unconfined: None,
             sudo: true,
             shell: Shell::Sh,
+            reads: nerve_policy::decide::Reads::Folders,
         };
         let check = |c: &Call| {
             let d = decide(&p, &env, c);
@@ -146,6 +189,7 @@ fn nothing_reaches_the_nodes_own_folders() {
         unconfined: None,
         sudo: false,
         shell: Shell::native(),
+        reads: nerve_policy::decide::Reads::Folders,
     };
     let notes = at("/h/notes/a", true);
     assert_eq!(
@@ -168,6 +212,7 @@ fn the_nodes_own_folders_are_seen_in_every_plain_spelling() {
             unconfined: None,
             sudo: true,
             shell: Shell::Sh,
+            reads: nerve_policy::decide::Reads::Folders,
         };
         let home = cwd_at("/h");
         let proj = cwd_at("/h/proj");
@@ -221,6 +266,7 @@ fn a_windows_command_line_reaches_no_own_folder() {
         unconfined: None,
         sudo: false,
         shell: Shell::native(),
+        reads: nerve_policy::decide::Reads::Folders,
     };
     let proj = cwd_at("C:\\Users\\u\\nerve-test\\proj");
     for mode in [Mode::Allowlist, Mode::Folder, Mode::User] {
@@ -265,6 +311,7 @@ fn a_long_windows_command_line_is_checked_at_once() {
         unconfined: None,
         sudo: false,
         shell: Shell::native(),
+        reads: nerve_policy::decide::Reads::Folders,
     };
     let proj = cwd_at("C:\\Users\\u\\nerve-test\\proj");
     let open = wide_open(Mode::User);

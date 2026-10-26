@@ -3,10 +3,12 @@
 //! A rule is `<scope>` or `<scope>:<pattern>`. The scope is a capability or
 //! `cap.action`, as in `caps`. The pattern is a glob over the call's target:
 //! the whole command line for `exec.run`, the resolved path for every `fs`
-//! action (in the center's form, `/c/Users/x` on Windows, and `~/` is the
-//! owner's home), and `<cap>.<action>` for any other action. `*` matches
-//! across `/` and spaces. A rule without a pattern covers every target of its
-//! scope.
+//! action and for each path argument of any other action (one its schema
+//! marks with `x-nerve-path`), and `<cap>.<action>` for an action that names
+//! no path. A path is in the center's form (`/c/Users/x` on Windows, where a
+//! path pattern ignores case as NTFS does), and `~/` in a pattern is the
+//! owner's home. `*` matches across `/` and spaces. A rule without a pattern
+//! covers every target of its scope.
 //!
 //! A pattern ending in ` *` also covers the bare program (`git *` covers
 //! `git`), and one ending in `/*` the folder itself, so the wildcard the
@@ -26,7 +28,7 @@ use crate::decide::sudo_command;
 use crate::guard::Guard;
 use crate::paths::to_wire;
 
-/// The capability whose targets are paths.
+/// The capability whose targets are all paths.
 const FS: &str = "fs";
 
 /// Whether `s` is `cap` or `cap.action`: the shape of a `caps` key.
@@ -56,7 +58,9 @@ fn split(rule: &str) -> Result<(&str, Option<&str>), String> {
     Ok((scope, pattern))
 }
 
-fn is_path_scope(scope: &str) -> bool {
+/// Whether every target of `scope` is a path (`fs`). Any other scope's
+/// target is a path where its call names one ([`RuleSet::find_path`]).
+fn always_paths(scope: &str) -> bool {
     scope.split('.').next() == Some(FS)
 }
 
@@ -102,7 +106,10 @@ pub fn validate(rule: &str) -> Result<(), String> {
     }
     let (scope, pattern) = split(rule)?;
     if let Some(p) = pattern {
-        build(p, is_path_scope(scope)).map_err(|e| format!("rule {rule:?}: {e}"))?;
+        // Any scope's pattern may meet a path.
+        for path in [always_paths(scope), true] {
+            build(p, path).map_err(|e| format!("rule {rule:?}: {e}"))?;
+        }
     }
     Ok(())
 }
@@ -173,6 +180,9 @@ struct Compiled {
     /// The pattern with `~/` resolved; [`RuleSet::find_exact`] compares it.
     pattern: Option<String>,
     globs: Vec<GlobMatcher>,
+    /// The globs a path target is matched with: `~/` resolved and, on
+    /// Windows, without case, whatever the scope.
+    path_globs: Vec<GlobMatcher>,
     /// A rule of the guard: it matches parsed commands, not the text.
     guard: Option<Guard>,
 }
@@ -201,6 +211,7 @@ impl RuleSet {
                         action: Some("run".into()),
                         pattern: None,
                         globs: Vec::new(),
+                        path_globs: Vec::new(),
                         guard: Some(guard),
                     });
                 }
@@ -212,24 +223,23 @@ impl RuleSet {
                     Some((c, a)) => (c, Some(a)),
                     None => (scope, None),
                 };
-                let path = is_path_scope(scope);
-                let pattern = pattern.map(|p| expand_home(p, &home, path));
-                let globs = match &pattern {
+                let path = always_paths(scope);
+                let globs_of = |path: bool| match pattern {
                     Some(p) => {
-                        let g = matchers(p, path);
-                        if g.is_empty() {
-                            return None;
-                        }
-                        g
+                        let g = matchers(&expand_home(p, &home, path), path);
+                        (!g.is_empty()).then_some(g)
                     }
-                    None => Vec::new(),
+                    None => Some(Vec::new()),
                 };
+                let globs = globs_of(path)?;
+                let path_globs = globs_of(true)?;
                 Some(Compiled {
                     text: text.clone(),
                     cap: cap.into(),
                     action: action.map(Into::into),
-                    pattern,
+                    pattern: pattern.map(|p| expand_home(p, &home, path)),
                     globs,
+                    path_globs,
                     guard: None,
                 })
             })
@@ -263,6 +273,18 @@ impl RuleSet {
                 },
                 None => r.globs.is_empty() || r.globs.iter().any(|g| g.is_match(target)),
             })
+            .map(|r| r.text.as_str())
+    }
+
+    /// The first rule that covers the path `target` of `cap.action`: a path
+    /// argument of any action, matched as `fs` paths are (`~/` is the
+    /// owner's home, Windows ignores case). The guard's rules look at
+    /// command lines only.
+    pub fn find_path(&self, cap: &str, action: &str, target: &str) -> Option<&str> {
+        self.rules
+            .iter()
+            .filter(|r| r.guard.is_none() && r.covers(cap, action))
+            .find(|r| r.path_globs.is_empty() || r.path_globs.iter().any(|g| g.is_match(target)))
             .map(|r| r.text.as_str())
     }
 
@@ -847,6 +869,27 @@ mod tests {
         // `~` means nothing in a command.
         let s = set(&["exec.run:~/bin/*"]);
         assert!(s.find("exec", "run", "/h/bin/x").is_none());
+    }
+
+    /// A path target of any scope is matched as an `fs` path: `~/` is the
+    /// owner's home and a Windows path rule ignores case. The same rule
+    /// still reads its pattern as text where the target is no path, and the
+    /// guard's rules never cover a path.
+    #[test]
+    fn a_path_target_of_any_scope_is_matched_as_a_path() {
+        let s = set(&["notes:~/secret/*", "lamp.set", "guard:node-paths"]);
+        assert!(s.find_path("notes", "open", "/h/secret/a").is_some());
+        assert!(s.find_path("notes", "open", "/h/secret").is_some());
+        assert!(s.find_path("notes", "open", "/h/other").is_none());
+        assert!(s.find("notes", "open", "/h/secret/a").is_none());
+        assert!(s.find_path("lamp", "set", "/anywhere").is_some());
+        assert!(s.find_path("exec", "run", "/h/.config/nerve").is_none());
+        let s = set(&["notes:/W/Secret/*"]);
+        assert_eq!(
+            s.find_path("notes", "open", "/w/secret/a").is_some(),
+            cfg!(windows)
+        );
+        assert!(s.find("notes", "open", "/w/secret/a").is_none());
     }
 
     #[test]
