@@ -173,11 +173,19 @@ pub fn readable(path: &Path) -> Result<(), Unreadable> {
 /// reading it (`O_PATH`). Through `/proc/self/fd` the kernel checks the
 /// rights of the file itself again, as the account this thread's file
 /// access acts as, and it is the very file held, whatever was put at its
-/// path meanwhile.
+/// path meanwhile. Non-blocking: an open for reading of a file another
+/// process holds a write lease on (`F_SETLEASE`) waits until it lets go,
+/// up to `lease-break-time` (45 s by default), and the gate asks on a
+/// worker of the node's runtime. A file or a folder reads the same either
+/// way.
 #[cfg(target_os = "linux")]
 fn reopen(held: &std::fs::File) -> std::io::Result<std::fs::File> {
     use std::os::fd::AsRawFd;
-    std::fs::File::open(format!("/proc/self/fd/{}", held.as_raw_fd()))
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(format!("/proc/self/fd/{}", held.as_raw_fd()))
 }
 
 /// Whether `path` is open to every account on this machine by its mode
@@ -1087,19 +1095,39 @@ mod tests {
     }
 
     /// A FIFO open to all at `path`, and a writer that waits in its `open`
-    /// for a reader; the receiver hears once that open returned.
+    /// for a reader; this returns once it waits there, and the receiver
+    /// hears once that open returned. A reader that comes and goes before
+    /// the writer waits lets nothing go, so it has to wait first.
     #[cfg(target_os = "linux")]
     fn a_writer_waits_on(
         path: &Path,
     ) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<()>) {
+        use std::os::unix::fs::PermissionsExt;
         let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o666) }, 0);
+        // mkfifo takes the umask off (027 leaves others nothing).
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let (tid_tx, tid_rx) = std::sync::mpsc::channel();
         let (tx, rx) = std::sync::mpsc::channel();
         let at = path.to_path_buf();
         let writer = std::thread::spawn(move || {
+            tid_tx.send(unsafe { libc::gettid() }).unwrap();
             let _f = std::fs::OpenOptions::new().write(true).open(at).unwrap();
             tx.send(()).unwrap();
         });
+        // Once the thread sleeps after it said its id, it sleeps in `open`:
+        // it does nothing else there that waits.
+        let stat = format!("/proc/self/task/{}/stat", tid_rx.recv().unwrap());
+        let sleeps = || {
+            let s = std::fs::read_to_string(&stat).unwrap();
+            s.rsplit_once(") ")
+                .is_some_and(|(_, rest)| rest.starts_with('S'))
+        };
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !sleeps() {
+            assert!(std::time::Instant::now() < until, "the writer never waited");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         (writer, rx)
     }
 
@@ -1151,6 +1179,68 @@ mod tests {
             still_waiting(&fifo, writer),
             "the read or the write opened the pipe"
         );
+    }
+
+    /// A file another process holds a write lease on: asking whether it may
+    /// be read, and reading it, answer at once instead of waiting until the
+    /// holder lets go (up to `lease-break-time`, 45 s by default). In the
+    /// gate that wait would hold a worker of the node's runtime.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_leased_file_is_not_waited_on() {
+        use std::io::Read;
+        use std::os::fd::FromRawFd;
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let file = d.path().join("leased");
+        std::fs::write(&file, "x").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let c = std::ffi::CString::new(file.as_os_str().as_encoded_bytes()).unwrap();
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        // SAFETY: the child calls only async-signal-safe functions and
+        // leaves with _exit; it ignores the signal a lease break sends, so
+        // it holds the lease until the kernel takes it or the test ends it.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe {
+                libc::signal(libc::SIGIO, libc::SIG_IGN);
+                let fd = libc::open(c.as_ptr(), libc::O_RDWR);
+                let ok = fd >= 0 && libc::fcntl(fd, libc::F_SETLEASE, libc::F_WRLCK) == 0;
+                libc::write(fds[1], [u8::from(ok)].as_ptr().cast(), 1);
+                loop {
+                    libc::pause();
+                }
+            }
+        }
+        unsafe { libc::close(fds[1]) };
+        let mut ready = std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[0]) });
+        let mut held = [0u8];
+        ready.read_exact(&mut held).unwrap();
+        let end = || unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            libc::waitpid(pid, std::ptr::null_mut(), 0);
+        };
+        if held[0] != 1 {
+            end();
+            eprintln!("no write lease can be taken here (fs.leases-enable, or the file system)");
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let at = file.clone();
+        let asks = std::thread::spawn(move || {
+            tx.send((readable(&at), run("read", json!({"path": wire(&at)}))))
+                .unwrap();
+        });
+        let answer = rx.recv_timeout(std::time::Duration::from_secs(5));
+        // Ending the holder lets a waiting open go, so the thread ends too.
+        end();
+        asks.join().unwrap();
+        let (check, read) = answer.expect("the leased file was waited on");
+        assert_eq!(check, Err(Unreadable::Closed));
+        assert!(read.is_err(), "{read:?}");
     }
 
     /// A path is open to every account only where each folder above it
