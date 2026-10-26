@@ -39,6 +39,9 @@ pub const READ_DEFAULT: usize = 16 * 1024;
 /// The least and the most `stream.read` gives in one call.
 pub const READ_MIN: usize = 64;
 pub const READ_MAX: usize = crate::listing::TEXT_MAX;
+/// What one read keeps free of [`READ_MAX`] for the words around its text,
+/// so its answer stays within what one answer hands the model.
+pub const READ_ROOM: usize = 4 * 1024;
 /// How long an ended stream is kept when nobody reads or closes it.
 pub const KEEP_FOR: Duration = crate::jobs::KEEP_FOR;
 /// How long one `stream.open` waits for the node's answer.

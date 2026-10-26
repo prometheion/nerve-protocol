@@ -247,7 +247,7 @@ command runs there, also when that takes a while:
 
 | Call | Does |
 |---|---|
-| `stream.read` with `{"stream": "s-…"}` | Gives what the command printed since the last read (its stdout and stderr as they came), marked as the machine's content like any result, and says whether more may come. `"wait_ms"` waits for more when nothing is there yet, at most the call wait; `"max_bytes"` reads less or more at once (16 KiB unless set, at most 256 KiB) |
+| `stream.read` with `{"stream": "s-…"}` | Gives what the command printed since the last read (its stdout and stderr as they came), marked as the machine's content like any result, and says whether more may come. `"wait_ms"` waits for more when nothing is there yet, at most the call wait; `"max_bytes"` reads less or more at once (16 KiB unless set, at most 256 KiB; one read gives at most 252 KiB, so the answer around it fits) |
 | `stream.close` with `{"stream": "s-…"}` | Ends the stream; the command runs on |
 
 The model can follow a build or a test run this way and stop it with

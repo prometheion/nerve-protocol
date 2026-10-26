@@ -660,7 +660,8 @@ impl Engine {
             .get("max_bytes")
             .and_then(Value::as_u64)
             .map_or(streams::READ_DEFAULT, |n| n as usize)
-            .clamp(streams::READ_MIN, streams::READ_MAX);
+            .clamp(streams::READ_MIN, streams::READ_MAX)
+            .min(streams::READ_MAX - streams::READ_ROOM);
         let r = found.ring.read(max);
         // The command's output is outside content, as its result is.
         if !r.text.is_empty() {
@@ -708,7 +709,11 @@ impl Engine {
         if !r.eof {
             sc["center"]["next"] = json!(next);
         }
-        v["structuredContent"] = sc;
+        // As for a call's result: what would hand the model more than the
+        // text may hold is left to the text.
+        if structured_fits(&sc) {
+            v["structuredContent"] = sc;
+        }
         v
     }
 }

@@ -436,12 +436,15 @@ read, no checker, no statistics):
 | `stream.close` | `read` | `stream` | `{"stream", "state": "closed"}` |
 
 - `stream.read` waits up to `wait_ms` (never longer than the call wait) when
-  nothing is there yet, then gives at most `max_bytes`: a line `Stream s-…
+  nothing is there yet, then gives at most `max_bytes` (and at most 252 KiB,
+  so the answer's other words fit within 256 KiB): a line `Stream s-…
   (output of job j-… on node box-1): N bytes; more may come. Call
   stream.read … again …` (or `nothing new yet. …`, or `it ended (the command
   ended); this is the last of it.`), then the text framed as device content.
   `structuredContent` is the envelope (§4.3) with `result` `{text, eof,
-  dropped?}`, and the center's `{stream, job, eof, next?}` as `center`. A
+  dropped?}`, and the center's `{stream, job, eof, next?}` as `center`; as
+  for a long result (§4.3), it is left out when its JSON would pass 256 KiB,
+  and the text stands alone. A
   character a cut would split waits for the next read, and a wait goes on
   while the stream holds only the start of one. The bytes are read as UTF-8
   (a byte that is not is a replacement character); a Windows node sends

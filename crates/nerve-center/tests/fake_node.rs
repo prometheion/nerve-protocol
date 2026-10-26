@@ -191,7 +191,8 @@ enum Seen {
 /// half a second after the call, `talkbusy`, whose `stream.open` is busy
 /// for that half second, `talkmute`, whose `stream.close` is never
 /// answered, and `talkgap`, which also drops 5 bytes and prints 100 more;
-/// and `talkrefuse`, whose stream is refused with [`NODE_WORDS`]),
+/// `talkbig`, which prints [`BIG`] bytes more of quotes and line breaks at
+/// once, and `talkrefuse`, whose stream is refused with [`NODE_WORDS`]),
 /// and reports what it saw.
 fn serve(ws: WebSocketStream<BoxIo>, desc: Value) -> mpsc::UnboundedReceiver<Seen> {
     serve_task(ws, desc).0
@@ -239,6 +240,8 @@ fn talk_ends(talk: &str) -> bool {
 
 /// How long the fake node takes to answer a `slow` call.
 const SLOW: Duration = Duration::from_millis(600);
+/// How much a `talkbig` command prints at once.
+const BIG: usize = 300 * 1024;
 /// How long a `talk` command runs.
 const TALK: Duration = Duration::from_millis(1200);
 /// What a node says where the model could take it for the center's words.
@@ -370,6 +373,13 @@ fn serve_changing(
                             WsMessage::binary(f.encode().unwrap())
                         };
                         let _ = raw.send(frame(0, "one\n"));
+                        if talk == "talkbig" {
+                            let big = "\"\n".repeat(BIG / 2);
+                            for (i, chunk) in big.as_bytes().chunks(16 * 1024).enumerate() {
+                                let chunk = std::str::from_utf8(chunk).unwrap();
+                                let _ = raw.send(frame(i as u32 + 1, chunk));
+                            }
+                        }
                         if talk == "talkgap" {
                             let gap = nerve_proto::frame::Frame::gap(sid as u32, 1, 5);
                             let _ = raw.send(WsMessage::binary(gap.encode().unwrap()));
@@ -4045,6 +4055,57 @@ async fn a_result_without_all_the_output_leaves_its_stream() {
         }
         assert_eq!(got, "one\ntwo\n", "{command}");
     }
+    r.stop().await;
+}
+
+/// A read of the most bytes stays within what one answer hands the model:
+/// its text does, and its `structuredContent` is left out when its JSON
+/// would not (quotes and line breaks double in it). A smaller read keeps
+/// it.
+#[tokio::test]
+async fn a_big_read_stays_within_what_an_answer_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, _seen, _task) = job_box(&r).await;
+    let reply = execute_as(&e, json!(1), "exec.run", json!({"command": "talkbig"})).await;
+    let stream = stream_of(&reply);
+    let sess = e.session();
+    wait_for(|| {
+        let found = sess
+            .streams
+            .lock()
+            .unwrap()
+            .get(&stream, &node, std::time::Instant::now())
+            .0;
+        found.filter(|f| f.ring.held() > BIG).map(|_| ())
+    })
+    .await;
+    let max = nerve_center::listing::TEXT_MAX;
+    let read = |n: usize| {
+        execute_as(
+            &e,
+            json!("read"),
+            "stream.read",
+            json!({"stream": stream, "max_bytes": n}),
+        )
+    };
+    let big = read(nerve_center::streams::READ_MAX).await;
+    let (text, err) = said(&big);
+    assert!(!err, "{big}");
+    assert!(
+        text.len() <= max && text.len() > max - 8 * 1024,
+        "{}",
+        text.len()
+    );
+    let sc = &big["result"]["structuredContent"];
+    assert!(sc.is_null(), "{} bytes", sc.to_string().len());
+    let small = read(4096).await;
+    let sc = &small["result"]["structuredContent"];
+    assert_eq!(
+        sc["result"]["text"].as_str().map(str::len),
+        Some(4096),
+        "{small}"
+    );
     r.stop().await;
 }
 
