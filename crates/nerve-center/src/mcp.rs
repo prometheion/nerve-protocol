@@ -401,7 +401,7 @@ impl Engine {
                 }
                 // A command's output streams while it runs.
                 let stream = match command {
-                    true => Some(self.center.open_output(&sess, &route, &job).await),
+                    true => Some(self.center.open_output(&sess, &route, &job)),
                     false => None,
                 };
                 running(&route, &job, wait, follow.iter().any(is_signal), stream)
@@ -533,7 +533,7 @@ impl Engine {
         if view.outcome.is_some() {
             let stream = sess.streams.lock().unwrap().of_job(job);
             if let Some(c) = stream {
-                c.close("its job's result was read").await;
+                c.close("its job's result was read");
             }
         }
         let what = job_what(&view.route);
@@ -619,7 +619,7 @@ impl Engine {
             let Some(c) = closed else {
                 return unknown();
             };
-            c.close("the agent closed it").await;
+            c.close("the agent closed it");
             let mut v = text_result(
                 &format!("Stream {id} is closed: nothing more of it is kept."),
                 false,
@@ -629,7 +629,7 @@ impl Engine {
         }
         let (found, gone) = sess.streams.lock().unwrap().get(id, node, Instant::now());
         for c in gone {
-            c.close("it ended 10 minutes ago and was not read").await;
+            c.close("it ended 10 minutes ago and was not read");
         }
         let Some(found) = found else {
             return unknown();
@@ -646,13 +646,17 @@ impl Engine {
             .map_or(streams::READ_DEFAULT, |n| n as usize)
             .clamp(streams::READ_MIN, streams::READ_MAX);
         let r = found.ring.read(max);
+        // The command's output is outside content, as its result is.
+        if !r.text.is_empty() {
+            self.center.taint_by_output(sess);
+        }
         let mut head = format!(
             "Stream {id} (output of job {} on node {}): ",
             found.job, route.node_name
         );
         if r.dropped > 0 {
             head.push_str(&format!(
-                "{} bytes were dropped before this text: a stream keeps at most {} MiB that was not read, and the node drops what the link cannot carry fast enough. ",
+                "{} bytes were dropped before this text: a stream that opened after its command printed a lot starts with the end of it, a stream keeps at most {} MiB that was not read, and the node drops what the link cannot carry fast enough; the job's result holds all of the output, up to its cap. ",
                 r.dropped,
                 streams::RING_BYTES / (1024 * 1024)
             ));

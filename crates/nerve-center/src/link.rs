@@ -333,10 +333,29 @@ impl Link {
             return Err("the node never took this link up".into());
         }
         let again = replay.resume(got)?;
+        // A stream the node opened on the old connection ended with it, and
+        // its answer may still come with what the node sends again: a
+        // `stream.open` in flight fails now (its opener asks again), and
+        // goes as `withdrawn` below if the node never read it.
+        let opening: Vec<u64> = self
+            .opening
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(id, _)| id)
+            .collect();
+        let mut pending = self.pending.lock().unwrap();
+        for id in opening {
+            if let Some(tx) = pending.remove(&id) {
+                let _ = tx.send(Err(RpcError::new(
+                    ErrorCode::ConnectionLost,
+                    "the link to the node dropped",
+                )));
+            }
+        }
         // A request nobody waits for any more (its caller timed out or
         // cancelled) is not delivered late: it goes as `withdrawn`, which
         // keeps the count and which the node ignores.
-        let pending = self.pending.lock().unwrap();
         let again = again
             .into_iter()
             .map(|t| match Message::decode(&t) {
@@ -397,7 +416,8 @@ impl Link {
     }
 
     /// [`Link::start`], refused with `busy` when `most` requests wait for
-    /// their reply already.
+    /// their reply already. A `stream.open` is not one of the node's calls
+    /// and takes no place.
     pub async fn start_within(
         &self,
         method: &str,
@@ -408,9 +428,11 @@ impl Link {
             return Err(lost());
         }
         let (tx, rx) = oneshot::channel();
+        // One lock at a time, as everywhere: the count may be a moment old.
+        let opening = self.opening.lock().unwrap().len();
         let id = {
             let mut pending = self.pending.lock().unwrap();
-            if pending.len() >= most {
+            if pending.len().saturating_sub(opening) >= most {
                 return Err(RpcError::new(ErrorCode::Busy, "too many calls in flight"));
             }
             let id = self.next_id.fetch_add(1, Ordering::SeqCst);
@@ -552,9 +574,15 @@ impl Link {
     }
 
     /// Opens a stream on the node (`stream.open` with `params`) whose
-    /// frames go to `ring`: its `sid`.
-    pub async fn open_stream(&self, params: Value, ring: Arc<Ring>) -> Result<u32, RpcError> {
-        if self.is_closed() {
+    /// frames go to `ring`, waiting up to `wait` for the answer: its `sid`.
+    /// A link that is down now opens none: streams end with a connection.
+    pub async fn open_stream(
+        &self,
+        params: Value,
+        ring: Arc<Ring>,
+        wait: Duration,
+    ) -> Result<u32, RpcError> {
+        if !self.is_live() {
             return Err(lost());
         }
         let (tx, rx) = oneshot::channel();
@@ -571,7 +599,7 @@ impl Link {
             return Err(lost());
         }
         unsent.id = None;
-        let r = self.finish(id, rx, Some(SHORT_CALL)).await;
+        let r = self.finish(id, rx, Some(wait)).await;
         self.opening.lock().unwrap().remove(&id);
         let v = r?;
         v.get("sid")
@@ -594,20 +622,17 @@ impl Link {
     }
 
     /// The node closed the stream `sid` (its command ended): what it holds
-    /// can still be read. Whether the center held it.
+    /// can still be read. Whether the center held it. The node's reason is
+    /// not passed on: the model reads the end in the center's words.
     fn stream_closed(&self, sid: u32, reason: &str) -> bool {
         let ring = self.streams.lock().unwrap().remove(&sid);
         match ring {
             Some(ring) => {
-                let why = if reason == "ended" {
-                    "the command ended".to_string()
+                ring.end(if reason == "ended" {
+                    "the command ended"
                 } else {
-                    format!(
-                        "the node closed it ({})",
-                        crate::util::clip(&crate::listing::one_line(reason), 200)
-                    )
-                };
-                ring.end(&why);
+                    "the node closed it"
+                });
                 true
             }
             None => false,
@@ -1256,5 +1281,50 @@ mod tests {
         assert!(held.is_err(), "the queue had room");
         assert_eq!(link.waiting(), 1);
         assert!(rx.try_recv().is_ok());
+    }
+
+    /// A `stream.open` in flight when the link resumes fails, and is not
+    /// sent again; the node's answer, which may still come with what it
+    /// sends again, opens nothing: the node ended that stream with the old
+    /// connection.
+    #[tokio::test]
+    async fn a_resume_fails_a_stream_open_in_flight() {
+        let (out, mut rx) = mpsc::channel(8);
+        let link = Arc::new(Link::new(
+            "n1",
+            String::new(),
+            false,
+            Limits::default(),
+            out,
+            Some("l-1".into()),
+        ));
+        let conn = link.wire.lock().unwrap().conn;
+        assert!(link.take_frame(conn, true));
+        let opener = {
+            let link = link.clone();
+            tokio::spawn(async move {
+                let ring = Arc::new(Ring::default());
+                link.open_stream(json!({}), ring, Duration::from_secs(10))
+                    .await
+            })
+        };
+        let Some(Out::Frame(m)) = rx.recv().await else {
+            panic!("no request")
+        };
+        let Ok(Message::Request {
+            id: Id::Num(id), ..
+        }) = Message::decode(m.to_text().unwrap())
+        else {
+            panic!("{m:?}")
+        };
+        assert!(link.park(conn));
+        let (out, _rx) = mpsc::channel(8);
+        let (_, again) = link.resume(out, 0).unwrap();
+        assert_eq!(again.len(), 1);
+        assert!(again[0].contains("withdrawn"), "{again:?}");
+        let e = opener.await.unwrap().expect_err("it failed");
+        assert_eq!(e.kind(), ErrorCode::ConnectionLost);
+        link.reply(&Id::Num(id), Ok(json!({"sid": 1})));
+        assert_eq!(link.stream_count(), 0);
     }
 }

@@ -1,11 +1,13 @@
 //! A job's command output as a stream (docs/dev/spec/harness.md §4.5).
 //!
-//! When `exec.run` becomes a job, the center opens the command's `output`
-//! stream on the node (`stream.open`, protocol §5) and names it in the job's
-//! answer. The node sends what the command printed so far and then what it
-//! prints, as frames; the center keeps them in a [`Ring`] per stream, and the
-//! model reads them with `stream.read`, polling: there are no MCP
-//! notifications (an event subscription, B6, is a stream read the same way).
+//! When `exec.run` becomes a job, the center names a stream for its output
+//! in the job's answer and opens the command's `output` stream on the node
+//! (`stream.open`, protocol §5) as soon as the command runs there
+//! ([`open_on_node`]). The node sends what the command printed so far and
+//! then what it prints, as frames; the center keeps them in a [`Ring`] per
+//! stream, and the model reads them with `stream.read`, polling: there are
+//! no MCP notifications (an event subscription, B6, is a stream read the
+//! same way).
 //!
 //! A ring holds at most [`RING_BYTES`]; past it the oldest bytes go, and the
 //! next read says how many. Rings are kept in memory only, per session, and
@@ -16,8 +18,12 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+use nerve_proto::ErrorCode;
+use serde_json::json;
 use tokio::sync::watch;
 
+use crate::center::Session;
+use crate::jobs::NoSignal;
 use crate::link::Link;
 
 /// The most bytes one stream keeps that the model did not read yet.
@@ -31,6 +37,12 @@ pub const READ_MIN: usize = 64;
 pub const READ_MAX: usize = crate::listing::TEXT_MAX;
 /// How long an ended stream is kept when nobody reads or closes it.
 pub const KEEP_FOR: Duration = crate::jobs::KEEP_FOR;
+/// How long one `stream.open` waits for the node's answer.
+pub const OPEN_WAIT: Duration = Duration::from_secs(10);
+/// How long the center keeps asking for the stream of a command its node
+/// does not run yet, once the call was sent: the node may hold a command
+/// before it starts (its folders' access, a sandbox to set up).
+pub const START_WAIT: Duration = Duration::from_secs(60);
 
 /// What one stream received and nobody read yet.
 pub struct Ring {
@@ -135,7 +147,15 @@ impl Ring {
     /// ended.
     pub async fn wait(&self, wait: Duration) {
         let mut rx = self.moved.subscribe();
-        let ready = |s: &RingState| !s.buf.is_empty() || s.dropped > 0 || s.end.is_some();
+        // Only the start of a character is nothing a read could give yet.
+        let ready = |s: &RingState| {
+            let part = s.buf.len() < 4
+                && {
+                    let head: Vec<u8> = s.buf.iter().copied().collect();
+                    matches!(std::str::from_utf8(&head), Err(e) if e.valid_up_to() == 0 && e.error_len().is_none())
+                };
+            (!s.buf.is_empty() && !part) || s.dropped > 0 || s.end.is_some()
+        };
         if ready(&self.state.lock().unwrap()) {
             return;
         }
@@ -186,22 +206,26 @@ pub struct Found {
 /// What closing a stream leaves to do: tell the node, if the stream still
 /// runs there.
 pub struct Closer {
-    link: Weak<Link>,
-    sid: u32,
+    /// The link and `sid` of the stream, once the node opened it.
+    node: Option<(Weak<Link>, u32)>,
     ring: Arc<Ring>,
 }
 
 impl Closer {
-    /// Frees the stream on its link and tells the node to stop it, unless it
-    /// ended already.
-    pub async fn close(self, why: &str) {
-        let Some(link) = self.link.upgrade() else {
+    /// Ends the stream, frees it on its link and tells the node to stop it,
+    /// unless it ended there already. The node's answer is not waited for:
+    /// it says nothing the center needs.
+    pub fn close(self, why: &str) {
+        self.ring.end(why);
+        let Some((link, sid)) = self.node else {
             return;
         };
-        let open = link.forget_stream(self.sid);
-        self.ring.end(why);
-        if open && !link.is_closed() {
-            link.close_stream(self.sid, why).await;
+        let Some(link) = link.upgrade() else {
+            return;
+        };
+        if link.forget_stream(sid) && !link.is_closed() {
+            let why = why.to_string();
+            tokio::spawn(async move { link.close_stream(sid, &why).await });
         }
     }
 }
@@ -209,8 +233,7 @@ impl Closer {
 struct Entry {
     node_id: String,
     job: String,
-    link: Weak<Link>,
-    sid: u32,
+    node: Option<(Weak<Link>, u32)>,
     ring: Arc<Ring>,
     opened: Instant,
 }
@@ -218,8 +241,7 @@ struct Entry {
 impl Entry {
     fn closer(self) -> Closer {
         Closer {
-            link: self.link,
-            sid: self.sid,
+            node: self.node,
             ring: self.ring,
         }
     }
@@ -266,30 +288,33 @@ impl Streams {
         (!self.ended && self.entries.len() < STREAMS_MAX, gone)
     }
 
-    /// Adds the stream `sid` on `link`, the output of `job` on `node_id`, as
-    /// `id`. Refused (its closer given back) once the session ended.
-    pub fn add(
-        &mut self,
-        id: &str,
-        node_id: &str,
-        job: &str,
-        link: &Arc<Link>,
-        sid: u32,
-        ring: Arc<Ring>,
-    ) -> Result<(), Closer> {
+    /// Adds the stream of the output of `job` on `node_id`, as `id`, before
+    /// the node opened it. Refused once the session ended.
+    pub fn add(&mut self, id: &str, node_id: &str, job: &str, ring: Arc<Ring>) -> bool {
+        if self.ended {
+            return false;
+        }
         let e = Entry {
             node_id: node_id.to_string(),
             job: job.to_string(),
-            link: Arc::downgrade(link),
-            sid,
+            node: None,
             ring,
             opened: Instant::now(),
         };
-        if self.ended {
-            return Err(e.closer());
-        }
         self.entries.insert(id.to_string(), e);
-        Ok(())
+        true
+    }
+
+    /// The node opened the stream `id` as `sid` on `link`; `false` when the
+    /// session no longer holds it.
+    pub fn opened(&mut self, id: &str, link: &Arc<Link>, sid: u32) -> bool {
+        match self.entries.get_mut(id) {
+            Some(e) => {
+                e.node = Some((Arc::downgrade(link), sid));
+                true
+            }
+            None => false,
+        }
     }
 
     /// The stream `id` of `node_id`; none when this session has no such
@@ -342,6 +367,92 @@ impl Streams {
             .filter_map(|id| self.entries.remove(id))
             .map(Entry::closer)
             .collect()
+    }
+}
+
+/// Opens the stream `id` of the job `job` of `sess` on `node_id`, whose
+/// frames go to `ring`: once the job's call reached the node and its
+/// command runs there, which may take a while (the checker, a call place,
+/// the node setting up). Gives up when the job ended, the stream was closed
+/// or the node refused it, and then says why in the ring.
+pub async fn open_on_node(
+    sess: Weak<Session>,
+    node_id: String,
+    job: String,
+    id: String,
+    ring: Arc<Ring>,
+) {
+    let mut pause = Duration::from_millis(50);
+    let mut sent_at: Option<Instant> = None;
+    loop {
+        // Closed meanwhile: by the agent, the job's result read, the session's end.
+        if ring.ended() {
+            return;
+        }
+        let Some(s) = sess.upgrade() else {
+            return;
+        };
+        let target = s.jobs.lock().unwrap().signal_target(&job, &node_id);
+        let session = s.id.clone();
+        drop(s);
+        match target {
+            Err(NoSignal::NotSent) => {}
+            Err(_) => {
+                ring.end("its command ended before its output could be streamed; job.status gives it with the result");
+                return;
+            }
+            Ok((link, call)) => {
+                let since = *sent_at.get_or_insert_with(Instant::now);
+                if since.elapsed() >= START_WAIT {
+                    ring.end("its command did not start on the node in time to be streamed; job.status gives its output with the result");
+                    return;
+                }
+                let params = json!({"cap": "exec", "stream": "output", "params": {"call": call},
+                                    "ctx": {"session": session}});
+                match link.open_stream(params, ring.clone(), OPEN_WAIT).await {
+                    Ok(sid) => {
+                        let kept = sess
+                            .upgrade()
+                            .is_some_and(|s| s.streams.lock().unwrap().opened(&id, &link, sid));
+                        if !kept {
+                            Closer {
+                                node: Some((Arc::downgrade(&link), sid)),
+                                ring,
+                            }
+                            .close("it was closed");
+                        }
+                        return;
+                    }
+                    // Not running there yet (or any more: the job's end tells),
+                    // or the link is down for now.
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            ErrorCode::InvalidArgs | ErrorCode::Timeout | ErrorCode::ConnectionLost
+                        ) => {}
+                    Err(e) => {
+                        ring.end(&refused(&e.kind()));
+                        return;
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(pause).await;
+        pause = (pause * 2).min(Duration::from_secs(1));
+    }
+}
+
+/// Why the node did not open a stream, in the center's words: a node's own
+/// text never reaches the model as the center's.
+fn refused(code: &ErrorCode) -> String {
+    match code {
+        ErrorCode::Unavailable => {
+            "the node does not stream this command's output; job.status gives it with the result"
+                .into()
+        }
+        ErrorCode::Busy => "the node has too many streams open".into(),
+        ErrorCode::Other(_) => "the node refused to open it".into(),
+        c => format!("the node refused to open it ({})", c.as_str()),
     }
 }
 
@@ -423,6 +534,15 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(r.read(READ_MAX).text, "hi");
         pusher.await.unwrap();
+        // The start of a character alone is nothing a read could give: the
+        // wait goes on until the rest comes.
+        r.push(&"\u{2713}".as_bytes()[..1]);
+        let started = Instant::now();
+        r.wait(Duration::from_millis(100)).await;
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        r.push(&"\u{2713}".as_bytes()[1..]);
+        r.wait(Duration::from_secs(10)).await;
+        assert_eq!(r.read(READ_MAX).text, "\u{2713}");
     }
 
     /// A session finds only its own streams, on the node they are on; the
@@ -433,24 +553,18 @@ mod tests {
         let mut s = Streams::default();
         let now = Instant::now();
         let ring = Arc::new(Ring::default());
-        assert!(s.add("s-1", "n1", "j-1", &link, 1, ring).is_ok());
+        assert!(s.add("s-1", "n1", "j-1", ring));
+        assert!(s.opened("s-1", &link, 1));
         assert!(s.get("s-1", "n1", now).0.is_some());
         assert!(s.get("s-1", "n2", now).0.is_none(), "another node's");
         assert!(s.get("s-2", "n1", now).0.is_none());
         assert!(s.close("s-1", "n2").is_none());
         assert!(s.of_job("j-1").is_some());
         assert!(s.is_empty());
+        assert!(!s.opened("s-1", &link, 1), "closed meanwhile");
         for i in 0..STREAMS_MAX {
             let ring = Arc::new(Ring::default());
-            let added = s.add(
-                &format!("s-{i}"),
-                "n1",
-                &format!("j-{i}"),
-                &link,
-                i as u32,
-                ring,
-            );
-            assert!(added.is_ok());
+            assert!(s.add(&format!("s-{i}"), "n1", &format!("j-{i}"), ring));
         }
         // Full of running streams: no room; one that ended makes room.
         assert!(!s.room(now).0);
@@ -464,7 +578,7 @@ mod tests {
         assert_eq!(gone.len(), 1);
         assert_eq!(s.end().len(), STREAMS_MAX - 2);
         let ring = Arc::new(Ring::default());
-        assert!(s.add("s-x", "n1", "j-x", &link, 99, ring).is_err());
+        assert!(!s.add("s-x", "n1", "j-x", ring));
         assert!(!s.room(now).0);
     }
 }

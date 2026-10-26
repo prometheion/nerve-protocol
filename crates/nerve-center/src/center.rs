@@ -25,7 +25,7 @@ use crate::checker::{
     self, AllowRule, CallInfo, Checker, CheckerConfig, Decision, Endpoint, Layer, LocalModel,
     ModelSource, NodeSettings, NodeSwitch, Scope,
 };
-use crate::jobs::{self, Jobs, NoSignal, Stop};
+use crate::jobs::{self, Jobs, Stop};
 use crate::link::{Link, SHORT_CALL, calls_kept};
 use crate::listing;
 use crate::pairing::{Codes, Outcome};
@@ -2252,7 +2252,7 @@ impl Center {
         // Its streams are dropped; one still running on its node stops.
         let closers = s.streams.lock().unwrap().end();
         for c in closers {
-            c.close("the session ended").await;
+            c.close("the session ended");
         }
         self.log.record(
             Level::Info,
@@ -2525,23 +2525,19 @@ impl Center {
         )
     }
 
-    /// Opens the output stream of the `exec.run` job `job` of `sess` on its
-    /// node (docs/dev/spec/harness.md §4.5): its id, or why it has none.
-    pub async fn open_output(
+    /// Names the output stream of the `exec.run` job `job` of `sess`, and
+    /// opens it on its node once the command runs there
+    /// (docs/dev/spec/harness.md §4.5, [`streams::open_on_node`]): its id,
+    /// or why it has none.
+    pub fn open_output(
         &self,
         sess: &Arc<Session>,
         route: &Route,
         job: &str,
     ) -> Result<String, String> {
-        let target = sess.jobs.lock().unwrap().signal_target(job, &route.node_id);
-        let (link, call) = match target {
-            Ok(t) => t,
-            Err(NoSignal::NotSent) => return Err("its call had not reached the node yet".into()),
-            Err(_) => return Err("it ended meanwhile".into()),
-        };
         let (room, gone) = sess.streams.lock().unwrap().room(Instant::now());
         for c in gone {
-            c.close("too many streams").await;
+            c.close("too many streams");
         }
         if !room {
             return Err(format!(
@@ -2550,23 +2546,35 @@ impl Center {
             ));
         }
         let ring = Arc::new(Ring::default());
-        let params = json!({"cap": "exec", "stream": "output", "params": {"call": call},
-                            "ctx": {"session": sess.id}});
-        let sid = link
-            .open_stream(params, ring.clone())
-            .await
-            .map_err(|e| format!("node {} did not open it: {}", route.node_name, e.message))?;
         let id = streams::new_id();
-        let added = sess
+        if !sess
             .streams
             .lock()
             .unwrap()
-            .add(&id, &route.node_id, job, &link, sid, ring);
-        if let Err(c) = added {
-            c.close("the session ended").await;
+            .add(&id, &route.node_id, job, ring.clone())
+        {
             return Err("the session ended".into());
         }
+        tokio::spawn(streams::open_on_node(
+            Arc::downgrade(sess),
+            route.node_id.clone(),
+            job.to_string(),
+            id.clone(),
+            ring,
+        ));
         Ok(id)
+    }
+
+    /// The session read a command's output (`stream.read`): outside content,
+    /// as the command's result is once it ends, so it taints the session.
+    pub fn taint_by_output(&self, sess: &Session) {
+        if self.checker().taint_on()
+            && checker::taints(nerve_proto::Effect::Execute)
+            && !sess.tainted()
+        {
+            sess.set_tainted();
+            self.changed(Change::Sessions);
+        }
     }
 
     /// The task that owns a call: it runs it until its result comes or it is
@@ -2607,7 +2615,7 @@ impl Center {
                         // Its output stream goes with it.
                         let stream = s.streams.lock().unwrap().of_job(&id);
                         if let Some(c) = stream {
-                            c.close("its job was forgotten").await;
+                            c.close("its job was forgotten");
                         }
                     }
                 });
