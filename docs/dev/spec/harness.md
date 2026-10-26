@@ -290,20 +290,21 @@ and sends nothing to the node.
    (`exec.signal` names no folder). A session
    remembers at most 1024 units and drops the one listed longest ago; the
    model then lists it again. An `execute` answered with a job counts as the
-   details of that node's `job.status` and `job.cancel`, and of its
-   `exec.signal` where the node offers it: it names them with their args
-   (§4.4).
+   details of that node's `job.status` and `job.cancel`, of its
+   `stream.read` and `stream.close`, and of its `exec.signal` where the node
+   offers it: it names them with their args (§4.4, §4.5).
 5. `args` (missing or `null` is `{}`) against the unit's `params`. Arguments
    that do not fit are `error invalid_args: <field>: expected <what>`
    (`error invalid_args: path: expected a string (required)`). This refusal
    is logged and counted as a failed call of the unit.
 6. The call itself: the action checker (§6), then the node, as for any call.
    A node that is offline is `error unavailable`. A call that runs past the
-   call wait becomes a job (§4.4). The center's own `job.status` and
-   `job.cancel` go to neither: the center answers them.
+   call wait becomes a job (§4.4). The center's own `job.status`,
+   `job.cancel`, `stream.read` and `stream.close` go to neither: the center
+   answers them.
 
-`unknown_node`, `list_first` and `unknown_job` (§4.4) are the center's own
-codes; the others are those of [protocol.md](protocol.md) §5. Nothing of
+`unknown_node`, `list_first`, `unknown_job` (§4.4) and `unknown_stream`
+(§4.5) are the center's own codes; the others are those of [protocol.md](protocol.md) §5. Nothing of
 this changes the node link.
 
 A result is text marked as device content:
@@ -418,7 +419,10 @@ stderr in the order it read them; the result still carries the output as
 before. When the stream cannot be opened (the job ended first, the node
 refused, the command did not start within that minute) it ends, and a read
 says why in the center's words: `it ended (the node refused to open it
-(busy))`. Only when the session holds 16 streams that still run, or it ended,
+(forbidden))`. A session has at most half of a node's stream places open at
+once (8 of its `limits.streams` 16), so other sessions' streams find room; a
+further stream of it, or one the node has no place for yet (`busy`), opens
+once a place frees up, and reads give nothing new until then. Only when the session holds 16 streams that still run, or it ended,
 does the answer name none: `Its output is not streamed (…); job.status gives
 it with the result.` The answer counts as the details of `stream.read` and
 `stream.close` (§4.3), as of `job.*`.
@@ -446,7 +450,9 @@ read, no checker, no statistics):
   §4.4): it is outside content, as the job's result is when it ends.
 - The center keeps at most 1 MiB per stream that was not read; past it the
   oldest bytes go, and the next read says how many (`dropped`, and `N bytes
-  were dropped before this text: …`, which names every cause). The node keeps
+  were dropped before this text: …`, which names every cause). A read ends
+  where the node dropped bytes, so its text has nothing missing inside it;
+  the next read starts with that count. The node keeps
   at most 1 MiB the link did not carry yet and says the same of what it
   drops, and a stream opened after its command printed more than the node
   keeps of it starts with the end of that and the count of what came before;

@@ -784,10 +784,12 @@ concurrently.
   yet per stream and sends a gap for what it drops: the command never waits
   for its stream. Output that is not UTF-8 is sent as the result reads it: on
   Windows decoded from the console's code page (what Windows PowerShell 5.1
-  writes) and sent as UTF-8, once the output proved not to be UTF-8; a cut
-  never starts a frame inside a character of a pipe's output. Every copy of
-  the sudo password the node holds is replaced as in any frame (§7.4.1), also
-  one that two reads of the pipe cut. A sudo command's output (also one the
+  writes) and sent as UTF-8, once that pipe's output proved not to be UTF-8
+  (stdout and stderr each on its own); a cut never starts a frame inside a
+  character of a pipe's output. Every copy of the sudo password the node
+  holds is replaced as in any frame (§7.4.1), also one that two reads of the
+  pipe cut, and once more as the stream sends, with the password held then:
+  output printed before sudo was turned on goes out without it too. A sudo command's output (also one the
   node runs as root for a pairing whose commands run as `nerve-run`) is not
   streamed: its `stream.open` is `unavailable`. A center may ask for the
   stream of a call the node does not run yet again later.

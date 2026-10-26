@@ -261,8 +261,11 @@ ends.
 
 A stream belongs to its session, as its job does. The center keeps at most
 1 MiB of a stream that was not read, in memory only; when more comes, the
-oldest part goes and the next read says how much. A session holds at most 16
-streams. A stream goes when it is closed, when the job's result is read with
+oldest part goes and the next read says how much; a read ends where output
+was dropped, so its text never has a hole inside it. A session holds at most
+16 streams, and has at most 8 open on one machine at once, so other
+sessions' streams find room there: a further stream opens once one of its
+own ends (reads give nothing new until then). A stream goes when it is closed, when the job's result is read with
 `job.status`, when the session ends, and 10 minutes after it ended unread.
 When the machine's link drops, its streams end (also when the link resumes):
 `stream.read` gives what came and says so. A `sudo` command's output is not

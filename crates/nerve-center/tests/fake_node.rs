@@ -188,7 +188,8 @@ enum Seen {
 /// prints two lines into its output stream and ends after [`TALK`],
 /// `talkodd` too but closes its stream with [`NODE_WORDS`], `talkhang`
 /// prints one and never ends, as do `talklate`, whose stream opens only
-/// half a second after the call, `talkmute`, whose `stream.close` is never
+/// half a second after the call, `talkbusy`, whose `stream.open` is busy
+/// for that half second, `talkmute`, whose `stream.close` is never
 /// answered, and `talkgap`, which also drops 5 bytes and prints 100 more;
 /// and `talkrefuse`, whose stream is refused with [`NODE_WORDS`]),
 /// and reports what it saw.
@@ -314,7 +315,7 @@ fn serve_changing(
                         let late = running.as_ref().is_some_and(|(t, at)| {
                             t == "talklate" && at.elapsed() < Duration::from_millis(500)
                         });
-                        let Some((talk, _)) = running.filter(|_| !late) else {
+                        let Some((talk, at)) = running.filter(|_| !late) else {
                             let e = RpcError::invalid_args(format!(
                                 "no running command {call} of this session"
                             ));
@@ -323,6 +324,14 @@ fn serve_changing(
                         };
                         if talk == "talkrefuse" {
                             let e = RpcError::forbidden(NODE_WORDS);
+                            send(&mut ws, Message::error(Some(id), e)).await;
+                            continue;
+                        }
+                        if talk == "talkbusy" && at.elapsed() < Duration::from_millis(500) {
+                            let e = RpcError::new(
+                                nerve_proto::ErrorCode::Busy,
+                                "16 streams are open already",
+                            );
                             send(&mut ws, Message::error(Some(id), e)).await;
                             continue;
                         }
@@ -4152,6 +4161,99 @@ async fn a_command_that_starts_late_still_streams() {
         }
     }
     assert_eq!(text, "one\n");
+    r.stop().await;
+}
+
+/// A stream the node has no place for yet opens once one frees up: the
+/// command runs, and its output is not lost to a busy node.
+#[tokio::test]
+async fn a_stream_waits_for_a_place_on_the_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, _node, mut seen, _task) = job_box(&r).await;
+    let reply = execute_as(&e, json!(1), "exec.run", json!({"command": "talkbusy"})).await;
+    let stream = stream_of(&reply);
+    let Seen::Hang(_) = next_seen(&mut seen).await else {
+        panic!("no invoke")
+    };
+    let Seen::StreamOpen(_) = next_seen(&mut seen).await else {
+        panic!("never opened")
+    };
+    let mut text = String::new();
+    for _ in 0..30 {
+        let got = read_stream(&e, &stream, 100).await;
+        let (said, data) = read_of(&got);
+        assert_eq!(data["eof"], false, "{said}");
+        text.push_str(data["text"].as_str().unwrap());
+        if !text.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(text, "one\n");
+    r.stop().await;
+}
+
+/// One session has at most half of a node's stream places open (8 of 16):
+/// its next stream waits until one of its own ends, and the other sessions'
+/// streams find room meanwhile.
+#[tokio::test]
+async fn a_session_takes_half_of_a_nodes_streams() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = job_box(&r).await;
+    let link = r.center.link(&node).unwrap();
+    let share = nerve_center::streams::node_share(nerve_proto::limits::STREAMS);
+    assert_eq!(share, 8);
+    let mut streams = Vec::new();
+    let mut opened = 0;
+    for id in 0..=share {
+        let reply = execute_as(&e, json!(id), "exec.run", json!({"command": "talkhang"})).await;
+        streams.push(stream_of(&reply));
+    }
+    // Each call, and the first eight streams.
+    for _ in 0..(2 * share + 1) {
+        match next_seen(&mut seen).await {
+            Seen::Hang(_) => {}
+            Seen::StreamOpen(_) => opened += 1,
+            _ => panic!("something else"),
+        }
+    }
+    assert_eq!(opened, share);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(seen.try_recv().is_err(), "a ninth stream opened");
+    assert_eq!(link.stream_count(), share);
+
+    // Another session's stream opens meanwhile.
+    let other = Engine::new(&r.center, "test");
+    list_text(&other, json!({"node": "box-1", "capability": ["exec.run"]})).await;
+    let reply = execute_as(&other, json!(1), "exec.run", json!({"command": "talkhang"})).await;
+    stream_of(&reply);
+    let Seen::Hang(_) = next_seen(&mut seen).await else {
+        panic!("no invoke")
+    };
+    let Seen::StreamOpen(_) = next_seen(&mut seen).await else {
+        panic!("the other session's stream did not open")
+    };
+
+    // One of the first session's own closes: its ninth opens.
+    let closed = execute_as(
+        &e,
+        json!("c"),
+        "stream.close",
+        json!({"stream": streams[0]}),
+    )
+    .await;
+    assert!(!said(&closed).1, "{closed}");
+    let mut got = Vec::new();
+    for _ in 0..2 {
+        match next_seen(&mut seen).await {
+            Seen::StreamClose(_) => got.push("close"),
+            Seen::StreamOpen(_) => got.push("open"),
+            _ => panic!("something else"),
+        }
+    }
+    got.sort();
+    assert_eq!(got, ["close", "open"]);
     r.stop().await;
 }
 

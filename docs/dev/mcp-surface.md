@@ -98,8 +98,10 @@ conversation the model asks for it, like a skill:
   is not offered; the Overview lists it under "Not offered to the agent", with
   the reason.
 - Beside a node's own capabilities the center offers its own `job.status`
-  and `job.cancel`, and `exec.signal` takes a job's id where the node's takes
-  the `invoke` id ([harness spec §4.4](spec/harness.md#44-jobs)). A node's
+  and `job.cancel`, `stream.read` and `stream.close`
+  ([harness spec §4.5](spec/harness.md#45-streams-and-events)), and
+  `exec.signal` takes a job's id where the node's takes the `invoke` id
+  ([harness spec §4.4](spec/harness.md#44-jobs)). A node's
   capability named `job` or `stream` is not offered.
 
 The cost: a harness that asks the user before each tool call can only ask
@@ -148,8 +150,9 @@ by the center, not by the request. `job.status` gives its state or, once it
 ended, its result (given once, kept in memory for 10 minutes at most);
 `job.cancel` stops it on the node; `exec.signal` sends its command a signal
 by the job's id. Jobs are the session's own: another session's id names
-nothing. `job.status` and `job.cancel` work on every node that is not
-disabled, also once its offer dropped to nothing; disabling a node stops its
+nothing. `job.status` and `job.cancel` (and `stream.read` and
+`stream.close`) work on every node that is not disabled, also once its offer
+dropped to nothing; disabling a node stops its
 jobs. A session runs at most 16 calls at once, and the agents' calls of all
 sessions leave a quarter of a node's call places free, at most 8. Details:
 [harness spec §4.4](spec/harness.md#44-jobs).

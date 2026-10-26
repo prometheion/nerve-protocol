@@ -44,6 +44,12 @@ pub const OPEN_WAIT: Duration = Duration::from_secs(10);
 /// before it starts (its folders' access, a sandbox to set up).
 pub const START_WAIT: Duration = Duration::from_secs(60);
 
+/// The most streams one session has open on one node: half of the node's
+/// `limits.streams` (8 of 16), so the other sessions' streams find room.
+pub fn node_share(streams: u32) -> usize {
+    (streams as usize / 2).max(1)
+}
+
 /// What one stream received and nobody read yet.
 pub struct Ring {
     state: Mutex<RingState>,
@@ -357,6 +363,19 @@ impl Streams {
         }
     }
 
+    /// How many of the session's streams are open on `link` and still run.
+    pub fn open_on(&self, link: &Arc<Link>) -> usize {
+        self.entries
+            .values()
+            .filter(|e| {
+                e.node
+                    .as_ref()
+                    .is_some_and(|(l, _)| std::ptr::eq(l.as_ptr(), Arc::as_ptr(link)))
+                    && !e.ring.ended()
+            })
+            .count()
+    }
+
     /// The stream `id` of `node_id`; none when this session has no such
     /// stream on that node.
     pub fn get(&mut self, id: &str, node_id: &str, now: Instant) -> (Option<Found>, Vec<Closer>) {
@@ -413,8 +432,10 @@ impl Streams {
 /// Opens the stream `id` of the job `job` of `sess` on `node_id`, whose
 /// frames go to `ring`: once the job's call reached the node and its
 /// command runs there, which may take a while (the checker, a call place,
-/// the node setting up). Gives up when the job ended, the stream was closed
-/// or the node refused it, and then says why in the ring.
+/// the node setting up), and once there is room for it: the session's share
+/// of the node's streams ([`node_share`]) and the node's own places. Gives
+/// up when the job ended, the stream was closed or the node refused it, and
+/// then says why in the ring.
 pub async fn open_on_node(
     sess: Weak<Session>,
     node_id: String,
@@ -442,6 +463,16 @@ pub async fn open_on_node(
                 return;
             }
             Ok((link, call)) => {
+                let mine = sess
+                    .upgrade()
+                    .map_or(0, |s| s.streams.lock().unwrap().open_on(&link));
+                // Waiting for room is not waiting for the command to start.
+                if mine >= node_share(link.limits.streams) {
+                    sent_at = None;
+                    tokio::time::sleep(pause).await;
+                    pause = (pause * 2).min(Duration::from_secs(1));
+                    continue;
+                }
                 let since = *sent_at.get_or_insert_with(Instant::now);
                 if since.elapsed() >= START_WAIT {
                     ring.end("its command did not start on the node in time to be streamed; job.status gives its output with the result");
@@ -465,6 +496,9 @@ pub async fn open_on_node(
                     }
                     // Not running there yet (or any more: the job's end tells),
                     // or the link is down for now.
+                    // The command runs, and the node has no stream place free:
+                    // one frees up when another stream ends.
+                    Err(e) if e.kind() == ErrorCode::Busy => sent_at = None,
                     Err(e)
                         if matches!(
                             e.kind(),
@@ -490,7 +524,6 @@ fn refused(code: &ErrorCode) -> String {
             "the node does not stream this command's output; job.status gives it with the result"
                 .into()
         }
-        ErrorCode::Busy => "the node has too many streams open".into(),
         ErrorCode::Other(_) => "the node refused to open it".into(),
         c => format!("the node refused to open it ({})", c.as_str()),
     }
