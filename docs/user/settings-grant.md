@@ -14,7 +14,8 @@ With several centers, add `--center <name>`.
 Every center, with the grant or without, is told its own pairing's mode,
 until when it holds, the account its commands run as and, in `folder` mode,
 its folders (a folder you closed inside one is not named, only that some
-folder below is closed) and whether it may read what `nerve-run` may read:
+folder below is closed) and whether it may read, outside the folders, what
+every account on the machine may read:
 the agent needs them to know where it may work
 ([modes](modes.md#what-each-mode-allows)). It is never told another center's.
 

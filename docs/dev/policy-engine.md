@@ -159,7 +159,7 @@ check. The center's action checker has its own splitter
   commands need `x` on their working directory. The deepest folder that holds
   a path decides. Commands are confined where the platform can confine them.
   Where the node reads as the command account (`Reads::Account`, below), a
-  read goes as far as that account may read instead.
+  read in no folder at all goes where every account may read.
 - **`user`.** Everything the user could do, protected paths aside. Commands are
   not confined.
 
@@ -171,8 +171,17 @@ Every capability is decided by its effect, the node's own and what a
 An action names paths by marking arguments in its schema (`x-nerve-path`,
 `nerve_proto::schema::path_args`); the node resolves them into `Target`s. A
 write or execute action that names no path lies in no folder: `folder` mode
-allows it only where the owner set it `on`. A read is allowed there with or
-without paths.
+allows it only where the owner set it `on`, and so is a write whose only
+paths are ones it reads (`decide` asks the table as for no path then, and the
+descriptor offers it so). A read is allowed there with or without paths.
+
+A path handed to a capability other than `fs` and not a command (a
+provider's) counts with what lies below it, since the program may read or
+write there; `fs` walks skip such places themselves (`works_below`). Such a
+path is refused when a node-own folder lies below it (with the own-folder
+check, first), when a protected entry below it is not released for its
+access (`Protected::entry_below`), or in `folder` mode when a folder below it
+lacks the flag (`closed_below`).
 
 ### The effect table
 
@@ -191,7 +200,7 @@ there, so there is nothing to signal.
 | `write`, `execute` with paths | an allow rule | every path in a folder with the matching flag (a command's working directory in one with `x`; another execute call's paths also in one with `x`) | allowed |
 | `read` without a path | an allow rule | allowed | allowed |
 | `write`, `execute` without a path | an allow rule | `on` | allowed |
-| `sense`, `actuate` | an allow rule | `on` | `on` |
+| `sense`, `actuate` | an allow rule | `on`, and every path in a folder with the matching flag | `on` |
 
 - `paths` is `PathArgs::None` for an action with no path, no working directory
   and no command, else `PathArgs::Some { all_in_folders }`.
@@ -207,15 +216,22 @@ there, so there is nothing to signal.
   instead. In `folder` mode a command also needs confinement.
 - `Env::reads` says what holds a read in `folder` mode. `Reads::Folders`: a
   path read needs an `r` folder. `Reads::Account(may_read)`: the node reads
-  as the command account (the installed Linux node, `nerve-run`), so a
-  `Read` target of a read call counts as in the folders, and `decide` then
-  asks `may_read` of every `Read` target of the call; the node answers it as
-  that account (`fs::readable` under `act_as`), which is what keeps a
-  provider, which reads with the owner's rights, to what `nerve-run` may
-  read. A write or execute call that reads a path still needs `r` there. The
-  link picks `Account` where the account was found and `Shared::separate`
-  holds, the walk of `grep`, `find` and `list` then skips nothing by the
-  folders, and the descriptor's `access` block says `reads_by_account`.
+  as the command account (the installed Linux node, `nerve-run`). Inside
+  the folders the deepest one still decides by `r`, so a folder the owner
+  closed stays closed. A `Read` target of a read call that lies in no
+  folder counts as in them, and `decide` then asks `may_read` of it, which
+  gives the refusal's reason. The node answers it as that account, under
+  `act_as`: the path must be open to every account by its mode bits
+  (`fs::open_to_all`: `o+x` on each folder above it, `o+r` on it), so the
+  ACL entries the node put on for the folders (another pairing's grants, the
+  pass-through on the owner's folders above a grant) reach no further than
+  those folders, and it must open (`fs::readable`). For a provider, which
+  reads with the owner's rights, it must also be no folder, as the provider
+  would read below it. A write or execute call that reads a path still needs
+  `r` there. The link picks `Account` where the account was found and
+  `Shared::separate` holds; the walk of `grep`, `find` and `list` asks
+  `read_reach` of each entry with `fs::open_to_all`, as the gate does, and
+  the descriptor's `access` block says `reads_by_account`.
 
 Each path of a call is a `Target` with an access: `Read` needs `r`, `Write`
 needs `w`, and `Run` needs `x`. `Run` is the working directory of `exec.run`.
@@ -551,7 +567,7 @@ action a call could get through.
 The descriptor also says what the policy lets this center do now
 ([spec/protocol.md](spec/protocol.md) §6.2): the mode in force and when it
 ends, the account its commands run as, and in folder mode whether a read
-goes as far as that account may read (`reads_by_account`) and the folders
+in no folder goes where every account may read (`reads_by_account`) and the folders
 with their flags, the built-in ones of `nerve-run` among them and marked
 `own`.
 A folder with no flag is not named; the deepest named folder around it

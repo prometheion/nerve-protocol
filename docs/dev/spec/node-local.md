@@ -839,7 +839,8 @@ change, the commands that take something away say what ends now.
   commands inside the `folders` and, on the installed Linux node, the
   built-in `/tmp`, `/var/tmp` and `nerve-run`'s home (and everything below
   them), by their flags; where the node reads as `nerve-run` (the installed
-  Linux node), reading also wherever that account may read (below).
+  Linux node), reading also, outside every folder, what every account may
+  read (below).
   `access` is three independent flags, any combination
   (`"r"`, `"w"`, `"x"`, `"rw"`, `"rx"`, `"wx"`, `"rwx"`, `""` for none; the
   letters in any order, each once). `r` allows reading a path a call names
@@ -881,13 +882,19 @@ deny mode, not in `folder`.
 
 Reading in folder mode where the node reads as the command account: the
 installed Linux node does a center's file calls as `nerve-run`
-(`account::FsAs`), so a call that reads may read whatever that account may
-read, in the folders or not: its home, `/tmp`, `/var/tmp`, what every account
-may read, and the folders it is given by ACL (§1). Before such a call the
-node asks, as `nerve-run`, whether it may read each path the call reads (it
-opens it for reading; a path that does not exist passes), so that a provider,
-which reads with the owner's rights, gets no path `nerve-run` could not
-read. The node's own folders, protected paths, deny rules and `off` and
+(`account::FsAs`). Inside the center's folders (its own built-in ones among
+them) their flags decide as for every path, the deepest one first. A path a
+read call reads in no folder of the center may be read where it is open to
+every account on the machine: each folder above it lets others pass (`o+x`)
+and it lets them read (`o+r`). What `nerve-run` reaches beyond that it
+reaches through the ACL entries the node puts on for the folders (§1): every
+pairing's grants, and the pass-through on the owner's folders above a grant;
+those belong to the folders, not to the account, so they open nothing to a
+file call outside them. Before such a call the node asks, as `nerve-run`,
+whether the path is open to every account and whether it may open it for
+reading (a path that does not exist passes); for a provider, which reads
+with the owner's rights, the path must also be no folder, as it would read
+below it. The node's own folders, protected paths, deny rules and `off` and
 `hidden` still win. Writes and commands keep to the folders, and a write or
 execute call that also reads a path needs `r` for it. Landlock, where
 present, holds a command of `nerve-run` to less (the system's folders and its
@@ -903,7 +910,9 @@ actuate actions are allowed by no full-access mode, only by the owner's
 `caps` entry `on`; in `allowlist` mode an allow rule allows them (a center
 may not add one for a provider's capability that senses or actuates
 itself, §7). `on` allows nothing else that a mode refuses: a call with
-paths outside the folders stays refused.
+paths outside the folders stays refused, a sense or actuate call's too. A
+write whose marked paths are all `read` names no place it writes and needs
+`on` in folder mode, as a write with no path does.
 
 ### Rules
 
@@ -962,7 +971,8 @@ answer. For each call the node takes the center's policy and, in this order:
    anything is checked. A call that touches the node's own folders (§1) is
    `forbidden` before anything else is looked at; no rule, mode, folder or release lifts that.
    It looks at every path of a call (an `fs` call's, an action's marked
-   path arguments; resolved), at the working
+   path arguments; resolved, and for an action's, which its program may
+   read or write below, also an own folder below it), at the working
    directory of `exec.run`, and at paths the command line names plainly
    (absolute, or from `~/`, `$HOME/`, `${HOME}/`). The line is compared
    without case, with `\` and `/` alike on Windows, with `seg/..` and
@@ -1108,8 +1118,8 @@ hidden nor off for that center (`Reach::of`) and the sudo switch is on
 list alone, in any folder and unconfined; with the switch off, or
 `exec.run` hidden or off, none runs, and the block does not say so.
 `reads_by_account` says that in folder mode the node reads as the command
-account (the installed Linux node, `Shared::separate`), so a read goes as
-far as that account may read (§Modes). A switch change moves the rev. In
+account (the installed Linux node, `Shared::separate`), so a read in no
+folder goes where every account may read (§Modes). A switch change moves the rev. In
 `allowlist` mode as `nerve-run` the folders still hold the allowed
 commands, but only `folder` mode names them. The account's name needs no
 lookup of its own (the home of `nerve-run` is the last one looked up). The
@@ -1561,8 +1571,12 @@ arguments its schema marks with `x-nerve-path` (top-level strings, `read` or
 `write`), each resolved as the command account sees it (`WirePath::parse`
 under `account::FsAs`), as an `fs` call's path is: the folders, the rules,
 the protected paths and the node's own folders judge them, and the audit
-entry names them (joined by `, `). A marked argument left out or `null`
-names no path; with none, the target is `<cap>.<action>`. Only an allowed
+entry names them (joined by `, `); a path that does not resolve is refused
+with `bad_path` and audited with the text given. A path argument counts with
+what lies below it, as the program may read or write there: a protected
+entry below it that no folder releases for its access, or in folder mode a
+folder below it without that flag, refuses the call. A marked argument left
+out or `null` names no path; with none, the target is `<cap>.<action>`. Only an allowed
 call whose arguments fit reaches the provider, with each marked path as the
 node resolved it, as one line:
 

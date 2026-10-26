@@ -231,8 +231,12 @@ A rule is `<scope>` or `<scope>:<pattern>`.
 | `notes:~/private/*` | Every action of the capability `notes` that takes a path there |
 | `exec` | Every `exec` action, so every command |
 
-Commands and paths never mix: `fs:/tmp/*` is not a command rule. An unknown
-rule shape is refused when you add it.
+Commands and paths never mix: `fs:/tmp/*` is not a command rule. A path rule
+covers the capability it names only: `fs:~/private/*` does not keep a
+[program's capability](providers.md#paths-it-takes) that takes paths out of
+that folder. Deny each such capability too, or make the place a
+[protected path](protected-paths.md), which every capability respects. An
+unknown rule shape is refused when you add it.
 
 ## What a wildcard covers
 

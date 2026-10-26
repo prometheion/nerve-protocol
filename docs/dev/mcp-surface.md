@@ -46,8 +46,8 @@ conversation the model asks for it, like a skill:
 | Call | Gives |
 |---|---|
 | `list()` | the paired nodes: name, id, `online`/`offline`/`disabled`, platform, how many capabilities, this center's mode there and the account its commands run as; then the owner's notes on machines |
-| `list(node)` | the mode line, in folder mode the folders this center may use with `r`/`w`/`x`, then the node's capabilities, one line each: name and what it does |
-| `list(node, capability)` | for a list of names (or one): description, effect, `params` schema, result; for `fs.*` and `exec.run` in folder mode the folder note, and after the framing the center's advice on it |
+| `list(node)` | the mode line, in folder mode a `Reads:` line where the node reads as its command account (`access.reads_by_account`) and the folders this center may use with `r`/`w`/`x`, then the node's capabilities, one line each: name and what it does |
+| `list(node, capability)` | for a list of names (or one): description, effect, `params` schema, a `paths:` line naming the arguments marked `x-nerve-path`, result; for every unit whose `params` mark a path (`fs.*`, `exec.run`, a provider's) in folder mode the folder note, and after the framing the center's advice on it |
 | `execute(node, capability, args)` | runs one capability on one node |
 
 - A capability is named `<cap>.<action>`, a **unit** of the node's catalog
@@ -60,8 +60,8 @@ conversation the model asks for it, like a skill:
 - **Schema first.** `execute` runs a unit only after `list(node, capability)`
   gave this session its details, and only while the unit is the same, by a
   hash over its name, effect, description (as `list` shows it), `params`,
-  `result`, and for `fs.*` and `exec.run` in folder mode the folder note and
-  the center's advice on it. Otherwise
+  `result`, and for every unit that marks a path in folder mode the folder
+  note and the center's advice on it. Otherwise
   it answers `error list_first` and tells the model which `list` call to
   make. A rule or mode change alone does not change the hash, so it forces no
   new `list`, unless it changes the folder note or the advice (below). The center then checks `args` against `params` and refuses a

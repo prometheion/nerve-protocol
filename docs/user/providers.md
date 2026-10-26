@@ -50,7 +50,7 @@ A provider's capability is decided like any other, by what it does
 | Mode | A provider's action runs when |
 |---|---|
 | `allowlist` | an allow rule names it: `nerve-node config add center.<name>.policy.allow 'lamp.on'`, or `'lamp'` for all its actions |
-| `folder` | it reads; it writes or runs something at paths that lie in your folders ([below](#paths-it-takes)); or you set it on: `nerve-node cap set lamp on` (one that names no path lies in no folder, and one that senses or acts on the world needs `on` anyway) |
+| `folder` | it reads; it writes or runs something at paths that lie in your folders ([below](#paths-it-takes)); or you set it on: `nerve-node cap set lamp on` (one that names no path lies in no folder, a write whose only paths are ones it reads names no place it writes, and one that senses or acts on the world needs `on` anyway, its paths in your folders too) |
 | `user` | always, except one that senses or acts on the world, which needs `on` |
 
 Deny rules and `off` and `hidden` work as for `fs` and `exec`. A call to an
@@ -79,12 +79,22 @@ The node then judges each such path as it judges an `fs` call's: in `folder`
 mode a path read needs an `r` folder and one written a `w` folder (one that
 runs something also `x`); [rules](rules.md#rule-syntax) match the path
 (`notes:~/private/*`); protected paths and the node's own files are refused;
-and the [audit log](audit.md) names the path. A link is followed to where it
-leads, so one in your folder that leads out is refused. The program gets the
-path as the node resolved it, links followed, so it works where the node
-looked. Only the top-level arguments can be marked, each a string. A write
-or a run whose marked path the call leaves out names no folder: it needs
-`on`, as an action without paths does.
+and the [audit log](audit.md) names the path, also one that does not resolve.
+On the installed Linux node a read outside every folder goes where every
+account may read ([reading in folder mode](modes.md#reading-in-folder-mode)),
+and only for a file. A link is followed to where it leads, so one in your
+folder that leads out is refused. The program gets the path as the node
+resolved it, links followed, so it works where the node looked. Only the
+top-level arguments can be marked, each a string. A write or a run whose
+marked path the call leaves out names no folder: it needs `on`, as an action
+without paths does.
+
+A folder given as a path counts with everything below it, since the program
+may read or write anywhere in it: the call is refused when a protected path
+that no folder releases, the node's own files or, in `folder` mode, a folder
+you gave less lies below it. An `fs:` rule covers `fs` calls only: to keep
+every capability out of a place, deny it for each one that takes paths
+(`notes:~/private/*`), or make it a [protected path](protected-paths.md).
 
 The node checks the path when the call comes; the program reads or writes it
 afterwards with your rights, so a link swapped in between is not caught.

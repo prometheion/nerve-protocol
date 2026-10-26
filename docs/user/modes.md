@@ -5,7 +5,7 @@ Every pairing has a mode. It sets how much that center may do on the machine.
 | Mode | What is allowed | Commands on the installed Linux node |
 |---|---|---|
 | `allowlist` | Only what an [allow rule](rules.md) names | As `nerve-run`, held to the folders you grant; or as you, if you say so (as root where [root is the owner](service.md#root-as-the-owner)) |
-| `folder` (default for a new pairing) | Writing and commands inside the folders you grant, by their rights; reading there too, and on the installed Linux node wherever `nerve-run` may read ([below](#what-each-mode-allows)) | As `nerve-run`, held to those folders |
+| `folder` (default for a new pairing) | Writing and commands inside the folders you grant, by their rights; reading there too, and on the installed Linux node also what every account on the machine may read ([below](#what-each-mode-allows)) | As `nerve-run`, held to those folders |
 | `user` | Everything you could do yourself | As you, not confined (as root where [root is the owner](service.md#root-as-the-owner)) |
 
 From most to least locked down: `allowlist`, `folder`, `user`. On the node
@@ -26,35 +26,45 @@ effect, which `list` shows the agent):
 
 | Effect | `allowlist` | `folder` | `user` |
 |---|---|---|---|
-| `read` | an allow rule | allowed; each path it reads needs an `r` folder, or on the installed Linux node one `nerve-run` may read ([below](#reading-in-folder-mode)) | allowed |
+| `read` | an allow rule | allowed; each path it reads needs an `r` folder, or on the installed Linux node, outside every folder, one open to every account ([below](#reading-in-folder-mode)) | allowed |
 | `write` | an allow rule | each path it writes in a `w` folder (and each it reads in an `r` one); with no path, only where you set it `on` | allowed |
 | `execute` | an allow rule | `exec.run`: its working directory in an `x` folder. Another capability: each of its paths in a folder with `x` and the flag for what it does there; with no path, only where you set it `on` | allowed |
-| `sense`, `actuate` | an allow rule | only where you set it `on` | only where you set it `on` |
+| `sense`, `actuate` | an allow rule | only where you set it `on`, and each of its paths in the folders as above | only where you set it `on` |
 
 `on` (`nerve-node cap set lamp on`) never lets a call out of the folders: it
-allows only what names no path, and sensing and acting on the world. Deny
-rules, `off`, `hidden`, [protected paths](protected-paths.md) and the node's
-own files win in every mode.
+allows only what names no path, and sensing and acting on the world, whose
+paths stay in the folders too. A write whose only paths are ones it reads
+names no place it writes, so it counts as a write with no path. Deny rules,
+`off`, `hidden`, [protected paths](protected-paths.md) and the node's own
+files win in every mode.
 
 A capability names its paths by marking them in its schema
 (`x-nerve-path`): `fs` marks its `path`, `exec.run` its `cwd`, and a program's
 capability the arguments it reads or writes. Those paths count as an `fs`
 call's do: the folders, the [rules](rules.md#rule-syntax), protected paths and
-the node's own files judge them, and the [audit log](audit.md) names them.
+the node's own files judge them, and the [audit log](audit.md) names them. A
+folder handed to a program counts with everything below it, since the program
+may read or write there: it is refused when a protected path, the node's own
+files or, in `folder` mode, a folder you gave less lies below it.
 
 ### Reading in folder mode
 
 On the node [installed as a service](service.md) on Linux, the node reads a
-`folder` mode center's files as `nerve-run`. So a call that reads may read
-whatever `nerve-run` may read: its home, `/tmp`, `/var/tmp`, the files every
-account on the machine may read, and the folders you give it. It reads
-nothing of yours that is closed to other accounts, no protected path and none
-of the node's own files (its keys, config and state), which are closed to
-`nerve-run`. Writing and commands stay in the folders. A program that reads a
-path for a call ([provider](providers.md)) gets the call only when `nerve-run`
-may read that path. With [Landlock](#the-account-nerve-run-linux), a command
-of `nerve-run` reads less than a file call: the system's folders and its
-`r` and `x` folders.
+`folder` mode center's files as `nerve-run`. Inside the folders of that center
+their flags decide, as everywhere: a read needs `r`, and a folder you closed
+inside one with `r` stays closed. Outside every folder of that center, a call
+that reads may read what every account on the machine may read: a file others
+may read, in folders others may enter all the way down (`/etc/hostname`, most
+of `/usr`). It reads nothing of yours that is closed to other accounts, also
+where the node lets `nerve-run` pass through your home to a folder you gave,
+nothing another center was given unless it is open to everyone, no protected
+path and none of the node's own files (its keys, config and state), which are
+closed to `nerve-run`. Writing and commands stay in the folders. A program
+that reads a path for a call ([provider](providers.md)) gets the call outside
+the folders only for a file open to every account, never for a folder, since
+it would read below it with your rights. With
+[Landlock](#the-account-nerve-run-linux), a command of `nerve-run` reads less
+than a file call: the system's folders and its `r` and `x` folders.
 
 A node you run yourself, and Windows, read with your own rights, so there
 `folder` mode reads only in the folders with `r`. A read that names no path
@@ -106,7 +116,7 @@ Folders count in `folder` mode. In `allowlist` mode as `nerve-run` they are
 the sandbox the allowed commands run in; the allow rules decide what runs.
 
 The agent is told each center's own mode and account, and in `folder` mode
-whether it may read what `nerve-run` may read, and its folders with their
+whether it may read outside the folders what every account may read, and its folders with their
 flags (the built-in ones of `nerve-run` among them,
 marked as its own; a folder left without rights is not named, and the
 granted folder around it is marked as having folders below it that allow
@@ -287,9 +297,11 @@ and no other groups; `uninstall` removes both.
   everything below it, with the rights of its flags, and a default entry, so
   that what it makes there stays yours to use as well. A folder of yours
   above a grant that others may not enter gets an entry that lets it pass
-  through it: with Landlock that is all it does there, without Landlock it
-  can then read what others may read inside that folder ([your
-  home](#your-home-and-other-accounts)). Removing the grant takes the entries
+  through it: with Landlock that is all it does there, without Landlock its
+  commands can then read what others may read inside that folder ([your
+  home](#your-home-and-other-accounts)). A file call in `folder` mode never
+  reads through that entry: outside the folders it reads only what every
+  account may ([reading in folder mode](#reading-in-folder-mode)). Removing the grant takes the entries
   off your files again, and a default ACL of your own on a folder below it
   (one you set with `setfacl -d`) is left as you had it, with an entry you
   gave yourself there; a folder that had none has none again. `ls -l` shows a `+` on such files, and their group bits show
@@ -297,7 +309,9 @@ and no other groups; `uninstall` removes both.
   union of the folders of every pairing whose commands run as `nerve-run`;
   Landlock holds each command to its own pairing's folders and to
   `nerve-run`'s own ones, which all those pairings share, the settings of
-  their programs included (below). A pairing in `user` mode,
+  their programs included (below). A file call keeps to its own pairing's
+  folders by their flags, and reads another pairing's only where they are
+  open to every account. A pairing in `user` mode,
   or in `allowlist` mode as you, gives `nerve-run` none of its folders.
 - What `nerve-run` made in a granted folder is its own, and keeps its entries
   when you remove the grant: you cannot change another account's files, and
@@ -381,7 +395,11 @@ and a line `folder mode runs no command: …` says why.
 ### Your home and other accounts
 
 With Landlock, each command of `nerve-run` is held to its own pairing's
-folders, and nothing below is a concern.
+folders, and nothing below is a concern for commands. File calls in `folder`
+mode read, outside the folders, what every account on the machine may read,
+with or without Landlock: where your home is open to others (755 or 711), that
+includes the files in it that others may read, as it does for any account on
+the machine. `chmod 750 ~` closes them to file calls too.
 
 Without Landlock, `nerve-run` is an account like any other on the machine:
 in your home it may read every file that you let other accounts read (most

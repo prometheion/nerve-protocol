@@ -1174,7 +1174,7 @@ mod tests {
             run(&p, &folders, &marked("open", Effect::Read, &outside)),
             "refused"
         );
-        // The account holds it: as far as it may read, in the folders or not.
+        // The account holds it: in no folder, as far as it may read.
         assert_eq!(
             decide(&p, &account, &marked("open", Effect::Read, &outside)),
             Decision::Allow

@@ -215,8 +215,9 @@ pub struct Access {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sudo: bool,
     /// In `folder` mode: the node reads as `account`, so a call that reads
-    /// may read whatever that account may read, in the folders or not;
-    /// writes and commands keep to the folders. False where a read keeps to
+    /// may read, besides the folders with `r`, what is open to every account
+    /// on the machine outside every folder; writes and commands keep to the
+    /// folders. False where a read keeps to
     /// the folders with `r` (the node then reads with its own or the
     /// owner's rights). Protected paths and the node's own files stay
     /// closed either way.

@@ -22,8 +22,10 @@ action, the target and the decision. A refusal adds its reason.
 
 The reason says what is missing. Use it to write the rule you want
 ([rules](rules.md)). The target of a call that names paths is its path (an
-`fs` call's, or the paths a program's capability takes, joined by `, `); a
-call to a capability you switched `off` is a refusal too:
+`fs` call's, or the paths a program's capability takes, joined by `, `; a
+path that does not resolve is refused as given, with `bad_path`); a call to
+a capability you switched `off` is a refusal too, with the path or command
+line an `fs` or `exec.run` call names as its target:
 
 ```
 1791834531650  lab  notes.open  notes.open  forbidden: notes.open is off

@@ -166,9 +166,9 @@ the `result` of the envelope described below.
   be shown on one line`); with none of either, `Folders: none granted yet`,
   which with `sudo` adds that a command on the sudo list still runs, as
   the node sends `sudo` only while its sudo switch is on and `exec.run` is
-  callable); with `reads_by_account`, before the folders a line `Reads:
-  whatever the account its commands run as may read, in the folders or not;
-  writes and commands keep to the folders.`, and with no folder `Folders:
+  callable); with `reads_by_account`, before the folders a line `Reads: in
+  the folders marked r, and outside every folder what is open to every
+  account on the machine; writes and commands keep to the folders.`, and with no folder `Folders:
   none granted yet` names writes, not file calls, as refused; a
   disabled node shows
   neither, and a node that offers nothing still shows them, as the mode
@@ -198,11 +198,12 @@ the `result` of the envelope described below.
   flags as in `list(node)` (`none granted` when there are none). After the
   framing a line `Folders: …` gives the center's advice on them, in its own
   words and naming no path: with `reads_by_account`, that a call may read
-  whatever the account its commands run as may read, in the folders or not,
-  except protected paths and the node's own files, and may write only in
-  the folders marked `w`, else that calls may name paths only in these
-  folders; that a command starts only in one marked `x` (`exec.run`'s
-  advice only); where folders nest the deepest one decides; with
+  in the folders marked `r` and, outside every folder, what is open to every
+  account on the machine, except protected paths and the node's own files,
+  and may write only in the folders marked `w` (`exec.run`'s advice says
+  none of that, only that a command starts in a folder marked `x`), else
+  that calls may name paths only in these folders and that a command starts
+  only in one marked `x` (`exec.run`'s advice only); where folders nest the deepest one decides; with
   `confined` the machine's sandbox holds what a command reaches to these
   folders (and the system's files), without it the machine does not and
   a command reaches what its account may reach; with `sudo`, a command on

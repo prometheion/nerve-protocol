@@ -96,8 +96,18 @@ word.)
 
 `folder` and `user` mode do not cover `sense` and `actuate` actions. They run
 only when the owner set the action to `on`, or, in `allowlist` mode, when an
-allow rule names them. A provider's action names no folder, so `folder` mode
-runs it only when it is set to `on`, whatever its effect.
+allow rule names them; only the owner turns them on, never a center with the
+settings grant. A mode allows the same for every capability by its effect
+(the table in [policy-engine](policy-engine.md)). An action names the paths
+it takes by marking top-level string arguments of its `params` with
+`x-nerve-path: "read"` or `"write"` ([protocol](spec/protocol.md)); `fs`
+marks its `path` and `exec.run` its `cwd`. In `folder` mode a read is
+allowed, each path it reads in an `r` folder (on the installed Linux node,
+outside every folder, one open to every account); a write or a run is
+allowed when every marked path lies in a folder with the matching flag, and
+needs `on` when it names none (a write: no path it writes); a `sense` or
+`actuate` action needs `on`, and its marked paths stay in the folders too. A
+path the node is handed for another program counts with what lies below it.
 
 ## Built-in profiles
 
