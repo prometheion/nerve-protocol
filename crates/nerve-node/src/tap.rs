@@ -381,6 +381,10 @@ impl Tap {
             p.ended = t.ended;
         }
         if !t.ended {
+            // Streams closed while the command printed nothing are dropped
+            // here too, so a center that opens and closes streams of a
+            // quiet command does not grow the list.
+            t.readers.retain(|r| r.strong_count() > 0);
             t.readers.push(Arc::downgrade(&r));
         }
         r
@@ -469,6 +473,18 @@ mod tests {
         drop(r);
         t.push(Pipe::Out, b"d");
         assert!(lock(&t.inner).readers.is_empty());
+    }
+
+    /// Streams opened and closed while the command prints nothing leave
+    /// nothing behind in the tap.
+    #[test]
+    fn closed_streams_of_a_quiet_command_are_let_go() {
+        let t = Tap::default();
+        for _ in 0..1000 {
+            drop(t.reader());
+        }
+        let _open = t.reader();
+        assert_eq!(lock(&t.inner).readers.len(), 1);
     }
 
     /// Everything a stream sends until its end: the bytes dropped, and the
