@@ -18,7 +18,7 @@ use nerve_policy::NodeConfig;
 use nerve_policy::config::{Access, CenterPolicy, Folder};
 use nerve_policy::paths::{to_wire, within};
 use nerve_policy::protected::{Platform, Protected};
-use nerve_policy::{Target, protected::expand};
+use nerve_policy::{PathAccess, Target, protected::expand};
 use nerve_proto::rpc::params;
 use nerve_proto::{ErrorCode, RpcError};
 use nerve_sandbox::{ContainerSpec, LandlockSpec, SHIM_ARG, ShimSpec};
@@ -99,12 +99,12 @@ impl RunCall {
         })
     }
 
-    /// The working directory is judged as a read; the command itself by the
-    /// command rules and the folders that allow running.
+    /// The working directory is judged as the place the command runs in
+    /// (`x`); the command itself by the command rules.
     pub fn targets(&self) -> Vec<Target> {
         vec![Target {
             path: self.cwd.clone(),
-            write: false,
+            access: PathAccess::Run,
         }]
     }
 }

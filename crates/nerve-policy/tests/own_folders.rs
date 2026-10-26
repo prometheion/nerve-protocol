@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use nerve_policy::command::Shell;
 use nerve_policy::config::{Access, Folder, ProtectedOptions};
 use nerve_policy::protected::{Platform, Protected, WinFolders};
-use nerve_policy::{Call, CenterPolicy, Decision, Env, Mode, Target, decide};
+use nerve_policy::{Call, CenterPolicy, Decision, Env, Mode, PathAccess, Target, decide};
 use nerve_proto::Effect;
 
 const NOW: u64 = 1_000_000;
@@ -77,7 +77,19 @@ fn run<'a>(command: &'a str, cwd: &'a [Target]) -> Call<'a> {
 fn at(p: &str, write: bool) -> Vec<Target> {
     vec![Target {
         path: p.into(),
-        write,
+        access: if write {
+            PathAccess::Write
+        } else {
+            PathAccess::Read
+        },
+    }]
+}
+
+/// The working directory of a command.
+fn cwd_at(p: &str) -> Vec<Target> {
+    vec![Target {
+        path: p.into(),
+        access: PathAccess::Run,
     }]
 }
 
@@ -109,8 +121,8 @@ fn nothing_reaches_the_nodes_own_folders() {
             &at("/h/.local/state/nerve/config.key", false),
         ));
         check(&fs(Effect::Write, &at("/h/.CONFIG/Nerve/node.toml", true)));
-        let home = at("/h", false);
-        let inside = at("/h/.config/nerve", false);
+        let home = cwd_at("/h");
+        let inside = cwd_at("/h/.config/nerve");
         check(&run("ls", &inside));
         for named in [
             "cat ~/.config/nerve/node.toml",
@@ -157,8 +169,8 @@ fn the_nodes_own_folders_are_seen_in_every_plain_spelling() {
             sudo: true,
             shell: Shell::Sh,
         };
-        let home = at("/h", false);
-        let proj = at("/h/proj", false);
+        let home = cwd_at("/h");
+        let proj = cwd_at("/h/proj");
         for (named, cwd) in [
             ("cat ../.config/nerve/node.toml", &proj),
             ("cat ./.config/nerve/node.toml", &home),
@@ -210,7 +222,7 @@ fn a_windows_command_line_reaches_no_own_folder() {
         sudo: false,
         shell: Shell::native(),
     };
-    let proj = at("C:\\Users\\u\\nerve-test\\proj", false);
+    let proj = cwd_at("C:\\Users\\u\\nerve-test\\proj");
     for mode in [Mode::Allowlist, Mode::Folder, Mode::User] {
         let mut p = wide_open(mode);
         p.folders.push(Folder {
@@ -254,7 +266,7 @@ fn a_long_windows_command_line_is_checked_at_once() {
         sudo: false,
         shell: Shell::native(),
     };
-    let proj = at("C:\\Users\\u\\nerve-test\\proj", false);
+    let proj = cwd_at("C:\\Users\\u\\nerve-test\\proj");
     let open = wide_open(Mode::User);
     let d = decide(&open, &env, &run(&"a:".repeat(16 * 1024), &proj));
     assert_eq!(d, Decision::Allow);
