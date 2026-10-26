@@ -24,6 +24,7 @@ use nerve_proto::{ErrorCode, RpcError};
 use nerve_sandbox::{ContainerSpec, LandlockSpec, SHIM_ARG, ShimSpec};
 
 use crate::fs::WirePath;
+use crate::tap::Pipe;
 
 /// The most of stdout and of stderr a result carries, whatever the config
 /// says, so the result fits the 4 MiB message limit.
@@ -367,29 +368,15 @@ fn decode(bytes: &[u8], cut: bool) -> String {
     output_text(bytes, cut, other)
 }
 
-/// A chunk of a command's output for its `output` stream, as UTF-8 where
-/// its result would read it so: on Windows bytes that are not UTF-8 are
-/// taken in the console's code page, as [`output_text`] does (Windows
-/// PowerShell 5.1 writes that). A chunk that only ends inside a UTF-8
-/// character stays as it is; the center joins it with the next one.
-pub fn stream_bytes(b: Vec<u8>) -> Vec<u8> {
+/// How a command's `output` stream reads output that is not UTF-8, as its
+/// result does ([`decode`]): the console code page on Windows (Windows
+/// PowerShell 5.1 writes that), none elsewhere.
+pub fn other_text() -> Option<crate::tap::Decode> {
     #[cfg(windows)]
-    if let Err(e) = std::str::from_utf8(&b)
-        && e.error_len().is_some()
-    {
-        return decode(&b, false).into_bytes();
-    }
-    b
+    return Some(|b| crate::win::code_page_text(crate::win::console_code_page(), b));
+    #[cfg(not(windows))]
+    None
 }
-
-/// The most of a command's output one stream frame takes before
-/// [`stream_bytes`]: a byte of a code page can take three in UTF-8, and a
-/// frame carries at most [`nerve_proto::frame::MAX_PAYLOAD`].
-pub const STREAM_CHUNK: usize = if cfg!(windows) {
-    nerve_proto::frame::MAX_PAYLOAD / 3
-} else {
-    nerve_proto::frame::MAX_PAYLOAD
-};
 
 /// The Landlock rules for a command of a center in `folders` mode: it reads
 /// the system and its `r` folders, writes its `w` folders, runs programs from
@@ -1508,11 +1495,11 @@ fn kill_group(_pid: u32, _sig: Sig) {}
 
 /// Reads up to `cap` bytes and drains the rest, so the command never blocks
 /// on a full pipe. Returns the bytes and whether some were dropped. All of
-/// it, past the cap too, goes to `tap` as it comes.
+/// it, past the cap too, goes to `tap` as it comes, as that pipe's.
 async fn capped(
     mut r: impl AsyncRead + Unpin,
     cap: usize,
-    tap: Option<&crate::tap::Tap>,
+    tap: Option<(&crate::tap::Tap, crate::tap::Pipe)>,
 ) -> (Vec<u8>, bool) {
     let mut out = Vec::new();
     let mut buf = vec![0u8; 16 * 1024];
@@ -1521,8 +1508,8 @@ async fn capped(
         match r.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                if let Some(t) = tap {
-                    t.push(&buf[..n]);
+                if let Some((t, pipe)) = tap {
+                    t.push(pipe, &buf[..n]);
                 }
                 let room = cap.saturating_sub(out.len());
                 if n > room {
@@ -1857,17 +1844,18 @@ pub async fn run(
     let stderr = child.stderr.take().expect("piped");
     let cap = opts.output_cap.min(OUTPUT_HARD_CAP);
     let limit = opts.timeouts.limit(call.timeout);
-    // A sudo command's output is not streamed: the frames of a stream are
-    // not scrubbed of the password the way its result is.
+    // A sudo command's output is not streamed: its stderr carries sudo's
+    // prompts, which only its result is stripped of.
     let tap = opts.tap.as_deref().filter(|_| opts.sudo.is_none());
     let err = async {
         match sudo_stdin {
             Some((stdin, sudo)) => sudo_stderr(stderr, stdin, sudo, pid, cap).await,
-            None => capped(stderr, cap, tap).await,
+            None => capped(stderr, cap, tap.map(|t| (t, Pipe::Err))).await,
         }
     };
     let work = async {
-        let (o, e, st) = tokio::join!(capped(stdout, cap, tap), err, child.wait());
+        let out = capped(stdout, cap, tap.map(|t| (t, Pipe::Out)));
+        let (o, e, st) = tokio::join!(out, err, child.wait());
         (o, e, st)
     };
     tokio::pin!(work);
@@ -2019,8 +2007,16 @@ async fn run_as(
     let tap = opts.tap.as_deref().filter(|_| opts.sudo.is_none());
     let work = async {
         tokio::join!(
-            capped(tokio::fs::File::from_std(stdout), cap, tap),
-            capped(tokio::fs::File::from_std(stderr), cap, tap),
+            capped(
+                tokio::fs::File::from_std(stdout),
+                cap,
+                tap.map(|t| (t, Pipe::Out))
+            ),
+            capped(
+                tokio::fs::File::from_std(stderr),
+                cap,
+                tap.map(|t| (t, Pipe::Err))
+            ),
             async {
                 tokio::task::spawn_blocking(wait)
                     .await
@@ -3482,15 +3478,6 @@ mod text_tests {
         assert_eq!(output_text(b"a\xFFb", false, |_| None), "a\u{FFFD}b");
     }
 
-    /// A stream's chunk of UTF-8 stays as it is, also one that ends inside
-    /// a character, which the next chunk completes.
-    #[test]
-    fn a_streams_utf8_goes_as_it_is() {
-        let text = "Grüße".as_bytes().to_vec();
-        assert_eq!(stream_bytes(text.clone()), text);
-        assert_eq!(stream_bytes(text[..3].to_vec()), text[..3]);
-    }
-
     /// The `exec.run` text names the shell and, for Windows PowerShell 5.1,
     /// how to chain commands there.
     #[test]
@@ -3853,16 +3840,19 @@ mod windows_tests {
             d.path(),
             Duration::from_secs(60),
         );
-        let tap = std::sync::Arc::new(crate::tap::Tap::default());
+        let tap = std::sync::Arc::new(crate::tap::Tap::new(None, other_text()));
         let o = RunOptions {
             tap: Some(tap.clone()),
             ..opts()
         };
         run(&c, &o, |_| {}).await.unwrap();
-        let crate::tap::Chunk::Data(d) = tap.reader().next(STREAM_CHUNK).await else {
-            panic!("no output")
-        };
-        let text = String::from_utf8(stream_bytes(d)).unwrap();
+        tap.end();
+        let mut d = Vec::new();
+        let r = tap.reader();
+        while let crate::tap::Chunk::Data(more) = r.next(usize::MAX).await {
+            d.extend(more);
+        }
+        let text = String::from_utf8(d).unwrap();
         assert!(text.contains("Grüße") && text.contains("Größe"), "{text:?}");
     }
 

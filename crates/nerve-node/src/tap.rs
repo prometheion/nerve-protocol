@@ -6,6 +6,12 @@
 //! comes ([`crate::exec`] drains its pipes whatever happens); a stream that
 //! cannot keep up loses its oldest bytes and says how many
 //! ([`Chunk::Gap`]), and its result still holds the output as before.
+//!
+//! What a stream carries is the text the result would hold: on Windows
+//! output that is not UTF-8 is read in the console's code page, and every
+//! copy of the sudo password the node holds is replaced, as in any frame
+//! (crate::sudo). Both work on what each pipe printed, across its reads: a
+//! character or a copy that a read cut waits for the next one.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, Weak};
@@ -13,6 +19,7 @@ use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::Notify;
 
 use crate::daemon::lock;
+use crate::sudo::{REDACTED, Secret};
 
 /// What a stream opened on a running command gets first: the end of what
 /// the command printed so far.
@@ -21,11 +28,28 @@ pub const TAIL: usize = 64 * 1024;
 /// oldest bytes go.
 pub const PENDING: usize = 1024 * 1024;
 
+/// The pipe a command printed on.
+#[derive(Clone, Copy, Debug)]
+pub enum Pipe {
+    Out = 0,
+    Err = 1,
+}
+
+/// Reads output that is not UTF-8, as the command's result does: the
+/// console code page on Windows (crate::exec::other_text).
+pub type Decode = fn(&[u8]) -> Option<String>;
+
+/// Gives the sudo password the node holds now.
+pub(crate) type Held = Box<dyn Fn() -> Option<Secret> + Send + Sync>;
+
 /// One running command's output, stdout and stderr in the order the node
-/// read them.
+/// read them, as text the way its result reads it and without the sudo
+/// password the node holds.
 #[derive(Default)]
 pub struct Tap {
     inner: Mutex<Inner>,
+    secret: Option<Held>,
+    other: Option<Decode>,
 }
 
 #[derive(Default)]
@@ -34,6 +58,19 @@ struct Inner {
     printed: u64,
     readers: Vec<Weak<Reader>>,
     ended: bool,
+    pipes: [Carry; 2],
+    /// Whether the output is in the code page (`Some(true)`) or UTF-8, once
+    /// a read told them apart.
+    code_page: Option<bool>,
+}
+
+/// What a pipe's last read left for its next one.
+#[derive(Default)]
+struct Carry {
+    /// The start of a character the read cut off.
+    raw: Vec<u8>,
+    /// Text that may be the start of a copy of the password.
+    held: Vec<u8>,
 }
 
 /// One stream's view of a [`Tap`]: what it still has to send.
@@ -60,13 +97,46 @@ pub enum Chunk {
     End,
 }
 
+/// Drops the bytes of a character whose start was cut off; how many.
+fn skip_cut(b: &mut VecDeque<u8>) -> u64 {
+    let mut n = 0;
+    while n < 3 && b.front().is_some_and(|c| (0x80..0xC0).contains(c)) {
+        b.pop_front();
+        n += 1;
+    }
+    n
+}
+
+/// The end of `b` that starts a character it does not finish, cut off.
+fn cut_char(b: &mut Vec<u8>) -> Vec<u8> {
+    match std::str::from_utf8(b) {
+        Err(e) if e.error_len().is_none() => b.split_off(e.valid_up_to()),
+        _ => Vec::new(),
+    }
+}
+
+fn replace(hay: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(hay.len());
+    let mut i = 0;
+    while i < hay.len() {
+        if hay[i..].starts_with(needle) {
+            out.extend_from_slice(with);
+            i += needle.len();
+        } else {
+            out.push(hay[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 impl Pending {
     fn push(&mut self, b: &[u8]) {
         self.data.extend(b);
         let over = self.data.len().saturating_sub(PENDING);
         if over > 0 {
             self.data.drain(..over);
-            self.dropped += over as u64;
+            self.dropped += over as u64 + skip_cut(&mut self.data);
         }
     }
 }
@@ -81,19 +151,85 @@ impl std::fmt::Debug for Tap {
     }
 }
 
-impl Tap {
-    /// The command printed `b`.
-    pub fn push(&self, b: &[u8]) {
+impl Inner {
+    /// `b`, read from `pipe`, as text the way the result reads it: UTF-8,
+    /// or with `other` once the output proved not to be UTF-8. A character
+    /// the read cut off waits for the pipe's next read, so a chunk never
+    /// starts inside one.
+    fn text(&mut self, pipe: Pipe, b: &[u8], other: Option<Decode>) -> Vec<u8> {
+        let carry = &mut self.pipes[pipe as usize];
+        let mut data = std::mem::take(&mut carry.raw);
+        data.extend_from_slice(b);
+        let Some(other) = other else {
+            // Elsewhere the bytes go as they are.
+            carry.raw = cut_char(&mut data);
+            return data;
+        };
+        let decoded = |d: &[u8]| {
+            other(d)
+                .unwrap_or_else(|| String::from_utf8_lossy(d).into_owned())
+                .into_bytes()
+        };
+        if self.code_page == Some(true) {
+            return decoded(&data);
+        }
+        match std::str::from_utf8(&data) {
+            Err(e) if e.error_len().is_some() => {
+                if self.code_page == Some(false) {
+                    return String::from_utf8_lossy(&data).into_owned().into_bytes();
+                }
+                self.code_page = Some(true);
+                decoded(&data)
+            }
+            _ => {
+                carry.raw = cut_char(&mut data);
+                if !data.is_ascii() {
+                    self.code_page = Some(false);
+                }
+                data
+            }
+        }
+    }
+
+    /// `text` of `pipe` without any copy of `secret`. Text that may start a
+    /// copy waits for the pipe's next read, unless it is the `last`.
+    fn scrub(&mut self, pipe: Pipe, text: Vec<u8>, secret: Option<&Secret>, last: bool) -> Vec<u8> {
+        let carry = &mut self.pipes[pipe as usize];
+        let mut data = std::mem::take(&mut carry.held);
+        data.extend(text);
+        let copies = secret.map_or_else(Vec::new, |s| crate::sudo::copies(s.expose()));
+        for c in &copies {
+            data = replace(&data, c.as_bytes(), REDACTED.as_bytes());
+        }
+        if !last {
+            let starts = |k: usize| {
+                copies
+                    .iter()
+                    .any(|c| k < c.len() && c.as_bytes().starts_with(&data[data.len() - k..]))
+            };
+            let most = copies.iter().map(String::len).max().unwrap_or(1) - 1;
+            if let Some(k) = (1..=most.min(data.len())).rev().find(|&k| starts(k)) {
+                carry.held = data.split_off(data.len() - k);
+            }
+        }
+        data
+    }
+
+    /// The command printed `b` (text, scrubbed).
+    fn emit(&mut self, b: &[u8]) {
         if b.is_empty() {
             return;
         }
-        let mut t = lock(&self.inner);
-        t.printed += b.len() as u64;
-        t.tail.extend(b);
-        let over = t.tail.len().saturating_sub(TAIL);
-        t.tail.drain(..over);
+        self.printed += b.len() as u64;
+        self.tail.extend(b);
+        let over = self.tail.len().saturating_sub(TAIL);
+        if over > 0 {
+            self.tail.drain(..over);
+            // A late stream starts at a whole character.
+            skip_cut(&mut self.tail);
+        }
         // A stream that was closed is gone from here too.
-        t.readers.retain(|r| match r.upgrade() {
+        self.readers.retain(|r| match r.upgrade() {
             Some(r) => {
                 lock(&r.pending).push(b);
                 r.more.notify_one();
@@ -102,10 +238,52 @@ impl Tap {
             None => false,
         });
     }
+}
 
-    /// The command ended: its streams end once they sent what is left.
-    pub fn end(&self) {
+impl Tap {
+    /// A tap that keeps what `secret` gives out of the stream and reads
+    /// output that is not UTF-8 with `other`.
+    pub(crate) fn new(secret: Option<Held>, other: Option<Decode>) -> Tap {
+        Tap {
+            inner: Mutex::default(),
+            secret,
+            other,
+        }
+    }
+
+    fn secret(&self) -> Option<Secret> {
+        self.secret.as_ref().and_then(|f| f())
+    }
+
+    /// The command printed `b` on `pipe`.
+    pub fn push(&self, pipe: Pipe, b: &[u8]) {
+        if b.is_empty() {
+            return;
+        }
+        // Taken before the tap's lock: the password has its own.
+        let secret = self.secret();
         let mut t = lock(&self.inner);
+        if t.ended {
+            return;
+        }
+        let text = t.text(pipe, b, self.other);
+        let out = t.scrub(pipe, text, secret.as_ref(), false);
+        t.emit(&out);
+    }
+
+    /// The command ended: what its pipes left goes out, and its streams end
+    /// once they sent the rest.
+    pub fn end(&self) {
+        let secret = self.secret();
+        let mut t = lock(&self.inner);
+        if t.ended {
+            return;
+        }
+        for pipe in [Pipe::Out, Pipe::Err] {
+            let raw = std::mem::take(&mut t.pipes[pipe as usize].raw);
+            let out = t.scrub(pipe, raw, secret.as_ref(), true);
+            t.emit(&out);
+        }
         t.ended = true;
         for r in t.readers.drain(..).filter_map(|r| r.upgrade()) {
             lock(&r.pending).ended = true;
@@ -176,9 +354,9 @@ mod tests {
     #[tokio::test]
     async fn a_stream_gets_the_tail_then_what_follows() {
         let t = Tap::default();
-        t.push(&vec![b'a'; TAIL + 3]);
+        t.push(Pipe::Out, &vec![b'a'; TAIL + 3]);
         let r = t.reader();
-        t.push(b"xyz");
+        t.push(Pipe::Err, b"xyz");
         t.end();
         let got = all(&r).await;
         assert_eq!(got[0], Chunk::Gap(3));
@@ -206,8 +384,8 @@ mod tests {
     async fn a_slow_stream_drops_its_oldest_bytes() {
         let t = Tap::default();
         let r = t.reader();
-        t.push(&vec![b'a'; PENDING]);
-        t.push(b"bc");
+        t.push(Pipe::Out, &vec![b'a'; PENDING]);
+        t.push(Pipe::Out, b"bc");
         assert_eq!(r.next(PENDING).await, Chunk::Gap(2));
         match r.next(PENDING).await {
             Chunk::Data(d) => {
@@ -218,7 +396,103 @@ mod tests {
         }
         // A closed stream is no longer fed.
         drop(r);
-        t.push(b"d");
+        t.push(Pipe::Out, b"d");
         assert!(lock(&t.inner).readers.is_empty());
+    }
+
+    /// Everything a stream sends until its end: the bytes dropped, and the
+    /// data as text (it must be UTF-8).
+    async fn text_of(r: &Reader) -> (u64, String) {
+        let (mut gap, mut data) = (0, Vec::new());
+        loop {
+            match r.next(PENDING).await {
+                Chunk::Data(d) => data.extend(d),
+                Chunk::Gap(n) => gap += n,
+                Chunk::End => return (gap, String::from_utf8(data).unwrap()),
+            }
+        }
+    }
+
+    const PW: &str = "pw-7c1e\"x";
+
+    fn with_password() -> Tap {
+        Tap::new(Some(Box::new(|| Some(Secret::new(PW.into())))), None)
+    }
+
+    /// No copy of the sudo password goes out, also not one that two reads
+    /// cut, nor its JSON-escaped form; text that only starts like it waits
+    /// for the next read and then goes as it is.
+    #[tokio::test]
+    async fn the_password_never_streams() {
+        let t = with_password();
+        let r = t.reader();
+        t.push(Pipe::Out, b"a pw-7");
+        t.push(Pipe::Err, b"err\n");
+        t.push(Pipe::Out, b"c1e\"x b\n");
+        t.push(Pipe::Out, b"esc pw-7c1e\\\"x\n");
+        t.push(Pipe::Out, b"pw-");
+        assert_eq!(lock(&t.inner).pipes[0].held, b"pw-", "a start of it waits");
+        t.push(Pipe::Out, b"no\n");
+        t.push(Pipe::Err, b"last pw-7c");
+        t.end();
+        let (_, text) = text_of(&r).await;
+        assert_eq!(
+            text,
+            "a err\n[redacted] b\nesc [redacted]\npw-no\nlast pw-7c"
+        );
+        // The tail a late stream gets is scrubbed too.
+        let (_, late) = text_of(&t.reader()).await;
+        assert!(!late.contains(PW) && late.contains("[redacted]"), "{late}");
+    }
+
+    /// A character a read cuts waits for the rest from the same pipe; on a
+    /// platform with a code page, output that is not UTF-8 is read in it
+    /// from then on, and UTF-8 output stays UTF-8 whatever its reads cut.
+    #[tokio::test]
+    async fn characters_stay_whole_and_a_code_page_is_read() {
+        let latin1: Decode = |b| Some(b.iter().map(|&c| char::from(c)).collect());
+        let t = Tap::new(None, Some(latin1));
+        let r = t.reader();
+        t.push(Pipe::Out, b"Gr\xC3");
+        t.push(Pipe::Err, b"x");
+        t.push(Pipe::Out, b"\xBC\xC3");
+        t.push(Pipe::Out, b"\x9Fe\n");
+        t.end();
+        assert_eq!(text_of(&r).await, (0, "Grxüße\n".into()));
+
+        let t = Tap::new(None, Some(latin1));
+        let r = t.reader();
+        t.push(Pipe::Out, b"ok ");
+        t.push(Pipe::Out, b"Gr\xFC\xDFe ");
+        t.push(Pipe::Out, b"\xC3\xBC\n");
+        t.end();
+        assert_eq!(text_of(&r).await, (0, "ok Grüße Ã¼\n".into()));
+
+        // Without a code page the bytes go as they are, a cut character
+        // whole.
+        let t = Tap::default();
+        let r = t.reader();
+        t.push(Pipe::Out, b"\xE2\x9C");
+        t.push(Pipe::Out, b"\x93 \xFF");
+        t.end();
+        let mut got = Vec::new();
+        while let Chunk::Data(d) = r.next(PENDING).await {
+            assert!(!d.starts_with(b"\x93"), "{d:?}");
+            got.extend(d);
+        }
+        assert_eq!(got, b"\xE2\x9C\x93 \xFF");
+    }
+
+    /// A late stream whose tail would start inside a character starts at
+    /// the next one, and counts the bytes before it as dropped.
+    #[tokio::test]
+    async fn a_late_stream_starts_at_a_whole_character() {
+        let t = Tap::default();
+        t.push(Pipe::Out, "ä".repeat(TAIL / 2).as_bytes());
+        t.push(Pipe::Out, b"x");
+        t.end();
+        let (gap, text) = text_of(&t.reader()).await;
+        assert_eq!(gap, 2);
+        assert_eq!(text, format!("{}x", "ä".repeat(TAIL / 2 - 1)));
     }
 }

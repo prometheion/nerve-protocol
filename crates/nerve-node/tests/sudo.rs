@@ -337,6 +337,98 @@ async fn the_sudo_switch() {
     node.stop().await;
 }
 
+/// A command's output stream is scrubbed of the password like its result,
+/// also a copy two reads cut; a sudo command's output is not streamed at
+/// all (protocol §7.3).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_carries_no_password_and_a_sudo_command_none() {
+    use nerve_conformance::wire::Recv;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let (head, rest) = RIGHT.split_at(6);
+    let prints = format!("printf 'a {head}'; sleep 0.6; printf '{rest} b\\n'; sleep 0.3");
+    let node = node_with(dir.path(), &center, |cfg| {
+        let rule = rules::rule_for("exec", "run", &prints, false)?;
+        cfg.centers[0].policy.allow.push(rule);
+        cfg.centers[0].policy.sudo_allow.push("sudo sleep *".into());
+        Ok(())
+    })
+    .await;
+    let mut conn = linked(&mut center).await;
+    let mut seen = Seen { frames: Vec::new() };
+    let offer = seen.offer(&mut conn, &center).await;
+    seen.on(&mut conn, &seal(&offer, RIGHT, now()).unwrap())
+        .await
+        .expect("on");
+    let output = |call: u64| json!({"cap": "exec", "stream": "output", "params": {"call": call}});
+
+    let run = conn
+        .request(
+            "invoke",
+            json!({"cap": "exec", "action": "run", "args": {"command": prints}}),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let sid = conn
+        .call("stream.open", output(run), WAIT)
+        .await
+        .unwrap()
+        .expect("opened")["sid"]
+        .as_u64()
+        .unwrap();
+    let mut data: Vec<u8> = conn
+        .take_frames()
+        .into_iter()
+        .flat_map(|f| f.payload)
+        .collect();
+    let (mut closed, mut ran) = (false, None);
+    while !closed || ran.is_none() {
+        match conn.recv(WAIT).await {
+            Recv::Frame(f) => {
+                assert_eq!(u64::from(f.id), sid);
+                data.extend(f.payload);
+            }
+            Recv::Msg(Message::Request { id, method, .. }) if method == "stream.close" => {
+                conn.send(&Message::result(id, json!({}))).await.unwrap();
+                closed = true;
+            }
+            Recv::Msg(Message::Result { id, result }) if id == nerve_proto::Id::Num(run) => {
+                ran = Some(result)
+            }
+            Recv::Msg(_) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(String::from_utf8(data).unwrap(), "a [redacted] b\n");
+    assert_eq!(ran.unwrap()["stdout"], "a [redacted] b\n");
+
+    let sudo = conn
+        .request(
+            "invoke",
+            json!({"cap": "exec", "action": "run", "args": {"command": "sudo sleep 1"}}),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let e = conn
+        .call("stream.open", output(sudo), WAIT)
+        .await
+        .unwrap()
+        .expect_err("a sudo command's output is not streamed");
+    assert_eq!(e.kind(), ErrorCode::Unavailable, "{e:?}");
+    let mut others = Vec::new();
+    let r = conn
+        .answer(sudo, WAIT, &mut others)
+        .await
+        .unwrap()
+        .expect("ran");
+    assert_eq!(r["exit_code"], 0, "{r}");
+    assert!(conn.take_frames().is_empty());
+    node.stop().await;
+}
+
 /// With root as the owner `sudo -v` checks no password, so no center turns
 /// the switch on, with any password (#151).
 #[tokio::test(flavor = "multi_thread")]

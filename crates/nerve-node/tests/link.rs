@@ -837,6 +837,159 @@ async fn the_centers_stream_close_stops_the_frames() {
     node.stop().await;
 }
 
+/// A stream opened after its command printed more than the tail starts
+/// with a gap frame that counts what came before the tail, then the tail.
+/// A link holds at most `limits::STREAMS` streams; one more is `busy`.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_stream_starts_with_a_gap_and_a_link_holds_16() {
+    use nerve_node::tap::TAIL;
+
+    let dir = tempdir();
+    let script = "head -c 70000 /dev/zero | tr '\\0' a; sleep 3\n";
+    let (node, mut lab, _work, command) = two_centers_running(dir.path(), script).await;
+    let run = lab
+        .request("invoke", session_run(&command, "s1"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let mut sids = Vec::new();
+    for _ in 0..nerve_proto::limits::STREAMS {
+        let opened = lab
+            .call("stream.open", output_of(run, Some("s1")), WAIT)
+            .await
+            .unwrap()
+            .expect("opened");
+        sids.push(opened["sid"].as_u64().unwrap());
+    }
+    let more = lab
+        .call("stream.open", output_of(run, Some("s1")), WAIT)
+        .await
+        .unwrap()
+        .expect_err("one too many");
+    assert_eq!(nerve_conformance::wire::code_of(&more), "busy");
+    let first: Vec<_> = lab
+        .take_frames()
+        .into_iter()
+        .filter(|f| u64::from(f.id) == sids[0])
+        .collect();
+    assert_eq!(first[0].seq, 0);
+    assert_eq!(first[0].gap_bytes(), Some(70000 - TAIL as u64), "{first:?}");
+    let data: Vec<u8> = first[1..].iter().flat_map(|f| f.payload.clone()).collect();
+    assert_eq!(data, vec![b'a'; TAIL]);
+    lab.notify("cancel", json!({"id": run})).await.unwrap();
+    node.stop().await;
+}
+
+/// The node's `stream.close` comes after the stream's last frame, also when
+/// frames still wait to go out as the command ends.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_streams_close_comes_after_its_last_frame() {
+    use nerve_conformance::wire::Recv;
+    use nerve_proto::Message;
+
+    let dir = tempdir();
+    let script = "sleep 0.5; head -c 1000000 /dev/zero | tr '\\0' b\n";
+    let (node, mut lab, _work, command) = two_centers_running(dir.path(), script).await;
+    let run = lab
+        .request("invoke", session_run(&command, "s1"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let sid = lab
+        .call("stream.open", output_of(run, Some("s1")), WAIT)
+        .await
+        .unwrap()
+        .expect("opened")["sid"]
+        .as_u64()
+        .unwrap();
+    // Not read while the command prints and ends: its last frames wait.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let mut got = lab
+        .take_frames()
+        .iter()
+        .map(|f| f.payload.len())
+        .sum::<usize>();
+    loop {
+        match lab.recv(WAIT).await {
+            Recv::Frame(f) => {
+                assert_eq!(f.gap_bytes(), None);
+                got += f.payload.len();
+            }
+            Recv::Msg(Message::Request { method, params, .. }) if method == "stream.close" => {
+                assert_eq!(params["sid"].as_u64(), Some(sid));
+                break;
+            }
+            Recv::Msg(_) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(got, 1_000_000, "every frame came before the close");
+    node.stop().await;
+}
+
+/// A stream whose command prints faster than the center reads waits in a
+/// queue of its own: the link's own frames, here an event of another call,
+/// still get out (protocol §5.5).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_that_outruns_the_link_leaves_room_for_events() {
+    use nerve_conformance::wire::Recv;
+    use nerve_proto::Message;
+    use nerve_proto::rpc::Id;
+
+    let dir = tempdir();
+    // The first run prints without end, the next one ends at once.
+    let script =
+        "d=$(dirname \"$0\")\n[ -e \"$d/once\" ] && exit 0\ntouch \"$d/once\"\nexec yes streamed\n";
+    let (node, mut lab, _work, command) = two_centers_running(dir.path(), script).await;
+    lab.call("sub", json!({"topics": ["exec/exit"]}), WAIT)
+        .await
+        .unwrap()
+        .expect("sub");
+    let run = lab
+        .request("invoke", session_run(&command, "s1"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let sid = lab
+        .call("stream.open", output_of(run, Some("s1")), WAIT)
+        .await
+        .unwrap()
+        .expect("opened")["sid"]
+        .as_u64()
+        .unwrap();
+    lab.take_frames();
+    // Nothing is read for a while: the connection and the node's queues
+    // fill up with the stream.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let quick = lab
+        .request("invoke", session_run(&command, "s1"))
+        .await
+        .unwrap();
+    // It ends and its event is sent while the queues are still full.
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let mut exit = false;
+    loop {
+        match lab.recv(WAIT).await {
+            Recv::Frame(f) => assert_eq!(u64::from(f.id), sid),
+            Recv::Msg(Message::Notification { method, params })
+                if method == "event" && params["data"]["call"] == quick =>
+            {
+                exit = true
+            }
+            // The event goes before the result.
+            Recv::Msg(Message::Result { id, .. }) if id == Id::Num(quick) => break,
+            Recv::Msg(_) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(exit, "the event of the quick call was dropped");
+    lab.notify("cancel", json!({"id": run})).await.unwrap();
+    node.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unknown_node_answer_stops_dialling() {
     let dir = tempdir();
