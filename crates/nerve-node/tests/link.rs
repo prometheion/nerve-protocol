@@ -1818,6 +1818,118 @@ async fn a_dropped_link_resumes_with_the_output_and_the_exit_event() {
     node.stop().await;
 }
 
+/// A stream ends with its connection, also when the link is resumed
+/// (spec §4.9): the old stream sends nothing on the new connection, not
+/// even once its command prints again, and its sid is unknown there; a new
+/// `stream.open` for the same command gets a new sid and its frames from
+/// seq 0.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_link_carries_no_stream() {
+    use nerve_conformance::wire::Recv;
+    use nerve_proto::Message;
+    let dir = tempdir();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let node = paired_node_with(dir.path(), &center, |p| {
+        p.mode = nerve_policy::Mode::User;
+    })
+    .await;
+    let home = dir.path().join("home");
+    let (mut conn, first) = resumable_link(&mut center, fresh).await;
+    let command = "touch started; echo tick; while [ ! -e go ]; do sleep 0.05; done; echo after";
+    let run = conn
+        .request(
+            "invoke",
+            json!({"cap": "exec", "action": "run", "args": {"command": command}}),
+        )
+        .await
+        .unwrap();
+    for _ in 0..200 {
+        if home.join("started").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(home.join("started").exists(), "the command did not start");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let sid = conn
+        .call("stream.open", output_of(run, None), WAIT)
+        .await
+        .unwrap()
+        .expect("opened")["sid"]
+        .as_u64()
+        .unwrap();
+    let mut data = conn
+        .take_frames()
+        .into_iter()
+        .flat_map(|f| f.payload)
+        .collect::<Vec<u8>>();
+    while data != b"tick\n" {
+        match conn.recv(WAIT).await {
+            Recv::Frame(f) => data.extend(f.payload),
+            Recv::Msg(_) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    drop(conn);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The center read the stream.open's answer.
+    let (mut conn, again) = resumable_link(&mut center, |_| nerve_proto::msg::Resumed {
+        resumed: true,
+        got: 1,
+    })
+    .await;
+    assert_eq!(again.link, first.link, "the same link is offered");
+    assert_eq!(again.got, 2, "the node read the run and the stream.open");
+
+    let new = conn
+        .call("stream.open", output_of(run, None), WAIT)
+        .await
+        .unwrap()
+        .expect("opened again")["sid"]
+        .as_u64()
+        .unwrap();
+    assert_ne!(new, sid);
+    std::fs::write(home.join("go"), "").unwrap();
+    let mut frames = conn.take_frames();
+    let (mut ran, mut closed) = (false, false);
+    while !ran || !closed {
+        match conn.recv(WAIT).await {
+            Recv::Frame(f) => frames.push(f),
+            Recv::Msg(Message::Result { id, .. }) if id == nerve_proto::rpc::Id::Num(run) => {
+                ran = true
+            }
+            Recv::Msg(Message::Request { id, method, params }) if method == "stream.close" => {
+                assert_eq!(params["sid"].as_u64(), Some(new), "{params:?}");
+                conn.send(&Message::result(id, json!({}))).await.unwrap();
+                closed = true;
+            }
+            Recv::Msg(_) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(
+        frames.iter().all(|f| u64::from(f.id) == new),
+        "the old stream sent on: {:?}",
+        frames.iter().map(|f| (f.id, f.seq)).collect::<Vec<_>>()
+    );
+    assert_eq!(frames.first().map(|f| f.seq), Some(0));
+    let text: Vec<u8> = frames.into_iter().flat_map(|f| f.payload).collect();
+    assert_eq!(text, b"tick\nafter\n");
+    let e = conn
+        .call("stream.close", json!({"sid": sid}), WAIT)
+        .await
+        .unwrap()
+        .expect_err("the old stream is gone");
+    assert_eq!(
+        nerve_conformance::wire::code_of(&e),
+        "unknown_member",
+        "{e:?}"
+    );
+    node.stop().await;
+}
+
 /// A dropped link the center does not resume within the grace ends as
 /// without resume: its command is killed, and the next link is a new one.
 #[cfg(target_os = "linux")]

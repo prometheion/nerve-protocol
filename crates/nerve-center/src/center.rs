@@ -3974,7 +3974,8 @@ mod tests {
     }
 
     /// The result of a job nobody reads is forgotten after `KEEP_FOR` by a
-    /// timer of its own: no later call of the session is needed for it.
+    /// timer of its own: no later call of the session is needed for it. Its
+    /// output stream goes with it.
     #[tokio::test(start_paused = true)]
     async fn an_unread_jobs_result_is_forgotten_without_another_call() {
         let dir = tempfile::tempdir().unwrap();
@@ -3995,16 +3996,28 @@ mod tests {
                 Some(Duration::ZERO),
             )
             .await;
-        assert!(matches!(ran, Ran::Job(_)), "{ran:?}");
+        let Ran::Job(job) = ran else {
+            panic!("{ran:?}")
+        };
+        let ring = Arc::new(crate::streams::Ring::default());
+        assert!(
+            sess.streams
+                .lock()
+                .unwrap()
+                .add("s-1", "n1", &job, ring.clone())
+        );
         while sess.jobs.lock().unwrap().running() > 0 {
             tokio::task::yield_now().await;
         }
         let held = || sess.jobs.lock().unwrap().held();
-        assert_eq!(held(), 1, "its result is kept");
+        let streams = || sess.streams.lock().unwrap().len();
+        assert_eq!((held(), streams()), (1, 1), "its result is kept");
         tokio::time::sleep(jobs::KEEP_FOR - Duration::from_secs(1)).await;
-        assert_eq!(held(), 1, "for ten minutes");
+        assert_eq!((held(), streams()), (1, 1), "for ten minutes");
         tokio::time::sleep(Duration::from_secs(2)).await;
-        assert_eq!(held(), 0, "then forgotten");
+        assert_eq!((held(), streams()), (0, 0), "then forgotten");
+        let r = ring.read(64);
+        assert_eq!(r.why.as_deref(), Some("its job was forgotten"));
     }
 
     /// The owner's note on a machine is kept on one line, refused when long,
