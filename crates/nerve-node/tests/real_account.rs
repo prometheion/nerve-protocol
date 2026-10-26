@@ -420,10 +420,12 @@ except OSError as e:
         closed.as_ref().is_err_and(|e| e.contains("may not read")),
         "{closed:?}"
     );
+    // The node's own folder is closed to nerve-run: the path does not even
+    // resolve as that account, and the policy would refuse it anyway.
     let own = fs_call(&mut conn, "read", at(Path::new("/etc/nerve/node.toml"))).await;
     assert!(
         own.as_ref()
-            .is_err_and(|e| e.contains("belongs to the node")),
+            .is_err_and(|e| e.contains("belongs to the node") || e.contains("Permission denied")),
         "{own:?}"
     );
     let write = fs_call(

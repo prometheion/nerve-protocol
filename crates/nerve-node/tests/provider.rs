@@ -551,12 +551,24 @@ async fn large_calls_at_once_do_not_wedge_a_provider() {
         }
         p
     });
+    // The two calls race to the provider, so their answers come in either
+    // order: one that comes while the other is awaited is kept.
+    let mut others = Vec::new();
     for (i, id) in ids.into_iter().enumerate() {
-        let v = conn
-            .answer(id, WAIT, &mut Vec::new())
-            .await
-            .unwrap()
-            .expect("answered");
+        let early = others.iter().position(
+            |m| matches!(m, Message::Result { id: got, .. } if *got == nerve_proto::rpc::Id::Num(id)),
+        );
+        let v = match early {
+            Some(at) => match others.remove(at) {
+                Message::Result { result, .. } => result,
+                _ => unreachable!(),
+            },
+            None => conn
+                .answer(id, WAIT, &mut others)
+                .await
+                .unwrap()
+                .expect("answered"),
+        };
         assert_eq!(v["n"], i);
         assert_eq!(v["pad"].as_str().map(str::len), Some(big.len()));
     }
