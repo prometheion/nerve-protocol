@@ -750,22 +750,26 @@ fn no_job(node: &str, job: &str, running: bool) -> String {
 /// content from that machine in the text and in `structuredContent`.
 /// `cut` when it is the cut text of a longer result.
 fn device_result(route: &Route, v: Value, cut: bool) -> Value {
-    let body = match &v {
-        // A string is the node's own lines; JSON quotes what it holds.
-        Value::String(s) => listing::guarded(s),
-        other => serde_json::to_string_pretty(other).unwrap_or_default(),
+    let (body, whole) = match &v {
+        // A string is the node's own lines, sized as the guard shows them;
+        // JSON quotes what it holds.
+        Value::String(s) => listing::guarded_clip(s, RESULT_TEXT),
+        other => {
+            let body = serde_json::to_string_pretty(other).unwrap_or_default();
+            (util::clip(&body, RESULT_TEXT), body.len() <= RESULT_TEXT)
+        }
     };
     let text = listing::framed(
         &format!("node {:?}, {}.{}", route.node_name, route.cap, route.action),
         false,
-        &util::clip(&body, RESULT_TEXT),
+        &body,
     );
     // `structuredContent` carries the node's data in the same marking as
     // the text, for a harness that shows only it; a result too long for the
     // text is left to the cut text, so no harness hands the model more than
     // that.
     let mut r = text_result(&text, false);
-    if !cut && body.len() <= RESULT_TEXT && structured_fits(&v) {
+    if !cut && whole && structured_fits(&v) {
         r["structuredContent"] =
             listing::envelope(&listing::source(&route.node_name, &route.node_id), false, v);
     }
@@ -2025,6 +2029,34 @@ mod tests {
         assert!(data["capabilities"].as_array().unwrap().len() > 2000, "{r}");
         assert_eq!(data["more"], 0);
         assert!(r["structuredContent"].to_string().len() <= RESULT_TEXT);
+    }
+
+    /// A string result is sized as the guard shows it: past the cap with
+    /// its escapes, its text ends in one `…` within the cap, splits no
+    /// escape and has no `structuredContent`.
+    #[test]
+    fn a_string_result_is_sized_as_it_is_shown() {
+        let route = Route {
+            node_id: "n1".into(),
+            node_name: "box-1".into(),
+            cap: "test".into(),
+            action: "log".into(),
+            effect: Effect::Read,
+        };
+        let line = "\u{1b}[32mok\u{1b}[0m test passed\n";
+        let colored = line.repeat(RESULT_TEXT * 9 / 10 / line.len());
+        let r = device_result(&route, json!(colored), false);
+        let t = text(&r);
+        let (_, body) = t.split_once('\n').unwrap();
+        let (body, end) = body.rsplit_once('\n').unwrap();
+        assert_eq!(end, "[end of device content]");
+        assert!(body.len() <= RESULT_TEXT, "{}", body.len());
+        let shown = body.strip_suffix('…').unwrap();
+        assert!(listing::guarded(&colored).starts_with(shown));
+        // The last escape is whole.
+        let last = &shown[shown.rfind('\\').unwrap()..];
+        assert!(last.starts_with("\\u001b"), "{last:?}");
+        assert!(r.get("structuredContent").is_none());
     }
 
     #[test]

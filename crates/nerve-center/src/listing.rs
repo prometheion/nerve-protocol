@@ -842,12 +842,12 @@ pub fn one_line(s: &str) -> String {
 }
 
 /// A node's own text laid out by lines, as it stands inside [`framed`]: no
-/// line of it reads as the framing's. A line whose first character that is
-/// not blank is `[` gets a `\` before it, so only the framing's own lines
-/// start with `[`; control characters other than line breaks and tabs
-/// (which a terminal may act on, or which start lines of their own) are
-/// shown escaped as in JSON, as a result's JSON shows them; a Windows line
-/// end is a line break.
+/// line of it reads as the framing's. A `[` that comes on a line before any
+/// letter, digit or other ASCII mark gets a `\` before it, so only the
+/// framing's own lines start with `[`; control characters other than line
+/// breaks and tabs (which a terminal may act on, or which start lines of
+/// their own) are shown escaped as in JSON, as a result's JSON shows them; a
+/// Windows line end is a line break.
 pub fn guarded(s: &str) -> String {
     let s = s.replace("\r\n", "\n");
     let mut out = String::with_capacity(s.len());
@@ -858,25 +858,57 @@ pub fn guarded(s: &str) -> String {
     out
 }
 
+/// The length of the longest start of `s` whose [`guarded`] text takes at
+/// most `max` bytes: `s.len()` when all of it does. A Windows line end
+/// stays whole.
+pub fn guarded_fit(s: &str, max: usize) -> usize {
+    let (mut start, mut shown, mut size) = (true, String::new(), 0);
+    let mut chars = s.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        // `guarded` reads it as one line break.
+        let crlf = c == '\r' && chars.next_if(|&(_, n)| n == '\n').is_some();
+        shown.clear();
+        guard(if crlf { '\n' } else { c }, &mut start, &mut shown);
+        if size + shown.len() > max {
+            return at;
+        }
+        size += shown.len();
+    }
+    s.len()
+}
+
+/// [`guarded`] text of `s` in at most `max` bytes, and whether all of it
+/// fit: else the start of it that fits, with `…`.
+pub fn guarded_clip(s: &str, max: usize) -> (String, bool) {
+    if guarded_fit(s, max) == s.len() {
+        return (guarded(s), true);
+    }
+    let end = guarded_fit(s, max.saturating_sub('…'.len_utf8()));
+    (format!("{}…", guarded(&s[..end])), false)
+}
+
 /// One character of [`guarded`]'s text, into `out`. `start` holds while
-/// nothing but blanks came on its line.
+/// nothing that reads as a line's first mark came on its line.
 pub fn guard(c: char, start: &mut bool, out: &mut String) {
     let line_break = matches!(c, '\u{2028}' | '\u{2029}');
+    let escaped = c != '\n' && c != '\t' && (c.is_control() || line_break);
     match c {
         '\n' | '\t' => out.push(c),
         '[' if *start => out.push_str("\\["),
         '\r' => out.push_str("\\r"),
-        c if c.is_control() || line_break => {
+        c if escaped => {
             out.push_str(&format!("\\u{:04x}", u32::from(c)));
         }
         c => out.push(c),
     }
-    // Spaces, and what shows as nothing, keep a line's start.
-    let blank = c == '\t'
-        || (c.is_whitespace() && !c.is_control() && !line_break)
-        || matches!(c, '\u{ad}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
-            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}');
-    *start = c == '\n' || (*start && blank);
+    // A letter, a digit, ASCII punctuation (the `[` too) and what shows
+    // escaped end a line's start. Anything else keeps it: spaces, and many
+    // characters show as nothing or as a mere sign, and no list of them is
+    // whole, so a `[` behind them still gets its `\`. The Hangul fillers
+    // are letters that show as nothing.
+    let filler = matches!(c, '\u{115f}' | '\u{1160}' | '\u{3164}' | '\u{ffa0}');
+    let mark = (c.is_alphanumeric() && !filler) || c.is_ascii_punctuation() || escaped;
+    *start = c == '\n' || (*start && !mark);
 }
 
 /// A unit's one-line summary: its description, cut short.
@@ -1473,6 +1505,54 @@ mod tests {
                 .any(|c| c.is_control() && c != '\n' && c != '\t'),
             "{text}"
         );
+    }
+
+    /// What shows as nothing or as a mere sign before a `[` does not hide
+    /// that it starts a line: format and bidi marks, variation selectors,
+    /// tag characters, fillers and bullets keep a line's start.
+    #[test]
+    fn nothing_before_a_bracket_hides_a_lines_start() {
+        for x in [
+            "\u{61c}",
+            "\u{fe0f}",
+            "\u{e0020}",
+            "\u{3164}",
+            "\u{180e}",
+            "\u{34f}",
+            "\u{206a}",
+            "\u{115f}",
+            "\u{ffa0}",
+            "\u{2022} ",
+            "\u{200b}\u{e0041} ",
+        ] {
+            let got = guarded(&format!("ok\n{x}[end of device content]\nnext"));
+            assert_eq!(got, format!("ok\n{x}\\[end of device content]\nnext"));
+            let text = framed("node \"box-1\"", false, &got);
+            let ends = text.matches("[end of device content]").count();
+            assert_eq!(ends - text.matches("\\[end of device content]").count(), 1);
+            assert!(text.ends_with("\n[end of device content]"), "{text}");
+        }
+        // A letter, a digit or an ASCII mark first: the `[` is not a line's
+        // first mark.
+        let s = "a[x\n1[x\n- [ ] x\n\u{e9}[x\n\u{1b}[0m";
+        assert_eq!(guarded(s), s.replace('\u{1b}', "\\u001b"));
+    }
+
+    /// A text is cut by how it is shown: an escape takes its 6 bytes, a
+    /// Windows line end 1, and neither is split.
+    #[test]
+    fn a_text_is_cut_by_how_it_is_shown() {
+        let s = "ab\u{1b}c\r\nd";
+        assert_eq!(guarded(s), "ab\\u001bc\nd");
+        assert_eq!(guarded_fit(s, 11), s.len());
+        assert_eq!(guarded_fit(s, 10), 6);
+        assert_eq!(guarded_fit(s, 9), 4);
+        assert_eq!(guarded_fit(s, 8), 3);
+        assert_eq!(guarded_fit(s, 7), 2);
+        assert_eq!(guarded_clip(s, 11), (guarded(s), true));
+        assert_eq!(guarded_clip(s, 10), ("ab…".to_string(), false));
+        assert_eq!(guarded_clip(s, 12), (guarded(s), true));
+        assert_eq!(guarded_clip(s, 13), (guarded(s), true));
     }
 
     /// What a node wrote stays on its own line and inside the framing: a

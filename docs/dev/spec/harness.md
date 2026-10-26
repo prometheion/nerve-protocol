@@ -330,12 +330,17 @@ own `invalid_args` names): a line break in them becomes a space.
 
 A node's text that the center puts in by lines (a string result, a
 stream's output) cannot end the framing or start a line that reads as it:
-a line whose first character that is not blank is `[` gets a `\` before
-it (`\[end of device content]`), so only the framing's own two lines start
-with `[`, and control characters other than line breaks and tabs are shown
-escaped as in JSON (`\r`, `\u001b`, also U+2028 and U+2029), with a Windows
-line end read as a line break. Any other result is JSON, which quotes what
-it holds. `structuredContent` carries the text as it came.
+a `[` that comes on a line before any letter, digit or other ASCII mark
+(so also after blanks, characters that show as nothing, or a sign such as
+`•`) gets a `\` before it (`\[end of device content]`), so only the
+framing's own two lines start with `[`. Each stream read's text starts a
+line, also where it begins in the middle of one of the node's lines.
+Control characters other than line breaks and tabs are shown escaped as in
+JSON (`\r`, `\u001b`, also U+2028 and U+2029), with a Windows line end read
+as a line break. Such text is sized as it is shown: a string result whose
+shown text passes 256 KiB is cut, also when the string itself is shorter.
+Any other result is JSON, which quotes what it holds. `structuredContent`
+carries the text as it came.
 
 ### 4.4 Jobs
 

@@ -25,6 +25,7 @@ use tokio::sync::{oneshot, watch};
 use nerve_proto::{ErrorCode, RpcError};
 
 use crate::link::{self, Link};
+use crate::listing;
 use crate::tools::Route;
 use crate::util;
 
@@ -99,20 +100,30 @@ impl Outcome {
     fn of(r: Result<Value, RpcError>) -> Outcome {
         match r {
             Ok(v) => {
-                // Cut as `execute` would show it: by its text, pretty.
-                let body = match &v {
-                    Value::String(s) => s.clone(),
-                    other => serde_json::to_string_pretty(other).unwrap_or_default(),
-                };
-                if body.len() > RESULT_TEXT {
-                    Outcome::Done {
-                        value: Value::String(util::clip(&body, RESULT_TEXT)),
-                        cut: true,
+                // Cut as `execute` would show it: by its text, pretty, and a
+                // string by its text as the guard shows it.
+                let pretty;
+                let (body, fits) = match &v {
+                    Value::String(s) => {
+                        (s.as_str(), listing::guarded_fit(s, RESULT_TEXT) == s.len())
                     }
-                } else {
+                    other => {
+                        pretty = serde_json::to_string_pretty(other).unwrap_or_default();
+                        (pretty.as_str(), pretty.len() <= RESULT_TEXT)
+                    }
+                };
+                if fits {
                     Outcome::Done {
                         value: v,
                         cut: false,
+                    }
+                } else {
+                    // The cut text is a string, which `execute` shows
+                    // guarded and with its `…`: so much of it as fits so.
+                    let end = listing::guarded_fit(body, RESULT_TEXT - '…'.len_utf8());
+                    Outcome::Done {
+                        value: Value::String(format!("{}…", &body[..end])),
+                        cut: true,
                     }
                 }
             }
@@ -705,6 +716,34 @@ mod tests {
         held.push(j.start("j-x", &route("n1", "exec.run"), false).unwrap());
     }
 
+    /// A string result is cut by its text as `execute` shows it, guarded:
+    /// one that fits as it came but not with its escapes is cut, and says
+    /// so; one that only its Windows line ends make look longer is whole.
+    #[test]
+    fn a_string_result_is_cut_by_its_shown_text() {
+        // Two colour codes a line, each shown as 6 bytes: 40 % more.
+        let line = "\u{1b}[32mok\u{1b}[0m test passed\n";
+        let colored = line.repeat(RESULT_TEXT * 9 / 10 / line.len());
+        assert!(colored.len() < RESULT_TEXT);
+        let Outcome::Done { value, cut } = Outcome::of(Ok(json!(colored))) else {
+            panic!("not done")
+        };
+        assert!(cut);
+        let text = value.as_str().unwrap();
+        assert!(text.ends_with('…'));
+        assert!(colored.starts_with(text.trim_end_matches('…')));
+        assert!(listing::guarded(text).len() <= RESULT_TEXT);
+        let crlf = "ok\r\n".repeat(RESULT_TEXT / 4 + 100);
+        assert!(crlf.len() > RESULT_TEXT);
+        assert_eq!(
+            Outcome::of(Ok(json!(crlf))),
+            Outcome::Done {
+                value: json!(crlf),
+                cut: false
+            }
+        );
+    }
+
     /// Finished results take at most `KEPT_MAX` bytes; one past it is
     /// named, not kept. Each one is cut as a result is.
     #[test]
@@ -728,13 +767,13 @@ mod tests {
                 panic!("{v:?}")
             };
             assert!(cut);
-            assert!(value.as_str().unwrap().len() <= RESULT_TEXT + 3);
+            assert!(value.as_str().unwrap().len() <= RESULT_TEXT);
             i += 1;
             assert!(i < 100, "never dropped");
         }
         assert!(j.kept() <= KEPT_MAX, "{}", j.kept());
         // Each is kept as its JSON text: the cut text and its quotes.
-        assert_eq!(i, KEPT_MAX / (RESULT_TEXT + 5));
+        assert_eq!(i, KEPT_MAX / (RESULT_TEXT + 2));
         // A failure past the bound keeps its code, so it still reads as
         // failed, not as a call that ended well.
         let _ = j.start("j-f", &route("n1", "exec.run"), false).unwrap();

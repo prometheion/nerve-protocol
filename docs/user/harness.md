@@ -152,8 +152,9 @@ A result is text, marked as data from a machine:
 
 What the machine wrote line by line, such as a command's output read from
 its stream, cannot end that mark: a line of it that starts with `[` gets a
-`\` before it, and control characters such as a terminal's colours show
-escaped (`\u001b`), as in JSON.
+`\` before it, also when only spaces or characters that show as nothing
+come before the `[`, and control characters such as a terminal's colours
+show escaped (`\u001b`), as in JSON.
 
 Some harnesses show the model the structured content of a result instead of
 its text. That carries the same mark: it names the machine and says its
