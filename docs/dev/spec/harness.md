@@ -328,6 +328,15 @@ are cut at 4 KiB each. Every error text of `execute` is one line, whoever wrote
 its words (a node's message, or a field of the node's schema that the center's
 own `invalid_args` names): a line break in them becomes a space.
 
+A node's text that the center puts in by lines (a string result, a
+stream's output) cannot end the framing or start a line that reads as it:
+a line whose first character that is not blank is `[` gets a `\` before
+it (`\[end of device content]`), so only the framing's own two lines start
+with `[`, and control characters other than line breaks and tabs are shown
+escaped as in JSON (`\r`, `\u001b`, also U+2028 and U+2029), with a Windows
+line end read as a line break. Any other result is JSON, which quotes what
+it holds. `structuredContent` carries the text as it came.
+
 ### 4.4 Jobs
 
 `execute` waits for a call's result at most the **call wait**
@@ -450,7 +459,8 @@ read, no checker, no statistics):
   character a cut would split waits for the next read, and a wait goes on
   while the stream holds only the start of one. The bytes are read as UTF-8
   (bytes that are not read as a replacement character, which counts as 3
-  bytes toward `max_bytes` and the 252 KiB); a Windows node sends
+  bytes toward `max_bytes` and the 252 KiB, as an escaped control character
+  or the `\` before a line's `[` (§4.3) counts as what the text shows); a Windows node sends
   output in the console's code page as UTF-8 (protocol.md §7.3).
 - A read that gives output taints the session (the action checker's taint,
   §4.4): it is outside content, as the job's result is when it ends.

@@ -697,7 +697,7 @@ impl Engine {
                 route.node_name, found.job
             ),
             false,
-            &r.text,
+            &listing::guarded(&r.text),
         );
         let mut v = text_result(&format!("{head}\n{body}"), false);
         let mut data = json!({"text": r.text, "eof": r.eof});
@@ -751,7 +751,8 @@ fn no_job(node: &str, job: &str, running: bool) -> String {
 /// `cut` when it is the cut text of a longer result.
 fn device_result(route: &Route, v: Value, cut: bool) -> Value {
     let body = match &v {
-        Value::String(s) => s.clone(),
+        // A string is the node's own lines; JSON quotes what it holds.
+        Value::String(s) => listing::guarded(s),
         other => serde_json::to_string_pretty(other).unwrap_or_default(),
     };
     let text = listing::framed(

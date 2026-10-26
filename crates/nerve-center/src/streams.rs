@@ -26,6 +26,7 @@ use tokio::sync::watch;
 use crate::center::Session;
 use crate::jobs::NoSignal;
 use crate::link::Link;
+use crate::listing;
 
 /// The most bytes one stream keeps that the model did not read yet.
 pub const RING_BYTES: usize = 1024 * 1024;
@@ -241,35 +242,46 @@ impl Ring {
 }
 
 /// How many of `bytes` one read takes: as many as make at most `max` bytes
-/// of text, where each run of bytes that is not UTF-8 reads as one
-/// replacement character of 3 bytes (a Unix node sends a command's bytes as
-/// they are). The start of a character at the end stays for the next read,
-/// unless it is the `last` that can come: the end is checked on its own, so
-/// a bad byte before it does not let the character be split.
+/// of the text the model reads ([`listing::guarded`]: a control character
+/// shown escaped counts as its escape), where each run of bytes that is not
+/// UTF-8 reads as one replacement character of 3 bytes (a Unix node sends a
+/// command's bytes as they are). The start of a character at the end stays
+/// for the next read, unless it is the `last` that can come: the end is
+/// checked on its own, so a bad byte before it does not let the character
+/// be split.
 fn text_cut(bytes: &[u8], max: usize, last: bool) -> usize {
     let (mut took, mut size) = (0, 0);
+    // The text starts a line: it starts the framing's body.
+    let (mut start, mut shown) = (true, String::new());
+    let mut cost = |c: char| {
+        shown.clear();
+        listing::guard(c, &mut start, &mut shown);
+        shown.len()
+    };
     for chunk in bytes.utf8_chunks() {
-        let valid = chunk.valid();
-        if size + valid.len() > max {
-            let mut k = max - size;
-            while !valid.is_char_boundary(k) {
-                k -= 1;
+        for c in chunk.valid().chars() {
+            let n = cost(c);
+            if size + n > max {
+                return took;
             }
-            return took + k;
+            took += c.len_utf8();
+            size += n;
         }
-        took += valid.len();
-        size += valid.len();
         let bad = chunk.invalid();
         if bad.is_empty() {
             continue;
         }
         let start = took + bad.len() == bytes.len()
             && std::str::from_utf8(bad).is_err_and(|e| e.error_len().is_none());
-        if (start && !last) || size + char::REPLACEMENT_CHARACTER.len_utf8() > max {
+        if start && !last {
+            return took;
+        }
+        let n = cost(char::REPLACEMENT_CHARACTER);
+        if size + n > max {
             return took;
         }
         took += bad.len();
-        size += char::REPLACEMENT_CHARACTER.len_utf8();
+        size += n;
     }
     took
 }
@@ -771,6 +783,36 @@ mod tests {
         assert!(first.text.len() <= READ_MIN, "{}", first.text.len());
         assert!(first.text.ends_with('a'), "{}", first.text);
         assert_eq!(r.read(READ_MIN).text, "\u{fc} rest");
+    }
+
+    /// The model reads the text with its control characters escaped and a
+    /// `\` before a line's `[`: a read gives at most `max` bytes of that,
+    /// and what it leaves stays for the next one.
+    #[test]
+    fn a_read_counts_its_text_as_the_model_reads_it() {
+        let r = Ring::default();
+        r.push(&[0x1b; 100]);
+        r.push(b"\n[x\n");
+        r.end("ended");
+        let mut text = String::new();
+        loop {
+            let got = r.read(READ_MIN);
+            let shown = listing::guarded(&got.text);
+            assert!(shown.len() <= READ_MIN, "{shown:?}");
+            text.push_str(&got.text);
+            if got.eof {
+                break;
+            }
+        }
+        assert_eq!(text, "\u{1b}".repeat(100) + "\n[x\n");
+        // Each read holds as many escapes as fit: ten of 6 bytes.
+        let r = Ring::default();
+        r.push(&[0x1b; 100]);
+        assert_eq!(r.read(READ_MIN).text.len(), 10);
+        let r = Ring::default();
+        r.push(b"[");
+        r.push(&[b'a'; READ_MIN - 1]);
+        assert_eq!(r.read(READ_MIN).text.len(), READ_MIN - 1);
     }
 
     /// A read that waits returns once something comes, or when its wait is

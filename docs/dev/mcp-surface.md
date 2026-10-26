@@ -119,7 +119,10 @@ A result is text marked as device content:
 [end of device content]
 ```
 
-plus `structuredContent`. `list` frames what a node wrote the same way. Some
+plus `structuredContent`. `list` frames what a node wrote the same way, and
+a node's own lines (a string result, a stream's output) get a `\` before a
+`[` that starts one and their control characters escaped, so they cannot
+end the framing. Some
 harnesses show the model only `structuredContent` when a result has it, and
 never the text, so the marking stands there as well: `structuredContent` is an
 envelope `{"source": "node box-1 (id n1)", "note": "content from that machine:
