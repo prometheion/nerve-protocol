@@ -66,7 +66,7 @@ pub enum PathArgs {
 /// What holds a read call to the places it may read in `folder` mode.
 #[derive(Clone, Copy)]
 pub enum Reads<'a> {
-    /// The folders: each path it reads needs a folder with `r`. So it is
+    /// The folders: each path it reads needs a folder with `r`. This holds
     /// where the node reads with its own or the owner's rights (a node run
     /// by hand, Windows), which reach further than the folders.
     Folders,

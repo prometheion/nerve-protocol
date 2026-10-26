@@ -348,6 +348,17 @@ fn nerve_center_and_nerve_node_work_together() {
     let r = mcp.run(&node_name, "fs.read", json!({"path": path}));
     assert_eq!(r["isError"], json!(true), "{r}");
     node.ok(&["mode", "set", "folder"]);
+    // The mode changes the folder note of `fs.read`, so a `list` that the
+    // center answered before the new descriptor reached it is stale: wait
+    // until it tells folder mode.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !text_of(&mcp.list(json!({"node": node_name}))).contains("Mode: folder") {
+        assert!(
+            Instant::now() < deadline,
+            "the center never saw folder mode"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     let r = mcp.run(&node_name, "fs.read", json!({"path": path}));
     assert_eq!(r["isError"], json!(false), "{r}");
     assert!(text_of(&r).contains("hello from the node"), "{r}");
