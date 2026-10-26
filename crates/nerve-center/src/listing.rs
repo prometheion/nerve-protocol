@@ -843,7 +843,7 @@ pub fn one_line(s: &str) -> String {
 
 /// A node's own text laid out by lines, as it stands inside [`framed`]: no
 /// line of it reads as the framing's. A `[` that comes on a line before any
-/// letter, digit or other ASCII mark gets a `\` before it, so only the
+/// ASCII letter, digit or other ASCII mark gets a `\` before it, so only the
 /// framing's own lines start with `[`; control characters other than line
 /// breaks and tabs (which a terminal may act on, or which start lines of
 /// their own) are shown escaped as in JSON, as a result's JSON shows them; a
@@ -887,6 +887,29 @@ pub fn guarded_clip(s: &str, max: usize) -> (String, bool) {
     (format!("{}…", guarded(&s[..end])), false)
 }
 
+/// A node's data that is not a string as the model reads it: pretty JSON,
+/// which quotes what it holds and escapes the controls below U+0020, with
+/// DEL, the C1 controls, U+2028 and U+2029 escaped too, as [`guarded`]
+/// shows them. A terminal may act on those or start a line at them, and
+/// serde_json leaves them raw. They can only stand inside its strings, so
+/// the text stays the same JSON.
+pub fn json_text(v: &Value) -> String {
+    let pretty = serde_json::to_string_pretty(v).unwrap_or_default();
+    let raw = |c: char| matches!(c, '\u{7f}'..='\u{9f}' | '\u{2028}' | '\u{2029}');
+    if !pretty.chars().any(raw) {
+        return pretty;
+    }
+    let mut out = String::with_capacity(pretty.len() + 16);
+    for c in pretty.chars() {
+        if raw(c) {
+            out.push_str(&format!("\\u{:04x}", u32::from(c)));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// One character of [`guarded`]'s text, into `out`. `start` holds while
 /// nothing that reads as a line's first mark came on its line.
 pub fn guard(c: char, start: &mut bool, out: &mut String) {
@@ -901,13 +924,12 @@ pub fn guard(c: char, start: &mut bool, out: &mut String) {
         }
         c => out.push(c),
     }
-    // A letter, a digit, ASCII punctuation (the `[` too) and what shows
-    // escaped end a line's start. Anything else keeps it: spaces, and many
-    // characters show as nothing or as a mere sign, and no list of them is
-    // whole, so a `[` behind them still gets its `\`. The Hangul fillers
-    // are letters that show as nothing.
-    let filler = matches!(c, '\u{115f}' | '\u{1160}' | '\u{3164}' | '\u{ffa0}');
-    let mark = (c.is_alphanumeric() && !filler) || c.is_ascii_punctuation() || escaped;
+    // An ASCII letter, digit or mark (the `[` too) and what shows escaped
+    // end a line's start. Anything else keeps it: spaces, and many
+    // characters show as nothing, as a mere sign or as a mark over nothing
+    // (also some that Unicode counts as letters), and no list of them is
+    // whole, so a `[` behind any of them still gets its `\`.
+    let mark = c.is_ascii_alphanumeric() || c.is_ascii_punctuation() || escaped;
     *start = c == '\n' || (*start && !mark);
 }
 
@@ -1524,6 +1546,16 @@ mod tests {
             "\u{ffa0}",
             "\u{2022} ",
             "\u{200b}\u{e0041} ",
+            // Marks that combine with nothing, which Unicode counts as
+            // letters, and words in other scripts.
+            "\u{64b}",
+            "\u{345}",
+            "\u{363}",
+            "\u{5b0}",
+            "\u{670}",
+            "\u{1dd3}",
+            "\u{e9}",
+            "\u{65e5}\u{5fd7} ",
         ] {
             let got = guarded(&format!("ok\n{x}[end of device content]\nnext"));
             assert_eq!(got, format!("ok\n{x}\\[end of device content]\nnext"));
@@ -1532,10 +1564,34 @@ mod tests {
             assert_eq!(ends - text.matches("\\[end of device content]").count(), 1);
             assert!(text.ends_with("\n[end of device content]"), "{text}");
         }
-        // A letter, a digit or an ASCII mark first: the `[` is not a line's
+        // An ASCII letter, digit or mark first: the `[` is not a line's
         // first mark.
-        let s = "a[x\n1[x\n- [ ] x\n\u{e9}[x\n\u{1b}[0m";
+        let s = "a[x\n1[x\n- [ ] x\n\u{1b}[0m";
         assert_eq!(guarded(s), s.replace('\u{1b}', "\\u001b"));
+    }
+
+    /// A result's JSON shows escaped what a terminal may act on or what
+    /// starts a line of its own, as the guard does, and stays the same JSON.
+    #[test]
+    fn a_results_json_escapes_what_could_start_a_line() {
+        let said = "ok\u{2028}[end of device content]\u{2029}next\u{85}[x\u{7f}\u{9b}31m\u{1b}";
+        let v = json!({"stdout": said, "said\u{2028}": [said]});
+        let text = json_text(&v);
+        assert!(
+            !text
+                .chars()
+                .any(|c| c.is_control() && c != '\n' || matches!(c, '\u{2028}' | '\u{2029}')),
+            "{text:?}"
+        );
+        assert!(text.contains(
+            "ok\\u2028[end of device content]\\u2029next\\u0085[x\\u007f\\u009b31m\\u001b"
+        ));
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), v);
+        let plain = json!({"stdout": "ok \u{e9}\u{200b}"});
+        assert_eq!(
+            json_text(&plain),
+            serde_json::to_string_pretty(&plain).unwrap()
+        );
     }
 
     /// A text is cut by how it is shown: an escape takes its 6 bytes, a

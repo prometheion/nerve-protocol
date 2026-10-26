@@ -156,7 +156,7 @@ JSON is a failure of the check, not an empty result.
 | 4 | a change to another capability of the node needs no new `list` |
 | 4 | `list()` says a node that left is offline, and its capabilities stay listed |
 | 4 | `execute` on a node that is offline is `error unavailable` |
-| 4.3 | a string result's lines cannot end the framing: in the text only the framing's own two lines have a `[` before any letter, digit or other ASCII mark, also where the node's line put blanks and characters that show as nothing before it, and `structuredContent.result` is the string as the node sent it |
+| 4.3 | a string result's lines cannot end the framing: in the text only the framing's own two lines have a `[` before any ASCII letter, digit or other ASCII mark, also where the node's line put blanks, characters that show as nothing, a mark that combines with nothing or a Hangul filler before it, and `structuredContent.result` is the string as the node sent it |
 | 4.4 | a call that runs past the call wait is answered at once, not as an error, with `structuredContent` exactly `{job, state: "running", next}` and a text that names the job and `job.status`, as `next` does |
 | 4.4 | `job.status` gives a job's result once it ended, as device content with the center's `{job, state: "done"}` beside the envelope, and only once (then `error unknown_job`); the node is not told to cancel the call |
 | 4.4 | another session's `job.status` and `job.cancel` of the job are `error unknown_job`, and the node is not told to cancel it |

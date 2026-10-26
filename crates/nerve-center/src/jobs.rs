@@ -108,7 +108,7 @@ impl Outcome {
                         (s.as_str(), listing::guarded_fit(s, RESULT_TEXT) == s.len())
                     }
                     other => {
-                        pretty = serde_json::to_string_pretty(other).unwrap_or_default();
+                        pretty = listing::json_text(other);
                         (pretty.as_str(), pretty.len() <= RESULT_TEXT)
                     }
                 };
@@ -742,6 +742,27 @@ mod tests {
                 cut: false
             }
         );
+    }
+
+    /// A result that is not a string is cut by its JSON text as `execute`
+    /// shows it, with what that escapes beyond serde_json.
+    #[test]
+    fn a_json_result_is_cut_by_its_shown_text() {
+        // Each U+2028 shows as 6 bytes in place of 3.
+        let lines = "\u{2028}".repeat(RESULT_TEXT * 3 / 10);
+        let v = json!({"stdout": lines});
+        assert!(serde_json::to_string_pretty(&v).unwrap().len() < RESULT_TEXT);
+        let Outcome::Done { value, cut } = Outcome::of(Ok(v)) else {
+            panic!("not done")
+        };
+        assert!(cut);
+        let text = value.as_str().unwrap();
+        assert!(
+            text.starts_with("{\n  \"stdout\": \"\\u2028"),
+            "{}",
+            &text[..40]
+        );
+        assert!(listing::guarded(text).len() <= RESULT_TEXT);
     }
 
     /// Finished results take at most `KEPT_MAX` bytes; one past it is
