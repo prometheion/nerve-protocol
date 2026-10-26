@@ -1017,7 +1017,10 @@ async fn a_path_taking_provider_is_held_to_the_folders() {
 
 /// A file handed to a provider holds nothing below it, so a deny rule that
 /// names places below its folder (`files:**/.env`) refuses the folder and a
-/// path a write may make a folder at, not the files beside those places.
+/// path a write may make a folder at, not the files beside those places. A
+/// path given as a link is refused by the name given: the refusal does not
+/// say where it leads (a link of another process under `/proc` leads where
+/// that process works), and only the audit does.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deny_rule_below_a_folder_leaves_the_files_there_alone() {
     let dir = tempfile::tempdir().unwrap();
@@ -1041,9 +1044,16 @@ async fn a_deny_rule_below_a_folder_leaves_the_files_there_alone() {
         json!({"type": "object", "required": ["path"],
                                    "properties": {"path": {"type": "string", "x-nerve-path": mark}}})
     };
+    // A link that leads to the folder, by a name shorter than the folder's.
+    let away = root.join("w");
+    std::os::unix::fs::symlink(&work, &away).unwrap();
+    let short = away.display().to_string().len();
     let caps = json!([{"id": "files", "summary": "Files of the desk.", "actions": {
         "open": {"effect": "read", "params": path("read")},
-        "save": {"effect": "write", "params": path("write")}}}]);
+        "save": {"effect": "write", "params": path("write")},
+        "peek": {"effect": "read", "params": {"type": "object", "required": ["path"],
+                 "properties": {"path": {"type": "string", "maxLength": short,
+                                         "x-nerve-path": "read"}}}}}}]);
     let (mut p, first) = hello_with(&daemon.paths().ctl_socket(), caps).await;
     assert_eq!(first["ok"]["broken"], json!([]), "{first}");
     descriptor_changed(&mut conn).await;
@@ -1081,6 +1091,36 @@ async fn a_deny_rule_below_a_folder_leaves_the_files_there_alone() {
             "{action}"
         );
     }
+    let named = |m: &str| m.contains(&*work.display().to_string());
+    let e = conn
+        .call("invoke", call("open", &away), WAIT)
+        .await
+        .unwrap()
+        .expect_err("refused");
+    assert_eq!(
+        e.message,
+        format!("{} holds a place that is denied", away.display())
+    );
+    // Resolved, it no longer fits the program's schema.
+    let e = conn
+        .call("invoke", call("peek", &away), WAIT)
+        .await
+        .unwrap()
+        .expect_err("refused");
+    assert_eq!(code_of(&e), "bad_path", "{}", e.message);
+    assert!(!named(&e.message), "{}", e.message);
+    let audit = std::fs::read_to_string(daemon.paths().audit_log()).unwrap();
+    let last: Vec<Value> = audit
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e["cap"] == "files")
+        .collect();
+    let (open, peek) = (&last[last.len() - 2], &last[last.len() - 1]);
+    assert_eq!(open["target"], json!(work.display().to_string()), "{open}");
+    assert!(
+        named(peek["reason"].as_str().unwrap()),
+        "the audit says where it leads: {peek}"
+    );
     served.abort();
     daemon.stop().await;
 }
@@ -1261,10 +1301,8 @@ async fn a_program_is_handed_no_more_than_the_node_judged() {
             "pick",
             only.clone(),
             "bad_path",
-            format!(
-                "{only} leads to {}, which files.pick does not take",
-                wire(&work.join("plain"))
-            ),
+            // Not where it leads: only the audit says that.
+            format!("{only} leads to a path files.pick does not take"),
         ),
         (
             "open",
@@ -1313,9 +1351,17 @@ async fn a_program_is_handed_no_more_than_the_node_judged() {
         })
         .collect();
     assert_eq!(audit.len(), refused.len(), "{audit:#?}");
-    for ((target, reason), (_, at, _, why)) in audit.iter().zip(&refused) {
+    for ((target, reason), (action, at, _, why)) in audit.iter().zip(&refused) {
         assert_eq!(target, at);
-        assert!(why.is_empty() || reason == why, "{reason}");
+        // The audit says where a path the program does not take leads.
+        let why = match *action {
+            "pick" => format!(
+                "{at} leads to {}, which files.pick does not take",
+                wire(&work.join("plain"))
+            ),
+            _ => why.clone(),
+        };
+        assert!(why.is_empty() || *reason == why, "{reason}");
     }
     served.abort();
     daemon.stop().await;

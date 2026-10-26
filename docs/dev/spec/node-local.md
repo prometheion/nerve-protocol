@@ -1609,7 +1609,11 @@ entries below all the call's paths together (those of the folders the links
 lead to included), refuse the call. A call dropped while the node walks (its
 deadline passed, or the center cancelled it) stops the walk and is audited
 `forbidden` with code `cancelled`; it never reaches the program. A marked path to write that is itself a link is refused
-with `bad_path`, since the program would act on the place it leads to. In
+with `bad_path`, since the program would act on the place it leads to. The
+refusal the center gets names each marked path as given, and a place below it
+below the given one, never as resolved (resolved as the command account, a
+link of another of its processes under `/proc` leads where that process
+works); the audit entry names the resolved path. In
 folder mode, where commands cannot be confined (§2), an `execute` action
 with paths is refused as `exec.run` is, and not offered. What a program writes below
 a folder is not checked for the places whose writes run code later (`.git`,

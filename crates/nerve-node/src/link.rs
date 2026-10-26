@@ -1688,6 +1688,8 @@ impl Link {
             }
             let mut args = inv.args.clone();
             let mut targets = Vec::new();
+            // Each path as resolved (its wire form) and as given.
+            let mut named = Vec::new();
             // One that does not resolve as the account (a place it may not
             // look into, the node's own folders) is refused and in the audit
             // as any refusal, with the path given. The entry is written once
@@ -1699,7 +1701,7 @@ impl Link {
                     let Some(Value::String(given)) = inv.args.get(field) else {
                         return Ok(());
                     };
-                    let path = WirePath::parse(given).map_err(|e| (given, e))?;
+                    let path = WirePath::parse(given).map_err(|e| (given, e, None))?;
                     let write = *mark == PathMark::Write;
                     // The program gets the path resolved, so where the path
                     // given is itself a link, a write there (a removal, a
@@ -1714,6 +1716,7 @@ impl Link {
                             crate::fs::bad_path(format!(
                                 "{given} is a link; name the place it leads to"
                             )),
+                            None,
                         ));
                     }
                     // It is handed the path judged, character for character:
@@ -1728,20 +1731,26 @@ impl Link {
                             crate::fs::bad_path(format!(
                                 "{given} leads to a name the program cannot be handed as it is"
                             )),
+                            None,
                         ));
                     };
                     args.insert(field.clone(), Value::String(real.clone()));
-                    // Its schema holds the path as it is handed, too.
+                    // Its schema holds the path as it is handed, too. Only the
+                    // audit names where it leads ([`as_given`]).
                     nerve_proto::schema::validate(&action.params, &Value::Object(args.clone()))
                         .map_err(|_| {
+                            let (cap, act) = (&inv.cap, &inv.action);
                             (
                                 given,
                                 crate::fs::bad_path(format!(
-                                    "{given} leads to {real}, which {}.{} does not take",
-                                    inv.cap, inv.action
+                                    "{given} leads to a path {cap}.{act} does not take"
+                                )),
+                                Some(format!(
+                                    "{given} leads to {real}, which {cap}.{act} does not take"
                                 )),
                             )
                         })?;
+                    named.push((real, given.clone()));
                     targets.push(Target {
                         holds: crate::fs::holds(&path.real, write),
                         path: path.real,
@@ -1754,8 +1763,12 @@ impl Link {
                     Ok(())
                 })
             };
-            resolved.map_err(|(given, e)| {
-                self.audit_bad_path(&inv, given, &e);
+            resolved.map_err(|(given, e, audited)| {
+                let mut entry = e.clone();
+                if let Some(why) = audited {
+                    entry.message = why;
+                }
+                self.audit_bad_path(&inv, given, &entry);
                 e
             })?;
             let target = if targets.is_empty() {
@@ -1784,7 +1797,8 @@ impl Link {
                 known.as_ref(),
                 unconfined,
             )
-            .await?;
+            .await
+            .map_err(|e| as_given(e, &named))?;
             // A missing account stops the call once it is decided and
             // audited, as for `fs`.
             account.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
@@ -2740,6 +2754,45 @@ fn off_target(inv: &Invoke) -> String {
     }
 }
 
+/// `e`, the refusal of a program's call, with each of its paths named as
+/// the center gave it, not as the node resolved it: `named` holds each as
+/// resolved (in its wire form) and as given, and a place below a resolved
+/// path is named below the given one. Resolved as the command account,
+/// which every pairing's commands share, a path given as a link of another
+/// of its processes (`/proc/<n>/cwd`) leads where that process works, which
+/// the center must not learn from a refusal. The audit entry names the
+/// resolved path; only the owner reads it.
+fn as_given(mut e: RpcError, named: &[(String, String)]) -> RpcError {
+    // The longest first, so a path is not taken for one it begins with.
+    let mut named: Vec<&(String, String)> = named.iter().filter(|(r, g)| r != g).collect();
+    named.sort_by_key(|(real, _)| std::cmp::Reverse(real.len()));
+    let text = &e.message;
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    'scan: while at < text.len() {
+        // A path in a reason starts the text or follows a space, a comma or
+        // a parenthesis, and ends it or comes before one of those, a colon
+        // or a `/` that goes below it.
+        let starts = at == 0 || text[..at].ends_with([' ', '(', ',']);
+        if starts {
+            for (real, given) in &named {
+                if let Some(rest) = text[at..].strip_prefix(real.as_str())
+                    && (rest.is_empty() || rest.starts_with([' ', '/', ')', ',', ':', ';']))
+                {
+                    out.push_str(given);
+                    at += real.len();
+                    continue 'scan;
+                }
+            }
+        }
+        let c = text[at..].chars().next().expect("inside the text");
+        out.push(c);
+        at += c.len_utf8();
+    }
+    e.message = out;
+    e
+}
+
 /// `given`, an `fs` path the node did not resolve, where it is written as a
 /// resolved path is (absolute, no `.` or `..` part, no empty one), else
 /// nothing. The audit's rule buttons make an `fs` rule of an entry's target
@@ -2887,6 +2940,47 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(4),
             "the walk ran on"
+        );
+    }
+
+    /// A program's refusal names each path as the center gave it, and a
+    /// place below it below the given one; a path that only begins like a
+    /// resolved one stays as it is.
+    #[test]
+    fn a_programs_refusal_names_its_paths_as_given() {
+        let named = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(r, g)| (r.to_string(), g.to_string()))
+                .collect()
+        };
+        let as_given = |why: &str, pairs: &[(&str, &str)]| {
+            let e = super::as_given(nerve_proto::RpcError::forbidden(why), &named(pairs));
+            assert_eq!(e.kind().as_str(), "forbidden");
+            e.message
+        };
+        let away = [("/home/u/clients/acme", "/proc/7/cwd")];
+        assert_eq!(
+            as_given("/home/u/clients/acme holds a place that is denied", &away),
+            "/proc/7/cwd holds a place that is denied"
+        );
+        assert_eq!(
+            as_given(
+                "/home/u/clients/acme/.env is protected (/home/u/clients/acme); not allowed",
+                &away
+            ),
+            "/proc/7/cwd/.env is protected (/proc/7/cwd); not allowed"
+        );
+        assert_eq!(
+            as_given("/home/u/clients/acme2 is outside the folders", &away),
+            "/home/u/clients/acme2 is outside the folders"
+        );
+        assert_eq!(
+            as_given(
+                "/a/b holds a protected path, /a: no",
+                &[("/a", "/x"), ("/a/b", "/y")]
+            ),
+            "/y holds a protected path, /x: no"
         );
     }
 
