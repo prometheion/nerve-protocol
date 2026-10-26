@@ -785,8 +785,10 @@ concurrently.
   for its stream. Output that is not UTF-8 is sent as the result reads it: on
   Windows decoded from the console's code page (what Windows PowerShell 5.1
   writes) and sent as UTF-8, once that pipe's output proved not to be UTF-8
-  (stdout and stderr each on its own); a cut never starts a frame inside a
-  character of a pipe's output. Every copy of the sudo password the node
+  (stdout and stderr each on its own); a character that a read of one pipe
+  cut is never split by the other pipe's output. Frames are cut by size, also
+  inside a character, so a receiver joins a stream's payloads as bytes before
+  it reads characters. Every copy of the sudo password the node
   holds is replaced as in any frame (§7.4.1), also one that two reads of the
   pipe cut, and once more as the stream takes output to send, with the
   password held then: output printed before sudo was turned on goes out

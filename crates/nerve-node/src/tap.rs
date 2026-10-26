@@ -141,12 +141,16 @@ fn skip_cut(b: &mut VecDeque<u8>) -> u64 {
     n
 }
 
-/// The end of `b` that starts a character it does not finish, cut off.
+/// The end of `b` that starts a character it does not finish, cut off. The
+/// end is checked on its own: a byte that is not UTF-8 before it must not
+/// let the character go out split.
 fn cut_char(b: &mut Vec<u8>) -> Vec<u8> {
-    match std::str::from_utf8(b) {
-        Err(e) if e.error_len().is_none() => b.split_off(e.valid_up_to()),
-        _ => Vec::new(),
-    }
+    let cut = b.utf8_chunks().last().map_or(0, |c| {
+        let bad = c.invalid();
+        let start = std::str::from_utf8(bad).is_err_and(|e| e.error_len().is_none());
+        if start { bad.len() } else { 0 }
+    });
+    b.split_off(b.len() - cut)
 }
 
 /// `text`, after what `held` kept of the text before it, without any copy
@@ -260,6 +264,7 @@ impl Inner {
         match std::str::from_utf8(&data) {
             Err(e) if e.error_len().is_some() => {
                 if carry.code_page == Some(false) {
+                    carry.raw = cut_char(&mut data);
                     return String::from_utf8_lossy(&data).into_owned().into_bytes();
                 }
                 carry.code_page = Some(true);
@@ -622,6 +627,31 @@ mod tests {
             got.extend(d);
         }
         assert_eq!(got, b"\xE2\x9C\x93 \xFF");
+
+        // A byte that is not UTF-8 earlier in the read does not let the
+        // other pipe's output into a character the read cut.
+        let t = Tap::default();
+        let r = t.reader();
+        t.push(Pipe::Out, b"\xFFab\xC3");
+        t.push(Pipe::Err, b"x\n");
+        t.push(Pipe::Out, b"\xBC!\n");
+        t.end();
+        let mut got = Vec::new();
+        while let Chunk::Data(d) = r.next(PENDING).await {
+            got.extend(d);
+        }
+        assert_eq!(got, b"\xFFabx\n\xC3\xBC!\n");
+
+        // Nor once a pipe's output proved to be UTF-8 and then held a bad
+        // byte, where it is read as UTF-8 still.
+        let t = Tap::new(None, Some(latin1));
+        let r = t.reader();
+        t.push(Pipe::Out, "ü".as_bytes());
+        t.push(Pipe::Out, b"\xFFa\xC3");
+        t.push(Pipe::Err, b"x");
+        t.push(Pipe::Out, b"\xBC\n");
+        t.end();
+        assert_eq!(text_of(&r).await, (0, "ü\u{FFFD}axü\n".into()));
     }
 
     /// A stand-in for a single-byte code page.
