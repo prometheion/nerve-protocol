@@ -123,9 +123,10 @@ What `list` shows follows what the machines allow:
   handle is not offered, even with an allow rule. The center's web UI lists
   it with the reason on the Overview, under **Not offered to the agent**
   ([web UI](web-ui.md#overview)).
-- Beside a machine's own capabilities `list` names `job.status` and
-  `job.cancel`: the center answers them itself (below). `exec.signal` is
-  offered where you allowed it, and takes a job's id.
+- Beside a machine's own capabilities `list` names `job.status`,
+  `job.cancel`, `stream.read` and `stream.close`: the center answers them
+  itself (below). `exec.signal` is offered where you allowed it, and takes a
+  job's id.
 - The machine's own settings, its rules and its audit log are never offered,
   so the model cannot change what limits it.
 
@@ -185,6 +186,7 @@ what to do:
 | `error unavailable: …` | The machine is disabled in the center, or offline |
 | `error forbidden: "exec.run" is turned off on node box-1 by its owner.` | You turned the capability off |
 | `error unknown_job: node box-1 has no job "j-…" of this session: …` | The job's id is wrong or another session's, or its result was given already or not read for 10 minutes |
+| `error unknown_stream: node box-1 has no stream "s-…" of this session: …` | The stream's id is wrong or another session's, or the stream was closed, its job's result was read, or it ended 10 minutes ago |
 | `error busy: this session has 16 calls running, …` | The session runs 16 calls at once already (below) |
 
 The model reads these and calls `list` again, or fixes the name or the
@@ -233,8 +235,39 @@ job's result is kept in the center's memory only, until it is read once, for
 session. When the machine's link drops and does not come back, its jobs are
 lost; a link the machine resumes keeps them.
 
+### A command's output while it runs
+
+When a command becomes a job, the center also opens its output as a
+**stream**, and the job's answer names it:
+
+```
+… Its output so far and as it comes: capability "stream.read" with args {"stream": "s-8hd1…"} ("wait_ms" waits for more); "stream.close" with the same args ends the stream.
+```
+
+| Call | Does |
+|---|---|
+| `stream.read` with `{"stream": "s-…"}` | Gives what the command printed since the last read (its stdout and stderr as they came), marked as the machine's content like any result, and says whether more may come. `"wait_ms"` waits for more when nothing is there yet, at most the call wait; `"max_bytes"` reads less or more at once (16 KiB unless set, at most 256 KiB) |
+| `stream.close` with `{"stream": "s-…"}` | Ends the stream; the command runs on |
+
+The model can follow a build or a test run this way and stop it with
+`job.cancel` when it sees it go wrong. The stream starts with the end of what
+the command printed before it opened. The result of the job still carries the
+whole output (up to the machine's output limit), so reading the stream is
+never needed. The center polls nothing on its own: the model asks with
+`stream.read`, and no MCP notification is sent.
+
+A stream belongs to its session, as its job does. The center keeps at most
+1 MiB of a stream that was not read, in memory only; when more comes, the
+oldest part goes and the next read says how much. A session holds at most 16
+streams. A stream goes when it is closed, when the job's result is read with
+`job.status`, when the session ends, and 10 minutes after it ended unread.
+When the machine's link drops, its streams end (also when the link resumes):
+`stream.read` gives what came and says so. A `sudo` command's output is not
+streamed; it comes in the result.
+
 ## Sessions
 
 Each MCP connection is one session. The center tells the machines a session
-used when it ends, and they stop that session's commands; its jobs stop too.
+used when it ends, and they stop that session's commands; its jobs stop
+and its streams go too.
 End a session by hand in the web UI, Overview, Sessions.

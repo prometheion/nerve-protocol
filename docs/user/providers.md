@@ -73,7 +73,8 @@ Each capability and action has a name of 1 to 64 letters, digits, `-` and
 The node refuses a program that gives another name, or a capability that is
 the node's own (`fs`, `exec`, …) or the center's (`job`, `stream`), or another
 provider's already, and the program's attach fails with the reason. The
-center serves `job.status` and `job.cancel` on every machine itself, and
+center serves `job.status`, `job.cancel`, `stream.read` and `stream.close`
+on every machine itself, and
 tells them by their capability, so a program you named `center` is yours like
 any other
 ([long calls](harness.md#long-calls-become-jobs)).

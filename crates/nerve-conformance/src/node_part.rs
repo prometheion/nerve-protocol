@@ -179,6 +179,22 @@ where
         ),
     );
 
+    // §5.2: `stream.open` carries the same strict ctx.
+    r.check(
+        "5.2",
+        "an unknown ctx field of stream.open is invalid_args",
+        expect_code(
+            conn.call(
+                method::STREAM_OPEN,
+                json!({"cap": "exec", "stream": "output", "params": {"call": 1},
+                       "ctx": {"session": "s1", "full_access": true}}),
+                WAIT,
+            )
+            .await,
+            ErrorCode::InvalidArgs,
+        ),
+    );
+
     if let Some(folder) = &setup.folder {
         let key = &paired.request.public_key;
         let pw = setup.sudo_password.as_deref();
@@ -210,6 +226,10 @@ const PROFILE_CHECKS: &[(&str, &str)] = &[
     ),
     ("7.2", "fs read outside the allowed folder is forbidden"),
     ("7.3", "exec run of a command an allow rule names runs"),
+    (
+        "7.3",
+        "a running command's output streams to its own session only: the stream gives it in order as frames, then stream.close",
+    ),
     (
         "7.3",
         "a deny rule wins over an allow rule from the next call on",
@@ -251,6 +271,10 @@ const SUDO_ON_CHECKS: &[(&str, &str)] = &[
 ];
 
 const ALLOWED: &str = "echo nerve-conformance-allowed";
+/// A command that prints three lines over a second, in `sh` and in
+/// PowerShell.
+const STREAMED_SH: &str = "for i in 1 2 3; do echo line $i; sleep 0.3; done";
+const STREAMED_PS: &str = "foreach ($i in 1..3) { \"line $i\"; Start-Sleep -Milliseconds 300 }";
 const SUDO_ALLOWED: &str = "sudo echo nerve-conformance-sudo";
 
 type Conn = crate::wire::Conn<tokio::net::TcpStream>;
@@ -310,6 +334,101 @@ async fn sudo_state(conn: &mut Conn) -> Result<String, String> {
         )
         .await)?;
     Ok(v["sudo"].as_str().unwrap_or_default().to_string())
+}
+
+/// The command [`streams_output`] runs, in the node's shell: PowerShell on
+/// Windows.
+async fn streamed_command(conn: &mut Conn) -> Result<&'static str, String> {
+    let d = ok(conn
+        .call(method::DESCRIBE, json!({"detail": "summary"}), WAIT)
+        .await)?;
+    Ok(if d["node"]["platform"] == "windows" {
+        STREAMED_PS
+    } else {
+        STREAMED_SH
+    })
+}
+
+/// Runs `command` for one session, refuses its output stream to another
+/// session and to none, then reads it: frames in order with all three lines,
+/// and the node's `stream.close` with reason `ended`.
+async fn streams_output(conn: &mut Conn, command: &str) -> Result<(), String> {
+    let run = conn
+        .request(
+            method::INVOKE,
+            json!({"cap": "exec", "action": "run", "args": {"command": command},
+                   "ctx": {"session": "conformance-1"}}),
+        )
+        .await?;
+    let open = |session: Option<&str>| {
+        let mut p = json!({"cap": "exec", "stream": "output", "params": {"call": run}});
+        if let Some(s) = session {
+            p["ctx"] = json!({"session": s});
+        }
+        p
+    };
+    let mut others = Vec::new();
+    // Not before the command runs; a short command may also have ended.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for session in [Some("conformance-2"), None] {
+        let id = conn.request(method::STREAM_OPEN, open(session)).await?;
+        expect_code(
+            conn.answer(id, WAIT, &mut others).await,
+            ErrorCode::InvalidArgs,
+        )
+        .map_err(|e| format!("stream.open for another session: {e}"))?;
+    }
+    let id = conn
+        .request(method::STREAM_OPEN, open(Some("conformance-1")))
+        .await?;
+    let sid = ok(conn.answer(id, WAIT, &mut others).await)?["sid"]
+        .as_u64()
+        .ok_or("stream.open answered no sid")?;
+    let mut frames = conn.take_frames();
+    let mut ran = others.iter().any(|m| answers(m, run));
+    let mut closed = false;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while !(ran && closed) {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match conn.recv(left).await {
+            crate::wire::Recv::Frame(f) => frames.push(f),
+            crate::wire::Recv::Msg(m) if answers(&m, run) => ran = true,
+            crate::wire::Recv::Msg(nerve_proto::Message::Request {
+                id,
+                method: m,
+                params,
+            }) if m == method::STREAM_CLOSE => {
+                ensure(
+                    params["sid"].as_u64() == Some(sid) && params["reason"] == "ended",
+                    format!("stream.close {params:?}"),
+                )?;
+                conn.send(&nerve_proto::Message::result(id, json!({})))
+                    .await?;
+                closed = true;
+            }
+            crate::wire::Recv::Msg(_) => {}
+            other => return Err(format!("waiting for the stream: {other:?}")),
+        }
+    }
+    let mut text = Vec::new();
+    for (n, f) in frames.iter().enumerate() {
+        ensure(
+            u64::from(f.id) == sid && f.seq as usize == n && f.gap_bytes().is_none(),
+            format!("frame {n}: sid {} seq {}", f.id, f.seq),
+        )?;
+        text.extend_from_slice(&f.payload);
+    }
+    let text = String::from_utf8_lossy(&text).replace("\r\n", "\n");
+    ensure(
+        text.ends_with("line 1\nline 2\nline 3\n"),
+        format!("the stream gave {text:?}"),
+    )
+}
+
+/// Whether `m` is the answer to the request `id`.
+fn answers(m: &nerve_proto::Message, id: u64) -> bool {
+    let want = nerve_proto::Id::Num(id);
+    matches!(m, nerve_proto::Message::Result { id, .. } | nerve_proto::Message::Error { id: Some(id), .. } if *id == want)
 }
 
 async fn profiles(
@@ -402,9 +521,11 @@ async fn profile_steps(
         p.remove("until");
     }
     policy["folders"] = json!([]);
+    let streamed = streamed_command(conn).await?;
     policy["allow"] = json!([
         format!("fs:{}/*", literal(folder.trim_end_matches('/'))),
         format!("exec.run:{ALLOWED}"),
+        format!("exec.run:{}", literal(streamed)),
     ]);
     policy["deny"] = json!([]);
     policy["sudo_allow"] = json!([SUDO_ALLOWED]);
@@ -467,6 +588,8 @@ async fn profile_steps(
             )
         }),
     )?;
+
+    step(streams_output(conn, streamed).await)?;
 
     // A rule edit counts from the next call on, and a deny rule wins over
     // the allow rule for the same command.

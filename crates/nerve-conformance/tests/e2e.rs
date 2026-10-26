@@ -60,7 +60,7 @@ fn harness_part_passes_against_nerve_center() {
     let report = block_on(harness_part::run(&target));
     assert!(report.ok(), "{report}");
     // Every check ran; a count that shrinks silently would hide a lost check.
-    assert_eq!(report.outcomes.len(), 45, "{report}");
+    assert_eq!(report.outcomes.len(), 46, "{report}");
 }
 
 fn with(mut args: Value, more: Value) -> Value {
@@ -597,6 +597,93 @@ fn a_long_command_becomes_a_job_that_exec_signal_and_job_cancel_end() {
     assert!(mcp.finish());
 }
 
+/// A command that became a job streams its output between the real
+/// binaries: `stream.read` gives its lines while it still runs, then its
+/// end; the job's result still has all of it, and once it was read the
+/// stream is gone.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_jobs_command_streams_its_lines_before_it_ends() {
+    let root = tempfile::tempdir().unwrap();
+    let mut mcp = Mcp::start(
+        &root.path().join("center"),
+        false,
+        &[("NERVE_CALL_WAIT", "1")],
+    );
+    let mut node = Node::new(&root.path().join("node"));
+    node.ok(&["center", "add", &mcp.pair_link(), "--yes"]);
+    node.ok(&["mode", "set", "user"]);
+    node.start();
+    let ov = mcp.wait_overview("the node is online", |v| {
+        v["nodes"][0]["online"] == json!(true)
+    });
+    let name = ov["nodes"][0]["name"].as_str().unwrap().to_string();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !mcp.offered(&name).iter().any(|n| n == "exec.run") {
+        assert!(Instant::now() < deadline, "exec.run is not offered");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let command = "for i in 1 2 3 4 5 6; do echo line $i; sleep 1; done";
+    let r = mcp.run(&name, "exec.run", json!({"command": command}));
+    assert_eq!(r["structuredContent"]["state"], "running", "{r}");
+    let job = r["structuredContent"]["job"].as_str().unwrap().to_string();
+    let stream = r["structuredContent"]["stream"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no stream: {r}"))
+        .to_string();
+    let mut call = |unit: &str, args: Value| {
+        mcp.call(
+            "execute",
+            json!({"node": name, "capability": unit, "args": args}),
+        )
+    };
+    let mut text = String::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !text.contains("line 2\n") {
+        let got = call("stream.read", json!({"stream": stream, "wait_ms": 1000}));
+        assert_ne!(got["isError"], true, "{got}");
+        text.push_str(got["structuredContent"]["result"]["text"].as_str().unwrap());
+        assert!(Instant::now() < deadline, "no second line: {text:?}");
+    }
+    let still = call("job.status", json!({"job": job}));
+    assert_eq!(
+        still["structuredContent"]["state"], "running",
+        "the lines came only at the end: {still}"
+    );
+    let last = loop {
+        let got = call("stream.read", json!({"stream": stream, "wait_ms": 1000}));
+        let data = &got["structuredContent"]["result"];
+        text.push_str(data["text"].as_str().unwrap());
+        if data["eof"] == true {
+            break got;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the stream did not end: {text:?}"
+        );
+    };
+    assert!(
+        text_of(&last).contains("it ended (the command ended)"),
+        "{last}"
+    );
+    let all = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\n";
+    assert_eq!(text, all);
+    let done = loop {
+        let r = call("job.status", json!({"job": job, "wait_ms": 1000}));
+        if r["structuredContent"]["state"] != "running" {
+            break r;
+        }
+        assert!(Instant::now() < deadline, "the job did not end: {r}");
+    };
+    assert_eq!(done["structuredContent"]["result"]["stdout"], all, "{done}");
+    let gone = call("stream.read", json!({"stream": stream}));
+    assert!(
+        text_of(&gone).starts_with("error unknown_stream: "),
+        "{gone}"
+    );
+    assert!(mcp.finish());
+}
+
 /// A TCP relay between the node and the center whose connections the test
 /// can cut, as an address change does.
 #[cfg(target_os = "linux")]
@@ -743,7 +830,7 @@ fn node_part_passes_against_nerve_node() {
         .outcomes
         .iter()
         .filter(|o| o.section.starts_with('7'));
-    assert_eq!(profiles.count(), 19, "{report}");
+    assert_eq!(profiles.count(), 20, "{report}");
     drop(node);
 }
 

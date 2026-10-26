@@ -134,7 +134,8 @@ reads as the center's. Every error text of `execute` is one line, so no line
 of a node's words (or of a field name from its schema) reads as another
 refusal. The code is one of the
 [error codes](capabilities.md#errors), or the center's own `unknown_node`,
-`list_first` and `unknown_job`: a node's code outside the error codes becomes
+`list_first`, `unknown_job` and `unknown_stream`: a node's code outside the
+error codes becomes
 `internal`.
 
 ## Long calls become jobs
@@ -153,13 +154,26 @@ jobs. A session runs at most 16 calls at once, and the agents' calls of all
 sessions leave a quarter of a node's call places free, at most 8. Details:
 [harness spec §4.4](spec/harness.md#44-jobs).
 
+## Streams and events
+
+A command that became a job streams its output: the center opens the
+command's `output` stream on the node for the session (`stream.open` with
+`ctx.session`) and names it in the job's answer. `stream.read` gives what
+came since the last read, framed as the node's content, and waits for more
+when asked (at most the call wait); `stream.close` ends it. The center keeps
+at most 1 MiB per stream that was not read, drops the oldest past it and
+says how much; streams are the session's own, at most 16, in memory only,
+and go on close, when the job's result is read, with the session, or when
+the link ends. Events come the same way, by polling: there are no MCP
+notifications. Details: [harness spec §4.5](spec/harness.md#45-streams-and-events).
+
 ## Sessions
 
 Each MCP connection is one session. The center sends its id as `ctx.session`.
 A session remembers the units `list` gave it (at most 1024); a new one starts
 with none. When the session ends, every node it used gets `session.end` and
 cancels the session's calls, which stops their commands; its jobs and their
-results go with it. The web UI can end a session. A `notifications/cancelled`
+results, and its streams, go with it. The web UI can end a session. A `notifications/cancelled`
 within the call wait cancels its call on the node, and the cancelled request
 gets no response; a call that became a job is stopped by `job.cancel`.
 

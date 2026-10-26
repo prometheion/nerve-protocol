@@ -1645,6 +1645,24 @@ pub async fn run(target: &Target) -> Report {
         .await,
     );
 
+    // harness 4.5: a stream id the session was not given names nothing, for
+    // reading and closing alike. (The echo nodes run no commands, so no
+    // stream is opened here; the end-to-end tests stream a real command.)
+    r.check(
+        "harness 4.5",
+        "stream.read and stream.close of a stream the session was not given are error unknown_stream",
+        async {
+            s3.list(json!({"node": A, "capability": ["stream.read", "stream.close"]}))
+                .await?;
+            for unit in ["stream.read", "stream.close"] {
+                let res = s3.execute(A, unit, json!({"stream": "s-unknown"})).await?;
+                check_error_result(&res, "unknown_stream").map_err(|e| format!("{unit}: {e}"))?;
+            }
+            Ok(())
+        }
+        .await,
+    );
+
     // harness 4: a node that left is listed as offline with what it
     // offered, and a call to it is `unavailable`.
     b.leave().await;

@@ -113,13 +113,14 @@ never appears in a capability id or action name (protocol §6), while `_` and
   name, whatever `provider` the node wrote, so no session names another
   session's call by its raw id.
 - Beside a node's own units, when it offers at least one that is not off,
-  `list` shows the center's own `job.status` and `job.cancel` (§4.4).
+  `list` shows the center's own `job.status` and `job.cancel` (§4.4) and
+  `stream.read` and `stream.close` (§4.5).
   `execute` finds them on every node that is not disabled, also once its
   offer dropped to nothing (an `until` passed, every unit turned off), so a
   running job can still be read and stopped. The center tells its units by
   their capability, never by the node's `provider` field. A
   capability of the node named `job` or `stream` is left out whole, as one
-  entry: these names are the center's (`stream` is kept for streams).
+  entry: these names are the center's.
 - A capability with exposure `off` offers none of its units; `list(node)`
   names them in one trailing line, and `execute` of one is
   `error forbidden`.
@@ -400,6 +401,64 @@ and they count in no statistics:
   resumed ends its calls, and their jobs are `lost`; a link the node resumes
   (protocol.md §4.9) carries them on.
 
+### 4.5 Streams and events
+
+A job of `exec.run` streams its command's output. When the call becomes a
+job, the center opens the command's `output` stream on the node
+(`stream.open {cap: "exec", stream: "output", params: {call}, ctx: {session}}`,
+protocol.md §5.1, §7.3) for the calling session, and the job's answer names
+it: `Its output so far and as it comes: capability "stream.read" with args
+{"stream": "s-…"} …`, also in `next`, and `structuredContent` carries
+`"stream": "s-…"`. The node sends the end of what the command printed so far,
+then what it prints, stdout and stderr in the order it read them; the result
+still carries the output as before. When no stream could be opened (the
+session holds 16 already, the node refused, the job ended meanwhile) the
+answer says so and why: `Its output is not streamed (…); job.status gives it
+with the result.` The answer counts as the details of `stream.read` and
+`stream.close` (§4.3), as of `job.*`.
+
+The center serves two more units of its own, like `job.*` (no node call for a
+read, no checker, no statistics):
+
+| Unit | Effect | `args` | Answer |
+|---|---|---|---|
+| `stream.read` | `read` | `stream`, `max_bytes?` (64 to 262 144, 16 384 when none), `wait_ms?` (0 to 600 000) | what came since the last read |
+| `stream.close` | `read` | `stream` | `{"stream", "state": "closed"}` |
+
+- `stream.read` waits up to `wait_ms` (never longer than the call wait) when
+  nothing is there yet, then gives at most `max_bytes`: a line `Stream s-…
+  (output of job j-… on node box-1): N bytes; more may come. Call
+  stream.read … again …` (or `nothing new yet. …`, or `it ended (the command
+  ended); this is the last of it.`), then the text framed as device content.
+  `structuredContent` is the envelope (§4.3) with `result` `{text, eof,
+  dropped?}`, and the center's `{stream, job, eof, next?}` as `center`. A
+  character a cut would split waits for the next read. The bytes are read as
+  UTF-8 (a byte that is not is a replacement character).
+- The center keeps at most 1 MiB per stream that was not read; past it the
+  oldest bytes go, and the next read says how many (`dropped`, and `N bytes
+  were dropped before this text: …`). The node keeps at most 1 MiB the link
+  did not carry yet and says the same of what it drops; the command is never
+  held up by its stream.
+- A stream is kept in memory only. It goes with `stream.close` (the node is
+  told to stop it if it still runs there), when its job's result is read
+  through `job.status`, with the session, and 10 minutes after it ended
+  unread. A session holds at most 16; a 17th goes in place of the oldest that
+  ended, or is not opened. A link that drops ends its streams on both sides,
+  also when the link resumes (their frames are not counted, protocol.md §4.9):
+  a read then gives what came and `it ended (the link to the node dropped)`.
+- An id that names no stream of this session on that node (another
+  session's, one closed or dropped, a wrong one) is `error unknown_stream`,
+  for reading and closing alike.
+- A sudo command's output is not streamed: frames are not scrubbed of the
+  sudo password the way the text of a result is.
+
+**Events.** The harness learns of what happens on a machine by polling, not
+by MCP notifications (HTTP has no server-sent events here, and many
+harnesses ignore notifications): an `execute` that subscribes to something
+answers with a stream id, and `stream.read` with `wait_ms` fetches what came.
+In this version only a command's output is a stream; a provider's events and
+streams come the same way later (B6 of issue #152).
+
 ## 5. Sessions
 
 Each MCP connection (stdio, attached, or HTTP session) is one session with an
@@ -407,7 +466,8 @@ id the center sends as `ctx.session`. A session remembers the units `list`
 gave it the details of (§4.3); a new session remembers none, also the one
 that replaces a session the web UI ended over stdio. When a session ends, every
 node it used gets `session.end` and cancels that session's calls, which stops
-their commands; its jobs stop and their results are dropped (§4.4). The web
+their commands; its jobs stop and their results are dropped (§4.4), and its
+streams are dropped (§4.5). The web
 UI can end a session. A `notifications/cancelled` within the call wait
 cancels its call on the node, and the cancelled request gets no response;
 once the call became a job, only `job.cancel` or the session's end stops it.
@@ -493,4 +553,5 @@ model endpoint's bearer token, mode 0600) and `<state>/checker/` (the
 installed llama.cpp build and model). It never stores file contents, command
 output or arguments; the endpoint token is its one secret, and it is in no
 backup. A job's result (§4.4) is held in memory only, until it is read, for
-10 minutes, or until its session ends.
+10 minutes, or until its session ends; so is a command's output in a stream
+(§4.5), until it is read or the stream goes.

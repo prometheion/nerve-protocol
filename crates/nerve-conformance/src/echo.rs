@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use nerve_proto::link::{CenterUrl, PairLink, PairRequest, PairResponse};
-use nerve_proto::msg::{self, Challenge, Describe, Invoke, method};
+use nerve_proto::msg::{self, Challenge, Describe, Invoke, StreamClose, StreamOpen, method};
 use nerve_proto::{
     Descriptor, ErrorCode, Message, PAIR_PATH, PROTOCOL_VERSION, RpcError, rpc::params,
 };
@@ -275,6 +275,23 @@ pub fn handle(m: &str, p: &Map<String, Value>, d: &Descriptor) -> Result<Value, 
         }
         method::SUB | method::UNSUB => Ok(json!({})),
         method::GET => Ok(json!({})),
+        // The echo node offers no streams, but reads the request as
+        // strictly as a node must.
+        method::STREAM_OPEN => {
+            let o: StreamOpen = params(p)?;
+            o.check()?;
+            Err(match d.capability(&o.cap) {
+                None => RpcError::new(
+                    ErrorCode::UnknownCapability,
+                    format!("no capability {}", o.cap),
+                ),
+                Some(_) => RpcError::new(ErrorCode::UnknownMember, "no such stream"),
+            })
+        }
+        method::STREAM_CLOSE => {
+            let _: StreamClose = params(p)?;
+            Err(RpcError::new(ErrorCode::UnknownMember, "no such stream"))
+        }
         _ => Err(RpcError::new(
             ErrorCode::MethodNotFound,
             format!("unknown method {m}"),

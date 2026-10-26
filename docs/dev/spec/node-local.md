@@ -1474,8 +1474,8 @@ The node refuses it, with nothing attached, when:
   longer name); a capability is named twice, takes the
   name or the profile of one of the node's own (`node`, `fs`, `exec`,
   `settings`, `audit`) or of the center's (`job`, `stream`: the center
-  serves `job.status` and `job.cancel` on every node itself, harness.md
-  §4.4, and keeps `stream` for streams), or is added by another attached
+  serves `job.status`, `job.cancel`, `stream.read` and `stream.close` on
+  every node itself, harness.md §4.4, §4.5), or is added by another attached
   provider; or a
   capability declares anything but `id`, `profile`, `summary` and `actions`
   (no events, state or streams: the node forwards calls only, and the node,
