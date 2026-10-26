@@ -2343,6 +2343,38 @@ mod tests {
         assert_eq!(r["truncated"], true);
     }
 
+    /// The output stream carries all a command prints, also past the cap
+    /// that cuts its result.
+    #[tokio::test]
+    async fn the_stream_carries_the_output_past_the_cap() {
+        let tap = std::sync::Arc::new(crate::tap::Tap::default());
+        let stream = tap.reader();
+        let o = RunOptions {
+            tap: Some(tap.clone()),
+            ..opts(100)
+        };
+        let r = run(
+            &call("head -c 5000 /dev/zero | tr '\\0' a; echo end"),
+            &o,
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["stdout"].as_str().unwrap().len(), 100);
+        assert_eq!(r["truncated"], true);
+        tap.end();
+        let mut got = Vec::new();
+        loop {
+            match stream.next(usize::MAX).await {
+                crate::tap::Chunk::Data(more) => got.extend(more),
+                crate::tap::Chunk::End => break,
+                gap => panic!("{gap:?}"),
+            }
+        }
+        assert_eq!(got.len(), 5004);
+        assert!(got.ends_with(b"aaend\n"));
+    }
+
     fn sudo_input(password: &str) -> Option<SudoInput> {
         Some(SudoInput {
             password: password.into(),
