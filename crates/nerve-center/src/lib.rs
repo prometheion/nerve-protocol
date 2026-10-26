@@ -27,6 +27,7 @@ pub mod pairing;
 pub mod server;
 pub mod service;
 pub mod store;
+pub mod streams;
 pub mod tools;
 pub mod ui;
 pub mod util;

@@ -133,9 +133,21 @@ pub(crate) struct LinkHandle {
 /// What [`LinkHandle`] scrubs a frame with.
 pub(crate) type Scrub = Box<dyn Fn(String) -> String + Send + Sync>;
 
+/// What goes to the writer of a connection beside its queue of frames:
+/// the frames of streams, which it sends only while that queue is empty.
+pub(crate) enum StreamOut {
+    Frame(WsMessage),
+    /// Answered once every stream frame queued before it was sent.
+    Flushed(tokio::sync::oneshot::Sender<()>),
+}
+
 struct Wire {
     /// The writer of the connection now; `None` while the link is down.
     tx: Option<mpsc::Sender<WsMessage>>,
+    /// Its queue of stream frames, apart from `tx`: a stream that outruns
+    /// the link never fills `tx`, so pings, acks, events and answers still
+    /// get out.
+    frames: Option<mpsc::Sender<StreamOut>>,
     /// The counts and the kept frames, when the center can resume the link.
     replay: Option<Replay>,
 }
@@ -158,12 +170,18 @@ struct Subs {
 }
 
 impl LinkHandle {
-    /// A link on the connection `tx` writes to; `resumable` when the center
-    /// can resume it.
-    pub fn new(tx: mpsc::Sender<WsMessage>, resumable: bool, scrub: Scrub) -> LinkHandle {
+    /// A link on the connection `tx` and `frames` write to; `resumable`
+    /// when the center can resume it.
+    pub fn new(
+        tx: mpsc::Sender<WsMessage>,
+        frames: mpsc::Sender<StreamOut>,
+        resumable: bool,
+        scrub: Scrub,
+    ) -> LinkHandle {
         LinkHandle {
             wire: Mutex::new(Wire {
                 tx: Some(tx),
+                frames: Some(frames),
                 replay: resumable.then(|| Replay::new(resume::KEEP_BYTES)),
             }),
             subs: Mutex::default(),
@@ -274,6 +292,35 @@ impl LinkHandle {
         }
     }
 
+    /// Sends a binary frame of a stream, waiting for room in the stream
+    /// queue. Binary frames are not counted: `false` when the link is not
+    /// on a connection now, and the stream ends.
+    pub async fn frame(&self, f: &nerve_proto::frame::Frame) -> bool {
+        let Ok(bytes) = f.encode() else {
+            return false;
+        };
+        let frames = lock(&self.wire).frames.clone();
+        match frames {
+            Some(q) => q
+                .send(StreamOut::Frame(WsMessage::binary(bytes)))
+                .await
+                .is_ok(),
+            None => false,
+        }
+    }
+
+    /// Waits until the stream frames queued so far were sent, so what
+    /// follows on the frame queue comes after them; `false` when the link
+    /// left its connection first.
+    pub async fn flushed(&self) -> bool {
+        let frames = lock(&self.wire).frames.clone();
+        let Some(q) = frames else {
+            return false;
+        };
+        let (done, sent) = tokio::sync::oneshot::channel();
+        q.send(StreamOut::Flushed(done)).await.is_ok() && sent.await.is_ok()
+    }
+
     /// Sends a frame of this connection only (a ping, an `ack`), if there
     /// is room.
     pub fn raw(&self, m: WsMessage) {
@@ -303,6 +350,7 @@ impl LinkHandle {
         let Wire {
             tx: Some(tx),
             replay: Some(r),
+            ..
         } = &mut *w
         else {
             return;
@@ -345,12 +393,20 @@ impl LinkHandle {
     /// Takes the link off its connection: until it resumes, what is sent is
     /// kept, or lost on a link that cannot resume.
     pub fn detach(&self) {
-        lock(&self.wire).tx = None;
+        let mut w = lock(&self.wire);
+        w.tx = None;
+        w.frames = None;
     }
 
-    /// Puts the resumed link on the connection `tx` writes to, the center
-    /// having read `got` frames of it. Gives the frames to send first.
-    pub fn attach(&self, tx: mpsc::Sender<WsMessage>, got: u64) -> Result<Vec<String>, String> {
+    /// Puts the resumed link on the connection `tx` and `frames` write to,
+    /// the center having read `got` frames of it. Gives the frames to send
+    /// first.
+    pub fn attach(
+        &self,
+        tx: mpsc::Sender<WsMessage>,
+        frames: mpsc::Sender<StreamOut>,
+        got: u64,
+    ) -> Result<Vec<String>, String> {
         let mut w = lock(&self.wire);
         let again = w
             .replay
@@ -358,6 +414,7 @@ impl LinkHandle {
             .ok_or("this link cannot resume")?
             .resume(got)?;
         w.tx = Some(tx);
+        w.frames = Some(frames);
         Ok(again)
     }
 

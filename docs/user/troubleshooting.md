@@ -70,6 +70,7 @@ in the machine's audit log. The model can mostly fix them by itself.
 | `unavailable: node … is disabled in the center` | You disabled the machine in the center | **Enable** it on the Overview |
 | `forbidden: "…" is turned off on node … by its owner` | `cap set … off` on the machine | `nerve-node cap set <capability> on` |
 | `unknown_job: node … has no job "j-…" of this session` | The id is wrong or another session's, or the job's result was given already, or not read within 10 minutes ([long calls](harness.md#long-calls-become-jobs)) | Run the call again if its result is still needed |
+| `unknown_stream: node … has no stream "s-…" of this session` | The id is wrong or another session's, or the stream went: it was closed, its job's result was read, or it ended 10 minutes ago ([long calls](harness.md#a-commands-output-while-it-runs)) | Read the job's result with `job.status`; it carries the output from its start |
 | `busy: this session has 16 calls running` | The session runs 16 calls at once already, jobs included; the message names its running jobs | Wait for one with `job.status`, or stop one with `job.cancel` |
 | `busy: node … runs 56 calls already` | Agents' calls of all sessions hold the places the center gives them on that machine ([limits](limits.md#calls-of-one-agent-session)) | Wait for a job to end, stop one with `job.cancel` (the message names the session's running jobs), or end a session in the web UI |
 

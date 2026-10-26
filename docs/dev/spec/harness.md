@@ -113,13 +113,14 @@ never appears in a capability id or action name (protocol §6), while `_` and
   name, whatever `provider` the node wrote, so no session names another
   session's call by its raw id.
 - Beside a node's own units, when it offers at least one that is not off,
-  `list` shows the center's own `job.status` and `job.cancel` (§4.4).
+  `list` shows the center's own `job.status` and `job.cancel` (§4.4) and
+  `stream.read` and `stream.close` (§4.5).
   `execute` finds them on every node that is not disabled, also once its
   offer dropped to nothing (an `until` passed, every unit turned off), so a
   running job can still be read and stopped. The center tells its units by
   their capability, never by the node's `provider` field. A
   capability of the node named `job` or `stream` is left out whole, as one
-  entry: these names are the center's (`stream` is kept for streams).
+  entry: these names are the center's.
 - A capability with exposure `off` offers none of its units; `list(node)`
   names them in one trailing line, and `execute` of one is
   `error forbidden`.
@@ -289,20 +290,21 @@ and sends nothing to the node.
    (`exec.signal` names no folder). A session
    remembers at most 1024 units and drops the one listed longest ago; the
    model then lists it again. An `execute` answered with a job counts as the
-   details of that node's `job.status` and `job.cancel`, and of its
-   `exec.signal` where the node offers it: it names them with their args
-   (§4.4).
+   details of that node's `job.status` and `job.cancel`, of its
+   `stream.read` and `stream.close`, and of its `exec.signal` where the node
+   offers it: it names them with their args (§4.4, §4.5).
 5. `args` (missing or `null` is `{}`) against the unit's `params`. Arguments
    that do not fit are `error invalid_args: <field>: expected <what>`
    (`error invalid_args: path: expected a string (required)`). This refusal
    is logged and counted as a failed call of the unit.
 6. The call itself: the action checker (§6), then the node, as for any call.
    A node that is offline is `error unavailable`. A call that runs past the
-   call wait becomes a job (§4.4). The center's own `job.status` and
-   `job.cancel` go to neither: the center answers them.
+   call wait becomes a job (§4.4). The center's own `job.status`,
+   `job.cancel`, `stream.read` and `stream.close` go to neither: the center
+   answers them.
 
-`unknown_node`, `list_first` and `unknown_job` (§4.4) are the center's own
-codes; the others are those of [protocol.md](protocol.md) §5. Nothing of
+`unknown_node`, `list_first`, `unknown_job` (§4.4) and `unknown_stream`
+(§4.5) are the center's own codes; the others are those of [protocol.md](protocol.md) §5. Nothing of
 this changes the node link.
 
 A result is text marked as device content:
@@ -325,6 +327,23 @@ has no `structuredContent`. The code is one of [protocol.md](protocol.md) §5
 are cut at 4 KiB each. Every error text of `execute` is one line, whoever wrote
 its words (a node's message, or a field of the node's schema that the center's
 own `invalid_args` names): a line break in them becomes a space.
+
+A node's text that the center puts in by lines (a string result, a
+stream's output) cannot end the framing or start a line that reads as it:
+a `[` that comes on a line before any ASCII letter, digit or other ASCII
+mark (so also after blanks, characters that show as nothing, a sign such as
+`•`, a mark that combines with nothing, or a word in another script) gets a
+`\` before it (`\[end of device content]`), so only the framing's own two
+lines start with `[`. Each stream read's text starts a line, also where it
+begins in the middle of one of the node's lines.
+Control characters other than line breaks and tabs are shown escaped as in
+JSON (`\r`, `\u001b`, also U+2028 and U+2029), with a Windows line end read
+as a line break. Such text is sized as it is shown: a string result whose
+shown text passes 256 KiB is cut, also when the string itself is shorter.
+Any other result is JSON, which quotes what it holds; the same control
+characters and U+2028/U+2029 are escaped in it too (JSON itself leaves DEL,
+the C1 controls and those two raw), and it is sized as it is shown.
+`structuredContent` carries the text as it came.
 
 ### 4.4 Jobs
 
@@ -400,6 +419,96 @@ and they count in no statistics:
   resumed ends its calls, and their jobs are `lost`; a link the node resumes
   (protocol.md §4.9) carries them on.
 
+### 4.5 Streams and events
+
+A job of `exec.run` streams its command's output. When the call becomes a
+job, its answer names a stream for the calling session: `Its output so far
+and as it comes: capability "stream.read" with args {"stream": "s-…"} …`,
+also in `next`, and `structuredContent` carries `"stream": "s-…"`. The center
+opens the command's `output` stream on the node (`stream.open {cap: "exec",
+stream: "output", params: {call}, ctx: {session}}`, protocol.md §5.1, §7.3)
+once the call was sent and the command runs there: while the node has no such
+command yet (the checker or a call place held the call, or the node is
+still setting the command up) it asks again, for up to a minute after the
+call was sent; neither the answer nor any read waits for that. The node sends
+the end of what the command printed so far, then what it prints, stdout and
+stderr in the order it read them; the result still carries the output as
+before. When the stream cannot be opened (the job ended first, the node
+refused, or the command did not start or the node did not answer within
+that minute; a link has at most 4 `stream.open`s that went unanswered for
+10 s each, and asks for no more until their answers come) it ends, and a read
+says why in the center's words: `it ended (the node refused to open it
+(forbidden))`. A session has at most half of a node's stream places open at
+once (8 of its `limits.streams` 16), so other sessions' streams find room; a
+further stream of it, or one the node has no place for yet (`busy`), opens
+once a place frees up, and reads give nothing new until then. Only when the session holds 16 streams that still run, or it ended,
+does the answer name none: `Its output is not streamed (…); job.status gives
+it with the result.` The answer counts as the details of `stream.read` and
+`stream.close` (§4.3), as of `job.*`.
+
+The center serves two more units of its own, like `job.*` (no node call for a
+read, no checker, no statistics):
+
+| Unit | Effect | `args` | Answer |
+|---|---|---|---|
+| `stream.read` | `read` | `stream`, `max_bytes?` (64 to 262 144, 16 384 when none), `wait_ms?` (0 to 600 000) | what came since the last read |
+| `stream.close` | `read` | `stream` | `{"stream", "state": "closed"}` |
+
+- `stream.read` waits up to `wait_ms` (never longer than the call wait) when
+  nothing is there yet, then gives at most `max_bytes` (and at most 252 KiB,
+  so the answer's other words fit within 256 KiB): a line `Stream s-…
+  (output of job j-… on node box-1): N bytes; more may come. Call
+  stream.read … again …` (or `nothing new yet. …`, or `it ended (the command
+  ended); this is the last of it.`), then the text framed as device content.
+  `structuredContent` is the envelope (§4.3) with `result` `{text, eof,
+  dropped?}`, and the center's `{stream, job, eof, next?}` as `center`; as
+  for a long result (§4.3), it is left out when its JSON would pass 256 KiB,
+  and the text stands alone. A
+  character a cut would split waits for the next read, and a wait goes on
+  while the stream holds only the start of one. The bytes are read as UTF-8
+  (bytes that are not read as a replacement character, which counts as 3
+  bytes toward `max_bytes` and the 252 KiB, as an escaped control character
+  or the `\` before a line's `[` (§4.3) counts as what the text shows); a Windows node sends
+  output in the console's code page as UTF-8 (protocol.md §7.3).
+- A read that gives output taints the session (the action checker's taint,
+  §4.4): it is outside content, as the job's result is when it ends.
+- The center keeps at most 1 MiB per stream that was not read; past it the
+  oldest bytes go, and the next read says how many (`dropped`, and `N bytes
+  were dropped before this text: …`, which names every cause). A read ends
+  where the node dropped bytes, so its text has nothing missing inside it;
+  the next read starts with that count. The node keeps
+  at most 1 MiB the link did not carry yet and says the same of what it
+  drops, and a stream opened after its command printed more than the node
+  keeps of it starts with the end of that and the count of what came before;
+  the command is never held up by its stream.
+- A stream is kept in memory only. It goes with `stream.close` (the node is
+  told to stop it if it still runs there, without waiting for its answer),
+  when its job's result is read through `job.status`, with the session, and
+  10 minutes after it ended unread. A result that lacks output the stream
+  holds (cut at its cap, or none at all: the command failed or timed out,
+  the link dropped, the result was not kept) leaves the stream until it is
+  read, closed or 10 minutes past its end, and the `job.status` answer
+  names it: `Its output stream s-… still holds what the command printed that
+  this answer lacks: …`. The job's answer says to read the stream before the
+  result. A session holds at most 16; a 17th goes in place of the oldest that
+  ended, or is not opened. A link that drops ends its streams on both sides,
+  also when the link resumes (their frames are not counted, protocol.md §4.9):
+  a read then gives what came and `it ended (the link to the node dropped)`.
+- An id that names no stream of this session on that node (another
+  session's, one closed or dropped, a wrong one) is `error unknown_stream`,
+  for reading and closing alike.
+- A sudo command's output is not streamed (also one the node runs as root for
+  `nerve-run`): its stderr carries sudo's prompts, which only its result is
+  stripped of; the node answers its `stream.open` with `unavailable`. Any other command's stream is stripped of the sudo
+  password the node holds, as every frame is (node-local.md §4).
+
+**Events.** The harness learns of what happens on a machine by polling, not
+by MCP notifications (HTTP has no server-sent events here, and many
+harnesses ignore notifications): an `execute` that subscribes to something
+answers with a stream id, and `stream.read` with `wait_ms` fetches what came.
+In this version only a command's output is a stream; a provider's events and
+streams come the same way later (B6 of issue #152).
+
 ## 5. Sessions
 
 Each MCP connection (stdio, attached, or HTTP session) is one session with an
@@ -407,7 +516,8 @@ id the center sends as `ctx.session`. A session remembers the units `list`
 gave it the details of (§4.3); a new session remembers none, also the one
 that replaces a session the web UI ended over stdio. When a session ends, every
 node it used gets `session.end` and cancels that session's calls, which stops
-their commands; its jobs stop and their results are dropped (§4.4). The web
+their commands; its jobs stop and their results are dropped (§4.4), and its
+streams are dropped (§4.5). The web
 UI can end a session. A `notifications/cancelled` within the call wait
 cancels its call on the node, and the cancelled request gets no response;
 once the call became a job, only `job.cancel` or the session's end stops it.
@@ -493,4 +603,5 @@ model endpoint's bearer token, mode 0600) and `<state>/checker/` (the
 installed llama.cpp build and model). It never stores file contents, command
 output or arguments; the endpoint token is its one secret, and it is in no
 backup. A job's result (§4.4) is held in memory only, until it is read, for
-10 minutes, or until its session ends.
+10 minutes, or until its session ends; so is a command's output in a stream
+(§4.5), until it is read or the stream goes.

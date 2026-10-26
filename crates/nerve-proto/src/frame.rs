@@ -9,6 +9,10 @@ pub const MAX_PAYLOAD: usize = 64 * 1024;
 
 /// Flag bit 0 on a blob chunk: this is the blob's last chunk.
 pub const FLAG_LAST: u8 = 1;
+/// Flag bit 1 on a stream frame: the sender dropped bytes of the stream here,
+/// because the other side did not take them fast enough. The payload is
+/// their count, a big-endian `u64`, and carries no data.
+pub const FLAG_GAP: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -90,6 +94,38 @@ impl Frame {
 
     pub fn last(&self) -> bool {
         self.flags & FLAG_LAST != 0
+    }
+
+    /// A stream frame that says `n` bytes of stream `sid` were dropped
+    /// before the frame `seq`.
+    pub fn gap(sid: u32, seq: u32, n: u64) -> Frame {
+        Frame {
+            kind: Kind::Stream,
+            flags: FLAG_GAP,
+            id: sid,
+            seq,
+            payload: n.to_be_bytes().to_vec(),
+        }
+    }
+
+    /// The bytes a gap frame says were dropped; none for any other frame.
+    pub fn gap_bytes(&self) -> Option<u64> {
+        if self.kind != Kind::Stream || self.flags & FLAG_GAP == 0 {
+            return None;
+        }
+        Some(u64::from_be_bytes(self.payload.as_slice().try_into().ok()?))
+    }
+}
+
+/// A stream frame with `data` (at most [`MAX_PAYLOAD`] bytes) of stream
+/// `sid`, the `seq`th frame of it.
+pub fn stream_frame(sid: u32, seq: u32, data: Vec<u8>) -> Frame {
+    Frame {
+        kind: Kind::Stream,
+        flags: 0,
+        id: sid,
+        seq,
+        payload: data,
     }
 }
 
@@ -178,6 +214,18 @@ mod tests {
         let mut big = big;
         big[0] = 1;
         assert!(matches!(Frame::decode(&big), Err(FrameError::TooLarge(_))));
+    }
+
+    /// A gap frame says how many bytes went; a data frame is no gap.
+    #[test]
+    fn stream_gaps() {
+        let g = Frame::decode(&Frame::gap(5, 2, 70_000).encode().unwrap()).unwrap();
+        assert_eq!((g.id, g.seq, g.gap_bytes()), (5, 2, Some(70_000)));
+        // Eight bytes of data are data, not a count.
+        assert_eq!(stream_frame(5, 3, b"8 bytes!".to_vec()).gap_bytes(), None);
+        let mut short = Frame::gap(5, 2, 1);
+        short.payload.pop();
+        assert_eq!(short.gap_bytes(), None);
     }
 
     #[test]

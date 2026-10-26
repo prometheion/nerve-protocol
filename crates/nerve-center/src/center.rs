@@ -30,6 +30,7 @@ use crate::link::{Link, SHORT_CALL, calls_kept};
 use crate::listing;
 use crate::pairing::{Codes, Outcome};
 use crate::store::{KeyRotation, NodeRecord, OldKey, Store};
+use crate::streams::{self, Ring, Streams};
 use crate::tools::Route;
 use crate::util::{self, now_ms};
 
@@ -124,6 +125,10 @@ pub struct Inner {
     /// How long `execute` waits for a result before the call becomes a job,
     /// in milliseconds (`--call-wait`).
     call_wait_ms: AtomicU64,
+    /// How long one `stream.open` waits for its answer, and how long a
+    /// job's stream is asked for while its command does not run yet
+    /// ([`streams::open_on_node`]).
+    stream_waits: Mutex<(Duration, Duration)>,
     /// The action checker (issue #17), rebuilt when its config changes.
     checker: Mutex<Arc<Checker>>,
     /// The local llama-server the checker runs, when the model is on and its
@@ -242,6 +247,9 @@ pub struct Session {
     /// The session's calls and the jobs they became (crate::jobs). Locked
     /// on its own, like `fetched`.
     pub jobs: Mutex<Jobs>,
+    /// The output streams of its jobs (crate::streams). Locked on its own,
+    /// never with `jobs`.
+    pub streams: Mutex<Streams>,
 }
 
 /// The most units a session remembers having been shown; past it the one
@@ -500,6 +508,7 @@ impl Center {
             dead_after_ms: AtomicU64::new(crate::link::DEAD_AFTER.as_millis() as u64),
             grace_ms: AtomicU64::new(nerve_proto::resume::GRACE.as_millis() as u64),
             call_wait_ms: AtomicU64::new(jobs::CALL_WAIT.as_millis() as u64),
+            stream_waits: Mutex::new((streams::OPEN_WAIT, streams::START_WAIT)),
             checker: Mutex::new(Arc::new(Checker::build(CheckerConfig::default(), None))),
             local_model: Mutex::new(None),
             local_sig: Mutex::new(String::new()),
@@ -551,6 +560,14 @@ impl Center {
     /// How long a dropped link waits for the node to resume it (spec §4.9).
     pub fn grace(&self) -> Duration {
         Duration::from_millis(self.grace_ms.load(Ordering::Relaxed))
+    }
+
+    /// Shortens a `stream.open`'s wait for its answer and the time a job's
+    /// stream is asked for while its command does not run yet, so that a
+    /// test need not wait 40 s and a minute for the center to give up.
+    #[doc(hidden)]
+    pub fn set_stream_waits(&self, open: Duration, start: Duration) {
+        *self.stream_waits.lock().unwrap() = (open, start);
     }
 
     /// Shortens the grace, so that a test need not wait 30 s for the calls
@@ -2215,6 +2232,7 @@ impl Center {
             tainted: AtomicBool::new(false),
             fetched: Mutex::new(Fetched::default()),
             jobs: Mutex::new(Jobs::default()),
+            streams: Mutex::new(Streams::default()),
         });
         self.sessions
             .lock()
@@ -2243,6 +2261,11 @@ impl Center {
         let stops = s.jobs.lock().unwrap().end();
         for stop in stops {
             let _ = stop.send(Stop::SessionEnded);
+        }
+        // Its streams are dropped; one still running on its node stops.
+        let closers = s.streams.lock().unwrap().end();
+        for c in closers {
+            c.close("the session ended");
         }
         self.log.record(
             Level::Info,
@@ -2515,6 +2538,60 @@ impl Center {
         )
     }
 
+    /// Names the output stream of the `exec.run` job `job` of `sess`, and
+    /// opens it on its node once the command runs there
+    /// (docs/dev/spec/harness.md §4.5, [`streams::open_on_node`]): its id,
+    /// or why it has none.
+    pub fn open_output(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        job: &str,
+    ) -> Result<String, String> {
+        let (room, gone) = sess.streams.lock().unwrap().room(Instant::now());
+        for c in gone {
+            c.close("too many streams");
+        }
+        if !room {
+            return Err(format!(
+                "this session holds {} streams already, the most it may: close one with stream.close",
+                streams::STREAMS_MAX
+            ));
+        }
+        let ring = Arc::new(Ring::default());
+        let id = streams::new_id();
+        if !sess
+            .streams
+            .lock()
+            .unwrap()
+            .add(&id, &route.node_id, job, ring.clone())
+        {
+            return Err("the session ended".into());
+        }
+        let waits = *self.stream_waits.lock().unwrap();
+        tokio::spawn(streams::open_on_node(
+            Arc::downgrade(sess),
+            route.node_id.clone(),
+            job.to_string(),
+            id.clone(),
+            ring,
+            waits,
+        ));
+        Ok(id)
+    }
+
+    /// The session read a command's output (`stream.read`): outside content,
+    /// as the command's result is once it ends, so it taints the session.
+    pub fn taint_by_output(&self, sess: &Session) {
+        if self.checker().taint_on()
+            && checker::taints(nerve_proto::Effect::Execute)
+            && !sess.tainted()
+        {
+            sess.set_tainted();
+            self.changed(Change::Sessions);
+        }
+    }
+
     /// The task that owns a call: it runs it until its result comes or it is
     /// stopped, counts it, and hands the result to the `execute` still
     /// waiting, or keeps it for the job's `job.status`. A stopped call drops
@@ -2550,6 +2627,11 @@ impl Center {
                     tokio::time::sleep(jobs::KEEP_FOR).await;
                     if let Some(s) = weak.upgrade() {
                         s.jobs.lock().unwrap().expire(&id);
+                        // Its output stream goes with it.
+                        let stream = s.streams.lock().unwrap().of_job(&id);
+                        if let Some(c) = stream {
+                            c.close("its job was forgotten");
+                        }
                     }
                 });
             }
@@ -3907,7 +3989,8 @@ mod tests {
     }
 
     /// The result of a job nobody reads is forgotten after `KEEP_FOR` by a
-    /// timer of its own: no later call of the session is needed for it.
+    /// timer of its own: no later call of the session is needed for it. Its
+    /// output stream goes with it.
     #[tokio::test(start_paused = true)]
     async fn an_unread_jobs_result_is_forgotten_without_another_call() {
         let dir = tempfile::tempdir().unwrap();
@@ -3928,16 +4011,28 @@ mod tests {
                 Some(Duration::ZERO),
             )
             .await;
-        assert!(matches!(ran, Ran::Job(_)), "{ran:?}");
+        let Ran::Job(job) = ran else {
+            panic!("{ran:?}")
+        };
+        let ring = Arc::new(crate::streams::Ring::default());
+        assert!(
+            sess.streams
+                .lock()
+                .unwrap()
+                .add("s-1", "n1", &job, ring.clone())
+        );
         while sess.jobs.lock().unwrap().running() > 0 {
             tokio::task::yield_now().await;
         }
         let held = || sess.jobs.lock().unwrap().held();
-        assert_eq!(held(), 1, "its result is kept");
+        let streams = || sess.streams.lock().unwrap().len();
+        assert_eq!((held(), streams()), (1, 1), "its result is kept");
         tokio::time::sleep(jobs::KEEP_FOR - Duration::from_secs(1)).await;
-        assert_eq!(held(), 1, "for ten minutes");
+        assert_eq!((held(), streams()), (1, 1), "for ten minutes");
         tokio::time::sleep(Duration::from_secs(2)).await;
-        assert_eq!(held(), 0, "then forgotten");
+        assert_eq!((held(), streams()), (0, 0), "then forgotten");
+        let r = ring.read(64);
+        assert_eq!(r.why.as_deref(), Some("its job was forgotten"));
     }
 
     /// The owner's note on a machine is kept on one line, refused when long,

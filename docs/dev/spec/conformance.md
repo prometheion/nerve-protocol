@@ -47,7 +47,8 @@ takes a call wait of up to 598.5 s (its job call runs 1.5 s longer, and
 `echo.wait` waits at most 600 s). A short one keeps the part quick; the
 tests use nerve-center's default, 20 s. Each node offers `echo.say`, `echo.fail` (valid by its schema, it
 always fails on the node), `echo.wait` (answered after the `ms` it is
-asked to wait), `mirror.say` and `mirror.set`, and describes `node`,
+asked to wait), `echo.lines` (the text back as a string result),
+`mirror.say` and `mirror.set`, and describes `node`,
 `settings` and `audit` units that a center must never offer; the part
 changes a node's descriptor while it runs.
 
@@ -90,6 +91,7 @@ points the node at a fake `sudo` (`machine.sudo_path`) for this.
 | 5.2 | an unknown method is `method_not_found` |
 | 5.3 | invoke of an unknown capability is `unknown_capability` |
 | 5.2 | an unknown ctx field is `invalid_args` |
+| 5.2 | an unknown ctx field of `stream.open` is `invalid_args` |
 | 4.5 | after `bye revoked` the node does not dial again |
 
 With a `Setup::folder`, before `bye revoked`:
@@ -102,6 +104,7 @@ With a `Setup::folder`, before `bye revoked`:
 | 7.2 | fs read returns what fs write wrote, with the same etag |
 | 7.2 | fs read outside the allowed folder is `forbidden` |
 | 7.3 | exec run of a command an allow rule names runs |
+| 7.3 | a running command's `output` stream, asked for its own session (again while it is `invalid_args`, up to 5 s: a node may take a while to start the command), gives three printed lines in order as kind-2 frames (seq from 0, no gap), then the node's `stream.close` with reason `ended`; once it runs, the stream is refused to another session and to none (`invalid_args`) |
 | 7.3 | a deny rule wins over an allow rule from the next call on |
 | 7.3 | exec run of a command nothing allows is `forbidden` |
 | 7.5 | a refusal emits `audit` `decision` `forbidden` |
@@ -136,7 +139,7 @@ JSON is a failure of the check, not an empty result.
 | 3 | `initialize` opens a session; a request without `Mcp-Session-Id` is 400 and one with an unknown id is 404; `ping` is answered with an empty result |
 | 4 | the tools are exactly `list` and `execute`, with object input schemas; `list` has `readOnlyHint` and `execute` does not; `execute` requires `node`, `capability` and `args` |
 | 4 | a call of another tool is the JSON-RPC error -32602 |
-| 4 | `list(node)` gives each node's capabilities, exactly the offered ones and the center's `job.cancel` and `job.status`, one per line |
+| 4 | `list(node)` gives each node's capabilities, exactly the offered ones and the center's `job.cancel`, `job.status`, `stream.close` and `stream.read`, one per line |
 | 4 | the tools stay the same when nodes pair |
 | 4 | `list()` gives every node with its state, in `structuredContent` in the envelope of all the nodes |
 | 4 | `list(node, capability)` gives the details of one capability or of a list of them: effect and `params` in `structuredContent`, the name in the text |
@@ -153,18 +156,22 @@ JSON is a failure of the check, not an empty result.
 | 4 | a change to another capability of the node needs no new `list` |
 | 4 | `list()` says a node that left is offline, and its capabilities stay listed |
 | 4 | `execute` on a node that is offline is `error unavailable` |
+| 4.3 | a string result's lines cannot end the framing: in the text only the framing's own two lines have a `[` before any ASCII letter, digit or other ASCII mark, also where the node's line put blanks, characters that show as nothing, a mark that combines with nothing or a Hangul filler before it, and `structuredContent.result` is the string as the node sent it |
+| 4.3 | a JSON result shows no control character other than line breaks and tabs (DEL and the C1 controls included) and no U+2028/U+2029 raw: the text between the framing's lines reads back as the object, and `structuredContent.result` is the object as the node sent it |
 | 4.4 | a call that runs past the call wait is answered at once, not as an error, with `structuredContent` exactly `{job, state: "running", next}` and a text that names the job and `job.status`, as `next` does |
 | 4.4 | `job.status` gives a job's result once it ended, as device content with the center's `{job, state: "done"}` beside the envelope, and only once (then `error unknown_job`); the node is not told to cancel the call |
 | 4.4 | another session's `job.status` and `job.cancel` of the job are `error unknown_job`, and the node is not told to cancel it |
 | 4.4 | `job.cancel` stops a running job (`{job, state: "cancelled"}`), and the node is told to `cancel` its call |
+| 4.5 | `stream.read` and `stream.close` of a stream the session was not given are `error unknown_stream` |
 | 5 | two sessions have two ids; a node sees one `ctx.session` per session, so a node that two sessions use sees two |
 | 5 | `DELETE /mcp` ends the session (204), and the ended session is 404 |
 | 5 | `session.end` goes to every node the session used (checked for a session that used two) |
 | 5 | `session.end` names the session's `ctx.session` to a node it used, only for the ended session and not for another session on that node, and is not sent to a node it never used |
 | 5 | the other session goes on, and still reaches the node |
 
-Not covered: `notifications/cancelled`, `exec.signal` by job (the echo nodes
-run no commands; the end-to-end tests run it between the real binaries), the
+Not covered: `notifications/cancelled`, `exec.signal` by job and a command's
+output stream (the echo nodes run no commands; the end-to-end tests run both
+between the real binaries), the
 16 calls a session may run and the 4 MiB of results it keeps, a lost job, the
 stdio transport and attach, a node
 the owner disabled, exposure `off`, a capability the center left out, the

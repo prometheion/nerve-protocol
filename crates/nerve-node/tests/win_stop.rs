@@ -65,6 +65,7 @@ fn opts() -> RunOptions {
         own: Vec::new(),
         root: None,
         limits: None,
+        tap: None,
     }
 }
 

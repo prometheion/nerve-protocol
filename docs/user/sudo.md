@@ -62,8 +62,9 @@ On Linux (Windows differs, see [sudo on Windows](#sudo-on-windows)):
   installed node), so sudo checks your password and your sudoers entries. A wrong password is refused and the switch stays as it was.
 - It keeps the password in memory only. Turning sudo off drops it. A node that
   restarts has sudo off.
-- It never sends the password to a center. It replaces any copy in a frame or
-  in the audit log with `[redacted]`. This holds on Windows too.
+- It never sends the password to a center. It replaces any copy in a frame,
+  also in a command's output stream, or in the audit log with `[redacted]`.
+  This holds on Windows too.
 - A sudo command must be one simple command. One with `; & | $ ` ( ) < >` or a
   line break is refused. This holds on Windows too.
 - A `--wildcard` entry covers plain commands only, as a [wildcard allow

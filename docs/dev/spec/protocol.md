@@ -307,7 +307,8 @@ Link ids and counts:
 - **Counted frames** are the text frames a side sends after `welcome`, except
   `ack` and `bye`. Each side numbers the counted frames it sends from 1 over
   the whole link, across resumes, and counts the counted frames it reads.
-  Binary frames are not counted; version "0" sends none a resume needs.
+  Binary frames are not counted, so a stream ends with its connection on
+  both sides: a resumed link carries no streams.
 
 Keeping and acknowledging, on a link that can resume:
 
@@ -487,7 +488,7 @@ Errors carry a string code in `error.data.code` (§5.3).
 | `sub` / `unsub` | request | C→N | `{topics}` | `{}` |
 | `event` | notification | N→C | `{cap, name, seq, ts, data}` | |
 | `state` | notification | N→C | `{cap, seq, ts, changed}` | |
-| `stream.open` | request | C→N | `{cap, stream, params}` | `{sid}` |
+| `stream.open` | request | C→N | `{cap, stream, params, ctx}` | `{sid}` |
 | `stream.close` | request | either | `{sid, reason}` | `{}` |
 | `session.end` | notification | C→N | `{session}` | |
 | `bye` | notification | either | `{reason}` | |
@@ -501,7 +502,15 @@ Errors carry a string code in `error.data.code` (§5.3).
 
 - `detail` is `summary`, `capability` (needs `cap`) or `full`.
 - `ctx` is `{session?}`: `session` is at most 256 bytes. Other fields are
-  refused. There is no field for "allowed", a mode or a folder.
+  refused. There is no field for "allowed", a mode or a folder. `stream.open`
+  carries the same `ctx`: a stream of a call (`exec`'s `output`, §7.3) is
+  served only to the session the call came from, on the link it came on.
+- After its `{sid}` answer, a stream's data comes as kind-2 binary frames
+  (§5.4). The side that sends a stream ends it with `stream.close {sid,
+  reason}` once everything went (`reason` `ended` for a command that ended);
+  the other side may close it at any time, and nothing more of it is sent.
+  A `sid` names no open stream: `unknown_member`. A node keeps at most
+  `limits.streams` open per link; one more is `busy`.
 - `deadline_ms` is a duration in milliseconds from receipt; past it the node
   fails the call with `timeout`.
 - `progress.id` and `cancel.id` are the `invoke` request id. An `invoke` id
@@ -517,8 +526,8 @@ Errors carry a string code in `error.data.code` (§5.3).
 ### 5.2 Strictness
 
 A node MUST be strict about what a center sends: unknown fields in `invoke`,
-`ctx`, `challenge`, `welcome`, `key.rotated`, `key.retired` and
-`center.rotate`, and unknown methods, are refused. A center SHOULD be
+`ctx`, `stream.open`, `stream.close`, `challenge`, `welcome`, `key.rotated`,
+`key.retired` and `center.rotate`, and unknown methods, are refused. A center SHOULD be
 tolerant of unknown fields a node sends, so newer nodes keep working.
 
 ### 5.3 Error codes
@@ -553,11 +562,17 @@ u8 kind | u8 flags | u32 id | u32 seq | payload (at most 65536 bytes)
 - kind 1: blob chunk. `id` is the blob id named as `{"$blob": id}` in a JSON
   message and listed in `invoke.blobs`; `seq` counts from 0; flag bit 0 marks
   the last chunk. A blob larger than `limits.blob_bytes` fails with `too_large`.
-- kind 2: reliable stream data; `id` is the stream's `sid`.
+- kind 2: reliable stream data; `id` is the stream's `sid`, `seq` counts
+  the stream's frames from 0. Flag bit 1 marks a gap: the sender dropped
+  bytes of the stream there (the other side did not take them fast enough),
+  and the payload is their count, a big-endian `u64`, with no data.
 - kind 3: media, reserved. In version "0" it is refused (`protocol_error`).
 
 Each side keeps at most 64 frames queued for sending; a full queue pushes back
-on the producer.
+on the producer. Stream frames wait apart from the other frames and go only
+while none of those waits, so a stream that outruns the link never holds up
+pings, acks, events or answers; a stream's `stream.close` goes after its last
+frame.
 
 ### 5.5 Limits
 
@@ -757,8 +772,31 @@ concurrently.
   default and most as the parameter's `default` and `maximum`. A command
   the node killed because it went past its own memory limit has `killed:
   "memory"` and a `reason` in its result (and `signal: "kill"`); one an OOM
-  of the machine killed has only `signal: "kill"`. Output comes in the result; the
-  `output` reliable stream is declared for later.
+  of the machine killed has only `signal: "kill"`. Output comes in the
+  result.
+- stream `output` (reliable, up), params `{call}`: the output of the
+  running `run` with that `invoke` id, stdout and stderr in the order the node
+  read them, for the center and session the call came from only (another
+  session's call, or none, is `invalid_args`, in the same words). It starts
+  with the end of what the command printed so far (at most 64 KiB, what came
+  before is a gap) and carries everything after, also past the result's cap;
+  it ends with the command. A node keeps at most 1 MiB the link did not take
+  yet per stream and sends a gap for what it drops: the command never waits
+  for its stream. Output that is not UTF-8 is sent as the result reads it: on
+  Windows decoded from the console's code page (what Windows PowerShell 5.1
+  writes) and sent as UTF-8, once that pipe's output proved not to be UTF-8
+  (stdout and stderr each on its own); a character that a read of one pipe
+  cut is never split by the other pipe's output. Frames are cut by size, also
+  inside a character, so a receiver joins a stream's payloads as bytes before
+  it reads characters. Every copy of the sudo password the node
+  holds is replaced as in any frame (§7.4.1), also one that two reads of the
+  pipe cut, and once more as the stream takes output to send, with the
+  password held then: output printed before sudo was turned on goes out
+  without it too, unless the stream had taken it already (the few frames
+  waiting for the link at that moment go as they are). A sudo command's output (also one the
+  node runs as root for a pairing whose commands run as `nerve-run`) is not
+  streamed: its `stream.open` is `unavailable`. A center may ask for the
+  stream of a call the node does not run yet again later.
 
 ### 7.4 `settings` (only with the settings grant `write`)
 

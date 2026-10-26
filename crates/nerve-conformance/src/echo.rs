@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use nerve_proto::link::{CenterUrl, PairLink, PairRequest, PairResponse};
-use nerve_proto::msg::{self, Challenge, Describe, Invoke, method};
+use nerve_proto::msg::{self, Challenge, Describe, Invoke, StreamClose, StreamOpen, method};
 use nerve_proto::{
     Descriptor, ErrorCode, Message, PAIR_PATH, PROTOCOL_VERSION, RpcError, rpc::params,
 };
@@ -74,6 +74,12 @@ pub fn harness_descriptor(node_id: &str, name: &str) -> Descriptor {
                    "properties": {"ms": {"type": "integer", "minimum": 0, "maximum": WAIT_MAX_MS}},
                    "required": ["ms"], "additionalProperties": false},
         "result": {"type": "object", "properties": {"waited": {"type": "integer"}}}});
+    // A result that is a string, the node's own lines, which a center puts
+    // into its framing by lines (harness.md §4.3).
+    let mut lines = say.clone();
+    lines["summary"] = json!("Return the text as a string.");
+    lines["result"] = json!({"type": "string"});
+    caps[1]["actions"]["lines"] = lines;
     // The three capabilities a center must never offer, each with an action
     // that would otherwise be listed.
     caps[0]["actions"] =
@@ -218,7 +224,7 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                     return String::new();
                 }
             }
-            Recv::Msg(_) => {}
+            Recv::Msg(_) | Recv::Frame(_) => {}
             Recv::Bye(r) => return r,
             Recv::Closed | Recv::Garbage(_) => return String::new(),
             Recv::Timeout => return "timeout".into(),
@@ -262,6 +268,15 @@ pub fn handle(m: &str, p: &Map<String, Value>, d: &Descriptor) -> Result<Value, 
                         _ => Err(RpcError::invalid_args("wait takes {ms}")),
                     }
                 }
+                ("echo", "lines")
+                    if d.capability("echo")
+                        .is_some_and(|c| c.actions.contains_key("lines")) =>
+                {
+                    match inv.args.get("text").and_then(Value::as_str) {
+                        Some(t) if inv.args.len() == 1 => Ok(json!(t)),
+                        _ => Err(RpcError::invalid_args("lines takes {text}")),
+                    }
+                }
                 ("echo", "fail") => Err(RpcError::new(
                     ErrorCode::Other("io".into()),
                     "the echo node fails this action on purpose",
@@ -275,6 +290,23 @@ pub fn handle(m: &str, p: &Map<String, Value>, d: &Descriptor) -> Result<Value, 
         }
         method::SUB | method::UNSUB => Ok(json!({})),
         method::GET => Ok(json!({})),
+        // The echo node offers no streams, but reads the request as
+        // strictly as a node must.
+        method::STREAM_OPEN => {
+            let o: StreamOpen = params(p)?;
+            o.check()?;
+            Err(match d.capability(&o.cap) {
+                None => RpcError::new(
+                    ErrorCode::UnknownCapability,
+                    format!("no capability {}", o.cap),
+                ),
+                Some(_) => RpcError::new(ErrorCode::UnknownMember, "no such stream"),
+            })
+        }
+        method::STREAM_CLOSE => {
+            let _: StreamClose = params(p)?;
+            Err(RpcError::new(ErrorCode::UnknownMember, "no such stream"))
+        }
         _ => Err(RpcError::new(
             ErrorCode::MethodNotFound,
             format!("unknown method {m}"),

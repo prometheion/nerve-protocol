@@ -1131,8 +1131,11 @@ mode until root's program runs. The folder's name never reaches the shell.
 Turning it off drops the password. On Linux the password is kept
 in memory only, whatever `secret_storage` says, so a restarted node, or
 a `node.toml` that says `on` without a password held, has the switch off. It
-never reaches a center: the node replaces every copy in an outgoing frame and
-in the audit log with `[redacted]`. `machine.sudo` changes only through the
+never reaches a center: the node replaces every copy in an outgoing frame
+(a command's output stream too, also a copy that two reads of its output cut,
+or output printed before the password was held, unless its stream had taken
+it to send already)
+and in the audit log with `[redacted]`. `machine.sudo` changes only through the
 switch; a value written into the file is turned off at start-up, since no
 password is held. The switch works on Linux and Windows.
 
@@ -1474,8 +1477,8 @@ The node refuses it, with nothing attached, when:
   longer name); a capability is named twice, takes the
   name or the profile of one of the node's own (`node`, `fs`, `exec`,
   `settings`, `audit`) or of the center's (`job`, `stream`: the center
-  serves `job.status` and `job.cancel` on every node itself, harness.md
-  §4.4, and keeps `stream` for streams), or is added by another attached
+  serves `job.status`, `job.cancel`, `stream.read` and `stream.close` on
+  every node itself, harness.md §4.4, §4.5), or is added by another attached
   provider; or a
   capability declares anything but `id`, `profile`, `summary` and `actions`
   (no events, state or streams: the node forwards calls only, and the node,

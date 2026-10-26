@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_tungstenite::WebSocketStream;
 
-use nerve_proto::frame::{Frame, FrameError};
+use nerve_proto::frame::{Frame, FrameError, Kind};
 use nerve_proto::msg::{self, ByeReason, Hello, Limits, Resumed, method};
 use nerve_proto::resume::{self, Replay};
 use nerve_proto::{ErrorCode, Id, Message, PROTOCOL_VERSION, RpcError};
@@ -22,6 +22,7 @@ use nerve_transport::net::BoxIo;
 use nerve_transport::ws::WsMessage;
 
 use crate::center::Center;
+use crate::streams::Ring;
 
 /// Each side has this long for its handshake step (§4.2).
 pub const HANDSHAKE_STEP: Duration = Duration::from_secs(15);
@@ -36,6 +37,9 @@ pub const SHORT_CALL: Duration = Duration::from_secs(30);
 /// from the center and a job's `exec.signal` find a place while jobs hold
 /// all the others.
 pub const CALLS_KEPT: usize = 8;
+/// The most `stream.open`s a node may leave unanswered past their wait on
+/// one link; past it the link gets no more.
+pub const UNANSWERED_MAX: usize = 4;
 
 /// How many of a node's `calls` places the agents' calls leave free: a
 /// quarter, at most [`CALLS_KEPT`], so a node with few places still runs
@@ -57,6 +61,7 @@ impl Drop for Unsent<'_> {
     fn drop(&mut self) {
         if let Some(id) = self.id {
             self.link.pending.lock().unwrap().remove(&id);
+            self.link.opening.lock().unwrap().remove(&id);
         }
     }
 }
@@ -100,6 +105,13 @@ pub struct Link {
     pub status: Mutex<String>,
     /// Sessions that called through this link, for `session.end`.
     pub sessions: Mutex<std::collections::BTreeSet<String>>,
+    /// Open streams of the connection now, by the node's `sid`: where their
+    /// frames go (crate::streams).
+    streams: Mutex<HashMap<u32, Arc<Ring>>>,
+    /// `stream.open` requests waiting for their `sid`, by request id: the
+    /// answer puts the ring in `streams` before the next frame is read.
+    /// None once the opener gave up: the answer then opens nothing.
+    opening: Mutex<HashMap<u64, Option<Arc<Ring>>>>,
 }
 
 /// The connection a link is on, and what it counts for a resume.
@@ -148,6 +160,8 @@ impl Link {
             pong: Notify::new(),
             status: Mutex::new("online".into()),
             sessions: Mutex::new(Default::default()),
+            streams: Mutex::default(),
+            opening: Mutex::default(),
         }
     }
 
@@ -201,6 +215,16 @@ impl Link {
     /// link is parked the frame is kept for the resume. `false` when it is
     /// lost: the link ended, or its connection did and it cannot resume.
     async fn send_text(&self, text: String) -> bool {
+        self.send_counted(text, None).await
+    }
+
+    /// [`Link::send_text`] of request `id`, which is not sent when nobody
+    /// waits for its reply any more by the time it would go (`false`).
+    async fn send_request(&self, id: u64, text: String) -> bool {
+        self.send_counted(text, Some(id)).await
+    }
+
+    async fn send_counted(&self, text: String, request: Option<u64>) -> bool {
         loop {
             // Kept under the same lock that saw the link parked, so a resume
             // that comes in between sends it.
@@ -216,6 +240,15 @@ impl Link {
             // A resume moved the link to another connection meanwhile.
             if !w.out.as_ref().is_some_and(|o| o.same_channel(&out)) {
                 continue;
+            }
+            // A resume fails a `stream.open` that waits for room here, and
+            // its opener asks again: sent now, on the new connection, it
+            // would open a stream on the node that nobody reads or closes.
+            // Under the wire's lock, as `resume` takes it before `pending`.
+            if let Some(id) = request
+                && !self.pending.lock().unwrap().contains_key(&id)
+            {
+                return false;
             }
             return match permit {
                 Ok(p) => {
@@ -298,6 +331,11 @@ impl Link {
             w.out = None;
             w.parked = true;
         }
+        drop(w);
+        // Streams are not counted: they end with their connection (§4.9).
+        if can {
+            self.end_streams("the link to the node dropped");
+        }
         can
     }
 
@@ -318,10 +356,29 @@ impl Link {
             return Err("the node never took this link up".into());
         }
         let again = replay.resume(got)?;
+        // A stream the node opened on the old connection ended with it, and
+        // its answer may still come with what the node sends again: a
+        // `stream.open` in flight fails now (its opener asks again), and
+        // goes as `withdrawn` below if the node never read it.
+        let opening: Vec<u64> = self
+            .opening
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(id, _)| id)
+            .collect();
+        let mut pending = self.pending.lock().unwrap();
+        for id in opening {
+            if let Some(tx) = pending.remove(&id) {
+                let _ = tx.send(Err(RpcError::new(
+                    ErrorCode::ConnectionLost,
+                    "the link to the node dropped",
+                )));
+            }
+        }
         // A request nobody waits for any more (its caller timed out or
         // cancelled) is not delivered late: it goes as `withdrawn`, which
         // keeps the count and which the node ignores.
-        let pending = self.pending.lock().unwrap();
         let again = again
             .into_iter()
             .map(|t| match Message::decode(&t) {
@@ -335,7 +392,11 @@ impl Link {
         w.conn += 1;
         w.out = Some(out);
         w.parked = false;
-        Ok((w.conn, again))
+        let conn = w.conn;
+        drop(w);
+        // The node ended the old connection's streams with it.
+        self.end_streams("the link to the node dropped");
+        Ok((conn, again))
     }
 
     /// Ends the link if it is still parked from connection `conn`: its
@@ -378,7 +439,8 @@ impl Link {
     }
 
     /// [`Link::start`], refused with `busy` when `most` requests wait for
-    /// their reply already.
+    /// their reply already. A `stream.open` is not one of the node's calls
+    /// and takes no place.
     pub async fn start_within(
         &self,
         method: &str,
@@ -389,9 +451,11 @@ impl Link {
             return Err(lost());
         }
         let (tx, rx) = oneshot::channel();
+        // One lock at a time, as everywhere: the count may be a moment old.
+        let opening = self.opening.lock().unwrap().len();
         let id = {
             let mut pending = self.pending.lock().unwrap();
-            if pending.len() >= most {
+            if pending.len().saturating_sub(opening) >= most {
                 return Err(RpcError::new(ErrorCode::Busy, "too many calls in flight"));
             }
             let id = self.next_id.fetch_add(1, Ordering::SeqCst);
@@ -406,7 +470,7 @@ impl Link {
             id: Some(id),
         };
         let text = Message::request(id, method, params).encode();
-        if !self.send_text(text).await {
+        if !self.send_request(id, text).await {
             return Err(lost());
         }
         unsent.id = None;
@@ -501,6 +565,7 @@ impl Link {
         w.out = None;
         w.parked = false;
         w.replay = None;
+        self.end_streams("the link to the node ended");
     }
 
     fn fail_pending(&self) {
@@ -511,11 +576,172 @@ impl Link {
     }
 
     fn reply(&self, id: &Id, r: Reply) {
-        if let Id::Num(n) = id
-            && let Some(tx) = self.pending.lock().unwrap().remove(n)
+        let Id::Num(n) = id else {
+            return;
+        };
+        // An opened stream is known before its first frame is read, which
+        // may follow the answer at once. One lock at a time: `open_stream`
+        // takes them the other way round.
+        let opened = self.opening.lock().unwrap().remove(n).flatten();
+        let waited = self.pending.lock().unwrap().contains_key(n);
+        if let Some(ring) = opened.filter(|_| waited)
+            && let Ok(v) = &r
+            && let Some(sid) = sid_of(v)
         {
+            self.streams.lock().unwrap().insert(sid, ring);
+        }
+        if let Some(tx) = self.pending.lock().unwrap().remove(n) {
             let _ = tx.send(r);
         }
+    }
+
+    /// Opens a stream on the node (`stream.open` with `params`) whose
+    /// frames go to `ring`, waiting up to `wait` for the answer: its `sid`.
+    /// A link that is down now opens none: streams end with a connection.
+    pub async fn open_stream(
+        self: &Arc<Self>,
+        params: Value,
+        ring: Arc<Ring>,
+        wait: Duration,
+    ) -> Result<u32, RpcError> {
+        if !self.is_live() {
+            return Err(lost());
+        }
+        let (tx, mut rx) = oneshot::channel();
+        // The ring is in place before the request can be answered.
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        {
+            let mut opening = self.opening.lock().unwrap();
+            // Each one left unanswered holds a request and a task here
+            // until the link ends: a node that does not answer gets no more.
+            if opening.values().filter(|r| r.is_none()).count() >= UNANSWERED_MAX {
+                return Err(RpcError::new(
+                    ErrorCode::Timeout,
+                    "the node left earlier stream.open requests unanswered",
+                ));
+            }
+            opening.insert(id, Some(ring));
+        }
+        self.pending.lock().unwrap().insert(id, tx);
+        let mut unsent = Unsent {
+            link: self,
+            id: Some(id),
+        };
+        let text = Message::request(id, method::STREAM_OPEN, params).encode();
+        if !self.send_request(id, text).await {
+            return Err(lost());
+        }
+        unsent.id = None;
+        let r = match tokio::time::timeout(wait, &mut rx).await {
+            Ok(r) => r.unwrap_or_else(|_| Err(lost())),
+            Err(_) => {
+                // The node may still open it, and nobody would read it: it
+                // would hold one of the link's stream places until its
+                // command ends. Its answer frames nothing here and closes it
+                // there; the request still waits for it, as a stream.open
+                // is not cancelled.
+                let abandoned = match self.opening.lock().unwrap().get_mut(&id) {
+                    Some(ring) => ring.take().is_some(),
+                    None => false,
+                };
+                if !abandoned {
+                    // The answer is being taken in right now.
+                    rx.await.unwrap_or_else(|_| Err(lost()))
+                } else {
+                    let link = self.clone();
+                    tokio::spawn(async move {
+                        if let Ok(Ok(v)) = rx.await
+                            && let Some(sid) = sid_of(&v)
+                        {
+                            link.close_stream(sid, "nobody waits for it").await;
+                        }
+                    });
+                    return Err(RpcError::new(
+                        ErrorCode::Timeout,
+                        "the node did not answer in time",
+                    ));
+                }
+            }
+        };
+        self.opening.lock().unwrap().remove(&id);
+        sid_of(&r?).ok_or_else(|| RpcError::internal("the node answered stream.open without a sid"))
+    }
+
+    /// How many `stream.open`s the node left unanswered past their wait.
+    pub fn unanswered_opens(&self) -> usize {
+        self.opening
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|r| r.is_none())
+            .count()
+    }
+
+    /// A stream frame from the node: data or a gap for its ring. A frame
+    /// of a stream the center does not hold (closed meanwhile) is dropped.
+    fn stream_frame(&self, f: &Frame) {
+        let ring = self.streams.lock().unwrap().get(&f.id).cloned();
+        let Some(ring) = ring else {
+            return;
+        };
+        match f.gap_bytes() {
+            Some(n) => ring.gap(n),
+            None => ring.push(&f.payload),
+        }
+    }
+
+    /// The node closed the stream `sid` (its command ended): what it holds
+    /// can still be read. Whether the center held it. The node's reason is
+    /// not passed on: the model reads the end in the center's words.
+    fn stream_closed(&self, sid: u32, reason: &str) -> bool {
+        let ring = self.streams.lock().unwrap().remove(&sid);
+        match ring {
+            Some(ring) => {
+                ring.end(if reason == "ended" {
+                    "the command ended"
+                } else {
+                    "the node closed it"
+                });
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Forgets the stream `sid` on the center's side; whether it was still
+    /// open.
+    pub fn forget_stream(&self, sid: u32) -> bool {
+        self.streams.lock().unwrap().remove(&sid).is_some()
+    }
+
+    /// Tells the node to stop the stream `sid`.
+    pub async fn close_stream(&self, sid: u32, why: &str) {
+        let _ = self
+            .call(
+                method::STREAM_CLOSE,
+                json!({"sid": sid, "reason": why}),
+                Some(SHORT_CALL),
+            )
+            .await;
+    }
+
+    /// Ends every stream of the connection: it is gone (`why`).
+    fn end_streams(&self, why: &str) {
+        let rings: Vec<Arc<Ring>> = self
+            .streams
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, r)| r)
+            .collect();
+        for r in rings {
+            r.end(why);
+        }
+    }
+
+    /// How many streams the link holds.
+    pub fn stream_count(&self) -> usize {
+        self.streams.lock().unwrap().len()
     }
 }
 
@@ -569,6 +795,13 @@ pub fn by_node(e: &RpcError) -> bool {
 
 fn lost() -> RpcError {
     RpcError::new(ErrorCode::ConnectionLost, "the link to the node ended")
+}
+
+/// The `sid` a `stream.open` answer names.
+fn sid_of(v: &Value) -> Option<u32> {
+    v.get("sid")
+        .and_then(Value::as_u64)
+        .and_then(|s| u32::try_from(s).ok())
 }
 
 async fn send_text(ws: &mut WebSocketStream<BoxIo>, m: Message) -> Result<(), String> {
@@ -967,15 +1200,20 @@ pub async fn run(center: Center, mut ws: WebSocketStream<BoxIo>, node_id: String
                     link.send_text(reply.encode()).await;
                 }
             },
-            WsMessage::Binary(b) => {
-                // Nodes send no blobs to the center; media frames are refused.
-                if let Err(FrameError::MediaReserved) = Frame::decode(&b) {
+            WsMessage::Binary(b) => match Frame::decode(&b) {
+                // A stream's data (crate::streams); nodes send no blobs to
+                // the center.
+                Ok(f) if f.kind == Kind::Stream => link.stream_frame(&f),
+                Ok(_) => {}
+                // Media frames are refused.
+                Err(FrameError::MediaReserved) => {
                     link.bye(ByeReason::ProtocolError).await;
                     said_bye = true;
                     why = "the node sent a media frame, which the center does not take".into();
                     break;
                 }
-            }
+                Err(_) => {}
+            },
             WsMessage::Pong(_) => link.pong.notify_waiters(),
             WsMessage::Close(_) => {
                 clean = true;
@@ -1014,6 +1252,26 @@ async fn handle(center: &Center, link: &Arc<Link>, m: Message) -> Option<ByeReas
                 Some(&link.node_id),
                 format!("the node reported an error: {}", error.message),
             );
+        }
+        // The node ends a stream whose command ended.
+        Message::Request {
+            id,
+            method: m,
+            params,
+        } if m == method::STREAM_CLOSE => {
+            let sid = params
+                .get("sid")
+                .and_then(Value::as_u64)
+                .and_then(|s| u32::try_from(s).ok());
+            let reason = params.get("reason").and_then(Value::as_str).unwrap_or("");
+            let reply = match sid {
+                Some(sid) if link.stream_closed(sid, reason) => Message::result(id, json!({})),
+                _ => Message::error(
+                    Some(id),
+                    RpcError::new(ErrorCode::UnknownMember, "no such stream"),
+                ),
+            };
+            link.send_text(reply.encode()).await;
         }
         Message::Request { id, method: m, .. } => {
             let e = RpcError::new(
@@ -1099,5 +1357,230 @@ mod tests {
         assert!(held.is_err(), "the queue had room");
         assert_eq!(link.waiting(), 1);
         assert!(rx.try_recv().is_ok());
+    }
+
+    /// A `stream.open` in flight when the link resumes fails, and is not
+    /// sent again; the node's answer, which may still come with what it
+    /// sends again, opens nothing: the node ended that stream with the old
+    /// connection.
+    #[tokio::test]
+    async fn a_resume_fails_a_stream_open_in_flight() {
+        let (out, mut rx) = mpsc::channel(8);
+        let link = Arc::new(Link::new(
+            "n1",
+            String::new(),
+            false,
+            Limits::default(),
+            out,
+            Some("l-1".into()),
+        ));
+        let conn = link.wire.lock().unwrap().conn;
+        assert!(link.take_frame(conn, true));
+        let opener = {
+            let link = link.clone();
+            tokio::spawn(async move {
+                let ring = Arc::new(Ring::default());
+                link.open_stream(json!({}), ring, Duration::from_secs(10))
+                    .await
+            })
+        };
+        let Some(Out::Frame(m)) = rx.recv().await else {
+            panic!("no request")
+        };
+        let Ok(Message::Request {
+            id: Id::Num(id), ..
+        }) = Message::decode(m.to_text().unwrap())
+        else {
+            panic!("{m:?}")
+        };
+        assert!(link.park(conn));
+        let (out, _rx) = mpsc::channel(8);
+        let (_, again) = link.resume(out, 0).unwrap();
+        assert_eq!(again.len(), 1);
+        assert!(again[0].contains("withdrawn"), "{again:?}");
+        let e = opener.await.unwrap().expect_err("it failed");
+        assert_eq!(e.kind(), ErrorCode::ConnectionLost);
+        link.reply(&Id::Num(id), Ok(json!({"sid": 1})));
+        assert_eq!(link.stream_count(), 0);
+    }
+
+    /// A `stream.open` that waits for room in the old connection's full
+    /// queue when the link resumes fails, and does not go out on the new
+    /// connection once the old queue lets it go: the node would open a
+    /// stream there that nobody reads or closes.
+    #[tokio::test]
+    async fn a_stream_open_waiting_for_room_is_not_sent_after_a_resume() {
+        let (out, old_rx) = mpsc::channel(1);
+        let link = Arc::new(Link::new(
+            "n1",
+            String::new(),
+            false,
+            Limits::default(),
+            out,
+            Some("l-1".into()),
+        ));
+        let conn = link.wire.lock().unwrap().conn;
+        assert!(link.take_frame(conn, true));
+        // The old queue is full: the stream.open waits for room.
+        link.notify("filler", json!({})).await;
+        let opener = {
+            let link = link.clone();
+            tokio::spawn(async move {
+                let ring = Arc::new(Ring::default());
+                link.open_stream(json!({}), ring, Duration::from_secs(10))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!opener.is_finished(), "the queue had room");
+        assert!(link.park(conn));
+        let (out, mut rx) = mpsc::channel(8);
+        let (_, again) = link.resume(out, 0).unwrap();
+        assert_eq!(again.len(), 1, "{again:?}");
+        // The old connection's writer is gone: its queue lets the wait go.
+        drop(old_rx);
+        let e = tokio::time::timeout(Duration::from_secs(5), opener)
+            .await
+            .expect("the opener ends")
+            .unwrap()
+            .expect_err("it failed");
+        assert_eq!(e.kind(), ErrorCode::ConnectionLost);
+        let next = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+        if let Ok(Some(Out::Frame(m))) = &next {
+            panic!("sent on the new connection: {m:?}");
+        }
+        assert!(next.is_err(), "the new connection ended");
+        assert_eq!((link.waiting(), link.stream_count()), (0, 0));
+    }
+
+    /// The request a link sent next: its id, method and params.
+    async fn sent(rx: &mut mpsc::Receiver<Out>) -> (u64, String, Value) {
+        let m = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        let Ok(Some(Out::Frame(m))) = m else {
+            panic!("nothing sent")
+        };
+        let Ok(Message::Request {
+            id: Id::Num(id),
+            method,
+            params,
+        }) = Message::decode(m.to_text().unwrap())
+        else {
+            panic!("{m:?}")
+        };
+        (id, method, Value::Object(params))
+    }
+
+    /// A `stream.open` whose answer comes after its opener gave up opens
+    /// nothing here, and the node is told to close the stream it opened:
+    /// nobody reads it, and it would hold one of the link's stream places.
+    #[tokio::test]
+    async fn a_stream_open_answered_late_is_closed_on_the_node() {
+        let (out, mut rx) = mpsc::channel(8);
+        let link = Arc::new(Link::new(
+            "n1",
+            String::new(),
+            false,
+            Limits::default(),
+            out,
+            None,
+        ));
+        let ring = Arc::new(Ring::default());
+        let e = link
+            .open_stream(json!({}), ring.clone(), Duration::from_millis(50))
+            .await
+            .expect_err("no answer in time");
+        assert_eq!(e.kind(), ErrorCode::Timeout);
+        let (id, method, _) = sent(&mut rx).await;
+        assert_eq!(method, method::STREAM_OPEN);
+        link.reply(&Id::Num(id), Ok(json!({"sid": 7})));
+        assert_eq!(link.stream_count(), 0, "it frames nothing here");
+        let (_, method, params) = sent(&mut rx).await;
+        assert_eq!(method, method::STREAM_CLOSE);
+        assert_eq!(params["sid"], 7);
+        assert!(!ring.ended(), "the opener may ask again");
+    }
+
+    /// A node that leaves [`UNANSWERED_MAX`] `stream.open`s unanswered gets
+    /// no more on that link: each one holds a request and a task until the
+    /// link ends.
+    #[tokio::test]
+    async fn a_node_that_does_not_answer_gets_few_stream_opens() {
+        let (out, mut rx) = mpsc::channel(8);
+        let link = Arc::new(Link::new(
+            "n1",
+            String::new(),
+            false,
+            Limits::default(),
+            out,
+            None,
+        ));
+        for _ in 0..UNANSWERED_MAX {
+            let ring = Arc::new(Ring::default());
+            let e = link
+                .open_stream(json!({}), ring, Duration::from_millis(20))
+                .await
+                .expect_err("no answer in time");
+            assert_eq!(e.kind(), ErrorCode::Timeout);
+            assert_eq!(sent(&mut rx).await.1, method::STREAM_OPEN);
+        }
+        assert_eq!(link.unanswered_opens(), UNANSWERED_MAX);
+        let ring = Arc::new(Ring::default());
+        let started = std::time::Instant::now();
+        let e = link
+            .open_stream(json!({}), ring, Duration::from_secs(5))
+            .await
+            .expect_err("refused at once");
+        assert_eq!(e.kind(), ErrorCode::Timeout);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(rx.try_recv().is_err(), "nothing more was sent");
+        assert_eq!(link.unanswered_opens(), UNANSWERED_MAX);
+    }
+
+    /// An open stream ends when its connection drops: when the link is
+    /// parked, and when the node resumes it before the center saw the old
+    /// connection go. The node ended it with that connection.
+    #[tokio::test]
+    async fn a_resumed_link_ends_its_streams() {
+        for parked in [true, false] {
+            let (out, mut rx) = mpsc::channel(8);
+            let link = Arc::new(Link::new(
+                "n1",
+                String::new(),
+                false,
+                Limits::default(),
+                out,
+                Some("l-1".into()),
+            ));
+            let conn = link.wire.lock().unwrap().conn;
+            assert!(link.take_frame(conn, true));
+            let opener = {
+                let link = link.clone();
+                tokio::spawn(async move {
+                    let ring = Arc::new(Ring::default());
+                    let sid = link
+                        .open_stream(json!({}), ring.clone(), Duration::from_secs(10))
+                        .await;
+                    (sid, ring)
+                })
+            };
+            let (id, _, _) = sent(&mut rx).await;
+            link.reply(&Id::Num(id), Ok(json!({"sid": 3})));
+            let (sid, ring) = opener.await.unwrap();
+            assert_eq!(sid.unwrap(), 3);
+            link.stream_frame(&nerve_proto::frame::stream_frame(3, 0, b"hi".to_vec()));
+            if parked {
+                assert!(link.park(conn));
+                assert!(ring.ended(), "parked");
+            }
+            let (out, _rx) = mpsc::channel(8);
+            link.resume(out, 1).unwrap();
+            assert_eq!(link.stream_count(), 0);
+            let r = ring.read(64);
+            assert_eq!(
+                (r.text.as_str(), r.eof, r.why.as_deref()),
+                ("hi", true, Some("the link to the node dropped")),
+                "parked: {parked}"
+            );
+        }
     }
 }

@@ -54,6 +54,7 @@ fn opts(account: &Account, root: AsRoot) -> RunOptions {
         own: Vec::new(),
         root: Some(root),
         limits: None,
+        tap: None,
     }
 }
 

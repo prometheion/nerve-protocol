@@ -179,6 +179,22 @@ where
         ),
     );
 
+    // §5.2: `stream.open` carries the same strict ctx.
+    r.check(
+        "5.2",
+        "an unknown ctx field of stream.open is invalid_args",
+        expect_code(
+            conn.call(
+                method::STREAM_OPEN,
+                json!({"cap": "exec", "stream": "output", "params": {"call": 1},
+                       "ctx": {"session": "s1", "full_access": true}}),
+                WAIT,
+            )
+            .await,
+            ErrorCode::InvalidArgs,
+        ),
+    );
+
     if let Some(folder) = &setup.folder {
         let key = &paired.request.public_key;
         let pw = setup.sudo_password.as_deref();
@@ -210,6 +226,10 @@ const PROFILE_CHECKS: &[(&str, &str)] = &[
     ),
     ("7.2", "fs read outside the allowed folder is forbidden"),
     ("7.3", "exec run of a command an allow rule names runs"),
+    (
+        "7.3",
+        "a running command's output streams to its own session only: the stream gives it in order as frames, then stream.close",
+    ),
     (
         "7.3",
         "a deny rule wins over an allow rule from the next call on",
@@ -251,6 +271,13 @@ const SUDO_ON_CHECKS: &[(&str, &str)] = &[
 ];
 
 const ALLOWED: &str = "echo nerve-conformance-allowed";
+/// How long [`streams_output`] asks for the stream of a command the node
+/// does not run yet.
+const START_WAIT: Duration = Duration::from_secs(5);
+/// A command that prints three lines over a second, in `sh` and in
+/// PowerShell.
+const STREAMED_SH: &str = "for i in 1 2 3; do echo line $i; sleep 0.3; done";
+const STREAMED_PS: &str = "foreach ($i in 1..3) { \"line $i\"; Start-Sleep -Milliseconds 300 }";
 const SUDO_ALLOWED: &str = "sudo echo nerve-conformance-sudo";
 
 type Conn = crate::wire::Conn<tokio::net::TcpStream>;
@@ -310,6 +337,123 @@ async fn sudo_state(conn: &mut Conn) -> Result<String, String> {
         )
         .await)?;
     Ok(v["sudo"].as_str().unwrap_or_default().to_string())
+}
+
+/// The command [`streams_output`] runs, in the node's shell: PowerShell on
+/// Windows.
+async fn streamed_command(conn: &mut Conn) -> Result<&'static str, String> {
+    let d = ok(conn
+        .call(method::DESCRIBE, json!({"detail": "summary"}), WAIT)
+        .await)?;
+    Ok(if d["node"]["platform"] == "windows" {
+        STREAMED_PS
+    } else {
+        STREAMED_SH
+    })
+}
+
+/// Runs `command` for one session, refuses its output stream to another
+/// session and to none, then reads it: frames in order with all three lines,
+/// and the node's `stream.close` with reason `ended`.
+async fn streams_output(conn: &mut Conn, command: &str) -> Result<(), String> {
+    let run = conn
+        .request(
+            method::INVOKE,
+            json!({"cap": "exec", "action": "run", "args": {"command": command},
+                   "ctx": {"session": "conformance-1"}}),
+        )
+        .await?;
+    let open = |session: Option<&str>| {
+        let mut p = json!({"cap": "exec", "stream": "output", "params": {"call": run}});
+        if let Some(s) = session {
+            p["ctx"] = json!({"session": s});
+        }
+        p
+    };
+    let mut others = Vec::new();
+    // A node may hold a command a while before it runs it (its folders'
+    // access, a sandbox to set up); until then its stream is `invalid_args`,
+    // as a center sees it, and asked for again.
+    let started = tokio::time::Instant::now();
+    let sid = loop {
+        let id = conn
+            .request(method::STREAM_OPEN, open(Some("conformance-1")))
+            .await?;
+        match conn.answer(id, WAIT, &mut others).await? {
+            Ok(v) => break v["sid"].as_u64().ok_or("stream.open answered no sid")?,
+            Err(e) if e.kind() == ErrorCode::InvalidArgs && started.elapsed() < START_WAIT => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e) => {
+                return Err(format!(
+                    "stream.open for its own session: error {} ({})",
+                    code_of(&e),
+                    e.message
+                ));
+            }
+        }
+    };
+    // Now that the command runs, another session's and no session's are
+    // refused as one that does not run.
+    for session in [Some("conformance-2"), None] {
+        let id = conn.request(method::STREAM_OPEN, open(session)).await?;
+        expect_code(
+            conn.answer(id, WAIT, &mut others).await,
+            ErrorCode::InvalidArgs,
+        )
+        .map_err(|e| format!("stream.open for another session: {e}"))?;
+    }
+    let mut frames = conn.take_frames();
+    // What came while the answers were waited for comes first.
+    let mut came: std::collections::VecDeque<_> = others.into();
+    let mut ran = false;
+    let mut closed = false;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while !(ran && closed) {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let next = match came.pop_front() {
+            Some(m) => crate::wire::Recv::Msg(m),
+            None => conn.recv(left).await,
+        };
+        match next {
+            crate::wire::Recv::Frame(f) => frames.push(f),
+            crate::wire::Recv::Msg(m) if answers(&m, run) => ran = true,
+            crate::wire::Recv::Msg(nerve_proto::Message::Request {
+                id,
+                method: m,
+                params,
+            }) if m == method::STREAM_CLOSE => {
+                ensure(
+                    params["sid"].as_u64() == Some(sid) && params["reason"] == "ended",
+                    format!("stream.close {params:?}"),
+                )?;
+                conn.send(&nerve_proto::Message::result(id, json!({})))
+                    .await?;
+                closed = true;
+            }
+            crate::wire::Recv::Msg(_) => {}
+            other => return Err(format!("waiting for the stream: {other:?}")),
+        }
+    }
+    let mut text = Vec::new();
+    for (n, f) in frames.iter().enumerate() {
+        ensure(
+            u64::from(f.id) == sid && f.seq as usize == n && f.gap_bytes().is_none(),
+            format!("frame {n}: sid {} seq {}", f.id, f.seq),
+        )?;
+        text.extend_from_slice(&f.payload);
+    }
+    let text = String::from_utf8_lossy(&text).replace("\r\n", "\n");
+    ensure(
+        text.ends_with("line 1\nline 2\nline 3\n"),
+        format!("the stream gave {text:?}"),
+    )
+}
+
+/// Whether `m` is the answer to the request `id`.
+fn answers(m: &nerve_proto::Message, id: u64) -> bool {
+    let want = nerve_proto::Id::Num(id);
+    matches!(m, nerve_proto::Message::Result { id, .. } | nerve_proto::Message::Error { id: Some(id), .. } if *id == want)
 }
 
 async fn profiles(
@@ -402,9 +546,11 @@ async fn profile_steps(
         p.remove("until");
     }
     policy["folders"] = json!([]);
+    let streamed = streamed_command(conn).await?;
     policy["allow"] = json!([
         format!("fs:{}/*", literal(folder.trim_end_matches('/'))),
         format!("exec.run:{ALLOWED}"),
+        format!("exec.run:{}", literal(streamed)),
     ]);
     policy["deny"] = json!([]);
     policy["sudo_allow"] = json!([SUDO_ALLOWED]);
@@ -467,6 +613,8 @@ async fn profile_steps(
             )
         }),
     )?;
+
+    step(streams_output(conn, streamed).await)?;
 
     // A rule edit counts from the next call on, and a deny rule wins over
     // the allow rule for the same command.
@@ -781,6 +929,64 @@ mod tests {
 
     fn echo() -> Value {
         serde_json::to_value(crate::echo::descriptor("node-id", "echo-node")).unwrap()
+    }
+
+    /// A node that runs a command only some time after its `invoke` passes
+    /// the stream check: its stream is asked for again until the command
+    /// runs, and only then are other sessions' asked for.
+    #[tokio::test]
+    async fn the_stream_check_waits_for_a_command_that_starts_late() {
+        use nerve_proto::{Message, RpcError};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let node = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut c = Conn::new(tokio_tungstenite::accept_async(tcp).await.unwrap());
+            let mut run = None;
+            loop {
+                let crate::wire::Recv::Msg(Message::Request {
+                    id,
+                    method: m,
+                    params,
+                }) = c.recv(WAIT).await
+                else {
+                    continue;
+                };
+                if m == method::INVOKE {
+                    run = Some((id, tokio::time::Instant::now()));
+                    continue;
+                }
+                let Some((call, at)) = run.clone() else {
+                    continue;
+                };
+                // Not running for 400 ms, and another session's never is.
+                let own = params.get("ctx").map(|c| &c["session"]) == Some(&json!("conformance-1"));
+                if !own || at.elapsed() < Duration::from_millis(400) {
+                    let e = RpcError::invalid_args("no running command 1 of this session");
+                    c.send(&Message::error(Some(id), e)).await.unwrap();
+                    continue;
+                }
+                c.send(&Message::result(id, json!({"sid": 5})))
+                    .await
+                    .unwrap();
+                let f =
+                    nerve_proto::frame::stream_frame(5, 0, b"line 1\nline 2\nline 3\n".to_vec());
+                c.send_binary(f.encode().unwrap()).await.unwrap();
+                let close = json!({"sid": 5, "reason": "ended"});
+                c.send(&Message::request(5, method::STREAM_CLOSE, close))
+                    .await
+                    .unwrap();
+                let out = json!({"exit_code": 0, "stdout": "", "stderr": "", "truncated": false});
+                c.send(&Message::result(call, out)).await.unwrap();
+            }
+        });
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (ws, _) = tokio_tungstenite::client_async(format!("ws://{addr}/"), tcp)
+            .await
+            .unwrap();
+        let mut conn = Conn::new(ws);
+        streams_output(&mut conn, "late").await.unwrap();
+        node.abort();
     }
 
     #[test]
