@@ -9,6 +9,7 @@
 //! matches that scope.
 
 use globset::{GlobBuilder, GlobMatcher};
+use nerve_proto::schema::PathMark;
 use regex::Regex;
 
 use super::normalize::{self, Command};
@@ -111,6 +112,19 @@ impl Rule {
     /// Whether `call` matches this rule, parsing the command line itself.
     pub fn matches(&self, call: &Call) -> bool {
         self.matches_with(call, None)
+    }
+
+    /// Whether the path argument `path` of a call of another capability
+    /// meets this rule: an `fs` entry (for every action, or for `fs.read` or
+    /// `fs.write` as the argument is read or written) whose glob takes the
+    /// path, spelled as an `fs` call's path is.
+    pub fn matches_path(&self, mark: PathMark, path: &str) -> bool {
+        match &self.matcher {
+            Matcher::Path(g) => {
+                self.covers("fs", mark.as_str()) && g.is_match(normalize_path(path))
+            }
+            _ => false,
+        }
     }
 
     /// Whether `call` matches this rule, with the command line already pulled

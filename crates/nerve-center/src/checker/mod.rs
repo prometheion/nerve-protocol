@@ -29,6 +29,7 @@ pub mod server;
 use serde_json::{Value, json};
 
 use nerve_proto::Effect;
+use nerve_proto::schema::PathMark;
 
 pub use config::{
     AllowRule, BlockEntry, CheckerConfig, LocalModel, ModelConfig, ModelScope, ModelSource,
@@ -89,10 +90,22 @@ pub struct CallInfo<'a> {
     pub cap: &'a str,
     pub action: &'a str,
     pub effect: Effect,
-    /// The command line, the path, or `<cap>.<action>` for an action without
-    /// a target.
+    /// What the node says the capability and this action do, from the
+    /// center's catalog, for the model's state. Written by the node (or a
+    /// provider program on it), so it is data the model weighs, never part
+    /// of the question.
+    pub description: &'a str,
+    /// `node` for a built-in capability, else the provider program's name.
+    pub provider: &'a str,
+    /// The command line, the path (an `fs` call's, or the path arguments of
+    /// any other call, joined by `, `), or `<cap>.<action>` for an action
+    /// without a target.
     pub target: &'a str,
-    /// The call's other arguments, for the model's state.
+    /// The values of the call's path arguments (`x-nerve-path`), with what
+    /// the action does there. A call of any capability but `fs` meets the
+    /// `fs` blocklist entries with them.
+    pub paths: &'a [(PathMark, String)],
+    /// The call's arguments, for the model's state.
     pub args: &'a serde_json::Map<String, Value>,
     pub node_id: &'a str,
     /// The node's OS (`linux`, `windows`, …), for the model's state.
@@ -248,20 +261,36 @@ impl Checker {
             };
         }
         let commands = parsed.as_ref().map(|p| p.commands.as_slice());
+        // A path argument of any other capability is a file the call reads
+        // or writes, so the `fs` entries hold it as they hold an `fs` call's
+        // path: an entry against writing `~/.ssh/authorized_keys` is not
+        // passed by a program's action that writes there. An `fs` call's
+        // path is its target already, matched by its own action.
+        let paths: &[(PathMark, String)] = if call.cap == "fs" { &[] } else { call.paths };
         // 1. Blocklist (hard deny, wins over everything): the entries for
         // every node and for this node, less those switched off for it.
         if blocklist_on
-            && let Some(b) = self
+            && let Some((b, path)) = self
                 .blocklist
                 .iter()
                 .filter(|b| b.entry.applies_to(call.node_id))
-                .find(|b| b.rule.matches_with(&target, commands))
+                .find_map(|b| {
+                    if b.rule.matches_with(&target, commands) {
+                        return Some((b, None));
+                    }
+                    let (_, p) = paths.iter().find(|(m, p)| b.rule.matches_path(*m, p))?;
+                    Some((b, Some(p)))
+                })
         {
             let e = &b.entry;
             let what = if e.note.is_empty() {
                 e.rule.clone()
             } else {
                 format!("{} ({})", e.note, e.rule)
+            };
+            let what = match path {
+                Some(p) => format!("{what}, for its path argument {p}"),
+                None => what,
             };
             let (scope, list, off) = match e.node_id {
                 None => (
@@ -397,13 +426,22 @@ pub fn taints(effect: Effect) -> bool {
     matches!(effect, Effect::Read | Effect::Sense | Effect::Execute)
 }
 
-/// The `state` sent to the model: the call, with args bounded. The question
-/// is fixed by the center, so only this ever carries the command text.
-fn model_state(call: &CallInfo<'_>) -> Value {
+/// The most of a capability's description the model's state carries: what
+/// it does in a sentence or two, so a long one cannot crowd out the call.
+pub const STATE_DESCRIPTION_MAX: usize = 400;
+
+/// The `state` sent to the model: the call, with its effect, the node's
+/// description of the capability, and args bounded. The question is fixed
+/// by the center, so only this ever carries the command text or what a
+/// node says of its capability: a description that claims a call is
+/// harmless is data for the model, never an instruction it is given.
+pub fn model_state(call: &CallInfo<'_>) -> Value {
     let args = clip(&Value::Object(call.args.clone()).to_string(), 2000);
     json!({
         "capability": call.cap,
         "action": call.action,
+        "effect": call.effect.as_str(),
+        "description": clip(call.description, STATE_DESCRIPTION_MAX),
         "target": clip(call.target, 2000),
         "os": call.os,
         "tainted": call.tainted,
@@ -428,7 +466,10 @@ mod tests {
             cap,
             action,
             effect,
+            description: "",
+            provider: "node",
             target,
+            paths: &[],
             args,
             node_id: "n1",
             os: "linux",
@@ -715,6 +756,109 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A program's action that writes a path is held by the `fs.write`
+    /// entries as `fs.write` is, however the path is spelled; one that only
+    /// reads it is not held by them, but by an `fs.read` or `fs` entry.
+    #[tokio::test]
+    async fn a_provider_path_arg_hits_the_fs_blocklist() {
+        let mut cfg = CheckerConfig::default();
+        cfg.blocklist.push(entry("fs.read:/srv/secret/*", None));
+        let checker = Checker::build(cfg, None);
+        let args = Map::new();
+        let notes = |paths: &'static [(PathMark, String)]| CallInfo {
+            provider: "notesd",
+            paths,
+            ..call("notes", "save", Effect::Write, "", &args)
+        };
+        let leak = |v: Vec<(PathMark, String)>| -> &'static [(PathMark, String)] { v.leak() };
+        for p in [
+            "~/.ssh/authorized_keys",
+            "/home/me/.ssh/authorized_keys",
+            "/home/me/work/../.ssh/authorized_keys",
+            "/home/me/.ssh/./authorized_keys",
+            "/c/Users/Me/.SSH/authorized_keys",
+        ] {
+            let paths = leak(vec![
+                (PathMark::Read, "/tmp/a".into()),
+                (PathMark::Write, p.into()),
+            ]);
+            let Decision::Refuse {
+                layer,
+                message,
+                detail,
+                ..
+            } = checker.check(&notes(paths), None).await
+            else {
+                panic!("a write to {p} should be refused");
+            };
+            assert_eq!(layer, Layer::Blocklist);
+            assert_eq!(detail, "fs.write:~/.ssh/authorized_keys");
+            assert!(message.contains(&format!("path argument {p}")), "{message}");
+        }
+        // Read there, it is not a write; a read of a path an `fs.read`
+        // entry names is refused.
+        let paths = leak(vec![(
+            PathMark::Read,
+            "/home/me/.ssh/authorized_keys".into(),
+        )]);
+        assert!(matches!(
+            checker.check(&notes(paths), None).await,
+            Decision::Pass
+        ));
+        let paths = leak(vec![(PathMark::Read, "/srv/secret/key".into())]);
+        assert!(matches!(
+            checker.check(&notes(paths), None).await,
+            Decision::Refuse { ref detail, .. } if detail == "fs.read:/srv/secret/*"
+        ));
+        // A path of an ordinary place passes.
+        let paths = leak(vec![(PathMark::Write, "/home/me/notes/today.md".into())]);
+        assert!(matches!(
+            checker.check(&notes(paths), None).await,
+            Decision::Pass
+        ));
+    }
+
+    /// The model is told the call's effect and what the node says the
+    /// capability does, cut to a few sentences, beside the call itself.
+    #[test]
+    fn the_model_state_carries_effect_and_description_clipped() {
+        let args = Map::new();
+        let long = format!("Saves a note to a file. {}", "More words. ".repeat(100));
+        let paths = [(PathMark::Write, "/home/me/notes/a.md".to_string())];
+        let c = CallInfo {
+            description: &long,
+            provider: "notesd",
+            paths: &paths,
+            ..call(
+                "notes",
+                "save",
+                Effect::Actuate,
+                "/home/me/notes/a.md",
+                &args,
+            )
+        };
+        let state = model_state(&c);
+        assert_eq!(state["effect"], "actuate");
+        let d = state["description"].as_str().unwrap();
+        assert!(d.starts_with("Saves a note to a file."), "{d}");
+        assert!(d.ends_with('…'), "{d}");
+        assert!(
+            d.len() <= STATE_DESCRIPTION_MAX + '…'.len_utf8(),
+            "{}",
+            d.len()
+        );
+        assert_eq!(state["capability"], "notes");
+        assert_eq!(state["target"], "/home/me/notes/a.md");
+        // A short one is given whole.
+        let c = CallInfo {
+            description: "Runs a command.",
+            ..call("exec", "run", Effect::Execute, "make", &args)
+        };
+        let state = model_state(&c);
+        assert_eq!(state["effect"], "execute");
+        assert_eq!(state["description"], "Runs a command.");
     }
 
     #[test]

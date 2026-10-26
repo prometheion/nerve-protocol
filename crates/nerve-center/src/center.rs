@@ -13,6 +13,7 @@ use tokio::sync::broadcast;
 
 use nerve_proto::link::{CenterUrl, PairLink, PairRequest, PairResponse};
 use nerve_proto::msg::{self, ByeReason, Event, Hello};
+use nerve_proto::schema::PathMark;
 use nerve_proto::{Descriptor, ErrorCode, Exposure, RpcError};
 use nerve_transport::log::{Level, Log, Query, call_line};
 use nerve_transport::tls::ServerIdentity;
@@ -2722,20 +2723,23 @@ impl Center {
         // node. It can only refuse; the node's policy still decides what it
         // lets through (design rule 1).
         let checker = self.checker();
-        let os = self.read(|s| {
-            s.nodes
-                .get(&route.node_id)
-                .map(|n| n.platform.clone())
-                .unwrap_or_default()
+        let (os, seen) = self.read(|s| {
+            let n = s.nodes.get(&route.node_id);
+            let os = n.map(|n| n.platform.clone()).unwrap_or_default();
+            (os, n.map(|n| CheckerUnit::of(n, route)).unwrap_or_default())
         });
         let tainted = checker.taint_on() && sess.tainted();
-        let target = checker_target(route, &args);
+        let paths = seen.paths(&args);
+        let target = checker_target(route, &args, &paths);
         let endpoint = self.resolved_endpoint(&checker);
         let info = CallInfo {
             cap: &route.cap,
             action: &route.action,
             effect: route.effect,
+            description: &seen.description,
+            provider: &seen.provider,
             target: &target,
+            paths: &paths,
             args: &args,
             node_id: &route.node_id,
             os: &os,
@@ -3425,9 +3429,15 @@ impl Center {
     }
 }
 
-/// What the checker matches on: the command line for `exec.run`, the path for
-/// an `fs` action, else `<cap>.<action>`.
-fn checker_target(route: &Route, args: &Map<String, Value>) -> String {
+/// What the checker matches on and the audit names: the command line for
+/// `exec.run`, the path for an `fs` action, the path arguments of any other
+/// action that takes paths (joined by `, `, as the node's audit names them),
+/// else `<cap>.<action>`.
+fn checker_target(
+    route: &Route,
+    args: &Map<String, Value>,
+    paths: &[(PathMark, String)],
+) -> String {
     match (route.cap.as_str(), route.action.as_str()) {
         ("exec", "run") => args
             .get("command")
@@ -3439,7 +3449,60 @@ fn checker_target(route: &Route, args: &Map<String, Value>) -> String {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
+        _ if !paths.is_empty() => paths
+            .iter()
+            .map(|(_, p)| p.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
         _ => format!("{}.{}", route.cap, route.action),
+    }
+}
+
+/// What the center's catalog says of the unit a call is for, as the action
+/// checker is shown it. Empty for a unit the catalog no longer has: the
+/// node refuses such a call anyway.
+#[derive(Default)]
+struct CheckerUnit {
+    /// The capability's summary and the action's own, on one line.
+    description: String,
+    provider: String,
+    /// The arguments the unit's schema marks as paths.
+    marked: Vec<(String, PathMark)>,
+}
+
+impl CheckerUnit {
+    fn of(n: &NodeRecord, route: &Route) -> CheckerUnit {
+        let Some(u) = n.catalog.unit(&format!("{}.{}", route.cap, route.action)) else {
+            return CheckerUnit::default();
+        };
+        // The capability's summary tells what it is for; the unit's own
+        // description, when it has one, what this action does. A unit
+        // without a summary of its own carries its capability's already.
+        let cap = n
+            .descriptor
+            .as_ref()
+            .and_then(|d| d.capability(&route.cap))
+            .map(|c| c.summary.split_whitespace().collect::<Vec<_>>().join(" "))
+            .unwrap_or_default();
+        let description = if cap.is_empty() || *u.description == *cap {
+            u.description.to_string()
+        } else {
+            format!("{cap} {}: {}", route.action, u.description)
+        };
+        CheckerUnit {
+            description,
+            provider: u.provider.to_string(),
+            marked: nerve_proto::schema::path_args(&u.params),
+        }
+    }
+
+    /// The values of the call's path arguments, in the schema's order. An
+    /// argument that is absent or not a string names no path.
+    fn paths(&self, args: &Map<String, Value>) -> Vec<(PathMark, String)> {
+        self.marked
+            .iter()
+            .filter_map(|(field, mark)| Some((*mark, args.get(field)?.as_str()?.to_string())))
+            .collect()
     }
 }
 
@@ -3901,6 +3964,78 @@ mod tests {
             .unwrap_err();
         let CallError::Rpc(e) = e;
         assert_eq!(e.kind(), ErrorCode::ConnectionLost);
+    }
+
+    /// A program's action that takes a path is audited by the checker under
+    /// that path, as the node's audit names it, not as `cap.action`; the
+    /// model and the blocklist see the path too, and the model is told what
+    /// the capability says it does.
+    #[tokio::test]
+    async fn the_audit_target_of_a_path_capability_is_its_path() {
+        use crate::tools::tests::{cap, desc};
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let params = json!({"type": "object",
+            "properties": {"path": {"type": "string", "x-nerve-path": "write"},
+                           "text": {"type": "string"}}});
+        let mut notes = cap(
+            "notes",
+            "notes",
+            &[("save", nerve_proto::Effect::Write, params)],
+        );
+        notes.provider = "notesd".into();
+        c.update(|s| {
+            let mut n = node_record("n1", "linux");
+            n.set_descriptor(desc("n1", vec![notes]));
+            s.nodes.insert("n1".into(), n);
+            s.checker.allow_rules.push(AllowRule {
+                rule: "notes.save".into(),
+                node_id: None,
+            });
+        });
+        c.rebuild_checker();
+        online(&c, "n1");
+        let sess = c.new_session("test");
+        let route = Route {
+            node_id: "n1".into(),
+            node_name: "n1".into(),
+            cap: "notes".into(),
+            action: "save".into(),
+            effect: nerve_proto::Effect::Write,
+        };
+        let save = |path: &str| {
+            let mut m = Map::new();
+            m.insert("path".into(), json!(path));
+            m.insert("text".into(), json!("hello"));
+            m
+        };
+        // Into an ordinary file: the allow rule lets it go to the node, and
+        // the audit names the file.
+        let CallError::Rpc(e) = c
+            .call(&sess, &route, save("/home/me/notes/today.md"))
+            .await
+            .unwrap_err();
+        assert_eq!(e.kind(), ErrorCode::ConnectionLost, "{}", e.message);
+        let last = c.audit().pop().unwrap();
+        assert_eq!(last["checker"]["layer"], "allow rule");
+        assert_eq!(last["target"], "/home/me/notes/today.md");
+        // Into the SSH keys: the `fs.write` entry refuses it, under the path.
+        let CallError::Rpc(e) = c
+            .call(&sess, &route, save("/home/me/.ssh/authorized_keys"))
+            .await
+            .unwrap_err();
+        assert_eq!(e.kind(), ErrorCode::Forbidden, "{}", e.message);
+        let last = c.audit().pop().unwrap();
+        assert_eq!(last["checker"]["layer"], "blocklist");
+        assert_eq!(last["target"], "/home/me/.ssh/authorized_keys");
+        // What the checker is shown of the unit.
+        let seen = c.read(|s| CheckerUnit::of(&s.nodes["n1"], &route));
+        assert_eq!(seen.provider, "notesd");
+        assert_eq!(seen.description, "notes summary save: save it");
+        assert_eq!(
+            seen.paths(&save("/x")),
+            vec![(PathMark::Write, "/x".to_string())]
+        );
     }
 
     /// A call to a node that is offline or disabled is `unavailable` before
