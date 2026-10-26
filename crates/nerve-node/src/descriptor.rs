@@ -11,6 +11,7 @@ use nerve_proto::descriptor::{
     Access, AccessMode, Action, Capability, Descriptor, Direction, Effect, EventDecl, Exposure,
     FolderAccess, NodeInfo, Software, StreamDecl, StreamKind,
 };
+use nerve_proto::schema::PathMark;
 
 pub const SOFTWARE: &str = "nerve-node";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -127,25 +128,29 @@ fn node_cap() -> Capability {
     c
 }
 
-/// The `path` argument of the `fs` actions. A Windows node says how its
-/// drives are written, so a model does not send `C:\...`, a `bad_path`.
-fn path_param(windows: bool) -> Value {
+/// The `path` argument of the `fs` actions, marked as a path the action
+/// reads or writes (`mark`, `x-nerve-path`) as any capability's is. A
+/// Windows node says how its drives are written, so a model does not send
+/// `C:\...`, a `bad_path`.
+fn path_param(windows: bool, mark: PathMark) -> Value {
     let text = if windows {
         "absolute path, the drive as a folder: /c/Users/x for C:\\Users\\x"
     } else {
         "absolute path"
     };
-    json!({"type": "string", "description": text})
+    json!({"type": "string", "description": text, "x-nerve-path": mark.as_str()})
 }
 
 /// The `cwd` argument of `exec.run`: it takes the same wire form as an `fs`
-/// path, so a Windows node says so here as well. A Unix node's is unchanged.
+/// path, so a Windows node says so here as well. It is marked a path, read
+/// only by its marker's words; the node holds a command's start to a folder
+/// with `x` whatever it says.
 fn cwd_param(windows: bool) -> Value {
     opt(if windows {
-        json!({"type": "string",
+        json!({"type": "string", "x-nerve-path": "read",
                "description": "working folder, the drive as a folder: /c/Users/x for C:\\Users\\x"})
     } else {
-        json!({"type": "string"})
+        json!({"type": "string", "x-nerve-path": "read"})
     })
 }
 
@@ -156,7 +161,7 @@ fn fs_cap(exposure: Exposure) -> Capability {
         exposure,
         "Files on this machine: stat, list, read, grep, find and write.",
     );
-    let path = path_param(cfg!(windows));
+    let path = path_param(cfg!(windows), PathMark::Read);
     let ty = json!({"enum": ["file", "dir", "link", "other"]});
     let a = &mut c.actions;
     a.insert(
@@ -245,7 +250,8 @@ fn fs_cap(exposure: Exposure) -> Capability {
             Effect::Write,
             "Writes a whole file; if_match guards against a concurrent change.",
             obj(
-                json!({"path": path, "content": {"type": "string"},
+                json!({"path": path_param(cfg!(windows), PathMark::Write),
+                       "content": {"type": "string"},
                        "encoding": opt(json!({"enum": ["utf8", "base64"]})),
                        "if_match": opt(json!({"type": "string"}))}),
                 &["path", "content"],
@@ -488,17 +494,18 @@ fn exposure(entry: &CenterEntry, id: &str) -> Option<Exposure> {
 /// action that senses or actuates (`exec.signal`), which no mode allows unless
 /// the owner set it to on. An action set to off stays, and fails `disabled`.
 ///
-/// `fs` and `exec.run` name their paths per call, so they are offered where
-/// a call with its paths in the folders is allowed. A provider's action
-/// (`provided`) names no path, so no folder holds it: `folder` mode offers it
-/// only where the owner set it to on.
+/// An action that names paths (`paths`: `fs`, `exec.run`, a provider's
+/// action whose schema marks some with `x-nerve-path`) names them per call,
+/// so it is offered where a call with its paths in the folders is allowed.
+/// One that names none lies in no folder: `folder` mode offers a read then,
+/// and a write or a command only where the owner set it to on.
 fn offered(
     policy: &CenterPolicy,
     view: View,
     cap: &str,
     action: &str,
     effect: Effect,
-    provided: bool,
+    paths: bool,
 ) -> bool {
     let View {
         mode,
@@ -520,12 +527,12 @@ fn offered(
     if cap == "exec" && mode == Mode::Folder && !confined && policy.sudo_allow.is_empty() {
         return false;
     }
-    let paths = if provided {
-        PathArgs::None
-    } else {
+    let paths = if paths {
         PathArgs::Some {
             all_in_folders: true,
         }
+    } else {
+        PathArgs::None
     };
     match effect_rule(mode, effect, paths, setting) {
         Need::Allowed => true,
@@ -577,6 +584,11 @@ pub struct Reach {
     /// for this center. The daemon clears it while the switch is off
     /// ([`crate::daemon::Shared::reach`]).
     pub sudo: bool,
+    /// Whether the node reads this center's files as its command account
+    /// (`nerve-run` on the installed Linux node), so in `folder` mode a read
+    /// goes as far as that account may read ([`nerve_policy::decide::Reads`]).
+    /// Set by the daemon.
+    pub reads_by_account: bool,
     /// The folders the owner granted this center.
     pub folders: Vec<Folder>,
     /// The built-in folders of `nerve-run` where its commands run as that
@@ -603,6 +615,7 @@ impl Reach {
             account,
             confined,
             held_by_account: false,
+            reads_by_account: false,
             // A command on the list runs only through `exec.run`: where the
             // owner hid or turned that off for this center, none runs.
             sudo: !entry.policy.sudo_allow.is_empty()
@@ -729,6 +742,7 @@ impl Reach {
             account: self.account.clone(),
             confined: folder && self.confined && !self.held_by_account,
             sudo: folder && self.sudo,
+            reads_by_account: folder && self.reads_by_account,
             folders: folders
                 .into_iter()
                 .zip(closed_below)
@@ -837,9 +851,11 @@ fn build(
     };
     for c in &mut caps {
         let id = c.id.clone();
-        let provided = c.provider != "node";
-        c.actions
-            .retain(|a, decl| offered(&entry.policy, view, &id, a, decl.effect, provided));
+        let node = c.provider == "node";
+        c.actions.retain(|a, decl| {
+            let paths = node || !nerve_proto::schema::path_args(&decl.params).is_empty();
+            offered(&entry.policy, view, &id, a, decl.effect, paths)
+        });
         for (a, decl) in &mut c.actions {
             if entry.policy.cap_setting(&id, Some(a)) == Some(CapSetting::Off) {
                 decl.exposure = Some(Exposure::Off);
@@ -1193,6 +1209,16 @@ mod tests {
         c
     }
 
+    /// [`provided`] whose action takes a path it reads or writes (`mark`).
+    fn provided_at(effect: Effect, mark: PathMark) -> Capability {
+        let mut c = provided(effect);
+        c.actions.get_mut("say").unwrap().params = obj(
+            json!({"path": {"type": "string", "x-nerve-path": mark.as_str()}}),
+            &["path"],
+        );
+        c
+    }
+
     /// A provider's action is offered exactly where the policy lets a call
     /// of it through, for every effect, mode, `on` and allow rule: so the
     /// center builds no tool for it that the node would refuse.
@@ -1290,11 +1316,13 @@ mod tests {
     }
 
     /// What a center is shown follows the effect table, for every mode,
-    /// effect, setting, allow rule and confinement: a provider's action,
-    /// which names no path, exactly where `decide` lets a call of it
-    /// through; `fs.read`, `fs.write` and `exec.run` exactly where the table
-    /// allows a call with its paths in the folders, which `decide` then
-    /// allows, while it allows one outside them as the table says.
+    /// effect, setting, allow rule and confinement: a provider's action
+    /// that names no path exactly where `decide` lets a call of it through;
+    /// `fs.read`, `fs.write`, `exec.run` and a provider's action with a path
+    /// it reads or writes exactly where the table allows a call with its
+    /// paths in the folders, which `decide` then allows, while it allows one
+    /// outside them as the table says. Where the command account holds the
+    /// reads, a read call's path outside the folders is in its reach.
     #[test]
     fn what_is_offered_follows_the_effect_table() {
         use Need::{AllowRule, Allowed, InFolders, NeedsOn, Off};
@@ -1309,6 +1337,11 @@ mod tests {
             sudo: false,
             shell: nerve_policy::command::Shell::Sh,
             reads: nerve_policy::decide::Reads::Folders,
+        };
+        let may = |_: &std::path::Path| true;
+        let by_account = |confined: bool| Env {
+            reads: nerve_policy::decide::Reads::Account(&may),
+            ..env(confined)
         };
         let cfg = NodeConfig::default();
         let effects = [
@@ -1419,33 +1452,56 @@ mod tests {
                             rows += 1;
                         }
                     }
-                    // The built-in actions that name their paths per call.
-                    for (cap, action, effect) in [
-                        ("fs", "read", Effect::Read),
-                        ("fs", "write", Effect::Write),
-                        ("exec", "run", Effect::Execute),
-                    ] {
+                    // The built-in actions that name their paths per call,
+                    // and a provider's that reads or writes a path.
+                    let mut path_actions: Vec<(&str, &str, Effect, Option<PathMark>)> = vec![
+                        ("fs", "read", Effect::Read, None),
+                        ("fs", "write", Effect::Write, None),
+                        ("exec", "run", Effect::Execute, None),
+                    ];
+                    for effect in effects {
+                        for mark in [PathMark::Read, PathMark::Write] {
+                            path_actions.push(("echo", "say", effect, Some(mark)));
+                        }
+                    }
+                    for (cap, action, effect, mark) in path_actions {
                         let key = format!("{cap}.{action}");
-                        for allow in [&[][..], &[key.as_str()], &[cap], &["fs.stat"]] {
+                        let provided: Vec<Capability> =
+                            mark.map(|m| provided_at(effect, m)).into_iter().collect();
+                        let other = if cap == "echo" {
+                            "echo.other"
+                        } else {
+                            "fs.stat"
+                        };
+                        for allow in [&[][..], &[key.as_str()], &[cap], &[other]] {
                             let e = policy_of(mode, &key, setting, allow);
-                            let what =
-                                format!("{key} {mode:?} {setting:?} {allow:?} confined={confined}");
-                            let d = for_center(&cfg, &e, 0, confined, &[]);
-                            let covered = allow.len() == 1 && allow[0] != "fs.stat";
+                            let what = format!(
+                                "{key} {effect:?} {mark:?} {mode:?} {setting:?} {allow:?} confined={confined}"
+                            );
+                            let d = for_center(&cfg, &e, 0, confined, &provided);
+                            let covered = allow.len() == 1 && allow[0] != other;
                             let by_table = |all_in_folders| {
                                 let paths = PathArgs::Some { all_in_folders };
                                 match need(mode, effect, paths, setting) {
-                                    Allowed => confined || cap != "exec" || mode != Mode::Folder,
+                                    Allowed => {
+                                        confined
+                                            || effect != Effect::Execute
+                                            || mode != Mode::Folder
+                                            || cap != "exec"
+                                    }
                                     AllowRule => covered,
                                     InFolders | NeedsOn | Off => false,
                                 }
                             };
                             assert_eq!(shown_on(&d, cap, action), by_table(true), "{what}");
                             for (path, all_in_folders) in [("/w", true), ("/elsewhere", false)] {
-                                let access = match effect {
-                                    Effect::Write => PathAccess::Write,
-                                    Effect::Execute => PathAccess::Run,
-                                    _ => PathAccess::Read,
+                                let access = match (mark, effect) {
+                                    (Some(PathMark::Read), _) => PathAccess::Read,
+                                    (Some(PathMark::Write), _) | (None, Effect::Write) => {
+                                        PathAccess::Write
+                                    }
+                                    (None, Effect::Execute) => PathAccess::Run,
+                                    (None, _) => PathAccess::Read,
                                 };
                                 let path = if cap == "exec" {
                                     path.to_string()
@@ -1466,9 +1522,22 @@ mod tests {
                                     cwd: run.then_some(std::path::Path::new(&path)),
                                     now_ms: 0,
                                 };
+                                // A provider's action is no command the
+                                // machine confines: the link asks no
+                                // confinement of it.
+                                let confined = confined || cap != "exec";
+                                let want = by_table(all_in_folders);
                                 let allowed =
                                     decide(&e.policy, &env(confined), &call) == Decision::Allow;
-                                assert_eq!(allowed, by_table(all_in_folders), "{what} at {path}");
+                                assert_eq!(allowed, want, "{what} at {path}");
+                                // Where the account holds the reads, a read
+                                // call reads where it may, in the folders or
+                                // not.
+                                let reads = effect == Effect::Read && access == PathAccess::Read;
+                                let want = if reads { by_table(true) } else { want };
+                                let allowed = decide(&e.policy, &by_account(confined), &call)
+                                    == Decision::Allow;
+                                assert_eq!(allowed, want, "{what} at {path}, read by the account");
                             }
                             rows += 1;
                         }
@@ -1476,9 +1545,9 @@ mod tests {
                 }
             }
         }
-        // 3 modes × 4 settings × 2 confinements × (5 effects + 3 path
-        // actions) × 4 allow lists.
-        assert_eq!(rows, 3 * 4 * 2 * 8 * 4);
+        // 3 modes × 4 settings × 2 confinements × (5 effects + 3 built-in
+        // path actions + 5 effects × 2 marks) × 4 allow lists.
+        assert_eq!(rows, 3 * 4 * 2 * 18 * 4);
     }
 
     #[test]
@@ -1497,21 +1566,38 @@ mod tests {
     }
 
     /// A Windows node's `fs` tools say how a drive is written on the wire,
-    /// so a model does not send `C:\...`.
+    /// so a model does not send `C:\...`. Each marks its path with what it
+    /// does there (`x-nerve-path`), as any capability's path is marked.
     #[test]
     fn a_windows_node_shows_the_wire_form_of_a_path() {
-        let win = path_param(true);
+        let win = path_param(true, PathMark::Read);
         let text = win["description"].as_str().unwrap();
         assert!(
             text.contains("/c/Users/") && text.contains("C:\\Users\\"),
             "{text}"
         );
-        assert_eq!(path_param(false)["description"], "absolute path");
+        assert_eq!(
+            path_param(false, PathMark::Read)["description"],
+            "absolute path"
+        );
         let fs = fs_cap(Exposure::On);
-        for a in ["stat", "list", "read", "write"] {
+        for (a, mark) in [
+            ("stat", PathMark::Read),
+            ("list", PathMark::Read),
+            ("read", PathMark::Read),
+            ("grep", PathMark::Read),
+            ("find", PathMark::Read),
+            ("write", PathMark::Write),
+        ] {
+            let params = &fs.actions[a].params;
             assert_eq!(
-                fs.actions[a].params["properties"]["path"],
-                path_param(cfg!(windows)),
+                params["properties"]["path"],
+                path_param(cfg!(windows), mark),
+                "{a}"
+            );
+            assert_eq!(
+                nerve_proto::schema::path_args(params),
+                [("path".to_string(), mark)],
                 "{a}"
             );
         }
@@ -1527,7 +1613,10 @@ mod tests {
             text.contains("/c/Users/x") && text.contains("C:\\Users\\x"),
             "{text}"
         );
-        assert_eq!(cwd_param(false), json!({"type": ["string", "null"]}));
+        assert_eq!(
+            cwd_param(false),
+            json!({"type": ["string", "null"], "x-nerve-path": "read"})
+        );
         for windows in [true, false] {
             let exec = exec_cap(
                 Exposure::On,
@@ -1539,6 +1628,10 @@ mod tests {
             assert_eq!(
                 exec.actions["run"].params["properties"]["cwd"],
                 cwd_param(windows)
+            );
+            assert_eq!(
+                nerve_proto::schema::path_args(&exec.actions["run"].params),
+                [("cwd".to_string(), PathMark::Read)]
             );
         }
     }
@@ -1970,6 +2063,26 @@ mod tests {
         assert!(actions(&d, "exec").contains(&"run".to_string()));
     }
 
+    /// Where the node reads as the command account, the block says that a
+    /// read goes as far as that account may read; only folder mode, where
+    /// the folders hold the rest, says it.
+    #[test]
+    fn the_access_block_says_where_reads_go() {
+        let mut e = entry();
+        e.policy.mode = Mode::Folder;
+        e.policy.folders = vec![folder("/srv/data", "rw")];
+        let mut r = Reach::of(&e, 0, Some("nerve-run".into()), true, None);
+        assert!(!r.access(false).reads_by_account);
+        r.reads_by_account = true;
+        assert!(r.access(false).reads_by_account);
+        for mode in [Mode::User, Mode::Allowlist] {
+            e.policy.mode = mode;
+            let mut r = Reach::of(&e, 0, Some("nerve-run".into()), true, None);
+            r.reads_by_account = true;
+            assert!(!r.access(false).reads_by_account, "{mode:?}");
+        }
+    }
+
     /// A Windows node names its folders in the center's form, as its paths
     /// are given in calls.
     #[test]
@@ -2134,7 +2247,15 @@ mod tests {
         fits(&exec(false), "unix");
         let mut fs = fs_cap(Exposure::On);
         for decl in fs.actions.values_mut() {
-            decl.params["properties"]["path"] = path_param(!cfg!(windows));
+            let mark = decl.params["properties"]["path"]["x-nerve-path"].clone();
+            decl.params["properties"]["path"] = path_param(
+                !cfg!(windows),
+                if mark == "write" {
+                    PathMark::Write
+                } else {
+                    PathMark::Read
+                },
+            );
         }
         fits(&fs, "the other platform's fs");
     }

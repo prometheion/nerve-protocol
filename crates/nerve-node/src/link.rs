@@ -15,9 +15,10 @@ use tokio::task::AbortHandle;
 use nerve_policy::audit::Entry;
 use nerve_policy::command::Shell;
 use nerve_policy::config::{Mode, SettingsGrant};
+use nerve_policy::decide::Reads;
 use nerve_policy::protected::Protected;
 use nerve_policy::rules::RuleSet;
-use nerve_policy::{Call, CenterEntry, Decision, Env, NodeConfig, SetError, Target};
+use nerve_policy::{Call, CenterEntry, Decision, Env, NodeConfig, PathAccess, SetError, Target};
 use nerve_proto::descriptor::{Detail, Effect, Exposure};
 use nerve_proto::frame::{self, Frame, FrameError};
 use nerve_proto::link::CenterUrl;
@@ -27,6 +28,7 @@ use nerve_proto::msg::{
 };
 use nerve_proto::resume;
 use nerve_proto::rpc::{Id, Message, params};
+use nerve_proto::schema::PathMark;
 use nerve_proto::{ErrorCode, PROTOCOL_VERSION, RpcError, limits};
 use nerve_transport::backoff::Backoff;
 use nerve_transport::keys::NodeKey;
@@ -37,7 +39,7 @@ use nerve_transport::ws::{self, ConnectError, WsMessage};
 use crate::daemon::{CenterState, LinkHandle, Shared, lock};
 use crate::descriptor;
 use crate::exec::{self, RunCall, RunOptions, Sig, SignalArgs};
-use crate::fs::{FsCall, conflict};
+use crate::fs::{FsCall, WirePath, conflict};
 
 /// Each handshake step must arrive within this (spec §4.2).
 const HANDSHAKE: Duration = Duration::from_secs(15);
@@ -1649,25 +1651,86 @@ impl Link {
             || entry.policy.cap_setting(&inv.cap, Some(&inv.action))
                 == Some(nerve_policy::config::CapSetting::Off);
         if off {
-            return Err(RpcError::new(
-                ErrorCode::Disabled,
-                format!("{}.{} is off", inv.cap, inv.action),
-            ));
+            // Refused before anything else, and in the audit as any refusal.
+            let why = format!("{}.{} is off", inv.cap, inv.action);
+            let target = format!("{}.{}", inv.cap, inv.action);
+            self.audit(&inv, &target, "forbidden", Some("disabled"), Some(&why));
+            return Err(RpcError::new(ErrorCode::Disabled, why));
         }
         // A provider's action (crate::provider) is decided and audited here
-        // like any other, with `cap.action` as its rule target; only an
-        // allowed call reaches the provider. Its arguments are checked first
-        // against the schema it published, so it never sees ones that do
-        // not fit, and the center learns which field is wrong.
+        // like any other; only an allowed call reaches the provider. Its
+        // arguments are checked first against the schema it published, so
+        // it never sees ones that do not fit, and the center learns which
+        // field is wrong.
         if cap.provider != "node" {
             let provider = cap.provider.clone();
             nerve_proto::schema::validate(&action.params, &Value::Object(inv.args.clone()))?;
-            let target = format!("{}.{}", inv.cap, inv.action);
-            self.gate(&entry, &inv, effect, &[], None, None, target, None, None)?;
+            let marked = nerve_proto::schema::path_args(&action.params);
+            // The arguments its schema marks as paths are the call's rule
+            // targets, resolved as the command account would see them, as an
+            // `fs` call's are: the folders, the rules and the protected and
+            // own paths judge them. The provider gets each path as resolved,
+            // so it works where the policy looked. An action with no path
+            // has `cap.action` as its target, and looks nobody up.
+            let account = if marked.is_empty() {
+                Ok(None)
+            } else {
+                self.shared.command_account(&cfg, &entry.policy)
+            };
+            let known = account.as_ref().ok().cloned().flatten();
+            if !marked.is_empty() && self.shared.separate(&entry.policy) {
+                self.acls_ready(&cfg).await?;
+            }
+            let mut args = inv.args.clone();
+            let mut targets = Vec::new();
+            {
+                let _as = act_as(known.as_ref())?;
+                for (field, mark) in &marked {
+                    // Left out (or null, which its schema may allow): no path.
+                    let Some(Value::String(given)) = inv.args.get(field) else {
+                        continue;
+                    };
+                    let path = WirePath::parse(given)?;
+                    args.insert(
+                        field.clone(),
+                        Value::String(nerve_policy::paths::to_wire(&path.real)),
+                    );
+                    targets.push(Target {
+                        path: path.real,
+                        access: match mark {
+                            PathMark::Read => PathAccess::Read,
+                            PathMark::Write => PathAccess::Write,
+                        },
+                    });
+                }
+            }
+            let target = if targets.is_empty() {
+                format!("{}.{}", inv.cap, inv.action)
+            } else {
+                targets
+                    .iter()
+                    .map(|t| nerve_policy::paths::to_wire(&t.path))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            self.gate(
+                &entry,
+                &inv,
+                effect,
+                &targets,
+                None,
+                None,
+                target,
+                known.as_ref(),
+                None,
+            )?;
+            // A missing account stops the call once it is decided and
+            // audited, as for `fs`.
+            account.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
             return self
                 .shared
                 .providers
-                .invoke(&provider, &inv.cap, &inv.action, inv.args)
+                .invoke(&provider, &inv.cap, &inv.action, args)
                 .await;
         }
         match (inv.cap.as_str(), inv.action.as_str()) {
@@ -1711,8 +1774,11 @@ impl Link {
                 };
                 // Taken before the gate: whenever the gate judged by the
                 // folders, the walk below does too, even if `until` passes
-                // in between.
-                let by_folders = entry.policy.mode_at(crate::now_ms()) == Mode::Folder;
+                // in between. Where the node reads as the command account,
+                // that account's own access holds the reads instead
+                // (nerve_policy::decide::Reads), as in the gate.
+                let by_folders = entry.policy.mode_at(crate::now_ms()) == Mode::Folder
+                    && !self.reads_by_account(&entry, known.as_ref());
                 let unconfined = self.shared.unconfined_as(&cfg, || known.clone());
                 self.gate(
                     &entry,
@@ -1838,6 +1904,15 @@ impl Link {
         };
         // The policy looks at the paths as the account (crate::account::FsAs);
         // the audit entry below is the node's own again. `~` is the owner's.
+        // Where the node reads as the command account, a path read in
+        // folder mode goes as far as that account may read, which is asked
+        // under the same switch (crate::fs::readable).
+        let may_read = |p: &std::path::Path| crate::fs::readable(p);
+        let reads = if self.reads_by_account(entry, account) {
+            Reads::Account(&may_read)
+        } else {
+            Reads::Folders
+        };
         let decision = {
             let protected = self.protected(entry);
             let home = self.home();
@@ -1849,22 +1924,12 @@ impl Link {
                 unconfined,
                 sudo: self.shared.sudo_on(),
                 shell: self.shell_for(command),
-                reads: nerve_policy::decide::Reads::Folders,
+                reads,
             };
             nerve_policy::decide(&entry.policy, &env, &call)
         };
         let audit = |decision: &str, code: Option<&str>, reason: Option<&str>| {
-            self.shared.audit(&Entry {
-                ts: crate::now_ms(),
-                center: self.name.clone(),
-                cap: inv.cap.clone(),
-                action: inv.action.clone(),
-                target: target.clone(),
-                decision: decision.into(),
-                code: code.map(Into::into),
-                session: inv.ctx.session.clone(),
-                reason: reason.map(Into::into),
-            })
+            self.audit(inv, &target, decision, code, reason)
         };
         match decision {
             Decision::Allow => {
@@ -1880,6 +1945,42 @@ impl Link {
                 Err(RpcError::forbidden(why))
             }
         }
+    }
+
+    /// Writes one entry of this center's calls to the audit log.
+    fn audit(
+        &self,
+        inv: &Invoke,
+        target: &str,
+        decision: &str,
+        code: Option<&str>,
+        reason: Option<&str>,
+    ) {
+        self.shared.audit(&Entry {
+            ts: crate::now_ms(),
+            center: self.name.clone(),
+            cap: inv.cap.clone(),
+            action: inv.action.clone(),
+            target: target.to_string(),
+            decision: decision.into(),
+            code: code.map(Into::into),
+            session: inv.ctx.session.clone(),
+            reason: reason.map(Into::into),
+        })
+    }
+
+    /// Whether the node reads this center's files as its command account,
+    /// `account` as a call looked it up: on the installed Linux node, where
+    /// the commands run as `nerve-run` (crate::account::FsAs). That
+    /// account's own file access then holds what folder mode reads
+    /// (nerve_policy::decide::Reads). A call whose account could not be
+    /// found reads by the folders.
+    fn reads_by_account(
+        &self,
+        entry: &CenterEntry,
+        account: Option<&crate::service::Account>,
+    ) -> bool {
+        account.is_some() && self.shared.separate(&entry.policy)
     }
 
     fn settings_set(&self, args: &Map<String, Value>) -> Result<Value, RpcError> {

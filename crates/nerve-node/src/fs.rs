@@ -104,6 +104,25 @@ struct WriteArgs {
     if_match: Option<String>,
 }
 
+/// Whether this thread's file access may read `path`: as the account
+/// [`crate::link::act_as`] gives it, where a call reads as its command
+/// account. It opens the path for reading (a folder too) without waiting on
+/// a pipe or taking a terminal, and closes it again. A path that does not
+/// exist passes: nothing can be read there, and the call says so itself.
+pub fn readable(path: &Path) -> bool {
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
+    }
+    match open.open(path) {
+        Ok(_) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
 /// One parsed `fs` call.
 pub enum FsCall {
     Stat(WirePath),

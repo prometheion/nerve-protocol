@@ -214,6 +214,14 @@ pub struct Access {
     /// hidden or off, none runs, and this is false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sudo: bool,
+    /// In `folder` mode: the node reads as `account`, so a call that reads
+    /// may read whatever that account may read, in the folders or not;
+    /// writes and commands keep to the folders. False where a read keeps to
+    /// the folders with `r` (the node then reads with its own or the
+    /// owner's rights). Protected paths and the node's own files stay
+    /// closed either way.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reads_by_account: bool,
     /// In `folder` mode: the folders the center's file calls and commands
     /// may use. Only folder mode names them: in `allowlist` mode as
     /// `nerve-run` they still hold the allowed commands, which this block
@@ -481,6 +489,7 @@ mod tests {
             account: Some("a".into()),
             confined: true,
             sudo: true,
+            reads_by_account: true,
             folders: vec![FolderAccess {
                 path: "/a".into(),
                 access: "r".into(),

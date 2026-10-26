@@ -664,6 +664,9 @@ impl Shared {
         // Without a sandbox, a folder-mode command that runs at all runs as
         // `nerve-run`, held back by that account alone ([`folder_refusal`]).
         reach.held_by_account = !self.sandboxed();
+        // The node reads as that account too (crate::link), whose own
+        // access then holds what folder mode reads.
+        reach.reads_by_account = self.separate(&entry.policy);
         // A command on the sudo list runs only while the switch is on, which
         // it is not by default nor, on Linux, after a restart: the block
         // tells the list only then. A switch change moves the rev like a

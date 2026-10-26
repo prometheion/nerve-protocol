@@ -679,3 +679,199 @@ async fn wrong_args_never_reach_the_provider() {
     assert_eq!(decided[0]["decision"], "allowed", "{decided:?}");
     daemon.stop().await;
 }
+
+/// A provider's action that takes paths (`x-nerve-path`) is held to the
+/// folders in folder mode as `fs` is, on a node run by hand, which reads by
+/// the folders: a path it reads needs `r`, one it writes `w`, and one left
+/// out leaves a write needing `on`. The protected paths and a link that
+/// leads out are refused, every decision names the path in the audit, and
+/// only an allowed call reaches the provider, with the path the node
+/// checked. A call to an action the owner turned off is audited too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_path_taking_provider_is_held_to_the_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let (work, ro, outside) = (root.join("work"), root.join("ro"), root.join("outside"));
+    let ssh = root.join("home/.ssh");
+    for d in [&work, &ro, &outside, &ssh] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(outside.join("secret.txt"), "s").unwrap();
+    std::fs::write(ssh.join("id_test"), "k").unwrap();
+    std::os::unix::fs::symlink(outside.join("secret.txt"), work.join("link")).unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let folder = |p: &Path, access: &str| nerve_policy::config::Folder {
+        path: p.display().to_string(),
+        access: nerve_policy::config::Access::parse(access).unwrap(),
+    };
+    let folders = vec![
+        folder(&work, "rw"),
+        folder(&ro, "r"),
+        folder(&root.join("home"), "rw"),
+    ];
+    let daemon = node(&root, &center, &me(), |p| {
+        p.mode = nerve_policy::Mode::Folder;
+        p.folders = folders.clone();
+    })
+    .await;
+    let mut conn = linked(&mut center).await;
+    let path = |mark: &str, ty: Value| json!({"type": ty, "x-nerve-path": mark});
+    let one = |name: &str, p: Value, required: &[&str]| json!({"type": "object", "properties": {name: p}, "required": required});
+    let caps = json!([{"id": "files", "summary": "Files of the desk.", "actions": {
+        "open": {"effect": "read", "params": one("path", path("read", json!("string")), &["path"])},
+        "save": {"effect": "write", "params": one("path", path("write", json!("string")), &["path"])},
+        "tidy": {"effect": "write",
+                 "params": one("path", path("write", json!(["string", "null"])), &[])}}}]);
+    let (mut p, first) = hello_with(&daemon.paths().ctl_socket(), caps).await;
+    assert_eq!(first["ok"]["broken"], json!([]), "{first}");
+    descriptor_changed(&mut conn).await;
+    // The marker is published, and folder mode offers all three: a call
+    // with its paths in the folders, or `tidy` with none and `on`, could run.
+    let d = conn
+        .call("describe", json!({"detail": "full"}), WAIT)
+        .await
+        .unwrap()
+        .unwrap();
+    let files = d["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "files")
+        .expect("files is listed")
+        .clone();
+    assert_eq!(
+        files["actions"]["open"]["params"]["properties"]["path"]["x-nerve-path"],
+        "read"
+    );
+    let offered: Vec<&String> = files["actions"].as_object().unwrap().keys().collect();
+    assert_eq!(offered, ["open", "save", "tidy"]);
+
+    // The provider answers with the arguments it got.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let got = seen.clone();
+    let served = tokio::spawn(async move {
+        while let Some(call) = p.next().await {
+            got.lock().unwrap().push(call["params"].clone());
+            p.send(json!({"id": call["id"], "ok": call["params"]["args"]}))
+                .await;
+        }
+    });
+    let wire = |p: &Path| p.display().to_string();
+    let call = |action: &str, at: Value| json!({"cap": "files", "action": action, "args": {"path": at}, "ctx": {}});
+    // Given the long way round, checked and passed on as resolved.
+    let given = wire(&work.join("../work/a.txt"));
+    let in_work = wire(&work.join("a.txt"));
+    let saved = wire(&work.join("b.txt"));
+    let secret = wire(&outside.join("secret.txt"));
+    let allowed = [("open", &given, &in_work), ("save", &saved, &saved)];
+    let refused = [
+        (
+            "open",
+            secret.clone(),
+            "outside the folders that allow reading",
+        ),
+        (
+            "save",
+            wire(&ro.join("b")),
+            "outside the folders that allow writing",
+        ),
+        (
+            "save",
+            wire(&outside.join("b")),
+            "outside the folders that allow writing",
+        ),
+        ("open", wire(&ssh.join("id_test")), "is protected"),
+        // Resolved, the link is the file it leads to.
+        (
+            "open",
+            wire(&work.join("link")),
+            "outside the folders that allow reading",
+        ),
+    ];
+    for (action, at, why) in &refused {
+        let e = conn
+            .call("invoke", call(action, json!(at)), WAIT)
+            .await
+            .unwrap()
+            .expect_err("refused");
+        assert_eq!(code_of(&e), "forbidden", "{action} {at}: {}", e.message);
+        assert!(e.message.contains(why), "{action} {at}: {}", e.message);
+    }
+    // A write that names no path lies in no folder: it needs `on`.
+    let e = conn
+        .call("invoke", call("tidy", Value::Null), WAIT)
+        .await
+        .unwrap()
+        .expect_err("refused");
+    assert!(e.message.contains("touches no folder"), "{}", e.message);
+    for (action, at, resolved) in allowed {
+        let v = conn
+            .call("invoke", call(action, json!(at)), WAIT)
+            .await
+            .unwrap()
+            .expect("allowed");
+        assert_eq!(v["path"], json!(resolved));
+    }
+    // Only the allowed calls reached it, with the paths the node checked.
+    let reached: Vec<Value> = seen.lock().unwrap().clone();
+    assert_eq!(
+        reached
+            .iter()
+            .map(|c| (c["action"].clone(), c["args"]["path"].clone()))
+            .collect::<Vec<_>>(),
+        [
+            (json!("open"), json!(in_work)),
+            (json!("save"), json!(saved))
+        ]
+    );
+
+    // The owner turns `open` off: the call is refused, and audited too.
+    let paths = daemon.paths().clone();
+    owner_edit(&paths, |c| {
+        c.centers[0]
+            .policy
+            .caps
+            .insert("files.open".into(), nerve_policy::config::CapSetting::Off);
+    })
+    .await;
+    let e = conn
+        .call("invoke", call("open", json!(in_work)), WAIT)
+        .await
+        .unwrap()
+        .expect_err("off");
+    assert_eq!(code_of(&e), "disabled", "{}", e.message);
+
+    let audit: Vec<Value> = std::fs::read_to_string(paths.audit_log())
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e["cap"] == "files")
+        .collect();
+    let entries: Vec<(String, String, String)> = audit
+        .iter()
+        .map(|e| {
+            (
+                e["action"].as_str().unwrap().to_string(),
+                e["target"].as_str().unwrap().to_string(),
+                e["decision"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let mut want: Vec<(String, String, String)> = refused
+        .iter()
+        .map(|(a, at, _)| (a.to_string(), at.clone(), "forbidden".into()))
+        .collect();
+    // The link is named as the file it leads to.
+    want[4].1 = secret.clone();
+    want.push(("tidy".into(), "files.tidy".into(), "forbidden".into()));
+    want.extend(
+        allowed
+            .iter()
+            .map(|(a, _, at)| (a.to_string(), at.to_string(), "allowed".into())),
+    );
+    want.push(("open".into(), "files.open".into(), "forbidden".into()));
+    assert_eq!(entries, want, "{audit:#?}");
+    assert_eq!(audit.last().unwrap()["code"], "disabled");
+    served.abort();
+    daemon.stop().await;
+}

@@ -643,9 +643,10 @@ fn by_mode(
         Need::InFolders => {
             reasons.push(match outside {
                 Some(PathAccess::Write) => "outside the folders that allow writing".into(),
-                Some(PathAccess::Run) => {
+                Some(PathAccess::Run) if call.command.is_some() || call.cwd.is_some() => {
                     "the working directory is not in a folder that allows running".into()
                 }
+                Some(PathAccess::Run) => "outside the folders that allow running".into(),
                 _ => "outside the folders that allow reading".into(),
             });
             false
@@ -659,20 +660,24 @@ fn by_mode(
 }
 
 /// What `call` does at the first of its paths that lies in no folder
-/// allowing it there, or `None` when every one does. An execute call needs
-/// its working directory in a folder with `x`, and every call each target
-/// in a folder with the flag its access needs (each flag stands alone:
-/// writing needs `w` and no `r`, reading `r` and no `w`). A path a read call
-/// reads needs no folder where the command account holds the read
-/// (`reads`); a write or a command that reads a path still needs `r` there.
+/// allowing it there, or `None` when every one does. A command needs its
+/// working directory in a folder with `x`; another execute call (a
+/// provider's) runs where its paths are, so each of them needs `x` as well.
+/// Every call needs each target in a folder with the flag its access needs
+/// (each flag stands alone: writing needs `w` and no `r`, reading `r` and no
+/// `w`). A path a read call reads needs no folder where the command account
+/// holds the read (`reads`); a write or an execute call that reads a path
+/// still needs `r` there.
 fn outside_folders(policy: &CenterPolicy, call: &Call, reads: Reads) -> Option<PathAccess> {
     let folders = &policy.folders;
-    if call.effect == Effect::Execute
-        && !call
-            .cwd
-            .is_some_and(|c| reaches(folders, c, PathAccess::Run))
-    {
-        return Some(PathAccess::Run);
+    let runs_at = |p: &Path| reaches(folders, p, PathAccess::Run);
+    if call.effect == Effect::Execute {
+        let command = call.command.is_some() || call.cwd.is_some();
+        if command && !call.cwd.is_some_and(runs_at)
+            || !command && !call.targets.iter().all(|t| runs_at(&t.path))
+        {
+            return Some(PathAccess::Run);
+        }
     }
     let by_account = call.effect == Effect::Read && matches!(reads, Reads::Account(_));
     call.targets
@@ -1135,6 +1140,47 @@ mod tests {
         assert_eq!(
             run(&p, &env, &marked("save", Effect::Write, &two)),
             "refused"
+        );
+    }
+
+    /// An execute action that is no command (a provider's) runs where its
+    /// paths are: each needs a folder with `x` besides the flag for what it
+    /// does there.
+    #[test]
+    fn an_execute_action_with_paths_needs_them_in_folders_that_allow_running() {
+        let x = T::new();
+        let env = x.env(true);
+        let mut p = policy(Mode::Folder);
+        p.folders.push(Folder {
+            path: "/w/rwonly".into(),
+            access: acc("rw"),
+        });
+        let running = Decision::Forbidden("outside the folders that allow running".into());
+        for (target, want) in [
+            (t("/w/rw/src", true), Decision::Allow),
+            (t("/w/rw/src", false), Decision::Allow),
+            (t("/w/rwonly/src", true), running.clone()),
+            (t("/w/ro/src", false), running.clone()),
+            (t("/elsewhere/src", false), running),
+        ] {
+            assert_eq!(
+                decide(&p, &env, &marked("build", Effect::Execute, &target)),
+                want,
+                "{target:?}"
+            );
+        }
+        // `x` alone does not let it write there.
+        p.folders = vec![Folder {
+            path: "/w/x".into(),
+            access: acc("x"),
+        }];
+        assert_eq!(
+            decide(
+                &p,
+                &env,
+                &marked("build", Effect::Execute, &t("/w/x/out", true))
+            ),
+            Decision::Forbidden("outside the folders that allow writing".into())
         );
     }
 

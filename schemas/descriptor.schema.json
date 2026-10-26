@@ -36,6 +36,7 @@
         "account": {"type": "string"},
         "confined": {"type": "boolean"},
         "sudo": {"type": "boolean", "default": false},
+        "reads_by_account": {"type": "boolean", "default": false},
         "unnamed": {"type": "integer", "minimum": 0, "default": 0},
         "folders": {
           "type": "array",
