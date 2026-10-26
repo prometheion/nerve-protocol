@@ -1133,7 +1133,8 @@ in memory only, whatever `secret_storage` says, so a restarted node, or
 a `node.toml` that says `on` without a password held, has the switch off. It
 never reaches a center: the node replaces every copy in an outgoing frame
 (a command's output stream too, also a copy that two reads of its output cut,
-or output printed before the password was held)
+or output printed before the password was held, unless its stream had taken
+it to send already)
 and in the audit log with `[redacted]`. `machine.sudo` changes only through the
 switch; a value written into the file is turned off at start-up, since no
 password is held. The switch works on Linux and Windows.

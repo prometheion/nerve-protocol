@@ -12,9 +12,10 @@
 //! copy of the sudo password the node holds is replaced, as in any frame
 //! (crate::sudo). Both work on what each pipe printed, across its reads: a
 //! character or a copy that a read cut waits for the next one. The password
-//! is replaced once more as a stream sends, with the one the node holds
-//! then, as text frames are: output kept for a stream may have been printed
-//! before sudo was turned on.
+//! is replaced once more as a stream takes output to send, with the one the
+//! node holds then: output kept for a stream may have been printed before
+//! sudo was turned on. Frames already taken and waiting for the link go as
+//! they are.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, Weak};

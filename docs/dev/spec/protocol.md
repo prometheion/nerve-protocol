@@ -788,8 +788,10 @@ concurrently.
   (stdout and stderr each on its own); a cut never starts a frame inside a
   character of a pipe's output. Every copy of the sudo password the node
   holds is replaced as in any frame (§7.4.1), also one that two reads of the
-  pipe cut, and once more as the stream sends, with the password held then:
-  output printed before sudo was turned on goes out without it too. A sudo command's output (also one the
+  pipe cut, and once more as the stream takes output to send, with the
+  password held then: output printed before sudo was turned on goes out
+  without it too, unless the stream had taken it already (the few frames
+  waiting for the link at that moment go as they are). A sudo command's output (also one the
   node runs as root for a pairing whose commands run as `nerve-run`) is not
   streamed: its `stream.open` is `unavailable`. A center may ask for the
   stream of a call the node does not run yet again later.
