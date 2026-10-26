@@ -417,7 +417,9 @@ call was sent; neither the answer nor any read waits for that. The node sends
 the end of what the command printed so far, then what it prints, stdout and
 stderr in the order it read them; the result still carries the output as
 before. When the stream cannot be opened (the job ended first, the node
-refused, the command did not start within that minute) it ends, and a read
+refused, the command did not start within that minute, or the node left 4
+`stream.open`s on its link unanswered for 10 s each, after which that link
+gets no more) it ends, and a read
 says why in the center's words: `it ended (the node refused to open it
 (forbidden))`. A session has at most half of a node's stream places open at
 once (8 of its `limits.streams` 16), so other sessions' streams find room; a

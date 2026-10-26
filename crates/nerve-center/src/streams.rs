@@ -468,14 +468,16 @@ impl Streams {
 /// the node setting up), and once there is room for it: the session's share
 /// of the node's streams ([`node_share`]) and the node's own places. Gives
 /// up when the job ended, the stream was closed or the node refused it, and
-/// then says why in the ring.
+/// then says why in the ring. `waits`: [`OPEN_WAIT`] and [`START_WAIT`].
 pub async fn open_on_node(
     sess: Weak<Session>,
     node_id: String,
     job: String,
     id: String,
     ring: Arc<Ring>,
+    waits: (Duration, Duration),
 ) {
+    let (open_wait, start_wait) = waits;
     let mut pause = Duration::from_millis(50);
     let mut sent_at: Option<Instant> = None;
     loop {
@@ -506,14 +508,18 @@ pub async fn open_on_node(
                     pause = (pause * 2).min(Duration::from_secs(1));
                     continue;
                 }
+                if link.unanswered_opens() >= crate::link::UNANSWERED_MAX {
+                    ring.end("the node did not answer earlier requests for a stream; job.status gives its output with the result");
+                    return;
+                }
                 let since = *sent_at.get_or_insert_with(Instant::now);
-                if since.elapsed() >= START_WAIT {
+                if since.elapsed() >= start_wait {
                     ring.end("its command did not start on the node in time to be streamed; job.status gives its output with the result");
                     return;
                 }
                 let params = json!({"cap": "exec", "stream": "output", "params": {"call": call},
                                     "ctx": {"session": session}});
-                match link.open_stream(params, ring.clone(), OPEN_WAIT).await {
+                match link.open_stream(params, ring.clone(), open_wait).await {
                     Ok(sid) => {
                         let kept = sess
                             .upgrade()

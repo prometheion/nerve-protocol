@@ -125,6 +125,10 @@ pub struct Inner {
     /// How long `execute` waits for a result before the call becomes a job,
     /// in milliseconds (`--call-wait`).
     call_wait_ms: AtomicU64,
+    /// How long one `stream.open` waits for its answer, and how long a
+    /// job's stream is asked for while its command does not run yet
+    /// ([`streams::open_on_node`]).
+    stream_waits: Mutex<(Duration, Duration)>,
     /// The action checker (issue #17), rebuilt when its config changes.
     checker: Mutex<Arc<Checker>>,
     /// The local llama-server the checker runs, when the model is on and its
@@ -504,6 +508,7 @@ impl Center {
             dead_after_ms: AtomicU64::new(crate::link::DEAD_AFTER.as_millis() as u64),
             grace_ms: AtomicU64::new(nerve_proto::resume::GRACE.as_millis() as u64),
             call_wait_ms: AtomicU64::new(jobs::CALL_WAIT.as_millis() as u64),
+            stream_waits: Mutex::new((streams::OPEN_WAIT, streams::START_WAIT)),
             checker: Mutex::new(Arc::new(Checker::build(CheckerConfig::default(), None))),
             local_model: Mutex::new(None),
             local_sig: Mutex::new(String::new()),
@@ -555,6 +560,14 @@ impl Center {
     /// How long a dropped link waits for the node to resume it (spec §4.9).
     pub fn grace(&self) -> Duration {
         Duration::from_millis(self.grace_ms.load(Ordering::Relaxed))
+    }
+
+    /// Shortens a `stream.open`'s wait for its answer and the time a job's
+    /// stream is asked for while its command does not run yet, so that a
+    /// test need not wait 40 s and a minute for the center to give up.
+    #[doc(hidden)]
+    pub fn set_stream_waits(&self, open: Duration, start: Duration) {
+        *self.stream_waits.lock().unwrap() = (open, start);
     }
 
     /// Shortens the grace, so that a test need not wait 30 s for the calls
@@ -2555,12 +2568,14 @@ impl Center {
         {
             return Err("the session ended".into());
         }
+        let waits = *self.stream_waits.lock().unwrap();
         tokio::spawn(streams::open_on_node(
             Arc::downgrade(sess),
             route.node_id.clone(),
             job.to_string(),
             id.clone(),
             ring,
+            waits,
         ));
         Ok(id)
     }

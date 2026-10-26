@@ -37,6 +37,9 @@ pub const SHORT_CALL: Duration = Duration::from_secs(30);
 /// from the center and a job's `exec.signal` find a place while jobs hold
 /// all the others.
 pub const CALLS_KEPT: usize = 8;
+/// The most `stream.open`s a node may leave unanswered past their wait on
+/// one link; past it the link gets no more.
+pub const UNANSWERED_MAX: usize = 4;
 
 /// How many of a node's `calls` places the agents' calls leave free: a
 /// quarter, at most [`CALLS_KEPT`], so a node with few places still runs
@@ -588,7 +591,18 @@ impl Link {
         let (tx, mut rx) = oneshot::channel();
         // The ring is in place before the request can be answered.
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        self.opening.lock().unwrap().insert(id, Some(ring));
+        {
+            let mut opening = self.opening.lock().unwrap();
+            // Each one left unanswered holds a request and a task here
+            // until the link ends: a node that does not answer gets no more.
+            if opening.values().filter(|r| r.is_none()).count() >= UNANSWERED_MAX {
+                return Err(RpcError::new(
+                    ErrorCode::Timeout,
+                    "the node left earlier stream.open requests unanswered",
+                ));
+            }
+            opening.insert(id, Some(ring));
+        }
         self.pending.lock().unwrap().insert(id, tx);
         let mut unsent = Unsent {
             link: self,
@@ -632,6 +646,16 @@ impl Link {
         };
         self.opening.lock().unwrap().remove(&id);
         sid_of(&r?).ok_or_else(|| RpcError::internal("the node answered stream.open without a sid"))
+    }
+
+    /// How many `stream.open`s the node left unanswered past their wait.
+    pub fn unanswered_opens(&self) -> usize {
+        self.opening
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|r| r.is_none())
+            .count()
     }
 
     /// A stream frame from the node: data or a gap for its ring. A frame
@@ -1406,6 +1430,42 @@ mod tests {
         assert_eq!(method, method::STREAM_CLOSE);
         assert_eq!(params["sid"], 7);
         assert!(!ring.ended(), "the opener may ask again");
+    }
+
+    /// A node that leaves [`UNANSWERED_MAX`] `stream.open`s unanswered gets
+    /// no more on that link: each one holds a request and a task until the
+    /// link ends.
+    #[tokio::test]
+    async fn a_node_that_does_not_answer_gets_few_stream_opens() {
+        let (out, mut rx) = mpsc::channel(8);
+        let link = Arc::new(Link::new(
+            "n1",
+            String::new(),
+            false,
+            Limits::default(),
+            out,
+            None,
+        ));
+        for _ in 0..UNANSWERED_MAX {
+            let ring = Arc::new(Ring::default());
+            let e = link
+                .open_stream(json!({}), ring, Duration::from_millis(20))
+                .await
+                .expect_err("no answer in time");
+            assert_eq!(e.kind(), ErrorCode::Timeout);
+            assert_eq!(sent(&mut rx).await.1, method::STREAM_OPEN);
+        }
+        assert_eq!(link.unanswered_opens(), UNANSWERED_MAX);
+        let ring = Arc::new(Ring::default());
+        let started = std::time::Instant::now();
+        let e = link
+            .open_stream(json!({}), ring, Duration::from_secs(5))
+            .await
+            .expect_err("refused at once");
+        assert_eq!(e.kind(), ErrorCode::Timeout);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(rx.try_recv().is_err(), "nothing more was sent");
+        assert_eq!(link.unanswered_opens(), UNANSWERED_MAX);
     }
 
     /// An open stream ends when its connection drops: when the link is

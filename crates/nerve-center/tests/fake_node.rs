@@ -192,7 +192,10 @@ enum Seen {
 /// for that half second, `talkmute`, whose `stream.close` is never
 /// answered, and `talkgap`, which also drops 5 bytes and prints 100 more;
 /// `talkbig`, which prints [`BIG`] bytes more of quotes and line breaks at
-/// once, and `talkrefuse`, whose stream is refused with [`NODE_WORDS`]),
+/// once, `talknever`, whose stream never opens, `talksilent`, whose
+/// `stream.open` is never answered, `talksudo`, whose stream is
+/// `unavailable`, and `talkrefuse`, whose stream is refused with
+/// [`NODE_WORDS`]),
 /// and reports what it saw.
 fn serve(ws: WebSocketStream<BoxIo>, desc: Value) -> mpsc::UnboundedReceiver<Seen> {
     serve_task(ws, desc).0
@@ -233,9 +236,13 @@ async fn describe_anew(c: &Center, node: &Described, d: Value, ready: impl Fn(&C
 
 /// Whether the fake node's `talk` command ends: `talk`, `talkodd`, and
 /// `talktimeout` and `talkcut`, which print the same but whose result is the
-/// error `timeout` and a result cut by the node.
+/// error `timeout` and a result cut by the node, and `talkgone`, whose
+/// stream never opens.
 fn talk_ends(talk: &str) -> bool {
-    matches!(talk, "talk" | "talkodd" | "talktimeout" | "talkcut")
+    matches!(
+        talk,
+        "talk" | "talkodd" | "talktimeout" | "talkcut" | "talkgone"
+    )
 }
 
 /// How long the fake node takes to answer a `slow` call.
@@ -339,7 +346,9 @@ fn serve_changing(
                         let call = params["params"]["call"].as_u64().unwrap_or(u64::MAX);
                         let running = talks.get(&call).cloned();
                         let late = running.as_ref().is_some_and(|(t, at)| {
-                            t == "talklate" && at.elapsed() < Duration::from_millis(500)
+                            (t == "talklate" && at.elapsed() < Duration::from_millis(500))
+                                || t == "talkgone"
+                                || t == "talknever"
                         });
                         let Some((talk, at)) = running.filter(|_| !late) else {
                             let e = RpcError::invalid_args(format!(
@@ -351,6 +360,14 @@ fn serve_changing(
                         if talk == "talkrefuse" {
                             let e = RpcError::forbidden(NODE_WORDS);
                             send(&mut ws, Message::error(Some(id), e)).await;
+                            continue;
+                        }
+                        if talk == "talksudo" {
+                            let e = RpcError::new(nerve_proto::ErrorCode::Unavailable, NODE_WORDS);
+                            send(&mut ws, Message::error(Some(id), e)).await;
+                            continue;
+                        }
+                        if talk == "talksilent" {
                             continue;
                         }
                         if talk == "talkbusy" && at.elapsed() < Duration::from_millis(500) {
@@ -4106,6 +4123,59 @@ async fn a_big_read_stays_within_what_an_answer_holds() {
         Some(4096),
         "{small}"
     );
+    r.stop().await;
+}
+
+/// Each way a job's stream gives up says why in the stream, in the
+/// center's words: the node does not stream the command (a sudo command),
+/// the command ended before it ran there, it did not start there in time,
+/// and the node left its requests unanswered.
+#[tokio::test]
+async fn a_stream_that_cannot_open_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, _node, _seen, _task) = job_box(&r).await;
+    let ms = Duration::from_millis;
+    for (n, (command, start, words)) in [
+        (
+            "talksudo",
+            60_000,
+            "it ended (the node does not stream this command's output; job.status gives it with the result)",
+        ),
+        (
+            "talkgone",
+            60_000,
+            "it ended (its command ended before its output could be streamed",
+        ),
+        (
+            "talknever",
+            400,
+            "it ended (its command did not start on the node in time to be streamed",
+        ),
+        (
+            "talksilent",
+            60_000,
+            "it ended (the node did not answer earlier requests for a stream",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        r.center.set_stream_waits(ms(50), ms(start));
+        let reply = execute_as(&e, json!(n), "exec.run", json!({"command": command})).await;
+        let stream = stream_of(&reply);
+        let mut end = None;
+        for _ in 0..60 {
+            let got = read_stream(&e, &stream, 100).await;
+            if got["result"]["structuredContent"]["result"]["eof"] == true {
+                end = Some(said(&got).0);
+                break;
+            }
+        }
+        let end = end.unwrap_or_else(|| panic!("{command}: the stream never ended"));
+        assert!(end.contains(words), "{command}: {end}");
+        assert!(!end.contains("nope"), "{end}");
+    }
     r.stop().await;
 }
 
