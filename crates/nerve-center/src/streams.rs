@@ -11,7 +11,8 @@
 //!
 //! A ring holds at most [`RING_BYTES`]; past it the oldest bytes go, and the
 //! next read says how many. Rings are kept in memory only, per session, and
-//! dropped on `stream.close`, when the job's result is read, when the session
+//! dropped on `stream.close`, when the job's result is read (unless that
+//! result lacks output the stream holds), when the session
 //! ends, or [`KEEP_FOR`] after the stream ended unread.
 
 use std::collections::{HashMap, VecDeque};
@@ -413,7 +414,22 @@ impl Streams {
         self.entries.remove(id).map(Entry::closer)
     }
 
-    /// Takes the stream of the job `job` out: its result was read.
+    /// The result of the job `job` was read: its stream goes, unless the
+    /// result is not `whole` (cut, or without the output: a failure, a lost
+    /// link, a result not kept) and the stream holds output or may still
+    /// get some. Then it stays, and its id is given.
+    pub fn result_read(&mut self, job: &str, whole: bool) -> (Option<String>, Option<Closer>) {
+        let Some((id, e)) = self.entries.iter().find(|(_, e)| e.job == job) else {
+            return (None, None);
+        };
+        if !whole && !(e.ring.ended() && e.ring.held() == 0) {
+            return (Some(id.clone()), None);
+        }
+        let id = id.clone();
+        (None, self.entries.remove(&id).map(Entry::closer))
+    }
+
+    /// Takes the stream of the job `job` out: the job is forgotten.
     pub fn of_job(&mut self, job: &str) -> Option<Closer> {
         let id = self
             .entries

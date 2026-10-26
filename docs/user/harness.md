@@ -242,7 +242,7 @@ job's answer names it. The center opens it on the machine as soon as the
 command runs there, also when that takes a while:
 
 ```
-… Its output so far and as it comes: capability "stream.read" with args {"stream": "s-8hd1…"} ("wait_ms" waits for more); "stream.close" with the same args ends the stream.
+… Its output so far and as it comes: capability "stream.read" with args {"stream": "s-8hd1…"} ("wait_ms" waits for more); "stream.close" with the same args ends the stream. Read the stream before job.status gives the result: a result that holds all of the output ends the stream.
 ```
 
 | Call | Does |
@@ -253,8 +253,8 @@ command runs there, also when that takes a while:
 The model can follow a build or a test run this way and stop it with
 `job.cancel` when it sees it go wrong. The stream starts with the end of what
 the command printed before it opened. The result of the job still carries the
-whole output (up to the machine's output limit), so reading the stream is
-never needed. The center polls nothing on its own: the model asks with
+output from its start (up to the machine's output limit), so reading the
+stream is never needed for a short command. The center polls nothing on its own: the model asks with
 `stream.read`, and no MCP notification is sent. Output read from a stream
 taints the session for the action checker, as the job's result does when it
 ends.
@@ -267,6 +267,9 @@ was dropped, so its text never has a hole inside it. A session holds at most
 sessions' streams find room there: a further stream opens once one of its
 own ends (reads give nothing new until then). A stream goes when it is closed, when the job's result is read with
 `job.status`, when the session ends, and 10 minutes after it ended unread.
+A result that lacks some of the output keeps the stream, and its answer
+names it: the end of a long output past the result's limit, or all of it
+when the command failed, ran out of time or its machine's link dropped.
 When the machine's link drops, its streams end (also when the link resumes):
 `stream.read` gives what came and says so. A `sudo` command's output is not
 streamed; it comes in the result. Every other stream is stripped of the sudo

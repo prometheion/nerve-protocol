@@ -168,8 +168,9 @@ output, and waits for more when asked (at most the call wait);
 `stream.close` ends it without waiting for the node. The center keeps
 at most 1 MiB per stream that was not read, drops the oldest past it and
 says how much; streams are the session's own, at most 16, in memory only,
-and go on close, when the job's result is read, with the session, or when
-the link ends. Events come the same way, by polling: there are no MCP
+and go on close, when the job's result is read (unless that result lacks
+output the stream holds, which its answer then names), with the session, or
+when the link ends. Events come the same way, by polling: there are no MCP
 notifications. Details: [harness spec §4.5](spec/harness.md#45-streams-and-events).
 
 ## Sessions

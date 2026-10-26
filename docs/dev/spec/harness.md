@@ -460,7 +460,13 @@ read, no checker, no statistics):
 - A stream is kept in memory only. It goes with `stream.close` (the node is
   told to stop it if it still runs there, without waiting for its answer),
   when its job's result is read through `job.status`, with the session, and
-  10 minutes after it ended unread. A session holds at most 16; a 17th goes in place of the oldest that
+  10 minutes after it ended unread. A result that lacks output the stream
+  holds (cut at its cap, or none at all: the command failed or timed out,
+  the link dropped, the result was not kept) leaves the stream until it is
+  read, closed or 10 minutes past its end, and the `job.status` answer
+  names it: `Its output stream s-… still holds what the command printed that
+  this answer lacks: …`. The job's answer says to read the stream before the
+  result. A session holds at most 16; a 17th goes in place of the oldest that
   ended, or is not opened. A link that drops ends its streams on both sides,
   also when the link resumes (their frames are not counted, protocol.md §4.9):
   a read then gives what came and `it ended (the link to the node dropped)`.

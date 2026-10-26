@@ -230,6 +230,13 @@ async fn describe_anew(c: &Center, node: &Described, d: Value, ready: impl Fn(&C
     wait_for(|| ready(c).then_some(())).await;
 }
 
+/// Whether the fake node's `talk` command ends: `talk`, `talkodd`, and
+/// `talktimeout` and `talkcut`, which print the same but whose result is the
+/// error `timeout` and a result cut by the node.
+fn talk_ends(talk: &str) -> bool {
+    matches!(talk, "talk" | "talkodd" | "talktimeout" | "talkcut")
+}
+
 /// How long the fake node takes to answer a `slow` call.
 const SLOW: Duration = Duration::from_millis(600);
 /// How long a `talk` command runs.
@@ -296,16 +303,32 @@ fn serve_changing(
                     if let Some(talk) = talk {
                         let n = serde_json::to_value(&id).unwrap().as_u64().unwrap();
                         talks.insert(n, (talk.to_string(), tokio::time::Instant::now()));
-                        if !matches!(talk, "talk" | "talkodd") {
+                        if !talk_ends(talk) {
                             let _ = tx.send(Seen::Hang(json!(n)));
                             continue;
                         }
                         let _ = tx.send(Seen::Invoke(Value::Object(params.clone())));
                         let later = later.clone();
+                        let talk = talk.to_string();
                         tokio::spawn(async move {
                             tokio::time::sleep(TALK).await;
                             let r = json!({"exit_code": 0, "stdout": "one\ntwo\n", "stderr": ""});
-                            let _ = later.send(Message::result(id, r));
+                            let reply = match talk.as_str() {
+                                "talktimeout" => Message::error(
+                                    Some(id),
+                                    RpcError::new(
+                                        nerve_proto::ErrorCode::Timeout,
+                                        "the command ran past timeout_ms and was killed",
+                                    ),
+                                ),
+                                "talkcut" => Message::result(
+                                    id,
+                                    json!({"exit_code": 0, "stdout": "one\n", "stderr": "",
+                                           "truncated": true}),
+                                ),
+                                _ => Message::result(id, r),
+                            };
+                            let _ = later.send(reply);
                         });
                         continue;
                     }
@@ -355,7 +378,7 @@ fn serve_changing(
                         let raw = raw.clone();
                         tokio::spawn(async move {
                             tokio::time::sleep(Duration::from_millis(300)).await;
-                            if !matches!(talk.as_str(), "talk" | "talkodd") {
+                            if !talk_ends(&talk) {
                                 return;
                             }
                             let _ = raw.send(frame(1, "two\n"));
@@ -3973,6 +3996,55 @@ async fn a_commands_output_streams_while_its_job_runs() {
     assert!(sess.streams.lock().unwrap().is_empty());
     // It had ended on the node: nothing is sent there.
     nothing_more(&mut seen).await;
+    r.stop().await;
+}
+
+/// A job's result that lacks output its stream holds (the command timed
+/// out, or the node cut its result) leaves the stream: the answer names it,
+/// and it still reads to its end. The job's answer says to read the stream
+/// before the result.
+#[tokio::test]
+async fn a_result_without_all_the_output_leaves_its_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, _node, _seen, _task) = job_box(&r).await;
+    for (n, (command, words)) in [
+        ("talktimeout", "error timeout: job"),
+        ("talkcut", "ended after"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let reply = execute_as(&e, json!(n), "exec.run", json!({"command": command})).await;
+        let job = job_of(&reply);
+        let stream = stream_of(&reply);
+        let next = reply["result"]["structuredContent"]["next"]
+            .as_str()
+            .unwrap();
+        assert!(
+            next.contains("Read the stream before job.status gives the result"),
+            "{next}"
+        );
+        // The stream ended on the node before the result is read.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let done = job_ended(&e, &job).await;
+        let (text, _) = said(&done);
+        assert!(text.contains(words), "{text}");
+        assert!(
+            text.contains(&format!("Its output stream {stream} still holds")),
+            "{text}"
+        );
+        let mut got = String::new();
+        for _ in 0..20 {
+            let read = read_stream(&e, &stream, 100).await;
+            let data = &read["result"]["structuredContent"]["result"];
+            got.push_str(data["text"].as_str().unwrap_or_else(|| panic!("{read}")));
+            if data["eof"] == true {
+                break;
+            }
+        }
+        assert_eq!(got, "one\ntwo\n", "{command}");
+    }
     r.stop().await;
 }
 

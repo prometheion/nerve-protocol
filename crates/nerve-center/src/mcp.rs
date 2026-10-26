@@ -529,13 +529,25 @@ impl Engine {
                 true,
             );
         };
-        // A result read is the end of the job: its output stream goes too.
-        if view.outcome.is_some() {
-            let stream = sess.streams.lock().unwrap().of_job(job);
-            if let Some(c) = stream {
+        // A result read is the end of the job: its output stream goes too,
+        // unless the result lacks output the stream holds (its end past the
+        // result's cap, or all of it when the command failed, timed out, its
+        // link dropped or its result was not kept); then the answer names it.
+        let mut kept_id = None;
+        if let Some(outcome) = &view.outcome {
+            let whole = matches!(outcome, Outcome::Done { value, cut: false } if value["truncated"] != json!(true));
+            let (id, closer) = sess.streams.lock().unwrap().result_read(job, whole);
+            if let Some(c) = closer {
                 c.close("its job's result was read");
             }
+            kept_id = id;
         }
+        let and_kept = |t: String| match &kept_id {
+            Some(id) => format!(
+                "{t} Its output stream {id} still holds what the command printed that this answer lacks: capability \"stream.read\" with args {{\"stream\": {id:?}}} reads it."
+            ),
+            None => t,
+        };
         let what = job_what(&view.route);
         let ran = util::span(view.ran);
         match view.outcome {
@@ -555,23 +567,27 @@ impl Engine {
             Some(Outcome::Done { value, cut }) => {
                 let mut v = device_result(&view.route, value, cut);
                 let text = v["content"][0]["text"].as_str().unwrap_or_default();
-                v["content"][0]["text"] = json!(format!(
+                v["content"][0]["text"] = json!(and_kept(format!(
                     "Job {job} ({what}) ended after {ran}; its result, given only this once:\n{text}"
-                ));
+                )));
                 if v["structuredContent"].is_object() {
                     v["structuredContent"]["center"] = json!({"job": job, "state": "done"});
+                    if let Some(id) = &kept_id {
+                        v["structuredContent"]["center"]["stream"] = json!(id);
+                    }
                 }
                 v
             }
             Some(Outcome::Failed(e)) => {
                 let lead = format!("job {job} ({what}) failed after {ran}: ");
-                job_error(&view.route, &e, &lead, &busy_jobs(sess, &e))
+                let tail = and_kept(busy_jobs(sess, &e));
+                job_error(&view.route, &e, &lead, tail.trim_start())
             }
             Some(Outcome::Lost) => text_result(
-                &format!(
+                &and_kept(format!(
                     "error connection_lost: job {job} ({what}) was lost after {ran}: the link to node {} ended before its result came. The node stops a call whose link ends, so it may have done part of its work.",
                     view.route.node_name
-                ),
+                )),
                 true,
             ),
             Some(Outcome::Dropped { bytes, failed }) => {
@@ -583,10 +599,10 @@ impl Engine {
                     None => ("too_large", "ended", "result"),
                 };
                 text_result(
-                    &format!(
+                    &and_kept(format!(
                         "error {code}: job {job} ({what}) {how} after {ran}, but its {words} ({bytes} bytes) was not kept: a session keeps at most {} MiB of results nobody read yet. Read a job's result soon after it ends.",
                         jobs::KEPT_MAX / (1024 * 1024)
-                    ),
+                    )),
                     true,
                 )
             }
@@ -656,7 +672,7 @@ impl Engine {
         );
         if r.dropped > 0 {
             head.push_str(&format!(
-                "{} bytes were dropped before this text: a stream that opened after its command printed a lot starts with the end of it, a stream keeps at most {} MiB that was not read, and the node drops what the link cannot carry fast enough; the job's result holds all of the output, up to its cap. ",
+                "{} bytes were dropped before this text: a stream that opened after its command printed a lot starts with the end of it, a stream keeps at most {} MiB that was not read, and the node drops what the link cannot carry fast enough; the job's result holds the output from its start, up to its cap. ",
                 r.dropped,
                 streams::RING_BYTES / (1024 * 1024)
             ));
@@ -817,7 +833,7 @@ fn running(
     };
     let output = match &stream {
         Some(Ok(id)) => format!(
-            " Its output so far and as it comes: capability \"stream.read\" with args {{\"stream\": {id:?}}} (\"wait_ms\" waits for more); \"stream.close\" with the same args ends the stream."
+            " Its output so far and as it comes: capability \"stream.read\" with args {{\"stream\": {id:?}}} (\"wait_ms\" waits for more); \"stream.close\" with the same args ends the stream. Read the stream before job.status gives the result: a result that holds all of the output ends the stream."
         ),
         Some(Err(why)) => {
             format!(" Its output is not streamed ({why}); job.status gives it with the result.")
