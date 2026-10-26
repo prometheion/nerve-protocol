@@ -119,12 +119,17 @@ folder, since the program may make one there.
 A program follows the links in a folder it is handed, which the node's own
 walks never do. So before the call the node looks for them, as the command
 account: each link below the folder, and below a folder a link leads to, is
-judged where it leads, as if the call named that place, and one that leads
-where the call may not go (outside the folders, to a protected path, to a
-place a deny rule names) refuses the call. The refusal names the link, not
-where it leads. A link that leads nowhere counts only for a write, at the
-place it names. A folder with more than 200 000 entries below it is refused,
-since the node cannot check them all. An `fs:` rule covers `fs` calls
+judged where it leads, as if the call named that place in the folder's
+stead, its other paths unchanged, and one that leads where the call may not
+go (outside the folders, to a protected path, to a place a deny rule names)
+refuses the call. A link that stays inside the folder it lies in is judged
+as the other names there, so in `allowlist` mode a rule that covers the
+folder covers it too. The node looks into a folder a link leads to only
+when that link passed, and the refusal names the link, not where it leads.
+A link that leads nowhere counts only for a write, at the place it names. A
+folder with more than 200 000 entries below it, counting those of the
+folders its links lead to, is refused, since the node cannot check them
+all. An `fs:` rule covers `fs` calls
 only: to keep every capability out of a place, deny it for each one that
 takes paths (`notes:~/private/*`), or make it a [protected
 path](protected-paths.md).

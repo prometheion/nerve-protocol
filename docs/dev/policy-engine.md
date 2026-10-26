@@ -196,9 +196,13 @@ the entry below and the path itself need a release with `x` as well
 below: the agent is shown no closed folder, no extra protected path and no
 deny rule. A program follows links, so once `decide` allows such a call the
 node walks the path (`nerve_node::fs::links_below`, as the command account,
-bounded) and `refuse_links` decides the call again with each place a link
-there leads to as its only target; a refusal there refuses the call and names
-the link, not where it leads. The
+bounded, off the link's threads) and `LinkCheck` judges each link when it is
+found: a link that leads within the path it lies below is covered by the
+checks below that path; any other decides the call again with the place it
+leads to in the stead of that path (the call's other paths unchanged, the
+rules compiled once for all links). A refusal there refuses the call and
+names the link, not where it leads, and a folder a refused link leads to is
+not walked. The
 tool-config check (writes to `.git`, `.envrc`, `.vscode`, `.idea`) looks at
 the path itself only, since a program may make those anywhere below a folder
 it writes in.

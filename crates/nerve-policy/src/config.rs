@@ -694,7 +694,8 @@ pub enum Mode {
     Allowlist,
     /// Full access inside the folders, by their flags: reading where `r` is
     /// set, writing where `w` is, commands where `x` is, in the folders and
-    /// everything below them. What a new pairing starts in.
+    /// everything below them; on the installed Linux node a read call may
+    /// also read where every account may read. What a new pairing starts in.
     Folder,
     /// Full access as the user, protected paths aside.
     User,

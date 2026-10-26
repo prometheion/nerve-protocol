@@ -462,8 +462,40 @@ fn closed_below<'f>(folders: &'f [Folder], dir: &Path, access: PathAccess) -> Op
     })
 }
 
+/// The deny and allow rules of a policy, compiled once for every decision
+/// of one call: the links below a folder handed to a program
+/// ([`LinkCheck`]) each decide the call again, and compiling the rules is
+/// most of what a decision costs. The allow rules are compiled only when
+/// `allowlist` mode asks for them.
+struct Rules<'a> {
+    deny: RuleSet,
+    allow: std::cell::OnceCell<RuleSet>,
+    policy: &'a CenterPolicy,
+    home: &'a Path,
+}
+
+impl<'a> Rules<'a> {
+    fn new(policy: &'a CenterPolicy, env: &Env<'a>) -> Rules<'a> {
+        Rules {
+            deny: RuleSet::new(&policy.deny, env.home).with_shell(env.shell),
+            allow: std::cell::OnceCell::new(),
+            policy,
+            home: env.home,
+        }
+    }
+
+    fn allow(&self) -> &RuleSet {
+        self.allow
+            .get_or_init(|| RuleSet::new(&self.policy.allow, self.home))
+    }
+}
+
 /// Decides `call` under `policy`.
 pub fn decide(policy: &CenterPolicy, env: &Env, call: &Call) -> Decision {
+    decide_with(policy, env, call, &Rules::new(policy, env))
+}
+
+fn decide_with(policy: &CenterPolicy, env: &Env, call: &Call, rules: &Rules) -> Decision {
     if let Some(c) = call.command
         && c.len() > COMMAND_MAX_BYTES
     {
@@ -496,9 +528,9 @@ pub fn decide(policy: &CenterPolicy, env: &Env, call: &Call) -> Decision {
 
     // Deny rules: forbidden in every mode, and they win over any allow.
     let targets = rule_targets(call);
-    let deny = RuleSet::new(&policy.deny, env.home).with_shell(env.shell);
+    let deny = &rules.deny;
     for t in &targets {
-        if let Some(rule) = find_rule(&deny, call, t) {
+        if let Some(rule) = find_rule(deny, call, t) {
             // The rule as `rule ls` shows it: the guard's hold tabs and line
             // breaks, and a reason is one line in the audit and the log.
             let rule = crate::rules::escape_controls(rule);
@@ -526,7 +558,7 @@ pub fn decide(policy: &CenterPolicy, env: &Env, call: &Call) -> Decision {
     let mut allowed = if sudo {
         by_sudo_list(policy, call, &mut reasons)
     } else {
-        by_mode(policy, env, call, mode, &targets, &mut reasons)
+        by_mode(policy, env, call, mode, &targets, rules, &mut reasons)
     };
     if !allowed && reasons.is_empty() {
         reasons.push("not allowed".into());
@@ -634,31 +666,56 @@ pub struct Link {
     pub to: Target,
 }
 
-/// Why `call`, which [`decide`] allowed, is refused for one of `links`. The
-/// checks below a handed path go by the names there, but a program follows
-/// a link to where it leads: each place a link leads to must be one the
-/// call could name itself. The refusal names the link, which lies where the
-/// call already reaches, not where it leads: the agent is never shown a
-/// protected path or a folder it may not reach that way.
-pub fn refuse_links(
-    policy: &CenterPolicy,
-    env: &Env,
-    call: &Call,
-    links: &[Link],
-) -> Option<String> {
-    links.iter().find_map(|l| {
-        let one = Call {
-            targets: std::slice::from_ref(&l.to),
-            ..*call
+/// Judges the links below the paths a call hands to a program, one at a
+/// time as the node finds them. The checks below a handed path go by the
+/// names there, but a program follows a link to where it leads: each place
+/// a link leads to must be one the call could name in its stead.
+pub struct LinkCheck<'a> {
+    policy: &'a CenterPolicy,
+    env: &'a Env<'a>,
+    call: &'a Call<'a>,
+    rules: Rules<'a>,
+}
+
+impl<'a> LinkCheck<'a> {
+    /// The check for `call`, which [`decide`] allowed.
+    pub fn new(policy: &'a CenterPolicy, env: &'a Env<'a>, call: &'a Call<'a>) -> LinkCheck<'a> {
+        LinkCheck {
+            policy,
+            env,
+            call,
+            rules: Rules::new(policy, env),
+        }
+    }
+
+    /// Why the call is refused for `link`, or `None`. A link that leads to
+    /// a place within the path it lies below needs no answer of its own:
+    /// the checks below that path (deny rules, protected and own paths,
+    /// closed folders) cover that place as they cover the names there, and
+    /// an allow rule that covers the path covers it too. Any other place is
+    /// judged in the call as it is, with that place in the stead of the
+    /// handed path. The refusal names the link, which lies where the call
+    /// already reaches, not where it leads: the agent is never shown a
+    /// protected path or a folder it may not reach that way.
+    pub fn refuse(&self, link: &Link) -> Option<String> {
+        let handed = &self.call.targets[link.handed];
+        if within(&link.to.path, &handed.path) {
+            return None;
+        }
+        let mut targets = self.call.targets.to_vec();
+        targets[link.handed] = link.to.clone();
+        let instead = Call {
+            targets: &targets,
+            ..*self.call
         };
-        (decide(policy, env, &one) != Decision::Allow).then(|| {
+        (decide_with(self.policy, self.env, &instead, &self.rules) != Decision::Allow).then(|| {
             format!(
                 "{} holds a link ({}) that leads where this call may not reach",
-                to_wire(&call.targets[l.handed].path),
-                to_wire(&l.at)
+                to_wire(&handed.path),
+                to_wire(&link.at)
             )
         })
-    })
+    }
 }
 
 /// A sudo command runs only when the sudo allow list names it, in every mode.
@@ -702,13 +759,12 @@ fn by_sudo_list(policy: &CenterPolicy, call: &Call, reasons: &mut Vec<String>) -
 
 /// `allowlist` mode: every target needs an allow rule.
 fn by_allow_rules(
-    policy: &CenterPolicy,
-    env: &Env,
     call: &Call,
     targets: &[RuleTarget],
+    rules: &Rules,
     reasons: &mut Vec<String>,
 ) -> bool {
-    let allow = RuleSet::new(&policy.allow, env.home);
+    let allow = rules.allow();
     for t in targets {
         // Commands run unconfined here, so a wildcard must not cover a second
         // command chained on or an expression the shell runs: only a rule
@@ -717,10 +773,10 @@ fn by_allow_rules(
         let found = if chained {
             allow.find_exact(call.cap, call.action, &t.text)
         } else {
-            find_rule(&allow, call, t)
+            find_rule(allow, call, t)
         };
         if found.is_none() {
-            reasons.push(if chained && find_rule(&allow, call, t).is_some() {
+            reasons.push(if chained && find_rule(allow, call, t).is_some() {
                 format!(
                     "{} chains commands or holds an expression (; & | $ ` ( ) < > @ {{ }} % ' \" # , \\, a line break, or a word such as powershell, cmd, iex or -Command); only an allow rule that names it exactly covers that",
                     name(call, &t.text)
@@ -743,6 +799,7 @@ fn by_mode(
     call: &Call,
     mode: Mode,
     targets: &[RuleTarget],
+    rules: &Rules,
     reasons: &mut Vec<String>,
 ) -> bool {
     let pathless = call.targets.is_empty() && call.cwd.is_none() && call.command.is_none();
@@ -766,7 +823,7 @@ fn by_mode(
     };
     let setting = policy.cap_setting(call.cap, Some(call.action));
     match effect_rule(mode, call.effect, paths, setting) {
-        Need::AllowRule => by_allow_rules(policy, env, call, targets, reasons),
+        Need::AllowRule => by_allow_rules(call, targets, rules, reasons),
         Need::Allowed => {
             // Folder mode runs a command only where it can be confined to
             // the folders it holds; an action with no path the owner set on
@@ -1833,6 +1890,93 @@ mod tests {
         }
     }
 
+    /// A link is judged in the call as it is, with the place it leads to in
+    /// the stead of the path it lies below: the call's other paths still
+    /// count. A link that stays within that path asks nothing new: an allow
+    /// rule that covers a folder covers what lies below it.
+    #[test]
+    fn a_link_is_judged_in_the_call_it_lies_in() {
+        let x = T::new();
+        let env = x.env(true);
+        let file = |p: &str, write: bool| {
+            let mut t = t(p, write);
+            t[0].holds = false;
+            t.remove(0)
+        };
+        let link = |handed: usize, at: &str, to: Target| Link {
+            handed,
+            at: at.into(),
+            to,
+        };
+        // Folder mode: a write call reads one folder and writes another.
+        let mut p = policy(Mode::Folder);
+        p.folders = vec![
+            Folder {
+                path: "/w/src".into(),
+                access: acc("r"),
+            },
+            Folder {
+                path: "/w/out".into(),
+                access: acc("rw"),
+            },
+        ];
+        let targets = [t("/w/src", false).remove(0), t("/w/out", true).remove(0)];
+        let call = marked("pack", Effect::Write, &targets);
+        assert_eq!(decide(&p, &env, &call), Decision::Allow);
+        let inner = link(
+            0,
+            "/w/src/node_modules/.bin/tsc",
+            file("/w/src/node_modules/typescript/bin/tsc", false),
+        );
+        assert_eq!(refuse_links(&p, &env, &call, &[inner]), None);
+        // Out of the folder it lies in, to a place the call may read.
+        let across = link(0, "/w/src/shared", file("/w/out/shared.txt", false));
+        assert_eq!(refuse_links(&p, &env, &call, &[across]), None);
+        let out = link(0, "/w/src/up", file("/etc/passwd", false));
+        assert_eq!(
+            refuse_links(&p, &env, &call, &[out]).as_deref(),
+            Some("/w/src holds a link (/w/src/up) that leads where this call may not reach")
+        );
+
+        // Allowlist mode: the rule names the folder, not what lies below.
+        let mut p = policy(Mode::Allowlist);
+        p.allow = rules(&["notes.search:/w/proj"]);
+        p.deny = Vec::new();
+        let proj = t("/w/proj", false);
+        let call = marked("search", Effect::Read, &proj);
+        assert_eq!(decide(&p, &env, &call), Decision::Allow);
+        let latest = link(0, "/w/proj/latest", t("/w/proj/v2", false).remove(0));
+        assert_eq!(refuse_links(&p, &env, &call, &[latest]), None);
+        let other = link(0, "/w/proj/other", t("/w/other", false).remove(0));
+        assert_eq!(
+            refuse_links(&p, &env, &call, &[other]).as_deref(),
+            Some("/w/proj holds a link (/w/proj/other) that leads where this call may not reach")
+        );
+    }
+
+    /// Every link decides the call again, so the rules are compiled once
+    /// for all of them: a folder may hold thousands of links.
+    #[test]
+    fn the_rules_are_compiled_once_for_all_the_links() {
+        let x = T::new();
+        let env = x.env(true);
+        let mut p = policy(Mode::Allowlist);
+        p.allow = rules(&["notes:/w/**"]);
+        let proj = t("/w/proj", false);
+        let call = marked("search", Effect::Read, &proj);
+        let links: Vec<Link> = (0..50)
+            .map(|n| Link {
+                handed: 0,
+                at: format!("/w/proj/l{n}").into(),
+                to: t(&format!("/w/lib{n}"), false).remove(0),
+            })
+            .collect();
+        let before = crate::rules::COMPILED.with(|c| c.get());
+        assert_eq!(refuse_links(&p, &env, &call, &links), None);
+        let compiled = crate::rules::COMPILED.with(|c| c.get()) - before;
+        assert!(compiled <= 2, "{compiled} rule sets compiled for 50 links");
+    }
+
     /// A file holds nothing, so a deny rule that names places below a
     /// folder leaves the other files there alone, in every mode; the folder
     /// above them is still refused.
@@ -1983,6 +2127,12 @@ mod tests {
             Decision::Forbidden(_) => "refused",
             Decision::Disabled(_) => "disabled",
         }
+    }
+
+    /// The first of `links` that refuses `call`, as the node asks each.
+    fn refuse_links(p: &CenterPolicy, env: &Env, call: &Call, links: &[Link]) -> Option<String> {
+        let check = LinkCheck::new(p, env, call);
+        links.iter().find_map(|l| check.refuse(l))
     }
 
     fn run(p: &CenterPolicy, env: &Env, c: &Call) -> &'static str {

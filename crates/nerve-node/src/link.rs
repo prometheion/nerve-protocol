@@ -1783,7 +1783,8 @@ impl Link {
                 target,
                 known.as_ref(),
                 unconfined,
-            )?;
+            )
+            .await?;
             // A missing account stops the call once it is decided and
             // audited, as for `fs`.
             account.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
@@ -1813,7 +1814,8 @@ impl Link {
                     target,
                     None,
                     unconfined,
-                )?;
+                )
+                .await?;
                 self.signal(&inv.args)
             }
             ("exec", "run") => self.exec_run(id, &cfg, &entry, effect, &inv).await,
@@ -1857,7 +1859,8 @@ impl Link {
                     call.target_text(),
                     known.as_ref(),
                     unconfined,
-                )?;
+                )
+                .await?;
                 account.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
                 let protected = self.protected(&entry);
                 let deny = RuleSet::new(&entry.policy.deny, &self.home());
@@ -1964,7 +1967,7 @@ impl Link {
     /// Runs the policy for one call: it either runs or is refused at once.
     /// Every outcome lands in the audit log.
     #[allow(clippy::too_many_arguments)]
-    fn gate(
+    async fn gate(
         &self,
         entry: &CenterEntry,
         inv: &Invoke,
@@ -1985,47 +1988,61 @@ impl Link {
             cwd,
             now_ms: crate::now_ms(),
         };
-        // The policy looks at the paths as the account (crate::account::FsAs);
-        // the audit entry below is the node's own again. `~` is the owner's.
-        // Where the node reads as the command account, a path read in no
-        // folder in folder mode is asked of that account under the same
-        // switch (crate::fs::may_read_outside).
-        let provider = inv.cap != "fs";
-        let may_read = |p: &std::path::Path| crate::fs::may_read_outside(p, provider);
-        let reads = if self.reads_by_account(entry, account) {
-            Reads::Account(&may_read)
-        } else {
-            Reads::Folders
+        let judged = Judged {
+            home: self.home(),
+            protected: self.protected(entry),
+            unconfined: unconfined.map(Into::into),
+            sudo: self.shared.sudo_on(),
+            shell: self.shell_for(command),
+            by_account: self.reads_by_account(entry, account),
+            provider: inv.cap != "fs",
         };
+        // The policy looks at the paths as the account (crate::account::FsAs);
+        // the audit entry below is the node's own again.
         let decision = {
-            let protected = self.protected(entry);
-            let home = self.home();
-            let home = &home;
             let _as = act_as(account)?;
-            let env = Env {
-                home,
-                protected: &protected,
-                unconfined,
-                sudo: self.shared.sudo_on(),
-                shell: self.shell_for(command),
-                reads,
-            };
-            let decision = nerve_policy::decide(&entry.policy, &env, &call);
-            // A program handed a folder follows the links in it: where they
-            // lead is judged too, once the call is allowed, so a folder the
-            // call may not use is never walked.
-            if decision == Decision::Allow
-                && nerve_policy::works_below(&call)
-                && targets.iter().any(|t| t.holds)
-            {
-                match crate::fs::links_below(targets, crate::fs::LINKS_LIMIT) {
-                    Ok(links) => nerve_policy::refuse_links(&entry.policy, &env, &call, &links)
-                        .map_or(decision, Decision::Forbidden),
-                    Err(why) => Decision::Forbidden(why),
-                }
-            } else {
-                decision
-            }
+            judged.with(|env| nerve_policy::decide(&entry.policy, env, &call))
+        };
+        // A program handed a folder follows the links in it: where they
+        // lead is judged too, once the call is allowed, so a folder the
+        // call may not use is never walked. The walk may be long (or hang
+        // on a mount that does not answer), so it runs off the link's
+        // threads, where the call's deadline still answers the center.
+        let decision = if decision == Decision::Allow
+            && nerve_policy::works_below(&call)
+            && targets.iter().any(|t| t.holds)
+        {
+            let policy = entry.policy.clone();
+            let (cap, action) = (inv.cap.clone(), inv.action.clone());
+            let targets = targets.to_vec();
+            let command = command.map(str::to_string);
+            let cwd = cwd.map(std::path::Path::to_path_buf);
+            let account = account.cloned();
+            let now_ms = call.now_ms;
+            tokio::task::spawn_blocking(move || {
+                let call = Call {
+                    cap: &cap,
+                    action: &action,
+                    effect,
+                    targets: &targets,
+                    command: command.as_deref(),
+                    cwd: cwd.as_deref(),
+                    now_ms,
+                };
+                let _as = act_as(account.as_ref())?;
+                Ok::<_, RpcError>(judged.with(|env| {
+                    let check = nerve_policy::LinkCheck::new(&policy, env, &call);
+                    let mut judge = |l: &nerve_policy::Link| check.refuse(l);
+                    match crate::fs::links_below(&targets, crate::fs::LINKS_LIMIT, &mut judge) {
+                        Ok(()) => Decision::Allow,
+                        Err(why) => Decision::Forbidden(why),
+                    }
+                }))
+            })
+            .await
+            .map_err(|e| RpcError::internal(e.to_string()))??
+        } else {
+            decision
         };
         let audit = |decision: &str, code: Option<&str>, reason: Option<&str>| {
             self.audit(inv, &target, decision, code, reason)
@@ -2292,7 +2309,8 @@ impl Link {
             target,
             looks_as.as_ref(),
             unconfined,
-        )?;
+        )
+        .await?;
         let account = account.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
         // The policy let a sudo command through only with the switch on and
         // the sudo allow list naming it. It runs the node's sudo, with the
@@ -2462,6 +2480,44 @@ impl Link {
             return Err(RpcError::new(ErrorCode::Unavailable, why));
         }
         Ok(nerve_sandbox::ContainerSpec { name })
+    }
+}
+
+/// What the policy needs to know of the node for one call
+/// (nerve_policy::Env), owned, so the links below a handed folder can be
+/// judged off the link's threads with the same view.
+struct Judged {
+    /// The `~` of the rules and the protected list.
+    home: std::path::PathBuf,
+    protected: Protected,
+    unconfined: Option<String>,
+    sudo: bool,
+    shell: Shell,
+    /// Whether the node reads as the command account (Link::reads_by_account).
+    by_account: bool,
+    /// Whether the call is a program's, not the node's own `fs`.
+    provider: bool,
+}
+
+impl Judged {
+    /// Runs `f` with the policy's view of the node. Where the node reads
+    /// as the command account, a path read in no folder in folder mode is
+    /// asked of that account (crate::fs::may_read_outside), so `f` runs
+    /// under the switch to it.
+    fn with<R>(&self, f: impl FnOnce(&Env) -> R) -> R {
+        let may_read = |p: &std::path::Path| crate::fs::may_read_outside(p, self.provider);
+        f(&Env {
+            home: &self.home,
+            protected: &self.protected,
+            unconfined: self.unconfined.as_deref(),
+            sudo: self.sudo,
+            shell: self.shell,
+            reads: if self.by_account {
+                Reads::Account(&may_read)
+            } else {
+                Reads::Folders
+            },
+        })
     }
 }
 

@@ -190,6 +190,13 @@ struct Compiled {
     guard: Option<Guard>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many rule sets this thread compiled, for the tests that check
+    /// a decision does not compile its rules again for each link it judges.
+    pub(crate) static COMPILED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// An allow or deny list, compiled.
 pub struct RuleSet {
     rules: Vec<Compiled>,
@@ -203,6 +210,8 @@ impl RuleSet {
     /// `home`. The guard reads a command line as the node's default shell
     /// does; [`RuleSet::with_shell`] names another.
     pub fn new(rules: &[String], home: &Path) -> RuleSet {
+        #[cfg(test)]
+        COMPILED.with(|c| c.set(c.get() + 1));
         let home = to_wire(home);
         let rules = rules
             .iter()

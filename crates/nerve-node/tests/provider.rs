@@ -1089,7 +1089,9 @@ async fn a_deny_rule_below_a_folder_leaves_the_files_there_alone() {
 /// in a folder it is handed, so where they lead counts too; a path to write
 /// that is itself a link is refused, since the program would act on the
 /// place it leads to; the path handed must still fit the program's schema
-/// and read as the one judged. Where folder-mode commands cannot be
+/// and read as the one judged. A link the node cannot follow refuses the
+/// call, and a link that is refused is not followed: no refusal names what
+/// lies where it leads. Where folder-mode commands cannot be
 /// confined (this test's node runs them unconfined), a program's execute
 /// action is neither offered nor run in an `x` folder.
 #[tokio::test(flavor = "multi_thread")]
@@ -1109,6 +1111,7 @@ async fn a_program_is_handed_no_more_than_the_node_judged() {
         work.join("chain"),
         work.join("relay"),
         work.join("new"),
+        work.join("loop"),
         outside.clone(),
         ssh.clone(),
     ] {
@@ -1123,6 +1126,9 @@ async fn a_program_is_handed_no_more_than_the_node_judged() {
     // A link to a folder in the folders that holds a link out.
     symlink(work.join("relay"), work.join("chain/next")).unwrap();
     symlink(&outside, work.join("relay/out")).unwrap();
+    // Where the call may not go, a link the node could not follow.
+    symlink(outside.join("loop"), outside.join("loop")).unwrap();
+    symlink(work.join("loop/l"), work.join("loop/l")).unwrap();
     // Nothing is there to read, but a write through it makes the place.
     symlink(outside.join("made.txt"), work.join("new/made")).unwrap();
     // A name that is no Unicode, and a link to it.
@@ -1224,6 +1230,16 @@ async fn a_program_is_handed_no_more_than_the_node_judged() {
                 "{} holds a link ({}) that leads where this call may not reach",
                 wire(&work.join("chain")),
                 wire(&work.join("relay/out"))
+            ),
+        ),
+        (
+            "open",
+            wire(&work.join("loop")),
+            "forbidden",
+            format!(
+                "{} holds a link ({}) the node cannot follow",
+                wire(&work.join("loop")),
+                wire(&work.join("loop/l"))
             ),
         ),
         (

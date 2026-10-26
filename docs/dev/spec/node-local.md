@@ -1594,12 +1594,14 @@ and folders below need `x` as well, as the path itself does. The refusal names t
 folder or the deny rule below it, which the center is not shown. A program
 follows links, which the node's own walks never do: once the call is
 allowed, the node walks each such path as the command account (and each
-folder a link there leads to, once), and judges the place each link leads to
-as a path of the call with the same access; one the call may not reach
-refuses it, and the refusal names the path handed over and the link, not
-where it leads. A link that leads nowhere counts only for a write, at the
-place it names; a link the node cannot follow, or more than 200 000 entries,
-refuse the call. A marked path to write that is itself a link is refused
+folder a link there leads to, once, after that link passed), and judges the
+place each link leads to in the stead of the path it lies below, with the
+same access and the call's other paths; one the call may not reach refuses
+it, and the refusal names the path handed over and the link, not where it
+leads. A link that leads within the path it lies below is judged as the
+other names there. A link that leads nowhere counts only for a write, at the
+place it names; a link the node cannot follow, or more than 200 000 entries
+(those of the folders the links lead to included), refuse the call. A marked path to write that is itself a link is refused
 with `bad_path`, since the program would act on the place it leads to. In
 folder mode, where commands cannot be confined (§2), an `execute` action
 with paths is refused as `exec.run` is, and not offered. What a program writes below

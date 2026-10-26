@@ -215,20 +215,26 @@ pub fn holds(path: &Path, write: bool) -> bool {
     }
 }
 
-/// The links that lie below the paths of `targets` that may hold others
-/// ([`Target::holds`]), and where each leads, for a call that hands them to
-/// a program (nerve_policy::works_below). The node's own walks never follow
-/// a link, but a program does, so each place a link leads to is judged as
-/// a path of the call (nerve_policy::refuse_links). A link that leads to a
-/// folder is looked into as well. Asked as the account the paths were
+/// Hands `judge` each link that lies below the paths of `targets` that may
+/// hold others ([`Target::holds`]), with where it leads, for a call that
+/// hands them to a program (nerve_policy::works_below). The node's own walks
+/// never follow a link, but a program does, so each place a link leads to
+/// is judged as a path of the call (nerve_policy::LinkCheck). A link is
+/// judged when it is found, and a folder it leads to is looked into only
+/// once it passed: a place the call may not reach is never walked, and no
+/// refusal names what lies there. Asked as the account the paths were
 /// resolved as; a folder it may not read is left out, as the walks leave it.
 /// A link that leads nowhere is left out where the call reads (nothing is
 /// there to read), and judged at the place it names where the call writes,
-/// since a write through it makes that place. `Err` says why the node
-/// cannot tell where they all lead: more than `limit` entries, or a link it
-/// cannot follow.
-pub fn links_below(targets: &[Target], limit: usize) -> Result<Vec<Link>, String> {
-    let mut links = Vec::new();
+/// since a write through it makes that place. `Err` is the first refusal of
+/// `judge`, or says why the node cannot tell where they all lead: more than
+/// `limit` entries, counting those of the folders the links lead to, or a
+/// link it cannot follow.
+pub fn links_below(
+    targets: &[Target],
+    limit: usize,
+    judge: &mut dyn FnMut(&Link) -> Option<String>,
+) -> Result<(), String> {
     let mut seen = 0usize;
     for (handed, t) in targets.iter().enumerate().filter(|(_, t)| t.holds) {
         let write = t.access == PathAccess::Write;
@@ -251,8 +257,9 @@ pub fn links_below(targets: &[Target], limit: usize) -> Result<Vec<Link>, String
                     seen += 1;
                     if seen > limit {
                         return Err(format!(
-                            "{given} holds more than {limit} entries; the node cannot check \
-                             where the links in it lead"
+                            "{given} holds more than {limit} entries, counting those of the \
+                             folders its links lead to; the node cannot check where the links \
+                             in it lead"
                         ));
                     }
                     let at = e.path();
@@ -284,24 +291,26 @@ pub fn links_below(targets: &[Target], limit: usize) -> Result<Vec<Link>, String
                         }
                         Err(_) => return Err(cannot()),
                     };
-                    let holds = holds(&to, write);
-                    if holds {
-                        roots.push(to.clone());
-                    }
-                    links.push(Link {
+                    let link = Link {
                         handed,
                         at,
                         to: Target {
+                            holds: holds(&to, write),
                             path: to,
                             access: t.access,
-                            holds,
                         },
-                    });
+                    };
+                    if let Some(why) = judge(&link) {
+                        return Err(why);
+                    }
+                    if link.to.holds {
+                        roots.push(link.to.path);
+                    }
                 }
             }
         }
     }
-    Ok(links)
+    Ok(())
 }
 
 /// Whether `path` lies in the node's own entry of `/proc`: `/proc/self`,
@@ -1096,14 +1105,13 @@ mod tests {
             holds: true,
         };
         let found = |access| {
-            let mut v: Vec<(PathBuf, PathBuf, bool)> = links_below(&[target(access)], LINKS_LIMIT)
-                .unwrap()
-                .into_iter()
-                .map(|l| {
-                    assert_eq!((l.handed, l.to.access), (0, access));
-                    (l.at, l.to.path, l.to.holds)
-                })
-                .collect();
+            let mut v: Vec<(PathBuf, PathBuf, bool)> = Vec::new();
+            links_below(&[target(access)], LINKS_LIMIT, &mut |l| {
+                assert_eq!((l.handed, l.to.access), (0, access));
+                v.push((l.at.clone(), l.to.path.clone(), l.to.holds));
+                None
+            })
+            .unwrap();
             v.sort();
             v
         };
@@ -1125,14 +1133,64 @@ mod tests {
             access: PathAccess::Read,
             holds: false,
         };
-        assert_eq!(links_below(&[file], LINKS_LIMIT).unwrap(), []);
+        let mut none = |_: &Link| -> Option<String> { panic!("a file was walked") };
+        assert_eq!(links_below(&[file], LINKS_LIMIT, &mut none), Ok(()));
+        let mut pass = |_: &Link| None;
         // Cut short: refused, never judged by the part looked at.
-        let e = links_below(&[target(PathAccess::Read)], 3).unwrap_err();
+        let e = links_below(&[target(PathAccess::Read)], 3, &mut pass).unwrap_err();
         assert!(e.contains("holds more than 3 entries"), "{e}");
         // A link it cannot follow: a loop.
         symlink(proj.join("loop"), proj.join("loop")).unwrap();
-        let e = links_below(&[target(PathAccess::Read)], LINKS_LIMIT).unwrap_err();
+        let e = links_below(&[target(PathAccess::Read)], LINKS_LIMIT, &mut pass).unwrap_err();
         assert!(e.contains("holds a link") && e.contains("loop"), "{e}");
+    }
+
+    /// A link is judged when it is found: one that is refused stops the
+    /// walk with its own reason, and the folder it leads to is not looked
+    /// into, so neither its size nor a link there the node cannot follow
+    /// gives the refusal, which would name a place the call may not reach.
+    /// A folder a link that passed leads to counts towards the limit.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_link_is_not_followed() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().canonicalize().unwrap();
+        let (proj, far) = (root.join("proj"), root.join("far"));
+        for p in [&proj, &far] {
+            std::fs::create_dir(p).unwrap();
+        }
+        std::fs::write(proj.join("a.txt"), "a").unwrap();
+        symlink(&far, proj.join("far")).unwrap();
+        for n in 0..10 {
+            std::fs::write(far.join(format!("f{n}")), "f").unwrap();
+        }
+        symlink(far.join("loop"), far.join("loop")).unwrap();
+        let proj = [Target {
+            path: proj.clone(),
+            access: PathAccess::Read,
+            holds: true,
+        }];
+        let mut judged = Vec::new();
+        let mut refuse_far = |l: &Link| {
+            judged.push(l.at.clone());
+            (l.to.path == far).then(|| "refused".to_string())
+        };
+        assert_eq!(
+            links_below(&proj, 5, &mut refuse_far),
+            Err("refused".into())
+        );
+        assert_eq!(judged, [root.join("proj/far")]);
+        let mut pass = |_: &Link| None;
+        let e = links_below(&proj, 5, &mut pass).unwrap_err();
+        assert!(
+            e.contains(
+                "holds more than 5 entries, counting those of the folders its links lead to"
+            ),
+            "{e}"
+        );
+        let e = links_below(&proj, LINKS_LIMIT, &mut pass).unwrap_err();
+        assert!(e.contains("far/loop) the node cannot follow"), "{e}");
     }
 
     #[test]
