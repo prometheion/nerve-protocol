@@ -523,8 +523,11 @@ pub async fn open_on_node(
         drop(s);
         match target {
             Err(NoSignal::NotSent) => {}
+            // Ended without a stream: its command may have run and ended,
+            // or never run (the checker or the node refused it, or it was
+            // cancelled), so the words hold for each.
             Err(_) => {
-                ring.end("its command ended before its output could be streamed; job.status gives it with the result");
+                ring.end("its job ended before its output could be streamed; job.status gives its result");
                 return;
             }
             Ok((link, call)) => {

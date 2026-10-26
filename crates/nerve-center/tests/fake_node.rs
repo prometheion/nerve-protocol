@@ -239,11 +239,13 @@ async fn describe_anew(c: &Center, node: &Described, d: Value, ready: impl Fn(&C
 /// Whether the fake node's `talk` command ends: `talk`, `talkodd`, and
 /// `talktimeout`, `talkcut` and `talklong`, which print the same but whose
 /// result is the error `timeout`, a result cut by the node and one too long
-/// for the center to keep whole, and `talkgone`, whose stream never opens.
+/// for the center to keep whole, `talkgone`, whose stream never opens, and
+/// `talkdenied`, whose stream never opens either and which the node refuses
+/// to run.
 fn talk_ends(talk: &str) -> bool {
     matches!(
         talk,
-        "talk" | "talkodd" | "talktimeout" | "talkcut" | "talklong" | "talkgone"
+        "talk" | "talkodd" | "talktimeout" | "talkcut" | "talklong" | "talkgone" | "talkdenied"
     )
 }
 
@@ -337,6 +339,10 @@ fn serve_changing(
                                         "the command ran past timeout_ms and was killed",
                                     ),
                                 ),
+                                "talkdenied" => Message::error(
+                                    Some(id),
+                                    RpcError::forbidden("no rule allows this command"),
+                                ),
                                 "talkcut" => Message::result(
                                     id,
                                     json!({"exit_code": 0, "stdout": "one\n", "stderr": "",
@@ -359,6 +365,7 @@ fn serve_changing(
                         let late = running.as_ref().is_some_and(|(t, at)| {
                             (t == "talklate" && at.elapsed() < Duration::from_millis(500))
                                 || t == "talkgone"
+                                || t == "talkdenied"
                                 || t == "talknever"
                         });
                         let Some((talk, at)) = running.filter(|_| !late) else {
@@ -4316,8 +4323,9 @@ async fn a_node_that_answers_late_still_streams() {
 
 /// Each way a job's stream gives up says why in the stream, in the
 /// center's words: the node does not stream the command (a sudo command),
-/// the command ended before it ran there, it did not start there in time,
-/// and the node left its requests unanswered.
+/// its job ended before the stream opened (also one the node refused to
+/// run, which must not read as a command that ran), it did not start there
+/// in time, and the node left its requests unanswered.
 #[tokio::test]
 async fn a_stream_that_cannot_open_says_why() {
     let dir = tempfile::tempdir().unwrap();
@@ -4333,7 +4341,12 @@ async fn a_stream_that_cannot_open_says_why() {
         (
             "talkgone",
             60_000,
-            "it ended (its command ended before its output could be streamed",
+            "it ended (its job ended before its output could be streamed; job.status gives its result)",
+        ),
+        (
+            "talkdenied",
+            60_000,
+            "it ended (its job ended before its output could be streamed; job.status gives its result)",
         ),
         (
             "talknever",
