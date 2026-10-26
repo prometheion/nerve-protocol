@@ -564,7 +564,7 @@ async fn serve(
                     seen.lock().unwrap().ended.push(s.to_string());
                 }
             }
-            Recv::Msg(_) | Recv::Timeout => {}
+            Recv::Msg(_) | Recv::Frame(_) | Recv::Timeout => {}
             Recv::Bye(_) | Recv::Closed | Recv::Garbage(_) => return,
         }
     }

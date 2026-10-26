@@ -218,7 +218,7 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                     return String::new();
                 }
             }
-            Recv::Msg(_) => {}
+            Recv::Msg(_) | Recv::Frame(_) => {}
             Recv::Bye(r) => return r,
             Recv::Closed | Recv::Garbage(_) => return String::new(),
             Recv::Timeout => return "timeout".into(),

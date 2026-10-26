@@ -251,15 +251,19 @@ pub struct Invoke {
 impl Invoke {
     /// Checks what serde cannot: the session's length.
     pub fn check(&self) -> Result<(), crate::RpcError> {
-        if let Some(s) = &self.ctx.session
-            && (s.is_empty() || s.len() > SESSION_BYTES)
-        {
-            return Err(crate::RpcError::invalid_args(
-                "ctx.session must be 1 to 256 bytes",
-            ));
-        }
-        Ok(())
+        check_session(&self.ctx)
     }
+}
+
+fn check_session(ctx: &Ctx) -> Result<(), crate::RpcError> {
+    if let Some(s) = &ctx.session
+        && (s.is_empty() || s.len() > SESSION_BYTES)
+    {
+        return Err(crate::RpcError::invalid_args(
+            "ctx.session must be 1 to 256 bytes",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -335,6 +339,9 @@ pub struct StateChange {
     pub changed: Map<String, Value>,
 }
 
+/// `stream.open`: the stream `stream` of the capability `cap`, for the harness
+/// session in `ctx`. A node serves a stream of a call (`exec`'s `output`)
+/// only to the session the call came from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StreamOpen {
@@ -342,9 +349,21 @@ pub struct StreamOpen {
     pub stream: String,
     #[serde(default)]
     pub params: Map<String, Value>,
+    #[serde(default)]
+    pub ctx: Ctx,
 }
 
+impl StreamOpen {
+    /// Checks what serde cannot: the session's length, as for `invoke`.
+    pub fn check(&self) -> Result<(), crate::RpcError> {
+        check_session(&self.ctx)
+    }
+}
+
+/// `stream.close`, either way. A node reads it strictly, like everything a
+/// center sends; a center reads a node's tolerantly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StreamClose {
     pub sid: u32,
     #[serde(default)]
@@ -464,6 +483,36 @@ mod tests {
             ..ok
         };
         assert!(long.check().is_err());
+    }
+
+    /// `stream.open` names the session it is for, in a `ctx` as strict as
+    /// `invoke`'s.
+    #[test]
+    fn stream_open_is_strict() {
+        let ok: StreamOpen = serde_json::from_value(json!({
+            "cap": "exec", "stream": "output", "params": {"call": 3},
+            "ctx": {"session": "s1"}
+        }))
+        .unwrap();
+        assert_eq!(ok.ctx.session.as_deref(), Some("s1"));
+        assert!(ok.check().is_ok());
+        for bad in [
+            json!({"cap": "exec", "stream": "output", "ctx": {"session": "s1", "mode": "full"}}),
+            json!({"cap": "exec", "stream": "output", "x": 1}),
+        ] {
+            assert!(serde_json::from_value::<StreamOpen>(bad).is_err());
+        }
+        let long = StreamOpen {
+            ctx: Ctx {
+                session: Some("s".repeat(257)),
+            },
+            ..ok
+        };
+        assert!(long.check().is_err());
+        assert!(
+            serde_json::from_value::<StreamClose>(json!({"sid": 1, "reason": "x", "y": 2}))
+                .is_err()
+        );
     }
 
     #[test]

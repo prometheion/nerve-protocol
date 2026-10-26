@@ -646,6 +646,196 @@ async fn a_deny_rule_refuses_exec_signal_and_the_audit_says_so() {
     assert!(line.contains("\"allowed\""), "{line}");
 }
 
+/// Two centers paired in allowlist mode, each allowing the shell script
+/// `text` as `sh <its path>`, the node started, and both links up: (node,
+/// lab's link, work's link, the command).
+#[cfg(unix)]
+async fn two_centers_running(
+    dir: &Path,
+    text: &str,
+) -> (Daemon, Conn<TcpStream>, Conn<TcpStream>, String) {
+    let mut a = FakeCenter::start(false).await.unwrap();
+    let mut b = FakeCenter::start(false).await.unwrap();
+    let o = options(dir);
+    let script = o.home.join("script.sh");
+    std::fs::write(&script, text).unwrap();
+    let command = format!("sh {}", script.display());
+    nerve_node::pair::pair(&o.paths, &a.link(), Some("lab"))
+        .await
+        .expect("pair a");
+    nerve_node::pair::pair(&o.paths, &b.link(), Some("work"))
+        .await
+        .expect("pair b");
+    owner_edit(&o.paths, |c| {
+        for e in c.centers.iter_mut() {
+            e.policy.mode = nerve_policy::Mode::Allowlist;
+            e.policy.allow.push(format!("exec.run:{command}"));
+        }
+    })
+    .await;
+    let node = Daemon::start(o).await.expect("start");
+    let (lab, work) = (linked(&mut a).await, linked(&mut b).await);
+    // The fake centers' listeners are not needed once linked.
+    drop((a, b));
+    (node, lab, work, command)
+}
+
+/// The `invoke` params that run `command` for the session `session`.
+#[cfg(unix)]
+fn session_run(command: &str, session: &str) -> Value {
+    json!({"cap": "exec", "action": "run", "args": {"command": command},
+           "ctx": {"session": session}})
+}
+
+/// `stream.open` of `exec`'s `output` for the call `call`, in `session`.
+fn output_of(call: u64, session: Option<&str>) -> Value {
+    let mut p = json!({"cap": "exec", "stream": "output", "params": {"call": call}});
+    if let Some(s) = session {
+        p["ctx"] = json!({"session": s});
+    }
+    p
+}
+
+/// A running command's output streams only to the session (and the center)
+/// its call came from: the same `stream.open` from another session, without
+/// one, or from the other center is refused alike. The stream sends what the
+/// command printed so far, then the rest, in order, and the node closes it
+/// when the command ended.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_commands_output_streams_in_order_to_its_own_session_only() {
+    use nerve_conformance::wire::Recv;
+    use nerve_proto::Message;
+    use nerve_proto::rpc::Id;
+
+    let dir = tempdir();
+    let script = "for i in 1 2 3 4 5; do echo line $i; sleep 0.3; done\n";
+    let (node, mut lab, mut work, command) = two_centers_running(dir.path(), script).await;
+    let run = lab
+        .request("invoke", session_run(&command, "s1"))
+        .await
+        .unwrap();
+    // The first line is out before the stream opens: it comes from the tail.
+    tokio::time::sleep(Duration::from_millis(450)).await;
+    for (on_work, p) in [
+        (false, output_of(run, Some("s2"))),
+        (false, output_of(run, None)),
+        (false, output_of(run + 7, Some("s1"))),
+        (true, output_of(run, Some("s1"))),
+    ] {
+        let conn = if on_work { &mut work } else { &mut lab };
+        let mut others = Vec::new();
+        let id = conn.request("stream.open", p.clone()).await.unwrap();
+        let e = conn
+            .answer(id, WAIT, &mut others)
+            .await
+            .unwrap()
+            .expect_err("another session's or center's call");
+        assert_eq!(nerve_conformance::wire::code_of(&e), "invalid_args", "{p}");
+        assert!(e.message.contains("no running command"), "{e:?}");
+    }
+    let mut others = Vec::new();
+    let id = lab
+        .request("stream.open", output_of(run, Some("s1")))
+        .await
+        .unwrap();
+    let sid = lab
+        .answer(id, WAIT, &mut others)
+        .await
+        .unwrap()
+        .expect("its own session's call")["sid"]
+        .as_u64()
+        .unwrap();
+    let (mut data, mut seqs, mut ran, mut closed) = (Vec::new(), Vec::new(), None, None);
+    while ran.is_none() || closed.is_none() {
+        match lab.recv(WAIT).await {
+            Recv::Frame(f) => {
+                assert_eq!(u64::from(f.id), sid);
+                assert_eq!(f.gap_bytes(), None, "nothing is dropped here");
+                seqs.push(f.seq);
+                data.extend(f.payload);
+            }
+            Recv::Msg(Message::Result { id, result }) if id == Id::Num(run) => ran = Some(result),
+            Recv::Msg(Message::Request { id, method, params }) if method == "stream.close" => {
+                assert_eq!(params["sid"].as_u64(), Some(sid));
+                assert_eq!(params["reason"], "ended");
+                lab.send(&Message::result(id, json!({}))).await.unwrap();
+                closed = Some(data.len());
+            }
+            Recv::Msg(_) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    let want = "line 1\nline 2\nline 3\nline 4\nline 5\n";
+    assert_eq!(String::from_utf8(data).unwrap(), want);
+    assert_eq!(closed, Some(want.len()), "the close comes after the data");
+    assert_eq!(seqs, (0..seqs.len() as u32).collect::<Vec<_>>());
+    assert!(seqs.len() > 1, "the lines came as they were printed");
+    // The result still carries the output.
+    assert_eq!(ran.unwrap()["stdout"], want);
+    node.stop().await;
+}
+
+/// `stream.close` from the center stops the stream at once, while its
+/// command runs on; the node then sends no frame and no close of its own.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_centers_stream_close_stops_the_frames() {
+    use nerve_conformance::wire::Recv;
+    use nerve_proto::Message;
+
+    let dir = tempdir();
+    let script = "while true; do echo tick; sleep 0.1; done\n";
+    let (node, mut lab, _work, command) = two_centers_running(dir.path(), script).await;
+    let run = lab
+        .request("invoke", session_run(&command, "s1"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let sid = lab
+        .call("stream.open", output_of(run, Some("s1")), WAIT)
+        .await
+        .unwrap()
+        .expect("opened")["sid"]
+        .clone();
+    // Ticks come.
+    let frames = loop {
+        match lab.recv(WAIT).await {
+            Recv::Frame(f) => break vec![f],
+            Recv::Msg(_) => {}
+            other => panic!("{other:?}"),
+        }
+    };
+    assert!(frames[0].payload.starts_with(b"tick"));
+    let closed = lab
+        .call("stream.close", json!({"sid": sid, "reason": "done"}), WAIT)
+        .await
+        .unwrap();
+    assert_eq!(closed, Ok(json!({})));
+    lab.take_frames();
+    // A second close finds no stream.
+    let again = lab
+        .call("stream.close", json!({"sid": sid}), WAIT)
+        .await
+        .unwrap()
+        .expect_err("closed already");
+    assert_eq!(nerve_conformance::wire::code_of(&again), "unknown_member");
+    lab.take_frames();
+    let until = tokio::time::Instant::now() + Duration::from_millis(800);
+    loop {
+        let left = until.saturating_duration_since(tokio::time::Instant::now());
+        match lab.recv(left).await {
+            Recv::Timeout => break,
+            Recv::Frame(f) => panic!("a frame after the close: {f:?}"),
+            Recv::Msg(Message::Request { method, .. }) => panic!("the node sent {method}"),
+            Recv::Msg(_) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    lab.notify("cancel", json!({"id": run})).await.unwrap();
+    node.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unknown_node_answer_stops_dialling() {
     let dir = tempdir();

@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::WebSocketStream;
 
+use nerve_proto::frame::Frame;
 use nerve_proto::msg::method;
 use nerve_proto::{Id, Message, RpcError};
 use nerve_transport::ws::WsMessage;
@@ -20,7 +21,10 @@ pub enum Recv {
     /// The socket closed (or failed) without a `bye`.
     Closed,
     Timeout,
-    /// A text frame that was not a valid JSON-RPC message, or a binary frame.
+    /// A binary frame (a stream's data).
+    Frame(Frame),
+    /// A text frame that was not a valid JSON-RPC message, or a binary frame
+    /// that is not one.
     Garbage(String),
 }
 
@@ -28,11 +32,17 @@ pub enum Recv {
 pub struct Conn<S> {
     ws: WebSocketStream<S>,
     next_id: u64,
+    /// Binary frames that came while [`Conn::answer`] waited.
+    frames: Vec<Frame>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
     pub fn new(ws: WebSocketStream<S>) -> Conn<S> {
-        Conn { ws, next_id: 1 }
+        Conn {
+            ws,
+            next_id: 1,
+            frames: Vec::new(),
+        }
     }
 
     pub async fn send(&mut self, m: &Message) -> Result<(), String> {
@@ -92,7 +102,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
                     };
                 }
                 WsMessage::Binary(b) => {
-                    return Recv::Garbage(format!("a binary frame of {} bytes", b.len()));
+                    return match Frame::decode(&b) {
+                        Ok(f) => Recv::Frame(f),
+                        Err(e) => {
+                            Recv::Garbage(format!("a binary frame of {} bytes: {e}", b.len()))
+                        }
+                    };
                 }
                 WsMessage::Close(_) => return Recv::Closed,
                 _ => continue,
@@ -120,12 +135,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
                     error,
                 }) if got == Id::Num(id) => return Ok(Err(error)),
                 Recv::Msg(m) => others.push(m),
+                Recv::Frame(f) => self.frames.push(f),
                 Recv::Bye(r) => return Err(format!("the peer said bye ({r})")),
                 Recv::Closed => return Err("the link closed".into()),
                 Recv::Timeout => return Err(format!("no answer within {wait:?}")),
                 Recv::Garbage(g) => return Err(format!("not a JSON-RPC message: {g}")),
             }
         }
+    }
+
+    /// The binary frames [`Conn::answer`] put aside, oldest first.
+    pub fn take_frames(&mut self) -> Vec<Frame> {
+        std::mem::take(&mut self.frames)
     }
 
     /// One request and its answer.

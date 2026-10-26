@@ -1091,6 +1091,9 @@ pub struct RunOptions {
         std::sync::Arc<crate::cgroup::Cgroups>,
         nerve_policy::config::Granted,
     )>,
+    /// Where the output goes as well as into the result, for the call's
+    /// `output` stream (crate::tap); `None` keeps it in the result only.
+    pub tap: Option<std::sync::Arc<crate::tap::Tap>>,
 }
 
 /// The environment of a command of `nerve-run` besides HOME, USER and
@@ -1480,8 +1483,13 @@ fn kill_group(pid: u32, sig: Sig, uid: Option<u32>) {
 fn kill_group(_pid: u32, _sig: Sig) {}
 
 /// Reads up to `cap` bytes and drains the rest, so the command never blocks
-/// on a full pipe. Returns the bytes and whether some were dropped.
-async fn capped(mut r: impl AsyncRead + Unpin, cap: usize) -> (Vec<u8>, bool) {
+/// on a full pipe. Returns the bytes and whether some were dropped. All of
+/// it, past the cap too, goes to `tap` as it comes.
+async fn capped(
+    mut r: impl AsyncRead + Unpin,
+    cap: usize,
+    tap: Option<&crate::tap::Tap>,
+) -> (Vec<u8>, bool) {
     let mut out = Vec::new();
     let mut buf = vec![0u8; 16 * 1024];
     let mut cut = false;
@@ -1489,6 +1497,9 @@ async fn capped(mut r: impl AsyncRead + Unpin, cap: usize) -> (Vec<u8>, bool) {
         match r.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
+                if let Some(t) = tap {
+                    t.push(&buf[..n]);
+                }
                 let room = cap.saturating_sub(out.len());
                 if n > room {
                     cut = true;
@@ -1541,7 +1552,7 @@ async fn sudo_stderr(
             }
         }
     }
-    let (rest, cut) = capped(err, cap).await;
+    let (rest, cut) = capped(err, cap, None).await;
     seen.extend_from_slice(&rest);
     let mut out = Vec::with_capacity(seen.len().min(cap));
     let mut i = 0;
@@ -1822,14 +1833,17 @@ pub async fn run(
     let stderr = child.stderr.take().expect("piped");
     let cap = opts.output_cap.min(OUTPUT_HARD_CAP);
     let limit = opts.timeouts.limit(call.timeout);
+    // A sudo command's output is not streamed: the frames of a stream are
+    // not scrubbed of the password the way its result is.
+    let tap = opts.tap.as_deref().filter(|_| opts.sudo.is_none());
     let err = async {
         match sudo_stdin {
             Some((stdin, sudo)) => sudo_stderr(stderr, stdin, sudo, pid, cap).await,
-            None => capped(stderr, cap).await,
+            None => capped(stderr, cap, tap).await,
         }
     };
     let work = async {
-        let (o, e, st) = tokio::join!(capped(stdout, cap), err, child.wait());
+        let (o, e, st) = tokio::join!(capped(stdout, cap, tap), err, child.wait());
         (o, e, st)
     };
     tokio::pin!(work);
@@ -1978,10 +1992,11 @@ async fn run_as(
     let crate::win_user::Spawned { stdout, stderr, .. } = child;
     let cap = opts.output_cap.min(OUTPUT_HARD_CAP);
     let limit = opts.timeouts.limit(call.timeout);
+    let tap = opts.tap.as_deref().filter(|_| opts.sudo.is_none());
     let work = async {
         tokio::join!(
-            capped(tokio::fs::File::from_std(stdout), cap),
-            capped(tokio::fs::File::from_std(stderr), cap),
+            capped(tokio::fs::File::from_std(stdout), cap, tap),
+            capped(tokio::fs::File::from_std(stderr), cap, tap),
             async {
                 tokio::task::spawn_blocking(wait)
                     .await
@@ -2093,6 +2108,7 @@ mod tests {
             own: Vec::new(),
             root: None,
             limits: None,
+            tap: None,
         }
     }
 
@@ -3494,6 +3510,7 @@ mod windows_tests {
             own: Vec::new(),
             root: None,
             limits: None,
+            tap: None,
         }
     }
 

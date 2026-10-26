@@ -274,6 +274,20 @@ impl LinkHandle {
         }
     }
 
+    /// Sends a binary frame of a stream, waiting for room in the queue.
+    /// Binary frames are not counted: `false` when the link is not on a
+    /// connection now, and the stream ends.
+    pub async fn frame(&self, f: &nerve_proto::frame::Frame) -> bool {
+        let Ok(bytes) = f.encode() else {
+            return false;
+        };
+        let tx = lock(&self.wire).tx.clone();
+        match tx {
+            Some(tx) => tx.send(WsMessage::binary(bytes)).await.is_ok(),
+            None => false,
+        }
+    }
+
     /// Sends a frame of this connection only (a ping, an `ack`), if there
     /// is room.
     pub fn raw(&self, m: WsMessage) {

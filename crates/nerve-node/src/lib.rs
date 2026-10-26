@@ -48,6 +48,7 @@ mod rotate;
 mod secrets;
 pub mod service;
 mod sudo;
+pub mod tap;
 // The walk is Windows-only in use, tested everywhere.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod tree;
