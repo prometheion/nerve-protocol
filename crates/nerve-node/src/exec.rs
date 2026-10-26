@@ -373,7 +373,10 @@ fn decode(bytes: &[u8], cut: bool) -> String {
 /// PowerShell 5.1 writes that), none elsewhere.
 pub fn other_text() -> Option<crate::tap::Decode> {
     #[cfg(windows)]
-    return Some(|b| crate::win::code_page_text(crate::win::console_code_page(), b));
+    return Some(crate::tap::Decode {
+        text: |b| crate::win::code_page_text(crate::win::console_code_page(), b),
+        cut: |b| crate::win::code_page_cut(crate::win::console_code_page(), b),
+    });
     #[cfg(not(windows))]
     None
 }
@@ -3867,6 +3870,12 @@ mod windows_tests {
             Some("Grüße")
         );
         assert_ne!(crate::win::console_code_page(), 0);
+        // A lead byte at the end waits for its second byte; a single-byte
+        // code page has none.
+        assert_eq!(crate::win::code_page_cut(932, b"a\x82"), 1);
+        assert_eq!(crate::win::code_page_cut(932, b"a\x82\xA0"), 0);
+        assert_eq!(crate::win::code_page_cut(932, b"\x82\x82\x82"), 1);
+        assert_eq!(crate::win::code_page_cut(1252, b"a\x82"), 0);
     }
 
     /// What Windows PowerShell 5.1 prints, on stdout and stderr, comes back

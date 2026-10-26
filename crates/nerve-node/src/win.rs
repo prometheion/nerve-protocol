@@ -90,6 +90,7 @@ unsafe extern "system" {
     fn TerminateProcess(process: Handle, code: u32) -> i32;
     fn CloseHandle(handle: Handle) -> i32;
     fn GetOEMCP() -> u32;
+    fn IsDBCSLeadByteEx(code_page: u32, byte: u8) -> i32;
     fn MultiByteToWideChar(
         code_page: u32,
         flags: u32,
@@ -455,6 +456,25 @@ pub fn is_elevated() -> bool {
 pub fn console_code_page() -> u32 {
     // SAFETY: it takes no arguments.
     unsafe { GetOEMCP() }
+}
+
+/// How many bytes at the end of `bytes` start a character of code page `cp`
+/// they do not finish: the lead byte of a double-byte code page (932, 936,
+/// 949, 950) whose second byte is still to come. `bytes` starts at a whole
+/// character.
+pub fn code_page_cut(cp: u32, bytes: &[u8]) -> usize {
+    let mut i = 0;
+    while i < bytes.len() {
+        // SAFETY: it takes plain values.
+        if unsafe { IsDBCSLeadByteEx(cp, bytes[i]) } == 0 {
+            i += 1;
+        } else if i + 1 == bytes.len() {
+            return 1;
+        } else {
+            i += 2;
+        }
+    }
+    0
 }
 
 /// `bytes` decoded from code page `cp`; `None` when Windows cannot.

@@ -40,7 +40,30 @@ pub enum Pipe {
 
 /// Reads output that is not UTF-8, as the command's result does: the
 /// console code page on Windows (crate::exec::other_text).
-pub type Decode = fn(&[u8]) -> Option<String>;
+#[derive(Clone, Copy)]
+pub struct Decode {
+    /// The text of whole characters.
+    pub text: fn(&[u8]) -> Option<String>,
+    /// How many bytes at the end start a character they do not finish: a
+    /// lead byte of a double-byte code page, whose second byte the pipe's
+    /// next read brings.
+    pub cut: fn(&[u8]) -> usize,
+}
+
+impl Decode {
+    /// `b` as UTF-8 text; what the code page does not read is replaced.
+    fn read(&self, b: &[u8]) -> Vec<u8> {
+        (self.text)(b)
+            .unwrap_or_else(|| String::from_utf8_lossy(b).into_owned())
+            .into_bytes()
+    }
+
+    /// The end of `b` that starts a character it does not finish, cut off.
+    fn cut_off(&self, b: &mut Vec<u8>) -> Vec<u8> {
+        let n = (self.cut)(b).min(b.len());
+        b.split_off(b.len() - n)
+    }
+}
 
 /// Gives the sudo password the node holds now.
 pub(crate) type Held = Arc<dyn Fn() -> Option<Secret> + Send + Sync>;
@@ -229,13 +252,9 @@ impl Inner {
             carry.raw = cut_char(&mut data);
             return data;
         };
-        let decoded = |d: &[u8]| {
-            other(d)
-                .unwrap_or_else(|| String::from_utf8_lossy(d).into_owned())
-                .into_bytes()
-        };
         if carry.code_page == Some(true) {
-            return decoded(&data);
+            carry.raw = other.cut_off(&mut data);
+            return other.read(&data);
         }
         match std::str::from_utf8(&data) {
             Err(e) if e.error_len().is_some() => {
@@ -243,7 +262,8 @@ impl Inner {
                     return String::from_utf8_lossy(&data).into_owned().into_bytes();
                 }
                 carry.code_page = Some(true);
-                decoded(&data)
+                carry.raw = other.cut_off(&mut data);
+                other.read(&data)
             }
             _ => {
                 carry.raw = cut_char(&mut data);
@@ -327,7 +347,14 @@ impl Tap {
             return;
         }
         for pipe in [Pipe::Out, Pipe::Err] {
-            let raw = std::mem::take(&mut t.pipes[pipe as usize].raw);
+            let carry = &mut t.pipes[pipe as usize];
+            let mut raw = std::mem::take(&mut carry.raw);
+            if let Some(other) = self
+                .other
+                .filter(|_| carry.code_page == Some(true) && !raw.is_empty())
+            {
+                raw = other.read(&raw);
+            }
             let out = t.scrub(pipe, raw, secret.as_ref(), true);
             t.emit(&out);
         }
@@ -528,7 +555,7 @@ mod tests {
     /// other way round.
     #[tokio::test]
     async fn each_pipe_keeps_its_own_encoding() {
-        let latin1: Decode = |b| Some(b.iter().map(|&c| char::from(c)).collect());
+        let latin1 = LATIN1;
         let t = Tap::new(None, Some(latin1));
         let r = t.reader();
         t.push(Pipe::Err, b"ausf\xFChrbaren\n");
@@ -547,7 +574,7 @@ mod tests {
     /// from then on, and UTF-8 output stays UTF-8 whatever its reads cut.
     #[tokio::test]
     async fn characters_stay_whole_and_a_code_page_is_read() {
-        let latin1: Decode = |b| Some(b.iter().map(|&c| char::from(c)).collect());
+        let latin1 = LATIN1;
         let t = Tap::new(None, Some(latin1));
         let r = t.reader();
         t.push(Pipe::Out, b"Gr\xC3");
@@ -578,6 +605,60 @@ mod tests {
             got.extend(d);
         }
         assert_eq!(got, b"\xE2\x9C\x93 \xFF");
+    }
+
+    /// A stand-in for a single-byte code page.
+    const LATIN1: Decode = Decode {
+        text: |b| Some(b.iter().map(|&c| char::from(c)).collect()),
+        cut: |_| 0,
+    };
+
+    /// A stand-in for a double-byte code page: a byte from 0x81 is the lead
+    /// of a pair, read as one character.
+    const PAIRS: Decode = Decode {
+        text: |b| {
+            let mut out = String::new();
+            let mut i = 0;
+            while i < b.len() {
+                if b[i] >= 0x81 {
+                    let trail = b.get(i + 1).copied()?;
+                    out.push(char::from_u32(0x3000 + u32::from(trail)).unwrap());
+                    i += 2;
+                } else {
+                    out.push(char::from(b[i]));
+                    i += 1;
+                }
+            }
+            Some(out)
+        },
+        cut: |b| {
+            let mut i = 0;
+            while i < b.len() {
+                if b[i] >= 0x81 && i + 1 == b.len() {
+                    return 1;
+                }
+                i += if b[i] >= 0x81 { 2 } else { 1 };
+            }
+            0
+        },
+    };
+
+    /// In a double-byte code page, a character whose lead byte ends a read
+    /// waits for its second byte from the pipe's next read, as the result
+    /// reads it whole; a lead byte the command never finished goes at the
+    /// end, read as the code page reads it.
+    #[tokio::test]
+    async fn a_double_byte_character_a_read_cuts_stays_whole() {
+        let t = Tap::new(None, Some(PAIRS));
+        let r = t.reader();
+        t.push(Pipe::Out, b"\x82\x41a\x82");
+        t.push(Pipe::Err, b"e\n");
+        t.push(Pipe::Out, b"\x42b\n\x83");
+        t.end();
+        assert_eq!(
+            text_of(&r).await,
+            (0, "\u{3041}ae\n\u{3042}b\n\u{fffd}".into())
+        );
     }
 
     /// A late stream whose tail would start inside a character starts at
