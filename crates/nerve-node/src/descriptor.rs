@@ -1241,6 +1241,202 @@ mod tests {
         assert_ne!(with, without);
     }
 
+    /// What a center is shown follows the effect table, for every mode,
+    /// effect, setting, allow rule and confinement: a provider's action,
+    /// which names no path, exactly where `decide` lets a call of it
+    /// through; `fs.read`, `fs.write` and `exec.run` exactly where the table
+    /// allows a call with its paths in the folders, which `decide` then
+    /// allows, while it allows one outside them as the table says.
+    #[test]
+    fn what_is_offered_follows_the_effect_table() {
+        use Need::{AllowRule, Allowed, InFolders, NeedsOn};
+        use nerve_policy::protected::{Platform, Protected};
+        use nerve_policy::{Call, Decision, Env, PathAccess, Target, decide};
+        let home = std::path::Path::new("/h");
+        let prot = Protected::new(&Platform::Unix, home, &[], &Default::default());
+        let env = |confined: bool| Env {
+            home,
+            protected: &prot,
+            unconfined: (!confined).then_some("commands cannot be confined here"),
+            sudo: false,
+            shell: nerve_policy::command::Shell::Sh,
+        };
+        let cfg = NodeConfig::default();
+        let effects = [
+            Effect::Read,
+            Effect::Write,
+            Effect::Execute,
+            Effect::Sense,
+            Effect::Actuate,
+        ];
+        let settings = [
+            None,
+            Some(CapSetting::On),
+            Some(CapSetting::Off),
+            Some(CapSetting::Hidden),
+        ];
+        // The policy for one row; its only folder `/w` allows everything.
+        let policy_of = |mode, key: &str, setting: Option<CapSetting>, allow: &[&str]| {
+            let mut e = entry();
+            e.policy.mode = mode;
+            e.policy.folders = vec![folder("/w", "rwx")];
+            e.policy.allow = rules(allow);
+            if let Some(s) = setting {
+                e.policy.caps.insert(key.into(), s);
+            }
+            e
+        };
+        // The table as policy-engine.md gives it: (mode, effect, no path,
+        // paths in the folders, a path outside).
+        #[rustfmt::skip]
+        let table = [
+            (Mode::Allowlist, Effect::Read, AllowRule, AllowRule, AllowRule),
+            (Mode::Allowlist, Effect::Write, AllowRule, AllowRule, AllowRule),
+            (Mode::Allowlist, Effect::Execute, AllowRule, AllowRule, AllowRule),
+            (Mode::Allowlist, Effect::Sense, AllowRule, AllowRule, AllowRule),
+            (Mode::Allowlist, Effect::Actuate, AllowRule, AllowRule, AllowRule),
+            (Mode::Folder, Effect::Read, NeedsOn, Allowed, InFolders),
+            (Mode::Folder, Effect::Write, NeedsOn, Allowed, InFolders),
+            (Mode::Folder, Effect::Execute, NeedsOn, Allowed, InFolders),
+            (Mode::Folder, Effect::Sense, NeedsOn, NeedsOn, NeedsOn),
+            (Mode::Folder, Effect::Actuate, NeedsOn, NeedsOn, NeedsOn),
+            (Mode::User, Effect::Read, Allowed, Allowed, Allowed),
+            (Mode::User, Effect::Write, Allowed, Allowed, Allowed),
+            (Mode::User, Effect::Execute, Allowed, Allowed, Allowed),
+            (Mode::User, Effect::Sense, NeedsOn, NeedsOn, NeedsOn),
+            (Mode::User, Effect::Actuate, NeedsOn, NeedsOn, NeedsOn),
+        ];
+        // The cell for a call, `on` applied; the table function agrees.
+        let need = |mode, effect, paths, setting| {
+            let (.., none, inside, outside) = *table
+                .iter()
+                .find(|(m, e, ..)| *m == mode && *e == effect)
+                .unwrap();
+            let cell = match paths {
+                PathArgs::None => none,
+                PathArgs::Some {
+                    all_in_folders: true,
+                } => inside,
+                PathArgs::Some {
+                    all_in_folders: false,
+                } => outside,
+            };
+            let cell = match cell {
+                NeedsOn if setting == Some(CapSetting::On) => Allowed,
+                cell => cell,
+            };
+            assert_eq!(effect_rule(mode, effect, paths, setting), cell);
+            cell
+        };
+        // Shown, and not marked off.
+        let shown_on = |d: &Descriptor, cap: &str, action: &str| {
+            d.capability(cap)
+                .and_then(|c| c.actions.get(action))
+                .is_some_and(|a| a.exposure != Some(Exposure::Off))
+        };
+        let mut rows = 0;
+        for mode in [Mode::Allowlist, Mode::Folder, Mode::User] {
+            for setting in settings {
+                for confined in [true, false] {
+                    // A provider's action: no path.
+                    for effect in effects {
+                        let provided = [provided(effect)];
+                        for allow in [&[][..], &["echo.say"], &["echo"], &["echo.other"]] {
+                            let e = policy_of(mode, "echo.say", setting, allow);
+                            let what = format!(
+                                "echo.say {effect:?} {mode:?} {setting:?} {allow:?} confined={confined}"
+                            );
+                            let d = for_center(&cfg, &e, 0, confined, &provided);
+                            let call = Call {
+                                cap: "echo",
+                                action: "say",
+                                effect,
+                                targets: &[],
+                                command: None,
+                                cwd: None,
+                                now_ms: 0,
+                            };
+                            let allowed =
+                                decide(&e.policy, &env(confined), &call) == Decision::Allow;
+                            assert_eq!(shown_on(&d, "echo", "say"), allowed, "{what}");
+                            let want =
+                                !matches!(setting, Some(CapSetting::Off | CapSetting::Hidden))
+                                    && match need(mode, effect, PathArgs::None, setting) {
+                                        Need::Allowed => true,
+                                        Need::AllowRule => {
+                                            allow.len() == 1 && allow[0] != "echo.other"
+                                        }
+                                        Need::InFolders | Need::NeedsOn => false,
+                                    };
+                            assert_eq!(allowed, want, "{what}");
+                            rows += 1;
+                        }
+                    }
+                    // The built-in actions that name their paths per call.
+                    for (cap, action, effect) in [
+                        ("fs", "read", Effect::Read),
+                        ("fs", "write", Effect::Write),
+                        ("exec", "run", Effect::Execute),
+                    ] {
+                        let key = format!("{cap}.{action}");
+                        for allow in [&[][..], &[key.as_str()], &[cap], &["fs.stat"]] {
+                            let e = policy_of(mode, &key, setting, allow);
+                            let what =
+                                format!("{key} {mode:?} {setting:?} {allow:?} confined={confined}");
+                            let d = for_center(&cfg, &e, 0, confined, &[]);
+                            let covered = allow.len() == 1 && allow[0] != "fs.stat";
+                            let by_table = |all_in_folders| {
+                                let paths = PathArgs::Some { all_in_folders };
+                                !matches!(setting, Some(CapSetting::Off | CapSetting::Hidden))
+                                    && match need(mode, effect, paths, setting) {
+                                        Allowed => {
+                                            confined || cap != "exec" || mode != Mode::Folder
+                                        }
+                                        AllowRule => covered,
+                                        InFolders | NeedsOn => false,
+                                    }
+                            };
+                            assert_eq!(shown_on(&d, cap, action), by_table(true), "{what}");
+                            for (path, all_in_folders) in [("/w", true), ("/elsewhere", false)] {
+                                let access = match effect {
+                                    Effect::Write => PathAccess::Write,
+                                    Effect::Execute => PathAccess::Run,
+                                    _ => PathAccess::Read,
+                                };
+                                let path = if cap == "exec" {
+                                    path.to_string()
+                                } else {
+                                    format!("{path}/a")
+                                };
+                                let targets = [Target {
+                                    path: path.clone().into(),
+                                    access,
+                                }];
+                                let run = cap == "exec";
+                                let call = Call {
+                                    cap,
+                                    action,
+                                    effect,
+                                    targets: &targets,
+                                    command: run.then_some("make"),
+                                    cwd: run.then_some(std::path::Path::new(&path)),
+                                    now_ms: 0,
+                                };
+                                let allowed =
+                                    decide(&e.policy, &env(confined), &call) == Decision::Allow;
+                                assert_eq!(allowed, by_table(all_in_folders), "{what} at {path}");
+                            }
+                            rows += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // 3 modes × 4 settings × 2 confinements × (5 effects + 3 path
+        // actions) × 4 allow lists.
+        assert_eq!(rows, 3 * 4 * 2 * 8 * 4);
+    }
+
     #[test]
     fn off_and_hidden_keep_their_meaning_in_allowlist() {
         let cfg = NodeConfig::default();
