@@ -1,8 +1,10 @@
 //! The `fs` capability (spec §7.2). Calls are parsed first ([`FsCall::parse`])
 //! so the policy can judge their paths, then run on a blocking thread.
 
+use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -176,6 +178,12 @@ pub fn open_to_all(_: &Path) -> bool {
 /// read them whatever account they act as. A `provider` reads with the
 /// owner's rights, so a folder handed to it here would let it read below as
 /// the owner whatever is closed to others.
+///
+/// The refusals other than the node's own process name no path: `path` is
+/// resolved as the command account, which every pairing's commands share,
+/// and a link of another of its processes (`/proc/<n>/cwd`) leads where
+/// that process works. The center gave the path, and the audit entry names
+/// where it led.
 pub fn may_read_outside(path: &Path, provider: bool) -> Result<(), String> {
     if own_process(path) {
         Err(format!(
@@ -183,20 +191,19 @@ pub fn may_read_outside(path: &Path, provider: bool) -> Result<(), String> {
             path.display()
         ))
     } else if !open_to_all(path) {
-        Err(format!(
-            "{} is in no folder that allows reading, and not open to every account on this machine",
-            path.display()
-        ))
+        Err(
+            "a path this call reads is in no folder that allows reading, and not open to every \
+             account on this machine"
+                .into(),
+        )
     } else if provider && path.is_dir() {
-        Err(format!(
-            "{} is a folder outside the folders that allow reading: a provider would read below it with the owner's rights",
-            path.display()
-        ))
+        Err(
+            "a folder this call hands over is outside the folders that allow reading: a \
+             provider would read below it with the owner's rights"
+                .into(),
+        )
     } else if !readable(path) {
-        Err(format!(
-            "the account this center's commands run as may not read {}",
-            path.display()
-        ))
+        Err("the account this center's commands run as may not read a path this call reads".into())
     } else {
         Ok(())
     }
@@ -229,10 +236,14 @@ pub fn holds(path: &Path, write: bool) -> bool {
 /// since a write through it makes that place. `Err` is the first refusal of
 /// `judge`, or says why the node cannot tell where they all lead: more than
 /// `limit` entries, counting those of the folders the links lead to, or a
-/// link it cannot follow.
+/// link it cannot follow. The limit counts the entries below all the paths
+/// together, so it bounds what one call costs. `stop` ends the walk once
+/// nobody waits for its answer any more (the call's deadline passed, or it
+/// was cancelled), so it does not run on after the call.
 pub fn links_below(
     targets: &[Target],
     limit: usize,
+    stop: &AtomicBool,
     judge: &mut dyn FnMut(&Link) -> Option<String>,
 ) -> Result<(), String> {
     let mut seen = 0usize;
@@ -242,24 +253,30 @@ pub fn links_below(
         // The folders to look into: the path itself, then each folder a
         // link leads to that lies in none looked into already.
         let mut roots = vec![t.path.clone()];
-        let mut walked: Vec<PathBuf> = Vec::new();
+        let mut walked: HashSet<PathBuf> = HashSet::new();
         while let Some(root) = roots.pop() {
-            if walked.iter().any(|w| nerve_policy::paths::within(&root, w)) {
+            if looked_into(&walked, &root) {
                 continue;
             }
-            walked.push(root.clone());
-            let mut stack = vec![root];
+            walked.insert(root.clone());
+            let mut stack = vec![root.clone()];
             while let Some(dir) = stack.pop() {
                 let Ok(rd) = std::fs::read_dir(&dir) else {
                     continue;
                 };
                 for e in rd.filter_map(Result::ok) {
+                    if stop.load(Ordering::Relaxed) {
+                        return Err(format!(
+                            "the call ended before the node had checked where the links below \
+                             {given} lead"
+                        ));
+                    }
                     seen += 1;
                     if seen > limit {
                         return Err(format!(
-                            "{given} holds more than {limit} entries, counting those of the \
-                             folders its links lead to; the node cannot check where the links \
-                             in it lead"
+                            "the paths this call hands over hold more than {limit} entries in \
+                             all, counting those of the folders their links lead to; the node \
+                             cannot check where the links in them lead"
                         ));
                     }
                     let at = e.path();
@@ -294,6 +311,7 @@ pub fn links_below(
                     let link = Link {
                         handed,
                         at,
+                        found_in: root.clone(),
                         to: Target {
                             holds: holds(&to, write),
                             path: to,
@@ -311,6 +329,20 @@ pub fn links_below(
         }
     }
     Ok(())
+}
+
+/// Whether `root` lies in a folder [`links_below`] looked into already. It
+/// asks for the folder and each one above it, so a walk of many links to
+/// many folders costs each of them no more than its depth, not as much as
+/// the folders looked into so far. Resolved paths keep the case they have
+/// on disk, so where [`nerve_policy::paths::within`] ignores case (Windows)
+/// a folder is still found by its own name.
+fn looked_into(walked: &HashSet<PathBuf>, root: &Path) -> bool {
+    root.ancestors().any(|a| {
+        #[cfg(test)]
+        tests::LOOKED_UP.with(|c| c.set(c.get() + 1));
+        walked.contains(a)
+    })
 }
 
 /// Whether `path` lies in the node's own entry of `/proc`: `/proc/self`,
@@ -921,6 +953,15 @@ impl Dir {
 mod tests {
     use super::*;
 
+    thread_local! {
+        /// How many folders [`looked_into`] asked for on this thread.
+        pub(super) static LOOKED_UP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// A walk nobody stops.
+    #[cfg(unix)]
+    static GOES_ON: AtomicBool = AtomicBool::new(false);
+
     fn args(v: Value) -> Map<String, Value> {
         v.as_object().unwrap().clone()
     }
@@ -1017,16 +1058,25 @@ mod tests {
         assert_eq!(may_read_outside(&file, true), Ok(()));
         assert_eq!(may_read_outside(&d.path().join("missing"), true), Ok(()));
         assert_eq!(may_read_outside(d.path(), false), Ok(()));
+        // The refusals name no path: one resolved as the command account
+        // may be where another of its processes works.
+        let named = |why: &str| why.contains(&*d.path().to_string_lossy());
         let why = may_read_outside(d.path(), true).unwrap_err();
-        assert!(why.contains("a provider would read below it"), "{why}");
+        assert!(
+            why.contains("a provider would read below it") && !named(&why),
+            "{why}"
+        );
         mode(&file, 0o600);
         let why = may_read_outside(&file, false).unwrap_err();
-        assert!(why.contains("not open to every account"), "{why}");
+        assert!(
+            why.contains("not open to every account") && !named(&why),
+            "{why}"
+        );
         // Others may read it, its owner may not; root opens anything.
         if unsafe { libc::geteuid() } != 0 {
             mode(&file, 0o004);
             let why = may_read_outside(&file, false).unwrap_err();
-            assert!(why.contains("may not read"), "{why}");
+            assert!(why.contains("may not read") && !named(&why), "{why}");
         }
         mode(&file, 0o644);
         #[cfg(target_os = "linux")]
@@ -1106,8 +1156,10 @@ mod tests {
         };
         let found = |access| {
             let mut v: Vec<(PathBuf, PathBuf, bool)> = Vec::new();
-            links_below(&[target(access)], LINKS_LIMIT, &mut |l| {
+            links_below(&[target(access)], LINKS_LIMIT, &GOES_ON, &mut |l| {
                 assert_eq!((l.handed, l.to.access), (0, access));
+                let root = if l.at.starts_with(&proj) { &proj } else { &out };
+                assert_eq!(&l.found_in, root);
                 v.push((l.at.clone(), l.to.path.clone(), l.to.holds));
                 None
             })
@@ -1134,14 +1186,53 @@ mod tests {
             holds: false,
         };
         let mut none = |_: &Link| -> Option<String> { panic!("a file was walked") };
-        assert_eq!(links_below(&[file], LINKS_LIMIT, &mut none), Ok(()));
+        assert_eq!(
+            links_below(&[file], LINKS_LIMIT, &GOES_ON, &mut none),
+            Ok(())
+        );
         let mut pass = |_: &Link| None;
         // Cut short: refused, never judged by the part looked at.
-        let e = links_below(&[target(PathAccess::Read)], 3, &mut pass).unwrap_err();
-        assert!(e.contains("holds more than 3 entries"), "{e}");
+        let e = links_below(&[target(PathAccess::Read)], 3, &GOES_ON, &mut pass).unwrap_err();
+        assert!(e.contains("hold more than 3 entries in all"), "{e}");
+        // The limit holds for the call: two paths share it, and the refusal
+        // names neither as the one too big.
+        let (a, b) = (root.join("a"), root.join("b"));
+        for (dir, n) in [(&a, 0), (&a, 1), (&a, 2), (&b, 0), (&b, 1), (&b, 2)] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(format!("f{n}")), "f").unwrap();
+        }
+        let both = [&a, &b].map(|p| Target {
+            path: p.clone(),
+            access: PathAccess::Read,
+            holds: true,
+        });
+        assert_eq!(links_below(&both[..1], 5, &GOES_ON, &mut pass), Ok(()));
+        let e = links_below(&both, 5, &GOES_ON, &mut pass).unwrap_err();
+        assert!(
+            e.starts_with("the paths this call hands over hold more than 5 entries in all"),
+            "{e}"
+        );
+        // Nobody waits any more: the walk ends at the next entry.
+        let e = links_below(
+            &[target(PathAccess::Read)],
+            LINKS_LIMIT,
+            &AtomicBool::new(true),
+            &mut |_| panic!("a link was judged after the call ended"),
+        )
+        .unwrap_err();
+        assert!(
+            e.starts_with("the call ended before the node had checked"),
+            "{e}"
+        );
         // A link it cannot follow: a loop.
         symlink(proj.join("loop"), proj.join("loop")).unwrap();
-        let e = links_below(&[target(PathAccess::Read)], LINKS_LIMIT, &mut pass).unwrap_err();
+        let e = links_below(
+            &[target(PathAccess::Read)],
+            LINKS_LIMIT,
+            &GOES_ON,
+            &mut pass,
+        )
+        .unwrap_err();
         assert!(e.contains("holds a link") && e.contains("loop"), "{e}");
     }
 
@@ -1177,20 +1268,58 @@ mod tests {
             (l.to.path == far).then(|| "refused".to_string())
         };
         assert_eq!(
-            links_below(&proj, 5, &mut refuse_far),
+            links_below(&proj, 5, &GOES_ON, &mut refuse_far),
             Err("refused".into())
         );
         assert_eq!(judged, [root.join("proj/far")]);
         let mut pass = |_: &Link| None;
-        let e = links_below(&proj, 5, &mut pass).unwrap_err();
+        let e = links_below(&proj, 5, &GOES_ON, &mut pass).unwrap_err();
         assert!(
             e.contains(
-                "holds more than 5 entries, counting those of the folders its links lead to"
+                "hold more than 5 entries in all, counting those of the folders their links lead to"
             ),
             "{e}"
         );
-        let e = links_below(&proj, LINKS_LIMIT, &mut pass).unwrap_err();
+        let e = links_below(&proj, LINKS_LIMIT, &GOES_ON, &mut pass).unwrap_err();
         assert!(e.contains("far/loop) the node cannot follow"), "{e}");
+    }
+
+    /// Many links to many folders: each folder a link leads to is looked
+    /// up by its own path and those above it, not against every folder
+    /// looked into before it, so the walk grows with the links, not with
+    /// their square.
+    #[cfg(unix)]
+    #[test]
+    fn many_links_to_many_folders_cost_no_more_than_their_number() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().canonicalize().unwrap();
+        let (proj, far) = (root.join("proj"), root.join("far"));
+        std::fs::create_dir(&proj).unwrap();
+        const N: usize = 2000;
+        for n in 0..N {
+            let to = far.join(format!("d{n}"));
+            std::fs::create_dir_all(&to).unwrap();
+            symlink(&to, proj.join(format!("l{n}"))).unwrap();
+        }
+        let proj = [Target {
+            path: proj,
+            access: PathAccess::Read,
+            holds: true,
+        }];
+        let before = LOOKED_UP.with(|c| c.get());
+        let mut judged = 0;
+        let r = links_below(&proj, LINKS_LIMIT, &GOES_ON, &mut |_| {
+            judged += 1;
+            None
+        });
+        assert_eq!((r, judged), (Ok(()), N));
+        let looked = LOOKED_UP.with(|c| c.get()) - before;
+        let depth = far.components().count() + 2;
+        assert!(
+            looked <= (N + 1) * depth,
+            "{looked} folders asked for {N} links"
+        );
     }
 
     #[test]

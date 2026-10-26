@@ -34,6 +34,11 @@ otherwise; else the target is empty and the reason names the path:
 1791834531650  lab  notes.open  notes.open  forbidden: notes.open is off
 ```
 
+A call whose folders the node was still checking for links when it ended
+(its deadline passed, or the center cancelled it) is a refusal with the
+code `cancelled`: it never reached the program
+([providers](providers.md#paths-it-takes)).
+
 A command killed for its memory limit gets a second line, `killed`, with the
 reason ([limits](limits.md)):
 

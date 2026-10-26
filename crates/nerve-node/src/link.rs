@@ -2,7 +2,7 @@
 //! center's requests (spec §4, §5, §7).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -2019,7 +2019,20 @@ impl Link {
             let cwd = cwd.map(std::path::Path::to_path_buf);
             let account = account.cloned();
             let now_ms = call.now_ms;
-            tokio::task::spawn_blocking(move || {
+            // A call whose deadline passes, or that is cancelled, while its
+            // links are walked is dropped at the await below: the walk
+            // stops then, and the call is in the audit log all the same.
+            let stop = Arc::new(AtomicBool::new(false));
+            let ended = Ended::new(stop.clone(), || {
+                self.audit(
+                    inv,
+                    &target,
+                    "forbidden",
+                    Some("cancelled"),
+                    Some(ENDED_IN_WALK),
+                )
+            });
+            let walk = tokio::task::spawn_blocking(move || {
                 let call = Call {
                     cap: &cap,
                     action: &action,
@@ -2033,14 +2046,20 @@ impl Link {
                 Ok::<_, RpcError>(judged.with(|env| {
                     let check = nerve_policy::LinkCheck::new(&policy, env, &call);
                     let mut judge = |l: &nerve_policy::Link| check.refuse(l);
-                    match crate::fs::links_below(&targets, crate::fs::LINKS_LIMIT, &mut judge) {
+                    match crate::fs::links_below(
+                        &targets,
+                        crate::fs::LINKS_LIMIT,
+                        &stop,
+                        &mut judge,
+                    ) {
                         Ok(()) => Decision::Allow,
                         Err(why) => Decision::Forbidden(why),
                     }
                 }))
             })
-            .await
-            .map_err(|e| RpcError::internal(e.to_string()))??
+            .await;
+            ended.waited();
+            walk.map_err(|e| RpcError::internal(e.to_string()))??
         } else {
             decision
         };
@@ -2483,6 +2502,43 @@ impl Link {
     }
 }
 
+/// The audit reason of a call that ended (its deadline passed, or it was
+/// cancelled) while the node walked the links below its paths. It never
+/// reached the program.
+const ENDED_IN_WALK: &str = "the call ended before the node had checked where the links below its paths lead; it did not run";
+
+/// Held by [`Link::gate`] while it waits for the walk of a call's links.
+/// Dropped before [`Ended::waited`], the call was dropped while it waited:
+/// it stops the walk and writes the call to the audit log, which the gate
+/// no longer does.
+struct Ended<F: FnOnce()> {
+    stop: Arc<AtomicBool>,
+    audit: Option<F>,
+}
+
+impl<F: FnOnce()> Ended<F> {
+    fn new(stop: Arc<AtomicBool>, audit: F) -> Ended<F> {
+        Ended {
+            stop,
+            audit: Some(audit),
+        }
+    }
+
+    /// The walk answered; the gate writes the outcome itself.
+    fn waited(mut self) {
+        self.audit = None;
+    }
+}
+
+impl<F: FnOnce()> Drop for Ended<F> {
+    fn drop(&mut self) {
+        if let Some(audit) = self.audit.take() {
+            self.stop.store(true, Ordering::Relaxed);
+            audit();
+        }
+    }
+}
+
 /// What the policy needs to know of the node for one call
 /// (nerve_policy::Env), owned, so the links below a handed folder can be
 /// judged off the link's threads with the same view.
@@ -2759,6 +2815,55 @@ mod tests {
             at - started < Duration::from_millis(300),
             "{:?}",
             at - started
+        );
+    }
+
+    /// A call dropped while the gate waits for the walk of its links (its
+    /// deadline passed, or it was cancelled) stops the walk and is written
+    /// to the audit log; one whose walk answered is left to the gate.
+    #[tokio::test]
+    async fn a_call_that_ends_while_its_links_are_walked_is_audited() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let audited = AtomicUsize::new(0);
+        let gate = |answer: bool| {
+            let stop = Arc::new(AtomicBool::new(false));
+            let ended = super::Ended::new(stop.clone(), || {
+                audited.fetch_add(1, Ordering::Relaxed);
+            });
+            let walked = stop.clone();
+            let (done, finished) = std::sync::mpsc::channel();
+            let walk = tokio::task::spawn_blocking(move || {
+                let started = std::time::Instant::now();
+                while !answer
+                    && !walked.load(Ordering::Relaxed)
+                    && started.elapsed() < Duration::from_secs(5)
+                {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let _ = done.send(());
+            });
+            let call = async move {
+                let r = walk.await;
+                ended.waited();
+                r.unwrap()
+            };
+            (call, stop, finished)
+        };
+        let deadline = Duration::from_millis(50);
+        let (call, stop, _) = gate(true);
+        assert_eq!(tokio::time::timeout(deadline, call).await, Ok(()));
+        assert!(!stop.load(Ordering::Relaxed));
+        assert_eq!(audited.load(Ordering::Relaxed), 0);
+        let (call, stop, finished) = gate(false);
+        let started = std::time::Instant::now();
+        assert!(tokio::time::timeout(deadline, call).await.is_err());
+        assert!(stop.load(Ordering::Relaxed));
+        assert_eq!(audited.load(Ordering::Relaxed), 1);
+        finished.recv().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "the walk ran on"
         );
     }
 

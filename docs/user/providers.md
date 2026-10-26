@@ -122,14 +122,17 @@ account: each link below the folder, and below a folder a link leads to, is
 judged where it leads, as if the call named that place in the folder's
 stead, its other paths unchanged, and one that leads where the call may not
 go (outside the folders, to a protected path, to a place a deny rule names)
-refuses the call. A link that stays inside the folder it lies in is judged
-as the other names there, so in `allowlist` mode a rule that covers the
+refuses the call. A link that stays inside the folder handed over, or
+inside the folder a link that passed leads to where it lies, is judged as
+the other names there, so in `allowlist` mode a rule that covers that
 folder covers it too. The node looks into a folder a link leads to only
 when that link passed, and the refusal names the link, not where it leads.
 A link that leads nowhere counts only for a write, at the place it names. A
-folder with more than 200 000 entries below it, counting those of the
-folders its links lead to, is refused, since the node cannot check them
-all. An `fs:` rule covers `fs` calls
+call whose folders hold more than 200 000 entries in all, counting those of
+the folders their links lead to, is refused, since the node cannot check
+them all. A call that ends (its deadline passes, or it is cancelled) while
+the node looks for the links stops that search and never reaches the
+program; the [audit log](audit.md) has it as refused, `cancelled`. An `fs:` rule covers `fs` calls
 only: to keep every capability out of a place, deny it for each one that
 takes paths (`notes:~/private/*`), or make it a [protected
 path](protected-paths.md).

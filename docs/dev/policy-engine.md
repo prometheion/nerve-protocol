@@ -197,8 +197,9 @@ below: the agent is shown no closed folder, no extra protected path and no
 deny rule. A program follows links, so once `decide` allows such a call the
 node walks the path (`nerve_node::fs::links_below`, as the command account,
 bounded, off the link's threads) and `LinkCheck` judges each link when it is
-found: a link that leads within the path it lies below is covered by the
-checks below that path; any other decides the call again with the place it
+found: a link that leads within the path it lies below, or within the
+folder it was found in (`Link::found_in`, a folder a link that passed leads
+to), is covered by the checks below that path or folder; any other decides the call again with the place it
 leads to in the stead of that path (the call's other paths unchanged, the
 rules compiled once for all links). A refusal there refuses the call and
 names the link, not where it leads, and a folder a refused link leads to is

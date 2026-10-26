@@ -662,6 +662,10 @@ pub struct Link {
     pub handed: usize,
     /// Where the link itself lies.
     pub at: PathBuf,
+    /// The folder it was found in: the handed path, or a folder another
+    /// link below that path leads to, which [`LinkCheck::refuse`] passed
+    /// as a path that holds others.
+    pub found_in: PathBuf,
     /// Where it leads, resolved, with the access of the path it lies below.
     pub to: Target,
 }
@@ -689,17 +693,19 @@ impl<'a> LinkCheck<'a> {
     }
 
     /// Why the call is refused for `link`, or `None`. A link that leads to
-    /// a place within the path it lies below needs no answer of its own:
-    /// the checks below that path (deny rules, protected and own paths,
-    /// closed folders) cover that place as they cover the names there, and
-    /// an allow rule that covers the path covers it too. Any other place is
+    /// a place within the path it lies below, or within the folder it was
+    /// found in, needs no answer of its own: that path or folder passed the
+    /// call with what lies below it, so the checks below it (deny rules,
+    /// protected and own paths, closed folders) cover that place as they
+    /// cover the names there, and an allow rule that covers the path or
+    /// folder covers it too. Any other place is
     /// judged in the call as it is, with that place in the stead of the
     /// handed path. The refusal names the link, which lies where the call
     /// already reaches, not where it leads: the agent is never shown a
     /// protected path or a folder it may not reach that way.
     pub fn refuse(&self, link: &Link) -> Option<String> {
         let handed = &self.call.targets[link.handed];
-        if within(&link.to.path, &handed.path) {
+        if within(&link.to.path, &handed.path) || within(&link.to.path, &link.found_in) {
             return None;
         }
         let mut targets = self.call.targets.to_vec();
@@ -1849,6 +1855,7 @@ mod tests {
         let link = |to: &str| Link {
             handed: 0,
             at: "/h/proj/link".into(),
+            found_in: "/h/proj".into(),
             to: t(to, false).remove(0),
         };
         let proj = t("/h/proj", false);
@@ -1903,9 +1910,10 @@ mod tests {
             t[0].holds = false;
             t.remove(0)
         };
-        let link = |handed: usize, at: &str, to: Target| Link {
+        let link = |handed: usize, found_in: &str, at: &str, to: Target| Link {
             handed,
             at: at.into(),
+            found_in: found_in.into(),
             to,
         };
         // Folder mode: a write call reads one folder and writes another.
@@ -1925,14 +1933,20 @@ mod tests {
         assert_eq!(decide(&p, &env, &call), Decision::Allow);
         let inner = link(
             0,
+            "/w/src",
             "/w/src/node_modules/.bin/tsc",
             file("/w/src/node_modules/typescript/bin/tsc", false),
         );
         assert_eq!(refuse_links(&p, &env, &call, &[inner]), None);
         // Out of the folder it lies in, to a place the call may read.
-        let across = link(0, "/w/src/shared", file("/w/out/shared.txt", false));
+        let across = link(
+            0,
+            "/w/src",
+            "/w/src/shared",
+            file("/w/out/shared.txt", false),
+        );
         assert_eq!(refuse_links(&p, &env, &call, &[across]), None);
-        let out = link(0, "/w/src/up", file("/etc/passwd", false));
+        let out = link(0, "/w/src", "/w/src/up", file("/etc/passwd", false));
         assert_eq!(
             refuse_links(&p, &env, &call, &[out]).as_deref(),
             Some("/w/src holds a link (/w/src/up) that leads where this call may not reach")
@@ -1945,13 +1959,37 @@ mod tests {
         let proj = t("/w/proj", false);
         let call = marked("search", Effect::Read, &proj);
         assert_eq!(decide(&p, &env, &call), Decision::Allow);
-        let latest = link(0, "/w/proj/latest", t("/w/proj/v2", false).remove(0));
+        let latest = link(
+            0,
+            "/w/proj",
+            "/w/proj/latest",
+            t("/w/proj/v2", false).remove(0),
+        );
         assert_eq!(refuse_links(&p, &env, &call, &[latest]), None);
-        let other = link(0, "/w/proj/other", t("/w/other", false).remove(0));
+        let other = link(
+            0,
+            "/w/proj",
+            "/w/proj/other",
+            t("/w/other", false).remove(0),
+        );
         assert_eq!(
             refuse_links(&p, &env, &call, &[other]).as_deref(),
             Some("/w/proj holds a link (/w/proj/other) that leads where this call may not reach")
         );
+        // A folder a link leads to passed with what lies below it, as the
+        // handed folder did: a link found in it that stays within it asks
+        // nothing new either.
+        p.allow = rules(&["notes.search:/w/proj", "notes.search:/w/lib"]);
+        let lib = link(0, "/w/proj", "/w/proj/lib", t("/w/lib", false).remove(0));
+        let v2 = link(
+            0,
+            "/w/lib",
+            "/w/lib/latest",
+            t("/w/lib/v2", false).remove(0),
+        );
+        assert_eq!(refuse_links(&p, &env, &call, &[lib, v2]), None);
+        let out = link(0, "/w/lib", "/w/lib/out", t("/w/other", false).remove(0));
+        assert!(refuse_links(&p, &env, &call, &[out]).is_some());
     }
 
     /// Every link decides the call again, so the rules are compiled once
@@ -1968,6 +2006,7 @@ mod tests {
             .map(|n| Link {
                 handed: 0,
                 at: format!("/w/proj/l{n}").into(),
+                found_in: "/w/proj".into(),
                 to: t(&format!("/w/lib{n}"), false).remove(0),
             })
             .collect();
