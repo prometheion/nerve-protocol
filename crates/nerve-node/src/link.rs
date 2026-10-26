@@ -1863,6 +1863,11 @@ impl Link {
                 let by_folders = entry.policy.mode_at(crate::now_ms()) == Mode::Folder;
                 let by_account = by_folders && self.reads_by_account(&entry, known.as_ref());
                 let unconfined = self.shared.unconfined_as(&cfg, || known.clone());
+                // Its refusal names the path as given, as a program's does.
+                let named = match inv.args.get("path") {
+                    Some(Value::String(given)) => vec![(call.target_text(), given.clone())],
+                    _ => Vec::new(),
+                };
                 self.gate(
                     &entry,
                     &inv,
@@ -1874,7 +1879,8 @@ impl Link {
                     known.as_ref(),
                     unconfined,
                 )
-                .await?;
+                .await
+                .map_err(|e| as_given(e, &named))?;
                 account.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
                 let protected = self.protected(&entry);
                 let deny = RuleSet::new(&entry.policy.deny, &self.home());
@@ -2324,6 +2330,15 @@ impl Link {
         let by_folders = entry.policy.mode_at(crate::now_ms()) == Mode::Folder;
         let separate = self.shared.separate(&entry.policy) && !sudo_call;
         let unconfined = self.shared.unconfined_as(cfg, || known.clone());
+        // Its refusal names the `cwd` given as given, as a program's paths
+        // are; the default one the center did not name.
+        let named: Vec<(String, String)> = inv
+            .args
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(|given| (nerve_policy::paths::to_wire(&rc.cwd), given.to_string()))
+            .into_iter()
+            .collect();
         self.gate(
             entry,
             inv,
@@ -2335,7 +2350,8 @@ impl Link {
             looks_as.as_ref(),
             unconfined,
         )
-        .await?;
+        .await
+        .map_err(|e| as_given(e, &named))?;
         let account = account.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
         // The policy let a sudo command through only with the switch on and
         // the sudo allow list naming it. It runs the node's sudo, with the
@@ -2754,8 +2770,9 @@ fn off_target(inv: &Invoke) -> String {
     }
 }
 
-/// `e`, the refusal of a program's call, with each of its paths named as
-/// the center gave it, not as the node resolved it: `named` holds each as
+/// `e`, the refusal of a call (a program's, an `fs` call, `exec.run` for
+/// its `cwd`), with each of its paths named as the center gave it, not as
+/// the node resolved it: `named` holds each as
 /// resolved (in its wire form) and as given, and a place below a resolved
 /// path is named below the given one. Resolved as the command account,
 /// which every pairing's commands share, a path given as a link of another

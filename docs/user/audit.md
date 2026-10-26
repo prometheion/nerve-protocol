@@ -23,9 +23,11 @@ action, the target and the decision. A refusal adds its reason.
 The reason says what is missing. Use it to write the rule you want
 ([rules](rules.md)). The target of a call that names paths is its path (an
 `fs` call's, or the paths a program's capability takes, joined by `, `; a
-path that does not resolve is refused as given, with `bad_path`); a call to
-a capability you switched `off` is a refusal too, with the path or command
-line an `fs` or `exec.run` call names as its target. An `fs` path the node did
+path that does not resolve is refused as given, with `bad_path`). The
+refusal the center gets names each path as it gave it; only the audit names
+where it led, which can be another place when the path goes through a link.
+A call to a capability you switched `off` is a refusal too, with the path or
+command line an `fs` or `exec.run` call names as its target. An `fs` path the node did
 not resolve is the target only where it is written as a resolved one
 (absolute, no `.` or `..` part), since a rule made of it would match nothing
 otherwise; else the target is empty and the reason names the path:

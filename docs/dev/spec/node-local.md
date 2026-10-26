@@ -1613,7 +1613,8 @@ with `bad_path`, since the program would act on the place it leads to. The
 refusal the center gets names each marked path as given, and a place below it
 below the given one, never as resolved (resolved as the command account, a
 link of another of its processes under `/proc` leads where that process
-works); the audit entry names the resolved path. In
+works); the audit entry names the resolved path. So does the refusal of an
+`fs` call for its path, and of `exec.run` for a `cwd` it gives. In
 folder mode, where commands cannot be confined (§2), an `execute` action
 with paths is refused as `exec.run` is, and not offered. What a program writes below
 a folder is not checked for the places whose writes run code later (`.git`,

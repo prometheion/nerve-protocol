@@ -495,6 +495,74 @@ async fn allow_rules_do_not_count_in_folder_mode_and_deny_rules_do() {
     node.stop().await;
 }
 
+/// A refusal of an `fs` call, and of `exec.run` for its `cwd`, names the
+/// path as the center gave it, not where it led: resolved as the command
+/// account, a link of another of its processes (`/proc/<n>/cwd`) would tell
+/// the center where that one works. The audit names the resolved path.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_names_the_path_as_the_center_gave_it() {
+    let dir = tempdir();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("secret.txt"), "x").unwrap();
+    let ssh = root.join("home/.ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    let (via, keys) = (root.join("via"), root.join("keys"));
+    std::os::unix::fs::symlink(&work, &via).unwrap();
+    std::os::unix::fs::symlink(&ssh, &keys).unwrap();
+    let wire = |p: &Path| nerve_policy::paths::to_wire(p);
+    let node = paired_node_with(&root, &center, |p| {
+        p.allow.push("fs:**".into());
+        p.allow.push("exec.run:true".into());
+        // A rule that names no folder: the refusal quotes it.
+        p.deny.push("fs:**/secret.txt".into());
+    })
+    .await;
+    let mut conn = linked(&mut center).await;
+    let given = wire(&via.join("secret.txt"));
+    let e = conn
+        .call(
+            "invoke",
+            json!({"cap": "fs", "action": "read", "args": {"path": given}}),
+            WAIT,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(nerve_conformance::wire::code_of(&e), "forbidden");
+    assert!(
+        e.message.starts_with(&format!("{given} is denied")) && !e.message.contains(&wire(&work)),
+        "{}",
+        e.message
+    );
+    let e = conn
+        .call(
+            "invoke",
+            json!({"cap": "exec", "action": "run",
+                   "args": {"command": "true", "cwd": wire(&keys)}}),
+            WAIT,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(nerve_conformance::wire::code_of(&e), "forbidden");
+    // The entry it names in parentheses is of the node's own list.
+    assert!(
+        e.message
+            .starts_with(&format!("{} is protected (", wire(&keys))),
+        "{}",
+        e.message
+    );
+    let audit = std::fs::read_to_string(node.paths().audit_log()).unwrap();
+    for resolved in [wire(&work.join("secret.txt")), wire(&ssh)] {
+        assert!(audit.contains(&resolved), "{resolved}: {audit}");
+    }
+    node.stop().await;
+}
+
 /// Starts `sleep 2` under `policy`, sends `exec.signal kill` for it and
 /// returns the signal's answer, the run's answer and the audit log.
 #[cfg(unix)]
