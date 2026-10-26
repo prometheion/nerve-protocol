@@ -2,7 +2,7 @@
 //! center's requests (spec §4, §5, §7).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,11 +19,11 @@ use nerve_policy::protected::Protected;
 use nerve_policy::rules::RuleSet;
 use nerve_policy::{Call, CenterEntry, Decision, Env, NodeConfig, SetError, Target};
 use nerve_proto::descriptor::{Detail, Effect, Exposure};
-use nerve_proto::frame::{Frame, FrameError};
+use nerve_proto::frame::{self, Frame, FrameError};
 use nerve_proto::link::CenterUrl;
 use nerve_proto::msg::{
     self, Ack, Bye, ByeReason, Cancel, Challenge, Describe, Get, Hello, Invoke, Resume, Resumed,
-    SessionEnd, Topic, Topics, Welcome, method,
+    SessionEnd, StreamClose, StreamOpen, Topic, Topics, Welcome, method,
 };
 use nerve_proto::resume;
 use nerve_proto::rpc::{Id, Message, params};
@@ -44,6 +44,9 @@ const HANDSHAKE: Duration = Duration::from_secs(15);
 /// Ping after this much quiet; give up after `DEAD` (spec §4.4).
 const PING: Duration = Duration::from_secs(20);
 const DEAD: Duration = Duration::from_secs(45);
+/// The stream frames a connection's writer holds; each stream waits for
+/// room here, never in the link's own queue.
+const STREAM_QUEUE: usize = 4;
 
 /// Dials in a row refused for the pin before the node says to pair again:
 /// more than the few seconds a center may take to serve its new key at the
@@ -669,11 +672,13 @@ async fn session(
 
     // One writer owns the sink; everyone else queues (spec §5.5).
     let (tx, mut rx) = mpsc::channel::<WsMessage>(limits::SEND_QUEUE);
+    // Stream frames wait in their own queue, sent while `rx` is empty.
+    let (ftx, mut frx) = mpsc::channel::<crate::daemon::StreamOut>(STREAM_QUEUE);
     // The center carries on the parked link, or starts a new one; without
     // `welcome.resume` it cannot resume links at all (spec §4.9).
     let carried = match (resumed, parked) {
         (Some(Resumed { resumed: true, got }), Some(p)) => {
-            match p.link().handle.attach(tx.clone(), got) {
+            match p.link().handle.attach(tx.clone(), ftx.clone(), got) {
                 Ok(again) => Ok((p.resume(), Some(again))),
                 Err(e) => Err(format!("the center resumed the link wrongly: {e}")),
             }
@@ -694,7 +699,7 @@ async fn session(
                 Some(s) => s.scrub(t),
                 None => t,
             });
-            let handle = Arc::new(LinkHandle::new(tx.clone(), r.is_some(), scrub));
+            let handle = Arc::new(LinkHandle::new(tx.clone(), ftx.clone(), r.is_some(), scrub));
             let link = Arc::new(Link {
                 shared: shared.clone(),
                 cs: cs.clone(),
@@ -704,6 +709,9 @@ async fn session(
                 handle,
                 calls: Mutex::default(),
                 commands: Mutex::default(),
+                taps: Mutex::default(),
+                streams: Mutex::default(),
+                next_sid: AtomicU32::new(1),
                 last_status: Mutex::new("online"),
                 seen_pin: Mutex::new(None),
             });
@@ -748,11 +756,25 @@ async fn session(
                 return;
             }
         }
+        let mut streams = true;
         loop {
             tokio::select! {
+                // The link's own frames go before stream frames.
+                biased;
                 m = rx.recv() => match m {
                     Some(m) => if sink.send(scrub(&scrubber, m)).await.is_err() { return; },
                     None => break,
+                },
+                f = frx.recv(), if streams => match f {
+                    Some(crate::daemon::StreamOut::Frame(m)) => {
+                        if sink.send(m).await.is_err() {
+                            return;
+                        }
+                    }
+                    Some(crate::daemon::StreamOut::Flushed(done)) => {
+                        let _ = done.send(());
+                    }
+                    None => streams = false,
                 },
                 _ = &mut done_rx => {
                     // Flush what is queued (the bye), then close.
@@ -768,7 +790,7 @@ async fn session(
         let _ = sink.close().await;
     });
 
-    drop(tx);
+    drop((tx, ftx));
     link.handle.set_rotate(rotate);
     *lock(&cs.link) = Some(link.handle.clone());
     // A rotation of the node's key that got no answer on an earlier link is
@@ -792,6 +814,9 @@ async fn session(
 
     // From here what the link sends is kept for a resume (or lost).
     link.handle.detach();
+    // Streams are not counted frames: they end with their connection, a
+    // resumed link carries none (spec §4.9).
+    link.end_streams();
     let _ = done_tx.send(());
     let _ = tokio::time::timeout(Duration::from_secs(2), writer).await;
     if matches!(outcome, Outcome::Lost) && link.handle.resumable() {
@@ -821,6 +846,14 @@ async fn session(
     }
 }
 
+/// The params of `exec`'s `output` stream: the call whose command it is,
+/// by its `invoke` id, as `exec.signal` names it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutputParams {
+    call: u64,
+}
+
 /// A call in flight: its task, and the harness session it came from.
 struct InFlight {
     abort: AbortHandle,
@@ -842,6 +875,12 @@ struct Link {
     calls: Mutex<HashMap<Id, InFlight>>,
     /// Running `exec.run` calls → what ends them.
     commands: Mutex<HashMap<Id, exec::Ender>>,
+    /// Running `exec.run` calls → their output, for `exec`'s `output`
+    /// stream; `None` for a sudo command, whose output is not streamed.
+    taps: Mutex<HashMap<Id, Option<Arc<crate::tap::Tap>>>>,
+    /// Open streams by `sid` → the task that sends them.
+    streams: Mutex<HashMap<u32, AbortHandle>>,
+    next_sid: AtomicU32,
     /// The `node` status the center last heard (online, busy or paused).
     last_status: Mutex<&'static str>,
     /// The pin of the certificate the center showed for the connection now.
@@ -1248,17 +1287,142 @@ impl Link {
             }
             method::GET => self.get(&p),
             method::SUB | method::UNSUB => self.sub(&p, m == method::SUB),
-            method::STREAM_OPEN => Err(RpcError::new(
-                ErrorCode::Unavailable,
-                "this node offers no streams",
-            )),
-            method::STREAM_CLOSE => Err(RpcError::new(ErrorCode::UnknownMember, "no such stream")),
+            method::STREAM_OPEN => {
+                self.stream_open(id, p).await;
+                return;
+            }
+            method::STREAM_CLOSE => self.stream_close(&p),
             other => Err(RpcError::new(
                 ErrorCode::MethodNotFound,
                 format!("unknown method {other}"),
             )),
         };
         self.reply(id, r).await;
+    }
+
+    /// `stream.open`: `exec`'s `output` of a running command of this link,
+    /// for the session the command's call came from only. The stream sends
+    /// the tail of what the command printed so far, then what it prints,
+    /// and ends with the command (`stream.close` from the node).
+    async fn stream_open(self: &Arc<Self>, id: Id, p: Map<String, Value>) {
+        let opened = self.open(&p);
+        let (sid, reader) = match opened {
+            Ok(o) => o,
+            Err(e) => return self.reply(id, Err(e)).await,
+        };
+        // The answer goes first, so the center knows the sid before its
+        // first frame comes.
+        let (go, start) = oneshot::channel::<()>();
+        let link = self.clone();
+        let task = tokio::spawn(async move {
+            if start.await.is_ok() {
+                link.pump(sid, reader).await;
+            }
+        });
+        lock(&self.streams).insert(sid, task.abort_handle());
+        self.reply(id, Ok(json!({ "sid": sid }))).await;
+        let _ = go.send(());
+    }
+
+    fn open(&self, p: &Map<String, Value>) -> Result<(u32, Arc<crate::tap::Reader>), RpcError> {
+        let o: StreamOpen = params(p)?;
+        o.check()?;
+        let view = self.view()?;
+        let cap = view.capability(&o.cap).ok_or_else(|| {
+            RpcError::new(
+                ErrorCode::UnknownCapability,
+                format!("no capability {}", o.cap),
+            )
+        })?;
+        if !cap.streams.contains_key(&o.stream) {
+            return Err(RpcError::new(
+                ErrorCode::UnknownMember,
+                format!("{} has no stream {}", o.cap, o.stream),
+            ));
+        }
+        if (o.cap.as_str(), o.stream.as_str()) != ("exec", "output") {
+            return Err(RpcError::new(
+                ErrorCode::Unavailable,
+                format!("the stream {}.{} is not served", o.cap, o.stream),
+            ));
+        }
+        let call: OutputParams = params(&o.params)?;
+        let call = Id::Num(call.call);
+        // Another session's call, or no running command, reads the same:
+        // the answer does not tell which calls run for other sessions.
+        let tap = {
+            let calls = lock(&self.calls);
+            calls
+                .get(&call)
+                .filter(|c| c.session == o.ctx.session)
+                .and_then(|_| lock(&self.taps).get(&call).cloned())
+        }
+        .ok_or_else(|| {
+            RpcError::invalid_args(format!("no running command {call} of this session"))
+        })?
+        .ok_or_else(|| {
+            RpcError::new(
+                ErrorCode::Unavailable,
+                format!("the output of command {call} is not streamed: it is a sudo command, whose output comes with its result"),
+            )
+        })?;
+        let streams = lock(&self.streams);
+        if streams.len() >= limits::STREAMS as usize {
+            return Err(RpcError::new(
+                ErrorCode::Busy,
+                format!("{} streams are open already", limits::STREAMS),
+            ));
+        }
+        let sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
+        drop(streams);
+        Ok((sid, tap.reader()))
+    }
+
+    /// Sends stream `sid` until its command ended and everything went, then
+    /// tells the center it ended. A link that went down ends it.
+    async fn pump(&self, sid: u32, reader: Arc<crate::tap::Reader>) {
+        let mut seq = 0u32;
+        loop {
+            let f = match reader.next(frame::MAX_PAYLOAD).await {
+                crate::tap::Chunk::Data(d) => frame::stream_frame(sid, seq, d),
+                crate::tap::Chunk::Gap(n) => Frame::gap(sid, seq, n),
+                crate::tap::Chunk::End => break,
+            };
+            if !self.handle.frame(&f).await {
+                lock(&self.streams).remove(&sid);
+                return;
+            }
+            seq = seq.wrapping_add(1);
+        }
+        // The close goes on the link's own queue, which the writer serves
+        // first: it waits until the stream's last frame went.
+        let flushed = self.handle.flushed().await;
+        if lock(&self.streams).remove(&sid).is_none() || !flushed {
+            return;
+        }
+        let close = Message::request(
+            u64::from(sid),
+            method::STREAM_CLOSE,
+            json!({"sid": sid, "reason": "ended"}),
+        );
+        self.handle.send(close.encode()).await;
+    }
+
+    /// `stream.close` from the center: the stream stops at once.
+    fn stream_close(&self, p: &Map<String, Value>) -> Result<Value, RpcError> {
+        let c: StreamClose = params(p)?;
+        let task = lock(&self.streams).remove(&c.sid).ok_or_else(|| {
+            RpcError::new(ErrorCode::UnknownMember, format!("no stream {}", c.sid))
+        })?;
+        task.abort();
+        Ok(json!({}))
+    }
+
+    /// Ends every stream: the connection they went on is gone.
+    fn end_streams(&self) {
+        for (_, task) in lock(&self.streams).drain() {
+            task.abort();
+        }
     }
 
     fn view(&self) -> Result<nerve_proto::descriptor::Descriptor, RpcError> {
@@ -1950,6 +2114,8 @@ impl Link {
             None
         };
         let guard = Running::start(self, id.clone(), cfg.limits.max_running as usize)?;
+        // A sudo command's output is not streamed (exec::run leaves it out).
+        let tap = guard.tap(sudo.is_none() && root.is_none());
         let own = self.shared.own(cfg);
         let confine = folder || separate && self.shared.exe.is_some();
         let landlock = (confine && self.shared.confinement.landlock_abi.is_some()).then(|| {
@@ -1985,6 +2151,7 @@ impl Link {
                 .as_ref()
                 .ok()
                 .map(|c| (c.clone(), granted)),
+            tap,
         };
         let r = exec::run(&rc, &opts, |e| guard.started(e)).await;
         drop(open);
@@ -2174,6 +2341,20 @@ impl<'a> Running<'a> {
         })
     }
 
+    /// The command's output, for its `output` stream while it runs, unless
+    /// it is not `streamed`. The stream is kept free of the sudo password
+    /// the node holds while it runs.
+    fn tap(&self, streamed: bool) -> Option<Arc<crate::tap::Tap>> {
+        let tap = streamed.then(|| {
+            let shared = Arc::downgrade(&self.link.shared);
+            let secret: crate::tap::Held =
+                Arc::new(move || shared.upgrade().and_then(|s| s.held_secret()));
+            Arc::new(crate::tap::Tap::new(Some(secret), exec::other_text()))
+        });
+        lock(&self.link.taps).insert(self.id.clone(), tap.clone());
+        tap
+    }
+
     fn started(&self, ender: &exec::Ender) {
         let pid = ender.pid();
         *lock(&self.pid) = Some(pid);
@@ -2188,6 +2369,10 @@ impl Drop for Running<'_> {
             lock(&self.link.shared.commands).remove(&pid);
         }
         lock(&self.link.commands).remove(&self.id);
+        // Its streams end once they sent what it printed.
+        if let Some(Some(tap)) = lock(&self.link.taps).remove(&self.id) {
+            tap.end();
+        }
         self.link.shared.running.fetch_sub(1, Ordering::SeqCst);
         self.link.check_status();
     }

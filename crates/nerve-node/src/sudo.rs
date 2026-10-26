@@ -41,11 +41,11 @@ pub const ROOT_SUDO: &str = "root is the owner of this node, and sudo checks no 
 /// What stands in for the password where it would have appeared.
 pub const REDACTED: &str = "[redacted]";
 
-/// `text` with every copy of `secret`, plain and JSON-escaped, replaced by
-/// [`REDACTED`]; `None` when there is none.
-pub fn scrub(text: &str, secret: &str) -> Option<String> {
+/// The copies of `secret` a text may carry: plain and JSON-escaped; none
+/// for an empty one.
+pub(crate) fn copies(secret: &str) -> Vec<String> {
     if secret.is_empty() {
-        return None;
+        return Vec::new();
     }
     let quoted = serde_json::to_string(secret).unwrap_or_default();
     let escaped = quoted
@@ -53,11 +53,17 @@ pub fn scrub(text: &str, secret: &str) -> Option<String> {
         .and_then(|s| s.strip_suffix('"'))
         .unwrap_or(secret)
         .to_string();
+    vec![secret.to_string(), escaped]
+}
+
+/// `text` with every copy of `secret`, plain and JSON-escaped, replaced by
+/// [`REDACTED`]; `None` when there is none.
+pub fn scrub(text: &str, secret: &str) -> Option<String> {
     let mut out: Option<String> = None;
-    for needle in [secret, escaped.as_str()] {
+    for needle in copies(secret) {
         let cur = out.as_deref().unwrap_or(text);
-        if cur.contains(needle) {
-            out = Some(cur.replace(needle, REDACTED));
+        if cur.contains(&needle) {
+            out = Some(cur.replace(&needle, REDACTED));
         }
     }
     out
@@ -94,6 +100,14 @@ impl Shared {
             .machine
             .sudo_path
             .unwrap_or_else(|| "sudo".into())
+    }
+
+    /// A copy of the sudo password the node holds, for what scrubs output
+    /// as it comes (crate::tap).
+    pub(crate) fn held_secret(&self) -> Option<Secret> {
+        lock(&self.sudo)
+            .as_ref()
+            .map(|s| Secret::new(s.expose().to_string()))
     }
 
     /// `text` without the sudo password.

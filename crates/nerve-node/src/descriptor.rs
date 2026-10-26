@@ -354,13 +354,14 @@ fn exec_cap(
             ),
         ),
     );
-    // Declared for later; the output comes in the result.
+    // A running command's output as it comes, for the session that started
+    // it (`stream.open` with params `{call}`); the result still carries it.
     c.streams.insert(
         "output".into(),
         StreamDecl {
             kind: StreamKind::Reliable,
             direction: Direction::Up,
-            summary: "Command output (not served).".into(),
+            summary: "A running command's output as it comes (params: call).".into(),
         },
     );
     c

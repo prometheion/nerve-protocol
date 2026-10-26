@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use nerve_proto::link::{CenterUrl, PairLink, PairRequest, PairResponse};
-use nerve_proto::msg::{self, Challenge, Describe, Invoke, method};
+use nerve_proto::msg::{self, Challenge, Describe, Invoke, StreamClose, StreamOpen, method};
 use nerve_proto::{
     Descriptor, ErrorCode, Message, PAIR_PATH, PROTOCOL_VERSION, RpcError, rpc::params,
 };
@@ -43,14 +43,18 @@ pub fn descriptor(node_id: &str, name: &str) -> Descriptor {
     .expect("the echo descriptor is well formed")
 }
 
+/// The longest `echo.wait` of the harness nodes, in milliseconds.
+pub const WAIT_MAX_MS: u64 = 600_000;
+
 /// The account the harness nodes say their commands run as.
 pub const ACCESS_ACCOUNT: &str = "conformance-run";
 /// The folder the harness nodes say the center may read and write.
 pub const ACCESS_FOLDER: &str = "/conformance/work";
 
-/// The descriptor the harness part's nodes offer: the echo node's, plus
-/// `mirror`, an `echo` twin with a write action, and actions of `node`,
-/// `settings` and `audit`, which a center must never offer a harness.
+/// The descriptor the harness part's nodes offer: the echo node's with
+/// `echo.wait`, which answers late, plus `mirror`, an `echo` twin with a
+/// write action, and actions of `node`, `settings` and `audit`, which a
+/// center must never offer a harness.
 pub fn harness_descriptor(node_id: &str, name: &str) -> Descriptor {
     let mut d = serde_json::to_value(descriptor(node_id, name)).expect("a descriptor is JSON");
     let caps = d["capabilities"].as_array_mut().expect("capabilities");
@@ -62,6 +66,20 @@ pub fn harness_descriptor(node_id: &str, name: &str) -> Descriptor {
     caps.push(json!({"id": "mirror", "exposure": "on",
         "summary": "Says back what it is sent, like echo.",
         "actions": {"say": say, "set": set}}));
+    // A call that takes as long as it is asked to, so that a center's call
+    // wait runs out and the call becomes a job (harness.md §4.4).
+    caps[1]["actions"]["wait"] = json!({"effect": "read",
+        "summary": "Answer after ms milliseconds.",
+        "params": {"type": "object",
+                   "properties": {"ms": {"type": "integer", "minimum": 0, "maximum": WAIT_MAX_MS}},
+                   "required": ["ms"], "additionalProperties": false},
+        "result": {"type": "object", "properties": {"waited": {"type": "integer"}}}});
+    // A result that is a string, the node's own lines, which a center puts
+    // into its framing by lines (harness.md §4.3).
+    let mut lines = say.clone();
+    lines["summary"] = json!("Return the text as a string.");
+    lines["result"] = json!({"type": "string"});
+    caps[1]["actions"]["lines"] = lines;
     // The three capabilities a center must never offer, each with an action
     // that would otherwise be listed.
     caps[0]["actions"] =
@@ -206,7 +224,7 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                     return String::new();
                 }
             }
-            Recv::Msg(_) => {}
+            Recv::Msg(_) | Recv::Frame(_) => {}
             Recv::Bye(r) => return r,
             Recv::Closed | Recv::Garbage(_) => return String::new(),
             Recv::Timeout => return "timeout".into(),
@@ -237,6 +255,28 @@ pub fn handle(m: &str, p: &Map<String, Value>, d: &Descriptor) -> Result<Value, 
                         _ => Err(RpcError::invalid_args("say takes {text}")),
                     }
                 }
+                // The harness part's node answers it later; here it is
+                // answered at once.
+                ("echo", "wait")
+                    if d.capability("echo")
+                        .is_some_and(|c| c.actions.contains_key("wait")) =>
+                {
+                    match inv.args.get("ms").and_then(Value::as_u64) {
+                        Some(ms) if inv.args.len() == 1 && ms <= WAIT_MAX_MS => {
+                            Ok(json!({"waited": ms}))
+                        }
+                        _ => Err(RpcError::invalid_args("wait takes {ms}")),
+                    }
+                }
+                ("echo", "lines")
+                    if d.capability("echo")
+                        .is_some_and(|c| c.actions.contains_key("lines")) =>
+                {
+                    match inv.args.get("text").and_then(Value::as_str) {
+                        Some(t) if inv.args.len() == 1 => Ok(json!(t)),
+                        _ => Err(RpcError::invalid_args("lines takes {text}")),
+                    }
+                }
                 ("echo", "fail") => Err(RpcError::new(
                     ErrorCode::Other("io".into()),
                     "the echo node fails this action on purpose",
@@ -250,6 +290,23 @@ pub fn handle(m: &str, p: &Map<String, Value>, d: &Descriptor) -> Result<Value, 
         }
         method::SUB | method::UNSUB => Ok(json!({})),
         method::GET => Ok(json!({})),
+        // The echo node offers no streams, but reads the request as
+        // strictly as a node must.
+        method::STREAM_OPEN => {
+            let o: StreamOpen = params(p)?;
+            o.check()?;
+            Err(match d.capability(&o.cap) {
+                None => RpcError::new(
+                    ErrorCode::UnknownCapability,
+                    format!("no capability {}", o.cap),
+                ),
+                Some(_) => RpcError::new(ErrorCode::UnknownMember, "no such stream"),
+            })
+        }
+        method::STREAM_CLOSE => {
+            let _: StreamClose = params(p)?;
+            Err(RpcError::new(ErrorCode::UnknownMember, "no such stream"))
+        }
         _ => Err(RpcError::new(
             ErrorCode::MethodNotFound,
             format!("unknown method {m}"),

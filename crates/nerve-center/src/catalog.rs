@@ -22,9 +22,14 @@ use nerve_proto::descriptor::{
 use nerve_proto::schema::{self, Role};
 use nerve_proto::{Descriptor, Effect};
 
+use crate::jobs::WAIT_MS_MAX;
 use crate::listing::one_line;
-use crate::tools::RESERVED_CAPS;
+use crate::streams::{READ_DEFAULT, READ_MAX, READ_MIN};
+use crate::tools::{CENTER_CAPS, RESERVED_CAPS};
 use crate::util;
+
+/// The provider of the units the center serves itself.
+pub const CENTER: &str = "center";
 
 /// The longest description a unit keeps, in bytes. A model needs a few
 /// sentences, and a node's long text is not copied into every unit.
@@ -385,6 +390,20 @@ impl Catalog {
             if RESERVED_CAPS.contains(&cap.id.as_str()) {
                 continue;
             }
+            // `job` and `stream` are the center's: a node's capability of that
+            // name would stand beside the center's own units under it.
+            if CENTER_CAPS.contains(&cap.id.as_str()) {
+                if left_out.insert(cap.id.as_str()) {
+                    c.broken.push(Broken {
+                        name: cap.id.clone(),
+                        reason: format!(
+                            "capability {}: the name is the center's own, for the units it serves itself",
+                            cap.id
+                        ),
+                    });
+                }
+                continue;
+            }
             // A capability whose name is not offered is one entry, however
             // many actions it has: its name is never copied into each.
             let unnamed = bad_name("capability", &cap.id).or_else(|| {
@@ -442,12 +461,26 @@ impl Catalog {
                     c.broken.push(Broken { name, reason });
                     continue;
                 }
+                // The node's `exec.signal` names its call by the `invoke` id,
+                // which only the center knows: the agent names the job, and
+                // the center maps it (docs/dev/spec/harness.md §4.4).
+                let (params, own) = if is_signal(&cap.id, action) {
+                    match signal_by_job(&params) {
+                        Ok(p) => (p, Some(described(SIGNAL_SUMMARY))),
+                        Err(reason) => {
+                            c.broken.push(Broken { name, reason });
+                            continue;
+                        }
+                    }
+                } else {
+                    (params, None)
+                };
                 c.units.push(Unit {
                     name,
                     cap: cap.id.clone(),
                     action: action.clone(),
                     effect: def.effect,
-                    description: match described(&def.summary) {
+                    description: match own.unwrap_or_else(|| described(&def.summary)) {
                         own if own.is_empty() => cap_description.clone(),
                         own => own,
                     },
@@ -466,6 +499,11 @@ impl Catalog {
                     .filter(|_| bound),
                 });
             }
+        }
+        // Beside a node's own units only: a node that offers nothing runs
+        // no call that could become a job.
+        if c.units.iter().any(|u| !u.off) {
+            c.units.extend(center_units());
         }
         c.units.sort_by(|a, b| a.name.cmp(&b.name));
         c.broken.sort_by(|a, b| a.name.cmp(&b.name));
@@ -495,6 +533,111 @@ impl Catalog {
     pub fn offers(&self, cap: &str, action: &str) -> bool {
         self.unit(&format!("{cap}.{action}")).is_some()
     }
+}
+
+/// What the agent is told `exec.signal` does.
+const SIGNAL_SUMMARY: &str = "Signals a command that runs as a job of this session, named by the job's id: term asks it to stop, int interrupts it, kill ends it.";
+
+/// The node's `exec.signal` params with its `call` (the `invoke` id) named
+/// as the `job` the center maps to it.
+fn signal_by_job(params: &Value) -> Result<Value, String> {
+    let mut p = params.clone();
+    let props = p
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .filter(|m| m.contains_key("call"))
+        .ok_or("params: exec.signal names no call")?;
+    props.remove("call");
+    props.insert(
+        "job".into(),
+        json!({"type": "string", "minLength": 1,
+               "description": "The id of a running job of this session, from execute (like j-...)."}),
+    );
+    // The job is required whatever the node said of its call: a signal
+    // without one would name nothing to the center.
+    let mut req: Vec<Value> = match p.get("required") {
+        Some(Value::Array(r)) => r.iter().filter(|r| *r != "call").cloned().collect(),
+        _ => Vec::new(),
+    };
+    req.insert(0, json!("job"));
+    p["required"] = Value::Array(req);
+    Ok(p)
+}
+
+/// Whether `u` is one of the units the center serves itself. Told by its
+/// capability, never by its provider: a node names its providers, but a
+/// capability of a center's name is left out of its catalog.
+pub fn is_center(u: &Unit) -> bool {
+    CENTER_CAPS.contains(&u.cap.as_str())
+}
+
+/// Whether `cap.action` is the node's `exec.signal`, which names its call by
+/// the `invoke` id: the agent names the job, and the center maps it. Told by
+/// its name, whatever provider the node wrote: the provider is the node's
+/// word, and a raw `call` would reach other sessions' commands.
+pub fn is_signal(cap: &str, action: &str) -> bool {
+    (cap, action) == ("exec", "signal")
+}
+
+/// The units the center serves itself on every node: `job.status` and
+/// `job.cancel` (docs/dev/spec/harness.md §4.4). They are never sent to the
+/// node and never go to the action checker.
+pub fn center_units() -> Vec<Unit> {
+    let job = json!({"type": "string", "minLength": 1,
+                     "description": "The job's id, from execute (like j-...)."});
+    let stream = json!({"type": "string", "minLength": 1,
+                        "description": "The stream's id, from execute's answer for a job (like s-...)."});
+    let unit = |name: &str, effect: Effect, summary: &str, params: Value| Unit {
+        name: name.into(),
+        cap: name.split_once('.').map_or(name, |(c, _)| c).into(),
+        action: name.split_once('.').map_or("", |(_, a)| a).into(),
+        effect,
+        description: summary.into(),
+        params,
+        result: Value::Null,
+        provider: CENTER.into(),
+        off: false,
+        note: None,
+        advice: None,
+    };
+    vec![
+        unit(
+            "job.cancel",
+            Effect::Actuate,
+            "Stops a running job of this session: the node cancels its call.",
+            json!({"type": "object", "properties": {"job": job}, "required": ["job"],
+                   "additionalProperties": false}),
+        ),
+        unit(
+            "job.status",
+            Effect::Read,
+            "A job's state: running, or its result once it ended (given once). A job is a call that execute answered with a job id.",
+            json!({"type": "object",
+                   "properties": {"job": job,
+                                  "wait_ms": {"type": "integer", "minimum": 0, "maximum": WAIT_MS_MAX,
+                                              "description": "How long to wait for the job to end, in milliseconds, at most the center's call wait (20 s unless its owner set another); none or 0 answers at once."}},
+                   "required": ["job"], "additionalProperties": false}),
+        ),
+        unit(
+            "stream.close",
+            Effect::Read,
+            "Closes a stream of this session: nothing more of it is kept or read.",
+            json!({"type": "object", "properties": {"stream": stream}, "required": ["stream"],
+                   "additionalProperties": false}),
+        ),
+        unit(
+            "stream.read",
+            Effect::Read,
+            "Reads what a stream (a job's command output) sent since the last read; eof once it ended and all was read.",
+            json!({"type": "object",
+                   "properties": {"stream": stream,
+                                  "max_bytes": {"type": "integer", "minimum": READ_MIN, "maximum": READ_MAX,
+                                                "description": format!("The most bytes to read, {READ_DEFAULT} when none is given.")},
+                                  "wait_ms": {"type": "integer", "minimum": 0, "maximum": WAIT_MS_MAX,
+                                              "description": "How long to wait for more when nothing is there yet, in milliseconds, at most the center's call wait; none or 0 answers at once."}},
+                   "required": ["stream"], "additionalProperties": false}),
+        ),
+    ]
 }
 
 /// `summary` as a unit's description: one line, cut.
@@ -550,15 +693,21 @@ fn outside_subset(params: &Value, result: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::tests::{cap, desc};
+    use crate::tools::tests::{cap, desc, signal_params};
 
     fn path() -> Value {
         json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]})
     }
 
+    /// The node's units (the center's own, in every catalog, aside) and the
+    /// ones left out.
     fn names(c: &Catalog) -> (Vec<&str>, Vec<&str>) {
         (
-            c.units.iter().map(|u| u.name.as_str()).collect(),
+            c.units
+                .iter()
+                .filter(|u| &*u.provider != CENTER)
+                .map(|u| u.name.as_str())
+                .collect(),
             c.broken.iter().map(|b| b.name.as_str()).collect(),
         )
     }
@@ -604,6 +753,157 @@ mod tests {
         assert!(c.offers("fs", "write"));
         assert!(!c.offers("settings", "set"));
         assert!(c.unit("settings.set").is_none());
+    }
+
+    /// Every node offers the center's `job.status` and `job.cancel`, served
+    /// by the center; a node's capability named `job` or `stream` is left
+    /// out. The node's `exec.signal` is offered by the job's id.
+    #[test]
+    fn the_centers_job_units_are_on_every_node_and_signal_names_a_job() {
+        let d = desc(
+            "box",
+            vec![
+                cap(
+                    "exec",
+                    "exec",
+                    &[
+                        ("run", Effect::Execute, path()),
+                        ("signal", Effect::Actuate, signal_params()),
+                    ],
+                ),
+                cap("job", "", &[("status", Effect::Read, json!({}))]),
+                cap("stream", "", &[("read", Effect::Read, json!({}))]),
+            ],
+        );
+        let c = Catalog::build(&d);
+        assert_eq!(
+            c.units.iter().map(|u| u.name.as_str()).collect::<Vec<_>>(),
+            [
+                "exec.run",
+                "exec.signal",
+                "job.cancel",
+                "job.status",
+                "stream.close",
+                "stream.read"
+            ]
+        );
+        assert_eq!(names(&c).1, ["job", "stream"]);
+        assert!(
+            c.broken[0].reason.contains("the center's own"),
+            "{:?}",
+            c.broken
+        );
+        let status = c.unit("job.status").unwrap();
+        assert_eq!(&*status.provider, CENTER);
+        assert_eq!(status.effect, Effect::Read);
+        assert_eq!(status.params["required"], json!(["job"]));
+        assert_eq!(
+            status.params["properties"]["wait_ms"]["maximum"],
+            WAIT_MS_MAX
+        );
+        let cancel = c.unit("job.cancel").unwrap();
+        assert_eq!(
+            (&*cancel.provider, cancel.effect),
+            (CENTER, Effect::Actuate)
+        );
+        // The stream units read only: they change nothing on the machine.
+        let read = c.unit("stream.read").unwrap();
+        assert_eq!((&*read.provider, read.effect), (CENTER, Effect::Read));
+        assert_eq!(read.params["required"], json!(["stream"]));
+        let close = c.unit("stream.close").unwrap();
+        assert_eq!(close.effect, Effect::Read);
+        for u in [status, cancel, read, close] {
+            schema::check(&u.params, Role::Params).unwrap();
+            assert_eq!(u.note, None);
+            assert!(is_center(u));
+        }
+        // Beside the node's own units only: one that offers nothing, or
+        // only units its owner turned off, has none.
+        let one = Catalog::build(&desc(
+            "one",
+            vec![cap("fs", "fs", &[("read", Effect::Read, path())])],
+        ));
+        assert_eq!(one.units.len(), 5);
+        assert_eq!(one.units[2], *c.unit("job.status").unwrap());
+        assert!(Catalog::build(&desc("bare", vec![])).units.is_empty());
+        let mut off = cap("fs", "fs", &[("read", Effect::Read, path())]);
+        off.exposure = Exposure::Off;
+        assert_eq!(
+            names(&Catalog::build(&desc("off", vec![off]))).0,
+            ["fs.read"]
+        );
+
+        let signal = c.unit("exec.signal").unwrap();
+        assert_eq!(&*signal.provider, "node");
+        assert!(is_signal(&signal.cap, &signal.action));
+        assert_eq!(signal.params["required"], json!(["job", "signal"]));
+        assert_eq!(signal.params["properties"]["job"]["type"], "string");
+        assert!(signal.params["properties"].get("call").is_none());
+        assert_eq!(
+            signal.params["properties"]["signal"],
+            json!({"enum": ["term", "kill", "int"]})
+        );
+        assert!(signal.description.contains("job"), "{}", signal.description);
+        // The job is required also where the node's call was not, so no
+        // signal reaches the center without one.
+        for required in [Some(json!(["signal"])), None] {
+            let mut p = signal_params();
+            match required {
+                Some(r) => p["required"] = r,
+                None => {
+                    p.as_object_mut().unwrap().remove("required");
+                }
+            }
+            let d = desc(
+                "box",
+                vec![cap("exec", "exec", &[("signal", Effect::Actuate, p)])],
+            );
+            let c = Catalog::build(&d);
+            let req = &c.unit("exec.signal").unwrap().params["required"];
+            assert_eq!(req[0], "job", "{req}");
+            assert!(!req.as_array().unwrap().contains(&json!("call")), "{req}");
+        }
+        // The center's units are told by their capability: a provider a
+        // node named `center` is the node's.
+        let mut lamp = cap("lamp", "", &[("on", Effect::Actuate, path())]);
+        lamp.provider = CENTER.into();
+        let c = Catalog::build(&desc("box", vec![lamp]));
+        let on = c.unit("lamp.on").unwrap();
+        assert_eq!(&*on.provider, CENTER);
+        assert!(!is_center(on));
+        assert!(is_center(c.unit("job.status").unwrap()));
+        // Told by its name: the node's `exec.signal` names a job also where
+        // the node wrote another provider, so no session signals a call by
+        // its raw id.
+        let mut exec = cap(
+            "exec",
+            "exec",
+            &[("signal", Effect::Actuate, signal_params())],
+        );
+        exec.provider = "p".into();
+        let c = Catalog::build(&desc("box", vec![exec]));
+        let other = c.unit("exec.signal").unwrap();
+        assert_eq!(&*other.provider, "p");
+        assert_eq!(other.params["required"], json!(["job", "signal"]));
+        assert!(other.params["properties"].get("call").is_none());
+        assert!(is_signal(&other.cap, &other.action));
+        assert!(!is_signal("lamp", "signal"));
+        // One that names no call cannot be offered by job.
+        let d = desc(
+            "box",
+            vec![cap("exec", "exec", &[("signal", Effect::Actuate, path())])],
+        );
+        let c = Catalog::build(&d);
+        assert_eq!(names(&c).1, ["exec.signal"]);
+        // A provider's `signal` of another capability is its own.
+        let d = desc(
+            "box",
+            vec![cap("lamp", "", &[("signal", Effect::Actuate, path())])],
+        );
+        assert_eq!(
+            Catalog::build(&d).unit("lamp.signal").unwrap().params,
+            path()
+        );
     }
 
     /// A name with `.` could not be split again, so it leaves out its own
@@ -707,7 +1007,7 @@ mod tests {
         d.capabilities[5].provider = "p".repeat(16 * 1024);
         let c = Catalog::build(&d);
         assert_eq!(
-            c.units.iter().map(|u| u.name.as_str()).collect::<Vec<_>>(),
+            names(&c).0,
             [format!("{edge}.go"), format!("fs.{edge}"), "fs.read".into()]
         );
         assert!(Arc::ptr_eq(&c.units[1].provider, &c.units[2].provider));
@@ -881,7 +1181,7 @@ mod tests {
                     "exec",
                     &[
                         ("run", Effect::Execute, path()),
-                        ("signal", Effect::Actuate, json!({"type": "object"})),
+                        ("signal", Effect::Actuate, signal_params()),
                     ],
                 ),
                 cap(
@@ -1237,11 +1537,11 @@ mod tests {
         }
         big.actions.get_mut("a7").unwrap().summary = "z\n".repeat(100_000);
         let c = Catalog::build(&desc("box", vec![big]));
-        assert_eq!(c.units.len(), 50);
+        assert_eq!(names(&c).0.len(), 50);
         let first = &c.units[0].description;
         assert!(first.starts_with("yyy") && first.ends_with('…'), "{first}");
         assert_eq!(first.len(), DESCRIPTION_MAX + '…'.len_utf8());
-        for u in &c.units {
+        for u in c.units.iter().filter(|u| u.cap == "big") {
             if u.action == "a7" {
                 assert!(u.description.starts_with("z z "), "{}", u.description);
                 assert!(u.description.len() <= DESCRIPTION_MAX + '…'.len_utf8());

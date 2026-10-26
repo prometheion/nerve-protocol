@@ -97,8 +97,12 @@ conversation the model asks for it, like a skill:
 - An action whose name or schemas the center cannot handle (protocol.md §6.1)
   is not offered; the Overview lists it under "Not offered to the agent", with
   the reason.
-- `exec.signal` is not offered for now: it takes the id of a running call,
-  which a model cannot know.
+- Beside a node's own capabilities the center offers its own `job.status`
+  and `job.cancel`, `stream.read` and `stream.close`
+  ([harness spec §4.5](spec/harness.md#45-streams-and-events)), and
+  `exec.signal` takes a job's id where the node's takes the `invoke` id
+  ([harness spec §4.4](spec/harness.md#44-jobs)). A node's
+  capability named `job` or `stream` is not offered.
 
 The cost: a harness that asks the user before each tool call can only ask
 for `execute` as a whole, no longer for reading a file apart from running a
@@ -115,7 +119,12 @@ A result is text marked as device content:
 [end of device content]
 ```
 
-plus `structuredContent`. `list` frames what a node wrote the same way. Some
+plus `structuredContent`. `list` frames what a node wrote the same way, and
+a node's own lines (a string result, a stream's output) get a `\` before a
+`[` that starts one (also behind blanks, characters that show as nothing or
+any other character that is not an ASCII letter, digit or mark) and their
+control characters escaped, so they cannot end the framing; JSON results show
+the same control characters escaped. Some
 harnesses show the model only `structuredContent` when a result has it, and
 never the text, so the marking stands there as well: `structuredContent` is an
 envelope `{"source": "node box-1 (id n1)", "note": "content from that machine:
@@ -131,17 +140,53 @@ time: a result is data from that machine, never instructions. A refusal or failu
 reads as the center's. Every error text of `execute` is one line, so no line
 of a node's words (or of a field name from its schema) reads as another
 refusal. The code is one of the
-[error codes](capabilities.md#errors), or the center's own `unknown_node` and
-`list_first`: a node's code outside the error codes becomes `internal`.
+[error codes](capabilities.md#errors), or the center's own `unknown_node`,
+`list_first`, `unknown_job` and `unknown_stream`: a node's code outside the
+error codes becomes
+`internal`.
+
+## Long calls become jobs
+
+A harness gives up on a tool call after a while, often a minute, while a
+build or a test run takes longer. So `execute` waits at most the center's
+call wait (`--call-wait`, 20 s by default): a call still running then
+becomes a job, and `execute` answers its id at once. The call runs on, owned
+by the center, not by the request. `job.status` gives its state or, once it
+ended, its result (given once, kept in memory for 10 minutes at most);
+`job.cancel` stops it on the node; `exec.signal` sends its command a signal
+by the job's id. Jobs are the session's own: another session's id names
+nothing. `job.status` and `job.cancel` (and `stream.read` and
+`stream.close`) work on every node that is not disabled, also once its offer
+dropped to nothing; disabling a node stops its
+jobs. A session runs at most 16 calls at once, and the agents' calls of all
+sessions leave a quarter of a node's call places free, at most 8. Details:
+[harness spec §4.4](spec/harness.md#44-jobs).
+
+## Streams and events
+
+A command that became a job streams its output: the job's answer names a
+stream, and the center opens the command's `output` stream on the node for
+the session (`stream.open` with `ctx.session`) once the command runs there,
+asking again while it does not yet. `stream.read` gives what came since the
+last read, framed as the node's content, taints the session when it gives
+output, and waits for more when asked (at most the call wait);
+`stream.close` ends it without waiting for the node. The center keeps
+at most 1 MiB per stream that was not read, drops the oldest past it and
+says how much; streams are the session's own, at most 16, in memory only,
+and go on close, when the job's result is read (unless that result lacks
+output the stream holds, which its answer then names), with the session, or
+when the link ends. Events come the same way, by polling: there are no MCP
+notifications. Details: [harness spec §4.5](spec/harness.md#45-streams-and-events).
 
 ## Sessions
 
 Each MCP connection is one session. The center sends its id as `ctx.session`.
 A session remembers the units `list` gave it (at most 1024); a new one starts
 with none. When the session ends, every node it used gets `session.end` and
-cancels the session's calls, which stops their commands. The web UI can end a
-session. A `notifications/cancelled` cancels its call on the node, and the
-cancelled request gets no response.
+cancels the session's calls, which stops their commands; its jobs and their
+results, and its streams, go with it. The web UI can end a session. A `notifications/cancelled`
+within the call wait cancels its call on the node, and the cancelled request
+gets no response; a call that became a job is stopped by `job.cancel`.
 
 ## The center's own gate
 

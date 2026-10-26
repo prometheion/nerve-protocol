@@ -44,7 +44,7 @@ names its reason. One the machine gave reads
 | `unavailable` | The machine is offline | Check the link, below |
 | `connection_lost` | The link dropped during the call and did not come back within 30 s, or the node or the center restarted | Run it again |
 | `the answer is … bytes, more than the center takes` (`too_large`) | The result is over the 4 MiB message limit, mostly from output full of control characters, which take six bytes each | Write the output to a file, or cut it down (`head -c`, `base64`) |
-| `busy` | Too many commands or calls at once (`limits.max_running`, 16 by default) | Wait, or raise the limit |
+| `busy` | Too many commands or calls at once (`limits.max_running`, 16 by default, for all centers together); an agent's [jobs](harness.md#long-calls-become-jobs) hold their places until their commands end, and the message names the session's running jobs | Wait, stop jobs nobody waits for with `job.cancel`, or raise the limit |
 | `timeout`: `the command ran past …` | The command ran longer than its `timeout_ms`, than the node's default (10 minutes, when the call gave none), or than the node's maximum (1 hour). It was killed. The message says which | Give a larger `timeout_ms`. Above the maximum, you raise `limits.max_timeout_secs` ([how long a command may run](config.md#how-long-a-command-may-run)) |
 | `memory_mb … is more than this node lets a command have: at most …` (also `cpu_percent`, `processes`) | The call asked for more than the most you set | Ask for less, or raise `limits.command.*_max*` ([limits](limits.md)) |
 | `killed: "memory"` in a result | The command went past its own memory limit (a command the machine's OOM killed has only `signal: "kill"`) | Ask for more `memory_mb`, up to the most, or raise `limits.command.memory_mb` |
@@ -69,6 +69,10 @@ in the machine's audit log. The model can mostly fix them by itself.
 | `unknown_node: there is no node "…"` | No paired machine has that name or id; the message names the ones there are | Use one of those names |
 | `unavailable: node … is disabled in the center` | You disabled the machine in the center | **Enable** it on the Overview |
 | `forbidden: "…" is turned off on node … by its owner` | `cap set … off` on the machine | `nerve-node cap set <capability> on` |
+| `unknown_job: node … has no job "j-…" of this session` | The id is wrong or another session's, or the job's result was given already, or not read within 10 minutes ([long calls](harness.md#long-calls-become-jobs)) | Run the call again if its result is still needed |
+| `unknown_stream: node … has no stream "s-…" of this session` | The id is wrong or another session's, or the stream went: it was closed, its job's result was read, or it ended 10 minutes ago ([long calls](harness.md#a-commands-output-while-it-runs)) | Read the job's result with `job.status`; it carries the output from its start |
+| `busy: this session has 16 calls running` | The session runs 16 calls at once already, jobs included; the message names its running jobs | Wait for one with `job.status`, or stop one with `job.cancel` |
+| `busy: node … runs 56 calls already` | Agents' calls of all sessions hold the places the center gives them on that machine ([limits](limits.md#calls-of-one-agent-session)) | Wait for a job to end, stop one with `job.cancel` (the message names the session's running jobs), or end a session in the web UI |
 
 ## The center's action checker refuses a call
 

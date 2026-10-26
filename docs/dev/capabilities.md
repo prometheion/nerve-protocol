@@ -112,9 +112,18 @@ runs it only when it is set to `on`, whatever its effect.
 - `fs.read` returns at most 2 MiB. `fs.write` takes at most 3 MiB. A `write`
   with an `if_match` that no longer matches fails with `conflict`.
 - A command's output comes in its result, at most 1 MiB for stdout and 1 MiB
-  for stderr.
+  for stderr. While it runs, `exec`'s `output` stream (params `{call}`)
+  carries it as it comes, to the center and session the call came from only;
+  the center opens it when the call becomes a job
+  ([harness spec §4.5](spec/harness.md#45-streams-and-events)).
 - `exec.signal` is offered only where the policy allows it: by an allow rule in
   `allowlist` mode, with `caps.exec.signal = on` in `folder` and `user` mode.
+  On the wire its `call` is the `invoke` id of a running `exec.run`; the
+  center offers it to the agent with the job's id instead and maps it
+  ([harness spec §4.4](spec/harness.md#44-jobs)).
+- `job` and `stream` are no capability of a node: the center serves `job.status`,
+  `job.cancel`, `stream.read` and `stream.close` itself. A node's capability
+  of either name is not offered, and a node refuses a provider of these names.
 - Every command has a time limit: `timeout_ms`, else the node's default, and
   never more than the node's maximum (the owner's `limits` in `node.toml`).
   The schema gives the default as `default` and the most in the
@@ -143,7 +152,7 @@ object.
 | `get {cap, keys}` | center to node | Read state |
 | `sub {topics}`, `unsub {topics}` | center to node | Topics `<cap>/<event>`, `<cap>/state`, `<cap>/*` |
 | `event`, `state` | node to center | Something happened, state changed |
-| `stream.open`, `stream.close` | either | Reliable streams |
+| `stream.open {cap, stream, params, ctx}`, `stream.close {sid, reason}` | center opens, either closes | Reliable streams; their data comes as binary frames |
 | `session.end {session}` | center to node | A harness session ended. The node cancels that session's calls |
 | `bye {reason}` | either | Clean close |
 

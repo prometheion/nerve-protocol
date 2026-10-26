@@ -60,7 +60,8 @@ motion, nothing moves. On a phone the menu opens from the button at the top.
 - Alerts, for example a machine whose key is in use twice.
 
 A disabled machine stays paired and connected. The agent's `list` shows it as
-disabled with no capabilities, and calls to it are refused.
+disabled with no capabilities, and calls to it are refused. The agent's calls
+that run there stop, its [jobs](harness.md#long-calls-become-jobs) too.
 
 ### Statistics
 

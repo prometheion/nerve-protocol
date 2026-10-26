@@ -45,6 +45,7 @@ fn opts(policy: &CenterPolicy, account: &Account, own: &[PathBuf]) -> RunOptions
         own: own.to_vec(),
         root: None,
         limits: None,
+        tap: None,
     }
 }
 

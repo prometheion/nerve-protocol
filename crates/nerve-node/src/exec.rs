@@ -24,6 +24,7 @@ use nerve_proto::{ErrorCode, RpcError};
 use nerve_sandbox::{ContainerSpec, LandlockSpec, SHIM_ARG, ShimSpec};
 
 use crate::fs::WirePath;
+use crate::tap::Pipe;
 
 /// The most of stdout and of stderr a result carries, whatever the config
 /// says, so the result fits the 4 MiB message limit.
@@ -365,6 +366,19 @@ fn decode(bytes: &[u8], cut: bool) -> String {
     #[cfg(not(windows))]
     let other = |_: &[u8]| None;
     output_text(bytes, cut, other)
+}
+
+/// How a command's `output` stream reads output that is not UTF-8, as its
+/// result does ([`decode`]): the console code page on Windows (Windows
+/// PowerShell 5.1 writes that), none elsewhere.
+pub fn other_text() -> Option<crate::tap::Decode> {
+    #[cfg(windows)]
+    return Some(crate::tap::Decode {
+        text: |b| crate::win::code_page_text(crate::win::console_code_page(), b),
+        cut: |b| crate::win::code_page_cut(crate::win::console_code_page(), b),
+    });
+    #[cfg(not(windows))]
+    None
 }
 
 /// The Landlock rules for a command of a center in `folders` mode: it reads
@@ -1091,6 +1105,9 @@ pub struct RunOptions {
         std::sync::Arc<crate::cgroup::Cgroups>,
         nerve_policy::config::Granted,
     )>,
+    /// Where the output goes as well as into the result, for the call's
+    /// `output` stream (crate::tap); `None` keeps it in the result only.
+    pub tap: Option<std::sync::Arc<crate::tap::Tap>>,
 }
 
 /// The environment of a command of `nerve-run` besides HOME, USER and
@@ -1480,8 +1497,13 @@ fn kill_group(pid: u32, sig: Sig, uid: Option<u32>) {
 fn kill_group(_pid: u32, _sig: Sig) {}
 
 /// Reads up to `cap` bytes and drains the rest, so the command never blocks
-/// on a full pipe. Returns the bytes and whether some were dropped.
-async fn capped(mut r: impl AsyncRead + Unpin, cap: usize) -> (Vec<u8>, bool) {
+/// on a full pipe. Returns the bytes and whether some were dropped. All of
+/// it, past the cap too, goes to `tap` as it comes, as that pipe's.
+async fn capped(
+    mut r: impl AsyncRead + Unpin,
+    cap: usize,
+    tap: Option<(&crate::tap::Tap, crate::tap::Pipe)>,
+) -> (Vec<u8>, bool) {
     let mut out = Vec::new();
     let mut buf = vec![0u8; 16 * 1024];
     let mut cut = false;
@@ -1489,6 +1511,9 @@ async fn capped(mut r: impl AsyncRead + Unpin, cap: usize) -> (Vec<u8>, bool) {
         match r.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
+                if let Some((t, pipe)) = tap {
+                    t.push(pipe, &buf[..n]);
+                }
                 let room = cap.saturating_sub(out.len());
                 if n > room {
                     cut = true;
@@ -1541,7 +1566,7 @@ async fn sudo_stderr(
             }
         }
     }
-    let (rest, cut) = capped(err, cap).await;
+    let (rest, cut) = capped(err, cap, None).await;
     seen.extend_from_slice(&rest);
     let mut out = Vec::with_capacity(seen.len().min(cap));
     let mut i = 0;
@@ -1822,14 +1847,18 @@ pub async fn run(
     let stderr = child.stderr.take().expect("piped");
     let cap = opts.output_cap.min(OUTPUT_HARD_CAP);
     let limit = opts.timeouts.limit(call.timeout);
+    // A sudo command's output is not streamed: its stderr carries sudo's
+    // prompts, which only its result is stripped of.
+    let tap = opts.tap.as_deref().filter(|_| opts.sudo.is_none());
     let err = async {
         match sudo_stdin {
             Some((stdin, sudo)) => sudo_stderr(stderr, stdin, sudo, pid, cap).await,
-            None => capped(stderr, cap).await,
+            None => capped(stderr, cap, tap.map(|t| (t, Pipe::Err))).await,
         }
     };
     let work = async {
-        let (o, e, st) = tokio::join!(capped(stdout, cap), err, child.wait());
+        let out = capped(stdout, cap, tap.map(|t| (t, Pipe::Out)));
+        let (o, e, st) = tokio::join!(out, err, child.wait());
         (o, e, st)
     };
     tokio::pin!(work);
@@ -1978,10 +2007,19 @@ async fn run_as(
     let crate::win_user::Spawned { stdout, stderr, .. } = child;
     let cap = opts.output_cap.min(OUTPUT_HARD_CAP);
     let limit = opts.timeouts.limit(call.timeout);
+    let tap = opts.tap.as_deref().filter(|_| opts.sudo.is_none());
     let work = async {
         tokio::join!(
-            capped(tokio::fs::File::from_std(stdout), cap),
-            capped(tokio::fs::File::from_std(stderr), cap),
+            capped(
+                tokio::fs::File::from_std(stdout),
+                cap,
+                tap.map(|t| (t, Pipe::Out))
+            ),
+            capped(
+                tokio::fs::File::from_std(stderr),
+                cap,
+                tap.map(|t| (t, Pipe::Err))
+            ),
             async {
                 tokio::task::spawn_blocking(wait)
                     .await
@@ -2093,6 +2131,7 @@ mod tests {
             own: Vec::new(),
             root: None,
             limits: None,
+            tap: None,
         }
     }
 
@@ -2302,6 +2341,38 @@ mod tests {
             .unwrap();
         assert_eq!(r["stdout"].as_str().unwrap().len(), 100);
         assert_eq!(r["truncated"], true);
+    }
+
+    /// The output stream carries all a command prints, also past the cap
+    /// that cuts its result.
+    #[tokio::test]
+    async fn the_stream_carries_the_output_past_the_cap() {
+        let tap = std::sync::Arc::new(crate::tap::Tap::default());
+        let stream = tap.reader();
+        let o = RunOptions {
+            tap: Some(tap.clone()),
+            ..opts(100)
+        };
+        let r = run(
+            &call("head -c 5000 /dev/zero | tr '\\0' a; echo end"),
+            &o,
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["stdout"].as_str().unwrap().len(), 100);
+        assert_eq!(r["truncated"], true);
+        tap.end();
+        let mut got = Vec::new();
+        loop {
+            match stream.next(usize::MAX).await {
+                crate::tap::Chunk::Data(more) => got.extend(more),
+                crate::tap::Chunk::End => break,
+                gap => panic!("{gap:?}"),
+            }
+        }
+        assert_eq!(got.len(), 5004);
+        assert!(got.ends_with(b"aaend\n"));
     }
 
     fn sudo_input(password: &str) -> Option<SudoInput> {
@@ -3494,6 +3565,7 @@ mod windows_tests {
             own: Vec::new(),
             root: None,
             limits: None,
+            tap: None,
         }
     }
 
@@ -3793,6 +3865,32 @@ mod windows_tests {
         }
     }
 
+    /// What PowerShell printed in the console's code page goes into the
+    /// output stream as UTF-8, like its result.
+    #[tokio::test]
+    async fn powershell_output_streams_with_its_umlauts() {
+        let d = tempfile::tempdir().unwrap();
+        let c = call(
+            "Write-Output 'Grüße'; [Console]::Error.WriteLine('Größe')",
+            d.path(),
+            Duration::from_secs(60),
+        );
+        let tap = std::sync::Arc::new(crate::tap::Tap::new(None, other_text()));
+        let o = RunOptions {
+            tap: Some(tap.clone()),
+            ..opts()
+        };
+        run(&c, &o, |_| {}).await.unwrap();
+        tap.end();
+        let mut d = Vec::new();
+        let r = tap.reader();
+        while let crate::tap::Chunk::Data(more) = r.next(usize::MAX).await {
+            d.extend(more);
+        }
+        let text = String::from_utf8(d).unwrap();
+        assert!(text.contains("Grüße") && text.contains("Größe"), "{text:?}");
+    }
+
     #[test]
     fn code_pages_decode() {
         assert_eq!(
@@ -3804,6 +3902,12 @@ mod windows_tests {
             Some("Grüße")
         );
         assert_ne!(crate::win::console_code_page(), 0);
+        // A lead byte at the end waits for its second byte; a single-byte
+        // code page has none.
+        assert_eq!(crate::win::code_page_cut(932, b"a\x82"), 1);
+        assert_eq!(crate::win::code_page_cut(932, b"a\x82\xA0"), 0);
+        assert_eq!(crate::win::code_page_cut(932, b"\x82\x82\x82"), 1);
+        assert_eq!(crate::win::code_page_cut(1252, b"a\x82"), 0);
     }
 
     /// What Windows PowerShell 5.1 prints, on stdout and stderr, comes back
