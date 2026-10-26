@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 
 use nerve_policy::config::{CapSetting, CenterPolicy, Folder, Mode, SettingsGrant};
-use nerve_policy::{CenterEntry, NodeConfig, rules};
+use nerve_policy::{CenterEntry, Need, NodeConfig, PathArgs, effect_rule, rules};
 use nerve_proto::descriptor::{
     Access, AccessMode, Action, Capability, Descriptor, Direction, Effect, EventDecl, Exposure,
     FolderAccess, NodeInfo, Software, StreamDecl, StreamKind,
@@ -474,19 +474,20 @@ fn exposure(entry: &CenterEntry, id: &str) -> Option<Exposure> {
     }
 }
 
-/// Whether the center is shown `cap.action`: not hidden, and in `allowlist`
-/// mode only when an allow rule covers it (any pattern, each call is still
-/// checked), and for `exec.run` also when the sudo allow list has an entry,
-/// since a sudo command runs by that list alone. In `folder` and `user` mode
-/// the allow rules do not count, so the action is offered, except `exec` in
-/// `folder` mode on a machine that cannot confine a command, and an action
-/// that senses or actuates (`exec.signal`), which no mode allows unless the
-/// owner set it to on. An action set to off stays, and fails `disabled`.
+/// Whether the center is shown `cap.action`: not hidden, and allowed for
+/// some call by the effect table ([`effect_rule`]), the one `decide` follows.
+/// In `allowlist` mode an allow rule must cover it (any pattern, each call is
+/// still checked), and for `exec.run` also when the sudo allow list has an
+/// entry, since a sudo command runs by that list alone. In `folder` and
+/// `user` mode the allow rules do not count, so the action is offered, except
+/// `exec` in `folder` mode on a machine that cannot confine a command, and an
+/// action that senses or actuates (`exec.signal`), which no mode allows unless
+/// the owner set it to on. An action set to off stays, and fails `disabled`.
 ///
-/// A provider's action (`provided`) is decided like the governed ones: in
-/// `allowlist` mode by the allow rules, sense and actuate only when on. It
-/// names no path, so no folder holds it: `folder` mode offers it only where
-/// the owner set it to on.
+/// `fs` and `exec.run` name their paths per call, so they are offered where
+/// a call with its paths in the folders is allowed. A provider's action
+/// (`provided`) names no path, so no folder holds it: `folder` mode offers it
+/// only where the owner set it to on.
 fn offered(
     policy: &CenterPolicy,
     view: View,
@@ -506,35 +507,34 @@ fn offered(
         Some(CapSetting::Off) => return true,
         _ => {}
     }
-    // Only the policy-governed capabilities are decided by rules and modes;
-    // `settings.pause` actuates as well and is no policy's business.
-    let governed = provided || matches!(cap, "fs" | "exec");
-    if by_rules
-        && governed
-        && mode != Mode::Allowlist
-        && matches!(effect, Effect::Sense | Effect::Actuate)
-        && setting != Some(CapSetting::On)
-    {
-        return false;
-    }
-    if by_rules && provided && mode == Mode::Folder && setting != Some(CapSetting::On) {
-        return false;
+    if !by_rules || !governed(cap) {
+        return true;
     }
     // Folder mode refuses every command it cannot confine, so it offers none;
     // a sudo command still runs by the sudo allow list.
-    if by_rules
-        && cap == "exec"
-        && mode == Mode::Folder
-        && !confined
-        && policy.sudo_allow.is_empty()
-    {
+    let sudo = cap == "exec" && action == "run" && !policy.sudo_allow.is_empty();
+    if cap == "exec" && mode == Mode::Folder && !confined && policy.sudo_allow.is_empty() {
         return false;
     }
-    if !by_rules || mode != Mode::Allowlist || !governed {
-        return true;
+    let paths = if provided {
+        PathArgs::None
+    } else {
+        PathArgs::Some {
+            all_in_folders: true,
+        }
+    };
+    match effect_rule(mode, effect, paths, setting) {
+        Need::Allowed => true,
+        Need::AllowRule => rules::offers(&policy.allow, cap, action) || sudo,
+        Need::InFolders | Need::NeedsOn => false,
     }
-    rules::offers(&policy.allow, cap, action)
-        || (cap == "exec" && action == "run" && !policy.sudo_allow.is_empty())
+}
+
+/// Whether the policy decides calls of `cap`: every capability but the
+/// node's own `node`, `settings` and `audit` (`settings.pause` actuates as
+/// well and is no policy's business).
+fn governed(cap: &str) -> bool {
+    !matches!(cap, "node" | "settings" | "audit")
 }
 
 /// What decides which actions a descriptor offers besides the policy.
@@ -627,7 +627,16 @@ impl Reach {
     /// folders: in allowlist mode as `nerve-run` they still hold the allowed
     /// commands, which the block does not tell.
     fn access(&self, windows: bool) -> Access {
-        let folder = self.mode == Mode::Folder;
+        // The folders hold a call only where the effect table holds its
+        // paths to them.
+        let folder = [Effect::Read, Effect::Write, Effect::Execute]
+            .into_iter()
+            .any(|e| {
+                let paths = PathArgs::Some {
+                    all_in_folders: false,
+                };
+                effect_rule(self.mode, e, paths, None) == Need::InFolders
+            });
         let within = |p: &str, b: &str| {
             if windows {
                 nerve_policy::paths::win::within(p, b)
@@ -833,9 +842,7 @@ fn build(
             }
         }
     }
-    caps.retain(|c| {
-        !((c.provider != "node" || matches!(c.id.as_str(), "fs" | "exec")) && c.actions.is_empty())
-    });
+    caps.retain(|c| !(governed(&c.id) && c.actions.is_empty()));
     let name = node_name(cfg);
     let platform = std::env::consts::OS.to_string();
     let mut d = Descriptor {
