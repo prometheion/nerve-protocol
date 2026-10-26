@@ -883,6 +883,8 @@ async fn a_late_stream_starts_with_a_gap_and_a_link_holds_16() {
 
 /// The node's `stream.close` comes after the stream's last frame, also when
 /// frames still wait to go out as the command ends.
+/// The command prints more than the socket buffers of the connection hold,
+/// so frames wait whatever the machine's buffer sizes.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_streams_close_comes_after_its_last_frame() {
@@ -890,7 +892,7 @@ async fn a_streams_close_comes_after_its_last_frame() {
     use nerve_proto::Message;
 
     let dir = tempdir();
-    let script = "sleep 0.5; head -c 1000000 /dev/zero | tr '\\0' b\n";
+    let script = "sleep 0.5\ni=0\nwhile [ $i -lt 60 ]; do head -c 1000000 /dev/zero | tr '\\0' b; i=$((i+1)); done\n";
     let (node, mut lab, _work, command) = two_centers_running(dir.path(), script).await;
     let run = lab
         .request("invoke", session_run(&command, "s1"))
@@ -906,16 +908,13 @@ async fn a_streams_close_comes_after_its_last_frame() {
         .unwrap();
     // Not read while the command prints and ends: its last frames wait.
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    let mut got = lab
-        .take_frames()
-        .iter()
-        .map(|f| f.payload.len())
-        .sum::<usize>();
+    // A frame counts by its payload, a gap by the bytes it says were dropped.
+    let size = |f: &nerve_proto::frame::Frame| f.gap_bytes().unwrap_or(f.payload.len() as u64);
+    let mut got = lab.take_frames().iter().map(size).sum::<u64>();
     loop {
         match lab.recv(WAIT).await {
             Recv::Frame(f) => {
-                assert_eq!(f.gap_bytes(), None);
-                got += f.payload.len();
+                got += size(&f);
             }
             Recv::Msg(Message::Request { method, params, .. }) if method == "stream.close" => {
                 assert_eq!(params["sid"].as_u64(), Some(sid));
@@ -925,7 +924,7 @@ async fn a_streams_close_comes_after_its_last_frame() {
             other => panic!("{other:?}"),
         }
     }
-    assert_eq!(got, 1_000_000, "every frame came before the close");
+    assert_eq!(got, 60_000_000, "every frame came before the close");
     node.stop().await;
 }
 

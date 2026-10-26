@@ -562,15 +562,10 @@ pub async fn open_on_node(
                     });
                     return;
                 }
-                // The node left requests unanswered: a slow link may still
-                // bring their answers, which frees them; until then the link
-                // gets no more, and this wait counts as the command's start.
-                if link.unanswered_opens() >= crate::link::UNANSWERED_MAX {
-                    unanswered = true;
-                    tokio::time::sleep(pause).await;
-                    pause = (pause * 2).min(Duration::from_secs(1));
-                    continue;
-                }
+                // A node that left requests unanswered gets no more from the
+                // link until their answers free them (a slow link may still
+                // bring them): the refusal is a timeout, which counts this
+                // wait as the command's start.
                 let params = json!({"cap": "exec", "stream": "output", "params": {"call": call},
                                     "ctx": {"session": session}});
                 let tried = link.open_stream(params, ring.clone(), open_wait).await;
