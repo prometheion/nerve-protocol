@@ -215,6 +215,16 @@ impl Link {
     /// link is parked the frame is kept for the resume. `false` when it is
     /// lost: the link ended, or its connection did and it cannot resume.
     async fn send_text(&self, text: String) -> bool {
+        self.send_counted(text, None).await
+    }
+
+    /// [`Link::send_text`] of request `id`, which is not sent when nobody
+    /// waits for its reply any more by the time it would go (`false`).
+    async fn send_request(&self, id: u64, text: String) -> bool {
+        self.send_counted(text, Some(id)).await
+    }
+
+    async fn send_counted(&self, text: String, request: Option<u64>) -> bool {
         loop {
             // Kept under the same lock that saw the link parked, so a resume
             // that comes in between sends it.
@@ -230,6 +240,15 @@ impl Link {
             // A resume moved the link to another connection meanwhile.
             if !w.out.as_ref().is_some_and(|o| o.same_channel(&out)) {
                 continue;
+            }
+            // A resume fails a `stream.open` that waits for room here, and
+            // its opener asks again: sent now, on the new connection, it
+            // would open a stream on the node that nobody reads or closes.
+            // Under the wire's lock, as `resume` takes it before `pending`.
+            if let Some(id) = request
+                && !self.pending.lock().unwrap().contains_key(&id)
+            {
+                return false;
             }
             return match permit {
                 Ok(p) => {
@@ -451,7 +470,7 @@ impl Link {
             id: Some(id),
         };
         let text = Message::request(id, method, params).encode();
-        if !self.send_text(text).await {
+        if !self.send_request(id, text).await {
             return Err(lost());
         }
         unsent.id = None;
@@ -609,7 +628,7 @@ impl Link {
             id: Some(id),
         };
         let text = Message::request(id, method::STREAM_OPEN, params).encode();
-        if !self.send_text(text).await {
+        if !self.send_request(id, text).await {
             return Err(lost());
         }
         unsent.id = None;
@@ -1383,6 +1402,55 @@ mod tests {
         assert_eq!(e.kind(), ErrorCode::ConnectionLost);
         link.reply(&Id::Num(id), Ok(json!({"sid": 1})));
         assert_eq!(link.stream_count(), 0);
+    }
+
+    /// A `stream.open` that waits for room in the old connection's full
+    /// queue when the link resumes fails, and does not go out on the new
+    /// connection once the old queue lets it go: the node would open a
+    /// stream there that nobody reads or closes.
+    #[tokio::test]
+    async fn a_stream_open_waiting_for_room_is_not_sent_after_a_resume() {
+        let (out, old_rx) = mpsc::channel(1);
+        let link = Arc::new(Link::new(
+            "n1",
+            String::new(),
+            false,
+            Limits::default(),
+            out,
+            Some("l-1".into()),
+        ));
+        let conn = link.wire.lock().unwrap().conn;
+        assert!(link.take_frame(conn, true));
+        // The old queue is full: the stream.open waits for room.
+        link.notify("filler", json!({})).await;
+        let opener = {
+            let link = link.clone();
+            tokio::spawn(async move {
+                let ring = Arc::new(Ring::default());
+                link.open_stream(json!({}), ring, Duration::from_secs(10))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!opener.is_finished(), "the queue had room");
+        assert!(link.park(conn));
+        let (out, mut rx) = mpsc::channel(8);
+        let (_, again) = link.resume(out, 0).unwrap();
+        assert_eq!(again.len(), 1, "{again:?}");
+        // The old connection's writer is gone: its queue lets the wait go.
+        drop(old_rx);
+        let e = tokio::time::timeout(Duration::from_secs(5), opener)
+            .await
+            .expect("the opener ends")
+            .unwrap()
+            .expect_err("it failed");
+        assert_eq!(e.kind(), ErrorCode::ConnectionLost);
+        let next = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+        if let Ok(Some(Out::Frame(m))) = &next {
+            panic!("sent on the new connection: {m:?}");
+        }
+        assert!(next.is_err(), "the new connection ended");
+        assert_eq!((link.waiting(), link.stream_count()), (0, 0));
     }
 
     /// The request a link sent next: its id, method and params.
