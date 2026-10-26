@@ -419,13 +419,14 @@ impl Streams {
 
     /// The result of the job `job` was read: its stream goes, unless the
     /// result is not `whole` (cut, or without the output: a failure, a lost
-    /// link, a result not kept) and the stream holds output or may still
-    /// get some. Then it stays, and its id is given.
+    /// link, a result not kept) and the stream holds output or, open on the
+    /// node, may still get some. Then it stays, and its id is given.
     pub fn result_read(&mut self, job: &str, whole: bool) -> (Option<String>, Option<Closer>) {
         let Some((id, e)) = self.entries.iter().find(|(_, e)| e.job == job) else {
             return (None, None);
         };
-        if !whole && !(e.ring.ended() && e.ring.held() == 0) {
+        let more = e.ring.held() > 0 || (e.node.is_some() && !e.ring.ended());
+        if !whole && more {
             return (Some(id.clone()), None);
         }
         let id = id.clone();
