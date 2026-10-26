@@ -4193,8 +4193,8 @@ async fn closing_a_stream_does_not_wait_for_the_node() {
     r.stop().await;
 }
 
-/// A gap the node reports counts as dropped bytes, not as text, and the
-/// read says what drops bytes; `max_bytes` sets how much one read gives,
+/// A gap the node reports counts as dropped bytes, not as text, where it
+/// is: a read ends there and the next says what drops bytes; `max_bytes` sets how much one read gives,
 /// and `wait_ms` waits at most the call wait.
 #[tokio::test]
 async fn a_streams_gap_size_and_wait() {
@@ -4218,15 +4218,19 @@ async fn a_streams_gap_size_and_wait() {
             json!({"stream": stream, "max_bytes": max, "wait_ms": wait}),
         )
     };
+    // A read ends at the gap: its text has nothing missing inside it.
+    let (text, data) = read_of(&read(64, 0).await);
+    assert_eq!(data.get("dropped"), None, "{text}");
+    assert_eq!(data["text"], "one\n", "{text}");
     let (text, data) = read_of(&read(64, 0).await);
     assert_eq!(data["dropped"], 5, "{text}");
-    assert_eq!(data["text"], format!("one\n{}", "y".repeat(60)), "{text}");
+    assert_eq!(data["text"], "y".repeat(64), "{text}");
     assert!(
         text.contains("5 bytes were dropped before this text: a stream that opened after its command printed a lot starts with the end of it"),
         "{text}"
     );
     let (_, data) = read_of(&read(64, 0).await);
-    assert_eq!(data["text"], "y".repeat(40));
+    assert_eq!(data["text"], "y".repeat(36));
     assert_eq!(data.get("dropped"), None, "told once");
     // Nothing more comes: a long wait ends with the call wait.
     let started = std::time::Instant::now();

@@ -54,9 +54,14 @@ pub struct Ring {
 #[derive(Default)]
 struct RingState {
     buf: VecDeque<u8>,
-    /// Bytes dropped since the last read: the ring's own, and those the node
-    /// said it dropped.
+    /// Bytes dropped before the text a read gives next: the ring's own, and
+    /// those the node said it dropped there.
     dropped: u64,
+    /// Where in the stream `buf` starts: the bytes read or dropped before it.
+    at: u64,
+    /// Where the node said it dropped bytes after data still in `buf`, and
+    /// how many: a read ends there, and the next one starts with the gap.
+    gaps: VecDeque<(u64, u64)>,
     /// Why it ended, and when.
     end: Option<(String, Instant)>,
 }
@@ -98,15 +103,29 @@ impl Ring {
             let over = s.buf.len().saturating_sub(RING_BYTES);
             if over > 0 {
                 s.buf.drain(..over);
+                s.at += over as u64;
                 s.dropped += over as u64;
+                s.gaps_before_text();
             }
         }
         self.moved();
     }
 
-    /// The node dropped `n` bytes of the stream.
+    /// The node dropped `n` bytes of the stream, after what came so far.
     pub fn gap(&self, n: u64) {
-        self.state.lock().unwrap().dropped += n;
+        {
+            let mut s = self.state.lock().unwrap();
+            let pos = s.at + s.buf.len() as u64;
+            if s.buf.is_empty() {
+                s.dropped += n;
+            } else if let Some((p, m)) = s.gaps.back_mut()
+                && *p == pos
+            {
+                *m += n;
+            } else {
+                s.gaps.push_back((pos, n));
+            }
+        }
         self.moved();
     }
 
@@ -154,7 +173,7 @@ impl Ring {
                     let head: Vec<u8> = s.buf.iter().copied().collect();
                     matches!(std::str::from_utf8(&head), Err(e) if e.valid_up_to() == 0 && e.error_len().is_none())
                 };
-            (!s.buf.is_empty() && !part) || s.dropped > 0 || s.end.is_some()
+            (!s.buf.is_empty() && !part) || s.dropped > 0 || !s.gaps.is_empty() || s.end.is_some()
         };
         if ready(&self.state.lock().unwrap()) {
             return;
@@ -169,13 +188,20 @@ impl Ring {
         .await;
     }
 
-    /// Takes up to `max` bytes as text. A character the cut would split
+    /// Takes up to `max` bytes as text, up to the next gap: the text a read
+    /// gives has nothing missing inside it. A character the cut would split
     /// stays for the next read, unless nothing more can come.
     pub fn read(&self, max: usize) -> Read {
         let mut s = self.state.lock().unwrap();
-        let n = s.buf.len().min(max);
+        s.gaps_before_text();
+        let upto = s
+            .gaps
+            .front()
+            .map_or(s.buf.len(), |(p, _)| (p - s.at) as usize);
+        let n = upto.min(max);
         let mut bytes: Vec<u8> = s.buf.drain(..n).collect();
-        let last = s.end.is_some() && s.buf.is_empty();
+        // Before a gap nothing comes that could finish a character.
+        let last = (s.end.is_some() && s.buf.is_empty()) || (n == upto && !s.gaps.is_empty());
         if !last && let Err(e) = std::str::from_utf8(&bytes) {
             // Only a split at the end is held back; a bad byte elsewhere
             // reads as a replacement character, as it would anyway.
@@ -186,12 +212,26 @@ impl Ring {
                 }
             }
         }
-        let eof = s.end.is_some() && s.buf.is_empty();
+        s.at += bytes.len() as u64;
+        let eof = s.end.is_some() && s.buf.is_empty() && s.gaps.is_empty();
         Read {
             text: String::from_utf8_lossy(&bytes).into_owned(),
             eof,
             dropped: std::mem::take(&mut s.dropped),
             why: s.end.as_ref().filter(|_| eof).map(|(w, _)| w.clone()),
+        }
+    }
+}
+
+impl RingState {
+    /// The node's gaps that no unread text comes before any more: they are
+    /// before the text the next read gives.
+    fn gaps_before_text(&mut self) {
+        while let Some(&(p, n)) = self.gaps.front()
+            && p <= self.at
+        {
+            self.dropped += n;
+            self.gaps.pop_front();
         }
     }
 }
@@ -472,10 +512,9 @@ mod tests {
         let r = Ring::default();
         r.push(&vec![b'a'; RING_BYTES]);
         r.push(b"bc");
-        r.gap(5);
         assert_eq!(r.held(), RING_BYTES);
         let first = r.read(READ_MAX);
-        assert_eq!(first.dropped, 2 + 5);
+        assert_eq!(first.dropped, 2);
         assert_eq!(first.text.len(), READ_MAX);
         assert!(!first.eof);
         let mut rest = String::new();
@@ -498,6 +537,42 @@ mod tests {
             (last.text.as_str(), last.eof, last.why.as_deref()),
             ("line\n", true, Some("the command ended"))
         );
+    }
+
+    /// A gap the node reports lies after the data that came before it: a
+    /// read ends there, and the next one starts with it, so no text a read
+    /// gives has bytes missing inside it.
+    #[test]
+    fn a_nodes_gap_ends_a_read_where_it_is() {
+        let r = Ring::default();
+        r.push(b"compiling crate-a\nwarn");
+        r.gap(300);
+        r.push(b"ing: unused\nerror");
+        r.gap(7);
+        let first = r.read(8);
+        assert_eq!((first.text.as_str(), first.dropped), ("compilin", 0));
+        let first = r.read(READ_MAX);
+        assert_eq!((first.text.as_str(), first.dropped), ("g crate-a\nwarn", 0));
+        let second = r.read(READ_MAX);
+        assert_eq!(
+            (second.text.as_str(), second.dropped, second.eof),
+            ("ing: unused\nerror", 300, false)
+        );
+        r.end("the command ended");
+        let last = r.read(READ_MAX);
+        assert_eq!((last.text.as_str(), last.dropped, last.eof), ("", 7, true));
+
+        // A gap with nothing unread before it is before what comes next; a
+        // character cut by a gap reads as it is, nothing can finish it.
+        let r = Ring::default();
+        r.gap(4);
+        r.push(&"\u{e4}".as_bytes()[..1]);
+        r.gap(1);
+        r.push(b"x");
+        let a = r.read(READ_MAX);
+        assert_eq!((a.text.as_str(), a.dropped), ("\u{fffd}", 4));
+        let b = r.read(READ_MAX);
+        assert_eq!((b.text.as_str(), b.dropped), ("x", 1));
     }
 
     /// A character the read would split waits for the next one.

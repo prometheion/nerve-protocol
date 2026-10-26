@@ -107,7 +107,8 @@ pub struct Link {
     streams: Mutex<HashMap<u32, Arc<Ring>>>,
     /// `stream.open` requests waiting for their `sid`, by request id: the
     /// answer puts the ring in `streams` before the next frame is read.
-    opening: Mutex<HashMap<u64, Arc<Ring>>>,
+    /// None once the opener gave up: the answer then opens nothing.
+    opening: Mutex<HashMap<u64, Option<Arc<Ring>>>>,
 }
 
 /// The connection a link is on, and what it counts for a resume.
@@ -559,12 +560,11 @@ impl Link {
         // An opened stream is known before its first frame is read, which
         // may follow the answer at once. One lock at a time: `open_stream`
         // takes them the other way round.
-        let opened = self.opening.lock().unwrap().remove(n);
+        let opened = self.opening.lock().unwrap().remove(n).flatten();
         let waited = self.pending.lock().unwrap().contains_key(n);
         if let Some(ring) = opened.filter(|_| waited)
             && let Ok(v) = &r
-            && let Some(sid) = v.get("sid").and_then(Value::as_u64)
-            && let Ok(sid) = u32::try_from(sid)
+            && let Some(sid) = sid_of(v)
         {
             self.streams.lock().unwrap().insert(sid, ring);
         }
@@ -577,7 +577,7 @@ impl Link {
     /// frames go to `ring`, waiting up to `wait` for the answer: its `sid`.
     /// A link that is down now opens none: streams end with a connection.
     pub async fn open_stream(
-        &self,
+        self: &Arc<Self>,
         params: Value,
         ring: Arc<Ring>,
         wait: Duration,
@@ -585,10 +585,10 @@ impl Link {
         if !self.is_live() {
             return Err(lost());
         }
-        let (tx, rx) = oneshot::channel();
+        let (tx, mut rx) = oneshot::channel();
         // The ring is in place before the request can be answered.
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        self.opening.lock().unwrap().insert(id, ring);
+        self.opening.lock().unwrap().insert(id, Some(ring));
         self.pending.lock().unwrap().insert(id, tx);
         let mut unsent = Unsent {
             link: self,
@@ -599,13 +599,39 @@ impl Link {
             return Err(lost());
         }
         unsent.id = None;
-        let r = self.finish(id, rx, Some(wait)).await;
+        let r = match tokio::time::timeout(wait, &mut rx).await {
+            Ok(r) => r.unwrap_or_else(|_| Err(lost())),
+            Err(_) => {
+                // The node may still open it, and nobody would read it: it
+                // would hold one of the link's stream places until its
+                // command ends. Its answer frames nothing here and closes it
+                // there; the request still waits for it, as a stream.open
+                // is not cancelled.
+                let abandoned = match self.opening.lock().unwrap().get_mut(&id) {
+                    Some(ring) => ring.take().is_some(),
+                    None => false,
+                };
+                if !abandoned {
+                    // The answer is being taken in right now.
+                    rx.await.unwrap_or_else(|_| Err(lost()))
+                } else {
+                    let link = self.clone();
+                    tokio::spawn(async move {
+                        if let Ok(Ok(v)) = rx.await
+                            && let Some(sid) = sid_of(&v)
+                        {
+                            link.close_stream(sid, "nobody waits for it").await;
+                        }
+                    });
+                    return Err(RpcError::new(
+                        ErrorCode::Timeout,
+                        "the node did not answer in time",
+                    ));
+                }
+            }
+        };
         self.opening.lock().unwrap().remove(&id);
-        let v = r?;
-        v.get("sid")
-            .and_then(Value::as_u64)
-            .and_then(|s| u32::try_from(s).ok())
-            .ok_or_else(|| RpcError::internal("the node answered stream.open without a sid"))
+        sid_of(&r?).ok_or_else(|| RpcError::internal("the node answered stream.open without a sid"))
     }
 
     /// A stream frame from the node: data or a gap for its ring. A frame
@@ -726,6 +752,13 @@ pub fn by_node(e: &RpcError) -> bool {
 
 fn lost() -> RpcError {
     RpcError::new(ErrorCode::ConnectionLost, "the link to the node ended")
+}
+
+/// The `sid` a `stream.open` answer names.
+fn sid_of(v: &Value) -> Option<u32> {
+    v.get("sid")
+        .and_then(Value::as_u64)
+        .and_then(|s| u32::try_from(s).ok())
 }
 
 async fn send_text(ws: &mut WebSocketStream<BoxIo>, m: Message) -> Result<(), String> {
@@ -1326,5 +1359,100 @@ mod tests {
         assert_eq!(e.kind(), ErrorCode::ConnectionLost);
         link.reply(&Id::Num(id), Ok(json!({"sid": 1})));
         assert_eq!(link.stream_count(), 0);
+    }
+
+    /// The request a link sent next: its id, method and params.
+    async fn sent(rx: &mut mpsc::Receiver<Out>) -> (u64, String, Value) {
+        let m = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        let Ok(Some(Out::Frame(m))) = m else {
+            panic!("nothing sent")
+        };
+        let Ok(Message::Request {
+            id: Id::Num(id),
+            method,
+            params,
+        }) = Message::decode(m.to_text().unwrap())
+        else {
+            panic!("{m:?}")
+        };
+        (id, method, Value::Object(params))
+    }
+
+    /// A `stream.open` whose answer comes after its opener gave up opens
+    /// nothing here, and the node is told to close the stream it opened:
+    /// nobody reads it, and it would hold one of the link's stream places.
+    #[tokio::test]
+    async fn a_stream_open_answered_late_is_closed_on_the_node() {
+        let (out, mut rx) = mpsc::channel(8);
+        let link = Arc::new(Link::new(
+            "n1",
+            String::new(),
+            false,
+            Limits::default(),
+            out,
+            None,
+        ));
+        let ring = Arc::new(Ring::default());
+        let e = link
+            .open_stream(json!({}), ring.clone(), Duration::from_millis(50))
+            .await
+            .expect_err("no answer in time");
+        assert_eq!(e.kind(), ErrorCode::Timeout);
+        let (id, method, _) = sent(&mut rx).await;
+        assert_eq!(method, method::STREAM_OPEN);
+        link.reply(&Id::Num(id), Ok(json!({"sid": 7})));
+        assert_eq!(link.stream_count(), 0, "it frames nothing here");
+        let (_, method, params) = sent(&mut rx).await;
+        assert_eq!(method, method::STREAM_CLOSE);
+        assert_eq!(params["sid"], 7);
+        assert!(!ring.ended(), "the opener may ask again");
+    }
+
+    /// An open stream ends when its connection drops: when the link is
+    /// parked, and when the node resumes it before the center saw the old
+    /// connection go. The node ended it with that connection.
+    #[tokio::test]
+    async fn a_resumed_link_ends_its_streams() {
+        for parked in [true, false] {
+            let (out, mut rx) = mpsc::channel(8);
+            let link = Arc::new(Link::new(
+                "n1",
+                String::new(),
+                false,
+                Limits::default(),
+                out,
+                Some("l-1".into()),
+            ));
+            let conn = link.wire.lock().unwrap().conn;
+            assert!(link.take_frame(conn, true));
+            let opener = {
+                let link = link.clone();
+                tokio::spawn(async move {
+                    let ring = Arc::new(Ring::default());
+                    let sid = link
+                        .open_stream(json!({}), ring.clone(), Duration::from_secs(10))
+                        .await;
+                    (sid, ring)
+                })
+            };
+            let (id, _, _) = sent(&mut rx).await;
+            link.reply(&Id::Num(id), Ok(json!({"sid": 3})));
+            let (sid, ring) = opener.await.unwrap();
+            assert_eq!(sid.unwrap(), 3);
+            link.stream_frame(&nerve_proto::frame::stream_frame(3, 0, b"hi".to_vec()));
+            if parked {
+                assert!(link.park(conn));
+                assert!(ring.ended(), "parked");
+            }
+            let (out, _rx) = mpsc::channel(8);
+            link.resume(out, 1).unwrap();
+            assert_eq!(link.stream_count(), 0);
+            let r = ring.read(64);
+            assert_eq!(
+                (r.text.as_str(), r.eof, r.why.as_deref()),
+                ("hi", true, Some("the link to the node dropped")),
+                "parked: {parked}"
+            );
+        }
     }
 }
