@@ -54,7 +54,8 @@ pub enum PathArgs {
     /// No path, no working directory and no command: a provider's action.
     None,
     /// Paths, and whether every one lies in a folder whose flag allows what
-    /// the call does there.
+    /// the call does there, and an execute call's working directory in one
+    /// with `x`.
     Some { all_in_folders: bool },
 }
 
@@ -70,31 +71,39 @@ pub enum Need {
     InFolders,
     /// The owner's `on` for it, which it does not have.
     NeedsOn,
+    /// The owner to switch it back: it is set to `off` or `hidden`, and
+    /// nothing allows it then.
+    Off,
 }
 
 /// The effect table: what `mode` lets a call of `effect` do, with `paths`
 /// and the owner's `setting` for its `cap.action`. It is the one place that
 /// says so: [`decide`] follows it, and the node's descriptor offers an
-/// action by it, so what a center is shown is what a call may do.
+/// action by it, so what a center is shown is what a call may do. The one
+/// exception lies outside the table: on a machine that cannot confine a
+/// command, `folder` mode offers no `exec` action (with an empty sudo
+/// allow list), so `exec.signal` set to `on` is not shown there though a
+/// call of it would be allowed; no command can run there to signal.
 ///
 /// | effect | `allowlist` | `folder` | `user` |
 /// |---|---|---|---|
 /// | read, write, execute | allow rule | paths in the folders; no path: `on` | allowed |
 /// | sense, actuate | allow rule | `on` | `on` |
 ///
-/// `on` never widens what the folders refuse. `off` and `hidden` are
-/// decided before the table (the call is disabled), and the sudo allow list
-/// beside it; a command in `folder` mode also needs to be confined.
+/// `on` never widens what the folders refuse. `off` and `hidden` give
+/// [`Need::Off`] in every cell ([`decide`] disables such a call before it
+/// asks); the sudo allow list decides beside the table, and a command in
+/// `folder` mode also needs to be confined.
 pub fn effect_rule(
     mode: Mode,
     effect: Effect,
     paths: PathArgs,
     setting: Option<CapSetting>,
 ) -> Need {
-    let on = if setting == Some(CapSetting::On) {
-        Need::Allowed
-    } else {
-        Need::NeedsOn
+    let on = match setting {
+        Some(CapSetting::Off | CapSetting::Hidden) => return Need::Off,
+        Some(CapSetting::On) => Need::Allowed,
+        None => Need::NeedsOn,
     };
     match (mode, effect, paths) {
         (Mode::Allowlist, _, _) => Need::AllowRule,
@@ -398,6 +407,22 @@ pub fn decide(policy: &CenterPolicy, env: &Env, call: &Call) -> Decision {
             reasons.push(format!("writes to {tc} run code later"));
         }
     }
+    // A command runs in its working directory whatever access its call
+    // site gave that path, so only `x` releases it.
+    if let Some(cwd) = call.cwd
+        && !call
+            .targets
+            .iter()
+            .any(|t| t.access == PathAccess::Run && t.path == cwd)
+        && let Some(entry) = env.protected.check_run(cwd, &policy.folders)
+    {
+        allowed = false;
+        let why = format!("{} is protected ({})", cwd.display(), entry.display());
+        // A target at the same path may have said so already.
+        if !reasons.contains(&why) {
+            reasons.push(why);
+        }
+    }
 
     if allowed {
         Decision::Allow
@@ -491,11 +516,16 @@ fn by_mode(
     reasons: &mut Vec<String>,
 ) -> bool {
     let pathless = call.targets.is_empty() && call.cwd.is_none() && call.command.is_none();
+    let outside = if pathless {
+        None
+    } else {
+        outside_folders(policy, call)
+    };
     let paths = if pathless {
         PathArgs::None
     } else {
         PathArgs::Some {
-            all_in_folders: in_folders(policy, call),
+            all_in_folders: outside.is_none(),
         }
     };
     let setting = policy.cap_setting(call.cap, Some(call.action));
@@ -529,31 +559,41 @@ fn by_mode(
             false
         }
         Need::InFolders => {
-            reasons.push(match call.effect {
-                Effect::Write => "outside the folders that allow writing".into(),
-                Effect::Execute => {
+            reasons.push(match outside {
+                Some(PathAccess::Write) => "outside the folders that allow writing".into(),
+                Some(PathAccess::Run) => {
                     "the working directory is not in a folder that allows running".into()
                 }
                 _ => "outside the folders that allow reading".into(),
             });
             false
         }
+        // `decide` disables such a call before it asks the mode.
+        Need::Off => {
+            reasons.push(format!("{}.{} is off", call.cap, call.action));
+            false
+        }
     }
 }
 
-/// Whether every path of `call` lies in a folder that allows what it does
-/// there: for a command its working directory, in a folder with `x`; for
-/// any other call each target, by the flag its access needs (each flag
-/// stands alone: writing needs `w` and no `r`, reading `r` and no `w`).
-fn in_folders(policy: &CenterPolicy, call: &Call) -> bool {
-    if call.effect == Effect::Execute {
-        call.cwd
-            .is_some_and(|c| reaches(&policy.folders, c, PathAccess::Run))
-    } else {
-        call.targets
-            .iter()
-            .all(|t| reaches(&policy.folders, &t.path, t.access))
+/// What `call` does at the first of its paths that lies in no folder
+/// allowing it there, or `None` when every one does. An execute call needs
+/// its working directory in a folder with `x`, and every call each target
+/// in a folder with the flag its access needs (each flag stands alone:
+/// writing needs `w` and no `r`, reading `r` and no `w`).
+fn outside_folders(policy: &CenterPolicy, call: &Call) -> Option<PathAccess> {
+    let folders = &policy.folders;
+    if call.effect == Effect::Execute
+        && !call
+            .cwd
+            .is_some_and(|c| reaches(folders, c, PathAccess::Run))
+    {
+        return Some(PathAccess::Run);
     }
+    call.targets
+        .iter()
+        .find(|t| !reaches(folders, &t.path, t.access))
+        .map(|t| t.access)
 }
 
 #[cfg(test)]
@@ -790,6 +830,14 @@ mod tests {
                 let with_on = if need == NeedsOn { Allowed } else { need };
                 let on = Some(CapSetting::On);
                 assert_eq!(effect_rule(mode, effect, paths, on), with_on, "{what}");
+                // A switched-off action is allowed in no cell.
+                for off in [CapSetting::Off, CapSetting::Hidden] {
+                    assert_eq!(
+                        effect_rule(mode, effect, paths, Some(off)),
+                        Need::Off,
+                        "{what}"
+                    );
+                }
                 for setting in [None, on] {
                     for allow in [&[][..], &["echo.say"][..], &["echo"][..], &["echo.x"][..]] {
                         for confined in [true, false] {
@@ -818,7 +866,7 @@ mod tests {
                                         || paths == PathArgs::None
                                 }
                                 AllowRule => matches!(allow, ["echo.say"] | ["echo"]),
-                                InFolders | NeedsOn => false,
+                                InFolders | NeedsOn | Need::Off => false,
                             };
                             let d = decide(&p, &x.env(confined), &call);
                             assert_eq!(
@@ -1134,6 +1182,100 @@ mod tests {
         assert_eq!(
             run(&p, &env, &call(Effect::Read, &run_there, None)),
             "refused"
+        );
+        // A command runs in its working directory whatever access its call
+        // site gave that path, or none: `r` does not release it.
+        let cwd_as_read = [at("/h/.ssh", PathAccess::Read)];
+        for targets in [&cwd_as_read[..], &[][..]] {
+            let c = Call {
+                cwd: Some(Path::new("/h/.ssh")),
+                ..call(Effect::Execute, targets, Some("ls"))
+            };
+            assert_eq!(run(&p, &env, &c), "refused", "{targets:?}");
+            let d = decide(&p, &env, &c);
+            assert_eq!(
+                d,
+                Decision::Forbidden("/h/.ssh is protected (/h/.ssh)".into()),
+                "{targets:?}"
+            );
+            // `x` does.
+            let mut p = p.clone();
+            p.folders[0].access = acc("rx");
+            assert_eq!(run(&p, &env, &c), "allow", "{targets:?}");
+            // With no release, the place is named once.
+            p.folders.clear();
+            assert_eq!(
+                decide(&p, &env, &c),
+                Decision::Forbidden("/h/.ssh is protected (/h/.ssh)".into()),
+                "{targets:?}"
+            );
+        }
+    }
+
+    /// In folder mode an execute call needs its working directory in a
+    /// folder with `x`, and every other path it names in a folder with the
+    /// flag for what it does there.
+    #[test]
+    fn an_execute_call_needs_each_of_its_paths_in_the_folders() {
+        let x = T::new();
+        let env = x.env(true);
+        let p = policy(Mode::Folder);
+        let at = |path: &str, access| Target {
+            path: path.into(),
+            access,
+        };
+        let cases = [
+            (vec![at("/w/rw", PathAccess::Run)], Decision::Allow),
+            (
+                vec![
+                    at("/w/rw", PathAccess::Run),
+                    at("/w/ro/a", PathAccess::Read),
+                ],
+                Decision::Allow,
+            ),
+            (
+                vec![
+                    at("/w/rw", PathAccess::Run),
+                    at("/elsewhere/a", PathAccess::Write),
+                ],
+                Decision::Forbidden("outside the folders that allow writing".into()),
+            ),
+            (
+                vec![
+                    at("/w/rw", PathAccess::Run),
+                    at("/w/ro/a", PathAccess::Write),
+                ],
+                Decision::Forbidden("outside the folders that allow writing".into()),
+            ),
+            (
+                vec![
+                    at("/w/rw", PathAccess::Run),
+                    at("/elsewhere/a", PathAccess::Read),
+                ],
+                Decision::Forbidden("outside the folders that allow reading".into()),
+            ),
+        ];
+        for (targets, want) in cases {
+            let c = Call {
+                cwd: Some(Path::new("/w/rw")),
+                ..call(Effect::Execute, &targets, Some("make"))
+            };
+            assert_eq!(decide(&p, &env, &c), want, "{targets:?}");
+        }
+        // The working directory is asked first, and stays needed.
+        let ro = [
+            at("/w/ro", PathAccess::Run),
+            at("/w/rw/a", PathAccess::Write),
+        ];
+        let c = Call {
+            cwd: Some(Path::new("/w/ro")),
+            ..call(Effect::Execute, &ro, Some("make"))
+        };
+        assert_eq!(
+            decide(&p, &env, &c),
+            Decision::Forbidden(
+                "the working directory is not in a folder that allows running".into()
+            )
         );
     }
 

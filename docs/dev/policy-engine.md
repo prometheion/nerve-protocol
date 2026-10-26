@@ -169,29 +169,36 @@ on `<cap>.<action>`.
 What each mode lets an action do depends only on its effect and on whether it
 names paths. One function holds this table, `nerve_policy::effect_rule(mode,
 effect, paths, setting)`. Step 6 of `decide` follows it, and the descriptor
-offers an action by it, so the two cannot drift apart.
+offers an action by it, so the two cannot drift apart. One thing lies outside
+the table: on a machine that cannot confine a command, `folder` mode with an
+empty sudo allow list offers no `exec` action, so `exec.signal` set to `on` is
+not shown there, though `decide` would allow a call of it. No command can run
+there, so there is nothing to signal.
 
 | Effect | `allowlist` | `folder` | `user` |
 |---|---|---|---|
-| `read`, `write`, `execute` with paths | an allow rule | every path in a folder with the matching flag | allowed |
+| `read`, `write`, `execute` with paths | an allow rule | every path in a folder with the matching flag (for `execute` also the working directory in one with `x`) | allowed |
 | `read`, `write`, `execute` without a path | an allow rule | `on` | allowed |
 | `sense`, `actuate` | an allow rule | `on` | `on` |
 
 - `paths` is `PathArgs::None` for an action with no path, no working directory
   and no command, else `PathArgs::Some { all_in_folders }`.
 - The answer is a `Need`: `Allowed`; `AllowRule`, when the allow rules decide;
-  `InFolders`, when a path lies outside the folders; or `NeedsOn`, when only
-  the owner's `on` allows it and it is not set.
+  `InFolders`, when a path lies outside the folders; `NeedsOn`, when only
+  the owner's `on` allows it and it is not set; or `Off`, when the action is
+  set to `off` or `hidden`.
 - `on` turns `NeedsOn` into `Allowed` and changes no other cell. It never
-  widens what the folders refuse.
-- Around the table, `off` and `hidden` (step 3), deny rules (step 5) and
-  protected paths (step 7) win as before. A sudo command goes by the sudo list
+  widens what the folders refuse. `off` and `hidden` turn every cell into
+  `Off`.
+- Around the table, `off` and `hidden` (step 3, before the table is asked),
+  deny rules (step 5) and protected paths (step 7) win as before. A sudo command goes by the sudo list
   instead. In `folder` mode a command also needs confinement.
 
 Each path of a call is a `Target` with an access: `Read` needs `r`, `Write`
 needs `w`, and `Run` needs `x`. `Run` is the working directory of `exec.run`.
 The same access picks the protected check: a `Run` target is released only by
-a folder with `x`.
+a folder with `x`. A command's working directory is held to `x` whatever
+access its call gives that path.
 
 For the descriptor, `fs` and `exec.run` ask the table with
 `all_in_folders: true`, since they name their paths per call: they are

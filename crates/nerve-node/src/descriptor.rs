@@ -480,7 +480,10 @@ fn exposure(entry: &CenterEntry, id: &str) -> Option<Exposure> {
 /// still checked), and for `exec.run` also when the sudo allow list has an
 /// entry, since a sudo command runs by that list alone. In `folder` and
 /// `user` mode the allow rules do not count, so the action is offered, except
-/// `exec` in `folder` mode on a machine that cannot confine a command, and an
+/// `exec` in `folder` mode on a machine that cannot confine a command (all of
+/// it: `exec.signal` too, though `decide` lets a call of it through when it is
+/// on, since no command can run there to signal; the one place outside the
+/// table), and an
 /// action that senses or actuates (`exec.signal`), which no mode allows unless
 /// the owner set it to on. An action set to off stays, and fails `disabled`.
 ///
@@ -526,7 +529,7 @@ fn offered(
     match effect_rule(mode, effect, paths, setting) {
         Need::Allowed => true,
         Need::AllowRule => rules::offers(&policy.allow, cap, action) || sudo,
-        Need::InFolders | Need::NeedsOn => false,
+        Need::InFolders | Need::NeedsOn | Need::Off => false,
     }
 }
 
@@ -1135,6 +1138,47 @@ mod tests {
         );
     }
 
+    /// The one place outside the effect table: on a machine that cannot
+    /// confine a command, `folder` mode with an empty sudo allow list offers
+    /// no `exec` action, `exec.signal` set to on included, though `decide`
+    /// lets a call of it through (no command can run there to signal).
+    /// Confined, or with a sudo allow list, it is offered as `decide` allows.
+    #[test]
+    fn exec_signal_goes_with_exec_where_commands_cannot_be_confined() {
+        use nerve_policy::protected::{Platform, Protected};
+        use nerve_policy::{Call, Decision, Env, decide};
+        let home = std::path::Path::new("/h");
+        let prot = Protected::new(&Platform::Unix, home, &[], &Default::default());
+        let env = Env {
+            home,
+            protected: &prot,
+            unconfined: Some("commands cannot be confined here"),
+            sudo: false,
+            shell: nerve_policy::command::Shell::native(),
+        };
+        let call = Call {
+            cap: "exec",
+            action: "signal",
+            effect: Effect::Actuate,
+            targets: &[],
+            command: None,
+            cwd: None,
+            now_ms: 0,
+        };
+        let cfg = NodeConfig::default();
+        let mut e = entry();
+        e.policy.mode = Mode::Folder;
+        e.policy.caps.insert("exec.signal".into(), CapSetting::On);
+        assert_eq!(decide(&e.policy, &env, &call), Decision::Allow);
+        assert!(actions(&for_center(&cfg, &e, 0, false, &[]), "exec").is_empty());
+        let shown = |e: &CenterEntry, confined| {
+            actions(&for_center(&cfg, e, 0, confined, &[]), "exec").contains(&"signal".into())
+        };
+        assert!(shown(&e, true));
+        e.policy.sudo_allow = rules(&["sudo apt *"]);
+        assert!(shown(&e, false));
+    }
+
     /// A provider's capability with one action of `effect`.
     fn provided(effect: Effect) -> Capability {
         let mut c = cap("echo", "", Exposure::On, "Says it back.");
@@ -1249,7 +1293,7 @@ mod tests {
     /// allows, while it allows one outside them as the table says.
     #[test]
     fn what_is_offered_follows_the_effect_table() {
-        use Need::{AllowRule, Allowed, InFolders, NeedsOn};
+        use Need::{AllowRule, Allowed, InFolders, NeedsOn, Off};
         use nerve_policy::protected::{Platform, Protected};
         use nerve_policy::{Call, Decision, Env, PathAccess, Target, decide};
         let home = std::path::Path::new("/h");
@@ -1306,7 +1350,8 @@ mod tests {
             (Mode::User, Effect::Sense, NeedsOn, NeedsOn, NeedsOn),
             (Mode::User, Effect::Actuate, NeedsOn, NeedsOn, NeedsOn),
         ];
-        // The cell for a call, `on` applied; the table function agrees.
+        // The cell for a call, `on`, `off` and `hidden` applied; the table
+        // function agrees.
         let need = |mode, effect, paths, setting| {
             let (.., none, inside, outside) = *table
                 .iter()
@@ -1321,9 +1366,10 @@ mod tests {
                     all_in_folders: false,
                 } => outside,
             };
-            let cell = match cell {
-                NeedsOn if setting == Some(CapSetting::On) => Allowed,
-                cell => cell,
+            let cell = match (cell, setting) {
+                (_, Some(CapSetting::Off | CapSetting::Hidden)) => Off,
+                (NeedsOn, Some(CapSetting::On)) => Allowed,
+                (cell, _) => cell,
             };
             assert_eq!(effect_rule(mode, effect, paths, setting), cell);
             cell
@@ -1366,7 +1412,7 @@ mod tests {
                                         Need::AllowRule => {
                                             allow.len() == 1 && allow[0] != "echo.other"
                                         }
-                                        Need::InFolders | Need::NeedsOn => false,
+                                        Need::InFolders | Need::NeedsOn | Need::Off => false,
                                     };
                             assert_eq!(allowed, want, "{what}");
                             rows += 1;
@@ -1393,7 +1439,7 @@ mod tests {
                                             confined || cap != "exec" || mode != Mode::Folder
                                         }
                                         AllowRule => covered,
-                                        InFolders | NeedsOn => false,
+                                        InFolders | NeedsOn | Off => false,
                                     }
                             };
                             assert_eq!(shown_on(&d, cap, action), by_table(true), "{what}");
