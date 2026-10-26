@@ -115,6 +115,12 @@ runs it only when it is set to `on`, whatever its effect.
   for stderr.
 - `exec.signal` is offered only where the policy allows it: by an allow rule in
   `allowlist` mode, with `caps.exec.signal = on` in `folder` and `user` mode.
+  On the wire its `call` is the `invoke` id of a running `exec.run`; the
+  center offers it to the agent with the job's id instead and maps it
+  ([harness spec §4.4](spec/harness.md#44-jobs)).
+- `job` and `stream` are no capability of a node: the center serves `job.status`
+  and `job.cancel` itself, and keeps `stream` for streams. A node's capability
+  of either name is not offered, and a node refuses a provider of these names.
 - Every command has a time limit: `timeout_ms`, else the node's default, and
   never more than the node's maximum (the owner's `limits` in `node.toml`).
   The schema gives the default as `default` and the most in the

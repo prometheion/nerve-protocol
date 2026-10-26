@@ -41,3 +41,5 @@ libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# The paused clock, for the ten minutes a job's result is kept (no new crate).
+tokio = { workspace = true, features = ["test-util"] }

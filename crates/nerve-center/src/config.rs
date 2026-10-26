@@ -60,6 +60,12 @@ pub struct Args {
     /// secret that logs in to the web UI, besides tokens made in the web UI.
     #[arg(long, env = "NERVE_HARNESS_TOKEN", hide_env_values = true)]
     pub harness_token: Option<String>,
+    /// How long `execute` waits for a call's result: a call still running
+    /// then becomes a job, whose id `execute` answers at once (`20`, `20s`
+    /// or `500ms`; 10 ms to 600 s). Keep it below your harness's own timeout
+    /// for a tool call.
+    #[arg(long, env = "NERVE_CALL_WAIT", default_value = "20s", value_parser = crate::jobs::parse_wait)]
+    pub call_wait: std::time::Duration,
     /// The log level (error, warn, info, debug). Without it the level set in
     /// the web UI holds, info at first; with it this level holds for this run.
     #[arg(long, env = "NERVE_LOG")]
@@ -242,6 +248,10 @@ mod tests {
         assert_eq!(a.mcp, McpMode::Stdio);
         assert_eq!(a.listen, "0.0.0.0:7443");
         assert!(!a.ui_off());
+        assert_eq!(a.call_wait, crate::jobs::CALL_WAIT);
+        let a = Args::try_parse_from(["nerve-center", "--call-wait", "500ms"]).unwrap();
+        assert_eq!(a.call_wait, std::time::Duration::from_millis(500));
+        assert!(Args::try_parse_from(["nerve-center", "--call-wait", "0"]).is_err());
         let a = Args::try_parse_from([
             "nerve-center",
             "--plain-loopback",

@@ -44,6 +44,7 @@ Open `http://127.0.0.1:7480` to [pair a machine](pairing.md).
 | `--mcp` | `NERVE_MCP` | `stdio` | `stdio`, `http` or `none` |
 | `--mcp-listen` | `NERVE_MCP_LISTEN` | `127.0.0.1:7481` | Address of the HTTP MCP endpoint |
 | `--harness-token` | `NERVE_HARNESS_TOKEN` | none | A [harness token](harness.md#tokens) |
+| `--call-wait` | `NERVE_CALL_WAIT` | `20s` | How long a call may run before `execute` answers with a job instead ([long calls](harness.md#long-calls-become-jobs)): `20`, `20s` or `500ms`, 10 ms to 600 s. Keep it below the time your harness gives a tool call |
 | `--log` | `NERVE_LOG` | the level set in the web UI, `info` at first | `error`, `warn`, `info` or `debug`; wins over the stored level for this run. The [log](logs.md) goes to stderr and to `log.jsonl` |
 
 `nerve-center --help` prints the same list.

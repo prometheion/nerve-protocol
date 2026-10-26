@@ -123,7 +123,9 @@ What `list` shows follows what the machines allow:
   handle is not offered, even with an allow rule. The center's web UI lists
   it with the reason on the Overview, under **Not offered to the agent**
   ([web UI](web-ui.md#overview)).
-- `exec.signal` is not offered for now.
+- Beside a machine's own capabilities `list` names `job.status` and
+  `job.cancel`: the center answers them itself (below). `exec.signal` is
+  offered where you allowed it, and takes a job's id.
 - The machine's own settings, its rules and its audit log are never offered,
   so the model cannot change what limits it.
 
@@ -182,6 +184,8 @@ what to do:
 | `error unknown_node: there is no node "box1" (did you mean "box-1"?); the nodes are …` | No paired machine has that name or id. A likely misspelling gets the name it was meant to be, but never a machine with another number (`box-3` gets no `box-1`) or one of two equally close names |
 | `error unavailable: …` | The machine is disabled in the center, or offline |
 | `error forbidden: "exec.run" is turned off on node box-1 by its owner.` | You turned the capability off |
+| `error unknown_job: node box-1 has no job "j-…" of this session: …` | The job's id is wrong or another session's, or its result was given already or not read for 10 minutes |
+| `error busy: this session has 16 calls running, …` | The session runs 16 calls at once already (below) |
 
 The model reads these and calls `list` again, or fixes the name or the
 arguments.
@@ -196,8 +200,41 @@ error forbidden: the center's action checker refused this call: it is on the cen
 You change that on the center, not on the machine
 ([troubleshooting](troubleshooting.md#the-centers-action-checker-refuses-a-call)).
 
+## Long calls become jobs
+
+A harness gives up on a tool call after a while, often a minute, while a
+build or a test run may take longer. So `execute` waits for a result at most
+the center's call wait, 20 seconds unless you set another (`--call-wait`,
+`NERVE_CALL_WAIT`, [center](center.md)). A call still running then becomes a
+**job**: `execute` answers at once with its id and the calls that follow it
+up, and the call runs on.
+
+```
+exec.run on node box-1 still runs after 20 s, so it became job j-4kq2…: it runs on. Call execute with node "box-1", capability "job.status" and args {"job": "j-4kq2…"} for its state, or its result once it ended …
+```
+
+| Call | Does |
+|---|---|
+| `job.status` with `{"job": "j-…"}` | Says the job still runs, or gives its result once it ended, as `execute` would have. `"wait_ms"` waits for the end, at most the call wait |
+| `job.cancel` with `{"job": "j-…"}` | Stops the job: the machine cancels its call, which ends a command |
+| `exec.signal` with `{"job": "j-…", "signal": "term"}` | Sends a command that runs as a job a signal: `term` asks it to stop, `int` interrupts it, `kill` ends it. Only where you allowed `exec.signal` ([stop](stop.md)); the job's answer names it only there |
+
+The center answers `job.status` and `job.cancel` itself, without the
+machine, the action checker or the statistics; `exec.signal` goes to the
+machine like any call. A job belongs to its session: another session cannot
+read, stop or signal it. `job.status` and `job.cancel` keep working when the
+machine offers nothing any more while a job runs (its `until` passed, you
+turned everything off); **Disable** in the center stops the machine's jobs.
+A session runs at most 16 calls at once, and every `busy` answer to it, the
+refusal of a 17th too, names its running jobs
+([limits](limits.md#calls-of-one-agent-session)). A finished
+job's result is kept in the center's memory only, until it is read once, for
+10 minutes, or until the session ends, and at most 4 MiB of results per
+session. When the machine's link drops and does not come back, its jobs are
+lost; a link the machine resumes keeps them.
+
 ## Sessions
 
 Each MCP connection is one session. The center tells the machines a session
-used when it ends, and they stop that session's commands. End a session by
-hand in the web UI, Overview, Sessions.
+used when it ends, and they stop that session's commands; its jobs stop too.
+End a session by hand in the web UI, Overview, Sessions.

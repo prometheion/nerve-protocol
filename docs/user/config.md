@@ -125,9 +125,14 @@ agent must list `exec.run` again before its next command here. The most is
 said in words, not as a `maximum`, since a larger `timeout_ms` is cut to it,
 not refused. The agent lists `exec.run` per machine, so it never reads one
 machine's numbers for another. A limit is at least 1 second;
-for a long job, set a large maximum and not none. The settings are left out of
+for a long build, set a large maximum and not none. The settings are left out of
 `node.toml` while they are the defaults, so `config get` shows them only once
 you set them. A command already running keeps the limit it started with.
+
+The agent's tool call does not wait as long as a command may run: after the
+center's call wait (20 seconds unless set with `--call-wait`) the command
+becomes a job, which runs on while the agent follows it up
+([long calls](harness.md#long-calls-become-jobs)).
 
 ## Do not edit the file by hand
 

@@ -25,7 +25,8 @@ use crate::checker::{
     self, AllowRule, CallInfo, Checker, CheckerConfig, Decision, Endpoint, Layer, LocalModel,
     ModelSource, NodeSettings, NodeSwitch, Scope,
 };
-use crate::link::{Link, SHORT_CALL};
+use crate::jobs::{self, Jobs, Stop};
+use crate::link::{Link, SHORT_CALL, calls_kept};
 use crate::listing;
 use crate::pairing::{Codes, Outcome};
 use crate::store::{KeyRotation, NodeRecord, OldKey, Store};
@@ -120,6 +121,9 @@ pub struct Inner {
     dead_after_ms: AtomicU64,
     /// How long a dropped link waits for its resume, in milliseconds.
     grace_ms: AtomicU64,
+    /// How long `execute` waits for a result before the call becomes a job,
+    /// in milliseconds (`--call-wait`).
+    call_wait_ms: AtomicU64,
     /// The action checker (issue #17), rebuilt when its config changes.
     checker: Mutex<Arc<Checker>>,
     /// The local llama-server the checker runs, when the model is on and its
@@ -235,6 +239,9 @@ pub struct Session {
     /// Locked on its own: never while the state is held (see
     /// `Inner::store`), so the hashes are copied out of the state first.
     fetched: Mutex<Fetched>,
+    /// The session's calls and the jobs they became (crate::jobs). Locked
+    /// on its own, like `fetched`.
+    pub jobs: Mutex<Jobs>,
 }
 
 /// The most units a session remembers having been shown; past it the one
@@ -287,6 +294,32 @@ impl Session {
     }
 }
 
+/// How a call of a unit (an `execute`) came out within its wait.
+#[derive(Debug)]
+pub enum Ran {
+    Done(Result<Value, CallError>),
+    /// It runs on as the job with this id.
+    Job(String),
+}
+
+/// A call whose `execute` waits for it; dropped before the call ended or
+/// became a job (the harness cancelled its request), it stops the call.
+struct Held {
+    sess: Arc<Session>,
+    id: Option<String>,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            let stop = self.sess.jobs.lock().unwrap().abandon(&id);
+            if let Some(stop) = stop {
+                let _ = stop.send(Stop::Abandoned);
+            }
+        }
+    }
+}
+
 /// Why a call of a unit (an `execute`) did not produce a result.
 #[derive(Debug)]
 pub enum CallError {
@@ -306,9 +339,10 @@ impl std::ops::Deref for Center {
     }
 }
 
-/// An `invoke` whose reply has not come. Dropped before it comes (the
-/// harness cancelled the call), it tells the node to cancel the request, so
-/// a command does not run on for nobody.
+/// An `invoke` whose reply has not come. Dropped before it comes (the call
+/// was stopped: `job.cancel`, the session's end, or the harness cancelled
+/// its request before the call became a job), it tells the node to cancel
+/// the request, so a command does not run on for nobody.
 struct Waiting {
     link: Option<Arc<Link>>,
     id: u64,
@@ -465,6 +499,7 @@ impl Center {
             pair_log: Mutex::new(Quiet::default()),
             dead_after_ms: AtomicU64::new(crate::link::DEAD_AFTER.as_millis() as u64),
             grace_ms: AtomicU64::new(nerve_proto::resume::GRACE.as_millis() as u64),
+            call_wait_ms: AtomicU64::new(jobs::CALL_WAIT.as_millis() as u64),
             checker: Mutex::new(Arc::new(Checker::build(CheckerConfig::default(), None))),
             local_model: Mutex::new(None),
             local_sig: Mutex::new(String::new()),
@@ -523,6 +558,18 @@ impl Center {
     #[doc(hidden)]
     pub fn set_resume_grace(&self, d: Duration) {
         self.grace_ms.store(d.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// How long `execute` waits for a result before the call becomes a job
+    /// (docs/dev/spec/harness.md §4.4).
+    pub fn call_wait(&self) -> Duration {
+        Duration::from_millis(self.call_wait_ms.load(Ordering::Relaxed))
+    }
+
+    /// Sets the call wait (`--call-wait`).
+    pub fn set_call_wait(&self, d: Duration) {
+        self.call_wait_ms
+            .store(d.as_millis() as u64, Ordering::Relaxed);
     }
 
     /// Whether the `--log` flag was given, so that the level in the settings
@@ -1552,12 +1599,24 @@ impl Center {
     }
 
     /// Switches a node off or on for the agent. The link stays as it is;
-    /// only `list` and the call path look at the flag.
+    /// `list` and the call path look at the flag, and the calls that run on
+    /// the node (jobs too) are stopped: the owner who disables a machine
+    /// wants the agent's work there to end, not to run on unseen.
     pub fn set_disabled(&self, node_id: &str, disabled: bool) -> Result<(), String> {
         self.update(|s| {
             s.nodes.get_mut(node_id).ok_or("no such node")?.disabled = disabled;
             Ok::<(), String>(())
         })?;
+        if disabled {
+            let sessions: Vec<Arc<Session>> =
+                self.sessions.lock().unwrap().values().cloned().collect();
+            for sess in sessions {
+                let stops = sess.jobs.lock().unwrap().stop_on(node_id);
+                for stop in stops {
+                    let _ = stop.send(Stop::Disabled);
+                }
+            }
+        }
         self.note(
             Level::Info,
             Some(node_id),
@@ -2155,6 +2214,7 @@ impl Center {
             nodes: Mutex::new(BTreeSet::new()),
             tainted: AtomicBool::new(false),
             fetched: Mutex::new(Fetched::default()),
+            jobs: Mutex::new(Jobs::default()),
         });
         self.sessions
             .lock()
@@ -2179,6 +2239,11 @@ impl Center {
             return false;
         };
         s.ended.store(true, Ordering::SeqCst);
+        // Its calls and jobs stop, and their results are dropped.
+        let stops = s.jobs.lock().unwrap().end();
+        for stop in stops {
+            let _ = stop.send(Stop::SessionEnded);
+        }
         self.log.record(
             Level::Info,
             None,
@@ -2382,19 +2447,113 @@ impl Center {
 
     // ---- Calls ----
 
-    /// Runs a call of a unit (an `execute`) on its node: the node's policy decides.
+    /// Runs a call of a unit (an `execute`) on its node and waits for its
+    /// result: the node's policy decides.
     pub async fn call(
         &self,
         sess: &Arc<Session>,
         route: &Route,
         args: Map<String, Value>,
     ) -> Result<Value, CallError> {
+        match self.run(sess, route, args, None, None).await {
+            Ran::Done(r) => r,
+            Ran::Job(_) => unreachable!("a call without a wait never becomes a job"),
+        }
+    }
+
+    /// Runs a call of a unit (an `execute`) on its node, waiting at most
+    /// `wait` for its result (docs/dev/spec/harness.md §4.4). A call still
+    /// running then becomes a job of the session, and runs on: a task of its
+    /// own owns it, so the `execute` that returns the job's id does not stop
+    /// it. Dropped before that (the harness cancelled its request), the call
+    /// is stopped, and the node is told to cancel it. `on` is the link a
+    /// job's `exec.signal` must go on: the `invoke` id it names is that
+    /// link's.
+    pub async fn run(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        args: Map<String, Value>,
+        on: Option<Arc<Link>>,
+        wait: Option<Duration>,
+    ) -> Ran {
+        let id = jobs::new_id();
+        let started = sess.jobs.lock().unwrap().start(&id, route, on.is_some());
+        let (mut result, stop) = match started {
+            Ok(s) => s,
+            Err(e) => return Ran::Done(Err(self.refused(sess, route, e))),
+        };
         sess.calls.fetch_add(1, Ordering::SeqCst);
+        let mut held = Held {
+            sess: sess.clone(),
+            id: Some(id.clone()),
+        };
+        let (c, s, r, i) = (self.clone(), sess.clone(), route.clone(), id.clone());
+        tokio::spawn(async move { c.run_call(&s, &r, args, &i, on, stop).await });
+        let got = match wait {
+            None => Some((&mut result).await),
+            Some(w) => tokio::time::timeout(w, &mut result).await.ok(),
+        };
+        let got = match got {
+            Some(got) => got,
+            None => {
+                let became = sess.jobs.lock().unwrap().detach(&id);
+                held.id = None;
+                if became {
+                    return Ran::Job(id);
+                }
+                // The result came in between.
+                result.await
+            }
+        };
+        held.id = None;
+        // The waiter goes away without a result only when the session's end
+        // stopped the call.
+        Ran::Done(
+            got.unwrap_or_else(|_| Err(Stop::SessionEnded.error()))
+                .map_err(CallError::Rpc),
+        )
+    }
+
+    /// The task that owns a call: it runs it until its result comes or it is
+    /// stopped, counts it, and hands the result to the `execute` still
+    /// waiting, or keeps it for the job's `job.status`. A stopped call drops
+    /// its `invoke`, which tells the node to cancel it.
+    async fn run_call(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        args: Map<String, Value>,
+        id: &str,
+        on: Option<Arc<Link>>,
+        stop: tokio::sync::oneshot::Receiver<Stop>,
+    ) {
         let started = Instant::now();
-        let out = self.call_inner(sess, route, args).await;
-        let failed = out.as_ref().err().map(|CallError::Rpc(e)| e);
-        self.count_call(sess, route, failed, started);
-        out
+        let out = tokio::select! {
+            r = self.call_inner(sess, route, args, id, on.as_ref()) => r.map_err(|CallError::Rpc(e)| e),
+            s = stop => Err(s.unwrap_or(Stop::Abandoned).error()),
+        };
+        // Stats, taint and the log of a failure come with the end of the
+        // call, also of one that became a job.
+        self.count_call(sess, route, out.as_ref().err(), started);
+        let handed = sess.jobs.lock().unwrap().finish(id, out, Instant::now());
+        match handed {
+            Some((waiter, out)) => {
+                let _ = waiter.send(out);
+            }
+            None => {
+                // A result kept for its job is forgotten after a while when
+                // nobody reads it; the session may be gone by then.
+                let weak = Arc::downgrade(sess);
+                let id = id.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(jobs::KEEP_FOR).await;
+                    if let Some(s) = weak.upgrade() {
+                        s.jobs.lock().unwrap().expire(&id);
+                    }
+                });
+            }
+        }
     }
 
     /// A call the MCP side refused before `call` (its arguments do not fit
@@ -2451,6 +2610,8 @@ impl Center {
         sess: &Arc<Session>,
         route: &Route,
         args: Map<String, Value>,
+        job: &str,
+        on: Option<&Arc<Link>>,
     ) -> Result<Value, CallError> {
         // Checked first: nothing is sent to a disabled node, not even the
         // session mark. `execute` refuses a disabled node before it gets
@@ -2520,15 +2681,46 @@ impl Center {
         // Looked up again: the node may have gone or come back on another
         // link while the model was asked.
         let link = self.link(&route.node_id).ok_or_else(offline)?;
+        // A job's `invoke` id is its link's: on another link of the node it
+        // would name some other call.
+        if on.is_some_and(|on| !Arc::ptr_eq(on, &link)) {
+            return Err(RpcError::invalid_args(
+                "the job's call no longer runs on the node's link: the link to the node ended",
+            )
+            .into());
+        }
         let ctx = json!({"session": sess.id});
         sess.nodes.lock().unwrap().insert(route.node_id.clone());
         link.sessions.lock().unwrap().insert(sess.id.clone());
+        // The agents' calls leave a few of the node's call places free, for
+        // the owner's settings changes from the center and for a job's
+        // `exec.signal`: jobs of many sessions could fill them all.
+        let most = link.limits.calls as usize;
+        let most = if on.is_some() {
+            most
+        } else {
+            (most - calls_kept(most)).max(1)
+        };
         let (id, rx) = link
-            .start(
+            .start_within(
                 msg::method::INVOKE,
                 json!({"cap": route.cap, "action": route.action, "args": args, "ctx": ctx}),
+                most,
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                if e.kind() != ErrorCode::Busy {
+                    return e;
+                }
+                RpcError::new(
+                    ErrorCode::Busy,
+                    format!(
+                        "node {} runs {} calls already, the most the center sends it for agents: try again when one ended, or stop a job of this session with job.cancel",
+                        route.node_name, most
+                    ),
+                )
+            })?;
+        sess.jobs.lock().unwrap().sent(job, &link, id);
         let mut waiting = Waiting {
             link: Some(link),
             id,
@@ -3678,6 +3870,74 @@ mod tests {
         assert_eq!(e.kind(), ErrorCode::Forbidden, "{}", e.message);
         assert!(e.message.contains("reach"), "{}", e.message);
         assert_eq!(audited(), 1);
+    }
+
+    /// A job's `exec.signal` goes only on the link its call runs on: the
+    /// `invoke` id it names is that link's, and on the node's newer link it
+    /// would name another call.
+    #[tokio::test]
+    async fn a_jobs_signal_goes_on_its_own_link_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        c.update(|s| {
+            s.nodes.insert("n1".into(), node_record("n1", "linux"));
+        });
+        online(&c, "n1");
+        let sess = c.new_session("test");
+        let mut route = exec_route("n1");
+        route.action = "signal".into();
+        route.effect = nerve_proto::Effect::Actuate;
+        let mut args = Map::new();
+        args.insert("call".into(), json!(1));
+        args.insert("signal".into(), json!("term"));
+        let old = Arc::new(Link::for_test("n1"));
+        let Ran::Done(Err(CallError::Rpc(e))) =
+            c.run(&sess, &route, args.clone(), Some(old), None).await
+        else {
+            panic!("refused")
+        };
+        assert_eq!(e.kind(), ErrorCode::InvalidArgs, "{}", e.message);
+        assert!(e.message.contains("no longer runs"), "{}", e.message);
+        // On its own link it is sent (and this test link has lost it).
+        let own = c.link("n1");
+        let Ran::Done(Err(CallError::Rpc(e))) = c.run(&sess, &route, args, own, None).await else {
+            panic!("sent")
+        };
+        assert_eq!(e.kind(), ErrorCode::ConnectionLost, "{}", e.message);
+    }
+
+    /// The result of a job nobody reads is forgotten after `KEEP_FOR` by a
+    /// timer of its own: no later call of the session is needed for it.
+    #[tokio::test(start_paused = true)]
+    async fn an_unread_jobs_result_is_forgotten_without_another_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        c.update(|s| {
+            s.nodes.insert("n1".into(), node_record("n1", "linux"));
+        });
+        online(&c, "n1");
+        let sess = c.new_session("test");
+        // With no wait the call is a job before its task runs; it ends at
+        // once, since this test link has lost it.
+        let ran = c
+            .run(
+                &sess,
+                &exec_route("n1"),
+                Map::new(),
+                None,
+                Some(Duration::ZERO),
+            )
+            .await;
+        assert!(matches!(ran, Ran::Job(_)), "{ran:?}");
+        while sess.jobs.lock().unwrap().running() > 0 {
+            tokio::task::yield_now().await;
+        }
+        let held = || sess.jobs.lock().unwrap().held();
+        assert_eq!(held(), 1, "its result is kept");
+        tokio::time::sleep(jobs::KEEP_FOR - Duration::from_secs(1)).await;
+        assert_eq!(held(), 1, "for ten minutes");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(held(), 0, "then forgotten");
     }
 
     /// The owner's note on a machine is kept on one line, refused when long,

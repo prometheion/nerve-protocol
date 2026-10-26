@@ -55,11 +55,12 @@ fn harness_part_passes_against_nerve_center() {
         mcp_addr: center.mcp_addr.clone(),
         token: center.token.clone(),
         links: [(); 2].map(|_| PairLink::parse(&center.ui.pair_link()).unwrap()),
+        call_wait: HttpCenter::CALL_WAIT,
     };
     let report = block_on(harness_part::run(&target));
     assert!(report.ok(), "{report}");
     // Every check ran; a count that shrinks silently would hide a lost check.
-    assert_eq!(report.outcomes.len(), 41, "{report}");
+    assert_eq!(report.outcomes.len(), 45, "{report}");
 }
 
 fn with(mut args: Value, more: Value) -> Value {
@@ -490,6 +491,109 @@ fn a_cancelled_call_and_an_ended_session_stop_their_command() {
         within(5, || !running(pid)),
         "an ended session's command runs on"
     );
+    assert!(mcp.finish());
+}
+
+/// A command that runs past the call wait becomes a job between the real
+/// binaries: `execute` answers its id at once, `exec.signal` names the job,
+/// `job.status` gives the result with the signal, and `job.cancel` ends
+/// another one; no process is left.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_long_command_becomes_a_job_that_exec_signal_and_job_cancel_end() {
+    let root = tempfile::tempdir().unwrap();
+    let mut mcp = Mcp::start(
+        &root.path().join("center"),
+        false,
+        &[("NERVE_CALL_WAIT", "1")],
+    );
+    let mut node = Node::new(&root.path().join("node"));
+    node.ok(&["center", "add", &mcp.pair_link(), "--yes"]);
+    node.ok(&["mode", "set", "user"]);
+    // `exec.signal` actuates: the owner turns it on.
+    node.ok(&["cap", "set", "exec.signal", "on"]);
+    node.start();
+    let ov = mcp.wait_overview("the node is online", |v| {
+        v["nodes"][0]["online"] == json!(true)
+    });
+    let name = ov["nodes"][0]["name"].as_str().unwrap().to_string();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let offered = mcp.offered(&name);
+        if ["exec.run", "exec.signal", "job.status", "job.cancel"]
+            .iter()
+            .all(|u| offered.iter().any(|n| n == u))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "not offered: {offered:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let start = |mcp: &mut Mcp, id: &str| -> (String, u32) {
+        let file = node.home.join(format!("{id}.pid"));
+        let command = format!("sleep 30 & echo $! > {}; wait", file.display());
+        let started = Instant::now();
+        let r = mcp.run(&name, "exec.run", json!({"command": command}));
+        assert!(started.elapsed() < Duration::from_secs(10), "it waited");
+        assert_eq!(r["structuredContent"]["state"], "running", "{r}");
+        let job = r["structuredContent"]["job"].as_str().unwrap().to_string();
+        let mut pid = 0;
+        assert!(
+            within(15, || {
+                pid = std::fs::read_to_string(&file)
+                    .ok()
+                    .and_then(|t| t.trim().parse().ok())
+                    .unwrap_or(0);
+                pid != 0
+            }),
+            "the command did not start"
+        );
+        (job, pid)
+    };
+    let status = |mcp: &mut Mcp, job: &str| {
+        mcp.call(
+            "execute",
+            json!({"node": name, "capability": "job.status",
+                   "args": {"job": job, "wait_ms": 1000}}),
+        )
+    };
+
+    let (job, pid) = start(&mut mcp, "signalled");
+    assert!(running(pid));
+    let r = mcp.run(&name, "exec.signal", json!({"job": job, "signal": "term"}));
+    assert_ne!(r["isError"], true, "{r}");
+    assert!(within(5, || !running(pid)), "the signalled command runs on");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let done = loop {
+        let r = status(&mut mcp, &job);
+        if r["structuredContent"]["state"] != "running" {
+            break r;
+        }
+        assert!(Instant::now() < deadline, "the job did not end: {r}");
+    };
+    assert_ne!(done["isError"], true, "{done}");
+    assert_eq!(
+        done["structuredContent"]["center"],
+        json!({"job": job, "state": "done"}),
+        "{done}"
+    );
+    assert_eq!(
+        done["structuredContent"]["result"]["signal"], "term",
+        "{done}"
+    );
+
+    let (job, pid) = start(&mut mcp, "cancelled");
+    let r = mcp.call(
+        "execute",
+        json!({"node": name, "capability": "job.cancel", "args": {"job": job}}),
+    );
+    assert_eq!(
+        r["structuredContent"],
+        json!({"job": job, "state": "cancelled"}),
+        "{r}"
+    );
+    assert!(within(5, || !running(pid)), "the cancelled command runs on");
+    assert!(text_of(&status(&mut mcp, &job)).starts_with("error unknown_job: "));
     assert!(mcp.finish());
 }
 

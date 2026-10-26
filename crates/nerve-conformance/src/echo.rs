@@ -43,14 +43,18 @@ pub fn descriptor(node_id: &str, name: &str) -> Descriptor {
     .expect("the echo descriptor is well formed")
 }
 
+/// The longest `echo.wait` of the harness nodes, in milliseconds.
+pub const WAIT_MAX_MS: u64 = 600_000;
+
 /// The account the harness nodes say their commands run as.
 pub const ACCESS_ACCOUNT: &str = "conformance-run";
 /// The folder the harness nodes say the center may read and write.
 pub const ACCESS_FOLDER: &str = "/conformance/work";
 
-/// The descriptor the harness part's nodes offer: the echo node's, plus
-/// `mirror`, an `echo` twin with a write action, and actions of `node`,
-/// `settings` and `audit`, which a center must never offer a harness.
+/// The descriptor the harness part's nodes offer: the echo node's with
+/// `echo.wait`, which answers late, plus `mirror`, an `echo` twin with a
+/// write action, and actions of `node`, `settings` and `audit`, which a
+/// center must never offer a harness.
 pub fn harness_descriptor(node_id: &str, name: &str) -> Descriptor {
     let mut d = serde_json::to_value(descriptor(node_id, name)).expect("a descriptor is JSON");
     let caps = d["capabilities"].as_array_mut().expect("capabilities");
@@ -62,6 +66,14 @@ pub fn harness_descriptor(node_id: &str, name: &str) -> Descriptor {
     caps.push(json!({"id": "mirror", "exposure": "on",
         "summary": "Says back what it is sent, like echo.",
         "actions": {"say": say, "set": set}}));
+    // A call that takes as long as it is asked to, so that a center's call
+    // wait runs out and the call becomes a job (harness.md §4.4).
+    caps[1]["actions"]["wait"] = json!({"effect": "read",
+        "summary": "Answer after ms milliseconds.",
+        "params": {"type": "object",
+                   "properties": {"ms": {"type": "integer", "minimum": 0, "maximum": WAIT_MAX_MS}},
+                   "required": ["ms"], "additionalProperties": false},
+        "result": {"type": "object", "properties": {"waited": {"type": "integer"}}}});
     // The three capabilities a center must never offer, each with an action
     // that would otherwise be listed.
     caps[0]["actions"] =
@@ -235,6 +247,19 @@ pub fn handle(m: &str, p: &Map<String, Value>, d: &Descriptor) -> Result<Value, 
                     match inv.args.get("text").and_then(Value::as_str) {
                         Some(t) if inv.args.len() == 1 => Ok(json!({"text": t})),
                         _ => Err(RpcError::invalid_args("say takes {text}")),
+                    }
+                }
+                // The harness part's node answers it later; here it is
+                // answered at once.
+                ("echo", "wait")
+                    if d.capability("echo")
+                        .is_some_and(|c| c.actions.contains_key("wait")) =>
+                {
+                    match inv.args.get("ms").and_then(Value::as_u64) {
+                        Some(ms) if inv.args.len() == 1 && ms <= WAIT_MAX_MS => {
+                            Ok(json!({"waited": ms}))
+                        }
+                        _ => Err(RpcError::invalid_args("wait takes {ms}")),
                     }
                 }
                 ("echo", "fail") => Err(RpcError::new(

@@ -364,7 +364,14 @@ mod tests {
                 ),
             ],
         ));
-        assert_eq!(n.catalog.units.len(), 1);
+        assert_eq!(
+            n.catalog
+                .units
+                .iter()
+                .filter(|u| &*u.provider != crate::catalog::CENTER)
+                .count(),
+            1
+        );
         s.nodes.insert("a".into(), n);
         s.save(dir.path()).unwrap();
         let text = std::fs::read_to_string(dir.path().join(FILE)).unwrap();

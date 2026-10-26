@@ -39,12 +39,17 @@ To check another implementation, call `center_part::run(&pair_link)` with a
 fresh pairing link of that center, `node_part::run(start)` with a closure
 that pairs the node under test with the link it is handed and starts it, or
 `harness_part::run(&target)` with the center's HTTP MCP address, a harness
-token and two fresh pairing links (the part pairs two echo nodes, `conf-a` and
-`conf-b`, so the center must have no node of those names). Each node offers
-`echo.say`, `echo.fail` (valid by its schema, it always fails on the node),
-`mirror.say` and `mirror.set`, and describes `node`, `settings` and `audit`
-units that a center must never offer; the part changes a node's descriptor
-while it runs.
+token, two fresh pairing links (the part pairs two echo nodes, `conf-a` and
+`conf-b`, so the center must have no node of those names) and the center's
+call wait (harness.md §4.4). The part waits for each answer that long plus
+15 s, since an `execute` holds its answer for the whole call wait, and it
+takes a call wait of up to 598.5 s (its job call runs 1.5 s longer, and
+`echo.wait` waits at most 600 s). A short one keeps the part quick; the
+tests use nerve-center's default, 20 s. Each node offers `echo.say`, `echo.fail` (valid by its schema, it
+always fails on the node), `echo.wait` (answered after the `ms` it is
+asked to wait), `mirror.say` and `mirror.set`, and describes `node`,
+`settings` and `audit` units that a center must never offer; the part
+changes a node's descriptor while it runs.
 
 The closure returns a `Setup`. With `folder` (an empty folder on the node, in
 wire form) and the settings grant `write` for the fake center, the node part
@@ -131,7 +136,7 @@ JSON is a failure of the check, not an empty result.
 | 3 | `initialize` opens a session; a request without `Mcp-Session-Id` is 400 and one with an unknown id is 404; `ping` is answered with an empty result |
 | 4 | the tools are exactly `list` and `execute`, with object input schemas; `list` has `readOnlyHint` and `execute` does not; `execute` requires `node`, `capability` and `args` |
 | 4 | a call of another tool is the JSON-RPC error -32602 |
-| 4 | `list(node)` gives each node's capabilities, exactly the offered ones, one per line |
+| 4 | `list(node)` gives each node's capabilities, exactly the offered ones and the center's `job.cancel` and `job.status`, one per line |
 | 4 | the tools stay the same when nodes pair |
 | 4 | `list()` gives every node with its state, in `structuredContent` in the envelope of all the nodes |
 | 4 | `list(node, capability)` gives the details of one capability or of a list of them: effect and `params` in `structuredContent`, the name in the text |
@@ -148,13 +153,20 @@ JSON is a failure of the check, not an empty result.
 | 4 | a change to another capability of the node needs no new `list` |
 | 4 | `list()` says a node that left is offline, and its capabilities stay listed |
 | 4 | `execute` on a node that is offline is `error unavailable` |
+| 4.4 | a call that runs past the call wait is answered at once, not as an error, with `structuredContent` exactly `{job, state: "running", next}` and a text that names the job and `job.status`, as `next` does |
+| 4.4 | `job.status` gives a job's result once it ended, as device content with the center's `{job, state: "done"}` beside the envelope, and only once (then `error unknown_job`); the node is not told to cancel the call |
+| 4.4 | another session's `job.status` and `job.cancel` of the job are `error unknown_job`, and the node is not told to cancel it |
+| 4.4 | `job.cancel` stops a running job (`{job, state: "cancelled"}`), and the node is told to `cancel` its call |
 | 5 | two sessions have two ids; a node sees one `ctx.session` per session, so a node that two sessions use sees two |
 | 5 | `DELETE /mcp` ends the session (204), and the ended session is 404 |
 | 5 | `session.end` goes to every node the session used (checked for a session that used two) |
 | 5 | `session.end` names the session's `ctx.session` to a node it used, only for the ended session and not for another session on that node, and is not sent to a node it never used |
 | 5 | the other session goes on, and still reaches the node |
 
-Not covered: `notifications/cancelled`, the stdio transport and attach, a node
+Not covered: `notifications/cancelled`, `exec.signal` by job (the echo nodes
+run no commands; the end-to-end tests run it between the real binaries), the
+16 calls a session may run and the 4 MiB of results it keeps, a lost job, the
+stdio transport and attach, a node
 the owner disabled, exposure `off`, a capability the center left out, the
 1024 units a session remembers, and of a node's error the 4 KiB cut, the one
 line and a code outside the protocol's becoming `internal` (the echo node

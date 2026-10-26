@@ -5,12 +5,18 @@
 //!
 //! The built-in capabilities `node`, `settings` and `audit` are never
 //! offered: they are the center's own business, and a harness that could
-//! call `settings.set` would let a model change its own permissions.
+//! call `settings.set` would let a model change its own permissions. The
+//! units of `job` are the center's own, served by the center itself.
 
 use nerve_proto::Effect;
 
 /// Capabilities that are never offered to the agent.
 pub const RESERVED_CAPS: [&str; 3] = ["node", "settings", "audit"];
+
+/// The center's own capabilities, which it serves itself on every node
+/// (`job.status`, `job.cancel`; `stream` is kept for streams): a node's
+/// capability of one of these names is left out.
+pub const CENTER_CAPS: [&str; 2] = ["job", "stream"];
 
 /// Where a call goes: one unit (`cap.action`) of one node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +60,14 @@ pub(crate) mod tests {
             state: Value::Null,
             streams: Default::default(),
         }
+    }
+
+    /// The params of the node's `exec.signal`.
+    pub fn signal_params() -> Value {
+        serde_json::json!({"type": "object",
+               "properties": {"call": {"type": "integer", "minimum": 0},
+                              "signal": {"enum": ["term", "kill", "int"]}},
+               "required": ["call", "signal"], "additionalProperties": false})
     }
 
     pub fn desc(name: &str, caps: Vec<Capability>) -> Descriptor {
