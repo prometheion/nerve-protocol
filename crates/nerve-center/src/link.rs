@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_tungstenite::WebSocketStream;
 
-use nerve_proto::frame::{Frame, FrameError};
+use nerve_proto::frame::{Frame, FrameError, Kind};
 use nerve_proto::msg::{self, ByeReason, Hello, Limits, Resumed, method};
 use nerve_proto::resume::{self, Replay};
 use nerve_proto::{ErrorCode, Id, Message, PROTOCOL_VERSION, RpcError};
@@ -22,6 +22,7 @@ use nerve_transport::net::BoxIo;
 use nerve_transport::ws::WsMessage;
 
 use crate::center::Center;
+use crate::streams::Ring;
 
 /// Each side has this long for its handshake step (§4.2).
 pub const HANDSHAKE_STEP: Duration = Duration::from_secs(15);
@@ -57,6 +58,7 @@ impl Drop for Unsent<'_> {
     fn drop(&mut self) {
         if let Some(id) = self.id {
             self.link.pending.lock().unwrap().remove(&id);
+            self.link.opening.lock().unwrap().remove(&id);
         }
     }
 }
@@ -100,6 +102,12 @@ pub struct Link {
     pub status: Mutex<String>,
     /// Sessions that called through this link, for `session.end`.
     pub sessions: Mutex<std::collections::BTreeSet<String>>,
+    /// Open streams of the connection now, by the node's `sid`: where their
+    /// frames go (crate::streams).
+    streams: Mutex<HashMap<u32, Arc<Ring>>>,
+    /// `stream.open` requests waiting for their `sid`, by request id: the
+    /// answer puts the ring in `streams` before the next frame is read.
+    opening: Mutex<HashMap<u64, Arc<Ring>>>,
 }
 
 /// The connection a link is on, and what it counts for a resume.
@@ -148,6 +156,8 @@ impl Link {
             pong: Notify::new(),
             status: Mutex::new("online".into()),
             sessions: Mutex::new(Default::default()),
+            streams: Mutex::default(),
+            opening: Mutex::default(),
         }
     }
 
@@ -298,6 +308,11 @@ impl Link {
             w.out = None;
             w.parked = true;
         }
+        drop(w);
+        // Streams are not counted: they end with their connection (§4.9).
+        if can {
+            self.end_streams("the link to the node dropped");
+        }
         can
     }
 
@@ -335,7 +350,11 @@ impl Link {
         w.conn += 1;
         w.out = Some(out);
         w.parked = false;
-        Ok((w.conn, again))
+        let conn = w.conn;
+        drop(w);
+        // The node ended the old connection's streams with it.
+        self.end_streams("the link to the node dropped");
+        Ok((conn, again))
     }
 
     /// Ends the link if it is still parked from connection `conn`: its
@@ -501,6 +520,7 @@ impl Link {
         w.out = None;
         w.parked = false;
         w.replay = None;
+        self.end_streams("the link to the node ended");
     }
 
     fn fail_pending(&self) {
@@ -511,11 +531,123 @@ impl Link {
     }
 
     fn reply(&self, id: &Id, r: Reply) {
-        if let Id::Num(n) = id
-            && let Some(tx) = self.pending.lock().unwrap().remove(n)
+        let Id::Num(n) = id else {
+            return;
+        };
+        // An opened stream is known before its first frame is read, which
+        // may follow the answer at once. One lock at a time: `open_stream`
+        // takes them the other way round.
+        let opened = self.opening.lock().unwrap().remove(n);
+        let waited = self.pending.lock().unwrap().contains_key(n);
+        if let Some(ring) = opened.filter(|_| waited)
+            && let Ok(v) = &r
+            && let Some(sid) = v.get("sid").and_then(Value::as_u64)
+            && let Ok(sid) = u32::try_from(sid)
         {
+            self.streams.lock().unwrap().insert(sid, ring);
+        }
+        if let Some(tx) = self.pending.lock().unwrap().remove(n) {
             let _ = tx.send(r);
         }
+    }
+
+    /// Opens a stream on the node (`stream.open` with `params`) whose
+    /// frames go to `ring`: its `sid`.
+    pub async fn open_stream(&self, params: Value, ring: Arc<Ring>) -> Result<u32, RpcError> {
+        if self.is_closed() {
+            return Err(lost());
+        }
+        let (tx, rx) = oneshot::channel();
+        // The ring is in place before the request can be answered.
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        self.opening.lock().unwrap().insert(id, ring);
+        self.pending.lock().unwrap().insert(id, tx);
+        let mut unsent = Unsent {
+            link: self,
+            id: Some(id),
+        };
+        let text = Message::request(id, method::STREAM_OPEN, params).encode();
+        if !self.send_text(text).await {
+            return Err(lost());
+        }
+        unsent.id = None;
+        let r = self.finish(id, rx, Some(SHORT_CALL)).await;
+        self.opening.lock().unwrap().remove(&id);
+        let v = r?;
+        v.get("sid")
+            .and_then(Value::as_u64)
+            .and_then(|s| u32::try_from(s).ok())
+            .ok_or_else(|| RpcError::internal("the node answered stream.open without a sid"))
+    }
+
+    /// A stream frame from the node: data or a gap for its ring. A frame
+    /// of a stream the center does not hold (closed meanwhile) is dropped.
+    fn stream_frame(&self, f: &Frame) {
+        let ring = self.streams.lock().unwrap().get(&f.id).cloned();
+        let Some(ring) = ring else {
+            return;
+        };
+        match f.gap_bytes() {
+            Some(n) => ring.gap(n),
+            None => ring.push(&f.payload),
+        }
+    }
+
+    /// The node closed the stream `sid` (its command ended): what it holds
+    /// can still be read. Whether the center held it.
+    fn stream_closed(&self, sid: u32, reason: &str) -> bool {
+        let ring = self.streams.lock().unwrap().remove(&sid);
+        match ring {
+            Some(ring) => {
+                let why = if reason == "ended" {
+                    "the command ended".to_string()
+                } else {
+                    format!(
+                        "the node closed it ({})",
+                        crate::util::clip(&crate::listing::one_line(reason), 200)
+                    )
+                };
+                ring.end(&why);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Forgets the stream `sid` on the center's side; whether it was still
+    /// open.
+    pub fn forget_stream(&self, sid: u32) -> bool {
+        self.streams.lock().unwrap().remove(&sid).is_some()
+    }
+
+    /// Tells the node to stop the stream `sid`.
+    pub async fn close_stream(&self, sid: u32, why: &str) {
+        let _ = self
+            .call(
+                method::STREAM_CLOSE,
+                json!({"sid": sid, "reason": why}),
+                Some(SHORT_CALL),
+            )
+            .await;
+    }
+
+    /// Ends every stream of the connection: it is gone (`why`).
+    fn end_streams(&self, why: &str) {
+        let rings: Vec<Arc<Ring>> = self
+            .streams
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, r)| r)
+            .collect();
+        for r in rings {
+            r.end(why);
+        }
+    }
+
+    /// How many streams the link holds.
+    pub fn stream_count(&self) -> usize {
+        self.streams.lock().unwrap().len()
     }
 }
 
@@ -967,15 +1099,20 @@ pub async fn run(center: Center, mut ws: WebSocketStream<BoxIo>, node_id: String
                     link.send_text(reply.encode()).await;
                 }
             },
-            WsMessage::Binary(b) => {
-                // Nodes send no blobs to the center; media frames are refused.
-                if let Err(FrameError::MediaReserved) = Frame::decode(&b) {
+            WsMessage::Binary(b) => match Frame::decode(&b) {
+                // A stream's data (crate::streams); nodes send no blobs to
+                // the center.
+                Ok(f) if f.kind == Kind::Stream => link.stream_frame(&f),
+                Ok(_) => {}
+                // Media frames are refused.
+                Err(FrameError::MediaReserved) => {
                     link.bye(ByeReason::ProtocolError).await;
                     said_bye = true;
                     why = "the node sent a media frame, which the center does not take".into();
                     break;
                 }
-            }
+                Err(_) => {}
+            },
             WsMessage::Pong(_) => link.pong.notify_waiters(),
             WsMessage::Close(_) => {
                 clean = true;
@@ -1014,6 +1151,26 @@ async fn handle(center: &Center, link: &Arc<Link>, m: Message) -> Option<ByeReas
                 Some(&link.node_id),
                 format!("the node reported an error: {}", error.message),
             );
+        }
+        // The node ends a stream whose command ended.
+        Message::Request {
+            id,
+            method: m,
+            params,
+        } if m == method::STREAM_CLOSE => {
+            let sid = params
+                .get("sid")
+                .and_then(Value::as_u64)
+                .and_then(|s| u32::try_from(s).ok());
+            let reason = params.get("reason").and_then(Value::as_str).unwrap_or("");
+            let reply = match sid {
+                Some(sid) if link.stream_closed(sid, reason) => Message::result(id, json!({})),
+                _ => Message::error(
+                    Some(id),
+                    RpcError::new(ErrorCode::UnknownMember, "no such stream"),
+                ),
+            };
+            link.send_text(reply.encode()).await;
         }
         Message::Request { id, method: m, .. } => {
             let e = RpcError::new(

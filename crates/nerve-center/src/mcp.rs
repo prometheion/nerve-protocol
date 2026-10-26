@@ -21,6 +21,7 @@ use crate::center::{CallError, Center, Change, Ran, Session};
 use crate::jobs::{self, NoSignal, Outcome, Stop};
 use crate::link;
 use crate::listing::{self, Answer, Miss};
+use crate::streams;
 use crate::tools::Route;
 use crate::util;
 
@@ -362,6 +363,9 @@ impl Engine {
         // node or the checker, and nothing is counted.
         if catalog::is_center(&unit) {
             return match fits {
+                Ok(()) if route.cap == "stream" => {
+                    self.stream_call(&sess, &route, &call_args).await
+                }
                 Ok(()) => self.job_call(&sess, &route, &call_args).await,
                 Err(e) => call_error(&route, &RpcError::from(e)),
             };
@@ -395,7 +399,12 @@ impl Engine {
                 for u in &follow {
                     sess.listed(&route.node_id, &u.name, u.hash());
                 }
-                running(&route, &job, wait, follow.iter().any(is_signal))
+                // A command's output streams while it runs.
+                let stream = match command {
+                    true => Some(self.center.open_output(&sess, &route, &job).await),
+                    false => None,
+                };
+                running(&route, &job, wait, follow.iter().any(is_signal), stream)
             }
         }
     }
@@ -520,6 +529,13 @@ impl Engine {
                 true,
             );
         };
+        // A result read is the end of the job: its output stream goes too.
+        if view.outcome.is_some() {
+            let stream = sess.streams.lock().unwrap().of_job(job);
+            if let Some(c) = stream {
+                c.close("its job's result was read").await;
+            }
+        }
         let what = job_what(&view.route);
         let ran = util::span(view.ran);
         match view.outcome {
@@ -576,6 +592,114 @@ impl Engine {
             }
         }
     }
+}
+
+impl Engine {
+    /// `stream.read` and `stream.close`: the session's own streams on this
+    /// node (docs/dev/spec/harness.md §4.5).
+    async fn stream_call(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        args: &Map<String, Value>,
+    ) -> Value {
+        let id = args
+            .get("stream")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let node = &route.node_id;
+        let unknown = || {
+            text_result(
+                &format!("error unknown_stream: {}", no_stream(&route.node_name, id)),
+                true,
+            )
+        };
+        if route.action == "close" {
+            let closed = sess.streams.lock().unwrap().close(id, node);
+            let Some(c) = closed else {
+                return unknown();
+            };
+            c.close("the agent closed it").await;
+            let mut v = text_result(
+                &format!("Stream {id} is closed: nothing more of it is kept."),
+                false,
+            );
+            v["structuredContent"] = json!({"stream": id, "state": "closed"});
+            return v;
+        }
+        let (found, gone) = sess.streams.lock().unwrap().get(id, node, Instant::now());
+        for c in gone {
+            c.close("it ended 10 minutes ago and was not read").await;
+        }
+        let Some(found) = found else {
+            return unknown();
+        };
+        // Waiting first when asked: at most the call wait, as job.status.
+        let asked = args.get("wait_ms").and_then(Value::as_u64).unwrap_or(0);
+        let wait = Duration::from_millis(asked).min(self.center.call_wait());
+        if !wait.is_zero() {
+            found.ring.wait(wait).await;
+        }
+        let max = args
+            .get("max_bytes")
+            .and_then(Value::as_u64)
+            .map_or(streams::READ_DEFAULT, |n| n as usize)
+            .clamp(streams::READ_MIN, streams::READ_MAX);
+        let r = found.ring.read(max);
+        let mut head = format!(
+            "Stream {id} (output of job {} on node {}): ",
+            found.job, route.node_name
+        );
+        if r.dropped > 0 {
+            head.push_str(&format!(
+                "{} bytes were dropped before this text: a stream keeps at most {} MiB that was not read, and the node drops what the link cannot carry fast enough. ",
+                r.dropped,
+                streams::RING_BYTES / (1024 * 1024)
+            ));
+        }
+        let next = format!(
+            "Call stream.read with args {{\"stream\": {id:?}}} again for more (\"wait_ms\" waits for it), or stream.close to end it."
+        );
+        if r.eof {
+            head.push_str(&format!(
+                "it ended ({}); this is the last of it.",
+                r.why.as_deref().unwrap_or("ended")
+            ));
+        } else if r.text.is_empty() {
+            head.push_str(&format!("nothing new yet. {next}"));
+        } else {
+            head.push_str(&format!("{} bytes; more may come. {next}", r.text.len()));
+        }
+        let body = listing::framed(
+            &format!(
+                "node {:?}, the output of job {}",
+                route.node_name, found.job
+            ),
+            false,
+            &r.text,
+        );
+        let mut v = text_result(&format!("{head}\n{body}"), false);
+        let mut data = json!({"text": r.text, "eof": r.eof});
+        if r.dropped > 0 {
+            data["dropped"] = json!(r.dropped);
+        }
+        let mut sc = listing::envelope(&listing::source(&route.node_name, node), false, data);
+        sc["center"] = json!({"stream": id, "job": found.job, "eof": r.eof});
+        if !r.eof {
+            sc["center"]["next"] = json!(next);
+        }
+        v["structuredContent"] = sc;
+        v
+    }
+}
+
+/// The words for a stream id that names no stream of this session on this
+/// node.
+fn no_stream(node: &str, stream: &str) -> String {
+    format!(
+        "node {node} has no stream {:?} of this session: the id is another session's or wrong, or the stream was closed (by stream.close, when its job's result was read, or 10 minutes after it ended).",
+        util::clip(stream, 64)
+    )
 }
 
 /// Whether `unit` is the node's `exec.signal`, which names a job.
@@ -672,7 +796,13 @@ fn job_error(route: &Route, e: &RpcError, lead: &str, tail: &str) -> Value {
 /// The answer of an `execute` whose call became the job `job` after `wait`:
 /// the center's own words, with the calls that follow it up; `signal` when
 /// the node offers `exec.signal` for it.
-fn running(route: &Route, job: &str, wait: Duration, signal: bool) -> Value {
+fn running(
+    route: &Route,
+    job: &str,
+    wait: Duration,
+    signal: bool,
+    stream: Option<Result<String, String>>,
+) -> Value {
     let node = &route.node_name;
     let signal = if signal {
         format!(
@@ -681,10 +811,19 @@ fn running(route: &Route, job: &str, wait: Duration, signal: bool) -> Value {
     } else {
         String::new()
     };
+    let output = match &stream {
+        Some(Ok(id)) => format!(
+            " Its output so far and as it comes: capability \"stream.read\" with args {{\"stream\": {id:?}}} (\"wait_ms\" waits for more); \"stream.close\" with the same args ends the stream."
+        ),
+        Some(Err(why)) => {
+            format!(" Its output is not streamed ({why}); job.status gives it with the result.")
+        }
+        None => String::new(),
+    };
     let next = format!(
         "Call execute with node {node:?}, capability \"job.status\" and args {{\"job\": {job:?}}} for its state, \
          or its result once it ended (\"wait_ms\" in args waits for its end, up to {} per call); \
-         capability \"job.cancel\" with the same args stops it.{signal}",
+         capability \"job.cancel\" with the same args stops it.{signal}{output}",
         util::span(wait),
     );
     let text = format!(
@@ -697,6 +836,9 @@ fn running(route: &Route, job: &str, wait: Duration, signal: bool) -> Value {
     // Also in `structuredContent`: some harnesses show the model only that,
     // and it must still learn which calls follow the job up.
     r["structuredContent"] = json!({"job": job, "state": "running", "next": next});
+    if let Some(Ok(id)) = stream {
+        r["structuredContent"]["stream"] = json!(id);
+    }
     r
 }
 
@@ -1279,7 +1421,7 @@ mod tests {
         let all = call(&e, "list", json!({})).await;
         let want = listing::nodes(&c.listed_nodes());
         assert_eq!(text(&all), want.text);
-        assert!(text(&all).contains("- box-1 (id n1): offline, linux/x86_64, 5 capabilities\n"));
+        assert!(text(&all).contains("- box-1 (id n1): offline, linux/x86_64, 7 capabilities\n"));
         assert_eq!(all["structuredContent"], want.data);
         assert_eq!(all["isError"], false);
 
@@ -1299,7 +1441,9 @@ mod tests {
                     "exec.signal",
                     "fs.read",
                     "job.cancel",
-                    "job.status"
+                    "job.status",
+                    "stream.close",
+                    "stream.read"
                 ]
             );
             assert_eq!(

@@ -25,11 +25,12 @@ use crate::checker::{
     self, AllowRule, CallInfo, Checker, CheckerConfig, Decision, Endpoint, Layer, LocalModel,
     ModelSource, NodeSettings, NodeSwitch, Scope,
 };
-use crate::jobs::{self, Jobs, Stop};
+use crate::jobs::{self, Jobs, NoSignal, Stop};
 use crate::link::{Link, SHORT_CALL, calls_kept};
 use crate::listing;
 use crate::pairing::{Codes, Outcome};
 use crate::store::{KeyRotation, NodeRecord, OldKey, Store};
+use crate::streams::{self, Ring, Streams};
 use crate::tools::Route;
 use crate::util::{self, now_ms};
 
@@ -242,6 +243,9 @@ pub struct Session {
     /// The session's calls and the jobs they became (crate::jobs). Locked
     /// on its own, like `fetched`.
     pub jobs: Mutex<Jobs>,
+    /// The output streams of its jobs (crate::streams). Locked on its own,
+    /// never with `jobs`.
+    pub streams: Mutex<Streams>,
 }
 
 /// The most units a session remembers having been shown; past it the one
@@ -2215,6 +2219,7 @@ impl Center {
             tainted: AtomicBool::new(false),
             fetched: Mutex::new(Fetched::default()),
             jobs: Mutex::new(Jobs::default()),
+            streams: Mutex::new(Streams::default()),
         });
         self.sessions
             .lock()
@@ -2243,6 +2248,11 @@ impl Center {
         let stops = s.jobs.lock().unwrap().end();
         for stop in stops {
             let _ = stop.send(Stop::SessionEnded);
+        }
+        // Its streams are dropped; one still running on its node stops.
+        let closers = s.streams.lock().unwrap().end();
+        for c in closers {
+            c.close("the session ended").await;
         }
         self.log.record(
             Level::Info,
@@ -2515,6 +2525,50 @@ impl Center {
         )
     }
 
+    /// Opens the output stream of the `exec.run` job `job` of `sess` on its
+    /// node (docs/dev/spec/harness.md §4.5): its id, or why it has none.
+    pub async fn open_output(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        job: &str,
+    ) -> Result<String, String> {
+        let target = sess.jobs.lock().unwrap().signal_target(job, &route.node_id);
+        let (link, call) = match target {
+            Ok(t) => t,
+            Err(NoSignal::NotSent) => return Err("its call had not reached the node yet".into()),
+            Err(_) => return Err("it ended meanwhile".into()),
+        };
+        let (room, gone) = sess.streams.lock().unwrap().room(Instant::now());
+        for c in gone {
+            c.close("too many streams").await;
+        }
+        if !room {
+            return Err(format!(
+                "this session holds {} streams already, the most it may: close one with stream.close",
+                streams::STREAMS_MAX
+            ));
+        }
+        let ring = Arc::new(Ring::default());
+        let params = json!({"cap": "exec", "stream": "output", "params": {"call": call},
+                            "ctx": {"session": sess.id}});
+        let sid = link
+            .open_stream(params, ring.clone())
+            .await
+            .map_err(|e| format!("node {} did not open it: {}", route.node_name, e.message))?;
+        let id = streams::new_id();
+        let added = sess
+            .streams
+            .lock()
+            .unwrap()
+            .add(&id, &route.node_id, job, &link, sid, ring);
+        if let Err(c) = added {
+            c.close("the session ended").await;
+            return Err("the session ended".into());
+        }
+        Ok(id)
+    }
+
     /// The task that owns a call: it runs it until its result comes or it is
     /// stopped, counts it, and hands the result to the `execute` still
     /// waiting, or keeps it for the job's `job.status`. A stopped call drops
@@ -2550,6 +2604,11 @@ impl Center {
                     tokio::time::sleep(jobs::KEEP_FOR).await;
                     if let Some(s) = weak.upgrade() {
                         s.jobs.lock().unwrap().expire(&id);
+                        // Its output stream goes with it.
+                        let stream = s.streams.lock().unwrap().of_job(&id);
+                        if let Some(c) = stream {
+                            c.close("its job was forgotten").await;
+                        }
                     }
                 });
             }

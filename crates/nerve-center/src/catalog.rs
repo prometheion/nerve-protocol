@@ -24,6 +24,7 @@ use nerve_proto::{Descriptor, Effect};
 
 use crate::jobs::WAIT_MS_MAX;
 use crate::listing::one_line;
+use crate::streams::{READ_DEFAULT, READ_MAX, READ_MIN};
 use crate::tools::{CENTER_CAPS, RESERVED_CAPS};
 use crate::util;
 
@@ -584,10 +585,12 @@ pub fn is_signal(cap: &str, action: &str) -> bool {
 pub fn center_units() -> Vec<Unit> {
     let job = json!({"type": "string", "minLength": 1,
                      "description": "The job's id, from execute (like j-...)."});
-    let unit = |action: &str, effect: Effect, summary: &str, params: Value| Unit {
-        name: format!("job.{action}"),
-        cap: "job".into(),
-        action: action.into(),
+    let stream = json!({"type": "string", "minLength": 1,
+                        "description": "The stream's id, from execute's answer for a job (like s-...)."});
+    let unit = |name: &str, effect: Effect, summary: &str, params: Value| Unit {
+        name: name.into(),
+        cap: name.split_once('.').map_or(name, |(c, _)| c).into(),
+        action: name.split_once('.').map_or("", |(_, a)| a).into(),
         effect,
         description: summary.into(),
         params,
@@ -599,14 +602,14 @@ pub fn center_units() -> Vec<Unit> {
     };
     vec![
         unit(
-            "cancel",
+            "job.cancel",
             Effect::Actuate,
             "Stops a running job of this session: the node cancels its call.",
             json!({"type": "object", "properties": {"job": job}, "required": ["job"],
                    "additionalProperties": false}),
         ),
         unit(
-            "status",
+            "job.status",
             Effect::Read,
             "A job's state: running, or its result once it ended (given once). A job is a call that execute answered with a job id.",
             json!({"type": "object",
@@ -614,6 +617,25 @@ pub fn center_units() -> Vec<Unit> {
                                   "wait_ms": {"type": "integer", "minimum": 0, "maximum": WAIT_MS_MAX,
                                               "description": "How long to wait for the job to end, in milliseconds, at most the center's call wait (20 s unless its owner set another); none or 0 answers at once."}},
                    "required": ["job"], "additionalProperties": false}),
+        ),
+        unit(
+            "stream.close",
+            Effect::Read,
+            "Closes a stream of this session: nothing more of it is kept or read.",
+            json!({"type": "object", "properties": {"stream": stream}, "required": ["stream"],
+                   "additionalProperties": false}),
+        ),
+        unit(
+            "stream.read",
+            Effect::Read,
+            "Reads what a stream (a job's command output) sent since the last read; eof once it ended and all was read.",
+            json!({"type": "object",
+                   "properties": {"stream": stream,
+                                  "max_bytes": {"type": "integer", "minimum": READ_MIN, "maximum": READ_MAX,
+                                                "description": format!("The most bytes to read, {READ_DEFAULT} when none is given.")},
+                                  "wait_ms": {"type": "integer", "minimum": 0, "maximum": WAIT_MS_MAX,
+                                              "description": "How long to wait for more when nothing is there yet, in milliseconds, at most the center's call wait; none or 0 answers at once."}},
+                   "required": ["stream"], "additionalProperties": false}),
         ),
     ]
 }
@@ -756,7 +778,14 @@ mod tests {
         let c = Catalog::build(&d);
         assert_eq!(
             c.units.iter().map(|u| u.name.as_str()).collect::<Vec<_>>(),
-            ["exec.run", "exec.signal", "job.cancel", "job.status"]
+            [
+                "exec.run",
+                "exec.signal",
+                "job.cancel",
+                "job.status",
+                "stream.close",
+                "stream.read"
+            ]
         );
         assert_eq!(names(&c).1, ["job", "stream"]);
         assert!(
@@ -777,9 +806,16 @@ mod tests {
             (&*cancel.provider, cancel.effect),
             (CENTER, Effect::Actuate)
         );
-        for u in [status, cancel] {
+        // The stream units read only: they change nothing on the machine.
+        let read = c.unit("stream.read").unwrap();
+        assert_eq!((&*read.provider, read.effect), (CENTER, Effect::Read));
+        assert_eq!(read.params["required"], json!(["stream"]));
+        let close = c.unit("stream.close").unwrap();
+        assert_eq!(close.effect, Effect::Read);
+        for u in [status, cancel, read, close] {
             schema::check(&u.params, Role::Params).unwrap();
             assert_eq!(u.note, None);
+            assert!(is_center(u));
         }
         // Beside the node's own units only: one that offers nothing, or
         // only units its owner turned off, has none.
@@ -787,7 +823,7 @@ mod tests {
             "one",
             vec![cap("fs", "fs", &[("read", Effect::Read, path())])],
         ));
-        assert_eq!(one.units.len(), 3);
+        assert_eq!(one.units.len(), 5);
         assert_eq!(one.units[2], *c.unit("job.status").unwrap());
         assert!(Catalog::build(&desc("bare", vec![])).units.is_empty());
         let mut off = cap("fs", "fs", &[("read", Effect::Read, path())]);

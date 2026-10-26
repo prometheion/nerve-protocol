@@ -363,7 +363,7 @@ impl Session {
 
 /// The units a harness is offered on each harness node, sorted: the node's
 /// own, and the center's `job.cancel` and `job.status` beside them.
-const OFFERED: [&str; 7] = [
+const OFFERED: [&str; 9] = [
     "echo.fail",
     "echo.say",
     "echo.wait",
@@ -371,6 +371,8 @@ const OFFERED: [&str; 7] = [
     "job.status",
     "mirror.say",
     "mirror.set",
+    "stream.close",
+    "stream.read",
 ];
 /// The units of `node`, `settings` and `audit` the harness nodes describe,
 /// which a center must never offer.
