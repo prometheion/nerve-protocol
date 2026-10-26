@@ -7,7 +7,13 @@
 //! conservative: where it is unsure, it reads more text as commands, not
 //! less.
 //!
-//! [`parse`] splits the line into its individual commands: at `;`, `&&`,
+//! [`parse`] reads the line twice and keeps the commands of both readings:
+//! with nerve-policy's parser ([`nerve_policy::command`], the node's guard
+//! reads commands with it), which knows more wrappers and the texts more
+//! programs run, and with the text splitter of this module, which reads
+//! what the parser reads otherwise or cannot read (see [`parse`]).
+//!
+//! The splitter splits the line into its individual commands: at `;`, `&&`,
 //! `||`, `|`, `&`, newlines and the parentheses of a subshell, and inside
 //! `$( )`, backticks (also within double quotes, for a POSIX shell), process
 //! substitution `<( )`, `sh -c '…'` (with the `c` anywhere in the flag word:
@@ -37,6 +43,10 @@
 //! then run, base64. Those the decision model and the node's own policy are
 //! for.
 
+use std::collections::HashSet;
+
+use nerve_policy::command;
+
 /// The deepest nesting the walk descends, counting `$( )`, backticks, `-c`
 /// bodies and started programs together. Real commands nest a few levels;
 /// past this the line is reported as overflow.
@@ -48,7 +58,7 @@ pub const MAX_DEPTH: usize = 16;
 pub const MAX_COMMANDS: usize = 100_000;
 
 /// One command pulled from a command line.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Command {
     /// The program's base name, lower-cased, without `.exe` (`/usr/bin/RM` →
     /// `rm`, `C:\Windows\System32\cmd.exe` → `cmd`).
@@ -212,7 +222,74 @@ pub fn commands(line: &str) -> Vec<Command> {
 
 /// Pulls `line` apart by the rules of `shell`, bounded in depth and in the
 /// number of commands.
+///
+/// Two readers take the line apart, and a command either finds is one
+/// here:
+///
+/// - nerve-policy's parser, the one the node's guard reads commands with
+///   ([`nerve_policy::command`]): every command it finds, at any depth and
+///   behind every wrapper it knows (`timeout`, `env -S`, `runuser`, `eval`,
+///   `Invoke-Expression`, cmd's `call` and `if`, …), as the program it runs;
+///   for a line it cannot read with confidence, the commands it read before
+///   it gave out;
+/// - the text splitter below ([`walk`]), for what the parser reads otherwise
+///   or not at all: a line it cannot read, the lines of a here-document or
+///   a PowerShell here-string (read as commands whatever the text is for:
+///   the owner's decision rules out a special reading of documents), a
+///   Windows path after a POSIX `\`, a `\` before a CRLF, cmd's `start ""`
+///   written in PowerShell, and a chain of starters past the parser's bound.
+///
+/// So the blocklist catches all it caught with the splitter alone, and what
+/// the parser sees besides.
 pub fn parse(line: &str, shell: Shell) -> Parsed {
+    let mut out = walk(line, shell);
+    if out.overflow.is_some() {
+        return out;
+    }
+    let mut seen: HashSet<Command> = out.commands.iter().cloned().collect();
+    let script = match command::parse(line, shell.policy()) {
+        Ok(script) => script,
+        Err(gave_out) => gave_out.read,
+    };
+    script.visit(&mut |s, i| {
+        if out.overflow.is_some() {
+            return;
+        }
+        let Some(run) = command::run(&s.commands[i], s.shell) else {
+            return;
+        };
+        let raw: Vec<String> = run.args.iter().map(|w| w.text.clone()).collect();
+        let c = Command {
+            program: base_name(&run.name),
+            args: raw.iter().flat_map(|a| expand_flags(a)).collect(),
+            raw,
+        };
+        if seen.contains(&c) {
+            return;
+        }
+        if out.commands.len() >= MAX_COMMANDS {
+            out.overflow = Some(Overflow::Commands);
+            return;
+        }
+        seen.insert(c.clone());
+        out.commands.push(c);
+    });
+    out
+}
+
+impl Shell {
+    fn policy(self) -> command::Shell {
+        match self {
+            Shell::Posix => command::Shell::Sh,
+            Shell::PowerShell => command::Shell::PowerShell,
+        }
+    }
+}
+
+/// The text splitter: pulls `line` apart by the rules of `shell` without
+/// the parser, for a line the parser cannot read. Where it is unsure it
+/// reads more text as commands, not less.
+fn walk(line: &str, shell: Shell) -> Parsed {
     let mut w = Walk {
         commands: Vec::new(),
         overflow: None,
@@ -224,7 +301,7 @@ pub fn parse(line: &str, shell: Shell) -> Parsed {
     }
 }
 
-/// The state threaded through one walk. One `Walk` per [`parse`], so the
+/// The state threaded through one walk. One `Walk` per [`walk`], so the
 /// bounds cover the whole line, not each nesting level on its own.
 struct Walk {
     commands: Vec<Command>,
@@ -1063,8 +1140,14 @@ fn expand_flags(word: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// The programs the text splitter reads in `line`, in order: the tests
+    /// of its reading. What the parser adds is tested on its own.
     fn progs(line: &str) -> Vec<String> {
-        commands(line).into_iter().map(|c| c.program).collect()
+        walk(line, Shell::Posix)
+            .commands
+            .into_iter()
+            .map(|c| c.program)
+            .collect()
     }
 
     #[test]
@@ -1158,7 +1241,7 @@ mod tests {
     #[test]
     fn a_quote_in_a_powershell_here_string_ends_with_its_line() {
         let progs = |line: &str| -> Vec<String> {
-            parse(line, Shell::PowerShell)
+            walk(line, Shell::PowerShell)
                 .commands
                 .into_iter()
                 .map(|c| c.program)
@@ -1325,7 +1408,7 @@ mod tests {
     #[test]
     fn a_powershell_line_is_read_by_powershells_rules() {
         let ps = |line: &str| -> Vec<String> {
-            parse(line, Shell::PowerShell)
+            walk(line, Shell::PowerShell)
                 .commands
                 .into_iter()
                 .map(|c| c.program)

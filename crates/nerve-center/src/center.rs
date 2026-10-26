@@ -3095,6 +3095,7 @@ impl Center {
             "platform_supported": checker::install::platform_supported(),
             "gpu_hint": checker::install::gpu_hint(),
             "rejected": self.checker().rejected,
+            "unpublished": self.read(|s| unpublished_rules(&s.checker, &s.nodes)),
         })
     }
 
@@ -3456,6 +3457,45 @@ fn checker_target(
             .join(", "),
         _ => format!("{}.{}", route.cap, route.action),
     }
+}
+
+/// The owner's blocklist entries and allow rules that name a capability, or
+/// an action of one, that no paired node publishes (the one node for a
+/// rule of one node): they match no call now, which the checker page says,
+/// since a misspelt name looks like a rule in force. Nothing is said while
+/// no node has published anything, and the built-in entries name the
+/// node's own capabilities.
+fn unpublished_rules(cfg: &CheckerConfig, nodes: &BTreeMap<String, NodeRecord>) -> Vec<String> {
+    if nodes.values().all(|n| n.descriptor.is_none()) {
+        return Vec::new();
+    }
+    let publishes = |n: &NodeRecord, cap: &str, action: Option<&str>| {
+        n.descriptor
+            .as_ref()
+            .and_then(|d| d.capability(cap))
+            .is_some_and(|c| action.is_none_or(|a| c.actions.contains_key(a)))
+    };
+    let own = cfg.blocklist.iter().filter(|e| !e.builtin);
+    let rules = own
+        .map(|e| (&e.rule, &e.node_id))
+        .chain(cfg.allow_rules.iter().map(|a| (&a.rule, &a.node_id)));
+    let mut out: Vec<String> = Vec::new();
+    for (rule, node) in rules {
+        let scope = rule.split_once(':').map_or(rule.as_str(), |(s, _)| s);
+        let (cap, action) = match scope.split_once('.') {
+            Some((c, a)) => (c, Some(a)),
+            None => (scope, None),
+        };
+        let known = match node {
+            // A rule for a machine no longer paired is shown as such.
+            Some(id) => nodes.get(id).is_none_or(|n| publishes(n, cap, action)),
+            None => nodes.values().any(|n| publishes(n, cap, action)),
+        };
+        if !known && !out.contains(rule) {
+            out.push(rule.clone());
+        }
+    }
+    out
 }
 
 /// What the center's catalog says of the unit a call is for, as the action
@@ -4035,6 +4075,59 @@ mod tests {
         assert_eq!(
             seen.paths(&save("/x")),
             vec![(PathMark::Write, "/x".to_string())]
+        );
+    }
+
+    /// The checker page is told which of the owner's rules name a
+    /// capability or action no paired node publishes (for a rule of one
+    /// node, that node), and none while no node has published anything.
+    #[test]
+    fn a_rule_naming_a_capability_no_node_publishes_is_warned_about() {
+        use crate::tools::tests::{cap, desc};
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let rule = |r: &str, node: Option<&str>| AllowRule {
+            rule: r.into(),
+            node_id: node.map(str::to_string),
+        };
+        c.update(|s| {
+            s.nodes.insert("n1".into(), node_record("n1", "linux"));
+            s.nodes.insert("n2".into(), node_record("n2", "linux"));
+            s.checker.allow_rules = vec![
+                rule("lamp.set", None),
+                rule("lamp.sett", None),
+                rule("lamp", Some("n2")),
+                rule("notes", None),
+                rule("exec.run:make *", None),
+            ];
+            s.checker.blocklist.push(checker::BlockEntry {
+                id: String::new(),
+                rule: "fs.wirte:/etc/*".into(),
+                on: true,
+                builtin: false,
+                note: String::new(),
+                node_id: None,
+                off_for: Vec::new(),
+            });
+        });
+        assert_eq!(c.checker_json()["unpublished"], json!([]));
+        let lamp = cap(
+            "lamp",
+            "lamp",
+            &[("set", nerve_proto::Effect::Actuate, json!({}))],
+        );
+        let exec = cap(
+            "exec",
+            "exec",
+            &[("run", nerve_proto::Effect::Execute, json!({}))],
+        );
+        c.update(|s| {
+            let n1 = s.nodes.get_mut("n1").unwrap();
+            n1.set_descriptor(desc("n1", vec![lamp, exec]));
+        });
+        assert_eq!(
+            c.checker_json()["unpublished"],
+            json!(["fs.wirte:/etc/*", "lamp.sett", "lamp", "notes"])
         );
     }
 

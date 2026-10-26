@@ -5,8 +5,11 @@
 //! one. `exec.run` patterns match the commands [`normalize`] pulls from the
 //! command line: a structured `program flags operands` form, or `re:<regex>`
 //! over the whole normalized line where a glob is not enough. `fs` patterns
-//! are path globs (with `~` standing for any home); any other `cap.action`
-//! matches that scope.
+//! are path globs (with `~` standing for any home); a blocklist entry's
+//! also holds the path arguments (`x-nerve-path`) of every other capability.
+//! Any other `cap` or `cap.action` takes no pattern and matches that whole
+//! scope: a pattern there is refused, since it would have nothing to match
+//! until rules on arguments come.
 
 use globset::{GlobBuilder, GlobMatcher};
 use nerve_proto::schema::PathMark;
@@ -37,9 +40,9 @@ enum Matcher {
     CmdRegex(Regex),
     /// An `fs` path glob.
     Path(GlobMatcher),
-    /// Any other `cap.action`: the scope, with an optional glob over the
-    /// `<cap>.<action>` target.
-    Scope(Option<GlobMatcher>),
+    /// Any other `cap` or `cap.action`, whole: a pattern on it would have
+    /// nothing to match until rules on arguments come (#152, C1).
+    Scope,
 }
 
 /// A blocklist entry or allow rule, parsed and ready to match.
@@ -86,17 +89,21 @@ impl Rule {
             let pattern =
                 pattern.ok_or_else(|| format!("rule {rule:?}: an fs rule needs a path"))?;
             Matcher::Path(path_glob(pattern).map_err(|e| format!("rule {rule:?}: {e}"))?)
+        } else if let Some(p) = pattern {
+            // A pattern here would be matched against nothing the call
+            // carries, so the entry would never refuse (or allow) anything:
+            // refused, so an owner does not count on it.
+            return Err(if (cap.as_str(), action.as_deref()) == ("exec", None) {
+                format!(
+                    "rule {rule:?}: a command pattern goes on exec.run (exec.run:{p}); exec alone, without a pattern, covers every exec action"
+                )
+            } else {
+                format!(
+                    "rule {rule:?}: a pattern on {scope} matches nothing yet (rules on a capability's arguments come later); write {scope} alone for all of it, or an fs.read:<path> or fs.write:<path> entry, which also holds the path arguments of every capability"
+                )
+            });
         } else {
-            let glob = match pattern {
-                Some(p) => Some(
-                    GlobBuilder::new(p)
-                        .build()
-                        .map_err(|e| format!("rule {rule:?}: {e}"))?
-                        .compile_matcher(),
-                ),
-                None => None,
-            };
-            Matcher::Scope(glob)
+            Matcher::Scope
         };
         Ok(Rule {
             cap,
@@ -151,8 +158,7 @@ impl Rule {
             // and match case-insensitively so a differently-spelled or (on a
             // case-folding filesystem) differently-cased path still hits.
             Matcher::Path(g) => g.is_match(normalize_path(call.target)),
-            Matcher::Scope(None) => true,
-            Matcher::Scope(Some(g)) => g.is_match(format!("{}.{}", call.cap, call.action)),
+            Matcher::Scope => true,
         }
     }
 }
@@ -602,6 +608,98 @@ mod tests {
             || defaults()
                 .iter()
                 .any(|r| r.matches_with(&exec(cmd), Some(&p.commands)))
+    }
+
+    /// A pattern on a scope that has none to match (anything but `exec.run`
+    /// and `fs`) is refused with a word on what to write instead, rather
+    /// than kept as an entry that never refuses anything; the whole scope
+    /// alone is still a rule.
+    #[test]
+    fn a_pattern_on_a_non_fs_exec_scope_is_refused() {
+        for rule in [
+            "notes.save:~/.ssh/*",
+            "lamp.set:office",
+            "lamp:*",
+            "exec.signal:*",
+        ] {
+            let Err(why) = Rule::parse(rule) else {
+                panic!("{rule} should be refused");
+            };
+            assert!(why.contains("matches nothing yet"), "{why}");
+            assert!(why.contains("fs.write:<path>"), "{why}");
+        }
+        for rule in [
+            "notes.save",
+            "lamp",
+            "exec",
+            "fs.read:/srv/*",
+            "fs:~/.ssh/*",
+        ] {
+            assert!(Rule::parse(rule).is_ok(), "{rule}");
+        }
+        assert!(
+            Rule::parse("lamp")
+                .unwrap()
+                .matches(&call("lamp", "set", "lamp.set"))
+        );
+    }
+
+    /// `exec:<pattern>` reads like a command rule but is not one: it is
+    /// refused, naming the `exec.run:` form.
+    #[test]
+    fn exec_colon_pattern_is_refused() {
+        let Err(why) = Rule::parse("exec:rm -rf /") else {
+            panic!("exec:rm -rf / should be refused");
+        };
+        assert!(why.contains("exec.run:rm -rf /"), "{why}");
+        assert!(hits("exec.run:rm -rf /", "rm -rf /"));
+    }
+
+    /// The commands nerve-policy's parser finds behind wrappers and in the
+    /// text a program runs, which the text splitter alone did not take
+    /// apart (#159), meet the blocklist; a mention in another program's
+    /// words stays data.
+    #[test]
+    fn the_parser_sees_commands_behind_more_wrappers() {
+        let (sh, ps) = (normalize::Shell::Posix, normalize::Shell::PowerShell);
+        for (shell, cmd) in [
+            (sh, "timeout 30 rm -rf /"),
+            (sh, "runuser -u root -- rm -rf ~"),
+            (sh, "env -S 'rm -rf /'"),
+            (sh, "eval 'rm -rf ~'"),
+            (sh, "su -c 'mkfs.ext4 /dev/sdb'"),
+            (sh, "busybox rm -rf /"),
+            (ps, "cmd /c \"call diskpart\""),
+            (ps, "cmd /c \"if 1==1 bcdedit /set x\""),
+            (ps, "Invoke-Expression 'Format-Volume -DriveLetter D'"),
+        ] {
+            assert!(refused_on(shell, cmd), "should be refused: {cmd:?}");
+        }
+        for (shell, cmd) in [
+            (sh, "timeout 30 make test"),
+            (sh, "git commit -m 'timeout 30 rm -rf /'"),
+            (sh, "echo eval rm -rf /"),
+            (ps, "Write-Host 'cmd /c call diskpart'"),
+            (ps, "Invoke-Expression 'git status'"),
+        ] {
+            assert!(!refused_on(shell, cmd), "should stay allowed: {cmd:?}");
+        }
+    }
+
+    /// Where the parser reads a line otherwise than the text splitter, or
+    /// cannot read it, the splitter's reading still counts: cmd's
+    /// `start ""` written in PowerShell, a `\` before a CRLF, and the lines
+    /// of a document written to a file.
+    #[test]
+    fn the_splitter_still_reads_what_the_parser_reads_otherwise() {
+        let (sh, ps) = (normalize::Shell::Posix, normalize::Shell::PowerShell);
+        for (shell, cmd) in [
+            (ps, "start \"\" /wait diskpart"),
+            (sh, "docker \\\r\n run --privileged img"),
+            (sh, "cat > notes.sh <<'EOF'\nrm -rf ~\nEOF"),
+        ] {
+            assert!(refused_on(shell, cmd), "should be refused: {cmd:?}");
+        }
     }
 
     /// Ordinary Windows clean-ups of an absolute path, `$env:` folders and

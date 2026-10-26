@@ -990,6 +990,7 @@ function pageChecker() {
       checkerToggle("model_on", "Decision model (off by default)", cfg.model_on, (v) => { cfg.model_on = v; }),
       checkerToggle("taint_on", "Taint marking (a session is tainted after a call returns content)", cfg.taint_on, (v) => { cfg.taint_on = v; }))),
     c.meta.rejected && c.meta.rejected.length ? banner("warn", "alert", `Some rules do not parse and were left out: ${c.meta.rejected.join("; ")}`) : null,
+    c.meta.unpublished && c.meta.unpublished.length ? banner("warn", "alert", `Some rules name a capability no machine offers, so they match no call now (a typo, or a capability that is gone): ${c.meta.unpublished.join("; ")}`) : null,
     blocklistCard(cfg, c.meta),
     allowCard(cfg),
     machinesCard(cfg),
@@ -1046,7 +1047,7 @@ function blocklistCard(cfg, meta) {
     cfg.blocklist = meta.default_blocklist.map((e) => ({ ...e }));
     await saveChecker();
   });
-  return section("Blocklist", "Exact commands or wildcards that are refused at once, in the machine's own rule syntax (exec.run:…, fs.write:…), for every machine or for one. A re: regex form is allowed where a glob is not enough. The blocklist wins over the allow rules and the model. An entry for every machine can be switched off for single machines under Per machine.", btn("Reset to defaults", "ghost", reset, "refresh", "blocklist:reset"),
+  return section("Blocklist", "Exact commands or wildcards that are refused at once, in the machine's own rule syntax (exec.run:…, fs.write:…), for every machine or for one. A re: regex form is allowed where a glob is not enough. An fs.read: or fs.write: path also holds the paths any other capability reads or writes; any other capability is named whole (lamp.set, or lamp for all its actions). The blocklist wins over the allow rules and the model. An entry for every machine can be switched off for single machines under Per machine.", btn("Reset to defaults", "ghost", reset, "refresh", "blocklist:reset"),
     el("div", { class: "card" }, el("div", { class: "form-row" },
       el("label", { class: "field grow" }, el("span", { class: "label" }, "Add a rule"), ruleIn),
       el("label", { class: "field grow" }, el("span", { class: "label" }, "Note"), noteIn),
