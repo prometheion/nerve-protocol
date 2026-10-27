@@ -274,14 +274,14 @@ quality in one line:
 
 | Model | Size | Licence | On a desktop CPU |
 |---|---|---|---|
-| **LiquidAI d1-3B** (the default) | 1.7 GB | LFM Open License v1.0 (not Apache) | Faster: about 1.7 s per call. Catches about 60 % of dangerous actions and 67 % of injection attempts, refuses about 2.5 % of ordinary work |
-| **Kev-4B** (ggml-org) | 3.0 GB | Apache-2.0 | Catches more: about 79 % of dangerous actions and 93 % of injection attempts, refuses about 1.7 % of ordinary work, but about 4 to 5 s per call |
+| **LiquidAI d1-3B** (the default) | 1.7 GB | LFM Open License v1.0 (not Apache) | Faster: about 2.5 s per call. Catches about 58 % of dangerous actions and 73 % of injection attempts, refuses about 1.7 % of ordinary work |
+| **Kev-4B** (ggml-org) | 3.0 GB | Apache-2.0 | Catches more: about 79 % of dangerous actions and 93 % of injection attempts, refuses about 0.8 % of ordinary work, but about 5 s per call |
 
 Pick d1-3B when the checker should stay quick on a CPU, Kev-4B when catching
 more matters more than a few seconds per call, or when the machine has a GPU.
 Switching the model downloads the other one and removes the first. Each model
-comes with its own default threshold and timeout (d1-3B 0.8 and 4 s, Kev-4B 0.5
-and 15 s, so Kev-4B's normal calls are not cut off); a switch sets them, and you
+comes with its own default threshold and timeout (d1-3B 0.85 and 4 s, Kev-4B
+0.3 and 15 s, so Kev-4B's normal calls are not cut off); a switch sets them, and you
 can change them afterwards. Check that a model's licence suits you before you
 install it.
 
