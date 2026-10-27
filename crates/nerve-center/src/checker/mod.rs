@@ -432,6 +432,22 @@ pub fn taints(effect: Effect) -> bool {
 /// it does in a sentence or two, so a long one cannot crowd out the call.
 pub const STATE_DESCRIPTION_MAX: usize = 400;
 
+/// The description of a unit as the model's state carries it: the action's
+/// own text first, then what the capability is for in brackets. The state
+/// clips the end, and a long capability summary must not push out the part
+/// that tells `unlock` from `status`. A unit without a text of its own, or
+/// with the capability's, is told once. The center and the evaluation runner
+/// both build it here, so the measured state is the sent one.
+pub fn unit_description(action: &str, unit: &str, capability: &str) -> String {
+    if capability.is_empty() || unit == capability {
+        unit.to_string()
+    } else if unit.is_empty() {
+        capability.to_string()
+    } else {
+        format!("{action}: {unit} ({capability})")
+    }
+}
+
 /// The `state` sent to the model: the call, with its effect, the node's
 /// description of the capability, and args bounded. The question is fixed
 /// by the center, so only this ever carries the command text or what a
@@ -476,6 +492,18 @@ mod tests {
             os: "linux",
             tainted: false,
         }
+    }
+
+    #[test]
+    fn a_unit_is_described_by_its_action_first_and_its_capability_in_brackets() {
+        assert_eq!(
+            unit_description("unlock", "Unlocks it.", "The front door."),
+            "unlock: Unlocks it. (The front door.)"
+        );
+        // Told once where the unit has no text of its own or the same one.
+        assert_eq!(unit_description("a", "Same.", "Same."), "Same.");
+        assert_eq!(unit_description("a", "Text.", ""), "Text.");
+        assert_eq!(unit_description("a", "", "The door."), "The door.");
     }
 
     #[tokio::test]

@@ -17,9 +17,10 @@
 //! `NERVE_CHECKER_TOKEN` and `NERVE_CHECKER_MODEL` are optional (a TypeSafe
 //! endpoint takes a token and `jev-latest`).
 //!
-//! Every case goes in the state the center sends ([`checker::model_state`]):
-//! the call's effect, the node's description of the capability, the target
-//! and the arguments. A command or file case takes the built-in
+//! Every case goes in the state the center sends ([`checker::model_state`],
+//! with the description put together by [`checker::unit_description`]): the
+//! call's effect, the node's description of the action and the capability,
+//! the target and the arguments. A command or file case takes the built-in
 //! capability's effect and description and its `command` or `path` as the
 //! arguments; a capability case (a provider's action) names its own. The
 //! command and file cases and the capability cases are also reported on
@@ -43,10 +44,13 @@ struct Case {
     danger: bool,
     kind: String,
     id: u64,
-    /// A capability case's own effect, description and arguments; a
-    /// command or file case takes the built-in's.
+    /// A capability case's own effect, the capability's summary, the
+    /// action's description and its arguments; a command or file case takes
+    /// the built-in's.
     #[serde(default)]
     effect: Option<Effect>,
+    #[serde(default)]
+    summary: Option<String>,
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
@@ -68,12 +72,14 @@ impl Case {
             })
     }
 
-    /// What the center tells the model of the capability: for the node's
-    /// own ones, the capability's summary and the action's, as the node
-    /// publishes them.
+    /// What the center tells the model of the action: the action's text and
+    /// the capability's summary, put together by `checker::unit_description`
+    /// as the center does. For the node's own capabilities they are the
+    /// texts the node publishes.
     fn description(&self) -> String {
         if let Some(d) = &self.description {
-            return d.clone();
+            let summary = self.summary.as_deref().unwrap_or("");
+            return checker::unit_description(&self.action, d, summary);
         }
         let run = if self.os == "windows" {
             "Runs a command in Windows PowerShell 5.1 (`powershell.exe -NoProfile -Command`): PowerShell syntax, not cmd or sh. Chain commands with `;`; `&&` and `a & b` are parser errors there."
@@ -96,7 +102,7 @@ impl Case {
         } else {
             "Files on this machine: stat, list, read, grep, find and write."
         };
-        format!("{cap} {}: {action}", self.action)
+        checker::unit_description(&self.action, &action, cap)
     }
 
     fn args(&self) -> Map<String, Value> {
@@ -258,4 +264,41 @@ fn report(what: &str, scored: &[&Scored]) {
             100.0 * inj_caught / inj.max(1.0),
         );
     }
+}
+
+/// The runner measures the description the center sends: the action's text
+/// first, the capability's summary after it in brackets. The order matters
+/// to the models, so thresholds measured on another one are not the
+/// product's.
+#[test]
+fn the_cases_carry_the_description_in_the_order_the_center_sends() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/checker-eval.json");
+    let cases: Vec<Case> = serde_json::from_slice(&std::fs::read(path).expect("read the eval set"))
+        .expect("valid JSON");
+    let (mut with_summary, mut built_in) = (0, 0);
+    for c in &cases {
+        let d = c.description();
+        match (&c.summary, c.capability()) {
+            (Some(summary), true) => {
+                with_summary += 1;
+                assert!(
+                    d.starts_with(&format!("{}: ", c.action))
+                        && d.ends_with(&format!("({summary})")),
+                    "case {}: {d}",
+                    c.id
+                );
+            }
+            (None, false) => {
+                built_in += 1;
+                assert!(
+                    d.starts_with(&format!("{}: ", c.action)),
+                    "case {}: {d}",
+                    c.id
+                );
+                assert!(d.ends_with(')'), "case {}: {d}", c.id);
+            }
+            _ => {}
+        }
+    }
+    assert!(with_summary > 10 && built_in > 100);
 }

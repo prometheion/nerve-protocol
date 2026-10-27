@@ -3548,11 +3548,7 @@ impl CheckerUnit {
             .and_then(|d| d.capability(&route.cap))
             .map(|c| catalog::described(&c.summary).to_string())
             .unwrap_or_default();
-        let description = if cap.is_empty() || *u.description == *cap {
-            u.description.to_string()
-        } else {
-            format!("{}: {} ({cap})", route.action, u.description)
-        };
+        let description = checker::unit_description(&route.action, &u.description, &cap);
         CheckerUnit {
             description,
             marked: nerve_proto::schema::path_args(&u.params),
