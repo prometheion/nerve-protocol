@@ -39,7 +39,8 @@ What follows `--` is the command: the program first (a name looked up in
 | `--platform` | `any` (the default), `linux` or `windows`: a node offers only those of its own platform |
 
 `--params-stdin` and `--result-stdin` read the schema from stdin instead, for
-one too long for the command line:
+one too long for the command line. Only one of them can come from stdin: add
+the capability with one and `cap edit` the other.
 
 ```sh
 nerve-node cap add logs.tail --effect read --params-stdin -- tail -n 50 -- {path} < tail.json
@@ -49,7 +50,9 @@ The node never opens a file of yours for it.
 
 `nerve-node cap edit NAME` changes what you give and keeps the rest (a
 command after `--` replaces the command); `nerve-node cap rm NAME` removes
-it, and it leaves every center at once.
+it, and it leaves every center at once. The name is what an entry is known
+by, so to rename one, remove it and add it again; a switch set for the old
+name stays (below).
 
 ## Arguments
 
@@ -114,18 +117,26 @@ you can.
 
 A command that runs as you must not run what a center may write: a center
 with `w` on a folder could put its own code there and have it run with your
-rights. So the node refuses its calls while one of these lies in a `w` folder
-of any center, in `/tmp` or `/var/tmp`, or in `nerve-run`'s home:
+rights. A center may write in a `w` folder of its own, in `/tmp` and
+`/var/tmp`, in `nerve-run`'s home, and, in `allowlist` mode where its writes
+run as you (`--as-owner`, or any pairing of a node you run yourself),
+wherever an allow rule lets it write (`fs.write:~/site/**` counts like a
+`w` folder `~/site`, a write rule with no path like your whole machine). So
+the node refuses its calls while one of these lies in such a place:
 
 - your home, where it starts (`make`, `npm test` or `python3 -m` read code
   from where they start, so a center with `w` on your whole home blocks every
   such command);
-- its program, as found in `PATH` (the node then runs that very file);
+- its program, as found in `PATH` (the node then runs that very file; a
+  program it finds none of that you may run does not start);
 - a place a word of its command names: a full path, a path from your home
   (`make -C proj`, `sh proj/ci.sh`), a name of something in your home, also
-  as an option's value (`--manifest-path=proj/Cargo.toml`).
+  as an option's or a variable's value (`--manifest-path=proj/Cargo.toml`,
+  `-Cproj`, `-I/srv/lib`, `PYTHONPATH=proj`). A place not there yet counts
+  by where the folder it would be in leads.
 
-`cap add` and `cap edit` warn of it. Keep what such a command reads on its
+The node judges this as you, from your home, before each call; `cap add`
+and `cap edit` ask the running node and warn of it. Keep what such a command reads on its
 own (its configuration, a file a script loads) out of those folders too: the
 node cannot see what a program reads.
 

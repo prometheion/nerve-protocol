@@ -165,7 +165,7 @@ http://user@host:port --password-stdin` takes the proxy's password from the
 first line of stdin, and `--headers-stdin` the headers from the lines after
 it, one `Name: value` each, so neither shows in the process list. `cap add`
 and `cap edit` with `--params-stdin` or `--result-stdin` take that schema as
-all of stdin. `setup` reads its answers
+all of stdin (one of the two per command). `setup` reads its answers
 from stdin one line each. `center add` needs `--yes`.
 
 ## What changed with the account nerve-run

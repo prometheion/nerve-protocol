@@ -120,8 +120,9 @@ nothing. If the machine dies in the middle of it, run it again.
 
 Restore only a backup you made yourself. It is the whole `node.toml`, with
 everything the file can set: the programs allowed to attach as providers, the
-`sudo` program, the account commands run as, the folders and rules of every
-center. The passphrase proves that whoever made the file knew it, not that the
+[capabilities of your own](config-capabilities.md) with their commands (run
+as `nerve-run` or as you), the `sudo` program, the account commands run as,
+the folders and rules of every center. The passphrase proves that whoever made the file knew it, not that the
 file is yours.
 
 ## The center
@@ -213,7 +214,8 @@ center, a relayed node holds the pin of its relay, and a node behind an
    ([install](install.md)), and `nerve-node restore file`.
 3. Check what belongs to the machine and not to the node: the folders in
    `center.<name>.policy.folders`, the account commands run as on Windows
-   (`machine.user`), the paths of providers, and the address of the relay.
+   (`machine.user`), the paths of providers, the programs of your own
+   capabilities (`nerve-node cap ls`), and the address of the relay.
    On Linux the installed node's owner is whoever installed it there, not
    part of the backup.
    `nerve-node config get` shows each.
