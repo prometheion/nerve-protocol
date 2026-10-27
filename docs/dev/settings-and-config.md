@@ -131,7 +131,8 @@ after `hello` and carries its calls.
 | `status` | Daemon and links |
 | `config.read` | Read `node.toml` and its `version` |
 | `config.write` | Replace it when `if_version` matches |
-| `config.accept` | Take a refused `node.toml` as it is |
+| `config.accept` | Take a refused `node.toml` as it is (an action that came to sense or actuate in it held in the same write) |
+| `cap.refusal` | Why the node refuses calls of a capability of `node.toml` that runs as the owner, judged as before a call (`cap add` and `cap edit` warn of it) |
 | `reload` | Reread `node.toml` (only a file the node signed) |
 | `sudo.status`, `sudo.on`, `sudo.off` | The sudo switch |
 | `folder.add` | `folder add`, judged by the node as the owner; it stores and records the real place |

@@ -582,23 +582,31 @@ A call is decided like a provider's (§7, Paths), then runs:
 | `owner` | the owner (root where root is the owner), the owner's home; a node by hand: its own user | as a program's (§7): the granted folders only, as the pairing's command account, closed folders refusing the walk | none |
 
 An `owner` one is refused `forbidden` (and audited so) before the gate when
-one of these lies, as written or where it leads (looked at as the owner), at
-or below a place a center's commands may write (a `w` folder of any center,
-`/tmp`, `/var/tmp`, `nerve-run`'s home): the folder it starts in (the owner's
-home; a node by hand: its home); its program (looked up in the node's `PATH`
-where it is a bare name, and that file is what runs); a fixed element that
-holds a `/` or names something in the folder it starts in, also as the part
-after `=` of an element that starts with `-`, read from that folder where it is
-not absolute. `cap add` and `cap edit` warn of it, and of a string argument
-without `x-nerve-path` (passed as given, judged by nothing).
+one of these lies, as written or where it leads (looked at as the owner; a
+place not there yet where its nearest existing folder leads), at or below a
+place a center may write (a `w` folder of any center, `/tmp`, `/var/tmp`,
+`nerve-run`'s home, and for each center in `allowlist` mode whose writes run
+as the owner, each allow rule of an action that writes at a path it names,
+`fs.write` or one with an argument marked `write`: its pattern up to the
+folder before its first wildcard, `/` without a pattern): the folder it
+starts in (the owner's home; a node by hand: its home); its program (the
+first file of that name in the node's `PATH` the owner may execute where it
+is a bare name, and that file is what runs; with none it fails `unavailable`
+after the gate); a fixed element that holds a `/` or names something in the
+folder it starts in, also as the part after the first `=` of any element and
+the rest of a single-dash element after its option letter or from its first
+`/` (`-Cdir`, `-I/x`), read from that folder where it is not absolute. `cap
+add` and `cap edit` ask the running node (`cap.refusal`, §5) and warn of it,
+and of a string argument without `x-nerve-path` (passed as given, judged by
+nothing); a stopped node's CLI judges it as its own user can.
 
 Both count toward `limits.max_running`, run in a cgroup of their own with the
 default `limits.command`, and end at `timeout_secs` (else
 `limits.default_timeout_secs`, at most the maximum): `timeout` "<name> ran
 past its limit of …". The result is stdout as a string (`text`; cut stdout
 ends with a note), or stdout parsed as JSON and validated against the result
-schema (`io` when it is not; `too_large` when stdout was cut; stderr past the
-cap cuts neither). An exit code other than 0, a signal or a memory kill
+schema (`io` when it is not, naming the field only where the schema names
+it; `too_large` when stdout was cut; stderr past the cap cuts neither). An exit code other than 0, a signal or a memory kill
 (whatever the exit code; audited `killed`/`memory` as for `exec.run`) is an
 `io` error whose message names it ("<name> failed: exit code 2"), with
 `data.exit_code` and `data.stderr` (the first 16 KiB, left out when it is
@@ -1381,7 +1389,8 @@ Methods:
 | `status` | | daemon and links; under `relay`, the relay's state, its pin, its nodes with their centers and its tunnels (§2, Relay) |
 | `config.read` | | `node.toml` and its `version` |
 | `config.write` | `config`, `if_version` | replaces it when the version matches |
-| `config.accept` | | takes `node.toml` as it is after it was refused, and signs it (§1) |
+| `config.accept` | | takes `node.toml` as it is after it was refused, and signs it (§1); an action that came to sense or actuate in it is switched off, in the same write, for each center whose earlier switch or allow rule covered it: `{version, held: [[center, action]]}` |
+| `cap.refusal` | `name` | why the node refuses calls of that `[[capability]]` with `account = "owner"` now, judged as before a call (§2): `{refusal: text \| null}` |
 | `folder.add` | `center`, `path`, `access` | `folder add`, done by the node so that it is judged as the owner (`exec::settle`): the path is followed a link at a time and must resolve to itself, the folder is stored at that place with `access` (replacing the entry there) and recorded in `policy.places`; `{stored, recorded, mode, counts}` (`counts`: whether the
 center's folders hold its commands, in folder mode or as `nerve-run`). An error, with nothing changed, when the path crosses a link inside a `w` folder of any center, leads nowhere, or changed while it was looked at. Where the node cannot tell either (a folder it may not look into, or a `w` folder it cannot resolve) the folder is stored as given, `recorded` is false, and a record it had stays. The CLI uses it whenever a node runs |
 | `folder.grants` | | the installed Linux node brings the folder ACLs in line at once (§Folder ACLs) and answers what that left: `{errors, stale, failed, skipped}`; `null` elsewhere. `folder add`, `set` and `rm` ask it |
