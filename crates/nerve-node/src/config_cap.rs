@@ -153,26 +153,70 @@ pub fn confined(
 /// names a path, else the first file of that name in `path`, the `PATH` it
 /// runs with, that this thread's account may execute (one it may not is
 /// passed over, as `execvp` does). The node runs that file, so `PATH` is
-/// looked up once, where [`written_by_centers`] judged it.
+/// looked up once, where [`written_by_centers`] judged it. An entry of
+/// `PATH` that is no full path (`.`, or an empty one) is passed over too:
+/// it names a folder from where the node runs, and the command starts
+/// elsewhere, so the file judged would not be the file that runs.
 pub fn program_file(program: &str, path: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
     if program.contains('/') {
         return Some(program.into());
     }
     path.and_then(|p| {
         std::env::split_paths(p)
+            .filter(|d| d.is_absolute())
             .map(|d| d.join(program))
             .find(|f| f.is_file() && executable(f))
     })
 }
 
 /// Why a command of `decl` that runs as the owner does not start: no file
-/// of its program's name in `PATH` that the owner may execute.
+/// of its program's name in `PATH` that the owner may execute. It names
+/// the program, so it is for the owner (`cap add`, `cap.refusal`, the
+/// node's log); the center gets [`no_program_for_center`].
 pub fn no_program(decl: &ConfigCapability) -> String {
     format!(
         "{} runs as the owner and finds no program {} in the node's PATH that the owner may run",
         decl.name,
         decl.command.first().map_or("", String::as_str)
     )
+}
+
+/// [`no_program`] as the calling center gets it, with no word of the
+/// command, which the descriptor keeps from every center.
+pub fn no_program_for_center(decl: &ConfigCapability) -> String {
+    format!(
+        "{} runs as the owner and finds no program in the node's PATH that the owner may run; the node's log says which",
+        decl.name
+    )
+}
+
+/// The words a shell would make of `line`, its quotes and escapes taken
+/// away, split at blanks and at its operators (`;`, `&`, `|`, `(`, `)`,
+/// `<`, `>`, a backquote): how a line such as `sh -c "cd /srv && ./x"`
+/// names a place, in one element of a command.
+fn shell_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('"') | None, '\\') => word.extend(chars.next()),
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => quote = Some(c),
+            (None, c) if c.is_whitespace() || ";&|()<>`".contains(c) => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            (None, c) => word.push(c),
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
 }
 
 /// Whether the account this thread acts as (crate::account::FsAs) may
@@ -398,9 +442,18 @@ pub fn written_by_centers(
     }
     let program = decl.command.first()?;
     let found = program_file(program, path);
-    let named = decl.command[1..]
+    // An element, and each word a shell would read in it: a line handed
+    // to `sh -c` names its places as the elements of a command do.
+    let elements: Vec<String> = decl.command[1..]
         .iter()
         .filter(|e| !(e.starts_with('{') && e.ends_with('}')))
+        .flat_map(|e| {
+            let words = shell_words(e).into_iter().filter(move |w| w != e);
+            std::iter::once(e.clone()).chain(words)
+        })
+        .collect();
+    let named = elements
+        .iter()
         .flat_map(|e| {
             // The value of `--opt=value` or `NAME=value` names a place as
             // the element would, and so does the rest of `-Cdir` or
@@ -922,6 +975,24 @@ account = "owner"
             ],
             vec!["java".into(), format!("@{}", s(&work.join("jvm.args")))],
             vec!["java".into(), "@work/jvm.args".into()],
+            // A line a shell reads names its places in its words.
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!("cd {} && ./deploy.sh", s(&work)),
+            ],
+            vec!["bash".into(), "-lc".into(), "make -C work".into()],
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!("exec sh '{}'", s(&work.join("deploy.sh"))),
+            ],
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!("true;sh \"{}\"|cat", s(&work.join("my dir/x.sh"))),
+            ],
+            vec!["sh".into(), "-c".into(), "cat <work/deploy.sh".into()],
         ] {
             let c = decl(&bad.iter().map(String::as_str).collect::<Vec<_>>());
             let why = written_by_centers(&c, w, None, Some(&path), &root);
@@ -945,6 +1016,11 @@ account = "owner"
                 "python3".into(),
             ],
             vec!["curl".into(), "https://example.org/a:b".into()],
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!("cd {} && ./safe.sh 2>&1 | tee log", s(&other)),
+            ],
         ] {
             let c = decl(&good.iter().map(String::as_str).collect::<Vec<_>>());
             assert_eq!(
@@ -967,6 +1043,21 @@ account = "owner"
         );
         assert_eq!(program_file("/bin/sh", None), Some("/bin/sh".into()));
         assert_eq!(program_file("no-such-b5", Some(&path)), None);
+        // An entry of PATH that is no full path names a folder from where
+        // the node runs, not from where the command starts: it is passed
+        // over, so the file judged is the file that runs.
+        let cwd = std::env::current_dir().unwrap();
+        let up = "../".repeat(cwd.components().count());
+        let relative = format!("{up}{}", s(&bin).trim_start_matches('/'));
+        assert!(std::path::Path::new(&relative).join("tool-b5").is_file());
+        let path = std::ffi::OsString::from(format!("{relative}:"));
+        assert_eq!(program_file("tool-b5", Some(&path)), None);
+        let path =
+            std::env::join_paths([std::path::PathBuf::from(&relative), bin.clone()]).unwrap();
+        assert_eq!(
+            program_file("tool-b5", Some(&path)),
+            Some(bin.join("tool-b5"))
+        );
     }
 
     /// What `nerve-run` owns or may change counts as a place a center may

@@ -2621,11 +2621,6 @@ impl Link {
         let (args, targets, named, target) =
             self.marked_paths(inv, &params, &marked, known.as_ref())?;
         let mut argv = decl.argv(&args).map_err(RpcError::invalid_args)?;
-        // The audit's target is what the center named: the paths, else the
-        // action, which the event to the center and the rules take. The
-        // command as it runs, with the call's values in it, holds the
-        // owner's own words and stays in the node's own log.
-        let ran = nerve_policy::config::ConfigCapability::line(&argv);
         // It starts in the home of the account it runs as (the node's own
         // by hand).
         let start_in = match &runs_as {
@@ -2635,32 +2630,39 @@ impl Link {
         // With the owner's rights it may not run what a center may write,
         // nor start there, and runs the program file judged, not another
         // one a second look in PATH might find.
-        let mut found = None;
-        if as_owner {
+        let judged = as_owner.then(|| {
             let owner = runs_as.as_ref().ok().cloned().flatten();
-            match self.shared.owner_command(cfg, &decl, owner.as_ref()) {
-                Err(why) => {
-                    // Where is the owner's to know: the place names words
-                    // of the owner's command and a folder some center may
-                    // write, perhaps another one's.
-                    self.audit_ran(
-                        inv,
-                        &target,
-                        Some(&ran),
-                        "forbidden",
-                        Some("forbidden"),
-                        Some(&why),
-                    );
-                    return Err(RpcError::new(
-                        ErrorCode::Forbidden,
-                        format!(
-                            "{} runs as the owner and its command names or starts in a place where a center may write; the node's audit log says which",
-                            decl.name
-                        ),
-                    ));
-                }
-                Ok(file) => found = file,
-            }
+            self.shared.owner_command(cfg, &decl, owner.as_ref())
+        });
+        let found = matches!(judged, Some(Ok(Some(_))));
+        if let Some(Ok(Some(f))) = &judged {
+            argv[0] = f.display().to_string();
+        }
+        // The audit's target is what the center named: the paths, else the
+        // action, which the event to the center and the rules take. The
+        // command as it runs, the program file judged and the call's
+        // values in it, holds the owner's own words and stays in the node's
+        // own log.
+        let ran = nerve_policy::config::ConfigCapability::line(&argv);
+        if let Some(Err(why)) = judged {
+            // Where is the owner's to know: the place names words of the
+            // owner's command and a folder some center may write, perhaps
+            // another one's.
+            self.audit_ran(
+                inv,
+                &target,
+                Some(&ran),
+                "forbidden",
+                Some("forbidden"),
+                Some(&why),
+            );
+            return Err(RpcError::new(
+                ErrorCode::Forbidden,
+                format!(
+                    "{} runs as the owner and its command names or starts in a place where a center may write; the node's audit log says which",
+                    decl.name
+                ),
+            ));
         }
         // A program of the owner's account: the link walk refuses a folder
         // it may not look into, where the owner may.
@@ -2694,15 +2696,15 @@ impl Link {
         looks_as.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
         let account = runs_as.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
         // A program the owner may not run, or none, is not left for a
-        // second look in PATH when it starts.
-        if as_owner {
-            let Some(f) = found else {
-                return Err(RpcError::new(
-                    ErrorCode::Unavailable,
-                    crate::config_cap::no_program(&decl),
-                ));
-            };
-            argv[0] = f.display().to_string();
+        // second look in PATH when it starts. The center learns of it with
+        // no word of the command; the owner reads which program in the
+        // node's log, and `cap add` warned of it.
+        if as_owner && !found {
+            tracing::warn!("{}", crate::config_cap::no_program(&decl));
+            return Err(RpcError::new(
+                ErrorCode::Unavailable,
+                crate::config_cap::no_program_for_center(&decl),
+            ));
         }
         // Only the installed Linux node has `nerve-run`, and only it offers
         // what runs as that account (crate::config_cap::offered).

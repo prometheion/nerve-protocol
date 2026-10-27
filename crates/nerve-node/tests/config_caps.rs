@@ -167,6 +167,22 @@ fn audited(paths: &NodePaths, cap: &str) -> Vec<Value> {
         .collect()
 }
 
+/// The file a node run by hand runs for the bare `program` of an owner's
+/// command: the first one of that name in a full path of `PATH` that may
+/// be run.
+fn found(program: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .filter(|d| d.is_absolute())
+        .map(|d| d.join(program))
+        .find(|f| {
+            std::fs::metadata(f).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+        .unwrap()
+        .display()
+        .to_string()
+}
+
 fn user_mode(p: &mut nerve_policy::CenterPolicy) {
     p.mode = nerve_policy::Mode::User;
 }
@@ -228,7 +244,7 @@ account = "owner""#);
     assert!(!heard[0].to_string().contains("printf"), "{heard:?}");
     let entries = audited(daemon.paths(), "say");
     let ran = ConfigCapability::line(&[
-        "printf".into(),
+        found("printf"),
         "--".into(),
         "[%s]\n".into(),
         a.clone(),
@@ -472,6 +488,16 @@ account = "owner""#);
     let r = invoke(&mut conn, "sh.first", json!({})).await.unwrap();
     let said = r.as_str().unwrap();
     assert!(said.starts_with('/') && said.ends_with("/sh"), "{said}");
+    // The audit names that file too: which of two programs of one name
+    // ran is the owner's to know.
+    let entries = audited(daemon.paths(), "sh");
+    assert!(
+        entries.iter().any(|e| e["decision"] == "allowed"
+            && e["command"]
+                .as_str()
+                .is_some_and(|c| c.starts_with(&format!("{said} -c ")))),
+        "{entries:?}"
+    );
     daemon.stop().await;
 }
 
@@ -646,9 +672,11 @@ account = "owner""#)
     assert_eq!(killed.len(), 1, "{entries:?}");
     assert_eq!(killed[0]["code"], "memory", "{entries:?}");
     assert_eq!(killed[0]["target"], "big.run", "{entries:?}");
+    let mut ran = big.command.clone();
+    ran[0] = found("sh");
     assert_eq!(
         killed[0]["command"],
-        ConfigCapability::line(&big.command),
+        ConfigCapability::line(&ran),
         "{entries:?}"
     );
 }
@@ -1424,11 +1452,14 @@ account = "owner""#);
     let mut conn = linked(&mut center).await;
     let e = invoke(&mut conn, "gen.run", json!({})).await.unwrap_err();
     assert_eq!(code_of(&e), "unavailable", "{}", e.message);
+    // The center is told that, with no word of the owner's command.
     assert!(
-        e.message.contains("finds no program no-such-program-b5"),
+        e.message
+            .contains("gen.run runs as the owner and finds no program in the node's PATH"),
         "{}",
         e.message
     );
+    assert!(!e.message.contains("no-such-program"), "{}", e.message);
     daemon.stop().await;
 }
 

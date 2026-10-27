@@ -600,10 +600,13 @@ search; ACLs are not read; another kind of file only where it is
 does, written aside and renamed over), stays that account's once its `w` is
 gone; a file of the owner's it wrote into in place, through the `w` grant's
 ACL entry, stays the owner's and is not told apart. These are: the folder it starts in (the owner's home; a node by hand: its home); its program (the
-first file of that name in the node's `PATH` the owner may execute where it
-is a bare name, and that file is what runs; with none it fails `unavailable`
-after the gate); a fixed element that holds a `/` or names something in the
-folder it starts in, also as the part after the first `=` of any element and
+first file of that name in a full-path folder of the node's `PATH` the owner
+may execute where it is a bare name, and that file is what runs and what
+the entry's `command` names; with none it fails `unavailable` after the
+gate, the center's error a fixed text and the program in the node's log); a
+fixed element, and each word of it as a shell splits it (at blanks and
+`;&|()<>` and a backquote, quotes and backslashes taken away), that holds a
+`/` or names something in the folder it starts in, also as the part after the first `=` of any element and
 the rest of a single-dash element after its option letter or from its first
 `/` (`-Cdir`, `-I/x`), the rest of an element after a leading `@`, and each
 `:`-separated part of any of these, read from that folder where it is not

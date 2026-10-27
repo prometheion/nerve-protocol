@@ -136,14 +136,20 @@ while one of these lies in such a place:
 - your home, where it starts (`make`, `npm test` or `python3 -m` read code
   from where they start, so a center with `w` on your whole home blocks every
   such command);
-- its program, as found in `PATH` (the node then runs that very file; a
-  program it finds none of that you may run does not start);
+- its program, as found in `PATH` (the node then runs that very file, and
+  the audit log names it; a folder of `PATH` that is no full path, such as
+  `.`, is passed over; a program it finds none of that you may run does not
+  start, the center is told no more than that, and the node's log names the
+  program);
 - a place a word of its command names: a full path, a path from your home
   (`make -C proj`, `sh proj/ci.sh`), a name of something in your home, also
   as an option's or a variable's value (`--manifest-path=proj/Cargo.toml`,
   `-Cproj`, `-I/srv/lib`, `PYTHONPATH=proj`), each part of a list of paths
   (`PYTHONPATH=lib:proj`, `-cp app.jar:proj/*`), the path of a URL
-  (`file:///srv/pkg`) and the file of `@file`. A place not there yet counts
+  (`file:///srv/pkg`) and the file of `@file`, and each word of a line a
+  shell reads (`sh -c "cd /srv/site && ./deploy.sh"` names `/srv/site`). A
+  word of a message names a place this way too: write `/tmp` in a commit
+  message and the node refuses the command. A place not there yet counts
   by where the folder it would be in leads, and a link whose target is gone
   by where that target would be.
 
