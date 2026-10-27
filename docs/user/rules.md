@@ -269,6 +269,10 @@ nerve-node cap set fs hidden
 nerve-node cap ls
 ```
 
+`cap ls` lists every capability, each action with its effect and, per
+center, whether it may use it now and the switch you set
+([providers](providers.md#see-what-is-there)).
+
 | Setting | Effect |
 |---|---|
 | `on` | Normal. Rules and mode decide |

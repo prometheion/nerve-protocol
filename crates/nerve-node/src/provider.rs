@@ -799,10 +799,27 @@ async fn check(
 /// where it comes from and how each center has it set (`cap set`: `on`,
 /// `off`, `hidden`, or `default` where the mode alone decides); an action a
 /// program offered that the node left out, with the reason; and the
-/// programs the owner allowed, attached or not. `attached` is `None` for a
-/// node that does not run: no program's capabilities are known then.
-pub fn listing(cfg: &NodeConfig, attached: Option<&Providers>) -> Value {
+/// programs the owner allowed, attached or not. `live` is the running node:
+/// without it no program's capabilities are known, and no row says whether
+/// each center may use the action now (`now`: `on` where its descriptor
+/// offers it and it is not off, else `off`), which its mode and machine
+/// decide besides the switch.
+pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>) -> Value {
     use nerve_policy::config::CapSetting;
+    let attached = live.map(|s| &s.providers);
+    // Each center's descriptor as it would see it now, built as the link
+    // builds it.
+    let seen: Option<BTreeMap<&str, Vec<Capability>>> = live.map(|s| {
+        let provided = s.providers.caps();
+        cfg.centers
+            .iter()
+            .map(|c| {
+                let reach = s.reach(cfg, c);
+                let d = crate::descriptor::for_center(cfg, c, &reach, &provided);
+                (c.name.as_str(), d.capabilities)
+            })
+            .collect()
+    });
     let centers = |cap: &str, action: &str| -> Map<String, Value> {
         cfg.centers
             .iter()
@@ -817,13 +834,34 @@ pub fn listing(cfg: &NodeConfig, attached: Option<&Providers>) -> Value {
             })
             .collect()
     };
+    let now = |cap: &str, action: &str| -> Option<Map<String, Value>> {
+        let seen = seen.as_ref()?;
+        let on = |caps: &Vec<Capability>| {
+            caps.iter().any(|c| {
+                c.id == cap
+                    && c.exposure == Exposure::On
+                    && c.actions
+                        .get(action)
+                        .is_some_and(|a| a.exposure != Some(Exposure::Off))
+            })
+        };
+        Some(
+            seen.iter()
+                .map(|(c, caps)| (c.to_string(), json!(if on(caps) { "on" } else { "off" })))
+                .collect(),
+        )
+    };
     let row = |c: &Capability, source: &str| -> Vec<Value> {
         c.actions
             .iter()
             .map(|(a, decl)| {
-                json!({"name": format!("{}.{a}", c.id), "effect": decl.effect,
-                       "source": source, "summary": decl.summary,
-                       "centers": centers(&c.id, a)})
+                let mut r = json!({"name": format!("{}.{a}", c.id), "effect": decl.effect,
+                                   "source": source, "summary": decl.summary,
+                                   "centers": centers(&c.id, a)});
+                if let Some(now) = now(&c.id, a) {
+                    r["now"] = Value::Object(now);
+                }
+                r
             })
             .collect()
     };
@@ -852,7 +890,7 @@ pub fn listing(cfg: &NodeConfig, attached: Option<&Providers>) -> Value {
             json!({"name": p.name, "exe": p.exe, "attached": on})
         })
         .collect();
-    json!({"capabilities": rows, "programs": programs, "running": attached.is_some()})
+    json!({"capabilities": rows, "programs": programs, "running": live.is_some()})
 }
 
 /// The provider socket's file name, beside the owner socket in the

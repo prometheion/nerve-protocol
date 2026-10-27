@@ -1757,9 +1757,13 @@ async fn a_full_owner_socket_does_not_block_the_provider_socket_and_the_reverse(
 async fn cap_ls_lists_what_the_attached_programs_offer() {
     let dir = tempfile::tempdir().unwrap();
     let center = FakeCenter::start(false).await.unwrap();
+    // Allowlist mode: a rule lets `fs.read` in, none `fs.write`.
     let daemon = node(dir.path(), &center, &me(), |p| {
         p.caps
             .insert("lamp.on".into(), nerve_policy::config::CapSetting::Off);
+        p.caps
+            .insert("exec.run".into(), nerve_policy::config::CapSetting::Hidden);
+        p.allow.push("fs.read".into());
     })
     .await;
     let paths = daemon.paths().clone();
@@ -1786,13 +1790,19 @@ async fn cap_ls_lists_what_the_attached_programs_offer() {
             .collect::<Vec<_>>()
             .join(" ")
     };
-    assert_eq!(words("lamp.on"), "lamp.on actuate program desk lab: off");
+    // Each center: whether it may use the action now, and the switch.
+    assert_eq!(
+        words("lamp.on"),
+        "lamp.on actuate program desk lab: off (set off)"
+    );
     assert!(
         words("lamp.dim")
             .starts_with("lamp.dim - program desk left out: params: /properties/level/oneOf"),
         "{ls}"
     );
-    assert_eq!(words("fs.read"), "fs.read read built-in lab: default");
+    assert_eq!(words("fs.read"), "fs.read read built-in lab: on");
+    assert_eq!(words("fs.write"), "fs.write write built-in lab: off");
+    assert_eq!(words("exec.run"), "exec.run execute built-in lab: hidden");
     assert!(!ls.contains("does not run"), "{ls}");
     assert!(
         ls.contains(&format!("program desk: {}, attached", me())),
@@ -1813,8 +1823,17 @@ async fn cap_ls_lists_what_the_attached_programs_offer() {
     assert_eq!(
         *on,
         json!({"name": "lamp.on", "effect": "actuate", "source": "program desk",
-               "summary": "Switches it on.", "centers": {"lab": "off"}})
+               "summary": "Switches it on.", "centers": {"lab": "off"},
+               "now": {"lab": "off"}})
     );
+    let read = v["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "fs.read")
+        .unwrap();
+    assert_eq!(read["centers"], json!({"lab": "default"}), "{v}");
+    assert_eq!(read["now"], json!({"lab": "on"}), "{v}");
     assert_eq!(v["running"], true, "{v}");
     let v: Value =
         serde_json::from_str(&cli(&paths, &["--json", "cap", "provider", "ls"]).await).unwrap();

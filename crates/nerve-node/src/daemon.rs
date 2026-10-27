@@ -1862,8 +1862,9 @@ fn file_ahead(on_disk: u64, in_force: u64) -> String {
 const FROM_A_COMMAND: &str =
     "refused: this request comes from a command the node runs for a center";
 
-/// One request on Windows' control pipe (crate::pipe): the status, and the
-/// changes to a center's folders, checked and made as the CLI makes them on
+/// One request on Windows' control pipe (crate::pipe): the status, the
+/// capabilities for `cap ls` (crate::provider::listing), and the changes to
+/// a center's folders, checked and made as the CLI makes them on
 /// the file (crate::folder_change). The node then brings the folder grants
 /// in line before it answers, as the CLI does after it wrote the file.
 /// Nothing is taken from a process of a command the node runs, not even the
@@ -1881,6 +1882,7 @@ pub(crate) async fn pipe_control(
     }
     match method {
         "status" => Reply::Ok(shared.status()),
+        "caps.list" => Reply::Ok(crate::provider::listing(&shared.config(), Some(shared))),
         "center.rotate-key" => rotate_key(shared, &params).await,
         "folder.add" | "folder.set" | "folder.rm" => {
             let (center, change) =
@@ -2068,10 +2070,7 @@ pub(crate) fn control(
         "status" => Reply::Ok(shared.status()),
         // Every capability with its effect and settings, the programs'
         // too (crate::provider::listing), for `cap ls`.
-        "caps.list" => Reply::Ok(crate::provider::listing(
-            &shared.config(),
-            Some(&shared.providers),
-        )),
+        "caps.list" => Reply::Ok(crate::provider::listing(&shared.config(), Some(shared))),
         "owner.check" => Reply::Ok(json!({})),
         "sudo.status" => Reply::Ok(json!({"sudo": if shared.sudo_on() { "on" } else { "off" }})),
         "sudo.off" => match shared.sudo_switch_off(nerve_policy::Writer::Local) {
@@ -3377,6 +3376,21 @@ mod tests {
         assert!(matches!(r, Reply::Ok(_)), "refused");
         assert_eq!(saved().mode, nerve_policy::Mode::Folder);
         assert_eq!(saved().folders.len(), 1);
+        daemon.stop().await;
+    }
+
+    /// Windows' pipe answers `cap ls` as the socket does: the running node's
+    /// listing.
+    #[tokio::test]
+    async fn the_pipe_lists_the_capabilities_of_the_running_node() {
+        use nerve_transport::ctl::Reply;
+        let (_d, daemon) = daemon().await;
+        let r = pipe_control(&daemon.shared, "caps.list", json!({}), false).await;
+        let Reply::Ok(v) = r else {
+            panic!("not listed");
+        };
+        assert_eq!(v["running"], true, "{v}");
+        assert!(v["capabilities"].as_array().is_some_and(|c| !c.is_empty()));
         daemon.stop().await;
     }
 

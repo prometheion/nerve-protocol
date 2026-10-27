@@ -3253,17 +3253,23 @@ fn confirm(input: &mut dyn BufRead, out: &mut dyn Write) -> Result<bool, String>
 }
 
 /// What `cap ls` lists (crate::provider::listing): the running node's, over
-/// its control socket, else what the config alone tells.
+/// its control socket (on Windows its pipe), else what the config alone
+/// tells.
 async fn cap_listing(paths: &NodePaths, cfg: &NodeConfig) -> Result<Value, String> {
     #[cfg(unix)]
-    match nerve_transport::ctl::call(&paths.ctl_socket(), "caps.list", json!({})).await {
-        Ok(v) => return Ok(v),
-        Err(e) if e == nerve_transport::ctl::NOT_RUNNING => {}
-        Err(e) => return Err(e),
+    let r = nerve_transport::ctl::call(&paths.ctl_socket(), "caps.list", json!({})).await;
+    #[cfg(windows)]
+    let r = crate::pipe::call(paths, "caps.list", json!({})).await;
+    #[cfg(not(any(unix, windows)))]
+    let r: Result<Value, String> = {
+        let _ = paths;
+        Err(nerve_transport::ctl::NOT_RUNNING.to_string())
+    };
+    match r {
+        Ok(v) => Ok(v),
+        Err(e) if e == nerve_transport::ctl::NOT_RUNNING => Ok(crate::provider::listing(cfg, None)),
+        Err(e) => Err(e),
     }
-    // Windows takes no provider yet, so the config says all.
-    let _ = paths;
-    Ok(crate::provider::listing(cfg, None))
 }
 
 /// The lines of `cap ls`: one per action, with its effect, where it comes
@@ -3284,7 +3290,17 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
                 .into_iter()
                 .flatten()
                 .filter(|(c, _)| center.is_none_or(|w| w == c.as_str()))
-                .map(|(c, set)| format!("{c}: {}", set.as_str().unwrap_or_default()))
+                .map(|(c, set)| {
+                    let set = set.as_str().unwrap_or_default();
+                    // The running node says whether the center may use it
+                    // now, and the switch where the owner set one.
+                    let state = match (r["now"][c].as_str(), set) {
+                        (_, "hidden") | (None, _) => set.to_string(),
+                        (Some(now), "default") => now.to_string(),
+                        (Some(now), set) => format!("{now} (set {set})"),
+                    };
+                    format!("{c}: {state}")
+                })
                 .collect::<Vec<_>>()
                 .join(", "),
         };
@@ -3317,7 +3333,7 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
     }
     if v["running"] == false {
         lines.push(
-            "the node does not run: the programs' capabilities show while it runs and they are attached"
+            "the node does not run: each center's switch shows (cap set); whether it may use an action now, and the programs' capabilities, show while the node runs"
                 .into(),
         );
     }
@@ -9196,6 +9212,40 @@ mod tests {
         let v = json_of(&paths, &["cap", "ls", "--center", "lab"]);
         assert_eq!(v["center"], "lab");
         assert_eq!(v["caps"], json!({"lamp": "on"}));
+    }
+
+    /// `cap ls` of a running node asks it, on Windows over its pipe: it
+    /// does not say the node does not run, and tells each center's state
+    /// now.
+    #[test]
+    fn cap_ls_asks_the_running_node() {
+        let (d, paths) = setup(&["home"]);
+        let desk = program_path("usr/bin/desk");
+        run(&paths, &["cap", "provider", "allow", "desk", &desk]).unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut opts = NodeOptions::new(paths.clone());
+        opts.home = d.path().to_path_buf();
+        let daemon = rt.block_on(Daemon::start(opts)).unwrap();
+        let ls = run(&paths, &["cap", "ls"]).unwrap();
+        assert!(!ls.contains("does not run"), "{ls}");
+        assert!(
+            ls.contains(&format!("program desk: {desk}, not attached")),
+            "{ls}"
+        );
+        let v = json_of(&paths, &["cap", "ls"]);
+        assert_eq!(v["running"], true, "{v}");
+        let read = v["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "fs.read")
+            .unwrap();
+        assert!(read["now"]["home"].is_string(), "{v}");
+        rt.block_on(daemon.stop());
     }
 
     /// `cap provider allow` names a program, again to replace it, `rm`

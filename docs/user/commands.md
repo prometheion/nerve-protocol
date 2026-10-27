@@ -52,7 +52,7 @@ center is paired.
 | `rule ls [allow\|deny\|sudo]` | List rules | [rules](rules.md#list-change-and-remove-rules) |
 | `rule guard` | Put the guard's deny rules back that a pairing lacks, in place of its older texts | [rules](rules.md#the-guard-against-changing-the-node) |
 | `cap set <cap> on\|off\|hidden` | Switch a capability or action | [rules](rules.md#switch-a-capability-off) |
-| `cap ls [--center C]` | List every capability: the node's own and those of the programs you allow, each action with its effect, where it comes from and how each center has it set (`default`: the mode decides) | [providers](providers.md#see-what-is-there) |
+| `cap ls [--center C]` | List every capability: the node's own and those of the programs you allow, each action with its effect, where it comes from and, per center, whether it may use it now and the switch you set (a stopped node: the switch only, `default` where the mode decides) | [providers](providers.md#see-what-is-there) |
 | `cap provider allow <name> <exe>`, `cap provider rm <name>`, `cap provider ls` | Allow a program to add capabilities, take it off, list them | [providers](providers.md#allow-a-program) |
 | `sudo on`, `sudo off`, `sudo status` | The sudo switch | [sudo](sudo.md) |
 | `config get\|set\|unset\|add\|remove <key> [value]` | Read or change any setting | [config](config.md) |

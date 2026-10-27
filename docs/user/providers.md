@@ -44,7 +44,10 @@ characters, since it holds names from the program's schemas.
 On the installed node only your own programs and root's attach: the node
 tells who asks by the account the system names for it, refuses any other
 account at once, and refuses a program that a center's command started, also
-when it runs the allowed program. It looks at which program asks with that
+when it runs the allowed program. A program that runs with `no_new_privs`
+(a unit with `NoNewPrivileges=yes`, a flatpak or another sandbox that sets it)
+is refused too, as every command the node runs keeps that, and it is told
+so: start it without. The node looks at which program asks with that
 account's rights (for root's programs it starts a short helper as root to
 look), and a program that ended while it looked is refused.
 
@@ -54,19 +57,25 @@ still make the allowed one attach for it. Allow only programs you trust.
 ## See what is there
 
 `nerve-node cap ls` lists every capability, one action a line: what it does
-(its effect), where it comes from (`built-in`, or `program desk`), and how
-each center has it set (`on`, `off`, `hidden`, or `default`, where the mode
-decides), for one center with `--center`. An action the node left out says
-why. A switch for something no program offers now is listed too, as it counts
-once one does. On a stopped node it lists the node's own capabilities and the
-programs you allow:
+(its effect), where it comes from (`built-in`, or `program desk`), and for
+each center whether it may use it now (`on` or `off`, as its mode, rules and
+switches decide), with the switch in brackets where you set one with `cap
+set` (`hidden` ones say just that), for one center with `--center`. An action
+the node left out says why. A switch for something no program offers now is
+listed too, as it counts once one does. On a stopped node it lists the node's
+own capabilities and the programs you allow, and for each center only the
+switch (`on`, `off`, `hidden`, or `default`, where the mode decides):
 
 ```
-fs.read       read     built-in      lab: default
-lamp.on       actuate  program desk  lab: on
+fs.read       read     built-in      lab: on
+fs.write      write    built-in      lab: off
+lamp.on       actuate  program desk  lab: on (set on)
 lamp.dim      -        program desk  left out: params: /properties/level/oneOf: …
 program desk: /usr/lib/nerve-desktop/nerve-desktop, attached
 ```
+
+`on` says the center is offered the action; each call is still decided by
+its paths and rules.
 
 ## Allow its capabilities
 
@@ -165,7 +174,10 @@ On the installed node the program runs as you (or root) and the search as
 `nerve-run`: a folder below that `nerve-run` may not look into, which your
 program could, refuses the call, since the node cannot tell where the links
 there lead. Give `nerve-run` that folder too, or hand the program a folder
-that does not hold it.
+that does not hold it. A program of root is held so whenever the node itself
+does not run as root, also where root is the owner and the search runs as
+root: the node still lacks root's rights to look into another account's
+folder.
 A link that leads nowhere counts only for a write, at the place it names. A
 call whose folders hold more than 200 000 entries in all, counting those of
 the folders their links lead to, is refused, since the node cannot check

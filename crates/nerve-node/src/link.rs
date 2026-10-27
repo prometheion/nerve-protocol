@@ -2701,7 +2701,6 @@ fn closed_for(program: Option<u32>, walker: u32, node: u32) -> crate::fs::Closed
 }
 
 /// `m` without the sudo password (crate::sudo).
-
 fn scrub(shared: &Shared, m: WsMessage) -> WsMessage {
     match m {
         WsMessage::Text(t) => WsMessage::text(shared.scrub(t.to_string())),
