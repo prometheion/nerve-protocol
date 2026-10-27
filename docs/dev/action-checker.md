@@ -492,7 +492,10 @@ timeout, use a GPU, or use an endpoint.
 The model does not stand alone: the deterministic blocklist already refuses the
 obvious dangerous commands (so many of the "missed" dangerous cases above are
 caught before the model), and the node's own policy is the authority. The model
-is the optional layer for the long tail and for injection, which is why a 60 %
+is the optional layer for the long tail and for injection, which is why a 57 %
 catch at a low benign-refusal rate is a good operating point rather than a
-weak one. Raise the threshold to 0.9 to trade a little catch for fewer
-benign refusals.
+weak one. A higher threshold does not refuse less ordinary work on this
+measurement: d1-3B refuses 1.7 % of it at 0.85 and at 0.9, and 0.9 only
+catches 50.5 % instead of 57.0 %. The trade that exists is downwards: 0.80
+catches 64.5 % at 3.3 % benign refused. For Kev-4B, 0.30 catches 77.4 % at
+0.8 % benign refused.

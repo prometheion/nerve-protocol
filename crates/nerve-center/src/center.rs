@@ -3624,7 +3624,11 @@ pub fn audit_rule(
     wildcard: bool,
 ) -> Result<String, String> {
     // A cut target is no longer the call's, so no rule can be made from it.
-    if nerve_policy::audit::is_cut_target(target) {
+    // Only a command line or a path is named by a rule; any other action's
+    // rule is its `cap.action`, whatever its (path argument) target.
+    if (cap == "fs" || (cap, action) == ("exec", "run"))
+        && nerve_policy::audit::is_cut_target(target)
+    {
         return Err("the target was cut to its start, so a rule cannot name it".into());
     }
     match list {
@@ -5686,5 +5690,19 @@ mod tests {
             assert!(rule(list, "exec", "run", &cut, false).is_err(), "{list}");
             assert!(rule(list, "exec", "run", &cut, true).is_err(), "{list}");
         }
+        // A provider's call is long-pathed: the rule is its action, which the
+        // cut target does not change.
+        let cut = nerve_policy::audit::cut_target(&"/srv/a/".repeat(100)).into_owned();
+        assert!(nerve_policy::audit::is_cut_target(&cut));
+        assert_eq!(
+            rule("allow", "photos", "export", &cut, false).unwrap(),
+            "photos.export"
+        );
+        assert_eq!(
+            rule("deny", "photos", "export", &cut, true).unwrap(),
+            "photos"
+        );
+        assert!(rule("allow", "fs", "write", &cut, false).is_err());
+        assert!(rule("allow", "exec", "signal", &cut, false).is_ok());
     }
 }

@@ -824,8 +824,9 @@ function auditRow(d, n) {
     return b;
   };
   // A rule needs the entry's target: a command line or a path. Any other
-  // action is its own target. A target cut to its start names no call.
-  const cut = /… \[cut at \d+ of \d+ characters\]$/.test(d.target || "");
+  // action is its own target. A target cut to its start names no call, which
+  // only matters where the rule names the target (a command line or a path).
+  const cut = (d.cap === "fs" || (d.cap === "exec" && d.action === "run")) && /… \[cut at \d+ of \d+ characters\]$/.test(d.target || "");
   const known = d.cap && d.action && !cut && (d.target || !["exec", "fs"].includes(d.cap));
   // A sudo command has its own allow list; deny rules take it as any other.
   const sudo = d.cap === "exec" && d.action === "run" && /^\s*(\S*\/)?sudo(\s|$)/.test(d.target || "");
@@ -862,7 +863,7 @@ function checkerAuditRow(d, k) {
   const refused = d.decision === "forbidden";
   const auditKey = `audit:${d.ts}:${d.node_id}:${d.cap}.${d.action}`;
   const byBlocklist = layer === "blocklist";
-  const cut = /… \[cut at \d+ of \d+ characters\]$/.test(d.target || "");
+  const cut = (d.cap === "fs" || (d.cap === "exec" && d.action === "run")) && /… \[cut at \d+ of \d+ characters\]$/.test(d.target || "");
   const known = d.cap && d.action && !cut && (d.target || !["exec", "fs"].includes(d.cap));
   const allow = (wildcard) => act(async () => {
     const r = await api("POST", "/api/checker/allow", { cap: d.cap, action: d.action, target: d.target || "", wildcard, node_id: d.node_id });

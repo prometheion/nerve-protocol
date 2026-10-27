@@ -297,7 +297,9 @@ more matters more than a few seconds per call, or when the machine has a GPU.
 Switching the model downloads the other one and removes the first. Each model
 comes with its own default threshold and timeout (d1-3B 0.85 and 6 s, Kev-4B
 0.25 and 15 s, so Kev-4B's normal calls are not cut off); a switch sets them, and you
-can change them afterwards. Check that a model's licence suits you before you
+can change them afterwards. A threshold and timeout you set before keep their
+values when you update: set the new defaults by hand on the Action checker page, or
+switch to the other model and back. Check that a model's licence suits you before you
 install it.
 
 The speeds above are for a desktop CPU. A small machine is much slower (d1-3B
