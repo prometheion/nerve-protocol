@@ -101,7 +101,6 @@ async fn the_real_cpu_build_installs_and_runs_d1() {
         action: "run",
         effect: Effect::Execute,
         description: "",
-        provider: "node",
         target,
         paths: &[],
         args: &args,

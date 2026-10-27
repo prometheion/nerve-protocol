@@ -57,20 +57,27 @@ patterns are path globs (a leading `~` becomes `*`, since the center does not
 know the node's home); any other `cap` or `cap.action` is written without a
 pattern and matches that whole scope. `Rule::parse` refuses a pattern there
 (`exec:<pattern>` with a pointer to `exec.run:`), since the call carries
-nothing it could match until argument rules come (#152, C1); before, such an
-entry was kept and never matched.
+nothing it could match until argument rules come (#152, C1). Before, a pattern
+there was a glob over the name `cap.action`, so all but a bare `*` matched
+nothing; an entry that holds one now does not parse and is out of force
+until it is removed.
 
-A call of any capability but `fs` meets the `fs` entries with its path
+A call of any capability, `fs` included, meets the `fs` entries with its path
 arguments: `CallInfo.paths` holds the values of the arguments the unit's
 schema marks `x-nerve-path` (`center.rs` `CheckerUnit`, from the catalog), and
 `Rule::matches_path` matches each against the `fs` entries for every action
 and for `fs.read` or `fs.write` by its mark, with the same `path_glob` and
-`normalize_path` as an `fs` call's path. Allow rules are not matched against
-path arguments: they only skip the model. The checker's target (in the audit
+`normalize_path` as an `fs` call's path (so an `fs.read` entry holds `fs.grep`,
+`fs.find`, `fs.list` and `fs.stat`, whose `path` is marked read, and
+`exec.run`'s `cwd`). Allow rules are not matched against path arguments: they
+only skip the model. The checker's target (in the audit
 entry and the model's state) is then the paths, joined by `, ` as the node's
 audit names them. `checker_json` lists under `unpublished` the owner's entries
 and allow rules whose capability or action no paired node's descriptor has (for
-a rule of one node, that node), and the page shows them in a warning.
+a rule of one node, that node), and the page shows them in a warning. An `fs`
+entry counts as published as well where some action of any capability marks a
+path for it (`fs.read` a read one, `fs.write` a written one), since it holds
+that path then.
 
 For `exec.run` an entry is a **structured command pattern** (`program` glob,
 the short and long flags that must all be present, and operand globs that must
@@ -134,7 +141,11 @@ of a here-document or a PowerShell here-string written to a file, a `\` before
 a CRLF, cmd's `start ""` written in PowerShell, a chain of starters past the
 parser's unwrap bound, and a line it cannot read. A run of both over the eval
 set and the guard's table found no line the splitter alone refused that the
-two together let through, and no ordinary line newly refused.
+two together let through, and no ordinary line newly refused. `Parsed::walked`
+counts the splitter's commands, which come first: the saved allow rules match
+only those, so a command the parser sees behind a wrapper (`timeout 600 make
+test && ./deploy.sh` for the rule `exec.run:make *`) is no further way to skip
+the model.
 
 The splitter splits on separators and subshell parentheses, pulls `$( )`,
 backticks, process substitution, `sh -c` (`c` anywhere in the flag word:
@@ -257,7 +268,7 @@ refuse every call). There is no path or build to choose; the
 model is one of the two pinned in `install::MODELS` (`ModelConfig::local_model`,
 d1-3B by default), independent of the device. Each pin carries its repo,
 revision, file, size, SHA-256, licence, and the evaluation's default threshold
-and timeout (d1-3B 0.85 / 4 s, Kev-4B 0.3 / 15 s); a model switch
+and timeout (d1-3B 0.85 / 6 s, Kev-4B 0.3 / 15 s); a model switch
 (`CheckerConfig::local_installed`) downloads the other file, deletes the first,
 and takes that model's defaults, while a reinstall of the same model keeps the
 owner's. The model client waits up to the checker's own timeout for an answer
@@ -368,6 +379,12 @@ capability case's score. `NERVE_CHECKER_TIMEOUT_MS` raises
 the client timeout for a slow model (e.g. Kev-4B on CPU); it is the runner
 only, not the product default.
 
+Two limits of the set. A file write is recorded by its path only, so the
+runner's `args` for it lack the `content` and `if_match` a real write sends
+(up to 2000 bytes of arguments in the state); the numbers are for the
+shorter state. And the thresholds were picked on this same set and are scored
+on it, not on a held-out one: read them as an operating point, not a forecast.
+
 ```sh
 CUDA_VISIBLE_DEVICES= llama-server \
     -m <model.gguf> -ngl 0 --host 127.0.0.1 --port 19931 &
@@ -401,7 +418,7 @@ ordinary work at a usable benign-refusal rate. Kev-4B is the **strongest on
 quality** — at threshold 0.5 it catches 78.5 % of the dangerous cases and 93 %
 of the injection cases at only 1.7 % benign refusals — but at **~4.0 s per call
 on this CPU** (measured with the eval runner's timeout raised; the product
-default stays 4 s for d1-3B) it is too slow to sit in front of every call. It
+default is 6 s for d1-3B) it is too slow to sit in front of every call. It
 is the pick on a machine with a GPU or much more CPU; on this CPU d1-3B's 1.7 s
 wins.
 
@@ -423,6 +440,16 @@ own threshold stays as set; a model switch sets the model's default.
 | Kev-4B | 214 command and file | 4.7 s / 5.6 s | 0.50 | 69.9 | 0.0 | 86.7 |
 | **Kev-4B** | 214 command and file | | **0.30** | **78.5** | **0.8** | 93.3 |
 | Kev-4B | 17 capability | | 0.30 | 50.0 (4 of 8) | 0.0 | – |
+
+Kev-4B's 0.3 is not where the sweep ends, so it was run lower (command and
+file cases, same state): 0.25 catches 81.7 % at 2.5 % benign refused (93.3 %
+injections), 0.20 catches 87.1 % at 2.5 % (100 %), 0.15 93.5 % at 5.8 %, 0.10
+95.7 % at 8.3 %. Below 0.3 the catch keeps rising at the price of ordinary
+work refused (from 1 of 121 benign cases at 0.3 to 3 at 0.25 and 0.2), which is
+a trade-off and not a better point on both, so the default stays at 0.3 (the
+earlier operating point, under 2 % benign refused); an owner who wants more
+catch lowers it. The p95 of that run (11 s) is inflated by other work on the
+machine and is not a latency figure.
 
 The capability cases show where a decision model is weak: both score every
 ordinary capability call low (0.01–0.08), and both find the account and system
@@ -447,7 +474,7 @@ both licences are named in the UI and the user guide.
 
 On a small CPU both are slower: on the 4-vCPU Windows test VM d1-3B took about
 35 s per call (the real one-click install with the pinned `win-cpu-x64` build,
-2026-10-18). There the default 4 s timeout fails closed on every call; raise the
+2026-10-18). There the default 6 s timeout fails closed on every call; raise the
 timeout, use a GPU, or use an endpoint.
 
 The model does not stand alone: the deterministic blocklist already refuses the

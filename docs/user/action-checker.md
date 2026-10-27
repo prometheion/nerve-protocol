@@ -82,14 +82,20 @@ Entries are in the machine's own rule syntax, `<scope>:<pattern>`:
   paths of every other capability: an argument a program marks as a path it
   reads or writes ([providers](providers.md#paths-it-takes)) is matched like
   an `fs.read` or `fs.write` call's path, so `fs.write:~/.ssh/authorized_keys`
-  also refuses a notes program's `notes.save` into that file.
+  also refuses a notes program's `notes.save` into that file. So does an
+  `exec.run` command whose working folder (`cwd`) an `fs.read:` entry names,
+  and `fs.read:` entries hold `fs.grep`, `fs.find`, `fs.list` and `fs.stat`
+  as they hold `fs.read`. Only the blocklist does this: an allow rule
+  `fs.write:~/notes/*` skips the model for `fs.write` calls only, not for a
+  program's `notes.save` into that folder.
 - `lamp.set`, or `lamp` for all its actions — any other capability, named
   whole. A pattern after it (`lamp.set:office`) is refused for now: it would
   have nothing to match until rules on a capability's arguments come.
   `exec:rm *` is refused too; a command pattern goes on `exec.run`
   (`exec.run:rm *`). The page warns about your own entries and allow rules
   that name a capability no paired machine offers, such as a misspelt one:
-  they match no call.
+  they match no call. An `fs` path entry is not listed while some program on
+  a machine takes paths, since it holds those.
 - `cmd-re:` for a regular expression over **each command** of the line, e.g.
   `exec.run:cmd-re:^terraform destroy( |$)`. The checker pulls the commands
   apart (see below) and writes each one as `program arg1 arg2 …`: the
@@ -225,6 +231,10 @@ Allow rules are the same syntax, saved for every machine or for one machine. A
 call that matches one skips the decision model and goes to the machine. It does
 not skip the blocklist: the blocklist is a hard deny, so to let something
 through that the blocklist caught, remove or switch off the blocklist entry.
+A rule matches the commands the checker's own splitter finds in a line, not
+those only the guard's parser sees behind `timeout`, `eval` and the like, so
+`exec.run:make *` does not cover `timeout 600 make test` and the model still
+judges it.
 
 The Audit page has **Allow** and **Allow as wildcard** buttons on a model
 refusal, which save an allow rule for that machine for you.
@@ -280,7 +290,7 @@ quality in one line:
 Pick d1-3B when the checker should stay quick on a CPU, Kev-4B when catching
 more matters more than a few seconds per call, or when the machine has a GPU.
 Switching the model downloads the other one and removes the first. Each model
-comes with its own default threshold and timeout (d1-3B 0.85 and 4 s, Kev-4B
+comes with its own default threshold and timeout (d1-3B 0.85 and 6 s, Kev-4B
 0.3 and 15 s, so Kev-4B's normal calls are not cut off); a switch sets them, and you
 can change them afterwards. Check that a model's licence suits you before you
 install it.

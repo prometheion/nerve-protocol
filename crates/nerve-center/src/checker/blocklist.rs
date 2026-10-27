@@ -99,7 +99,7 @@ impl Rule {
                 )
             } else {
                 format!(
-                    "rule {rule:?}: a pattern on {scope} matches nothing yet (rules on a capability's arguments come later); write {scope} alone for all of it, or an fs.read:<path> or fs.write:<path> entry, which also holds the path arguments of every capability"
+                    "rule {rule:?}: a pattern on {scope} cannot match anything yet (rules on a capability's arguments come later); write {scope} alone for all of it. A blocklist entry fs.read:<path> or fs.write:<path> also holds the path arguments of every capability"
                 )
             });
         } else {
@@ -625,8 +625,13 @@ mod tests {
             let Err(why) = Rule::parse(rule) else {
                 panic!("{rule} should be refused");
             };
-            assert!(why.contains("matches nothing yet"), "{why}");
-            assert!(why.contains("fs.write:<path>"), "{why}");
+            assert!(why.contains("cannot match anything yet"), "{why}");
+            // The advice on path arguments is for the blocklist: an allow
+            // rule is never matched against them.
+            assert!(
+                why.contains("A blocklist entry fs.read:<path> or fs.write:<path>"),
+                "{why}"
+            );
         }
         for rule in [
             "notes.save",

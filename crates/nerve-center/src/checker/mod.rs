@@ -95,15 +95,13 @@ pub struct CallInfo<'a> {
     /// provider program on it), so it is data the model weighs, never part
     /// of the question.
     pub description: &'a str,
-    /// `node` for a built-in capability, else the provider program's name.
-    pub provider: &'a str,
     /// The command line, the path (an `fs` call's, or the path arguments of
     /// any other call, joined by `, `), or `<cap>.<action>` for an action
     /// without a target.
     pub target: &'a str,
     /// The values of the call's path arguments (`x-nerve-path`), with what
-    /// the action does there. A call of any capability but `fs` meets the
-    /// `fs` blocklist entries with them.
+    /// the action does there. The `fs` blocklist entries hold them, whoever
+    /// the capability is.
     pub paths: &'a [(PathMark, String)],
     /// The call's arguments, for the model's state.
     pub args: &'a serde_json::Map<String, Value>,
@@ -261,12 +259,16 @@ impl Checker {
             };
         }
         let commands = parsed.as_ref().map(|p| p.commands.as_slice());
-        // A path argument of any other capability is a file the call reads
-        // or writes, so the `fs` entries hold it as they hold an `fs` call's
+        // A saved allow rule skips the model, so it only reads the commands
+        // the text splitter finds, as before the parser was added: the
+        // commands the parser sees behind a wrapper are for the blocklist.
+        let walked = parsed.as_ref().map(|p| &p.commands[..p.walked]);
+        // A path argument of any capability is a file the call reads or
+        // writes, so the `fs` entries hold it as they hold an `fs` call's
         // path: an entry against writing `~/.ssh/authorized_keys` is not
-        // passed by a program's action that writes there. An `fs` call's
-        // path is its target already, matched by its own action.
-        let paths: &[(PathMark, String)] = if call.cap == "fs" { &[] } else { call.paths };
+        // passed by a program's action that writes there, and an `fs.read`
+        // entry holds `fs.grep` and `fs.list` as it holds `fs.read`.
+        let paths = call.paths;
         // 1. Blocklist (hard deny, wins over everything): the entries for
         // every node and for this node, less those switched off for it.
         if blocklist_on
@@ -319,7 +321,7 @@ impl Checker {
         let every = |a: &&Allow| a.node_id.is_none();
         if let Some(a) = (self.allow.iter().filter(mine))
             .chain(self.allow.iter().filter(every))
-            .find(|a| a.rule.matches_with(&target, commands))
+            .find(|a| a.rule.matches_with(&target, walked))
         {
             let scope = if a.node_id.is_some() {
                 Scope::Node
@@ -467,7 +469,6 @@ mod tests {
             action,
             effect,
             description: "",
-            provider: "node",
             target,
             paths: &[],
             args,
@@ -768,7 +769,6 @@ mod tests {
         let checker = Checker::build(cfg, None);
         let args = Map::new();
         let notes = |paths: &'static [(PathMark, String)]| CallInfo {
-            provider: "notesd",
             paths,
             ..call("notes", "save", Effect::Write, "", &args)
         };
@@ -820,6 +820,96 @@ mod tests {
         ));
     }
 
+    /// An `fs.read` entry holds the node's own `fs` actions that read a path
+    /// (`grep`, `find`, `list`, `stat`) as it holds `fs.read`, and an
+    /// `exec.run` started in a folder it names (`cwd`); it does not hold a
+    /// write.
+    #[tokio::test]
+    async fn an_fs_read_entry_holds_every_action_that_reads_the_path() {
+        let mut cfg = CheckerConfig::default();
+        cfg.blocklist.push(entry("fs.read:/srv/secret/*", None));
+        let checker = Checker::build(cfg, None);
+        let args = Map::new();
+        let path = "/srv/secret/key";
+        for action in ["read", "grep", "find", "list", "stat"] {
+            let paths = [(PathMark::Read, path.to_string())];
+            let c = CallInfo {
+                paths: &paths,
+                ..call("fs", action, Effect::Read, path, &args)
+            };
+            assert!(
+                matches!(
+                    checker.check(&c, None).await,
+                    Decision::Refuse { ref detail, .. } if detail == "fs.read:/srv/secret/*"
+                ),
+                "fs.{action}"
+            );
+        }
+        let paths = [(PathMark::Read, "/srv/secret/work".to_string())];
+        let c = CallInfo {
+            paths: &paths,
+            ..call("exec", "run", Effect::Execute, "make", &args)
+        };
+        assert!(matches!(
+            checker.check(&c, None).await,
+            Decision::Refuse { ref message, .. } if message.contains("path argument /srv/secret/work")
+        ));
+        // A write there is not a read.
+        let paths = [(PathMark::Write, path.to_string())];
+        let c = CallInfo {
+            paths: &paths,
+            ..call("fs", "write", Effect::Write, path, &args)
+        };
+        assert!(matches!(checker.check(&c, None).await, Decision::Pass));
+    }
+
+    /// A saved allow rule reads the commands of the text splitter only: a
+    /// command only the parser finds behind `timeout` is no way to skip the
+    /// model, but the blocklist still sees it.
+    #[tokio::test]
+    async fn an_allow_rule_does_not_match_a_command_only_the_parser_sees() {
+        let mut cfg = CheckerConfig::default();
+        cfg.allow_rules.push(AllowRule {
+            rule: "exec.run:make *".into(),
+            node_id: None,
+        });
+        let checker = Checker::build(cfg, None);
+        let args = Map::new();
+        let run = |line: &'static str| call("exec", "run", Effect::Execute, line, &args);
+        // Plain, or behind a wrapper the splitter strips: the rule matches.
+        for line in ["make test", "sudo make test", "ls && make test"] {
+            assert!(
+                matches!(
+                    checker.check(&run(line), None).await,
+                    Decision::Allowed {
+                        layer: Layer::AllowRule,
+                        ..
+                    }
+                ),
+                "{line}"
+            );
+        }
+        // Behind `timeout` only the parser reads `make`; `./deploy.sh` is
+        // what the rule never covered.
+        for line in [
+            "timeout 600 make test && ./deploy.sh --prod",
+            "timeout 600 make test",
+        ] {
+            assert!(
+                matches!(checker.check(&run(line), None).await, Decision::Pass),
+                "{line}"
+            );
+        }
+        // The blocklist still reads what the parser finds.
+        let mut cfg = CheckerConfig::default();
+        cfg.blocklist.push(entry("exec.run:make *", None));
+        let checker = Checker::build(cfg, None);
+        assert!(matches!(
+            checker.check(&run("timeout 600 make test"), None).await,
+            Decision::Refuse { .. }
+        ));
+    }
+
     /// The model is told the call's effect and what the node says the
     /// capability does, cut to a few sentences, beside the call itself.
     #[test]
@@ -829,7 +919,6 @@ mod tests {
         let paths = [(PathMark::Write, "/home/me/notes/a.md".to_string())];
         let c = CallInfo {
             description: &long,
-            provider: "notesd",
             paths: &paths,
             ..call(
                 "notes",

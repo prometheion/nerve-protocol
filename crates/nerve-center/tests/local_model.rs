@@ -69,7 +69,6 @@ async fn the_local_server_starts_and_gates_a_call() {
         action: "run",
         effect: Effect::Execute,
         description: "",
-        provider: "node",
         target,
         paths: &[],
         args: &args,

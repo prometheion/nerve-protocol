@@ -136,6 +136,9 @@ pub enum Overflow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parsed {
     pub commands: Vec<Command>,
+    /// How many of `commands`, from the first, the text splitter found. The
+    /// rest only the parser did.
+    pub walked: usize,
     /// The walk hit a bound and could not take the whole line apart. The
     /// checker treats this as "cannot see" and refuses.
     pub overflow: Option<Overflow>,
@@ -240,7 +243,9 @@ pub fn commands(line: &str) -> Vec<Command> {
 ///   written in PowerShell, and a chain of starters past the parser's bound.
 ///
 /// So the blocklist catches all it caught with the splitter alone, and what
-/// the parser sees besides.
+/// the parser sees besides. A saved allow rule is matched against the
+/// splitter's commands only ([`Parsed::walked`]): a command the parser finds
+/// behind a wrapper must not be one more way for a rule to skip the model.
 pub fn parse(line: &str, shell: Shell) -> Parsed {
     let mut out = walk(line, shell);
     if out.overflow.is_some() {
@@ -296,6 +301,7 @@ fn walk(line: &str, shell: Shell) -> Parsed {
     };
     w.collect(line, shell, 0);
     Parsed {
+        walked: w.commands.len(),
         commands: w.commands,
         overflow: w.overflow,
     }

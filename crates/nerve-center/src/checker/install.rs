@@ -118,7 +118,9 @@ pub const MODELS: [ModelPin; 2] = [
         sha256: "16aff27ea2eefdc32b9897f43854a5d3170c1dc8dccb9c756905af30a4e22402",
         licence: "LFM Open License v1.0",
         threshold: 0.85,
-        timeout_ms: 4000,
+        // p95 was 3.0 s on the test CPU (2.3 s before the state grew by the
+        // description): twice that, for a busy machine.
+        timeout_ms: 6000,
         summary: "Faster: about 2.5 s per call on a desktop CPU. Catches about 58 % of dangerous actions and 73 % of injection attempts; refuses about 1.7 % of ordinary work.",
     },
     ModelPin {
@@ -867,7 +869,7 @@ mod tests {
         let kev = model_pin(LocalModel::Kev4b);
         assert_eq!((d1.threshold, kev.threshold), (0.85, 0.3));
         assert!(kev.timeout_ms >= 10_000, "{}", kev.timeout_ms);
-        assert!(d1.timeout_ms >= 2_000);
+        assert!(d1.timeout_ms >= 6_000, "{}", d1.timeout_ms);
         assert_ne!(d1.file, kev.file);
         assert_eq!(kev.bytes, 3_033_489_824);
         assert_eq!(kev.licence, "Apache-2.0");
