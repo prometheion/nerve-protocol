@@ -887,7 +887,9 @@ async fn check(
 /// What `cap ls` shows (docs/user/commands.md): every action of the node's
 /// own capabilities and of the attached programs', each with its effect,
 /// where it comes from and how each center has it set (`cap set`: `on`,
-/// `off`, `hidden`, or `default` where the mode alone decides); an action a
+/// `off`, `hidden`, or `default` where the mode alone decides; for
+/// `settings`, which no switch governs, `granted` or `not granted` by
+/// `center grant settings`); an action a
 /// program offered that the node left out, with the reason; and the
 /// programs the owner allowed, attached or not. `live` is the running node:
 /// without it no program's capabilities are known, and no row says whether
@@ -914,6 +916,14 @@ pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>) -> Value {
         cfg.centers
             .iter()
             .map(|c| {
+                // No switch: the center's grant offers it or not.
+                if cap == "settings" {
+                    let set = match c.settings {
+                        nerve_policy::config::SettingsGrant::Write => "granted",
+                        nerve_policy::config::SettingsGrant::Off => "not granted",
+                    };
+                    return (c.name.clone(), json!(set));
+                }
                 let set = match c.policy.cap_setting(cap, Some(action)) {
                     Some(CapSetting::On) => "on",
                     Some(CapSetting::Off) => "off",

@@ -816,7 +816,8 @@ pub fn switchable(cfg: &NodeConfig, entry: &CenterEntry) -> Vec<(String, Vec<Str
 }
 
 /// The node's own capabilities that have actions, every action in: what
-/// `cap ls` lists as built in (crate::provider::listing).
+/// `cap ls` lists as built in (crate::provider::listing). `settings` among
+/// them, which no switch but `center grant settings` governs.
 pub fn built_in(cfg: &NodeConfig) -> Vec<Capability> {
     vec![
         fs_cap(Exposure::On),
@@ -827,6 +828,7 @@ pub fn built_in(cfg: &NodeConfig) -> Vec<Capability> {
             &cfg.limits.command,
             &crate::exec::Timeouts::from_limits(&cfg.limits),
         ),
+        settings_cap(),
     ]
 }
 

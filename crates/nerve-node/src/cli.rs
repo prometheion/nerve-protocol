@@ -3297,6 +3297,8 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
                     let state = match (r["now"][c].as_str(), set) {
                         (_, "hidden") | (None, _) => set.to_string(),
                         (Some(now), "default") => now.to_string(),
+                        // `settings`: its grant, not a switch.
+                        (Some(now), "granted" | "not granted") => format!("{now} ({set})"),
                         (Some(now), set) => format!("{now} (set {set})"),
                     };
                     format!("{c}: {state}")
@@ -9163,6 +9165,11 @@ mod tests {
         )
         .unwrap();
         run(&paths, &["cap", "set", "lamp", "on", "--center", "lab"]).unwrap();
+        run(
+            &paths,
+            &["center", "grant", "settings", "write", "--center", "lab"],
+        )
+        .unwrap();
         run(&paths, &["cap", "provider", "allow", "desk", &desk]).unwrap();
         let ls = run(&paths, &["cap", "ls"]).unwrap();
         let line = |name: &str| {
@@ -9180,6 +9187,11 @@ mod tests {
         assert_eq!(
             line("exec.run"),
             "exec.run execute built-in home: default, lab: default"
+        );
+        // `settings`, which only the grant governs, is listed too.
+        assert_eq!(
+            line("settings.set"),
+            "settings.set write built-in home: not granted, lab: granted"
         );
         assert!(ls.contains("lab: lamp on (offered by nothing now)"), "{ls}");
         assert!(ls.contains("the node does not run"), "{ls}");
@@ -9247,6 +9259,25 @@ mod tests {
             .find(|r| r["name"] == "fs.read")
             .unwrap();
         assert!(read["now"]["home"].is_string(), "{v}");
+        // `settings` says what the grant leaves the center now.
+        let settings = |ls: &str| {
+            ls.lines()
+                .find(|l| l.starts_with("settings.set "))
+                .unwrap_or_else(|| panic!("no settings.set: {ls}"))
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert_eq!(
+            settings(&ls),
+            "settings.set write built-in home: off (not granted)"
+        );
+        run(&paths, &["center", "grant", "settings", "write"]).unwrap();
+        let ls = run(&paths, &["cap", "ls"]).unwrap();
+        assert_eq!(
+            settings(&ls),
+            "settings.set write built-in home: on (granted)"
+        );
         rt.block_on(daemon.stop());
     }
 

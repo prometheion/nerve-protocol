@@ -60,8 +60,10 @@ still make the allowed one attach for it. Allow only programs you trust.
 (its effect), where it comes from (`built-in`, or `program desk`), and for
 each center whether it may use it now (`on` or `off`, as its mode, rules and
 switches decide), with the switch in brackets where you set one with `cap
-set` (`hidden` ones say just that), for one center with `--center`. An action
-the node left out says why. A switch for something no program offers now is
+set` (`hidden` ones say just that), for one center with `--center`. The
+`settings` actions, with which a center changes its own entry, have no switch:
+they say `granted` or `not granted`, as `center grant settings` set it. An
+action the node left out says why. A switch for something no program offers now is
 listed too, as it counts once one does. On a stopped node it lists the node's
 own capabilities and the programs you allow, and for each center only the
 switch (`on`, `off`, `hidden`, or `default`, where the mode decides):
@@ -69,6 +71,7 @@ switch (`on`, `off`, `hidden`, or `default`, where the mode decides):
 ```
 fs.read       read     built-in      lab: on
 fs.write      write    built-in      lab: off
+settings.set  write    built-in      lab: off (not granted)
 lamp.on       actuate  program desk  lab: on (set on)
 lamp.dim      -        program desk  left out: params: /properties/level/oneOf: …
 program desk: /usr/lib/nerve-desktop/nerve-desktop, attached
