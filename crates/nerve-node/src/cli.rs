@@ -9229,6 +9229,8 @@ mod tests {
             .unwrap();
         let mut opts = NodeOptions::new(paths.clone());
         opts.home = d.path().to_path_buf();
+        // Not the rights of whoever runs the tests: an elevated run must pass.
+        opts.full_rights = Some(false);
         let daemon = rt.block_on(Daemon::start(opts)).unwrap();
         let ls = run(&paths, &["cap", "ls"]).unwrap();
         assert!(!ls.contains("does not run"), "{ls}");
