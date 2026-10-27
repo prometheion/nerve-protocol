@@ -72,6 +72,7 @@ fn opts() -> RunOptions {
 fn call(cmd: &str, cwd: &Path, timeout: Duration) -> RunCall {
     RunCall {
         command: cmd.into(),
+        argv: None,
         cwd: cwd.to_path_buf(),
         timeout: Some(timeout),
         limits: Default::default(),

@@ -142,10 +142,14 @@ impl Providers {
     /// actions, passes; the node cannot check it ahead, so it still counts
     /// when a provider later offers that capability or action with a sense
     /// or actuate action under the same name.
-    pub fn owner_only(&self) -> impl Fn(&str) -> bool + use<> {
+    ///
+    /// `config` are the config's capabilities offered now
+    /// (crate::config_cap), which count alike.
+    pub fn owner_only(&self, config: &[Capability]) -> impl Fn(&str) -> bool + use<> {
         let mut sensing = BTreeSet::new();
         let mut offered: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for c in lock(&self.attached).values().flat_map(|a| a.caps.iter()) {
+        let attached = lock(&self.attached);
+        for c in attached.values().flat_map(|a| a.caps.iter()).chain(config) {
             offered.insert(c.id.clone(), c.actions.keys().cloned().collect());
             if c.actions
                 .values()
@@ -154,6 +158,7 @@ impl Providers {
                 sensing.insert(c.id.clone());
             }
         }
+        drop(attached);
         move |scope| {
             let (cap, action) = match scope.split_once('.') {
                 Some((c, a)) => (c, Some(a)),
@@ -201,8 +206,10 @@ impl Providers {
     }
 
     /// Detaches the providers that `cfg` no longer allows, or allows as
-    /// another program than the one each was checked against. Whether any
-    /// went.
+    /// another program than the one each was checked against, and those
+    /// that offer a capability the config now declares itself
+    /// (`[[capability]]`), whose calls would no longer reach them. Whether
+    /// any went.
     pub fn follow_config(&self, cfg: &NodeConfig) -> bool {
         let mut attached = lock(&self.attached);
         let before = attached.len();
@@ -212,8 +219,20 @@ impl Providers {
                 tracing::info!(
                     "provider {name} detached: providers.allowed no longer names it with this program"
                 );
+                return false;
             }
-            kept
+            if let Some(c) = a
+                .caps
+                .iter()
+                .find(|c| crate::config_cap::names(cfg, &c.id))
+            {
+                tracing::info!(
+                    "provider {name} detached: its capability {} is declared in node.toml now",
+                    c.id
+                );
+                return false;
+            }
+            true
         });
         attached.len() != before
     }
@@ -265,7 +284,9 @@ impl Providers {
             .values()
             .flat_map(|a| a.caps.iter().map(|c| c.id.clone()))
             .collect();
-        let (caps, broken) = capabilities(name, fragment, &taken)?;
+        let (caps, broken) = capabilities(name, fragment, &taken, |id| {
+            crate::config_cap::names(&now, id)
+        })?;
         let a = Arc::new(Attached {
             name: name.to_string(),
             exe: exe.to_string(),
@@ -684,11 +705,13 @@ fn outside_subset(params: &Value, result: &Value) -> Option<String> {
 /// Checks a fragment and makes its capabilities, each with `provider:
 /// name`, and the actions left out because their schemas are outside the
 /// subset; a capability left with no action goes too. `taken` holds the
-/// capability ids of the other attached providers.
+/// capability ids of the other attached providers, and `config` tells the
+/// ones the config declares (`[[capability]]`), which no program may add.
 fn capabilities(
     name: &str,
     fragment: Vec<Fragment>,
     taken: &BTreeSet<String>,
+    config: impl Fn(&str) -> bool,
 ) -> Result<(Vec<Capability>, Vec<Broken>), String> {
     if fragment.is_empty() || fragment.len() > MAX_CAPS {
         return Err(format!("a provider adds 1 to {MAX_CAPS} capabilities"));
@@ -717,6 +740,12 @@ fn capabilities(
         if taken.contains(&f.id) {
             return Err(format!(
                 "capability {} is added by another provider already",
+                f.id
+            ));
+        }
+        if config(&f.id) {
+            return Err(format!(
+                "capability {}: the owner declares it in node.toml ([[capability]])",
                 f.id
             ));
         }
@@ -1157,7 +1186,8 @@ mod tests {
 
     #[test]
     fn a_fragment_becomes_capabilities_of_its_provider() {
-        let (caps, broken) = capabilities("desk", fragment(echo()), &BTreeSet::new()).unwrap();
+        let (caps, broken) =
+            capabilities("desk", fragment(echo()), &BTreeSet::new(), |_| false).unwrap();
         assert_eq!(broken, []);
         assert_eq!(caps.len(), 1);
         assert_eq!(caps[0].id, "echo");
@@ -1182,7 +1212,8 @@ mod tests {
                         "result": {"$ref": "#/defs/x"}}}},
             {"id": "fan", "actions": {"spin": {"effect": "write", "params": {"type": "string"}}}}
         ]);
-        let (caps, broken) = capabilities("desk", fragment(frag), &BTreeSet::new()).unwrap();
+        let (caps, broken) =
+            capabilities("desk", fragment(frag), &BTreeSet::new(), |_| false).unwrap();
         let ids: Vec<&str> = caps.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["lamp"]);
         let actions: Vec<&String> = caps[0].actions.keys().collect();
@@ -1206,7 +1237,7 @@ mod tests {
         );
 
         let none = json!([{"id": "fan", "actions": {"spin": {"effect": "write", "params": {}}}}]);
-        let e = capabilities("desk", fragment(none), &BTreeSet::new()).unwrap_err();
+        let e = capabilities("desk", fragment(none), &BTreeSet::new(), |_| false).unwrap_err();
         assert!(
             e.contains("no action") && e.contains("fan.spin: params"),
             "{e}"
@@ -1223,7 +1254,8 @@ mod tests {
             "dim": {"effect": "write", "params": {"type": "object", "properties": {
                 "x\nprovider other attached: fake\u{1b}[2J": {"type": "string", "pattern": "a"}}}},
             "get": {"effect": "read", "result": {"type": "object", long: 1}}}}]);
-        let (_, broken) = capabilities("desk", fragment(frag), &BTreeSet::new()).unwrap();
+        let (_, broken) =
+            capabilities("desk", fragment(frag), &BTreeSet::new(), |_| false).unwrap();
         let names: Vec<&str> = broken.iter().map(|b| b.name.as_str()).collect();
         assert_eq!(names, ["lamp.dim", "lamp.get"]);
         for b in &broken {
@@ -1298,7 +1330,7 @@ mod tests {
                 "capability x: action name of 65 bytes: at most 64",
             ),
         ] {
-            let e = capabilities("desk", fragment(bad.clone()), &taken).unwrap_err();
+            let e = capabilities("desk", fragment(bad.clone()), &taken, |_| false).unwrap_err();
             assert!(e.contains(why), "{bad}: {e}");
         }
         // A provider offers actions only, and says nothing of who serves them.
@@ -1321,7 +1353,7 @@ mod tests {
         let many: Vec<Value> = (0..17)
             .map(|i| json!({"id": format!("c{i}"), "actions": {"a": {"effect": "read"}}}))
             .collect();
-        assert!(capabilities("desk", fragment(json!(many)), &BTreeSet::new()).is_err());
+        assert!(capabilities("desk", fragment(json!(many)), &BTreeSet::new(), |_| false).is_err());
     }
 
     #[test]

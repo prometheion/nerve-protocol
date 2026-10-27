@@ -607,6 +607,21 @@ impl Shared {
         self.account_as(cfg, policy.runs_as_owner(crate::now_ms()))
     }
 
+    /// The account `nerve-run` (crate::account), which the config's
+    /// capabilities run as unless they say the owner, whatever a pairing's
+    /// commands run as; `None` on a node run by hand, which has none.
+    pub fn run_account(&self, cfg: &NodeConfig) -> Result<Option<crate::service::Account>, String> {
+        self.account_as(cfg, false)
+    }
+
+    /// The capabilities offered besides the node's own: the attached
+    /// programs' (crate::provider) and the config's (crate::config_cap).
+    pub fn added_caps(&self, cfg: &NodeConfig) -> Vec<nerve_proto::descriptor::Capability> {
+        let mut caps = self.providers.caps();
+        caps.extend(crate::config_cap::offered(cfg, self.service));
+        caps
+    }
+
     /// The owner's account, which sudo runs as and whose files the folders
     /// and rules name; `None` on a node run by hand, whose own user it is.
     pub fn owner_account(
