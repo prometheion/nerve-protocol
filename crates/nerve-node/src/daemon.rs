@@ -3224,7 +3224,11 @@ mod tests {
         let ticks = *s.changed.borrow();
         // From the command's job: refused, the status too, and nothing
         // changed.
-        for (method, params) in [(add.method(), add.params(None)), ("status", json!({}))] {
+        for (method, params) in [
+            (add.method(), add.params(None)),
+            ("status", json!({})),
+            ("caps.list", json!({})),
+        ] {
             let e = call(4242, method, params).await.unwrap_err();
             assert_eq!(e, FROM_A_COMMAND);
         }
@@ -3580,8 +3584,9 @@ mod tests {
         let r = control(&s, "config.write", write.clone(), Some(me));
         assert!(matches!(r, nerve_transport::ctl::Reply::Err(e) if e.starts_with("refused")));
         // What reads the config is refused as well: `status` and
-        // `config.read` hand it over whole.
-        for method in ["status", "config.read", "sudo.status"] {
+        // `config.read` hand it over whole, `caps.list` the programs and
+        // every center's switches.
+        for method in ["status", "config.read", "sudo.status", "caps.list"] {
             let r = control(&s, method, json!({}), Some(me));
             assert!(
                 matches!(&r, nerve_transport::ctl::Reply::Err(e) if e.starts_with("refused")),

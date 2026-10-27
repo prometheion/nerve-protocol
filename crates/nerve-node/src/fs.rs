@@ -289,7 +289,8 @@ pub fn holds(path: &Path, write: bool) -> bool {
     }
 }
 
-/// What [`links_below`] does with a folder it may not list.
+/// What [`links_below`] does with a folder it may not list, or an entry
+/// whose type it cannot tell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Closed {
     /// Leaves it out, as the node's own walks do: the program that gets the
@@ -341,19 +342,32 @@ pub fn links_below(
             walked.insert(root.clone());
             let mut stack = vec![root.clone()];
             while let Some(dir) = stack.pop() {
+                let shut = || {
+                    format!(
+                        "{given} holds a folder the node may not look into, so it cannot tell \
+                         where the links there lead"
+                    )
+                };
                 let rd = match std::fs::read_dir(&dir) {
                     Ok(rd) => rd,
                     // Gone since it was found: nothing there to follow.
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(_) if closed == Closed::Refuse => {
-                        return Err(format!(
-                            "{given} holds a folder the node may not look into, so it cannot \
-                             tell where the links there lead"
-                        ));
-                    }
+                    Err(_) if closed == Closed::Refuse => return Err(shut()),
                     Err(_) => continue,
                 };
-                for e in rd.filter_map(Result::ok) {
+                for e in rd {
+                    // An entry the listing could not read, or whose type the
+                    // walk cannot tell, may be a link or a folder. Where the
+                    // filesystem names no types the walk asks for each with a
+                    // stat, which a folder it may list but not enter refuses,
+                    // so for another account's program that hides as much as
+                    // a folder it may not list.
+                    let (e, ft) = match e.and_then(|e| entry_type(&e).map(|ft| (e, ft))) {
+                        Ok(typed) => typed,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(_) if closed == Closed::Refuse => return Err(shut()),
+                        Err(_) => continue,
+                    };
                     if stop.load(Ordering::Relaxed) {
                         return Err(format!(
                             "the call ended before the node had checked where the links below \
@@ -369,9 +383,6 @@ pub fn links_below(
                         ));
                     }
                     let at = e.path();
-                    let Ok(ft) = e.file_type() else {
-                        continue;
-                    };
                     if ft.is_dir() {
                         stack.push(at);
                         continue;
@@ -418,6 +429,17 @@ pub fn links_below(
         }
     }
     Ok(())
+}
+
+/// The type of an entry [`links_below`] lists. A test makes it fail, as it
+/// does on a filesystem that names no types, where the walk may list a
+/// folder but not enter it.
+fn entry_type(e: &std::fs::DirEntry) -> std::io::Result<std::fs::FileType> {
+    #[cfg(test)]
+    if tests::UNTYPED.with(std::cell::Cell::get) {
+        return Err(std::io::ErrorKind::PermissionDenied.into());
+    }
+    e.file_type()
 }
 
 /// Whether `root` lies in a folder [`links_below`] looked into already. It
@@ -1073,6 +1095,8 @@ mod tests {
     thread_local! {
         /// How many folders [`looked_into`] asked for on this thread.
         pub(super) static LOOKED_UP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        /// Whether [`entry_type`] fails on this thread.
+        pub(super) static UNTYPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     /// A walk nobody stops.
@@ -1430,6 +1454,46 @@ mod tests {
                 to_wire(&proj)
             )
         );
+    }
+
+    /// An entry whose type the walk cannot tell (a filesystem that names
+    /// no types, in a folder the walk may list but not enter) may be a link
+    /// or a folder: it is left out for the walking account's program and
+    /// refuses another account's, as a folder the walk may not list does.
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_the_walk_cannot_type_refuses_a_program_of_another_account() {
+        let d = tempfile::tempdir().unwrap();
+        let proj = d.path().canonicalize().unwrap().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", proj.join("to-elsewhere")).unwrap();
+        let handed = [Target {
+            path: proj.clone(),
+            access: PathAccess::Read,
+            holds: true,
+        }];
+        let judged = std::cell::Cell::new(0);
+        let mut count = |_: &Link| {
+            judged.set(judged.get() + 1);
+            None
+        };
+        UNTYPED.with(|u| u.set(true));
+        let skipped = links_below(&handed, LINKS_LIMIT, Closed::Skip, &GOES_ON, &mut count);
+        let refused = links_below(&handed, LINKS_LIMIT, Closed::Refuse, &GOES_ON, &mut count);
+        UNTYPED.with(|u| u.set(false));
+        assert_eq!(skipped, Ok(()));
+        assert_eq!(
+            refused.unwrap_err(),
+            format!(
+                "{} holds a folder the node may not look into, so it cannot tell where the \
+                 links there lead",
+                to_wire(&proj)
+            )
+        );
+        assert_eq!(judged.get(), 0);
+        let typed = links_below(&handed, LINKS_LIMIT, Closed::Refuse, &GOES_ON, &mut count);
+        assert_eq!(typed, Ok(()));
+        assert_eq!(judged.get(), 1, "with its type the link is judged");
     }
 
     /// The links below a folder handed to a program, and where they lead:
