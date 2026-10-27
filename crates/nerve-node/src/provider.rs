@@ -100,7 +100,6 @@ struct Attached {
     /// The program the node checked it against, as the config named it.
     exe: String,
     /// The account its program runs as, as the kernel named it.
-    #[allow(dead_code)]
     uid: u32,
     /// Tells this attachment from a later one of the same name.
     serial: u64,
@@ -168,6 +167,12 @@ impl Providers {
                 (Some(_), None) => false,
             }
         }
+    }
+
+    /// The account the program of the provider `name` runs as, while it is
+    /// attached.
+    pub fn uid_of(&self, name: &str) -> Option<u32> {
+        lock(&self.attached).get(name).map(|a| a.uid)
     }
 
     /// What `status` shows of them: each one's capabilities, and the

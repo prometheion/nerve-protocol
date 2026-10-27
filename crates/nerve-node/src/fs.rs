@@ -289,6 +289,17 @@ pub fn holds(path: &Path, write: bool) -> bool {
     }
 }
 
+/// What [`links_below`] does with a folder it may not list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Closed {
+    /// Leaves it out, as the node's own walks do: the program that gets the
+    /// paths runs as the account that walks, and cannot list it either.
+    Skip,
+    /// Refuses the call: the program runs as another account (the owner, or
+    /// root), which may list the folder and follow a link in it.
+    Refuse,
+}
+
 /// Hands `judge` each link that lies below the paths of `targets` that may
 /// hold others ([`Target::holds`]), with where it leads, for a call that
 /// hands them to a program (nerve_policy::works_below). The node's own walks
@@ -297,7 +308,8 @@ pub fn holds(path: &Path, write: bool) -> bool {
 /// judged when it is found, and a folder it leads to is looked into only
 /// once it passed: a place the call may not reach is never walked, and no
 /// refusal names what lies there. Asked as the account the paths were
-/// resolved as; a folder it may not read is left out, as the walks leave it.
+/// resolved as; a folder it may not read is left out or refuses the call,
+/// as `closed` says.
 /// A link that leads nowhere is left out where the call reads (nothing is
 /// there to read), and judged at the place it names where the call writes,
 /// since a write through it makes that place. `Err` is the first refusal of
@@ -310,6 +322,7 @@ pub fn holds(path: &Path, write: bool) -> bool {
 pub fn links_below(
     targets: &[Target],
     limit: usize,
+    closed: Closed,
     stop: &AtomicBool,
     judge: &mut dyn FnMut(&Link) -> Option<String>,
 ) -> Result<(), String> {
@@ -328,8 +341,17 @@ pub fn links_below(
             walked.insert(root.clone());
             let mut stack = vec![root.clone()];
             while let Some(dir) = stack.pop() {
-                let Ok(rd) = std::fs::read_dir(&dir) else {
-                    continue;
+                let rd = match std::fs::read_dir(&dir) {
+                    Ok(rd) => rd,
+                    // Gone since it was found: nothing there to follow.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(_) if closed == Closed::Refuse => {
+                        return Err(format!(
+                            "{given} holds a folder the node may not look into, so it cannot \
+                             tell where the links there lead"
+                        ));
+                    }
+                    Err(_) => continue,
                 };
                 for e in rd.filter_map(Result::ok) {
                     if stop.load(Ordering::Relaxed) {
@@ -1376,6 +1398,45 @@ mod tests {
     /// leads nowhere counts only for a write, at the place it names. Too
     /// many entries, and nothing can be told.
     #[cfg(unix)]
+    /// A folder the walk may not list is left out where the program runs as
+    /// the walking account, which could not list it either, and refuses the
+    /// call where it runs as another, which could follow a link in it. The
+    /// refusal names neither the folder nor the link.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_the_walk_may_not_list_refuses_a_program_of_another_account() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        if nerve_transport::net::euid() == 0 {
+            eprintln!("skipped: root lists every folder");
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let proj = d.path().canonicalize().unwrap().join("proj");
+        let shut = proj.join("shut");
+        std::fs::create_dir_all(&shut).unwrap();
+        symlink("/etc/hostname", shut.join("to-elsewhere")).unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let handed = [Target {
+            path: proj.clone(),
+            access: PathAccess::Read,
+            holds: true,
+        }];
+        let mut pass = |_: &Link| None;
+        let skipped = links_below(&handed, LINKS_LIMIT, Closed::Skip, &GOES_ON, &mut pass);
+        let refused = links_below(&handed, LINKS_LIMIT, Closed::Refuse, &GOES_ON, &mut pass);
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(skipped, Ok(()));
+        let e = refused.unwrap_err();
+        assert_eq!(
+            e,
+            format!(
+                "{} holds a folder the node may not look into, so it cannot tell where the \
+                 links there lead",
+                to_wire(&proj)
+            )
+        );
+    }
+
     #[test]
     fn the_links_below_a_handed_folder_are_found() {
         use std::os::unix::fs::symlink;
@@ -1399,13 +1460,19 @@ mod tests {
         };
         let found = |access| {
             let mut v: Vec<(PathBuf, PathBuf, bool)> = Vec::new();
-            links_below(&[target(access)], LINKS_LIMIT, &GOES_ON, &mut |l| {
-                assert_eq!((l.handed, l.to.access), (0, access));
-                let root = if l.at.starts_with(&proj) { &proj } else { &out };
-                assert_eq!(&l.found_in, root);
-                v.push((l.at.clone(), l.to.path.clone(), l.to.holds));
-                None
-            })
+            links_below(
+                &[target(access)],
+                LINKS_LIMIT,
+                Closed::Skip,
+                &GOES_ON,
+                &mut |l| {
+                    assert_eq!((l.handed, l.to.access), (0, access));
+                    let root = if l.at.starts_with(&proj) { &proj } else { &out };
+                    assert_eq!(&l.found_in, root);
+                    v.push((l.at.clone(), l.to.path.clone(), l.to.holds));
+                    None
+                },
+            )
             .unwrap();
             v.sort();
             v
@@ -1430,12 +1497,19 @@ mod tests {
         };
         let mut none = |_: &Link| -> Option<String> { panic!("a file was walked") };
         assert_eq!(
-            links_below(&[file], LINKS_LIMIT, &GOES_ON, &mut none),
+            links_below(&[file], LINKS_LIMIT, Closed::Skip, &GOES_ON, &mut none),
             Ok(())
         );
         let mut pass = |_: &Link| None;
         // Cut short: refused, never judged by the part looked at.
-        let e = links_below(&[target(PathAccess::Read)], 3, &GOES_ON, &mut pass).unwrap_err();
+        let e = links_below(
+            &[target(PathAccess::Read)],
+            3,
+            Closed::Skip,
+            &GOES_ON,
+            &mut pass,
+        )
+        .unwrap_err();
         assert!(e.contains("hold more than 3 entries in all"), "{e}");
         // The limit holds for the call: two paths share it, and the refusal
         // names neither as the one too big.
@@ -1449,8 +1523,11 @@ mod tests {
             access: PathAccess::Read,
             holds: true,
         });
-        assert_eq!(links_below(&both[..1], 5, &GOES_ON, &mut pass), Ok(()));
-        let e = links_below(&both, 5, &GOES_ON, &mut pass).unwrap_err();
+        assert_eq!(
+            links_below(&both[..1], 5, Closed::Skip, &GOES_ON, &mut pass),
+            Ok(())
+        );
+        let e = links_below(&both, 5, Closed::Skip, &GOES_ON, &mut pass).unwrap_err();
         assert!(
             e.starts_with("the paths this call hands over hold more than 5 entries in all"),
             "{e}"
@@ -1459,6 +1536,7 @@ mod tests {
         let e = links_below(
             &[target(PathAccess::Read)],
             LINKS_LIMIT,
+            Closed::Skip,
             &AtomicBool::new(true),
             &mut |_| panic!("a link was judged after the call ended"),
         )
@@ -1472,6 +1550,7 @@ mod tests {
         let e = links_below(
             &[target(PathAccess::Read)],
             LINKS_LIMIT,
+            Closed::Skip,
             &GOES_ON,
             &mut pass,
         )
@@ -1511,7 +1590,7 @@ mod tests {
             (l.to.path == far).then(|| "refused".to_string())
         };
         assert_eq!(
-            links_below(&proj, 5, &GOES_ON, &mut refuse_far),
+            links_below(&proj, 5, Closed::Skip, &GOES_ON, &mut refuse_far),
             Err("refused".into())
         );
         assert_eq!(judged, [root.join("proj/far")]);
@@ -1520,7 +1599,7 @@ mod tests {
         // differ).
         std::fs::remove_file(far.join("loop")).unwrap();
         let mut pass = |_: &Link| None;
-        let e = links_below(&proj, 5, &GOES_ON, &mut pass).unwrap_err();
+        let e = links_below(&proj, 5, Closed::Skip, &GOES_ON, &mut pass).unwrap_err();
         assert!(
             e.contains(
                 "hold more than 5 entries in all, counting those of the folders their links lead to"
@@ -1528,7 +1607,7 @@ mod tests {
             "{e}"
         );
         symlink(far.join("loop"), far.join("loop")).unwrap();
-        let e = links_below(&proj, LINKS_LIMIT, &GOES_ON, &mut pass).unwrap_err();
+        let e = links_below(&proj, LINKS_LIMIT, Closed::Skip, &GOES_ON, &mut pass).unwrap_err();
         assert!(e.contains("far/loop) the node cannot follow"), "{e}");
     }
 
@@ -1557,7 +1636,7 @@ mod tests {
         }];
         let before = LOOKED_UP.with(|c| c.get());
         let mut judged = 0;
-        let r = links_below(&proj, LINKS_LIMIT, &GOES_ON, &mut |_| {
+        let r = links_below(&proj, LINKS_LIMIT, Closed::Skip, &GOES_ON, &mut |_| {
             judged += 1;
             None
         });

@@ -227,12 +227,14 @@ impl Reach {
         // that is no read reads; outside them a read reads what every
         // account may. A program other
         // than the node reads with the owner's rights, so the node hands it
-        // no folder there.
+        // no folder there, and the command account's own folders do not
+        // count for it.
         const OPEN: &str = "what is open to every account on the machine, except protected \
                             paths and the node's own files";
         const NO_FOLDER: &str = "An action of any capability but fs may name a file there, \
                                  never a folder: its program would read below it with the \
-                                 owner's rights.";
+                                 owner's rights. For such an action a folder marked own counts \
+                                 as none: it is the command account's, not the owner's.";
         let reads = self.reads_by_account;
         if self.no_folder() && !commands {
             return Some(if reads {
@@ -1414,7 +1416,9 @@ mod tests {
         // A program other than the node's `fs` is never handed a folder
         // outside the folders.
         let never = "An action of any capability but fs may name a file there, never a folder: \
-                     its program would read below it with the owner's rights.";
+                     its program would read below it with the owner's rights. For such an action \
+                     a folder marked own counts as none: it is the command account's, not the \
+                     owner's.";
         let granted = json!([{"path": "/a", "access": "rw"}]);
         let r = reach(true, granted.clone(), false);
         let a = r.file_advice().unwrap();

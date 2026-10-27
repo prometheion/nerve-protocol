@@ -1630,7 +1630,10 @@ impl Link {
             .entry()
             .ok_or_else(|| RpcError::new(ErrorCode::Unavailable, "this center was removed"))?;
         // The gate and the sandbox see the built-in folders of `nerve-run`
-        // too; the config keeps the owner's.
+        // too; the config keeps the owner's. A program (a provider) works
+        // with the owner's rights, not that account's: its paths count by
+        // the folders the owner granted alone.
+        let granted = entry.clone();
         let entry = self.shared.with_built_in(&cfg, entry);
         let view =
             descriptor::for_call(&cfg, &entry, crate::now_ms(), &self.shared.providers.caps());
@@ -1667,6 +1670,7 @@ impl Link {
         // field is wrong.
         if cap.provider != "node" {
             let provider = cap.provider.clone();
+            let entry = granted;
             nerve_proto::schema::validate(&action.params, &Value::Object(inv.args.clone()))?;
             let marked = nerve_proto::schema::path_args(&action.params);
             // The arguments its schema marks as paths are the call's rule
@@ -1796,6 +1800,7 @@ impl Link {
                 target,
                 known.as_ref(),
                 unconfined,
+                self.shared.providers.uid_of(&provider),
             )
             .await
             .map_err(|e| as_given(e, &named))?;
@@ -1828,6 +1833,7 @@ impl Link {
                     target,
                     None,
                     unconfined,
+                    None,
                 )
                 .await?;
                 self.signal(&inv.args)
@@ -1878,6 +1884,7 @@ impl Link {
                     call.target_text(),
                     known.as_ref(),
                     unconfined,
+                    None,
                 )
                 .await
                 .map_err(|e| as_given(e, &named))?;
@@ -1998,6 +2005,7 @@ impl Link {
         target: String,
         account: Option<&crate::service::Account>,
         unconfined: Option<&str>,
+        program: Option<u32>,
     ) -> Result<(), RpcError> {
         let call = Call {
             cap: &inv.cap,
@@ -2037,6 +2045,8 @@ impl Link {
             let targets = targets.to_vec();
             let command = command.map(str::to_string);
             let cwd = cwd.map(std::path::Path::to_path_buf);
+            let walker = account.map_or_else(crate::account::own_uid, |a| a.uid);
+            let closed = closed_for(program, walker);
             let account = account.cloned();
             let now_ms = call.now_ms;
             // A call whose deadline passes, or that is cancelled, while its
@@ -2060,6 +2070,7 @@ impl Link {
                         match crate::fs::links_below(
                             &targets,
                             crate::fs::LINKS_LIMIT,
+                            closed,
                             stop,
                             &mut judge,
                         ) {
@@ -2349,6 +2360,7 @@ impl Link {
             target,
             looks_as.as_ref(),
             unconfined,
+            None,
         )
         .await
         .map_err(|e| as_given(e, &named))?;
@@ -2666,6 +2678,18 @@ pub(crate) fn act_as(account: Option<&crate::service::Account>) -> Result<Option
 }
 
 /// `m` without the sudo password (crate::sudo).
+/// What the link walk of a call does with a folder it may not list, when it
+/// walks as the account `walker` and the paths go to a program that runs as
+/// `program` (none: the node's own call, or a program run by that account).
+/// A program of another account may list the folder and follow a link in
+/// it, so the call is refused.
+fn closed_for(program: Option<u32>, walker: u32) -> crate::fs::Closed {
+    match program {
+        Some(uid) if uid != walker => crate::fs::Closed::Refuse,
+        _ => crate::fs::Closed::Skip,
+    }
+}
+
 fn scrub(shared: &Shared, m: WsMessage) -> WsMessage {
     match m {
         WsMessage::Text(t) => WsMessage::text(shared.scrub(t.to_string())),
@@ -2958,6 +2982,18 @@ mod tests {
             started.elapsed() < Duration::from_secs(4),
             "the walk ran on"
         );
+    }
+
+    /// A folder the link walk may not list refuses a call only where its
+    /// paths go to a program of another account than the walk's.
+    #[test]
+    fn a_closed_folder_refuses_a_program_of_another_account_only() {
+        use super::closed_for;
+        use crate::fs::Closed;
+        assert_eq!(closed_for(None, 990), Closed::Skip);
+        assert_eq!(closed_for(Some(990), 990), Closed::Skip);
+        assert_eq!(closed_for(Some(1000), 989), Closed::Refuse);
+        assert_eq!(closed_for(Some(0), 989), Closed::Refuse);
     }
 
     /// A program's refusal names each path as the center gave it, and a
