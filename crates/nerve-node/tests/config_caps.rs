@@ -955,7 +955,7 @@ command = ["echo", "frame"]"#);
 
 /// `config accept` of a node.toml the owner wrote with an action that
 /// senses switches it off where an earlier switch covered it, as `cap add`
-/// does, and says so.
+/// does, and says so; so does any other write the running node takes.
 #[tokio::test(flavor = "multi_thread")]
 async fn config_accept_holds_an_action_that_comes_to_sense() {
     let dir = scratch();
@@ -997,6 +997,22 @@ account = "owner""#);
         invoke(&mut conn, "probe.list", json!({})).await.unwrap(),
         json!("temp\n")
     );
+    // Any other write of the config the running node takes does the same.
+    owner_edit(&paths, |c| {
+        c.capabilities.push(cap(r#"name = "probe.mic"
+effect = "sense"
+command = ["echo", "sound"]
+account = "owner""#));
+    })
+    .await;
+    let caps = &nerve_node::cli::read_config(&paths)
+        .await
+        .unwrap()
+        .0
+        .centers[0]
+        .policy
+        .caps;
+    assert_eq!(caps.get("probe.mic"), Some(&CapSetting::Off), "{caps:?}");
     daemon.stop().await;
 }
 

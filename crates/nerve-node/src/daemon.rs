@@ -634,11 +634,7 @@ impl Shared {
         policy: &nerve_policy::config::CenterPolicy,
     ) -> Vec<nerve_proto::descriptor::Capability> {
         let mut caps = self.added_caps(cfg);
-        if !self.separate(policy) {
-            for a in caps.iter_mut().flat_map(|c| c.actions.values_mut()) {
-                a.as_account = false;
-            }
-        }
+        crate::config_cap::as_account_for(&mut caps, self.separate(policy));
         caps
     }
 

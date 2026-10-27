@@ -100,6 +100,19 @@ fn capabilities<'a>(entries: impl Iterator<Item = &'a ConfigCapability>) -> Vec<
     caps.into_values().collect()
 }
 
+/// `caps` as a pairing is offered them: an action marked as a command of
+/// the pairing's command account (`as_account`) keeps the mark only where
+/// that pairing's commands run as `nerve-run` (`separate`). Elsewhere the
+/// command account the center knows is the owner, which such an action
+/// does not run as.
+pub fn as_account_for(caps: &mut [Capability], separate: bool) {
+    if !separate {
+        for a in caps.iter_mut().flat_map(|c| c.actions.values_mut()) {
+            a.as_account = false;
+        }
+    }
+}
+
 /// `c` as `cap ls --json` gives it: as the owner declared it, the schemas
 /// as JSON.
 pub fn entry(c: &ConfigCapability) -> Value {
@@ -422,6 +435,18 @@ account = "owner"
         // held like fs, and one that runs as the owner like a program.
         assert!(sensors.actions["read"].as_account);
         assert!(!sensors.actions["list"].as_account);
+        // Only for a pairing whose commands run as nerve-run.
+        let mut kept = caps.clone();
+        as_account_for(&mut kept, true);
+        assert_eq!(kept, caps);
+        let mut owners = caps.clone();
+        as_account_for(&mut owners, false);
+        assert!(
+            owners
+                .iter()
+                .flat_map(|c| c.actions.values())
+                .all(|a| !a.as_account)
+        );
         assert_eq!(
             sensors.actions["list"].params,
             json!({"type": "object", "properties": {}, "additionalProperties": false})
@@ -606,10 +631,25 @@ command = ["sensors", "-l"]
             .insert("probe.cam".into(), CapSetting::On);
         let kept = again.clone();
         assert!(hold_new(&kept, &mut again).is_empty());
-        // A read that comes to sense.
+        // A read that comes to sense, also where the center turned that
+        // very action on while it read.
         let read = with("name = \"probe.cam\"\neffect = \"read\"\ncommand = [\"cam\"]");
         let mut sensing = with(cam);
         assert_eq!(hold_new(&read, &mut sensing).len(), 1);
+        let (mut read_on, mut sensing_on) = (read.clone(), with(cam));
+        for c in [&mut read_on, &mut sensing_on] {
+            c.centers[1]
+                .policy
+                .caps
+                .insert("probe.cam".into(), CapSetting::On);
+        }
+        assert_eq!(
+            hold_new(&read_on, &mut sensing_on),
+            [
+                ("lab".to_string(), "probe.cam".to_string()),
+                ("ops".to_string(), "probe.cam".to_string())
+            ]
+        );
         // The owner's own `on` for it, in the same change.
         let mut owned = with(cam);
         owned.centers[0]
