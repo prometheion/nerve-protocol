@@ -69,15 +69,18 @@ schema marks `x-nerve-path` (`center.rs` `CheckerUnit`, from the catalog), and
 and for `fs.read` or `fs.write` by its mark, with the same `path_glob` and
 `normalize_path` as an `fs` call's path (so an `fs.read` entry holds `fs.grep`,
 `fs.find`, `fs.list` and `fs.stat`, whose `path` is marked read, and
-`exec.run`'s `cwd`). Allow rules are not matched against path arguments: they
+`exec.run`'s `cwd`). A path also meets an entry as a folder would: the glob
+is tried on the path and on `<path>/x`, so `fs.read:/srv/secret/*` holds a
+walk started in `/srv/secret`, not one started in `/srv`. Allow rules are not matched against path arguments: they
 only skip the model. The checker's target (in the audit
 entry and the model's state) is then the paths, joined by `, ` as the node's
 audit names them. `checker_json` lists under `unpublished` the owner's entries
 and allow rules whose capability or action no paired node's descriptor has (for
-a rule of one node, that node), and the page shows them in a warning. An `fs`
-entry counts as published as well where some action of any capability marks a
-path for it (`fs.read` a read one, `fs.write` a written one), since it holds
-that path then.
+a rule of one node, that node), and the page shows them in a warning. A
+blocklist `fs` entry counts as published as well where some action of any
+capability marks a path for it (`fs.read` a read one, `fs.write` a written
+one), since it holds that path then; an allow rule does not, as it is matched
+against the call's own target only.
 
 For `exec.run` an entry is a **structured command pattern** (`program` glob,
 the short and long flags that must all be present, and operand globs that must
@@ -214,9 +217,10 @@ The center sends:
 and reads `answers.danger.noul`, the probability of `true` (dangerous). The
 question is fixed by the center; the command text is only ever in `state`, so a
 crafted command cannot change the question. `checker::model_state` builds the
-state: `effect` is the unit's, `description` the capability's summary and the
-action's own (`CheckerUnit::of`, from the descriptor and the catalog), cut at
-`STATE_DESCRIPTION_MAX` (400 bytes); the target is the command, an `fs` path,
+state: `effect` is the unit's, `description` the action's own text and the
+capability's summary after it (`CheckerUnit::of`, from the descriptor and the
+catalog), cut at `STATE_DESCRIPTION_MAX` (400 bytes), so a long capability
+summary loses its end, not the action's text; the target is the command, an `fs` path,
 another capability's path arguments, or `<cap>.<action>`; `args` is the whole
 argument object as JSON, cut at 2000 bytes. The description is node-written
 text, so it sits in the state beside the command, never in the question. Errors `401`, `422`, `429`, `501`

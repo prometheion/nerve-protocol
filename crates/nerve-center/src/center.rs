@@ -3462,16 +3462,17 @@ fn checker_target(
 /// an action of one, that no paired node publishes (the one node for a
 /// rule of one node): they match no call now, which the checker page says,
 /// since a misspelt name looks like a rule in force. An `fs`, `fs.read` or
-/// `fs.write` entry also holds the path arguments of the other
+/// `fs.write` blocklist entry also holds the path arguments of the other
 /// capabilities, so it is in force where some capability has an argument
-/// marked for it, `fs` published or not. Nothing is said while no node has
-/// published anything, and the built-in entries name the node's own
+/// marked for it, `fs` published or not; an allow rule is matched against
+/// the call's own target only, so it is not. Nothing is said while no node
+/// has published anything, and the built-in entries name the node's own
 /// capabilities.
 fn unpublished_rules(cfg: &CheckerConfig, nodes: &BTreeMap<String, NodeRecord>) -> Vec<String> {
     if nodes.values().all(|n| n.descriptor.is_none()) {
         return Vec::new();
     }
-    let publishes = |n: &NodeRecord, cap: &str, action: Option<&str>| {
+    let publishes = |n: &NodeRecord, cap: &str, action: Option<&str>, by_path: bool| {
         let Some(d) = n.descriptor.as_ref() else {
             return false;
         };
@@ -3486,7 +3487,8 @@ fn unpublished_rules(cfg: &CheckerConfig, nodes: &BTreeMap<String, NodeRecord>) 
             Some("write") => mark == PathMark::Write,
             Some(_) => false,
         };
-        cap == "fs"
+        by_path
+            && cap == "fs"
             && d.capabilities
                 .iter()
                 .flat_map(|c| c.actions.values())
@@ -3495,10 +3497,10 @@ fn unpublished_rules(cfg: &CheckerConfig, nodes: &BTreeMap<String, NodeRecord>) 
     };
     let own = cfg.blocklist.iter().filter(|e| !e.builtin);
     let rules = own
-        .map(|e| (&e.rule, &e.node_id))
-        .chain(cfg.allow_rules.iter().map(|a| (&a.rule, &a.node_id)));
+        .map(|e| (&e.rule, &e.node_id, true))
+        .chain(cfg.allow_rules.iter().map(|a| (&a.rule, &a.node_id, false)));
     let mut out: Vec<String> = Vec::new();
-    for (rule, node) in rules {
+    for (rule, node, by_path) in rules {
         let scope = rule.split_once(':').map_or(rule.as_str(), |(s, _)| s);
         let (cap, action) = match scope.split_once('.') {
             Some((c, a)) => (c, Some(a)),
@@ -3506,8 +3508,10 @@ fn unpublished_rules(cfg: &CheckerConfig, nodes: &BTreeMap<String, NodeRecord>) 
         };
         let known = match node {
             // A rule for a machine no longer paired is shown as such.
-            Some(id) => nodes.get(id).is_none_or(|n| publishes(n, cap, action)),
-            None => nodes.values().any(|n| publishes(n, cap, action)),
+            Some(id) => nodes
+                .get(id)
+                .is_none_or(|n| publishes(n, cap, action, by_path)),
+            None => nodes.values().any(|n| publishes(n, cap, action, by_path)),
         };
         if !known && !out.contains(rule) {
             out.push(rule.clone());
@@ -3521,7 +3525,7 @@ fn unpublished_rules(cfg: &CheckerConfig, nodes: &BTreeMap<String, NodeRecord>) 
 /// node refuses such a call anyway.
 #[derive(Default)]
 struct CheckerUnit {
-    /// The capability's summary and the action's own, on one line.
+    /// The action's own text and the capability's summary, on one line.
     description: String,
     /// The arguments the unit's schema marks as paths.
     marked: Vec<(String, PathMark)>,
@@ -3532,9 +3536,12 @@ impl CheckerUnit {
         let Some(u) = n.catalog.unit(&format!("{}.{}", route.cap, route.action)) else {
             return CheckerUnit::default();
         };
-        // The capability's summary tells what it is for; the unit's own
-        // description, when it has one, what this action does. A unit
-        // without a summary of its own carries its capability's already.
+        // The unit's own description, when it has one, tells what this
+        // action does; the capability's summary what it is for. The action
+        // goes first: the model's state clips the end, and a long summary
+        // must not push out the part that tells `unlock` from `status`. A
+        // unit without a summary of its own carries its capability's
+        // already.
         let cap = n
             .descriptor
             .as_ref()
@@ -3544,7 +3551,7 @@ impl CheckerUnit {
         let description = if cap.is_empty() || *u.description == *cap {
             u.description.to_string()
         } else {
-            format!("{cap} {}: {}", route.action, u.description)
+            format!("{}: {} ({cap})", route.action, u.description)
         };
         CheckerUnit {
             description,
@@ -4086,7 +4093,7 @@ mod tests {
         assert_eq!(last["target"], "/home/me/.ssh/authorized_keys");
         // What the checker is shown of the unit.
         let seen = c.read(|s| CheckerUnit::of(&s.nodes["n1"], &route));
-        assert_eq!(seen.description, "notes summary save: save it");
+        assert_eq!(seen.description, "save: save it (notes summary)");
         assert_eq!(
             seen.paths(&save("/x")),
             vec![(PathMark::Write, "/x".to_string())]
@@ -4188,7 +4195,7 @@ mod tests {
         assert_eq!(state["capability"], "notes");
         assert_eq!(state["action"], "save");
         assert_eq!(state["effect"], "write");
-        assert_eq!(state["description"], "notes summary save: save it");
+        assert_eq!(state["description"], "save: save it (notes summary)");
         assert_eq!(state["target"], "/home/me/notes/today.md");
         assert!(state["args"].as_str().unwrap().contains("hello"), "{state}");
         let last = c.audit().pop().unwrap();
@@ -4278,6 +4285,62 @@ mod tests {
         assert_eq!(seen.description, "The office lamp.  Turns it on  or off.");
     }
 
+    /// A capability summary longer than the model's state carries must not
+    /// push out what the action itself does: that part goes first.
+    #[test]
+    fn a_long_capability_summary_does_not_crowd_out_the_actions_text() {
+        use crate::tools::tests::{cap, desc};
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let mut door = cap(
+            "door",
+            "door",
+            &[(
+                "unlock",
+                nerve_proto::Effect::Actuate,
+                json!({"type": "object"}),
+            )],
+        );
+        door.summary = "The front door. ".repeat(30);
+        door.actions.get_mut("unlock").unwrap().summary = "Unlocks it for a given time.".into();
+        c.update(|s| {
+            let mut n = node_record("n1", "linux");
+            n.set_descriptor(desc("n1", vec![door]));
+            s.nodes.insert("n1".into(), n);
+        });
+        let route = Route {
+            node_id: "n1".into(),
+            node_name: "n1".into(),
+            cap: "door".into(),
+            action: "unlock".into(),
+            effect: nerve_proto::Effect::Actuate,
+        };
+        let seen = c.read(|s| CheckerUnit::of(&s.nodes["n1"], &route));
+        assert!(seen.description.len() > checker::STATE_DESCRIPTION_MAX);
+        let args = Map::new();
+        let info = checker::CallInfo {
+            cap: "door",
+            action: "unlock",
+            effect: nerve_proto::Effect::Actuate,
+            description: &seen.description,
+            target: "door.unlock",
+            paths: &[],
+            args: &args,
+            node_id: "n1",
+            os: "linux",
+            tainted: false,
+        };
+        let state = checker::model_state(&info);
+        assert!(
+            state["description"]
+                .as_str()
+                .unwrap()
+                .starts_with("unlock: Unlocks it for a given time."),
+            "{}",
+            state["description"]
+        );
+    }
+
     /// A pattern that cannot match anything is refused when the owner saves
     /// it, and one already stored is left out of the checker and reported.
     #[test]
@@ -4348,12 +4411,22 @@ mod tests {
                 entry("fs.read:/srv/secret/*"),
                 entry("fs.wirte:/etc/*"),
             ]);
+            // An allow rule is matched against a call's own target only, so
+            // a path argument does not put it in force.
+            s.checker.allow_rules.push(AllowRule {
+                rule: "fs.write:/home/*/notes/*".into(),
+                node_id: None,
+            });
         });
         // The program writes a path; nothing reads one, and `fs` is not
         // published here.
         assert_eq!(
             c.checker_json()["unpublished"],
-            json!(["fs.read:/srv/secret/*", "fs.wirte:/etc/*"])
+            json!([
+                "fs.read:/srv/secret/*",
+                "fs.wirte:/etc/*",
+                "fs.write:/home/*/notes/*"
+            ])
         );
     }
 

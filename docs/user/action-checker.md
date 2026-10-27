@@ -85,17 +85,22 @@ Entries are in the machine's own rule syntax, `<scope>:<pattern>`:
   also refuses a notes program's `notes.save` into that file. So does an
   `exec.run` command whose working folder (`cwd`) an `fs.read:` entry names,
   and `fs.read:` entries hold `fs.grep`, `fs.find`, `fs.list` and `fs.stat`
-  as they hold `fs.read`. Only the blocklist does this: an allow rule
-  `fs.write:~/notes/*` skips the model for `fs.write` calls only, not for a
-  program's `notes.save` into that folder.
+  as they hold `fs.read`. A folder handed over (to `fs.grep`, `fs.find` or
+  `fs.list`, or as the working folder) meets an entry as something in it
+  would, so `fs.read:/srv/secret/*` holds a walk of `/srv/secret` itself; a
+  walk from a folder above it (`/srv`) is not held. Only the blocklist does
+  this: an allow rule `fs.write:~/notes/*` skips the model for `fs.write`
+  calls only, not for a program's `notes.save` into that folder.
 - `lamp.set`, or `lamp` for all its actions — any other capability, named
   whole. A pattern after it (`lamp.set:office`) is refused for now: it would
   have nothing to match until rules on a capability's arguments come.
   `exec:rm *` is refused too; a command pattern goes on `exec.run`
   (`exec.run:rm *`). The page warns about your own entries and allow rules
   that name a capability no paired machine offers, such as a misspelt one:
-  they match no call. An `fs` path entry is not listed while some program on
-  a machine takes paths, since it holds those.
+  they match no call. An `fs` path entry of the blocklist is not listed while
+  some program on a machine takes paths, since it holds those; an allow rule
+  for `fs` is listed unless the machine offers `fs`, since it never
+  skips the model for a program's call.
 - `cmd-re:` for a regular expression over **each command** of the line, e.g.
   `exec.run:cmd-re:^terraform destroy( |$)`. The checker pulls the commands
   apart (see below) and writes each one as `program arg1 arg2 …`: the

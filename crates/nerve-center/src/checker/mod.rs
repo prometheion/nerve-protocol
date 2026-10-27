@@ -863,6 +863,93 @@ mod tests {
         assert!(matches!(checker.check(&c, None).await, Decision::Pass));
     }
 
+    /// A folder handed over as a path argument (what a walk starts in, where
+    /// a command runs) meets the entry for what lies in it; a folder above
+    /// the entry's does not.
+    #[tokio::test]
+    async fn a_folder_meets_the_entry_for_what_lies_in_it() {
+        let mut cfg = CheckerConfig::default();
+        cfg.blocklist.push(entry("fs.read:/srv/secret/*", None));
+        let checker = Checker::build(cfg, None);
+        let args = Map::new();
+        for (action, folder) in [
+            ("grep", "/srv/secret"),
+            ("find", "/srv/secret/"),
+            ("list", "/srv/other/../secret"),
+        ] {
+            let paths = [(PathMark::Read, folder.to_string())];
+            let c = CallInfo {
+                paths: &paths,
+                ..call("fs", action, Effect::Read, folder, &args)
+            };
+            assert!(
+                matches!(
+                    checker.check(&c, None).await,
+                    Decision::Refuse { ref detail, .. } if detail == "fs.read:/srv/secret/*"
+                ),
+                "fs.{action} {folder}"
+            );
+        }
+        let paths = [(PathMark::Read, "/srv/secret".to_string())];
+        let c = CallInfo {
+            paths: &paths,
+            ..call("exec", "run", Effect::Execute, "make", &args)
+        };
+        assert!(matches!(
+            checker.check(&c, None).await,
+            Decision::Refuse { .. }
+        ));
+        // The folder above, and a sibling whose name only starts alike.
+        for folder in ["/srv", "/srv/secrets-not"] {
+            let paths = [(PathMark::Read, folder.to_string())];
+            let c = CallInfo {
+                paths: &paths,
+                ..call("fs", "list", Effect::Read, folder, &args)
+            };
+            assert!(
+                matches!(checker.check(&c, None).await, Decision::Pass),
+                "{folder}"
+            );
+        }
+    }
+
+    /// An entry that names a capability, or a command pattern, still holds a
+    /// call that carries path arguments: the path match is added to the
+    /// entry's own, not in its place.
+    #[tokio::test]
+    async fn a_call_with_path_arguments_still_meets_the_entries_own_match() {
+        let mut cfg = CheckerConfig::default();
+        cfg.blocklist.push(entry("notes.save", None));
+        cfg.blocklist.push(entry("lamp", None));
+        cfg.blocklist.push(entry("exec.run:deploy *", None));
+        let checker = Checker::build(cfg, None);
+        let args = Map::new();
+        let paths = [(PathMark::Write, "/home/me/notes/today.md".to_string())];
+        for (cap, action, effect, target, detail) in [
+            ("notes", "save", Effect::Write, "", "notes.save"),
+            ("lamp", "set", Effect::Actuate, "", "lamp"),
+            (
+                "exec",
+                "run",
+                Effect::Execute,
+                "deploy staging",
+                "exec.run:deploy *",
+            ),
+        ] {
+            let c = CallInfo {
+                paths: &paths,
+                ..call(cap, action, effect, target, &args)
+            };
+            assert!(
+                matches!(
+                    checker.check(&c, None).await,
+                    Decision::Refuse { layer: Layer::Blocklist, detail: ref d, .. } if d == detail
+                ),
+                "{cap}.{action}"
+            );
+        }
+    }
+
     /// A saved allow rule reads the commands of the text splitter only: a
     /// command only the parser finds behind `timeout` is no way to skip the
     /// model, but the blocklist still sees it.

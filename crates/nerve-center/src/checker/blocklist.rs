@@ -124,11 +124,16 @@ impl Rule {
     /// Whether the path argument `path` of a call of another capability
     /// meets this rule: an `fs` entry (for every action, or for `fs.read` or
     /// `fs.write` as the argument is read or written) whose glob takes the
-    /// path, spelled as an `fs` call's path is.
+    /// path, spelled as an `fs` call's path is. A path argument is often a
+    /// folder (what `fs.list` walks, where a command starts), and an entry
+    /// is written for what lies below one (`/srv/secret/*`), so the folder
+    /// meets the entry as something in it would. A folder above the one the
+    /// entry names is not held.
     pub fn matches_path(&self, mark: PathMark, path: &str) -> bool {
         match &self.matcher {
-            Matcher::Path(g) => {
-                self.covers("fs", mark.as_str()) && g.is_match(normalize_path(path))
+            Matcher::Path(g) if self.covers("fs", mark.as_str()) => {
+                let p = normalize_path(path);
+                g.is_match(&p) || g.is_match(format!("{}/x", p.trim_end_matches('/')))
             }
             _ => false,
         }
