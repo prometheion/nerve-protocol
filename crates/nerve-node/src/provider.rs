@@ -507,7 +507,8 @@ pub(crate) struct Caller {
     /// Whether a process of a command the node runs, or one with
     /// `no_new_privs`, is refused from what the node saw of it
     /// (crate::owner::command_refusal): on the provider socket. The control
-    /// socket checks its callers itself.
+    /// socket, which takes a hello on a node run by hand only, checks its
+    /// callers itself.
     pub refuse_commands: bool,
 }
 

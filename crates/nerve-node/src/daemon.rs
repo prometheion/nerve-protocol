@@ -564,6 +564,11 @@ pub(crate) struct Shared {
     pub grace: Duration,
     /// The capability providers attached now (crate::provider).
     pub providers: crate::provider::Providers,
+    /// Linux: the installed node's provider socket, the only place it
+    /// takes a provider's hello (crate::provider::serve); `None` for a node
+    /// run by hand, which takes it on the control socket.
+    #[cfg(target_os = "linux")]
+    pub provider_socket: Option<PathBuf>,
     /// Where work goes that runs while the node is stopped
     /// ([`NodeOptions::aside`]).
     pub aside: Option<tokio::sync::mpsc::UnboundedSender<Aside>>,
@@ -1443,6 +1448,7 @@ impl Daemon {
         let cgroups = opts
             .cgroups
             .unwrap_or_else(|| crate::cgroup::Cgroups::find().map(Arc::new));
+        let endpoint = opts.owners.filter(|_| opts.ctl);
         let shared = Arc::new(Shared {
             paths: paths.clone(),
             service,
@@ -1469,6 +1475,8 @@ impl Daemon {
             told_keyring: Default::default(),
             grace: opts.resume_grace,
             providers: Default::default(),
+            #[cfg(target_os = "linux")]
+            provider_socket: endpoint.as_ref().map(|e| e.provider_socket()),
             relay: Default::default(),
             aside: opts.aside,
             owner: opts.owner,
@@ -1487,7 +1495,6 @@ impl Daemon {
         } else {
             None
         };
-        let endpoint = opts.owners.filter(|_| opts.ctl);
         // A node whose provider socket cannot be made runs on without it:
         // no program of its owner attaches then.
         #[cfg(target_os = "linux")]
@@ -2018,6 +2025,17 @@ async fn answer(
         // A capability provider attaches; its connection stays
         // (crate::provider).
         "hello" => {
+            // Here the command check reads as the node and no pidfd holds
+            // the caller, which the installed node's provider socket does
+            // with the caller's rights; root, who may connect here too,
+            // goes there as well.
+            #[cfg(target_os = "linux")]
+            if let Some(at) = &shared.provider_socket {
+                return nerve_transport::ctl::Reply::Err(format!(
+                    "refused: the installed node takes a provider's hello on {} only",
+                    at.display()
+                ));
+            }
             if shared.below_command(peer.pid) {
                 return nerve_transport::ctl::Reply::Err(FROM_A_COMMAND.into());
             }

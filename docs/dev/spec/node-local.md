@@ -1295,7 +1295,7 @@ center's folders hold its commands, in folder mode or as `nerve-run`). An error,
 | `center.rotate-key` | `center`, `end_grace` | rotates the node's key for `center` over the live link, or with `end_grace` ends the grace of the old one (protocol §4.10); `{center, public_key}`, the new key once. Waits for the center's answer, at most 15 s; an error when the node has no link to it or the center does not speak `rotate`. Also served on the control pipe (Windows) |
 | `owner.check` | | changes nothing; the CLI asks it before `install`, `setup`, `update`, `uninstall`, `backup` and `restore` |
 | `caps.list` | | what `cap ls` shows: `{capabilities, programs, running}`; each capability row `{name: "cap.action", effect, source: "built-in" \| "program <name>", summary, centers: {<center>: "on"\|"off"\|"hidden"\|"default"}, now: {<center>: "on"\|"off"}}`, `centers` the switch (`cap set`; `default` where none is set; for `settings`, which has none, `"granted"`\|`"not granted"` by the center's `settings` grant) and `now` whether the center's descriptor offers the action now and it is not off (§3: mode, rules, switches, the machine); an action a program offered that the node left out with `broken` (its reason), no effect and no `now`; `programs` the entries of `providers.allowed`, each `{name, exe, attached}`. A stopped node's CLI makes the same from `node.toml`, with the node's own capabilities only, no `now` and `attached` null. Also served on the control pipe (Windows), where no program attaches |
-| `hello` | `role` (`provider`), `name`, `capabilities` | a capability provider attaches; the connection stays (§7) |
+| `hello` | `role` (`provider`), `name`, `capabilities` | a capability provider attaches; the connection stays (§7); on a node run by hand only, the installed node takes it on its provider socket |
 
 Every method is refused from a process that runs below a command the node
 started for a center, the reading ones (`status`, `config.read`,
@@ -1545,7 +1545,10 @@ root as its account) keeps no `no_new_privs`, so a program it starts as the
 owner through two or more of root's processes may pass where `/proc` hides
 root's processes from the owner: the check is a guard against mistakes, as
 the owner socket's is. The
-provider socket takes `hello` only.
+provider socket takes `hello` only, and the installed node's control socket
+takes no `hello` (`refused: the installed node takes a provider's hello on
+/run/nerve-node/provider.sock only`): root, who may connect there too, would
+meet a check that reads as the node and holds no pidfd.
 
 The provider sends one request, `hello`, with the control socket's token on
 a node run by hand (the provider socket takes none, and ignores one):
@@ -1716,7 +1719,11 @@ on the installed node), so a link put in or swapped in between is not
 caught. A provider is a program the owner allowed and trusts. For root's
 program such a link reaches root's rights, also from a command of
 `nerve-run` with `w` in a granted folder; the owner keeps its actions that
-take paths away from the folders a center may write in.
+take paths away from the folders a center may write in. Inside a granted
+folder its flags decide a program's path, not the owner's own access to the
+file, so root's program on a node another account owns reads and writes
+there what only root or another account may; the node does not check a
+path with the owner's rights for it.
 
 A center with the settings grant may add allow rules and `on` entries for a
 provider's capability like for any other, and take away `off` and `hidden`

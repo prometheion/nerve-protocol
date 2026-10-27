@@ -8,8 +8,9 @@ every call to it by that center's mode and rules, as it does for files and
 commands, and writes it to the [audit log](audit.md).
 
 Providers work on Linux: a program of yours (or of root) attaches to the
-[installed node](service.md) on its provider socket, and to a node you run
-yourself on its control socket. Windows takes no provider yet.
+[installed node](service.md) on its provider socket (its control socket
+takes none), and to a node you run yourself on its control socket. Windows
+takes no provider yet.
 
 ## Allow a program
 
@@ -205,6 +206,12 @@ with `w` in a folder can make one. Allow only programs you trust. A program
 root runs reaches with such a link everything root may read or write, so
 let it take no paths in a folder a center may write in: switch its actions
 that take paths `off` for such a center, or run the program as yourself.
+Inside a folder you granted, the folder's flags decide a program's path,
+not whether you yourself may read or write that file, so a program root
+runs on a node you own reads and writes there with root's rights also what
+only root (or another account) may: a file a root tool left there, say. Run
+a program that takes paths as yourself, or grant it only folders that hold
+nothing of root's or another account's.
 
 When the program exits, its capabilities leave what `list` shows the centers,
 and a call that was waiting for it fails with `unavailable`.

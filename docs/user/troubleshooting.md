@@ -221,6 +221,7 @@ says `a provider was not attached: …` with the same text.
 | Message | Cause | Fix |
 |---|---|---|
 | `refused: only the owner of the installed node and root attach a provider to it` | The installed Linux node: the program runs as another account than yours or root's | Run it as yourself ([providers](providers.md#allow-a-program)) |
+| `refused: the installed node takes a provider's hello on /run/nerve-node/provider.sock only` | The program connected to the installed node's control socket, which takes providers on a node you run by hand only | Connect to `/run/nerve-node/provider.sock`, without the token ([providers](providers.md#allow-a-program)) |
 | `refused: providers.allowed names no provider …`, `refused: the provider … must be …, and this is …` | No program is allowed under that name, or the program that asks is not the one allowed (a copy, another version at another path, a script's interpreter) | `nerve-node cap provider ls`; `nerve-node cap provider allow <name> <full path>` with the program the system runs |
 | `refused: this request comes from a command the node runs for a center, or a program it started` | The program was started by a command of a center's (an agent started it) | Start it yourself, outside the agent |
 | `refused: this program runs with no_new_privs, …` | Every command of the node runs with `no_new_privs`, so the node cannot tell such a program from one: a unit with `NoNewPrivileges=yes`, a flatpak or another sandbox sets it | Start it without: no `NoNewPrivileges=` in its unit, no sandbox that sets it |

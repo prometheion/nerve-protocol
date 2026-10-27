@@ -1487,7 +1487,7 @@ async fn hello_on(at: &Path) -> (Provider, Value) {
 /// On the installed node a program of the owner attaches on the provider
 /// socket, which is open to every account and takes no token: the node
 /// tells it by the account and the program the kernel names. The socket
-/// takes nothing but a hello.
+/// takes nothing but a hello, and the control socket no hello.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_owners_program_attaches_on_the_provider_socket() {
     let dir = tempfile::tempdir().unwrap();
@@ -1511,6 +1511,15 @@ async fn the_owners_program_attaches_on_the_provider_socket() {
     let mode = std::fs::metadata(&at).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o666);
     assert!(!at.with_file_name("ctl.token").exists());
+    // The control socket, where only the node's account and root connect,
+    // takes no hello here, even with its token.
+    let (_c, first) = hello(&daemon.paths().ctl_socket()).await;
+    let e = first["error"].as_str().unwrap_or_default();
+    assert!(
+        e.contains("takes a provider's hello on") && e.contains("provider.sock"),
+        "{first}"
+    );
+    assert_eq!(daemon.status()["providers"], json!([]));
 
     let (_p, first) = hello_on(&at).await;
     assert_eq!(first["ok"]["capabilities"], json!(["lamp"]), "{first}");
