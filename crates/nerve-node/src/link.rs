@@ -2505,24 +2505,8 @@ impl Link {
         let r = exec::run(&rc, &opts, |e| guard.started(e)).await;
         drop(open);
         drop(guard);
-        // A command killed for its memory limit is a decision of the node's
-        // too: the audit log and the node's log say so, as the result does.
-        if let Ok(v) = &r
-            && v["killed"] == "memory"
-        {
-            let reason = v["reason"].as_str().unwrap_or_default();
-            tracing::warn!("a command of {} was killed: {reason}", self.name);
-            self.shared.audit(&Entry {
-                ts: crate::now_ms(),
-                center: self.name.clone(),
-                cap: inv.cap.clone(),
-                action: inv.action.clone(),
-                target: command,
-                decision: "killed".into(),
-                code: Some("memory".into()),
-                session: inv.ctx.session.clone(),
-                reason: Some(reason.into()),
-            });
+        if let Ok(v) = &r {
+            self.audit_killed(inv, command, v);
         }
         if let Ok(v) = &r {
             self.handle.event(
@@ -2536,6 +2520,28 @@ impl Link {
 }
 
 impl Link {
+    /// A command killed for its memory limit is a decision of the node's
+    /// too: the audit log (with `target`, as the call's entry has it) and
+    /// the node's log say so, as the result `v` does.
+    fn audit_killed(&self, inv: &Invoke, target: String, v: &Value) {
+        if v["killed"] != "memory" {
+            return;
+        }
+        let reason = v["reason"].as_str().unwrap_or_default();
+        tracing::warn!("a command of {} was killed: {reason}", self.name);
+        self.shared.audit(&Entry {
+            ts: crate::now_ms(),
+            center: self.name.clone(),
+            cap: inv.cap.clone(),
+            action: inv.action.clone(),
+            target,
+            decision: "killed".into(),
+            code: Some("memory".into()),
+            session: inv.ctx.session.clone(),
+            reason: Some(reason.into()),
+        });
+    }
+
     /// A call of the config capability `decl` (crate::config_cap): its
     /// arguments checked against its schema, its marked paths resolved and
     /// the call decided and audited like a program's; then its command runs
@@ -2609,7 +2615,7 @@ impl Link {
             &targets,
             None,
             None,
-            target,
+            target.clone(),
             known.as_ref(),
             unconfined,
             program,
@@ -2687,6 +2693,9 @@ impl Link {
         };
         let r = exec::run(&rc, &opts, |e| guard.started(e)).await;
         drop(guard);
+        if let Ok(v) = &r {
+            self.audit_killed(inv, target, v);
+        }
         let run = r.map_err(|e| match e.kind() {
             // Its own limit, not a `timeout_ms` the call never had.
             ErrorCode::Timeout => RpcError::new(

@@ -1933,6 +1933,11 @@ pub async fn run(
         "stderr": decode(&err.0, err.1),
         "truncated": out.1 || err.1,
     });
+    // A program's caller (crate::config_cap) returns its stdout alone, so it
+    // needs to know whether that was cut; exec.run's result keeps its schema.
+    if call.argv.is_some() {
+        result["stdout_truncated"] = out.1.into();
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
@@ -2080,12 +2085,16 @@ async fn run_as(
     };
     drop(group);
     let code = code.map_err(|e| RpcError::internal(format!("waiting for the command: {e}")))?;
-    Ok(json!({
+    let mut result = json!({
         "exit_code": code as i32,
         "stdout": decode(&out.0, out.1),
         "stderr": decode(&err.0, err.1),
         "truncated": out.1 || err.1,
-    }))
+    });
+    if call.argv.is_some() {
+        result["stdout_truncated"] = out.1.into();
+    }
+    Ok(result)
 }
 
 /// The command lines a command of another account gets on Windows.

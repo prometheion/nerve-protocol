@@ -464,6 +464,9 @@ pub fn forwarded_args(
     let mut out = Vec::new();
     let mut skip = false;
     let mut made_whole = false;
+    // After `--` the words are the command's own (`cap add NAME -- PROGRAM
+    // ...`): they go as they are, flags of the same names too.
+    let mut words = false;
     for a in given {
         if std::mem::take(&mut skip) {
             continue;
@@ -474,6 +477,11 @@ pub fn forwarded_args(
                 a.to_string_lossy()
             ));
         };
+        if words || s == "--" {
+            words = true;
+            out.push(s.to_string());
+            continue;
+        }
         if s == "--config-dir" || s == "--state-dir" || (own_passphrase && s == "--passphrase-file")
         {
             skip = true;
@@ -2172,6 +2180,27 @@ mod tests {
         );
         assert_eq!(FileJob::of(&c.cmd, None).unwrap().backup, None);
         assert!(FileJob::of(&cli(&["status"]).cmd, None).is_none());
+        // The words of a command after `--` are its own, flags of the same
+        // names too; one before it still goes.
+        let given = [
+            "--config-dir",
+            "/etc/nerve",
+            "cap",
+            "add",
+            "certs.list",
+            "--effect",
+            "read",
+            "--",
+            "certbot",
+            "certificates",
+            "--config-dir",
+            "/etc/letsencrypt",
+            "--state-dir=/x",
+        ];
+        assert_eq!(
+            forwarded_args(&cli(&given), os(&given), None).unwrap(),
+            given[2..]
+        );
     }
 
     /// Only the commands that read the input get it.

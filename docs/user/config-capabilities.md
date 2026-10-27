@@ -57,7 +57,7 @@ A word of the command written `{field}` is the call's argument `field`:
 
 ```sh
 nerve-node cap add logs.tail --effect read \
-  --params '{"type": "object", "required": ["path"],
+  --params '{"type": "object", "required": ["path", "lines"],
              "properties": {"path": {"type": "string", "x-nerve-path": "read"},
                             "lines": {"type": "integer"}}}' \
   -- tail -n {lines} -- {path}
@@ -68,7 +68,11 @@ nerve-node cap add logs.tail --effect read \
   in a value are just characters. A placeholder is always a word of its own:
   `--file={path}` is refused.
 - An argument may be a string, a number, an integer or a boolean. One the
-  call leaves out (or gives as null) is left out of the command.
+  call leaves out (or gives as null) is left out of the command, so the words
+  after it would move up: an option before it would take the next word as its
+  value. An argument the call may leave out (not in `required`, or one that
+  takes null) therefore stands after a `--` word and comes last; `tail -n
+  {lines}` needs `lines` in `required`.
 - A value that starts with `-` would read as an option of the program. It is
   taken only after a `--` word of the command, where programs read no
   options; before one the call is refused. Put `--` before the arguments that
@@ -110,7 +114,7 @@ As any capability, by what it does ([modes](modes.md#what-each-mode-allows),
 | Mode | It runs when |
 |---|---|
 | `allowlist` | an allow rule names it: `nerve-node config add center.<name>.policy.allow 'logs.tail'` |
-| `folder` | its paths lie in folders that allow them; one that takes no path needs `nerve-node cap set logs.tail on` |
+| `folder` | a `read`: its paths are anything the account it runs as may read (above); a `write` or `execute`: its paths lie in folders that allow them; one that takes no path needs `nerve-node cap set logs.tail on` |
 | `user` | always |
 
 One that senses or acts on the world (`sense`, `actuate`) needs your `cap set
@@ -149,7 +153,7 @@ name = "logs.tail"
 summary = "The end of a log file."
 effect = "read"
 command = ["tail", "-n", "{lines}", "--", "{path}"]
-params = '{"type": "object", "required": ["path"], "properties": {"path": {"type": "string", "x-nerve-path": "read"}, "lines": {"type": "integer"}}}'
+params = '{"type": "object", "required": ["path", "lines"], "properties": {"path": {"type": "string", "x-nerve-path": "read"}, "lines": {"type": "integer"}}}'
 result = "text"         # or a JSON Schema
 timeout_secs = 10       # optional
 account = "nerve-run"   # or "owner"

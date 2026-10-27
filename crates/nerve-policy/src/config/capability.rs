@@ -42,8 +42,9 @@ pub struct ConfigCapability {
     pub effect: Effect,
     /// The program and its arguments. An element `{field}` is the call's
     /// argument `field`, as one whole argument; one left out (or null) is
-    /// left out. A value that starts with `-` is taken only after a `--`
-    /// element, where the program reads no options.
+    /// left out, so it stands after a `--` element and comes last. A value
+    /// that starts with `-` is taken only after a `--` element, where the
+    /// program reads no options.
     pub command: Vec<String>,
     /// The arguments schema, JSON text; none takes no arguments.
     #[serde(
@@ -244,6 +245,34 @@ fn scalar(s: &Value) -> bool {
     }
 }
 
+/// Whether the schema `s` of a filled-in argument takes null, which leaves
+/// it out as well.
+fn nullable(s: &Value) -> bool {
+    match s.get("type") {
+        Some(Value::Array(ts)) => ts.iter().any(|t| t == "null"),
+        Some(t) => t == "null",
+        None => s
+            .get("enum")
+            .and_then(Value::as_array)
+            .is_some_and(|e| e.contains(&Value::Null)),
+    }
+}
+
+/// Whether `program` is a name looked up in PATH or a full path, in the
+/// form of the platform the entry is for: the file may be read on another
+/// one, which leaves it out.
+fn program_named(program: &str, platform: Platform) -> bool {
+    let unix = program.starts_with('/') || !program.contains('/');
+    let b = program.as_bytes();
+    let drive = b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && b"/\\".contains(&b[2]);
+    let windows = drive || program.starts_with("\\\\") || !program.contains(['/', '\\']);
+    match platform {
+        Platform::Linux => unix,
+        Platform::Windows => windows,
+        Platform::Any => unix || windows,
+    }
+}
+
 impl ConfigCapability {
     /// The capability and the action of `name`.
     pub fn split(&self) -> (&str, &str) {
@@ -323,16 +352,38 @@ impl ConfigCapability {
         }
         // A program named by a relative path would be looked for in the
         // account's home, where it runs.
-        let path = std::path::Path::new(program);
-        if !path.is_absolute() && path.components().count() > 1 {
+        if !program_named(program, self.platform) {
             return Err(format!(
                 "the program {program:?}: a name looked up in PATH, or a full path"
             ));
         }
         let empty = Map::new();
         let props = properties(&self.params).unwrap_or(&empty);
+        let required: Vec<&str> = self
+            .params
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|r| r.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
         let mut used = std::collections::BTreeSet::new();
+        let mut options = true;
+        // The argument a call may leave out that came last, after `--`.
+        let mut optional: Option<&str> = None;
         for e in &self.command[1..] {
+            if options && e == "--" {
+                options = false;
+                continue;
+            }
+            // A left-out argument drops its element, so the elements after
+            // it move up: an option before it would take the next one as its
+            // value, and an argument after it would stand in its place.
+            if let Some(last) = optional
+                && placeholder(e) != Some(last)
+            {
+                return Err(format!(
+                    "{{{last}}} may be left out, so it comes last: {e} would move into its place"
+                ));
+            }
             if let Some(field) = placeholder(e) {
                 let s = props
                     .get(field)
@@ -341,6 +392,14 @@ impl ConfigCapability {
                     return Err(format!(
                         "{e}: the argument {field} must be a string, number, integer or boolean, which fills one argument"
                     ));
+                }
+                if !required.contains(&field) || nullable(s) {
+                    if options {
+                        return Err(format!(
+                            "{e}: a call may leave {field} out, so it stands after a -- element (or give it in required, not null)"
+                        ));
+                    }
+                    optional = Some(field);
                 }
                 used.insert(field);
                 continue;
@@ -450,7 +509,7 @@ mod tests {
         )
     }
 
-    const PATH_PARAMS: &str = r#"params = '{"type": "object", "properties": {"path": {"type": "string", "x-nerve-path": "read"}, "lines": {"type": "integer"}}, "required": ["path"], "additionalProperties": false}'"#;
+    const PATH_PARAMS: &str = r#"params = '{"type": "object", "properties": {"path": {"type": "string", "x-nerve-path": "read"}, "lines": {"type": "integer"}}, "required": ["path", "lines"], "additionalProperties": false}'"#;
 
     #[test]
     fn config_capabilities_parse_and_round_trip() {
@@ -584,6 +643,39 @@ mod tests {
             ("a.b", r#"["cat"]"#, "platform = \"mac\"", "unknown variant"),
             ("a.b", r#"["cat"]"#, "summary = \"two\\nlines\"", "one line"),
             ("a.b", r#"["cat"]"#, "shell = true", "unknown field"),
+            // A call may leave out an argument that is not required or takes
+            // null: then before `--` an option would take the next element,
+            // and after it a later element would move into its place.
+            (
+                "a.b",
+                r#"["tail", "-n", "{lines}", "--", "{path}"]"#,
+                r#"params = '{"type": "object", "properties": {"path": {"type": "string"}, "lines": {"type": "integer"}}, "required": ["path"]}'"#,
+                "stands after a -- element",
+            ),
+            (
+                "a.b",
+                r#"["cat", "{path}"]"#,
+                r#"params = '{"type": "object", "properties": {"path": {"type": ["string", "null"]}}, "required": ["path"]}'"#,
+                "stands after a -- element",
+            ),
+            (
+                "a.b",
+                r#"["cat", "{path}"]"#,
+                r#"params = '{"type": "object", "properties": {"path": {"enum": ["a", null]}}, "required": ["path"]}'"#,
+                "stands after a -- element",
+            ),
+            (
+                "a.b",
+                r#"["cp", "--", "{a}", "{b}"]"#,
+                r#"params = '{"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}, "required": ["b"]}'"#,
+                "{a} may be left out, so it comes last: {b}",
+            ),
+            (
+                "a.b",
+                r#"["cp", "--", "{a}", "/x"]"#,
+                ok_params.replace("path", "a").as_str(),
+                "{a} may be left out, so it comes last: /x",
+            ),
         ] {
             let text = entry(name, command, extra);
             let e = NodeConfig::parse(&text).unwrap_err();
@@ -630,33 +722,42 @@ mod tests {
     #[test]
     fn arguments_fill_whole_elements_as_data() {
         let params = json!({"type": "object", "properties": {
-            "path": {"type": "string"}, "n": {"type": "integer"}, "all": {"type": ["boolean", "null"]}}});
-        let c = cap(&["show", "{n}", "{all}", "--", "{path}", "{path}"], params);
+            "path": {"type": "string"}, "n": {"type": "integer"}, "all": {"type": ["boolean", "null"]}},
+            "required": ["path", "n"]});
+        let c = cap(
+            &["show", "{n}", "--", "{path}", "{path}", "{all}", "{all}"],
+            params,
+        );
         c.validate(60).unwrap();
         let line = "a b; rm -rf x $(id) `id` | cat > /tmp/y";
         assert_eq!(
             c.argv(&args(json!({"path": line, "n": 3, "all": true})))
                 .unwrap(),
-            ["show", "3", "true", "--", line, line]
+            ["show", "3", "--", line, line, "true", "true"]
         );
         // Left out or null: no element.
         assert_eq!(
-            c.argv(&args(json!({"path": "p", "all": null}))).unwrap(),
-            ["show", "--", "p", "p"]
+            c.argv(&args(json!({"path": "p", "n": 1, "all": null})))
+                .unwrap(),
+            ["show", "1", "--", "p", "p"]
+        );
+        assert_eq!(
+            c.argv(&args(json!({"path": "p", "n": 1}))).unwrap(),
+            ["show", "1", "--", "p", "p"]
         );
         // Option-like before `--` is refused, after it it is an argument.
         let e = c.argv(&args(json!({"path": "p", "n": -1}))).unwrap_err();
         assert!(e.contains("would be read as an option"), "{e}");
         assert_eq!(
-            c.argv(&args(json!({"path": "-rf"}))).unwrap(),
-            ["show", "--", "-rf", "-rf"]
+            c.argv(&args(json!({"path": "-rf", "n": 1}))).unwrap(),
+            ["show", "1", "--", "-rf", "-rf"]
         );
         // A value that is no element is refused.
-        assert!(c.argv(&args(json!({"path": "a\0b"}))).is_err());
+        assert!(c.argv(&args(json!({"path": "a\0b", "n": 1}))).is_err());
         // Without `--` an option-like value never passes.
         let plain = cap(
             &["show", "{path}"],
-            json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
         );
         plain.validate(60).unwrap();
         assert!(plain.argv(&args(json!({"path": "--help"}))).is_err());
@@ -690,6 +791,32 @@ mod tests {
             c.command_line(),
             r#"grep -e "a b" "it's" "x\ny" "\u001b[1m" "" -- {x}"#
         );
+    }
+
+    #[test]
+    fn a_program_is_named_in_the_form_of_its_platform() {
+        for (program, platform, ok) in [
+            ("sensors", Platform::Any, true),
+            ("/usr/bin/sensors", Platform::Linux, true),
+            ("/usr/bin/sensors", Platform::Any, true),
+            ("/usr/bin/sensors", Platform::Windows, false),
+            ("C:/Windows/System32/whoami.exe", Platform::Windows, true),
+            ("C:\\Windows\\System32\\whoami.exe", Platform::Windows, true),
+            ("C:/Windows/System32/whoami.exe", Platform::Any, true),
+            ("C:/Windows/System32/whoami.exe", Platform::Linux, false),
+            ("whoami.exe", Platform::Windows, true),
+            ("bin\\run.bat", Platform::Windows, false),
+            ("./run.sh", Platform::Any, false),
+            ("./run.sh", Platform::Linux, false),
+        ] {
+            let mut c = cap(&[program], Value::Null);
+            c.platform = platform;
+            let r = c.validate(60);
+            assert_eq!(r.is_ok(), ok, "{program} {platform:?}: {r:?}");
+            if !ok {
+                assert!(r.unwrap_err().contains("a name looked up in PATH"));
+            }
+        }
     }
 
     #[test]

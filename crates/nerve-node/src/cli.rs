@@ -2197,7 +2197,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
         Cmd::Cap(CapCmd::Provider(ProviderCmd::Allow { name, exe })) => {
             if !nerve_policy::config::valid_provider_name(&name) {
                 return Err(format!(
-                    "{name:?} cannot name a provider: 1 to 32 of a-z, 0-9 and -, starting and ending with a letter or digit, and not node"
+                    "{name:?} cannot name a provider: 1 to 32 of a-z, 0-9 and -, starting and ending with a letter or digit, and not node or config"
                 ));
             }
             if !Path::new(&exe).is_absolute() {
@@ -9873,6 +9873,10 @@ mod tests {
             ),
             (
                 &["cap", "provider", "allow", "node", &a],
+                "cannot name a provider",
+            ),
+            (
+                &["cap", "provider", "allow", "config", &a],
                 "cannot name a provider",
             ),
             (

@@ -97,9 +97,11 @@ pub struct AllowedProvider {
 }
 
 /// Whether `name` can name a provider: a node name's shape (1 to 32 of
-/// a-z, 0-9 and `-`, starting and ending with a letter or digit), and not `node`, which stands for the node itself.
+/// a-z, 0-9 and `-`, starting and ending with a letter or digit), and not
+/// `node`, which stands for the node itself, or `config`, which stands for
+/// the capabilities of `node.toml` (the node routes a call by it).
 pub fn valid_provider_name(name: &str) -> bool {
-    nerve_proto::valid_node_name(name) && name != "node"
+    nerve_proto::valid_node_name(name) && !["node", "config"].contains(&name)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1165,7 +1167,7 @@ impl NodeConfig {
         for p in &self.providers.allowed {
             if !valid_provider_name(&p.name) {
                 return Err(format!(
-                    "providers.allowed name {:?}: 1 to 32 characters of a-z, 0-9 and -, starting and ending with a letter or digit, not node",
+                    "providers.allowed name {:?}: 1 to 32 characters of a-z, 0-9 and -, starting and ending with a letter or digit, not node or config",
                     p.name
                 ));
             }
@@ -1373,7 +1375,7 @@ mod tests {
             assert!(!valid_center_name(bad), "{bad}");
         }
         assert!(valid_provider_name("desk-2"));
-        for bad in ["-desk", "desk-", "node"] {
+        for bad in ["-desk", "desk-", "node", "config"] {
             assert!(!valid_provider_name(bad), "{bad}");
         }
         for (key, toml) in [

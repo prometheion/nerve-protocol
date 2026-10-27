@@ -133,8 +133,8 @@ async fn arguments_are_data_never_shell() {
     let mut center = FakeCenter::start(false).await.unwrap();
     let echo = cap(r#"name = "say.back"
 effect = "read"
-command = ["printf", "[%s]\n", "{a}", "{b}", "{c}"]
-params = '{"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}, "c": {"type": "integer"}}, "required": ["a"]}'
+command = ["printf", "--", "[%s]\n", "{a}", "{b}", "{c}"]
+params = '{"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}, "c": {"type": "integer"}}, "required": ["a", "b"]}'
 account = "owner""#);
     let daemon = node(dir.path(), &center, vec![echo], user_mode).await;
     let home = dir.path().join("home");
@@ -157,14 +157,18 @@ account = "owner""#);
     assert!(home.join("x").is_dir(), "nothing was removed");
     assert!(!marker.exists() && !home.join("y").exists());
     // An argument left out is no argument at all.
-    let out = invoke(&mut conn, "say.back", json!({"a": "only"}))
+    let out = invoke(&mut conn, "say.back", json!({"a": "only", "b": "two"}))
         .await
         .unwrap();
-    assert_eq!(out, json!("[only]\n"));
+    assert_eq!(out, json!("[only]\n[two]\n"));
     // Arguments outside its schema never reach it.
-    let e = invoke(&mut conn, "say.back", json!({"a": "x", "c": "seven"}))
-        .await
-        .unwrap_err();
+    let e = invoke(
+        &mut conn,
+        "say.back",
+        json!({"a": "x", "b": "y", "c": "seven"}),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(code_of(&e), "invalid_args", "{}", e.message);
     // Decided and audited like any call; it names no path.
     let entries = audited(daemon.paths(), "say");
@@ -326,6 +330,102 @@ account = "owner""#);
         e.message
     );
     assert!(!sleeping("41.25"), "the command was killed");
+    daemon.stop().await;
+}
+
+/// A command the kernel killed for its memory limit fails, whatever its
+/// first process's exit, and the audit log says so as for `exec.run`. The
+/// cgroups are plain folders here, and the command writes what the kernel
+/// would into its `memory.events` (as link.rs's test of `exec.run`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_killed_for_its_memory_fails_and_is_in_the_audit() {
+    use std::sync::Arc;
+    let me = nerve_transport::net::euid();
+    if me == 0 {
+        eprintln!("skipped: root's own folders are no cgroup without systemd's mark");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let fake = dir.path().join("cgroup");
+    let own = fake.join("node.scope");
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::write(fake.join("cgroup.controllers"), "cpu memory pids").unwrap();
+    std::fs::write(own.join("cgroup.controllers"), "cpu memory pids").unwrap();
+    std::fs::write(own.join("cgroup.procs"), "").unwrap();
+    let cgroups =
+        nerve_node::cgroup::Cgroups::at(&fake, "/node.scope", std::process::id(), me, &|_| true)
+            .expect("plain folders of this user");
+    std::fs::write(own.join("cgroup.subtree_control"), "cpu memory pids").unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let mut o = options(dir.path());
+    o.cgroups = Some(Ok(Arc::new(cgroups)));
+    nerve_node::pair::pair(&o.paths, &center.link(), Some("lab"))
+        .await
+        .expect("pair");
+    let script = format!(
+        "for d in {}/cmd-*; do printf 'oom 1\\noom_kill 1\\n' > \"$d/memory.events\"; done; echo done",
+        own.display()
+    );
+    let big = ConfigCapability {
+        command: vec!["sh".into(), "-c".into(), script],
+        ..cap(r#"name = "big.run"
+effect = "read"
+command = ["sh"]
+account = "owner""#)
+    };
+    owner_edit(&o.paths, |c| {
+        c.capabilities = vec![big.clone()];
+        c.centers[0].policy.mode = nerve_policy::Mode::User;
+    })
+    .await;
+    let node = Daemon::start(o).await.expect("start");
+    let mut conn = linked(&mut center).await;
+    let e = invoke(&mut conn, "big.run", json!({})).await.unwrap_err();
+    assert_eq!(code_of(&e), "io", "{}", e.message);
+    assert!(
+        e.message
+            .contains("big.run failed: the command went past its memory limit"),
+        "{}",
+        e.message
+    );
+    let entries = audited(node.paths(), "big");
+    node.stop().await;
+    let killed: Vec<&Value> = entries
+        .iter()
+        .filter(|v| v["decision"] == "killed")
+        .collect();
+    assert_eq!(killed.len(), 1, "{entries:?}");
+    assert_eq!(killed[0]["code"], "memory", "{entries:?}");
+    assert_eq!(killed[0]["target"], "big.run", "{entries:?}");
+}
+
+/// Only stdout's own cut counts for what a call returns: stderr past the
+/// node's output cap leaves a whole JSON result whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn stderr_past_the_cap_leaves_the_result_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let noisy = cap(r#"name = "probe.noisy"
+effect = "read"
+command = ["sh", "-c", "printf '{\"t\": 1}'; head -c 4096 /dev/zero | tr '\\0' x >&2"]
+result = '{"type": "object"}'
+account = "owner""#);
+    let o = options(dir.path());
+    nerve_node::pair::pair(&o.paths, &center.link(), Some("lab"))
+        .await
+        .expect("pair");
+    owner_edit(&o.paths, |c| {
+        c.capabilities = vec![noisy.clone()];
+        c.limits.output_cap_bytes = 1024;
+        c.centers[0].policy.mode = nerve_policy::Mode::User;
+    })
+    .await;
+    let daemon = Daemon::start(o).await.expect("start");
+    let mut conn = linked(&mut center).await;
+    assert_eq!(
+        invoke(&mut conn, "probe.noisy", json!({})).await.unwrap(),
+        json!({"t": 1})
+    );
     daemon.stop().await;
 }
 

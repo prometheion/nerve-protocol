@@ -463,7 +463,7 @@ name = "logs.tail"          # cap.action
 summary = "The end of a log file."
 effect = "read"             # read | write | execute | sense | actuate
 command = ["tail", "-n", "{lines}", "--", "{path}"]
-params = '{"type": "object", "required": ["path"], "properties": {"path": {"type": "string", "x-nerve-path": "read"}, "lines": {"type": "integer"}}}'
+params = '{"type": "object", "required": ["path", "lines"], "properties": {"path": {"type": "string", "x-nerve-path": "read"}, "lines": {"type": "integer"}}}'
 result = "text"             # text | a JSON Schema as text
 timeout_secs = 10           # optional, 1 to limits.max_timeout_secs
 account = "nerve-run"       # nerve-run | owner
@@ -535,11 +535,16 @@ them). The node refuses a file where:
 - `timeout_secs` is 0 or above `limits.max_timeout_secs`; the summary is not
   one plain line;
 - `command` is empty, its first element (the program: a name looked up in
-  `PATH`, or an absolute path) is a placeholder or a relative path, it has
+  `PATH`, or an absolute path in the form of the entry's `platform`, either
+  form for `any`) is a placeholder or a relative path, it has
   more than 64 elements or a NUL, an element `{field}` (no blank or brace
   inside) names no property of `params`, or one whose schema takes more than
   a string, number, integer, boolean or null; a property appears inside a
-  longer element (`--f={field}`), or no element names it.
+  longer element (`--f={field}`), or no element names it;
+- a placeholder whose argument a call may leave out (not in `required`, or
+  its schema takes null) stands before the first literal `--`, or an element
+  other than its own placeholder follows it: the elements after a dropped one
+  move up, so an option before it would take the next one as its value.
 
 A call's arguments are validated against `params` first. Each `{field}`
 element becomes the argument's value as one element of the program's argv (a
@@ -1357,7 +1362,7 @@ center's folders hold its commands, in folder mode or as `nerve-run`). An error,
 | `sudo.off` | | turns the switch off and drops the password |
 | `center.rotate-key` | `center`, `end_grace` | rotates the node's key for `center` over the live link, or with `end_grace` ends the grace of the old one (protocol §4.10); `{center, public_key}`, the new key once. Waits for the center's answer, at most 15 s; an error when the node has no link to it or the center does not speak `rotate`. Also served on the control pipe (Windows) |
 | `owner.check` | | changes nothing; the CLI asks it before `install`, `setup`, `update`, `uninstall`, `backup` and `restore` |
-| `caps.list` | | what `cap ls` shows: `{capabilities, programs, config, running}`; each capability row `{name: "cap.action", effect, source: "built-in" \| "config" \| "program <name>", summary, centers: {<center>: "on"\|"off"\|"hidden"\|"default"}, now: {<center>: "on"\|"off"}}`, `centers` the switch (`cap set`; `default` where none is set; for `settings`, which has none, `"granted"`\|`"not granted"` by the center's `settings` grant) and `now` whether the center's descriptor offers the action now and it is not off (§3: mode, rules, switches, the machine); an action a program offered that the node left out with `broken` (its reason), no effect and no `now`; a config capability's row has `account` (`"nerve-run"`\|`"owner"`), and one this node does not offer (§2) `left_out` (why) and no `now`; `config` each `[[capability]]` as declared, `{name, summary, effect, command, params, result, timeout_secs, account, platform}`, the schemas as JSON (`result` `"text"` or a schema); `programs` the entries of `providers.allowed`, each `{name, exe, attached}`. A stopped node's CLI makes the same from `node.toml`, with the node's own capabilities only, no `now` and `attached` null. Also served on the control pipe (Windows), where no program attaches |
+| `caps.list` | | what `cap ls` shows: `{capabilities, programs, config, running}`; each capability row `{name: "cap.action", effect, source: "built-in" \| "config" \| "program <name>", summary, centers: {<center>: "on"\|"off"\|"hidden"\|"default"}, now: {<center>: "on"\|"off"}}`, `centers` the switch (`cap set`; `default` where none is set; for `settings`, which has none, `"granted"`\|`"not granted"` by the center's `settings` grant) and `now` whether the center's descriptor offers the action now and it is not off (§3: mode, rules, switches, the machine); an action a program offered that the node left out with `broken` (its reason), no effect and no `now`; a config capability's row has `account` (`"nerve-run"`\|`"owner"`), and one this node does not offer (§2) `left_out` (why) and no `now`; `config` each `[[capability]]` as declared, `{name, summary, effect, command, params, result, timeout_secs, account, platform}`, the schemas as JSON (`result` `"text"` or a schema); `programs` the entries of `providers.allowed`, each `{name, exe, attached}`. A stopped node's CLI makes the same from `node.toml`, with the node's own capabilities and the config's (no program's), no `now` and `attached` null. Also served on the control pipe (Windows), where no program attaches |
 | `hello` | `role` (`provider`), `name`, `capabilities` | a capability provider attaches; the connection stays (§7); on a node run by hand only, the installed node takes it on its provider socket |
 
 Every method is refused from a process that runs below a command the node
@@ -1585,7 +1590,8 @@ absolute path of its executable (`nerve-node cap provider allow desk
 /usr/lib/nerve-desktop/nerve-desktop`; `cap provider rm desk` takes it off).
 None is allowed by default; only the owner changes the list, as no center document
 holds it. A name is 1 to 32 of `a-z`, `0-9` and `-`, starting and ending with a letter
-or digit, and not `node`.
+or digit, and not `node` or `config` (the providers of the node's own capabilities
+and of those in `node.toml`).
 
 On a node run by hand the provider connects like the CLI: the socket's user
 check (its own user or root) and the token hold for it too, and so does the

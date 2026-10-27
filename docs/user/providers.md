@@ -17,8 +17,9 @@ takes no provider yet.
 
 ## Allow a program
 
-No program may attach until you name it, with a name of your choice and the
-full path of its executable:
+No program may attach until you name it, with a name of your choice (not
+`node` or `config`, which stand for the node's own capabilities and those of
+[`node.toml`](config-capabilities.md)) and the full path of its executable:
 
 ```sh
 nerve-node cap provider allow desk /usr/lib/nerve-desktop/nerve-desktop

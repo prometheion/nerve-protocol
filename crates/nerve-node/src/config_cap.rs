@@ -117,14 +117,17 @@ pub fn names(cfg: &NodeConfig, cap: &str) -> bool {
 
 /// What a call of `decl` returns, from its command's result
 /// (crate::exec::run): what it printed, as text or as JSON that fits the
-/// result schema. A command that did not end with exit code 0 is an error
-/// with its exit code (or signal) and what it printed to stderr.
+/// result schema. A command that did not end with exit code 0, or was killed
+/// for its memory limit (whatever its first process's exit), is an error
+/// with its exit code (or signal, or the reason) and what it printed to
+/// stderr.
 pub fn result(decl: &ConfigCapability, run: &Value) -> Result<Value, RpcError> {
     let stdout = run["stdout"].as_str().unwrap_or_default();
     let stderr = run["stderr"].as_str().unwrap_or_default();
-    let cut = run["truncated"] == true;
+    // Only stdout's own cut counts: stderr past the cap leaves it whole.
+    let cut = run["stdout_truncated"] == true;
     let code = run["exit_code"].as_i64();
-    if code != Some(0) {
+    if code != Some(0) || run["killed"].is_string() {
         let how = match (code, run["signal"].as_str(), run["reason"].as_str()) {
             (_, _, Some(reason)) => reason.to_string(),
             (Some(c), _, _) => format!("exit code {c}"),
@@ -256,7 +259,7 @@ account = "owner"
         let c = cfg(TWO);
         let json_cap = find(&c, "sensors", "read").unwrap();
         let text_cap = find(&c, "sensors", "list").unwrap();
-        let run = |code: Value, out: &str, err: &str, cut: bool| json!({"exit_code": code, "stdout": out, "stderr": err, "truncated": cut});
+        let run = |code: Value, out: &str, err: &str, cut: bool| json!({"exit_code": code, "stdout": out, "stderr": err, "truncated": cut, "stdout_truncated": cut});
         assert_eq!(
             result(text_cap, &run(json!(0), "a\nb\n", "", false)).unwrap(),
             json!("a\nb\n")
@@ -299,5 +302,17 @@ account = "owner"
                 .unwrap()
                 .ends_with("cut here]")
         );
+        // Only stdout's own cut counts.
+        let mut loud = run(json!(0), "{}", "x", false);
+        loud["truncated"] = json!(true);
+        assert_eq!(result(json_cap, &loud).unwrap(), json!({}));
+        loud["stdout"] = json!("abc");
+        assert_eq!(result(text_cap, &loud).unwrap(), json!("abc"));
+        // Killed for its memory, though its first process ended with 0.
+        let mut big = run(json!(0), "{}", "", false);
+        big["killed"] = json!("memory");
+        big["reason"] = json!("past its memory limit");
+        let e = result(json_cap, &big).unwrap_err();
+        assert!(e.message.contains("past its memory limit"), "{}", e.message);
     }
 }
