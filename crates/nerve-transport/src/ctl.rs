@@ -117,6 +117,11 @@ pub const NOT_RUNNING: &str = "not running";
 /// taken, or its queue is full (EAGAIN).
 pub const BUSY: &str = "the node does not take connections now; try again";
 
+/// Why a provider socket ([`serve_providers`]), or its handler, refuses a
+/// caller whose process ended before the node could hold on to it: its pid
+/// may be another process's by then.
+pub const PEER_ENDED: &str = "refused: the program that asked has ended";
+
 /// Serves one connection whose caller is `peer` (what the transport could
 /// tell of it): one request, answered, and the connection ends. One that
 /// sends nothing for [`IDLE`] ends unanswered.
@@ -322,8 +327,8 @@ mod unix {
     use tokio::net::{UnixListener, UnixStream};
 
     use super::{
-        BUSY, CtlRequest, IDLE, MAX_CONNECTIONS, NOT_RUNNING, Peer, Reply, answer, call_stream,
-        serve_stream_within, token_file, write_line,
+        BUSY, CtlRequest, IDLE, MAX_CONNECTIONS, NOT_RUNNING, PEER_ENDED, Peer, Reply, answer,
+        call_stream, serve_stream_within, token_file, write_line,
     };
 
     /// Who a socket serves, and what it takes from the caller beside the
@@ -440,8 +445,8 @@ mod unix {
     }
 
     /// The pidfd of the process on the other end of `stream`, as it was when
-    /// it connected; `None` where the kernel has none to give.
-    fn peer_pidfd(stream: &UnixStream) -> Option<OwnedFd> {
+    /// it connected ([`pidfd_or_refuse`]).
+    fn peer_pidfd(stream: &UnixStream) -> Result<Option<OwnedFd>, String> {
         #[cfg(target_os = "linux")]
         {
             use std::os::fd::{AsRawFd, FromRawFd};
@@ -458,12 +463,36 @@ mod unix {
                     &mut len,
                 )
             };
-            (r == 0 && fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd) })
+            let got = match r == 0 && fd >= 0 {
+                true => Ok(unsafe { OwnedFd::from_raw_fd(fd) }),
+                false => Err(std::io::Error::last_os_error()),
+            };
+            pidfd_or_refuse(got)
         }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = stream;
-            None
+            Ok(None)
+        }
+    }
+
+    /// What SO_PEERPIDFD's answer `got` means for a caller: its pidfd;
+    /// `None` where the kernel has none to give (before Linux 6.5, or a
+    /// peer with no pid in this namespace); else a refusal. Before the
+    /// kernels that hand out the pidfd of a process already reaped, that
+    /// fails exactly when the caller is gone, and only then may its pid be
+    /// another's: the caller is refused rather than told by its pid.
+    #[cfg(target_os = "linux")]
+    fn pidfd_or_refuse(got: std::io::Result<OwnedFd>) -> Result<Option<OwnedFd>, String> {
+        match got {
+            Ok(fd) => Ok(Some(fd)),
+            Err(e) => match e.raw_os_error() {
+                Some(libc::ENOPROTOOPT | libc::ENODATA) => Ok(None),
+                Some(libc::EINVAL | libc::ESRCH) => Err(PEER_ENDED.into()),
+                _ => Err(format!(
+                    "refused: the node cannot hold on to the program that asked: {e}"
+                )),
+            },
         }
     }
 
@@ -717,16 +746,21 @@ mod unix {
                         return;
                     }
                     Callers::Admitted(admit) => {
-                        if let Err(why) = admit(&peer) {
-                            if stream.writable().await.is_ok() {
-                                let _ = stream
-                                    .try_write(format!("{}\n", json!({"error": why})).as_bytes());
-                            }
-                            return;
-                        }
-                        // Taken now: the process that connected may end, and
-                        // its pid go to another, before its request comes.
+                        // Taken first: the process that connected may end,
+                        // and its pid go to another, before its request
+                        // comes.
                         let pidfd = peer_pidfd(&stream);
+                        let pidfd = match admit(&peer).and(pidfd) {
+                            Ok(pidfd) => pidfd,
+                            Err(why) => {
+                                if stream.writable().await.is_ok() {
+                                    let _ = stream.try_write(
+                                        format!("{}\n", json!({"error": why})).as_bytes(),
+                                    );
+                                }
+                                return;
+                            }
+                        };
                         let _ =
                             serve_stream_within(stream, (peer, Vec::new(), pidfd), handler, idle)
                                 .await;
@@ -986,6 +1020,29 @@ mod unix {
                 assert_eq!(v["ok"]["files"], json!(want), "{answer}");
                 assert_eq!(v["ok"]["len"], pad, "{answer}");
             }
+        }
+
+        /// A caller whose pidfd the kernel will not give because it is gone
+        /// is refused; a kernel without SO_PEERPIDFD leaves the node its pid
+        /// alone.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_caller_gone_before_its_pidfd_is_refused() {
+            let err = |n| Err(std::io::Error::from_raw_os_error(n));
+            assert_eq!(
+                pidfd_or_refuse(err(libc::ENOPROTOOPT)).unwrap().map(|_| ()),
+                None
+            );
+            assert_eq!(
+                pidfd_or_refuse(err(libc::ENODATA)).unwrap().map(|_| ()),
+                None
+            );
+            assert_eq!(pidfd_or_refuse(err(libc::EINVAL)).unwrap_err(), PEER_ENDED);
+            assert_eq!(pidfd_or_refuse(err(libc::ESRCH)).unwrap_err(), PEER_ENDED);
+            let e = pidfd_or_refuse(err(libc::EMFILE)).unwrap_err();
+            assert!(e.starts_with("refused: the node cannot hold on"), "{e}");
+            let f = std::fs::File::open("/dev/null").unwrap();
+            assert!(pidfd_or_refuse(Ok(f.into())).unwrap().is_some());
         }
 
         /// The provider socket tells a caller it does not admit so at once,

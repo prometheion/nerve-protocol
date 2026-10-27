@@ -1670,6 +1670,14 @@ impl Link {
         // field is wrong.
         if cap.provider != "node" {
             let provider = cap.provider.clone();
+            // The call is decided for the program attached now, by its
+            // account, and goes to that one only.
+            let (program, serial) = self.shared.providers.held(&provider).ok_or_else(|| {
+                RpcError::new(
+                    ErrorCode::Unavailable,
+                    format!("the provider {provider} is not attached now"),
+                )
+            })?;
             let entry = granted;
             nerve_proto::schema::validate(&action.params, &Value::Object(inv.args.clone()))?;
             let marked = nerve_proto::schema::path_args(&action.params);
@@ -1800,7 +1808,7 @@ impl Link {
                 target,
                 known.as_ref(),
                 unconfined,
-                self.shared.providers.uid_of(&provider),
+                Some(program),
             )
             .await
             .map_err(|e| as_given(e, &named))?;
@@ -1810,7 +1818,7 @@ impl Link {
             return self
                 .shared
                 .providers
-                .invoke(&provider, &inv.cap, &inv.action, args)
+                .invoke(&provider, serial, &inv.cap, &inv.action, args)
                 .await;
         }
         match (inv.cap.as_str(), inv.action.as_str()) {
@@ -2046,7 +2054,7 @@ impl Link {
             let command = command.map(str::to_string);
             let cwd = cwd.map(std::path::Path::to_path_buf);
             let walker = account.map_or_else(crate::account::own_uid, |a| a.uid);
-            let closed = closed_for(program, walker);
+            let closed = closed_for(program, walker, crate::account::own_uid());
             let account = account.cloned();
             let now_ms = call.now_ms;
             // A call whose deadline passes, or that is cancelled, while its
@@ -2677,18 +2685,22 @@ pub(crate) fn act_as(account: Option<&crate::service::Account>) -> Result<Option
     }
 }
 
-/// `m` without the sudo password (crate::sudo).
 /// What the link walk of a call does with a folder it may not list, when it
-/// walks as the account `walker` and the paths go to a program that runs as
-/// `program` (none: the node's own call, or a program run by that account).
-/// A program of another account may list the folder and follow a link in
-/// it, so the call is refused.
-fn closed_for(program: Option<u32>, walker: u32) -> crate::fs::Closed {
+/// walks as the account `walker` on a node that runs as `node`, and the
+/// paths go to a program that runs as `program` (none: the node's own
+/// call). A program of another account may list the folder and follow a
+/// link in it, so the call is refused. So is root's program unless the node
+/// itself is root: a walk with root's file ids (crate::account::FsAs) still
+/// has only the node's rights, and cannot list another account's closed
+/// folder that root's program can.
+fn closed_for(program: Option<u32>, walker: u32, node: u32) -> crate::fs::Closed {
     match program {
-        Some(uid) if uid != walker => crate::fs::Closed::Refuse,
+        Some(uid) if uid != walker || (uid == 0 && node != 0) => crate::fs::Closed::Refuse,
         _ => crate::fs::Closed::Skip,
     }
 }
+
+/// `m` without the sudo password (crate::sudo).
 
 fn scrub(shared: &Shared, m: WsMessage) -> WsMessage {
     match m {
@@ -2990,10 +3002,15 @@ mod tests {
     fn a_closed_folder_refuses_a_program_of_another_account_only() {
         use super::closed_for;
         use crate::fs::Closed;
-        assert_eq!(closed_for(None, 990), Closed::Skip);
-        assert_eq!(closed_for(Some(990), 990), Closed::Skip);
-        assert_eq!(closed_for(Some(1000), 989), Closed::Refuse);
-        assert_eq!(closed_for(Some(0), 989), Closed::Refuse);
+        assert_eq!(closed_for(None, 990, 989), Closed::Skip);
+        assert_eq!(closed_for(Some(990), 990, 989), Closed::Skip);
+        assert_eq!(closed_for(Some(1000), 989, 989), Closed::Refuse);
+        assert_eq!(closed_for(Some(0), 989, 989), Closed::Refuse);
+        // Root's program, walked with root's file ids by a node that is not
+        // root: the walk lacks root's rights.
+        assert_eq!(closed_for(Some(0), 0, 989), Closed::Refuse);
+        // A node of root walks with root's rights itself.
+        assert_eq!(closed_for(Some(0), 0, 0), Closed::Skip);
     }
 
     /// A program's refusal names each path as the center gave it, and a

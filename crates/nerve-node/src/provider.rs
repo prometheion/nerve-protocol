@@ -171,10 +171,10 @@ impl Providers {
         }
     }
 
-    /// The account the program of the provider `name` runs as, while it is
-    /// attached.
-    pub fn uid_of(&self, name: &str) -> Option<u32> {
-        lock(&self.attached).get(name).map(|a| a.uid)
+    /// The account the program of the provider `name` runs as, and which
+    /// attachment of that name it is, while it is attached.
+    pub fn held(&self, name: &str) -> Option<(u32, u64)> {
+        lock(&self.attached).get(name).map(|a| (a.uid, a.serial))
     }
 
     /// What `status` shows of them: each one's capabilities, and the
@@ -228,12 +228,61 @@ impl Providers {
         }
     }
 
-    /// Forwards a call the node allowed to `provider` and waits for its
-    /// answer. Dropping the future (a cancel, a deadline, the link's end)
-    /// tells the provider to cancel it.
+    /// Holds the provider `name` as attached, for its program `exe` of the
+    /// account `uid`, with the capabilities of `fragment`, unless one of
+    /// that name is attached already, or the config `now` gives no longer
+    /// names it with `exe`. The node looked at the program after it read
+    /// the config, and the owner may have removed or changed the entry
+    /// meanwhile: [`Providers::follow_config`] then found nothing to
+    /// detach. `now` is read while the attachments are held, so a change
+    /// after it finds this one.
+    fn hold(
+        &self,
+        name: &str,
+        exe: &str,
+        uid: u32,
+        fragment: Vec<Fragment>,
+        tx: mpsc::Sender<Value>,
+        now: impl FnOnce() -> NodeConfig,
+    ) -> Result<Arc<Attached>, String> {
+        let mut held = lock(&self.attached);
+        if now().providers.get(name).is_none_or(|p| p.exe != exe) {
+            return Err(format!(
+                "refused: providers.allowed changed while the node looked at the provider {name}; try again"
+            ));
+        }
+        if held.contains_key(name) {
+            return Err(format!("a provider {name} is attached already"));
+        }
+        let taken = held
+            .values()
+            .flat_map(|a| a.caps.iter().map(|c| c.id.clone()))
+            .collect();
+        let (caps, broken) = capabilities(name, fragment, &taken)?;
+        let a = Arc::new(Attached {
+            name: name.to_string(),
+            exe: exe.to_string(),
+            uid,
+            serial: self.serial.fetch_add(1, Ordering::Relaxed),
+            caps,
+            broken,
+            tx,
+            pending: Mutex::default(),
+            next: AtomicU64::new(1),
+        });
+        held.insert(name.to_string(), a.clone());
+        Ok(a)
+    }
+
+    /// Forwards a call the node allowed to the attachment `serial` of
+    /// `provider` ([`Providers::held`]) and waits for its answer: the node
+    /// decided the call for that program, so a later one of the same name
+    /// never gets it. Dropping the future (a cancel, a deadline, the link's
+    /// end) tells the provider to cancel it.
     pub async fn invoke(
         &self,
         provider: &str,
+        serial: u64,
         cap: &str,
         action: &str,
         args: Map<String, Value>,
@@ -247,6 +296,7 @@ impl Providers {
         let (tx, rx, guard) = {
             let a = lock(&self.attached)
                 .get(provider)
+                .filter(|a| a.serial == serial)
                 .cloned()
                 .ok_or_else(gone)?;
             let id = a.next.fetch_add(1, Ordering::Relaxed);
@@ -429,6 +479,27 @@ fn identify(
         let _ = (exe, allowed);
         Err("refused: providers attach on Linux only for now".into())
     }
+}
+
+/// [`identify`] for `caller`, which must name its process. A process that
+/// ended while the node looked may have left its pid to another, so where
+/// the socket gave its pidfd, an ended one refuses whatever was read: also
+/// a failed read, since a pid that is gone is no answer either. Blocks.
+#[cfg(unix)]
+fn read_caller(
+    caller: &Caller,
+    allowed: &Path,
+    exe: Option<&Path>,
+) -> Result<(PathBuf, bool), String> {
+    let pid = caller
+        .pid
+        .ok_or("refused: the node cannot tell which process asks")?;
+    let looked = identify(caller.uid, pid, allowed, exe);
+    #[cfg(target_os = "linux")]
+    if caller.pidfd.as_ref().is_some_and(ended) {
+        return Err(nerve_transport::ctl::PEER_ENDED.into());
+    }
+    looked
 }
 
 /// The argument that starts the node's program as the helper that tells
@@ -665,14 +736,11 @@ async fn check(
         .get(&name)
         .ok_or_else(|| format!("refused: providers.allowed names no provider {name}"))?
         .clone();
-    let pid = caller
-        .pid
-        .ok_or("refused: the node cannot tell which process asks")?;
     let want = PathBuf::from(&allowed.exe);
-    let (uid, exe) = (caller.uid, shared.exe.clone());
+    let uid = caller.uid;
     let looked = {
-        let want = want.clone();
-        tokio::task::spawn_blocking(move || identify(uid, pid, &want, exe.as_deref()))
+        let (want, exe) = (want.clone(), shared.exe.clone());
+        tokio::task::spawn_blocking(move || read_caller(&caller, &want, exe.as_deref()))
             .await
             .map_err(|e| e.to_string())?
     };
@@ -680,41 +748,17 @@ async fn check(
         true => e,
         false => format!("refused: the provider {name}: {e}"),
     })?;
-    // A process that ended while the node looked may have left its pid to
-    // another: what was read is then no answer for the caller.
-    #[cfg(target_os = "linux")]
-    if caller.pidfd.as_ref().is_some_and(ended) {
-        return Err("refused: the program that asked has ended".into());
-    }
     if !same {
         return Err(other_program(&name, &running, &want));
     }
     let (out_tx, out_rx) = mpsc::channel(QUEUE);
     let (in_tx, mut in_rx) = mpsc::channel::<Value>(QUEUE);
-    let attached = {
-        let mut held = lock(&shared.providers.attached);
-        if held.contains_key(&name) {
-            return Err(format!("a provider {name} is attached already"));
-        }
-        let taken = held
-            .values()
-            .flat_map(|a| a.caps.iter().map(|c| c.id.clone()))
-            .collect();
-        let (caps, broken) = capabilities(&name, hello.capabilities, &taken)?;
-        let a = Arc::new(Attached {
-            name: name.clone(),
-            exe: allowed.exe.clone(),
-            uid,
-            serial: shared.providers.serial.fetch_add(1, Ordering::Relaxed),
-            caps,
-            broken,
-            tx: out_tx,
-            pending: Mutex::default(),
-            next: AtomicU64::new(1),
-        });
-        held.insert(name.clone(), a.clone());
-        a
-    };
+    let attached =
+        shared
+            .providers
+            .hold(&name, &allowed.exe, uid, hello.capabilities, out_tx, || {
+                shared.config()
+            })?;
     let ids: Vec<String> = attached.caps.iter().map(|c| c.id.clone()).collect();
     let broken = attached.broken.clone();
     tracing::info!(
@@ -858,8 +902,8 @@ pub(crate) async fn serve(
                             req.method
                         ));
                     }
-                    if crate::owner::from_a_command(&s, peer.pid) {
-                        return Reply::Err(crate::owner::FROM_A_COMMAND.into());
+                    if let Some(why) = crate::owner::command_refusal(&s, peer.pid) {
+                        return Reply::Err(why.into());
                     }
                     let caller = Caller {
                         uid: peer.uid,
@@ -1119,6 +1163,114 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(ended(&pidfd));
+    }
+
+    /// A pidfd of `sleep` that has ended.
+    #[cfg(target_os = "linux")]
+    fn ended_pidfd() -> std::os::fd::OwnedFd {
+        use std::os::fd::FromRawFd;
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        // SAFETY: pidfd_open of a child this test holds; the fd is new.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) };
+        assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) }
+    }
+
+    /// A caller whose process that connected has ended is refused, however
+    /// well its pid reads now: the pid may be another process's. While it
+    /// runs, what its pid reads is its own.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_caller_whose_process_ended_is_refused_whatever_its_pid_reads() {
+        use std::os::fd::FromRawFd;
+        let me = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let caller = Caller {
+            uid: crate::account::own_uid(),
+            pid: Some(std::process::id()),
+            pidfd: Some(ended_pidfd()),
+        };
+        assert_eq!(
+            read_caller(&caller, &me, None).unwrap_err(),
+            nerve_transport::ctl::PEER_ENDED
+        );
+        // SAFETY: pidfd_open of this process; the fd is new.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, std::process::id(), 0) };
+        assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+        let caller = Caller {
+            pidfd: Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) }),
+            ..caller
+        };
+        assert!(read_caller(&caller, &me, None).unwrap().1);
+    }
+
+    fn allowing(name: &str, exe: &str) -> NodeConfig {
+        let mut cfg = NodeConfig::default();
+        cfg.providers.allowed = vec![nerve_policy::config::AllowedProvider {
+            name: name.into(),
+            exe: exe.into(),
+        }];
+        cfg
+    }
+
+    /// A provider whose entry the owner removed or changed while the node
+    /// looked at its program is not held: the config is read again as it is
+    /// held.
+    #[test]
+    fn a_provider_the_owner_dropped_while_it_was_checked_is_not_held() {
+        let p = Providers::default();
+        let (tx, _rx) = mpsc::channel(1);
+        for now in [NodeConfig::default(), allowing("desk", "/opt/other")] {
+            let e = p
+                .hold(
+                    "desk",
+                    "/opt/desk",
+                    1000,
+                    fragment(echo()),
+                    tx.clone(),
+                    || now,
+                )
+                .err()
+                .expect("not held");
+            assert!(e.contains("providers.allowed changed"), "{e}");
+        }
+        assert_eq!(p.held("desk"), None);
+        let a = p
+            .hold("desk", "/opt/desk", 1000, fragment(echo()), tx, || {
+                allowing("desk", "/opt/desk")
+            })
+            .unwrap();
+        assert_eq!(p.held("desk"), Some((1000, a.serial)));
+    }
+
+    /// A call goes to the attachment it was decided for: once that one went,
+    /// a later one of the same name does not get it.
+    #[tokio::test]
+    async fn a_call_goes_to_the_attachment_it_was_decided_for_only() {
+        let p = Providers::default();
+        let (tx, _rx) = mpsc::channel(4);
+        let hold = |tx| {
+            p.hold("desk", "/opt/desk", 1000, fragment(echo()), tx, || {
+                allowing("desk", "/opt/desk")
+            })
+            .unwrap()
+            .serial
+        };
+        let first = hold(tx.clone());
+        assert!(p.remove("desk", first));
+        let (later_tx, mut later) = mpsc::channel(4);
+        let _later = hold(later_tx);
+        let call = p.invoke("desk", first, "echo", "say", Map::new());
+        let e = tokio::time::timeout(std::time::Duration::from_secs(5), call)
+            .await
+            .expect("answered at once")
+            .unwrap_err();
+        assert_eq!(e.kind(), ErrorCode::Unavailable);
+        assert!(later.try_recv().is_err(), "the later one got the call");
     }
 
     /// The node's own program, and a program of its own account, is looked

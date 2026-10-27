@@ -1676,6 +1676,32 @@ pub(crate) fn from_a_command(shared: &crate::daemon::Shared, pid: Option<u32>) -
     shared.below_command(Some(pid))
 }
 
+/// [`from_a_command`] with its reason, for a program that asks to attach as
+/// a provider: one that runs with `no_new_privs` but below no command of the
+/// node is told so, since the owner may start a program of theirs that way
+/// (a unit's `NoNewPrivileges=`, a sandbox) and must know why it is refused.
+#[cfg(unix)]
+pub(crate) fn command_refusal(
+    shared: &crate::daemon::Shared,
+    pid: Option<u32>,
+) -> Option<&'static str> {
+    let Some(pid) = pid else {
+        return Some(FROM_A_COMMAND);
+    };
+    if shared.below_command(Some(pid)) {
+        return Some(FROM_A_COMMAND);
+    }
+    #[cfg(target_os = "linux")]
+    if keeps_no_new_privs(pid) {
+        return Some(NO_NEW_PRIVS);
+    }
+    None
+}
+
+/// Why the node refuses a program that runs with `no_new_privs` and below
+/// none of its commands.
+pub(crate) const NO_NEW_PRIVS: &str = "refused: this program runs with no_new_privs, as every command the node runs for a center does, so the node cannot tell it from one; start it without no_new_privs (no NoNewPrivileges= in its unit, no sandbox that sets it)";
+
 #[cfg(windows)]
 pub(crate) use win::serve;
 

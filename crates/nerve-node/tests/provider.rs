@@ -1528,8 +1528,9 @@ async fn the_owners_program_attaches_on_the_provider_socket() {
 
 /// The provider socket refuses an account that is no owner as it
 /// connects, a program other than the allowed one, and a process of a
-/// command the node runs (below it, or with `no_new_privs` as a confined
-/// one keeps), also when it runs the allowed program.
+/// command the node runs, also when it runs the allowed program. One with
+/// `no_new_privs`, which a confined command keeps, is refused and told
+/// that is why.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_provider_socket_refuses_others_and_the_commands_of_the_node() {
     let Some(python) = python() else {
@@ -1620,10 +1621,7 @@ async fn the_provider_socket_refuses_others_and_the_commands_of_the_node() {
         .unwrap()
         .unwrap();
     let said = String::from_utf8_lossy(&o.stdout);
-    assert!(
-        said.contains("comes from a command the node runs"),
-        "{said}"
-    );
+    assert!(said.contains("runs with no_new_privs"), "{said}");
     // The same program as the owner's own process attaches.
     let script_at = (script.clone(), at.clone());
     let o = tokio::task::spawn_blocking(move || {
@@ -1637,6 +1635,62 @@ async fn the_provider_socket_refuses_others_and_the_commands_of_the_node() {
     .unwrap();
     let said = String::from_utf8_lossy(&o.stdout);
     assert!(said.contains("\"ok\""), "{said}");
+    daemon.stop().await;
+}
+
+/// A python program that connects to the socket its first argument names,
+/// leaves the connection to a child and ends; the child, once its parent
+/// is gone, sends the provider `desk`'s hello and prints the answer.
+const ENDED_PY: &str = r#"import json, os, socket, sys, time
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+parent = os.getpid()
+if os.fork() != 0:
+    os._exit(0)
+while os.getppid() == parent:
+    time.sleep(0.01)
+caps = [{"id": "lamp", "actions": {"on": {"effect": "write"}}}]
+hello = {"method": "hello", "params": {"role": "provider", "name": "desk", "capabilities": caps}}
+s.sendall((json.dumps(hello) + "\n").encode())
+print(s.makefile().readline())
+"#;
+
+/// A program whose process that connected has ended is refused: its pid
+/// may be another process's by then. The node holds on to the process
+/// that connected (its pidfd), so the hello its child sends on the same
+/// connection is not taken for the allowed program's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_program_that_ended_after_it_connected_is_refused() {
+    let Some(python) = python() else {
+        eprintln!("skipped: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (o, _, at) = installed_options(&root, vec![uid()]);
+    owner_edit(&o.paths, |c| {
+        c.providers.allowed = vec![AllowedProvider {
+            name: "desk".into(),
+            exe: python.clone(),
+        }];
+    })
+    .await;
+    let daemon = Daemon::start(o).await.unwrap();
+    let script = root.join("ended.py");
+    std::fs::write(&script, ENDED_PY).unwrap();
+    // The parent ends at once; the output comes once the child is done.
+    let o = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("python3")
+            .arg(&script)
+            .arg(&at)
+            .output()
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let said = String::from_utf8_lossy(&o.stdout);
+    assert!(said.contains(nerve_transport::ctl::PEER_ENDED), "{said}");
+    assert_eq!(daemon.status()["providers"], json!([]));
     daemon.stop().await;
 }
 
