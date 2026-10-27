@@ -1047,8 +1047,7 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     // nerve-run may not look into it, the owner's program may.
     chmod(&shut, "700");
     assert!(sh(Command::new("setfacl").arg("-b").arg(&shut)).0);
-    let pathprov = format!("{{ name = \"pathprov\", exe = \"{python}\" }}");
-    let (ok, said) = as_owner(&owner, &["config", "add", "providers.allowed", &pathprov]);
+    let (ok, said) = as_owner(&owner, &["cap", "provider", "allow", "pathprov", &python]);
     assert!(ok, "{said}");
     let paired = center.paired().expect("paired");
     let mut inc = center.next_link(WAIT).await.expect("the node dials");
@@ -1087,6 +1086,23 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     assert!(first.contains("\"ok\""), "{first}");
     let (_, st) = as_owner(&owner, &["status"]);
     assert!(st.contains("provider pathprov attached: files"), "{st}");
+    let (_, ls) = as_owner(&owner, &["cap", "ls"]);
+    assert!(
+        ls.contains(&format!("program pathprov: {python}, attached")),
+        "{ls}"
+    );
+    assert!(
+        ls.lines().any(|l| l.split_whitespace().collect::<Vec<_>>()
+            == [
+                "files.save",
+                "write",
+                "program",
+                "pathprov",
+                "conformance-center:",
+                "default"
+            ]),
+        "{ls}"
+    );
     let owner_uid = sh(Command::new("id").args(["-u", &owner])).1;
 
     // In the folder: it reads and writes, as the owner.

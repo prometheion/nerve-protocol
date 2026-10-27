@@ -2066,6 +2066,12 @@ pub(crate) fn control(
     let str_of = |k: &str| params.get(k).and_then(Value::as_str).map(str::to_string);
     match method {
         "status" => Reply::Ok(shared.status()),
+        // Every capability with its effect and settings, the programs'
+        // too (crate::provider::listing), for `cap ls`.
+        "caps.list" => Reply::Ok(crate::provider::listing(
+            &shared.config(),
+            Some(&shared.providers),
+        )),
         "owner.check" => Reply::Ok(json!({})),
         "sudo.status" => Reply::Ok(json!({"sudo": if shared.sudo_on() { "on" } else { "off" }})),
         "sudo.off" => match shared.sudo_switch_off(nerve_policy::Writer::Local) {

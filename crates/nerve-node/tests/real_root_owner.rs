@@ -563,8 +563,7 @@ async fn a_program_of_root_attaches_as_a_provider() {
     let (ok, said) = sh(Command::new(BIN).args(["center", "add", &link, "--yes"]));
     assert!(ok, "{said}");
     assert!(sh(Command::new(BIN).args(["mode", "set", "user"])).0);
-    let allowed = format!("{{ name = \"rootprov\", exe = \"{python}\" }}");
-    let (ok, said) = sh(Command::new(BIN).args(["config", "add", "providers.allowed", &allowed]));
+    let (ok, said) = sh(Command::new(BIN).args(["cap", "provider", "allow", "rootprov", &python]));
     assert!(ok, "{said}");
     let mut conn = linked(&mut center).await;
 

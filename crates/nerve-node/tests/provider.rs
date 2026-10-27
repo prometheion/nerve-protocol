@@ -186,6 +186,7 @@ async fn passes_the_conformance_provider_checks() {
         *keep.lock().unwrap() = Some(d);
         Ok(nerve_conformance::provider_part::Setup {
             socket,
+            attach: nerve_conformance::provider_part::Attach::Token,
             provider: "conformance".into(),
         })
     })
@@ -218,6 +219,45 @@ async fn passes_the_conformance_provider_checks() {
     assert!(decided("say", "allowed"), "{entries:?}");
     assert!(decided("fail", "allowed"), "{entries:?}");
     assert!(decided("shout", "forbidden"), "{entries:?}");
+}
+
+/// The same checks on the provider socket of the installed node, which tells
+/// the program by its account and process and takes no token.
+#[tokio::test(flavor = "multi_thread")]
+async fn passes_the_conformance_provider_checks_on_the_provider_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let running: Arc<Mutex<Option<Daemon>>> = Arc::default();
+    let keep = running.clone();
+    let report = nerve_conformance::provider_part::run(move |link| async move {
+        let (o, _, socket) = installed_options(&root, vec![uid()]);
+        nerve_node::pair::pair(&o.paths, &link, None).await?;
+        owner_edit(&o.paths, |c| {
+            c.centers[0].settings = SettingsGrant::Write;
+            c.providers.allowed = vec![AllowedProvider {
+                name: "conformance".into(),
+                exe: me(),
+            }];
+        })
+        .await;
+        let d = Daemon::start(o).await?;
+        *keep.lock().unwrap() = Some(d);
+        Ok(nerve_conformance::provider_part::Setup {
+            socket,
+            attach: nerve_conformance::provider_part::Attach::Peer,
+            provider: "conformance".into(),
+        })
+    })
+    .await;
+    let d = running.lock().unwrap().take();
+    if let Some(d) = d {
+        d.stop().await;
+    }
+    assert!(report.ok(), "{report}");
+    assert_eq!(
+        report.outcomes.len(),
+        nerve_conformance::provider_part::CHECKS.len()
+    );
 }
 
 /// The name alone does not attach: the program on the other end must be the
@@ -279,6 +319,13 @@ async fn status(paths: &NodePaths) -> String {
 
 /// What `nerve-node status` prints with the flags `extra`.
 async fn status_as(paths: &NodePaths, extra: &[&str]) -> String {
+    let mut words = vec!["status"];
+    words.extend(extra);
+    cli(paths, &words).await
+}
+
+/// What `nerve-node <words>` prints.
+async fn cli(paths: &NodePaths, words: &[&str]) -> String {
     use clap::Parser;
     let mut args = vec![
         "nerve-node".into(),
@@ -286,9 +333,8 @@ async fn status_as(paths: &NodePaths, extra: &[&str]) -> String {
         paths.config_dir.clone(),
         "--state-dir".into(),
         paths.state_dir.clone(),
-        PathBuf::from("status"),
     ];
-    args.extend(extra.iter().map(PathBuf::from));
+    args.extend(words.iter().map(PathBuf::from));
     let cli = nerve_node::cli::Cli::parse_from(args);
     let mut out = Vec::new();
     nerve_node::cli::execute(cli, &mut out).await.unwrap();
@@ -1646,5 +1692,83 @@ async fn a_full_owner_socket_does_not_block_the_provider_socket_and_the_reverse(
     }
     assert_eq!(answered, Ok(json!({"running": true})));
     drop(held);
+    daemon.stop().await;
+}
+
+/// `cap ls` on a running node lists the capabilities of the attached
+/// programs too, with their effects and where they come from, an action the
+/// node left out with its reason, and which allowed program is attached;
+/// `cap provider ls` says the same of the programs.
+#[tokio::test(flavor = "multi_thread")]
+async fn cap_ls_lists_what_the_attached_programs_offer() {
+    let dir = tempfile::tempdir().unwrap();
+    let center = FakeCenter::start(false).await.unwrap();
+    let daemon = node(dir.path(), &center, &me(), |p| {
+        p.caps
+            .insert("lamp.on".into(), nerve_policy::config::CapSetting::Off);
+    })
+    .await;
+    let paths = daemon.paths().clone();
+    owner_edit(&paths, |c| {
+        c.providers.allowed.push(AllowedProvider {
+            name: "fan".into(),
+            exe: "/usr/bin/fan".into(),
+        });
+    })
+    .await;
+    let caps = json!([{"id": "lamp", "summary": "A lamp.", "actions": {
+        "on": {"effect": "actuate", "summary": "Switches it on."},
+        "dim": {"effect": "write", "params": {"type": "object", "properties": {
+            "level": {"oneOf": [{"type": "integer"}, {"type": "string"}]}}}}}}]);
+    let (_p, first) = hello_with(&paths.ctl_socket(), caps).await;
+    assert_eq!(first["ok"]["capabilities"], json!(["lamp"]), "{first}");
+
+    let ls = cli(&paths, &["cap", "ls"]).await;
+    let words = |name: &str| {
+        ls.lines()
+            .find(|l| l.split_whitespace().next() == Some(name))
+            .unwrap_or_else(|| panic!("no {name}: {ls}"))
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    assert_eq!(words("lamp.on"), "lamp.on actuate program desk lab: off");
+    assert!(
+        words("lamp.dim")
+            .starts_with("lamp.dim - program desk left out: params: /properties/level/oneOf"),
+        "{ls}"
+    );
+    assert_eq!(words("fs.read"), "fs.read read built-in lab: default");
+    assert!(!ls.contains("does not run"), "{ls}");
+    assert!(
+        ls.contains(&format!("program desk: {}, attached", me())),
+        "{ls}"
+    );
+    assert!(
+        ls.contains("program fan: /usr/bin/fan, not attached"),
+        "{ls}"
+    );
+
+    let v: Value = serde_json::from_str(&cli(&paths, &["--json", "cap", "ls"]).await).unwrap();
+    let on = v["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "lamp.on")
+        .unwrap();
+    assert_eq!(
+        *on,
+        json!({"name": "lamp.on", "effect": "actuate", "source": "program desk",
+               "summary": "Switches it on.", "centers": {"lab": "off"}})
+    );
+    assert_eq!(v["running"], true, "{v}");
+    let v: Value =
+        serde_json::from_str(&cli(&paths, &["--json", "cap", "provider", "ls"]).await).unwrap();
+    assert_eq!(
+        v,
+        json!({"running": true, "programs": [
+            {"name": "desk", "exe": me(), "attached": true},
+            {"name": "fan", "exe": "/usr/bin/fan", "attached": false}]})
+    );
     daemon.stop().await;
 }

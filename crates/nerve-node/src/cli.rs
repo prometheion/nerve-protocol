@@ -319,11 +319,33 @@ pub enum CapCmd {
         #[command(flatten)]
         center: CenterArg,
     },
-    /// Show the capabilities and actions you set.
+    /// Show every capability: the node's own and those of the programs you allow, each action with what it does (its effect), where it comes from, and how each center has it set. A stopped node shows its own and the programs you allow.
     Ls {
-        #[command(flatten)]
-        center: CenterArg,
+        /// Only this center's settings.
+        #[arg(long)]
+        center: Option<String>,
     },
+    /// Allow a program on this machine to add capabilities (a provider), remove it, or list them.
+    #[command(subcommand)]
+    Provider(ProviderCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProviderCmd {
+    /// Let the program EXE attach as the provider NAME; it replaces the program allowed under that name. The node checks that the program that attaches runs this very file.
+    Allow {
+        /// The provider's name, which its capabilities carry: 1 to 32 of a-z, 0-9 and `-`.
+        name: String,
+        /// The full path of the program's executable.
+        exe: String,
+    },
+    /// Remove the program allowed as NAME; its capabilities leave at once.
+    Rm {
+        /// The provider's name.
+        name: String,
+    },
+    /// Show the programs you allow, and on a running node whether each is attached.
+    Ls,
 }
 
 #[derive(Debug, Subcommand, Clone, Copy)]
@@ -2019,13 +2041,62 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
         }
         Cmd::Cap(CapCmd::Ls { center }) => {
             let (cfg, _) = read_config(&paths).await?;
-            let name = pick_center(&cfg, &center)?;
-            let caps = &cfg.center(&name).expect("picked").policy.caps;
-            if caps.is_empty() {
-                w(out, format!("{name}: no capability was set"));
+            if let Some(c) = &center {
+                cfg.center(c)
+                    .ok_or_else(|| format!("no center named {c}"))?;
             }
-            for (cap, setting) in caps {
-                w(out, format!("{cap}  {}", enum_str(setting)));
+            let v = cap_listing(&paths, &cfg).await?;
+            for l in cap_lines(&cfg, &v, center.as_deref()) {
+                w(out, l);
+            }
+            Ok(())
+        }
+        Cmd::Cap(CapCmd::Provider(ProviderCmd::Allow { name, exe })) => {
+            if !nerve_policy::config::valid_provider_name(&name) {
+                return Err(format!(
+                    "{name:?} cannot name a provider: 1 to 32 of a-z, 0-9 and -, starting and ending with a letter or digit, and not node"
+                ));
+            }
+            if !Path::new(&exe).is_absolute() {
+                return Err(format!(
+                    "{exe}: give the program by its full path, as the node compares it"
+                ));
+            }
+            edit(&paths, |c| {
+                match c.providers.allowed.iter_mut().find(|p| p.name == name) {
+                    Some(p) => p.exe = exe.clone(),
+                    None => c
+                        .providers
+                        .allowed
+                        .push(nerve_policy::config::AllowedProvider {
+                            name: name.clone(),
+                            exe: exe.clone(),
+                        }),
+                }
+                Ok(())
+            })
+            .await?;
+            w(out, format!("provider {name} allowed: {exe}"));
+            Ok(())
+        }
+        Cmd::Cap(CapCmd::Provider(ProviderCmd::Rm { name })) => {
+            edit(&paths, |c| {
+                let before = c.providers.allowed.len();
+                c.providers.allowed.retain(|p| p.name != name);
+                if c.providers.allowed.len() == before {
+                    return Err(format!("no provider {name} is allowed"));
+                }
+                Ok(())
+            })
+            .await?;
+            w(out, format!("provider {name} removed"));
+            Ok(())
+        }
+        Cmd::Cap(CapCmd::Provider(ProviderCmd::Ls)) => {
+            let (cfg, _) = read_config(&paths).await?;
+            let v = cap_listing(&paths, &cfg).await?;
+            for l in program_lines(&v) {
+                w(out, l);
             }
             Ok(())
         }
@@ -3179,6 +3250,103 @@ fn confirm(input: &mut dyn BufRead, out: &mut dyn Write) -> Result<bool, String>
     let mut line = String::new();
     input.read_line(&mut line).map_err(|e| e.to_string())?;
     Ok(matches!(line.trim(), "y" | "Y" | "yes"))
+}
+
+/// What `cap ls` lists (crate::provider::listing): the running node's, over
+/// its control socket, else what the config alone tells.
+async fn cap_listing(paths: &NodePaths, cfg: &NodeConfig) -> Result<Value, String> {
+    #[cfg(unix)]
+    match nerve_transport::ctl::call(&paths.ctl_socket(), "caps.list", json!({})).await {
+        Ok(v) => return Ok(v),
+        Err(e) if e == nerve_transport::ctl::NOT_RUNNING => {}
+        Err(e) => return Err(e),
+    }
+    // Windows takes no provider yet, so the config says all.
+    let _ = paths;
+    Ok(crate::provider::listing(cfg, None))
+}
+
+/// The lines of `cap ls`: one per action, with its effect, where it comes
+/// from and each center's setting (`center` only), the settings that name
+/// no action offered now, and the programs.
+fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
+    let rows = v["capabilities"].as_array().cloned().unwrap_or_default();
+    let text = |r: &Value, k: &str| r[k].as_str().unwrap_or("-").to_string();
+    let names: Vec<String> = rows.iter().map(|r| text(r, "name")).collect();
+    let width = |k: &str| rows.iter().map(|r| text(r, k).len()).max().unwrap_or(0);
+    let (wn, we, ws) = (width("name"), width("effect"), width("source"));
+    let mut lines = Vec::new();
+    for r in &rows {
+        let what = match r["broken"].as_str() {
+            Some(why) => format!("left out: {why}"),
+            None => r["centers"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(c, _)| center.is_none_or(|w| w == c.as_str()))
+                .map(|(c, set)| format!("{c}: {}", set.as_str().unwrap_or_default()))
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+        let line = format!(
+            "{:wn$}  {:we$}  {:ws$}  {what}",
+            text(r, "name"),
+            text(r, "effect"),
+            text(r, "source"),
+        );
+        lines.push(line.trim_end().to_string());
+    }
+    // A setting for a capability or action that nothing offers now still
+    // counts once something does.
+    for c in &cfg.centers {
+        if center.is_some_and(|w| w != c.name) {
+            continue;
+        }
+        for (key, set) in &c.policy.caps {
+            let offered = names
+                .iter()
+                .any(|n| n == key || n.split_once('.').is_some_and(|(cap, _)| cap == key));
+            if !offered {
+                lines.push(format!(
+                    "{}: {key} {} (offered by nothing now)",
+                    c.name,
+                    enum_str(set)
+                ));
+            }
+        }
+    }
+    if v["running"] == false {
+        lines.push(
+            "the node does not run: the programs' capabilities show while it runs and they are attached"
+                .into(),
+        );
+    }
+    lines.extend(program_lines(v));
+    lines
+}
+
+/// The lines of `cap provider ls`: each program allowed, and whether it is
+/// attached.
+fn program_lines(v: &Value) -> Vec<String> {
+    let programs = v["programs"].as_array().cloned().unwrap_or_default();
+    if programs.is_empty() {
+        return vec!["no program is allowed as a provider".into()];
+    }
+    programs
+        .iter()
+        .map(|p| {
+            let state = match p["attached"].as_bool() {
+                Some(true) => "attached",
+                Some(false) => "not attached",
+                None => "the node does not run",
+            };
+            format!(
+                "program {}: {}, {state}",
+                p["name"].as_str().unwrap_or_default(),
+                p["exe"].as_str().unwrap_or_default()
+            )
+        })
+        .collect()
 }
 
 fn enum_str<T: serde::Serialize>(v: &T) -> String {
@@ -6856,13 +7024,13 @@ mod tests {
     #[test]
     fn caps_and_proxy_show_what_is_set() {
         let (_d, paths) = setup(&["home"]);
-        assert!(
-            run(&paths, &["cap", "ls"])
-                .unwrap()
-                .contains("no capability")
-        );
+        let ls = run(&paths, &["cap", "ls"]).unwrap();
+        assert!(ls.contains("fs.read"), "{ls}");
+        assert!(ls.contains("no program is allowed as a provider"), "{ls}");
         run(&paths, &["cap", "set", "exec", "hidden"]).unwrap();
-        assert_eq!(run(&paths, &["cap", "ls"]).unwrap(), "exec  hidden\n");
+        let ls = run(&paths, &["cap", "ls"]).unwrap();
+        let run_line = ls.lines().find(|l| l.starts_with("exec.run ")).unwrap();
+        assert!(run_line.ends_with("home: hidden"), "{ls}");
         assert_eq!(run(&paths, &["proxy", "ls"]).unwrap(), "no proxy\n");
         run(
             &paths,
@@ -7670,6 +7838,9 @@ mod tests {
             &["rule", "ls", "sudo"],
             &["cap", "set", "fs", "on"],
             &["cap", "ls"],
+            &["cap", "provider", "allow", "desk", "/usr/bin/desk"],
+            &["cap", "provider", "rm", "desk"],
+            &["cap", "provider", "ls"],
             &["proxy", "set", "http://p:1"],
             &["proxy", "rm"],
             &["proxy", "ls"],
@@ -7690,6 +7861,8 @@ mod tests {
             &["unpair"],
             &["centers"],
             &["caps", "fs", "on"],
+            &["provider", "allow", "desk", "/usr/bin/desk"],
+            &["cap", "allow", "desk", "/usr/bin/desk"],
             &["grant", "settings", "write"],
             &["allow", "ls"],
             &["deny", "ls"],
@@ -7788,6 +7961,16 @@ mod tests {
             rule.verbs[2].usage.contains("[LIST]"),
             "{}",
             rule.verbs[2].usage
+        );
+        // `cap provider` is a noun below `cap`, with a card of its own.
+        let provider: Vec<&str> = card("cap provider")
+            .verbs
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect();
+        assert_eq!(
+            provider,
+            ["cap provider allow", "cap provider rm", "cap provider ls"]
         );
         assert_eq!(card("panic / unlock").verbs.len(), 2);
         assert_eq!(card("install / uninstall").verbs.len(), 2);
@@ -8939,6 +9122,134 @@ mod tests {
                 panic!("the line written in two halves never came: {}", seen.text())
             }
         }
+    }
+
+    /// `cap ls` lists every action of the node's own capabilities with its
+    /// effect, where it comes from and each center's setting (`--center`:
+    /// that one's), a setting for what nothing offers now, and the programs
+    /// allowed; a stopped node knows no program's capabilities and says so.
+    #[test]
+    fn cap_ls_lists_every_capability_with_its_effect_and_settings() {
+        let (_d, paths) = setup(&["home", "lab"]);
+        run(
+            &paths,
+            &["cap", "set", "fs.write", "off", "--center", "home"],
+        )
+        .unwrap();
+        run(&paths, &["cap", "set", "lamp", "on", "--center", "lab"]).unwrap();
+        run(
+            &paths,
+            &["cap", "provider", "allow", "desk", "/usr/bin/desk"],
+        )
+        .unwrap();
+        let ls = run(&paths, &["cap", "ls"]).unwrap();
+        let line = |name: &str| {
+            ls.lines()
+                .find(|l| l.split_whitespace().next() == Some(name))
+                .unwrap_or_else(|| panic!("no {name}: {ls}"))
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert_eq!(
+            line("fs.write"),
+            "fs.write write built-in home: off, lab: default"
+        );
+        assert_eq!(
+            line("exec.run"),
+            "exec.run execute built-in home: default, lab: default"
+        );
+        assert!(ls.contains("lab: lamp on (offered by nothing now)"), "{ls}");
+        assert!(ls.contains("the node does not run"), "{ls}");
+        assert!(
+            ls.contains("program desk: /usr/bin/desk, the node does not run"),
+            "{ls}"
+        );
+        let one = run(&paths, &["cap", "ls", "--center", "lab"]).unwrap();
+        assert!(!one.contains("home:"), "{one}");
+        assert!(one.contains("fs.write"), "{one}");
+        assert!(run(&paths, &["cap", "ls", "--center", "nope"]).is_err());
+
+        let v = json_of(&paths, &["cap", "ls"]);
+        let write = v["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "fs.write")
+            .unwrap();
+        assert_eq!(write["effect"], "write", "{v}");
+        assert_eq!(write["source"], "built-in", "{v}");
+        assert_eq!(write["centers"], json!({"home": "off", "lab": "default"}));
+        assert_eq!(v["running"], false, "{v}");
+        assert_eq!(
+            v["programs"],
+            json!([{"name": "desk", "exe": "/usr/bin/desk", "attached": null}])
+        );
+        // Two centers and none picked: no one center's switches.
+        assert!(v.get("known").is_none(), "{v}");
+        let v = json_of(&paths, &["cap", "ls", "--center", "lab"]);
+        assert_eq!(v["center"], "lab");
+        assert_eq!(v["caps"], json!({"lamp": "on"}));
+    }
+
+    /// `cap provider allow` names a program, again to replace it, `rm`
+    /// takes it off, and `ls` shows them; a bad name or a relative path is
+    /// refused.
+    #[test]
+    fn cap_provider_allows_lists_and_removes_programs() {
+        let (_d, paths) = setup(&["home"]);
+        let said = run(&paths, &["cap", "provider", "allow", "desk", "/usr/bin/a"]).unwrap();
+        // A stopped node takes it at its next start, and is told so.
+        assert!(
+            said.starts_with("provider desk allowed: /usr/bin/a\n"),
+            "{said}"
+        );
+        run(&paths, &["cap", "provider", "allow", "desk", "/usr/bin/b"]).unwrap();
+        run(&paths, &["cap", "provider", "allow", "lamp-2", "/opt/lamp"]).unwrap();
+        let cfg =
+            NodeConfig::parse(&std::fs::read_to_string(paths.config_file()).unwrap()).unwrap();
+        let allowed: Vec<(&str, &str)> = cfg
+            .providers
+            .allowed
+            .iter()
+            .map(|p| (p.name.as_str(), p.exe.as_str()))
+            .collect();
+        assert_eq!(allowed, [("desk", "/usr/bin/b"), ("lamp-2", "/opt/lamp")]);
+        assert_eq!(
+            run(&paths, &["cap", "provider", "ls"]).unwrap(),
+            "program desk: /usr/bin/b, the node does not run\n\
+             program lamp-2: /opt/lamp, the node does not run\n"
+        );
+        let v = json_of(&paths, &["cap", "provider", "ls"]);
+        assert_eq!(v["programs"][1]["name"], "lamp-2", "{v}");
+        assert_eq!(v["running"], false, "{v}");
+        for (bad, why) in [
+            (
+                &["cap", "provider", "allow", "Desk", "/usr/bin/a"][..],
+                "cannot name a provider",
+            ),
+            (
+                &["cap", "provider", "allow", "node", "/usr/bin/a"],
+                "cannot name a provider",
+            ),
+            (
+                &["cap", "provider", "allow", "desk", "bin/a"],
+                "by its full path",
+            ),
+            (&["cap", "provider", "rm", "nope"], "no provider nope"),
+        ] {
+            let e = run(&paths, bad).unwrap_err();
+            assert!(e.contains(why), "{bad:?}: {e}");
+        }
+        let said = run(&paths, &["cap", "provider", "rm", "desk"]).unwrap();
+        assert!(said.starts_with("provider desk removed\n"), "{said}");
+        let v = json_of(&paths, &["cap", "provider", "ls"]);
+        assert_eq!(v["programs"].as_array().unwrap().len(), 1, "{v}");
+        run(&paths, &["cap", "provider", "rm", "lamp-2"]).unwrap();
+        assert_eq!(
+            run(&paths, &["cap", "provider", "ls"]).unwrap(),
+            "no program is allowed as a provider\n"
+        );
     }
 
     /// `cap ls --json` names what `cap set` switches, so the app need not.

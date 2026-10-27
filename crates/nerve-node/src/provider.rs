@@ -743,6 +743,67 @@ async fn check(
     })
 }
 
+/// What `cap ls` shows (docs/user/commands.md): every action of the node's
+/// own capabilities and of the attached programs', each with its effect,
+/// where it comes from and how each center has it set (`cap set`: `on`,
+/// `off`, `hidden`, or `default` where the mode alone decides); an action a
+/// program offered that the node left out, with the reason; and the
+/// programs the owner allowed, attached or not. `attached` is `None` for a
+/// node that does not run: no program's capabilities are known then.
+pub fn listing(cfg: &NodeConfig, attached: Option<&Providers>) -> Value {
+    use nerve_policy::config::CapSetting;
+    let centers = |cap: &str, action: &str| -> Map<String, Value> {
+        cfg.centers
+            .iter()
+            .map(|c| {
+                let set = match c.policy.cap_setting(cap, Some(action)) {
+                    Some(CapSetting::On) => "on",
+                    Some(CapSetting::Off) => "off",
+                    Some(CapSetting::Hidden) => "hidden",
+                    None => "default",
+                };
+                (c.name.clone(), json!(set))
+            })
+            .collect()
+    };
+    let row = |c: &Capability, source: &str| -> Vec<Value> {
+        c.actions
+            .iter()
+            .map(|(a, decl)| {
+                json!({"name": format!("{}.{a}", c.id), "effect": decl.effect,
+                       "source": source, "summary": decl.summary,
+                       "centers": centers(&c.id, a)})
+            })
+            .collect()
+    };
+    let mut rows: Vec<Value> = crate::descriptor::built_in(cfg)
+        .iter()
+        .flat_map(|c| row(c, "built-in"))
+        .collect();
+    let held = attached.map(|p| lock(&p.attached).clone());
+    for a in held.iter().flat_map(|h| h.values()) {
+        let source = format!("program {}", a.name);
+        for c in &a.caps {
+            rows.extend(row(c, &source));
+        }
+        for b in &a.broken {
+            let (cap, action) = b.name.split_once('.').unwrap_or((&b.name, ""));
+            rows.push(json!({"name": b.name, "source": source, "broken": b.reason,
+                             "centers": centers(cap, action)}));
+        }
+    }
+    let programs: Vec<Value> = cfg
+        .providers
+        .allowed
+        .iter()
+        .map(|p| {
+            let on = held.as_ref().map(|h| h.contains_key(&p.name));
+            json!({"name": p.name, "exe": p.exe, "attached": on})
+        })
+        .collect();
+    json!({"capabilities": rows, "programs": programs, "running": attached.is_some()})
+}
+
 /// The provider socket's file name, beside the owner socket in the
 /// installed unit's runtime folder (crate::owner::RUNTIME_DIR).
 pub const SOCKET_NAME: &str = "provider.sock";

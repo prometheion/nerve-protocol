@@ -14,7 +14,9 @@
 //! (protocol.md §6), so the node must leave it out. Another, `peek`, takes
 //! a path it reads (`x-nerve-path`), which the node decides the call by.
 //!
-//! Unix only: the provider attaches on the control socket.
+//! Unix only: the provider attaches on a Unix socket, the control socket
+//! of a node run by hand (with its token) or the provider socket of the
+//! installed node (by its peer credentials, [`Attach::Peer`]).
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -50,10 +52,23 @@ const PEEK_INSIDE: &str = "/nerve-conformance/inside";
 /// What the caller says about the node it started.
 #[derive(Debug, Clone)]
 pub struct Setup {
-    /// The node's control socket. Its token is in `ctl.token` beside it.
+    /// The socket the provider attaches on.
     pub socket: PathBuf,
+    /// How that socket tells who asks.
+    pub attach: Attach,
     /// The name `providers.allowed` gives the program that runs this part.
     pub provider: String,
+}
+
+/// How the node's socket tells who asks to attach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attach {
+    /// The control socket: each request carries the token in `ctl.token`
+    /// beside it.
+    Token,
+    /// A socket that tells the caller by the account and process the
+    /// kernel names (the installed node's provider socket): no token.
+    Peer,
 }
 
 /// Every check, in order; each needs the ones before it.
@@ -145,9 +160,20 @@ struct Provider {
 /// connection, and the node's answer (`ok` or the error text). `say` takes
 /// a string `text`; `odd` takes one of two types, which the subset cannot
 /// say.
-async fn hello(socket: &Path, name: &str) -> Result<(Provider, Result<Value, String>), String> {
-    let token = std::fs::read_to_string(socket.with_file_name("ctl.token"))
-        .map_err(|e| format!("cannot read the control socket's token: {e}"))?;
+async fn hello(
+    socket: &Path,
+    attach: Attach,
+    name: &str,
+) -> Result<(Provider, Result<Value, String>), String> {
+    let token = match attach {
+        Attach::Token => Some(
+            std::fs::read_to_string(socket.with_file_name("ctl.token"))
+                .map_err(|e| format!("cannot read the control socket's token: {e}"))?
+                .trim()
+                .to_string(),
+        ),
+        Attach::Peer => None,
+    };
     let stream = UnixStream::connect(socket)
         .await
         .map_err(|e| format!("cannot connect to {}: {e}", socket.display()))?;
@@ -171,11 +197,14 @@ async fn hello(socket: &Path, name: &str) -> Result<(Provider, Result<Value, Str
                     "fail": read("Fails with io."),
                     "odd": odd,
                     "peek": peek}}]);
-    let line = json!({"method": "hello", "token": token.trim(),
-                      "params": {"role": "provider", "name": name, "capabilities": fragment}});
-    w.write_all(format!("{line}\n").as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut line = json!({"method": "hello",
+                          "params": {"role": "provider", "name": name, "capabilities": fragment}});
+    if let Some(t) = token {
+        line["token"] = json!(t);
+    }
+    // A socket that refuses the caller says so as it connects, and may
+    // close before the line is written: its answer is read all the same.
+    let _ = w.write_all(format!("{line}\n").as_bytes()).await;
     let mut lines = BufReader::new(r).lines();
     let first = tokio::time::timeout(WAIT, lines.next_line())
         .await
@@ -386,13 +415,13 @@ async fn steps(
     let before = rev(conn).await?;
 
     let stranger = format!("{}-stranger", setup.provider);
-    step(match hello(&setup.socket, &stranger).await {
+    step(match hello(&setup.socket, setup.attach, &stranger).await {
         Ok((_, Err(_))) => Ok(()),
         Ok((_, Ok(v))) => Err(format!("it attached: {v}")),
         Err(e) => Err(e),
     })?;
 
-    let (provider, answer) = hello(&setup.socket, &setup.provider).await?;
+    let (provider, answer) = hello(&setup.socket, setup.attach, &setup.provider).await?;
     let left_out = answer
         .as_ref()
         .map(|v| v["broken"].clone())
@@ -404,11 +433,13 @@ async fn steps(
         )
     }))?;
 
-    step(match hello(&setup.socket, &setup.provider).await {
-        Ok((_, Err(_))) => Ok(()),
-        Ok((_, Ok(v))) => Err(format!("a second one attached: {v}")),
-        Err(e) => Err(e),
-    })?;
+    step(
+        match hello(&setup.socket, setup.attach, &setup.provider).await {
+            Ok((_, Err(_))) => Ok(()),
+            Ok((_, Ok(v))) => Err(format!("a second one attached: {v}")),
+            Err(e) => Err(e),
+        },
+    )?;
 
     step(descriptor_changed(conn, before).await)?;
 

@@ -249,6 +249,21 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         (Some(Page::Policy), -1, "Permissions › Capabilities"),
     ),
     (
+        "cap provider allow",
+        "nerve-node cap provider allow desk /usr/lib/nerve-desktop/nerve-desktop",
+        (Some(Page::Settings), 6, "Settings › Advanced › Add"),
+    ),
+    (
+        "cap provider rm",
+        "nerve-node cap provider rm desk",
+        (Some(Page::Settings), 6, "Settings › Advanced › Remove"),
+    ),
+    (
+        "cap provider ls",
+        "nerve-node cap provider ls",
+        (Some(Page::Settings), 6, "Settings › Advanced"),
+    ),
+    (
         "sudo on",
         "nerve-node sudo on",
         (Some(Page::Policy), -1, "Permissions › Sudo › Turn on"),

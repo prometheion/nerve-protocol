@@ -815,6 +815,21 @@ pub fn switchable(cfg: &NodeConfig, entry: &CenterEntry) -> Vec<(String, Vec<Str
         .collect()
 }
 
+/// The node's own capabilities that have actions, every action in: what
+/// `cap ls` lists as built in (crate::provider::listing).
+pub fn built_in(cfg: &NodeConfig) -> Vec<Capability> {
+    vec![
+        fs_cap(Exposure::On),
+        exec_cap(
+            Exposure::On,
+            cfg.machine.shell.as_deref(),
+            cfg!(windows),
+            &cfg.limits.command,
+            &crate::exec::Timeouts::from_limits(&cfg.limits),
+        ),
+    ]
+}
+
 fn build(
     cfg: &NodeConfig,
     entry: &CenterEntry,

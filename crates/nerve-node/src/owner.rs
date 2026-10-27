@@ -1256,7 +1256,9 @@ async fn run_for(
 
 /// Whether `cmd` only reads: it changes nothing of the node.
 fn only_reads(cmd: &Cmd) -> bool {
-    use crate::cli::{CapCmd, CenterCmd, ConfigCmd, ProxyCmd, RelayCmd, RuleCmd, ServiceCmd};
+    use crate::cli::{
+        CapCmd, CenterCmd, ConfigCmd, ProviderCmd, ProxyCmd, RelayCmd, RuleCmd, ServiceCmd,
+    };
     matches!(
         cmd,
         Cmd::Status
@@ -1265,7 +1267,7 @@ fn only_reads(cmd: &Cmd) -> bool {
             | Cmd::Center(CenterCmd::Ls)
             | Cmd::Folder(FolderCmd::Ls { .. })
             | Cmd::Rule(RuleCmd::Ls { .. })
-            | Cmd::Cap(CapCmd::Ls { .. })
+            | Cmd::Cap(CapCmd::Ls { .. } | CapCmd::Provider(ProviderCmd::Ls))
             | Cmd::Config(ConfigCmd::Get { .. })
             | Cmd::Proxy(ProxyCmd::Ls)
             | Cmd::Relay(RelayCmd::Ls)

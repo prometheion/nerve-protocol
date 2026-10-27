@@ -18,7 +18,7 @@ pub(super) fn own_form(cmd: &Cmd) -> bool {
             | Cmd::Center(CenterCmd::Ls | CenterCmd::Add { .. })
             | Cmd::Folder(FolderCmd::Ls { .. })
             | Cmd::Rule(RuleCmd::Ls { .. })
-            | Cmd::Cap(CapCmd::Ls { .. })
+            | Cmd::Cap(CapCmd::Ls { .. } | CapCmd::Provider(ProviderCmd::Ls))
             | Cmd::Config(ConfigCmd::Get { .. })
             | Cmd::Proxy(ProxyCmd::Ls)
             | Cmd::Relay(RelayCmd::Ls)
@@ -136,22 +136,43 @@ pub(super) async fn command(
         }
         Cmd::Cap(CapCmd::Ls { center }) => {
             let (cfg, _) = read_config(paths).await?;
-            let name = pick_center(&cfg, &center)?;
-            let caps: serde_json::Map<String, Value> = cfg
-                .center(&name)
-                .expect("picked")
-                .policy
-                .caps
-                .iter()
-                .map(|(cap, s)| (cap.clone(), json!(enum_str(s))))
-                .collect();
-            // What `cap set` switches here, so a program need not know it.
-            let known: serde_json::Map<String, Value> =
-                crate::descriptor::switchable(&cfg, cfg.center(&name).expect("picked"))
-                    .into_iter()
-                    .map(|(cap, actions)| (cap, json!(actions)))
+            let mut v = cap_listing(paths, &cfg).await?;
+            // One center's switches as the app reads them, besides: with
+            // `--center`, or where only one is paired.
+            let picked = match &center {
+                Some(c) => Some(
+                    cfg.center(c)
+                        .ok_or_else(|| format!("no center named {c}"))?
+                        .name
+                        .clone(),
+                ),
+                None if cfg.centers.len() == 1 => Some(cfg.centers[0].name.clone()),
+                None => None,
+            };
+            if let Some(name) = picked {
+                let entry = cfg.center(&name).expect("picked");
+                let caps: serde_json::Map<String, Value> = entry
+                    .policy
+                    .caps
+                    .iter()
+                    .map(|(cap, s)| (cap.clone(), json!(enum_str(s))))
                     .collect();
-            json!({ "center": name, "caps": caps, "known": known })
+                // What `cap set` switches here, so a program need not know it.
+                let known: serde_json::Map<String, Value> =
+                    crate::descriptor::switchable(&cfg, entry)
+                        .into_iter()
+                        .map(|(cap, actions)| (cap, json!(actions)))
+                        .collect();
+                v["center"] = json!(name);
+                v["caps"] = json!(caps);
+                v["known"] = json!(known);
+            }
+            v
+        }
+        Cmd::Cap(CapCmd::Provider(ProviderCmd::Ls)) => {
+            let (cfg, _) = read_config(paths).await?;
+            let v = cap_listing(paths, &cfg).await?;
+            json!({"programs": v["programs"], "running": v["running"]})
         }
         Cmd::Config(ConfigCmd::Get { key }) => {
             let (cfg, _) = read_config(paths).await?;

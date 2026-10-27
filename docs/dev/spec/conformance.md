@@ -185,7 +185,11 @@ cannot send those; these have tests in `nerve-center`).
 closure pairs the node with the link it is handed, gives that center the
 settings grant `write`, allows the program that runs the part
 (`std::env::current_exe()`) in `providers.allowed` under `Setup::provider`,
-and starts the node; `Setup::socket` is its control socket. The part writes its
+and starts the node; `Setup::socket` is the socket the provider attaches on,
+and `Setup::attach` how that socket tells who asks: `Attach::Token`, the
+control socket with the token in `ctl.token` beside it, or `Attach::Peer`, the
+installed node's provider socket, which tells the caller by its peer
+credentials and takes no token (node-local §5). The part writes its
 own policy with `settings.set` (`user` mode and a deny rule for `echo.shout`
 before the provider comes, allow rules for `echo.say`, `echo.fail` and
 `echo.peek:/nerve-conformance/inside/*` once it is there) and attaches an
