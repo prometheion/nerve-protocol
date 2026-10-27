@@ -1677,24 +1677,27 @@ pub(crate) fn from_a_command(shared: &crate::daemon::Shared, pid: Option<u32>) -
 }
 
 /// [`from_a_command`] with its reason, for a program that asks to attach as
-/// a provider: one that runs with `no_new_privs` but below no command of the
-/// node is told so, since the owner may start a program of theirs that way
-/// (a unit's `NoNewPrivileges=`, a sandbox) and must know why it is refused.
+/// a provider, from what the node saw of it as its account
+/// (crate::provider::Seen: its process and parents in `chain`, and whether
+/// it runs with `no_new_privs`): one that runs with `no_new_privs` but below
+/// no command of the node is told so, since the owner may start a program
+/// of theirs that way (a unit's `NoNewPrivileges=`, a sandbox) and must
+/// know why it is refused.
 #[cfg(unix)]
 pub(crate) fn command_refusal(
     shared: &crate::daemon::Shared,
-    pid: Option<u32>,
+    chain: &[u32],
+    nnp: bool,
 ) -> Option<&'static str> {
-    let Some(pid) = pid else {
-        return Some(FROM_A_COMMAND);
-    };
-    if shared.below_command(Some(pid)) {
+    if shared.runs_any(chain) {
         return Some(FROM_A_COMMAND);
     }
     #[cfg(target_os = "linux")]
-    if keeps_no_new_privs(pid) {
+    if nnp {
         return Some(NO_NEW_PRIVS);
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = nnp;
     None
 }
 

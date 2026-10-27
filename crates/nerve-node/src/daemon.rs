@@ -1127,6 +1127,14 @@ impl Shared {
         }
     }
 
+    /// Whether one of `chain` (a process and its parents, as far as they
+    /// were read: crate::provider::Seen) is a command the node started for a
+    /// center: the process descends from it.
+    #[cfg(unix)]
+    pub fn runs_any(&self, chain: &[u32]) -> bool {
+        lock(&self.commands).keys().any(|c| chain.contains(c))
+    }
+
     /// What the last sync of the folders' ACLs left, on the installed Linux
     /// node (crate::acl): `status`'s `folder_grants`.
     pub fn folder_grants(&self) -> Value {
@@ -2017,6 +2025,7 @@ async fn answer(
                 uid: peer.uid,
                 pid: peer.pid,
                 pidfd: None,
+                refuse_commands: false,
             };
             crate::provider::attach(shared, req.params, caller).await
         }
@@ -3408,6 +3417,7 @@ mod tests {
             uid: crate::account::own_uid(),
             pid: Some(std::process::id()),
             pidfd: None,
+            refuse_commands: false,
         };
         s.stop.send_replace(true);
         let Reply::Err(e) = crate::provider::attach(&s, hello(), caller()).await else {

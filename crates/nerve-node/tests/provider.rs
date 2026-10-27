@@ -1845,3 +1845,43 @@ async fn cap_ls_lists_what_the_attached_programs_offer() {
     );
     daemon.stop().await;
 }
+
+/// The helper the installed node starts as root to tell which program of
+/// root asks (`__provider-check`, crate::provider::check_main): for a
+/// process its account may look at it says the program, whether it is the
+/// one allowed, whether it runs with no_new_privs, and its parents. The
+/// node reads exactly these keys; anything else refuses root's program.
+#[test]
+fn the_root_helper_says_what_a_process_runs() {
+    let node = env!("CARGO_BIN_EXE_nerve-node");
+    let ask = |args: &[&str]| -> Value {
+        let out = std::process::Command::new(node)
+            .arg("__provider-check")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        serde_json::from_slice(&out.stdout).expect("one JSON answer")
+    };
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let pid = child.id().to_string();
+    let sleep = std::fs::read_link(format!("/proc/{pid}/exe")).unwrap();
+    let v = ask(&[&pid, sleep.to_str().unwrap()]);
+    assert_eq!(v["running"], sleep.to_str().unwrap(), "{v}");
+    assert_eq!(v["same"], true, "{v}");
+    assert_eq!(v["nnp"], false, "{v}");
+    assert_eq!(v["chain"][0], child.id(), "{v}");
+    assert_eq!(v["chain"][1], std::process::id(), "{v}");
+    let v = ask(&[&pid, "/bin/sh"]);
+    assert_eq!(v["same"], false, "{v}");
+    let v = ask(&[&pid]);
+    assert!(
+        v["error"].as_str().is_some_and(|e| e.starts_with("usage:")),
+        "{v}"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+}

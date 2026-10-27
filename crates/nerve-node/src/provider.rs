@@ -422,12 +422,74 @@ fn same_program(running: &Path, allowed: &Path) -> Result<bool, String> {
     Ok(running == allowed)
 }
 
-/// The program `pid` runs, and whether it is the one `allowed` names, both
-/// as this thread sees the files.
-fn compare(pid: u32, allowed: &Path) -> Result<(PathBuf, bool), String> {
+/// What the node saw of the process that asks to attach, with the rights
+/// of the account it looked as.
+#[derive(Debug)]
+pub(crate) struct Seen {
+    /// The program it runs, as the kernel resolved it.
+    pub running: PathBuf,
+    /// Whether that is the program the owner allowed.
+    pub same: bool,
+    /// Whether it runs with `no_new_privs`, as every command of the node
+    /// does (crate::owner::command_refusal).
+    pub nnp: bool,
+    /// Its pid, then its parent's and so on up, as far as could be read.
+    pub chain: Vec<u32>,
+}
+
+/// What `pid` is ([`Seen`]), against the program `allowed` names, all as
+/// this thread sees the files: a check of whether it comes from a command
+/// that read less than the program's read would pass a command where
+/// `/proc` hides other accounts' processes (`hidepid`), so it is read with
+/// the same rights. A status that cannot be read refuses.
+fn look(pid: u32, allowed: &Path) -> Result<Seen, String> {
     let running = program_of(pid)?;
     let same = same_program(&running, allowed)?;
-    Ok((running, same))
+    #[cfg(target_os = "linux")]
+    let (nnp, chain) = (no_new_privs(pid)?, ancestry(pid));
+    #[cfg(not(target_os = "linux"))]
+    let (nnp, chain) = (false, vec![pid]);
+    Ok(Seen {
+        running,
+        same,
+        nnp,
+        chain,
+    })
+}
+
+/// Whether the process `pid` runs with `no_new_privs`, from its status. One
+/// the node cannot read is refused rather than taken for one without.
+#[cfg(target_os = "linux")]
+fn no_new_privs(pid: u32) -> Result<bool, String> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).map_err(|e| {
+        format!("refused: the node cannot tell how the program that asks runs: {e}")
+    })?;
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("NoNewPrivs:"))
+        .map(|v| v.trim() == "1")
+        .ok_or_else(|| "refused: the node cannot tell how the program that asks runs".into())
+}
+
+/// `pid` and its parents, up to the first one that cannot be read. One
+/// that cannot be read, as the account that asks, belongs to another
+/// account, and a process of a command never becomes another account's
+/// (`no_new_privs` keeps a setuid program from changing it), so no command
+/// of the node lies above it that the caller descends from.
+#[cfg(target_os = "linux")]
+fn ancestry(pid: u32) -> Vec<u32> {
+    let mut chain = vec![pid];
+    let mut p = pid;
+    while chain.len() < 256 {
+        match nerve_transport::ctl::parent_of(p) {
+            Some(pp) if pp != p && pp != 0 => {
+                chain.push(pp);
+                p = pp;
+            }
+            _ => break,
+        }
+    }
+    chain
 }
 
 /// Who asks to attach: the account and the process the kernel names for
@@ -437,6 +499,11 @@ pub(crate) struct Caller {
     pub uid: u32,
     pub pid: Option<u32>,
     pub pidfd: Option<std::os::fd::OwnedFd>,
+    /// Whether a process of a command the node runs, or one with
+    /// `no_new_privs`, is refused from what the node saw of it
+    /// (crate::owner::command_refusal): on the provider socket. The control
+    /// socket checks its callers itself.
+    pub refuse_commands: bool,
 }
 
 /// Why a program of root is refused where the node cannot tell which one
@@ -444,25 +511,20 @@ pub(crate) struct Caller {
 #[cfg(target_os = "linux")]
 const ROOT_UNTOLD: &str = "refused: the node cannot tell which program of root asks";
 
-/// The program `pid` of the account `uid` runs, and whether it is the one
-/// `allowed` names, looked at with that account's rights: the kernel shows
-/// a process's program only to its own account (or to a process that holds
-/// at least every right it holds), and `allowed` may lie where only that
-/// account may look. The node's own processes and a node of root look
+/// What the process `pid` of the account `uid` is ([`Seen`]), looked at
+/// with that account's rights: the kernel shows a process's program only to
+/// its own account (or to a process that holds at least every right it
+/// holds), where `/proc` is mounted `hidepid` its status and parents too,
+/// and `allowed` may lie where only that account may look. The node's own processes and a node of root look
 /// themselves. For another account the installed node takes its file ids
 /// (crate::account::FsAs). For root it starts `exe` as root to look
 /// ([`check_main`]), as it starts root's commands: the node itself holds
 /// too few rights to see a process of root's. Blocks.
 #[cfg(unix)]
-fn identify(
-    uid: u32,
-    pid: u32,
-    allowed: &Path,
-    exe: Option<&Path>,
-) -> Result<(PathBuf, bool), String> {
+fn identify(uid: u32, pid: u32, allowed: &Path, exe: Option<&Path>) -> Result<Seen, String> {
     let me = crate::account::own_uid();
     if me == 0 || uid == me {
-        return compare(pid, allowed);
+        return look(pid, allowed);
     }
     #[cfg(target_os = "linux")]
     {
@@ -480,7 +542,7 @@ fn identify(
             .ok_or_else(|| format!("refused: the node cannot look up the account uid {uid}"))?;
         let _as = crate::account::FsAs::new(&account)
             .map_err(|e| format!("refused: the node cannot look as {}: {e}", account.name))?;
-        compare(pid, allowed)
+        look(pid, allowed)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -494,11 +556,7 @@ fn identify(
 /// the socket gave its pidfd, an ended one refuses whatever was read: also
 /// a failed read, since a pid that is gone is no answer either. Blocks.
 #[cfg(unix)]
-fn read_caller(
-    caller: &Caller,
-    allowed: &Path,
-    exe: Option<&Path>,
-) -> Result<(PathBuf, bool), String> {
+fn read_caller(caller: &Caller, allowed: &Path, exe: Option<&Path>) -> Result<Seen, String> {
     let pid = caller
         .pid
         .ok_or("refused: the node cannot tell which process asks")?;
@@ -515,11 +573,11 @@ fn read_caller(
 pub const CHECK_ARG: &str = "__provider-check";
 
 /// Runs `exe` as root with [`CHECK_ARG`] for `pid` and `allowed`, and
-/// reads its answer. The child takes root's ids before its program starts,
+/// reads its answer ([`Seen`]). The child takes root's ids before its program starts,
 /// as a command of root does (crate::account::Switch), and so runs with
 /// root's rights; it gets nothing from the node's environment.
 #[cfg(target_os = "linux")]
-fn as_root(exe: &Path, pid: u32, allowed: &Path) -> Result<(PathBuf, bool), String> {
+fn as_root(exe: &Path, pid: u32, allowed: &Path) -> Result<Seen, String> {
     use std::os::unix::process::CommandExt;
     let switch = crate::account::Switch::new(&crate::account::root(), None, &[])
         .map_err(|e| format!("{ROOT_UNTOLD}: {e}"))?;
@@ -542,15 +600,31 @@ fn as_root(exe: &Path, pid: u32, allowed: &Path) -> Result<(PathBuf, bool), Stri
     if let Some(e) = v["error"].as_str() {
         return Err(e.to_string());
     }
-    match (v["running"].as_str(), v["same"].as_bool()) {
-        (Some(r), Some(same)) => Ok((PathBuf::from(r), same)),
-        _ => Err(format!("{ROOT_UNTOLD}: its helper did not answer")),
+    let untold = || format!("{ROOT_UNTOLD}: its helper did not answer");
+    let chain: Option<Vec<u32>> = v["chain"].as_array().and_then(|c| {
+        c.iter()
+            .map(|p| p.as_u64().and_then(|p| u32::try_from(p).ok()))
+            .collect()
+    });
+    match (
+        v["running"].as_str(),
+        v["same"].as_bool(),
+        v["nnp"].as_bool(),
+        chain,
+    ) {
+        (Some(r), Some(same), Some(nnp), Some(chain)) if !chain.is_empty() => Ok(Seen {
+            running: PathBuf::from(r),
+            same,
+            nnp,
+            chain,
+        }),
+        _ => Err(untold()),
     }
 }
 
 /// The helper [`as_root`] starts: `<CHECK_ARG> <pid> <allowed>` prints
-/// `{"running": path, "same": bool}`, or `{"error": text}`. The exit code
-/// is 0 either way.
+/// `{"running": path, "same": bool, "nnp": bool, "chain": [pid, …]}`
+/// ([`Seen`]), or `{"error": text}`. The exit code is 0 either way.
 pub fn check_main() -> i32 {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(2).collect();
     let answer = match (
@@ -559,10 +633,9 @@ pub fn check_main() -> i32 {
             .and_then(|p| p.parse::<u32>().ok()),
         args.get(1),
     ) {
-        (Some(pid), Some(allowed)) if args.len() == 2 => match compare(pid, Path::new(allowed)) {
-            Ok((running, same)) => {
-                json!({"running": running.to_string_lossy(), "same": same})
-            }
+        (Some(pid), Some(allowed)) if args.len() == 2 => match look(pid, Path::new(allowed)) {
+            Ok(seen) => json!({"running": seen.running.to_string_lossy(), "same": seen.same,
+                               "nnp": seen.nnp, "chain": seen.chain}),
             Err(e) => json!({"error": e}),
         },
         _ => json!({"error": format!("usage: {CHECK_ARG} <pid> <program>")}),
@@ -745,17 +818,25 @@ async fn check(
         .ok_or_else(|| format!("refused: providers.allowed names no provider {name}"))?
         .clone();
     let want = PathBuf::from(&allowed.exe);
-    let uid = caller.uid;
+    let (uid, refuse_commands) = (caller.uid, caller.refuse_commands);
     let looked = {
         let (want, exe) = (want.clone(), shared.exe.clone());
         tokio::task::spawn_blocking(move || read_caller(&caller, &want, exe.as_deref()))
             .await
             .map_err(|e| e.to_string())?
     };
-    let (running, same) = looked.map_err(|e| match e.starts_with("refused:") {
+    let Seen {
+        running,
+        same,
+        nnp,
+        chain,
+    } = looked.map_err(|e| match e.starts_with("refused:") {
         true => e,
         false => format!("refused: the provider {name}: {e}"),
     })?;
+    if refuse_commands && let Some(why) = crate::owner::command_refusal(shared, &chain, nnp) {
+        return Err(why.into());
+    }
     if !same {
         return Err(other_program(&name, &running, &want));
     }
@@ -1026,13 +1107,13 @@ pub(crate) async fn serve(
                             req.method
                         ));
                     }
-                    if let Some(why) = crate::owner::command_refusal(&s, peer.pid) {
-                        return Reply::Err(why.into());
-                    }
+                    // Below a command, or with no_new_privs: told from
+                    // what the node sees of the process as its account.
                     let caller = Caller {
                         uid: peer.uid,
                         pid: peer.pid,
                         pidfd,
+                        refuse_commands: true,
                     };
                     attach(&s, req.params, caller).await
                 }
@@ -1317,6 +1398,7 @@ mod tests {
             uid: crate::account::own_uid(),
             pid: Some(std::process::id()),
             pidfd: Some(ended_pidfd()),
+            refuse_commands: true,
         };
         assert_eq!(
             read_caller(&caller, &me, None).unwrap_err(),
@@ -1329,7 +1411,7 @@ mod tests {
             pidfd: Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) }),
             ..caller
         };
-        assert!(read_caller(&caller, &me, None).unwrap().1);
+        assert!(read_caller(&caller, &me, None).unwrap().same);
     }
 
     /// The provider socket tells the owner by a uid it looked up before:
@@ -1475,17 +1557,32 @@ mod tests {
     #[test]
     fn the_program_of_the_nodes_own_account_is_told_directly() {
         let me = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
-        let (running, same) =
-            identify(crate::account::own_uid(), std::process::id(), &me, None).unwrap();
-        assert_eq!((running.as_path(), same), (me.as_path(), true));
-        let (_, same) = identify(
+        let seen = identify(crate::account::own_uid(), std::process::id(), &me, None).unwrap();
+        assert_eq!((seen.running.as_path(), seen.same), (me.as_path(), true));
+        assert!(!seen.nnp);
+        assert_eq!(
+            seen.chain[..2],
+            [std::process::id(), std::os::unix::process::parent_id()]
+        );
+        let seen = identify(
             crate::account::own_uid(),
             std::process::id(),
             Path::new("/bin/sh"),
             None,
         )
         .unwrap();
-        assert!(!same);
+        assert!(!seen.same);
+    }
+
+    /// A process whose status the node cannot read is refused, not taken
+    /// for one without `no_new_privs`: where `/proc` hides it, a command's
+    /// process would pass.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_status_the_node_cannot_read_refuses() {
+        assert_eq!(no_new_privs(std::process::id()), Ok(false));
+        let e = no_new_privs(u32::MAX).unwrap_err();
+        assert!(e.starts_with("refused: the node cannot tell how"), "{e}");
     }
 
     #[cfg(target_os = "linux")]

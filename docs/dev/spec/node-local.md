@@ -1536,7 +1536,11 @@ connects, by its uid alone, so it holds a place only for that comparison
 most once a minute, off the connections); a process below a command of a center
 is refused as on the owner socket, and one with `no_new_privs` (every
 confined command keeps it) too, told so: `refused: this program runs with
-no_new_privs, …`. The provider socket takes `hello` only.
+no_new_privs, …`. The node reads the process's status and parents for that
+with the same rights it looks at its program with (below), so a `/proc`
+mounted `hidepid` hides nothing from it; a status it cannot read refuses
+(`refused: the node cannot tell how the program that asks runs`). The
+provider socket takes `hello` only.
 
 The provider sends one request, `hello`, with the control socket's token on
 a node run by hand (the provider socket takes none, and ignores one):
@@ -1562,7 +1566,8 @@ The node refuses it, with nothing attached, when:
   ids (`account::FsAs`) to read `/proc/<pid>/exe` and resolve the entry; for
   root, whose processes hold more rights than the node, it starts its own
   program as root (`nerve-node __provider-check <pid> <exe>`, its environment
-  cleared, as a command of root starts) to look, and refuses when it cannot
+  cleared, as a command of root starts; it prints the program, whether it is
+  the entry's, `no_new_privs` and the parents) to look, and refuses when it cannot
   (`refused: the node cannot tell which program of root asks`). It neither
   holds CAP_SYS_PTRACE nor skips the check. The provider socket takes the
   caller's pidfd as it accepts the connection (`SO_PEERPIDFD`, Linux 6.5); a
