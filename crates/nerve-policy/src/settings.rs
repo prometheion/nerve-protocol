@@ -1496,7 +1496,7 @@ mod tests {
         };
         let targets = [crate::decide::Target {
             path: file.into(),
-            write: true,
+            access: crate::decide::PathAccess::Write,
         }];
         let call = crate::decide::Call {
             cap: "fs",

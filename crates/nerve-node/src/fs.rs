@@ -10,8 +10,8 @@ use globset::{Glob, GlobMatcher};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use nerve_policy::Target;
 use nerve_policy::paths::{parse_device_path, resolve, to_wire};
+use nerve_policy::{PathAccess, Target};
 use nerve_proto::rpc::params;
 use nerve_proto::{ErrorCode, RpcError};
 
@@ -226,7 +226,11 @@ impl FsCall {
     pub fn targets(&self) -> Vec<Target> {
         vec![Target {
             path: self.path().real.clone(),
-            write: matches!(self, FsCall::Write { .. }),
+            access: if matches!(self, FsCall::Write { .. }) {
+                PathAccess::Write
+            } else {
+                PathAccess::Read
+            },
         }]
     }
 

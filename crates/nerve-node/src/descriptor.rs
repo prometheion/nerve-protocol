@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 
 use nerve_policy::config::{CapSetting, CenterPolicy, Folder, Mode, SettingsGrant};
-use nerve_policy::{CenterEntry, NodeConfig, rules};
+use nerve_policy::{CenterEntry, Need, NodeConfig, PathArgs, effect_rule, rules};
 use nerve_proto::descriptor::{
     Access, AccessMode, Action, Capability, Descriptor, Direction, Effect, EventDecl, Exposure,
     FolderAccess, NodeInfo, Software, StreamDecl, StreamKind,
@@ -475,19 +475,23 @@ fn exposure(entry: &CenterEntry, id: &str) -> Option<Exposure> {
     }
 }
 
-/// Whether the center is shown `cap.action`: not hidden, and in `allowlist`
-/// mode only when an allow rule covers it (any pattern, each call is still
-/// checked), and for `exec.run` also when the sudo allow list has an entry,
-/// since a sudo command runs by that list alone. In `folder` and `user` mode
-/// the allow rules do not count, so the action is offered, except `exec` in
-/// `folder` mode on a machine that cannot confine a command, and an action
-/// that senses or actuates (`exec.signal`), which no mode allows unless the
-/// owner set it to on. An action set to off stays, and fails `disabled`.
+/// Whether the center is shown `cap.action`: not hidden, and allowed for
+/// some call by the effect table ([`effect_rule`]), the one `decide` follows.
+/// In `allowlist` mode an allow rule must cover it (any pattern, each call is
+/// still checked), and for `exec.run` also when the sudo allow list has an
+/// entry, since a sudo command runs by that list alone. In `folder` and
+/// `user` mode the allow rules do not count, so the action is offered, except
+/// `exec` in `folder` mode on a machine that cannot confine a command (all of
+/// it: `exec.signal` too, though `decide` lets a call of it through when it is
+/// on, since no command can run there to signal; the one place outside the
+/// table), and an
+/// action that senses or actuates (`exec.signal`), which no mode allows unless
+/// the owner set it to on. An action set to off stays, and fails `disabled`.
 ///
-/// A provider's action (`provided`) is decided like the governed ones: in
-/// `allowlist` mode by the allow rules, sense and actuate only when on. It
-/// names no path, so no folder holds it: `folder` mode offers it only where
-/// the owner set it to on.
+/// `fs` and `exec.run` name their paths per call, so they are offered where
+/// a call with its paths in the folders is allowed. A provider's action
+/// (`provided`) names no path, so no folder holds it: `folder` mode offers it
+/// only where the owner set it to on.
 fn offered(
     policy: &CenterPolicy,
     view: View,
@@ -507,35 +511,34 @@ fn offered(
         Some(CapSetting::Off) => return true,
         _ => {}
     }
-    // Only the policy-governed capabilities are decided by rules and modes;
-    // `settings.pause` actuates as well and is no policy's business.
-    let governed = provided || matches!(cap, "fs" | "exec");
-    if by_rules
-        && governed
-        && mode != Mode::Allowlist
-        && matches!(effect, Effect::Sense | Effect::Actuate)
-        && setting != Some(CapSetting::On)
-    {
-        return false;
-    }
-    if by_rules && provided && mode == Mode::Folder && setting != Some(CapSetting::On) {
-        return false;
+    if !by_rules || !governed(cap) {
+        return true;
     }
     // Folder mode refuses every command it cannot confine, so it offers none;
     // a sudo command still runs by the sudo allow list.
-    if by_rules
-        && cap == "exec"
-        && mode == Mode::Folder
-        && !confined
-        && policy.sudo_allow.is_empty()
-    {
+    let sudo = cap == "exec" && action == "run" && !policy.sudo_allow.is_empty();
+    if cap == "exec" && mode == Mode::Folder && !confined && policy.sudo_allow.is_empty() {
         return false;
     }
-    if !by_rules || mode != Mode::Allowlist || !governed {
-        return true;
+    let paths = if provided {
+        PathArgs::None
+    } else {
+        PathArgs::Some {
+            all_in_folders: true,
+        }
+    };
+    match effect_rule(mode, effect, paths, setting) {
+        Need::Allowed => true,
+        Need::AllowRule => rules::offers(&policy.allow, cap, action) || sudo,
+        Need::InFolders | Need::NeedsOn | Need::Off => false,
     }
-    rules::offers(&policy.allow, cap, action)
-        || (cap == "exec" && action == "run" && !policy.sudo_allow.is_empty())
+}
+
+/// Whether the policy decides calls of `cap`: every capability but the
+/// node's own `node`, `settings` and `audit` (`settings.pause` actuates as
+/// well and is no policy's business).
+fn governed(cap: &str) -> bool {
+    !matches!(cap, "node" | "settings" | "audit")
 }
 
 /// What decides which actions a descriptor offers besides the policy.
@@ -628,7 +631,16 @@ impl Reach {
     /// folders: in allowlist mode as `nerve-run` they still hold the allowed
     /// commands, which the block does not tell.
     fn access(&self, windows: bool) -> Access {
-        let folder = self.mode == Mode::Folder;
+        // The folders hold a call only where the effect table holds its
+        // paths to them.
+        let folder = [Effect::Read, Effect::Write, Effect::Execute]
+            .into_iter()
+            .any(|e| {
+                let paths = PathArgs::Some {
+                    all_in_folders: false,
+                };
+                effect_rule(self.mode, e, paths, None) == Need::InFolders
+            });
         let within = |p: &str, b: &str| {
             if windows {
                 nerve_policy::paths::win::within(p, b)
@@ -834,9 +846,7 @@ fn build(
             }
         }
     }
-    caps.retain(|c| {
-        !((c.provider != "node" || matches!(c.id.as_str(), "fs" | "exec")) && c.actions.is_empty())
-    });
+    caps.retain(|c| !(governed(&c.id) && c.actions.is_empty()));
     let name = node_name(cfg);
     let platform = std::env::consts::OS.to_string();
     let mut d = Descriptor {
@@ -1129,6 +1139,47 @@ mod tests {
         );
     }
 
+    /// The one place outside the effect table: on a machine that cannot
+    /// confine a command, `folder` mode with an empty sudo allow list offers
+    /// no `exec` action, `exec.signal` set to on included, though `decide`
+    /// lets a call of it through (no command can run there to signal).
+    /// Confined, or with a sudo allow list, it is offered as `decide` allows.
+    #[test]
+    fn exec_signal_goes_with_exec_where_commands_cannot_be_confined() {
+        use nerve_policy::protected::{Platform, Protected};
+        use nerve_policy::{Call, Decision, Env, decide};
+        let home = std::path::Path::new("/h");
+        let prot = Protected::new(&Platform::Unix, home, &[], &Default::default());
+        let env = Env {
+            home,
+            protected: &prot,
+            unconfined: Some("commands cannot be confined here"),
+            sudo: false,
+            shell: nerve_policy::command::Shell::native(),
+        };
+        let call = Call {
+            cap: "exec",
+            action: "signal",
+            effect: Effect::Actuate,
+            targets: &[],
+            command: None,
+            cwd: None,
+            now_ms: 0,
+        };
+        let cfg = NodeConfig::default();
+        let mut e = entry();
+        e.policy.mode = Mode::Folder;
+        e.policy.caps.insert("exec.signal".into(), CapSetting::On);
+        assert_eq!(decide(&e.policy, &env, &call), Decision::Allow);
+        assert!(actions(&for_center(&cfg, &e, 0, false, &[]), "exec").is_empty());
+        let shown = |e: &CenterEntry, confined| {
+            actions(&for_center(&cfg, e, 0, confined, &[]), "exec").contains(&"signal".into())
+        };
+        assert!(shown(&e, true));
+        e.policy.sudo_allow = rules(&["sudo apt *"]);
+        assert!(shown(&e, false));
+    }
+
     /// A provider's capability with one action of `effect`.
     fn provided(effect: Effect) -> Capability {
         let mut c = cap("echo", "", Exposure::On, "Says it back.");
@@ -1233,6 +1284,197 @@ mod tests {
         let with = for_center(&cfg, &e, 0, true, &provided).rev;
         let without = for_center(&cfg, &e, 0, true, &[]).rev;
         assert_ne!(with, without);
+    }
+
+    /// What a center is shown follows the effect table, for every mode,
+    /// effect, setting, allow rule and confinement: a provider's action,
+    /// which names no path, exactly where `decide` lets a call of it
+    /// through; `fs.read`, `fs.write` and `exec.run` exactly where the table
+    /// allows a call with its paths in the folders, which `decide` then
+    /// allows, while it allows one outside them as the table says.
+    #[test]
+    fn what_is_offered_follows_the_effect_table() {
+        use Need::{AllowRule, Allowed, InFolders, NeedsOn, Off};
+        use nerve_policy::protected::{Platform, Protected};
+        use nerve_policy::{Call, Decision, Env, PathAccess, Target, decide};
+        let home = std::path::Path::new("/h");
+        let prot = Protected::new(&Platform::Unix, home, &[], &Default::default());
+        let env = |confined: bool| Env {
+            home,
+            protected: &prot,
+            unconfined: (!confined).then_some("commands cannot be confined here"),
+            sudo: false,
+            shell: nerve_policy::command::Shell::Sh,
+        };
+        let cfg = NodeConfig::default();
+        let effects = [
+            Effect::Read,
+            Effect::Write,
+            Effect::Execute,
+            Effect::Sense,
+            Effect::Actuate,
+        ];
+        let settings = [
+            None,
+            Some(CapSetting::On),
+            Some(CapSetting::Off),
+            Some(CapSetting::Hidden),
+        ];
+        // The policy for one row; its only folder `/w` allows everything.
+        let policy_of = |mode, key: &str, setting: Option<CapSetting>, allow: &[&str]| {
+            let mut e = entry();
+            e.policy.mode = mode;
+            e.policy.folders = vec![folder("/w", "rwx")];
+            e.policy.allow = rules(allow);
+            if let Some(s) = setting {
+                e.policy.caps.insert(key.into(), s);
+            }
+            e
+        };
+        // The table as policy-engine.md gives it: (mode, effect, no path,
+        // paths in the folders, a path outside).
+        #[rustfmt::skip]
+        let table = [
+            (Mode::Allowlist, Effect::Read, AllowRule, AllowRule, AllowRule),
+            (Mode::Allowlist, Effect::Write, AllowRule, AllowRule, AllowRule),
+            (Mode::Allowlist, Effect::Execute, AllowRule, AllowRule, AllowRule),
+            (Mode::Allowlist, Effect::Sense, AllowRule, AllowRule, AllowRule),
+            (Mode::Allowlist, Effect::Actuate, AllowRule, AllowRule, AllowRule),
+            (Mode::Folder, Effect::Read, NeedsOn, Allowed, InFolders),
+            (Mode::Folder, Effect::Write, NeedsOn, Allowed, InFolders),
+            (Mode::Folder, Effect::Execute, NeedsOn, Allowed, InFolders),
+            (Mode::Folder, Effect::Sense, NeedsOn, NeedsOn, NeedsOn),
+            (Mode::Folder, Effect::Actuate, NeedsOn, NeedsOn, NeedsOn),
+            (Mode::User, Effect::Read, Allowed, Allowed, Allowed),
+            (Mode::User, Effect::Write, Allowed, Allowed, Allowed),
+            (Mode::User, Effect::Execute, Allowed, Allowed, Allowed),
+            (Mode::User, Effect::Sense, NeedsOn, NeedsOn, NeedsOn),
+            (Mode::User, Effect::Actuate, NeedsOn, NeedsOn, NeedsOn),
+        ];
+        // The cell for a call, `on`, `off` and `hidden` applied; the table
+        // function agrees.
+        let need = |mode, effect, paths, setting| {
+            let (.., none, inside, outside) = *table
+                .iter()
+                .find(|(m, e, ..)| *m == mode && *e == effect)
+                .unwrap();
+            let cell = match paths {
+                PathArgs::None => none,
+                PathArgs::Some {
+                    all_in_folders: true,
+                } => inside,
+                PathArgs::Some {
+                    all_in_folders: false,
+                } => outside,
+            };
+            let cell = match (cell, setting) {
+                (_, Some(CapSetting::Off | CapSetting::Hidden)) => Off,
+                (NeedsOn, Some(CapSetting::On)) => Allowed,
+                (cell, _) => cell,
+            };
+            assert_eq!(effect_rule(mode, effect, paths, setting), cell);
+            cell
+        };
+        // Shown, and not marked off.
+        let shown_on = |d: &Descriptor, cap: &str, action: &str| {
+            d.capability(cap)
+                .and_then(|c| c.actions.get(action))
+                .is_some_and(|a| a.exposure != Some(Exposure::Off))
+        };
+        let mut rows = 0;
+        for mode in [Mode::Allowlist, Mode::Folder, Mode::User] {
+            for setting in settings {
+                for confined in [true, false] {
+                    // A provider's action: no path.
+                    for effect in effects {
+                        let provided = [provided(effect)];
+                        for allow in [&[][..], &["echo.say"], &["echo"], &["echo.other"]] {
+                            let e = policy_of(mode, "echo.say", setting, allow);
+                            let what = format!(
+                                "echo.say {effect:?} {mode:?} {setting:?} {allow:?} confined={confined}"
+                            );
+                            let d = for_center(&cfg, &e, 0, confined, &provided);
+                            let call = Call {
+                                cap: "echo",
+                                action: "say",
+                                effect,
+                                targets: &[],
+                                command: None,
+                                cwd: None,
+                                now_ms: 0,
+                            };
+                            let allowed =
+                                decide(&e.policy, &env(confined), &call) == Decision::Allow;
+                            assert_eq!(shown_on(&d, "echo", "say"), allowed, "{what}");
+                            let want = match need(mode, effect, PathArgs::None, setting) {
+                                Need::Allowed => true,
+                                Need::AllowRule => allow.len() == 1 && allow[0] != "echo.other",
+                                Need::InFolders | Need::NeedsOn | Need::Off => false,
+                            };
+                            assert_eq!(allowed, want, "{what}");
+                            rows += 1;
+                        }
+                    }
+                    // The built-in actions that name their paths per call.
+                    for (cap, action, effect) in [
+                        ("fs", "read", Effect::Read),
+                        ("fs", "write", Effect::Write),
+                        ("exec", "run", Effect::Execute),
+                    ] {
+                        let key = format!("{cap}.{action}");
+                        for allow in [&[][..], &[key.as_str()], &[cap], &["fs.stat"]] {
+                            let e = policy_of(mode, &key, setting, allow);
+                            let what =
+                                format!("{key} {mode:?} {setting:?} {allow:?} confined={confined}");
+                            let d = for_center(&cfg, &e, 0, confined, &[]);
+                            let covered = allow.len() == 1 && allow[0] != "fs.stat";
+                            let by_table = |all_in_folders| {
+                                let paths = PathArgs::Some { all_in_folders };
+                                match need(mode, effect, paths, setting) {
+                                    Allowed => confined || cap != "exec" || mode != Mode::Folder,
+                                    AllowRule => covered,
+                                    InFolders | NeedsOn | Off => false,
+                                }
+                            };
+                            assert_eq!(shown_on(&d, cap, action), by_table(true), "{what}");
+                            for (path, all_in_folders) in [("/w", true), ("/elsewhere", false)] {
+                                let access = match effect {
+                                    Effect::Write => PathAccess::Write,
+                                    Effect::Execute => PathAccess::Run,
+                                    _ => PathAccess::Read,
+                                };
+                                let path = if cap == "exec" {
+                                    path.to_string()
+                                } else {
+                                    format!("{path}/a")
+                                };
+                                let targets = [Target {
+                                    path: path.clone().into(),
+                                    access,
+                                }];
+                                let run = cap == "exec";
+                                let call = Call {
+                                    cap,
+                                    action,
+                                    effect,
+                                    targets: &targets,
+                                    command: run.then_some("make"),
+                                    cwd: run.then_some(std::path::Path::new(&path)),
+                                    now_ms: 0,
+                                };
+                                let allowed =
+                                    decide(&e.policy, &env(confined), &call) == Decision::Allow;
+                                assert_eq!(allowed, by_table(all_in_folders), "{what} at {path}");
+                            }
+                            rows += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // 3 modes × 4 settings × 2 confinements × (5 effects + 3 path
+        // actions) × 4 allow lists.
+        assert_eq!(rows, 3 * 4 * 2 * 8 * 4);
     }
 
     #[test]

@@ -164,6 +164,50 @@ provider](spec/node-local.md#7-capability-providers) adds, lies in no folder:
 it as it allows the node's own actions, and `allowlist` mode by an allow rule
 on `<cap>.<action>`.
 
+### The effect table
+
+What each mode lets an action do depends only on its effect and on whether it
+names paths. One function holds this table, `nerve_policy::effect_rule(mode,
+effect, paths, setting)`. Step 6 of `decide` follows it, and the descriptor
+offers an action by it, so the two cannot drift apart. One thing lies outside
+the table: on a machine that cannot confine a command, `folder` mode with an
+empty sudo allow list offers no `exec` action, so `exec.signal` set to `on` is
+not shown there, though `decide` would allow a call of it. No command can run
+there, so there is nothing to signal.
+
+| Effect | `allowlist` | `folder` | `user` |
+|---|---|---|---|
+| `read`, `write`, `execute` with paths | an allow rule | every path in a folder with the matching flag (for `execute` also the working directory in one with `x`) | allowed |
+| `read`, `write`, `execute` without a path | an allow rule | `on` | allowed |
+| `sense`, `actuate` | an allow rule | `on` | `on` |
+
+- `paths` is `PathArgs::None` for an action with no path, no working directory
+  and no command, else `PathArgs::Some { all_in_folders }`.
+- The answer is a `Need`: `Allowed`; `AllowRule`, when the allow rules decide;
+  `InFolders`, when a path lies outside the folders; `NeedsOn`, when only
+  the owner's `on` allows it and it is not set; or `Off`, when the action is
+  set to `off` or `hidden`.
+- `on` turns `NeedsOn` into `Allowed` and changes no other cell. It never
+  widens what the folders refuse. `off` and `hidden` turn every cell into
+  `Off`.
+- Around the table, `off` and `hidden` (step 3, before the table is asked),
+  deny rules (step 5) and protected paths (step 7) win as before. A sudo command goes by the sudo list
+  instead. In `folder` mode a command also needs confinement.
+
+Each path of a call is a `Target` with an access: `Read` needs `r`, `Write`
+needs `w`, and `Run` needs `x`. `Run` is the working directory of `exec.run`.
+The same access picks the protected check: a `Run` target is released only by
+a folder with `x`. A command's working directory is held to `x` whatever
+access its call gives that path.
+
+For the descriptor, `fs` and `exec.run` ask the table with
+`all_in_folders: true`, since they name their paths per call: they are
+offered where a call with its paths in the folders would be allowed. A
+provider's action asks with `PathArgs::None`. `node`, `settings` and `audit`
+are not governed by the policy and are always offered. The test
+`what_is_offered_follows_the_effect_table` (nerve-node `descriptor.rs`) runs
+every mode, effect, setting, allow rule and confinement against `decide`.
+
 ## Protected paths
 
 Protected paths apply to the file actions and to a command's working directory,
@@ -475,8 +519,9 @@ password.
 
 ## What a center is shown
 
-The descriptor follows the same policy ([capabilities](capabilities.md)).
-`list` offers only an action a call could get through.
+The descriptor follows the same policy ([capabilities](capabilities.md)),
+through the same [effect table](#the-effect-table). `list` offers only an
+action a call could get through.
 
 The descriptor also says what the policy lets this center do now
 ([spec/protocol.md](spec/protocol.md) §6.2): the mode in force and when it
