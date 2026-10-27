@@ -90,3 +90,17 @@ pub(crate) mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod names {
+    /// The names the center keeps for itself and from the agent are names
+    /// no program and no capability of a node's config may take
+    /// (nerve_policy::config::BUILT_IN), so none of theirs is ever left out
+    /// or shadowed for its name.
+    #[test]
+    fn the_centers_own_names_are_built_in_on_every_node() {
+        for name in super::CENTER_CAPS.iter().chain(&super::RESERVED_CAPS) {
+            assert!(nerve_policy::config::BUILT_IN.contains(name), "{name}");
+        }
+    }
+}

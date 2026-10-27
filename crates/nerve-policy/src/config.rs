@@ -15,6 +15,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::paths::within;
 
+mod capability;
+pub use capability::{
+    BUILT_IN, ConfigCapability, MAX_CAPABILITIES, Output, Platform, RunsAs, validate_all,
+};
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeConfig {
@@ -44,6 +49,10 @@ pub struct NodeConfig {
     /// control socket. Only the owner sets it.
     #[serde(default, skip_serializing_if = "Providers::is_empty")]
     pub providers: Providers,
+    /// The capabilities the owner declares here (`[[capability]]`), each
+    /// one action that runs a fixed command (docs/user/config-capabilities.md).
+    #[serde(default, rename = "capability", skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<ConfigCapability>,
     #[serde(default, rename = "center", skip_serializing_if = "Vec::is_empty")]
     pub centers: Vec<CenterEntry>,
 }
@@ -1170,6 +1179,7 @@ impl NodeConfig {
                 ));
             }
         }
+        validate_all(&self.capabilities, self.limits.max_timeout_secs)?;
         self.relay.validate()?;
         let mut names = std::collections::BTreeSet::new();
         for c in &mut self.centers {

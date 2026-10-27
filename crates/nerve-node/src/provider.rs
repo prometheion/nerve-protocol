@@ -37,10 +37,9 @@ use crate::daemon::Shared;
 use crate::daemon::lock;
 
 /// The capabilities and profiles that are the node's own, and the ones the
-/// center serves itself on every node (`job`, `stream`): a provider may not
-/// take their names, so no call meant for them reaches it, and a center
-/// never leaves its capability out for the name.
-pub const BUILT_IN: &[&str] = &["node", "fs", "exec", "settings", "audit", "job", "stream"];
+/// center serves itself on every node: a provider may not take their names
+/// (nor a capability of the config).
+pub use nerve_policy::config::BUILT_IN;
 
 /// How many capabilities one provider may add, and actions one capability
 /// may have: far past what a program offers, and a bound on what every
