@@ -1700,6 +1700,7 @@ pub(crate) fn command_refusal(
 
 /// Why the node refuses a program that runs with `no_new_privs` and below
 /// none of its commands.
+#[cfg(target_os = "linux")]
 pub(crate) const NO_NEW_PRIVS: &str = "refused: this program runs with no_new_privs, as every command the node runs for a center does, so the node cannot tell it from one; start it without no_new_privs (no NoNewPrivileges= in its unit, no sandbox that sets it)";
 
 #[cfg(windows)]

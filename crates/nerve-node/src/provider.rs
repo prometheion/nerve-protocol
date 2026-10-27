@@ -33,7 +33,6 @@ use nerve_proto::descriptor::{Action, Capability, Effect, Exposure, bad_member_n
 use nerve_proto::schema::{self, Role};
 use nerve_proto::{ErrorCode, RpcError};
 
-#[cfg(unix)]
 use crate::daemon::Shared;
 use crate::daemon::lock;
 
