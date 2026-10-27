@@ -1311,6 +1311,21 @@ async fn cap_add_warns_as_the_node_judges_from_where_it_starts() {
     .unwrap();
     assert_eq!(asked["refusal"], Value::Null, "{asked}");
     daemon.stop().await;
+    // Nor does the CLI while no node runs.
+    let said = cli(
+        &paths,
+        &[
+            "cap",
+            "edit",
+            "win.ip",
+            "--",
+            "no-such-program-b5.exe",
+            "/renew",
+        ],
+    )
+    .await;
+    assert!(said.contains("for windows only"), "{said}");
+    assert!(!said.contains("Warning: win.ip"), "{said}");
 }
 
 /// A command that runs as the owner and whose program is in no folder of
