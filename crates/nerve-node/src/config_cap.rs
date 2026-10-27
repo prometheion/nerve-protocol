@@ -122,6 +122,55 @@ pub fn confined(
     policy
 }
 
+/// Why the command of `decl`, which runs with the owner's rights, may not
+/// run: its program (looked up in `path`, the `PATH` it runs with, where it
+/// is a bare name) or a fixed element that is a full path lies at or below a
+/// folder of `writable`, where a center's commands may write. A center could
+/// put its own code there (the program, a script, a Makefile) and have it
+/// run as the owner. Each is looked at where it leads, so a link out of
+/// such a folder counts too. The call's arguments are judged by the gate.
+pub fn written_by_centers(
+    decl: &ConfigCapability,
+    writable: &[std::path::PathBuf],
+    path: Option<&std::ffi::OsStr>,
+) -> Option<String> {
+    use std::path::{Path, PathBuf};
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let folders: Vec<PathBuf> = writable.iter().map(|f| real(f)).collect();
+    let program = decl.command.first()?;
+    let found = if program.contains('/') {
+        Some(PathBuf::from(program))
+    } else {
+        path.and_then(|p| {
+            std::env::split_paths(p)
+                .map(|d| d.join(program))
+                .find(|f| f.is_file())
+        })
+    };
+    let fixed = decl.command[1..]
+        .iter()
+        .filter(|e| !(e.starts_with('{') && e.ends_with('}')) && e.starts_with('/'))
+        .map(PathBuf::from);
+    for place in found.into_iter().chain(fixed) {
+        // Where it leads, and as it is written: a file not there yet may
+        // still be put there.
+        for seen in [real(&place), place.clone()] {
+            if let Some(f) = folders
+                .iter()
+                .find(|f| nerve_policy::paths::within(&seen, f))
+            {
+                return Some(format!(
+                    "{} runs as the owner and its command names {}, which lies in {}, where a center may write: that center's code would run with the owner's rights",
+                    decl.name,
+                    place.display(),
+                    f.display()
+                ));
+            }
+        }
+    }
+    None
+}
+
 /// The config's entry for `cap.action`.
 pub fn find<'a>(cfg: &'a NodeConfig, cap: &str, action: &str) -> Option<&'a ConfigCapability> {
     cfg.capabilities.iter().find(|c| c.split() == (cap, action))
@@ -295,6 +344,64 @@ account = "owner"
         let own = confined(&policy, false, Some(home));
         assert_eq!(own.folders, crate::account::built_in(home));
         assert!(confined(&policy, false, None).folders.is_empty());
+    }
+
+    /// An owner's command whose program, script or other fixed path lies
+    /// where a center may write is refused, also through `PATH` or a link;
+    /// one that names only places outside, or takes its path from the call,
+    /// is not.
+    #[cfg(unix)]
+    #[test]
+    fn an_owners_command_may_not_name_what_a_center_writes() {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let (work, bin, other) = (root.join("work"), root.join("work/bin"), root.join("other"));
+        for f in [&bin, &other] {
+            std::fs::create_dir_all(f).unwrap();
+        }
+        std::fs::write(work.join("deploy.sh"), "true\n").unwrap();
+        std::fs::write(bin.join("tool-b5"), "true\n").unwrap();
+        std::fs::write(other.join("safe.sh"), "true\n").unwrap();
+        std::os::unix::fs::symlink(work.join("deploy.sh"), other.join("link.sh")).unwrap();
+        let path = std::env::join_paths([&other, &bin]).unwrap();
+        let decl = |command: &[&str]| ConfigCapability {
+            name: "proj.deploy".into(),
+            summary: String::new(),
+            effect: nerve_proto::descriptor::Effect::Execute,
+            command: command.iter().map(|s| s.to_string()).collect(),
+            params: Value::Null,
+            result: Output::Text,
+            timeout_secs: None,
+            account: RunsAs::Owner,
+            platform: Default::default(),
+        };
+        let w = std::slice::from_ref(&work);
+        let s = |p: &std::path::Path| p.display().to_string();
+        for bad in [
+            vec!["sh".to_string(), s(&work.join("deploy.sh"))],
+            vec![s(&work.join("deploy.sh"))],
+            vec!["make".into(), "-C".into(), s(&work)],
+            vec!["tool-b5".into()],
+            vec!["sh".into(), s(&other.join("link.sh"))],
+            // Not there yet: a center may put it there.
+            vec!["sh".into(), s(&work.join("later.sh"))],
+        ] {
+            let c = decl(&bad.iter().map(String::as_str).collect::<Vec<_>>());
+            let why = written_by_centers(&c, w, Some(&path));
+            assert!(
+                why.as_ref()
+                    .is_some_and(|y| y.contains("where a center may write")),
+                "{bad:?}: {why:?}"
+            );
+        }
+        for good in [
+            vec!["sh".to_string(), s(&other.join("safe.sh"))],
+            vec!["id".into()],
+            vec!["cat".into(), "--".into(), "{path}".into()],
+        ] {
+            let c = decl(&good.iter().map(String::as_str).collect::<Vec<_>>());
+            assert_eq!(written_by_centers(&c, w, Some(&path)), None, "{good:?}");
+        }
     }
 
     #[test]

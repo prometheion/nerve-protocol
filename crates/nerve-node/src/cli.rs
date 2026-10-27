@@ -2157,11 +2157,14 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             })
             .await?;
             w(out, format!("capability {name} added: {}", cap_line(&c)));
+            let (cfg, _) = read_config(&paths).await?;
+            let installed = crate::service::is_service_node(&paths);
             let notes = CapNotes {
-                installed: crate::service::is_service_node(&paths),
+                installed,
                 root: runs_as_root(&paths),
                 held: held.into_inner().unwrap(),
                 programs,
+                written: written_by_centers(&cfg, &c, installed),
             };
             for note in notes.of(&c) {
                 w(out, note);
@@ -2207,11 +2210,13 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                 .find(|d| d.name == name)
                 .ok_or_else(|| format!("no capability {name} is declared"))?;
             w(out, format!("capability {name} changed: {}", cap_line(c)));
+            let installed = crate::service::is_service_node(&paths);
             let notes = CapNotes {
-                installed: crate::service::is_service_node(&paths),
+                installed,
                 root: runs_as_root(&paths),
                 held: held.into_inner().unwrap(),
                 programs: Vec::new(),
+                written: written_by_centers(&cfg, c, installed),
             };
             for note in notes.of(c) {
                 w(out, note);
@@ -3679,6 +3684,26 @@ fn runs_as_root(paths: &NodePaths) -> bool {
     }
 }
 
+/// Why the node refuses calls of `c` now, as `crate::config_cap::
+/// written_by_centers` judges it: it runs as the owner and names a place a
+/// center may write (the `w` folders of `cfg`, `/tmp`, `/var/tmp`, and on the
+/// installed node `nerve-run`'s home). Looked at as this process can.
+fn written_by_centers(
+    cfg: &NodeConfig,
+    c: &nerve_policy::config::ConfigCapability,
+    installed: bool,
+) -> Option<String> {
+    if c.account != nerve_policy::config::RunsAs::Owner {
+        return None;
+    }
+    let mut writable = crate::exec::write_folders(cfg, &crate::paths::home_dir());
+    writable.extend([PathBuf::from("/tmp"), PathBuf::from("/var/tmp")]);
+    if installed {
+        writable.push(crate::account::RUN_HOME.into());
+    }
+    crate::config_cap::written_by_centers(c, &writable, std::env::var_os("PATH").as_deref())
+}
+
 /// What the owner should know of a capability once `cap add` or `cap edit`
 /// declared it.
 struct CapNotes {
@@ -3690,6 +3715,8 @@ struct CapNotes {
     held: Vec<String>,
     /// The programs that offered its capability and are let go.
     programs: Vec<String>,
+    /// Why the node refuses its calls ([`written_by_centers`]).
+    written: Option<String>,
 }
 
 impl CapNotes {
@@ -3708,6 +3735,11 @@ impl CapNotes {
             notes.push(format!(
                 "Warning: root is the owner here, so {} runs as root: anything on this machine, Nerve and its keys included",
                 c.name
+            ));
+        }
+        if let Some(why) = &self.written {
+            notes.push(format!(
+                "Warning: {why}; the node refuses its calls while that holds"
             ));
         }
         if c.summary.is_empty() {
@@ -9783,6 +9815,54 @@ mod tests {
         }
     }
 
+    /// `cap add` and `cap edit` warn of a command that runs as the owner and
+    /// names a place a center may write: the node refuses its calls.
+    #[cfg(unix)]
+    #[test]
+    fn an_owners_command_where_a_center_writes_is_warned_of() {
+        let (d, paths) = setup(&["lab"]);
+        let work = std::fs::canonicalize(d.path()).unwrap().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let mut cfg = load(&paths);
+        cfg.centers[0].policy.folders = vec![Folder {
+            path: work.display().to_string(),
+            access: Access::parse("rw").unwrap(),
+        }];
+        cfg.save(&paths.config_file()).unwrap();
+        let script = work.join("deploy.sh").display().to_string();
+        let warning = "Warning: proj.deploy runs as the owner and its command names";
+        let said = run(
+            &paths,
+            &[
+                "cap",
+                "add",
+                "proj.deploy",
+                "--effect",
+                "execute",
+                "--account",
+                "owner",
+                "--",
+                "sh",
+                &script,
+            ],
+        )
+        .unwrap();
+        assert!(said.contains(warning), "{said}");
+        // As nerve-run, held like that account's commands, it is not.
+        let said = run(
+            &paths,
+            &["cap", "edit", "proj.deploy", "--account", "nerve-run"],
+        )
+        .unwrap();
+        assert!(!said.contains(warning), "{said}");
+        let said = run(
+            &paths,
+            &["cap", "edit", "proj.deploy", "--account", "owner"],
+        )
+        .unwrap();
+        assert!(said.contains(warning), "{said}");
+    }
+
     /// What `cap add` and `cap edit` tell the owner besides: that an
     /// owner's capability runs as root where root is the owner, that one
     /// with no summary shows the agent no description, and which programs
@@ -9806,6 +9886,7 @@ mod tests {
                 root,
                 held: Vec::new(),
                 programs: vec!["desk".into()],
+                written: None,
             }
             .of(c)
             .join("\n")

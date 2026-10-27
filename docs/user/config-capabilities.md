@@ -97,7 +97,15 @@ says how), and the program gets it as the node resolved it.
 A capability that runs as `nerve-run` is a command of that account: it reads
 a path outside the folders only where `nerve-run` may read it, never your
 files closed to others nor the node's own. Choose `owner` only for a command
-that needs your rights; it can do whatever you can. A node you run yourself
+that needs your rights; it can do whatever you can.
+
+A command that runs as you must not run what a center may write: a center
+with `w` on a folder could put its own code there and have it run with your
+rights. So the node refuses its calls while its program, or a full path in its
+command (a script it runs, a folder it works in), lies in a `w` folder of any
+center, in `/tmp` or `/var/tmp`, or in `nerve-run`'s home; `cap add` warns of
+it. Keep what such a command reads on its own (its configuration, a Makefile)
+out of those folders too: the node cannot see what a program reads. A node you run yourself
 has no `nerve-run`: it offers only capabilities with `account = "owner"`, run
 as you.
 

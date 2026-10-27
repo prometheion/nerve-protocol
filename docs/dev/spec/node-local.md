@@ -573,14 +573,23 @@ A call is decided like a provider's (§7, Paths), then runs:
 | `nerve-run` | `nerve-run`, its home | as `nerve-run`, with the pairing's folders and, where the pairing's commands run as `nerve-run`, its built-in ones; a read outside them by `nerve-run`'s own access; the link walk as that account | Landlock where present: the pairing's folders and the built-ins where its commands run as `nerve-run`, else the built-ins alone (§1, Commands) |
 | `owner` | the owner (root where root is the owner), the owner's home; a node by hand: its own user | as a program's (§7): the granted folders only, as the pairing's command account, closed folders refusing the walk | none |
 
+An `owner` one is refused `forbidden` (and audited so) before the gate when
+its program (looked up in the node's `PATH` where it is a bare name) or a fixed
+element that is an absolute path lies, as written or where it leads (looked at
+as the owner), at or below a place a center's commands may write: a `w` folder
+of any center, `/tmp`, `/var/tmp`, `nerve-run`'s home. `cap add` and `cap edit`
+warn of it.
+
 Both count toward `limits.max_running`, run in a cgroup of their own with the
 default `limits.command`, and end at `timeout_secs` (else
 `limits.default_timeout_secs`, at most the maximum): `timeout` "<name> ran
-past its limit of …". The result is stdout as a string (`text`; cut output
+past its limit of …". The result is stdout as a string (`text`; cut stdout
 ends with a note), or stdout parsed as JSON and validated against the result
-schema (`io` when it is not; `too_large` when cut). An exit code other than 0,
-a signal or a memory kill is an `io` error naming it, with `data.exit_code`
-and `data.stderr` (the first 16 KiB).
+schema (`io` when it is not; `too_large` when stdout was cut; stderr past the
+cap cuts neither). An exit code other than 0, a signal or a memory kill
+(whatever the exit code; audited `killed`/`memory` as for `exec.run`) is an
+`io` error naming it, with `data.exit_code` and `data.stderr` (the first 16
+KiB).
 
 ### Commands
 

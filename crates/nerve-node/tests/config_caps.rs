@@ -307,6 +307,56 @@ fn sleeping(arg: &str) -> bool {
     })
 }
 
+/// A command that runs as the owner may not run what a center may write:
+/// a script in a `w` folder would be that center's code with the owner's
+/// rights. It is refused and in the audit, and nothing of it runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owners_command_in_a_folder_a_center_writes_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let ran = root.join("ran");
+    std::fs::write(work.join("deploy.sh"), format!("touch {}\n", ran.display())).unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let deploy = ConfigCapability {
+        command: vec!["sh".into(), work.join("deploy.sh").display().to_string()],
+        ..cap(r#"name = "proj.deploy"
+effect = "execute"
+command = ["sh"]
+account = "owner""#)
+    };
+    let folder = nerve_policy::config::Folder {
+        path: work.display().to_string(),
+        access: nerve_policy::config::Access::parse("rw").unwrap(),
+    };
+    let daemon = node(&root, &center, vec![deploy], |p| {
+        p.mode = nerve_policy::Mode::Folder;
+        p.folders = vec![folder.clone()];
+        p.caps.insert("proj.deploy".into(), CapSetting::On);
+    })
+    .await;
+    let mut conn = linked(&mut center).await;
+    let e = invoke(&mut conn, "proj.deploy", json!({}))
+        .await
+        .unwrap_err();
+    assert_eq!(code_of(&e), "forbidden", "{}", e.message);
+    assert!(
+        e.message.contains("where a center may write"),
+        "{}",
+        e.message
+    );
+    assert!(!ran.exists(), "the script did not run");
+    let entries = audited(daemon.paths(), "proj");
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["decision"] == "forbidden" && e["target"] == "proj.deploy"),
+        "{entries:?}"
+    );
+    daemon.stop().await;
+}
+
 /// A command past its `timeout_secs` is killed and its call fails
 /// `timeout`, naming its own limit.
 #[tokio::test(flavor = "multi_thread")]

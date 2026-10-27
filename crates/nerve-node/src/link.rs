@@ -2595,6 +2595,32 @@ impl Link {
         let (args, targets, named, target) =
             self.marked_paths(inv, &params, &marked, known.as_ref())?;
         let argv = decl.argv(&args).map_err(RpcError::invalid_args)?;
+        // With the owner's rights it may not run what a center may write:
+        // the `w` folders of every center and `nerve-run`'s own. Looked at
+        // as the owner, who may look into them.
+        if as_owner {
+            let mut writable = exec::write_folders(cfg, &self.shared.rules_home(cfg));
+            writable.extend(match self.shared.run_account(cfg) {
+                Ok(Some(a)) => crate::account::built_in(&a.home)
+                    .into_iter()
+                    .map(|f| f.path.into())
+                    .collect(),
+                _ => vec!["/tmp".into(), "/var/tmp".into()],
+            });
+            let why = {
+                let owner = runs_as.as_ref().ok().cloned().flatten();
+                let _as = act_as(owner.as_ref()).ok().flatten();
+                crate::config_cap::written_by_centers(
+                    &decl,
+                    &writable,
+                    std::env::var_os("PATH").as_deref(),
+                )
+            };
+            if let Some(why) = why {
+                self.audit(inv, &target, "forbidden", Some("forbidden"), Some(&why));
+                return Err(RpcError::new(ErrorCode::Forbidden, why));
+            }
+        }
         // A program of the owner's account: the link walk refuses a folder
         // it may not look into, where the owner may.
         let program = as_owner.then(|| {
