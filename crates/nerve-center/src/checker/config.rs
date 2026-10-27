@@ -372,11 +372,11 @@ impl CheckerConfig {
 /// The default threshold and timeout are d1-3B's (the default model); a
 /// switch to Kev-4B sets that model's own (`install::model_pin`).
 fn default_threshold() -> f64 {
-    0.8
+    0.85
 }
 
 fn default_timeout_ms() -> u64 {
-    4000
+    6000
 }
 
 /// The question's default instructions, tuned on the evaluation
@@ -1299,14 +1299,14 @@ mod tests {
         assert!(c.model_on);
         assert_eq!(c.model.source, ModelSource::Local);
         assert_eq!(c.model.local_model, LocalModel::Kev4b);
-        assert_eq!(c.model.threshold, 0.5);
+        assert_eq!(c.model.threshold, 0.25);
         assert!(c.model.timeout_ms >= 10_000);
         c.model.threshold = 0.6;
         c.local_installed(true, LocalModel::Kev4b);
         assert_eq!(c.model.threshold, 0.6, "the owner's threshold stays");
         assert!(c.model.local_gpu);
         c.local_installed(false, LocalModel::D1_3b);
-        assert_eq!((c.model.threshold, c.model.timeout_ms), (0.8, 4000));
+        assert_eq!((c.model.threshold, c.model.timeout_ms), (0.85, 6000));
 
         // The first local install, coming from an endpoint whose threshold and
         // timeout were the endpoint's, takes the model's own (review r2,
@@ -1316,7 +1316,19 @@ mod tests {
         e.model.threshold = 0.5;
         e.model.timeout_ms = 1000;
         e.local_installed(false, LocalModel::D1_3b);
-        assert_eq!((e.model.threshold, e.model.timeout_ms), (0.8, 4000));
+        assert_eq!((e.model.threshold, e.model.timeout_ms), (0.85, 6000));
+    }
+
+    /// The config a fresh center starts with, and a stored model section
+    /// without a threshold or timeout, take the default model's measured ones.
+    #[test]
+    fn the_default_threshold_is_the_default_models() {
+        let pin = crate::checker::install::model_pin(LocalModel::default());
+        assert_eq!(ModelConfig::default().threshold, pin.threshold);
+        assert_eq!(ModelConfig::default().timeout_ms, pin.timeout_ms);
+        let stored: ModelConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(stored.threshold, pin.threshold);
+        assert_eq!(stored.timeout_ms, pin.timeout_ms);
     }
 
     /// An install switches the model on for every node only when nothing has

@@ -78,6 +78,29 @@ Entries are in the machine's own rule syntax, `<scope>:<pattern>`:
 - `exec.run:rm -rf /*` — a command. The program (in any letter case), then
   the flags that must be present, then an operand pattern.
 - `fs.write:/etc/sudoers` — a write to a path. `~` stands for any user's home.
+  `fs.read:` holds a read of a path, `fs:` both. These entries also hold the
+  paths of every other capability: an argument a program marks as a path it
+  reads or writes ([providers](providers.md#paths-it-takes)) is matched like
+  an `fs.read` or `fs.write` call's path, so `fs.write:~/.ssh/authorized_keys`
+  also refuses a notes program's `notes.save` into that file. So does an
+  `exec.run` command whose working folder (`cwd`) an `fs.read:` entry names,
+  and `fs.read:` entries hold `fs.grep`, `fs.find`, `fs.list` and `fs.stat`
+  as they hold `fs.read`. A folder handed over (to `fs.grep`, `fs.find` or
+  `fs.list`, or as the working folder) meets an entry as something in it
+  would, so `fs.read:/srv/secret/*` holds a walk of `/srv/secret` itself; a
+  walk from a folder above it (`/srv`) is not held. Only the blocklist does
+  this: an allow rule `fs.write:~/notes/*` skips the model for `fs.write`
+  calls only, not for a program's `notes.save` into that folder.
+- `lamp.set`, or `lamp` for all its actions — any other capability, named
+  whole. A pattern after it (`lamp.set:office`) is refused for now: it would
+  have nothing to match until rules on a capability's arguments come.
+  `exec:rm *` is refused too; a command pattern goes on `exec.run`
+  (`exec.run:rm *`). The page warns about your own entries and allow rules
+  that name a capability no paired machine offers, such as a misspelt one:
+  they match no call. An `fs` path entry of the blocklist is not listed while
+  some program on a machine takes paths, since it holds those; an allow rule
+  for `fs` is listed unless the machine offers `fs`, since it never
+  skips the model for a program's call.
 - `cmd-re:` for a regular expression over **each command** of the line, e.g.
   `exec.run:cmd-re:^terraform destroy( |$)`. The checker pulls the commands
   apart (see below) and writes each one as `program arg1 arg2 …`: the
@@ -134,8 +157,15 @@ mentions one of them is not refused. One exception: a shell's quoted `-c` body
 the shell's name stands, so a note that writes out such a whole line, shell and
 quotes included, is refused too.
 
-The matcher does not just look at the raw string. For a command it splits the
-line into its commands (at `;`, `&&`, `||`, `|`, newlines, inside `$( )`,
+The matcher does not just look at the raw string. It reads a command line
+twice, and a command either reading finds counts. The first is the parser the
+machine's own guard reads commands with
+([rules](rules.md#the-guard-against-changing-the-node)), which also sees
+the command behind `timeout`, `runuser`, `env -S`, `su -c`, `eval`,
+`busybox`, cmd's `call` and `if`, and PowerShell's `Invoke-Expression` of a
+quoted command. The second is the checker's own simpler splitter, which keeps
+what the parser reads differently or cannot read. It splits the line into its
+commands (at `;`, `&&`, `||`, `|`, newlines, inside `$( )`,
 backticks and `sh -c '…'` / `cmd /c` / `powershell -Command` bodies), strips
 wrappers (`sudo`, `env A=B`, `nohup`, `time`, `nice`, `xargs`, …), reads the
 program that `Start-Process` (also with `-Verb RunAs`) or `start` runs as a
@@ -206,6 +236,10 @@ Allow rules are the same syntax, saved for every machine or for one machine. A
 call that matches one skips the decision model and goes to the machine. It does
 not skip the blocklist: the blocklist is a hard deny, so to let something
 through that the blocklist caught, remove or switch off the blocklist entry.
+A rule matches the commands the checker's own splitter finds in a line, not
+those only the guard's parser sees behind `timeout`, `eval` and the like, so
+`exec.run:make *` does not cover `timeout 600 make test` and the model still
+judges it.
 
 The Audit page has **Allow** and **Allow as wildcard** buttons on a model
 refusal, which save an allow rule for that machine for you.
@@ -255,15 +289,17 @@ quality in one line:
 
 | Model | Size | Licence | On a desktop CPU |
 |---|---|---|---|
-| **LiquidAI d1-3B** (the default) | 1.7 GB | LFM Open License v1.0 (not Apache) | Faster: about 1.7 s per call. Catches about 60 % of dangerous actions and 67 % of injection attempts, refuses about 2.5 % of ordinary work |
-| **Kev-4B** (ggml-org) | 3.0 GB | Apache-2.0 | Catches more: about 79 % of dangerous actions and 93 % of injection attempts, refuses about 1.7 % of ordinary work, but about 4 to 5 s per call |
+| **LiquidAI d1-3B** (the default) | 1.7 GB | LFM Open License v1.0 (not Apache) | Faster: about 2.5 s per call. Catches about 57 % of dangerous actions and 73 % of injection attempts, refuses about 1.7 % of ordinary work |
+| **Kev-4B** (ggml-org) | 3.0 GB | Apache-2.0 | Catches more: about 83 % of dangerous actions and 93 % of injection attempts, refuses about 1.7 % of ordinary work, but about 5 s per call |
 
 Pick d1-3B when the checker should stay quick on a CPU, Kev-4B when catching
 more matters more than a few seconds per call, or when the machine has a GPU.
 Switching the model downloads the other one and removes the first. Each model
-comes with its own default threshold and timeout (d1-3B 0.8 and 4 s, Kev-4B 0.5
-and 15 s, so Kev-4B's normal calls are not cut off); a switch sets them, and you
-can change them afterwards. Check that a model's licence suits you before you
+comes with its own default threshold and timeout (d1-3B 0.85 and 6 s, Kev-4B
+0.25 and 15 s, so Kev-4B's normal calls are not cut off); a switch sets them, and you
+can change them afterwards. A threshold and timeout you set before keep their
+values when you update: set the new defaults by hand on the Action checker page, or
+switch to the other model and back. Check that a model's licence suits you before you
 install it.
 
 The speeds above are for a desktop CPU. A small machine is much slower (d1-3B
@@ -304,7 +340,14 @@ list show which sessions are tainted.
 
 ## What the model is told
 
-The state sent to the model is the call: its capability and action, the command
-or path, the other arguments cut to a bounded size, the machine's OS, and
-whether the session is tainted. The center never sends file contents or command
-output to the model, and the question is fixed by the center.
+The state sent to the model is the call: its capability and action, its effect
+(`read`, `write`, `execute`, `sense` or `actuate`), what the machine says the
+capability and the action do (the action's own text first, then the
+capability's, cut to a few hundred characters, so a long capability text loses
+its end first), the command or path (for another capability, the paths its arguments name, else its
+name), the arguments cut to a bounded size, the machine's OS, and whether the
+session is tainted. The description is written by the machine, or by the
+program that provides the capability, so it is data the model weighs like the
+command, not an instruction: a description that calls an action harmless does
+not make it so. The center never sends file contents or command output to the
+model, and the question is fixed by the center.

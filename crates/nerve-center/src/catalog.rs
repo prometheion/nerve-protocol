@@ -729,7 +729,7 @@ pub fn center_units() -> Vec<Unit> {
 }
 
 /// `summary` as a unit's description: one line, cut.
-fn described(summary: &str) -> Arc<str> {
+pub(crate) fn described(summary: &str) -> Arc<str> {
     util::clip(&one_line(summary), DESCRIPTION_MAX).into()
 }
 

@@ -29,6 +29,7 @@ pub mod server;
 use serde_json::{Value, json};
 
 use nerve_proto::Effect;
+use nerve_proto::schema::PathMark;
 
 pub use config::{
     AllowRule, BlockEntry, CheckerConfig, LocalModel, ModelConfig, ModelScope, ModelSource,
@@ -89,10 +90,20 @@ pub struct CallInfo<'a> {
     pub cap: &'a str,
     pub action: &'a str,
     pub effect: Effect,
-    /// The command line, the path, or `<cap>.<action>` for an action without
-    /// a target.
+    /// What the node says the capability and this action do, from the
+    /// center's catalog, for the model's state. Written by the node (or a
+    /// provider program on it), so it is data the model weighs, never part
+    /// of the question.
+    pub description: &'a str,
+    /// The command line, the path (an `fs` call's, or the path arguments of
+    /// any other call, joined by `, `), or `<cap>.<action>` for an action
+    /// without a target.
     pub target: &'a str,
-    /// The call's other arguments, for the model's state.
+    /// The values of the call's path arguments (`x-nerve-path`), with what
+    /// the action does there. The `fs` blocklist entries hold them, whoever
+    /// the capability is.
+    pub paths: &'a [(PathMark, String)],
+    /// The call's arguments, for the model's state.
     pub args: &'a serde_json::Map<String, Value>,
     pub node_id: &'a str,
     /// The node's OS (`linux`, `windows`, …), for the model's state.
@@ -248,20 +259,40 @@ impl Checker {
             };
         }
         let commands = parsed.as_ref().map(|p| p.commands.as_slice());
+        // A saved allow rule skips the model, so it only reads the commands
+        // the text splitter finds, as before the parser was added: the
+        // commands the parser sees behind a wrapper are for the blocklist.
+        let walked = parsed.as_ref().map(|p| &p.commands[..p.walked]);
+        // A path argument of any capability is a file the call reads or
+        // writes, so the `fs` entries hold it as they hold an `fs` call's
+        // path: an entry against writing `~/.ssh/authorized_keys` is not
+        // passed by a program's action that writes there, and an `fs.read`
+        // entry holds `fs.grep` and `fs.list` as it holds `fs.read`.
+        let paths = call.paths;
         // 1. Blocklist (hard deny, wins over everything): the entries for
         // every node and for this node, less those switched off for it.
         if blocklist_on
-            && let Some(b) = self
+            && let Some((b, path)) = self
                 .blocklist
                 .iter()
                 .filter(|b| b.entry.applies_to(call.node_id))
-                .find(|b| b.rule.matches_with(&target, commands))
+                .find_map(|b| {
+                    if b.rule.matches_with(&target, commands) {
+                        return Some((b, None));
+                    }
+                    let (_, p) = paths.iter().find(|(m, p)| b.rule.matches_path(*m, p))?;
+                    Some((b, Some(p)))
+                })
         {
             let e = &b.entry;
             let what = if e.note.is_empty() {
                 e.rule.clone()
             } else {
                 format!("{} ({})", e.note, e.rule)
+            };
+            let what = match path {
+                Some(p) => format!("{what}, for its path argument {p}"),
+                None => what,
             };
             let (scope, list, off) = match e.node_id {
                 None => (
@@ -290,7 +321,7 @@ impl Checker {
         let every = |a: &&Allow| a.node_id.is_none();
         if let Some(a) = (self.allow.iter().filter(mine))
             .chain(self.allow.iter().filter(every))
-            .find(|a| a.rule.matches_with(&target, commands))
+            .find(|a| a.rule.matches_with(&target, walked))
         {
             let scope = if a.node_id.is_some() {
                 Scope::Node
@@ -397,13 +428,38 @@ pub fn taints(effect: Effect) -> bool {
     matches!(effect, Effect::Read | Effect::Sense | Effect::Execute)
 }
 
-/// The `state` sent to the model: the call, with args bounded. The question
-/// is fixed by the center, so only this ever carries the command text.
-fn model_state(call: &CallInfo<'_>) -> Value {
+/// The most of a capability's description the model's state carries: what
+/// it does in a sentence or two, so a long one cannot crowd out the call.
+pub const STATE_DESCRIPTION_MAX: usize = 400;
+
+/// The description of a unit as the model's state carries it: the action's
+/// own text first, then what the capability is for in brackets. The state
+/// clips the end, and a long capability summary must not push out the part
+/// that tells `unlock` from `status`. A unit without a text of its own, or
+/// with the capability's, is told once. The center and the evaluation runner
+/// both build it here, so the measured state is the sent one.
+pub fn unit_description(action: &str, unit: &str, capability: &str) -> String {
+    if capability.is_empty() || unit == capability {
+        unit.to_string()
+    } else if unit.is_empty() {
+        capability.to_string()
+    } else {
+        format!("{action}: {unit} ({capability})")
+    }
+}
+
+/// The `state` sent to the model: the call, with its effect, the node's
+/// description of the capability, and args bounded. The question is fixed
+/// by the center, so only this ever carries the command text or what a
+/// node says of its capability: a description that claims a call is
+/// harmless is data for the model, never an instruction it is given.
+pub fn model_state(call: &CallInfo<'_>) -> Value {
     let args = clip(&Value::Object(call.args.clone()).to_string(), 2000);
     json!({
         "capability": call.cap,
         "action": call.action,
+        "effect": call.effect.as_str(),
+        "description": clip(call.description, STATE_DESCRIPTION_MAX),
         "target": clip(call.target, 2000),
         "os": call.os,
         "tainted": call.tainted,
@@ -428,12 +484,26 @@ mod tests {
             cap,
             action,
             effect,
+            description: "",
             target,
+            paths: &[],
             args,
             node_id: "n1",
             os: "linux",
             tainted: false,
         }
+    }
+
+    #[test]
+    fn a_unit_is_described_by_its_action_first_and_its_capability_in_brackets() {
+        assert_eq!(
+            unit_description("unlock", "Unlocks it.", "The front door."),
+            "unlock: Unlocks it. (The front door.)"
+        );
+        // Told once where the unit has no text of its own or the same one.
+        assert_eq!(unit_description("a", "Same.", "Same."), "Same.");
+        assert_eq!(unit_description("a", "Text.", ""), "Text.");
+        assert_eq!(unit_description("a", "", "The door."), "The door.");
     }
 
     #[tokio::test]
@@ -715,6 +785,284 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A program's action that writes a path is held by the `fs.write`
+    /// entries as `fs.write` is, however the path is spelled; one that only
+    /// reads it is not held by them, but by an `fs.read` or `fs` entry.
+    #[tokio::test]
+    async fn a_provider_path_arg_hits_the_fs_blocklist() {
+        let mut cfg = CheckerConfig::default();
+        cfg.blocklist.push(entry("fs.read:/srv/secret/*", None));
+        let checker = Checker::build(cfg, None);
+        let args = Map::new();
+        let notes = |paths: &'static [(PathMark, String)]| CallInfo {
+            paths,
+            ..call("notes", "save", Effect::Write, "", &args)
+        };
+        let leak = |v: Vec<(PathMark, String)>| -> &'static [(PathMark, String)] { v.leak() };
+        for p in [
+            "~/.ssh/authorized_keys",
+            "/home/me/.ssh/authorized_keys",
+            "/home/me/work/../.ssh/authorized_keys",
+            "/home/me/.ssh/./authorized_keys",
+            "/c/Users/Me/.SSH/authorized_keys",
+        ] {
+            let paths = leak(vec![
+                (PathMark::Read, "/tmp/a".into()),
+                (PathMark::Write, p.into()),
+            ]);
+            let Decision::Refuse {
+                layer,
+                message,
+                detail,
+                ..
+            } = checker.check(&notes(paths), None).await
+            else {
+                panic!("a write to {p} should be refused");
+            };
+            assert_eq!(layer, Layer::Blocklist);
+            assert_eq!(detail, "fs.write:~/.ssh/authorized_keys");
+            assert!(message.contains(&format!("path argument {p}")), "{message}");
+        }
+        // Read there, it is not a write; a read of a path an `fs.read`
+        // entry names is refused.
+        let paths = leak(vec![(
+            PathMark::Read,
+            "/home/me/.ssh/authorized_keys".into(),
+        )]);
+        assert!(matches!(
+            checker.check(&notes(paths), None).await,
+            Decision::Pass
+        ));
+        let paths = leak(vec![(PathMark::Read, "/srv/secret/key".into())]);
+        assert!(matches!(
+            checker.check(&notes(paths), None).await,
+            Decision::Refuse { ref detail, .. } if detail == "fs.read:/srv/secret/*"
+        ));
+        // A path of an ordinary place passes.
+        let paths = leak(vec![(PathMark::Write, "/home/me/notes/today.md".into())]);
+        assert!(matches!(
+            checker.check(&notes(paths), None).await,
+            Decision::Pass
+        ));
+    }
+
+    /// An `fs.read` entry holds the node's own `fs` actions that read a path
+    /// (`grep`, `find`, `list`, `stat`) as it holds `fs.read`, and an
+    /// `exec.run` started in a folder it names (`cwd`); it does not hold a
+    /// write.
+    #[tokio::test]
+    async fn an_fs_read_entry_holds_every_action_that_reads_the_path() {
+        let mut cfg = CheckerConfig::default();
+        cfg.blocklist.push(entry("fs.read:/srv/secret/*", None));
+        let checker = Checker::build(cfg, None);
+        let args = Map::new();
+        let path = "/srv/secret/key";
+        for action in ["read", "grep", "find", "list", "stat"] {
+            let paths = [(PathMark::Read, path.to_string())];
+            let c = CallInfo {
+                paths: &paths,
+                ..call("fs", action, Effect::Read, path, &args)
+            };
+            assert!(
+                matches!(
+                    checker.check(&c, None).await,
+                    Decision::Refuse { ref detail, .. } if detail == "fs.read:/srv/secret/*"
+                ),
+                "fs.{action}"
+            );
+        }
+        let paths = [(PathMark::Read, "/srv/secret/work".to_string())];
+        let c = CallInfo {
+            paths: &paths,
+            ..call("exec", "run", Effect::Execute, "make", &args)
+        };
+        assert!(matches!(
+            checker.check(&c, None).await,
+            Decision::Refuse { ref message, .. } if message.contains("path argument /srv/secret/work")
+        ));
+        // A write there is not a read.
+        let paths = [(PathMark::Write, path.to_string())];
+        let c = CallInfo {
+            paths: &paths,
+            ..call("fs", "write", Effect::Write, path, &args)
+        };
+        assert!(matches!(checker.check(&c, None).await, Decision::Pass));
+    }
+
+    /// A folder handed over as a path argument (what a walk starts in, where
+    /// a command runs) meets the entry for what lies in it; a folder above
+    /// the entry's does not.
+    #[tokio::test]
+    async fn a_folder_meets_the_entry_for_what_lies_in_it() {
+        let mut cfg = CheckerConfig::default();
+        cfg.blocklist.push(entry("fs.read:/srv/secret/*", None));
+        let checker = Checker::build(cfg, None);
+        let args = Map::new();
+        for (action, folder) in [
+            ("grep", "/srv/secret"),
+            ("find", "/srv/secret/"),
+            ("list", "/srv/other/../secret"),
+        ] {
+            let paths = [(PathMark::Read, folder.to_string())];
+            let c = CallInfo {
+                paths: &paths,
+                ..call("fs", action, Effect::Read, folder, &args)
+            };
+            assert!(
+                matches!(
+                    checker.check(&c, None).await,
+                    Decision::Refuse { ref detail, .. } if detail == "fs.read:/srv/secret/*"
+                ),
+                "fs.{action} {folder}"
+            );
+        }
+        let paths = [(PathMark::Read, "/srv/secret".to_string())];
+        let c = CallInfo {
+            paths: &paths,
+            ..call("exec", "run", Effect::Execute, "make", &args)
+        };
+        assert!(matches!(
+            checker.check(&c, None).await,
+            Decision::Refuse { .. }
+        ));
+        // The folder above, and a sibling whose name only starts alike.
+        for folder in ["/srv", "/srv/secrets-not"] {
+            let paths = [(PathMark::Read, folder.to_string())];
+            let c = CallInfo {
+                paths: &paths,
+                ..call("fs", "list", Effect::Read, folder, &args)
+            };
+            assert!(
+                matches!(checker.check(&c, None).await, Decision::Pass),
+                "{folder}"
+            );
+        }
+    }
+
+    /// An entry that names a capability, or a command pattern, still holds a
+    /// call that carries path arguments: the path match is added to the
+    /// entry's own, not in its place.
+    #[tokio::test]
+    async fn a_call_with_path_arguments_still_meets_the_entries_own_match() {
+        let mut cfg = CheckerConfig::default();
+        cfg.blocklist.push(entry("notes.save", None));
+        cfg.blocklist.push(entry("lamp", None));
+        cfg.blocklist.push(entry("exec.run:deploy *", None));
+        let checker = Checker::build(cfg, None);
+        let args = Map::new();
+        let paths = [(PathMark::Write, "/home/me/notes/today.md".to_string())];
+        for (cap, action, effect, target, detail) in [
+            ("notes", "save", Effect::Write, "", "notes.save"),
+            ("lamp", "set", Effect::Actuate, "", "lamp"),
+            (
+                "exec",
+                "run",
+                Effect::Execute,
+                "deploy staging",
+                "exec.run:deploy *",
+            ),
+        ] {
+            let c = CallInfo {
+                paths: &paths,
+                ..call(cap, action, effect, target, &args)
+            };
+            assert!(
+                matches!(
+                    checker.check(&c, None).await,
+                    Decision::Refuse { layer: Layer::Blocklist, detail: ref d, .. } if d == detail
+                ),
+                "{cap}.{action}"
+            );
+        }
+    }
+
+    /// A saved allow rule reads the commands of the text splitter only: a
+    /// command only the parser finds behind `timeout` is no way to skip the
+    /// model, but the blocklist still sees it.
+    #[tokio::test]
+    async fn an_allow_rule_does_not_match_a_command_only_the_parser_sees() {
+        let mut cfg = CheckerConfig::default();
+        cfg.allow_rules.push(AllowRule {
+            rule: "exec.run:make *".into(),
+            node_id: None,
+        });
+        let checker = Checker::build(cfg, None);
+        let args = Map::new();
+        let run = |line: &'static str| call("exec", "run", Effect::Execute, line, &args);
+        // Plain, or behind a wrapper the splitter strips: the rule matches.
+        for line in ["make test", "sudo make test", "ls && make test"] {
+            assert!(
+                matches!(
+                    checker.check(&run(line), None).await,
+                    Decision::Allowed {
+                        layer: Layer::AllowRule,
+                        ..
+                    }
+                ),
+                "{line}"
+            );
+        }
+        // Behind `timeout` only the parser reads `make`; `./deploy.sh` is
+        // what the rule never covered.
+        for line in [
+            "timeout 600 make test && ./deploy.sh --prod",
+            "timeout 600 make test",
+        ] {
+            assert!(
+                matches!(checker.check(&run(line), None).await, Decision::Pass),
+                "{line}"
+            );
+        }
+        // The blocklist still reads what the parser finds.
+        let mut cfg = CheckerConfig::default();
+        cfg.blocklist.push(entry("exec.run:make *", None));
+        let checker = Checker::build(cfg, None);
+        assert!(matches!(
+            checker.check(&run("timeout 600 make test"), None).await,
+            Decision::Refuse { .. }
+        ));
+    }
+
+    /// The model is told the call's effect and what the node says the
+    /// capability does, cut to a few sentences, beside the call itself.
+    #[test]
+    fn the_model_state_carries_effect_and_description_clipped() {
+        let args = Map::new();
+        let long = format!("Saves a note to a file. {}", "More words. ".repeat(100));
+        let paths = [(PathMark::Write, "/home/me/notes/a.md".to_string())];
+        let c = CallInfo {
+            description: &long,
+            paths: &paths,
+            ..call(
+                "notes",
+                "save",
+                Effect::Actuate,
+                "/home/me/notes/a.md",
+                &args,
+            )
+        };
+        let state = model_state(&c);
+        assert_eq!(state["effect"], "actuate");
+        let d = state["description"].as_str().unwrap();
+        assert!(d.starts_with("Saves a note to a file."), "{d}");
+        assert!(d.ends_with('…'), "{d}");
+        assert!(
+            d.len() <= STATE_DESCRIPTION_MAX + '…'.len_utf8(),
+            "{}",
+            d.len()
+        );
+        assert_eq!(state["capability"], "notes");
+        assert_eq!(state["target"], "/home/me/notes/a.md");
+        // A short one is given whole.
+        let c = CallInfo {
+            description: "Runs a command.",
+            ..call("exec", "run", Effect::Execute, "make", &args)
+        };
+        let state = model_state(&c);
+        assert_eq!(state["effect"], "execute");
+        assert_eq!(state["description"], "Runs a command.");
     }
 
     #[test]

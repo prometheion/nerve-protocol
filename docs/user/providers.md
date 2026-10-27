@@ -92,7 +92,10 @@ path as the node resolved it, links followed, so it works where the node
 looked; a path that resolves to a name that is not valid Unicode, or to one
 the program's own schema does not take, is refused (`bad_path`). A refusal
 names each path as the center gave it, never where it led: the
-[audit log](audit.md) says that. Only the
+[audit log](audit.md) says that. The center's
+[action checker](action-checker.md#the-blocklist) holds the same paths: its
+`fs` blocklist entries refuse a program's call that reads or writes a path
+they name, and the audit entry names the paths. Only the
 top-level arguments can be marked, each a string. A call whose marked path
 it leaves out names no folder: it needs `on`, as an action without paths
 does.

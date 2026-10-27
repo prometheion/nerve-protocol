@@ -13,6 +13,7 @@ use tokio::sync::broadcast;
 
 use nerve_proto::link::{CenterUrl, PairLink, PairRequest, PairResponse};
 use nerve_proto::msg::{self, ByeReason, Event, Hello};
+use nerve_proto::schema::PathMark;
 use nerve_proto::{Descriptor, ErrorCode, Exposure, RpcError};
 use nerve_transport::log::{Level, Log, Query, call_line};
 use nerve_transport::tls::ServerIdentity;
@@ -2722,20 +2723,22 @@ impl Center {
         // node. It can only refuse; the node's policy still decides what it
         // lets through (design rule 1).
         let checker = self.checker();
-        let os = self.read(|s| {
-            s.nodes
-                .get(&route.node_id)
-                .map(|n| n.platform.clone())
-                .unwrap_or_default()
+        let (os, seen) = self.read(|s| {
+            let n = s.nodes.get(&route.node_id);
+            let os = n.map(|n| n.platform.clone()).unwrap_or_default();
+            (os, n.map(|n| CheckerUnit::of(n, route)).unwrap_or_default())
         });
         let tainted = checker.taint_on() && sess.tainted();
-        let target = checker_target(route, &args);
+        let paths = seen.paths(&args);
+        let target = checker_target(route, &args, &paths);
         let endpoint = self.resolved_endpoint(&checker);
         let info = CallInfo {
             cap: &route.cap,
             action: &route.action,
             effect: route.effect,
+            description: &seen.description,
             target: &target,
+            paths: &paths,
             args: &args,
             node_id: &route.node_id,
             os: &os,
@@ -3091,6 +3094,7 @@ impl Center {
             "platform_supported": checker::install::platform_supported(),
             "gpu_hint": checker::install::gpu_hint(),
             "rejected": self.checker().rejected,
+            "unpublished": self.read(|s| unpublished_rules(&s.checker, &s.nodes)),
         })
     }
 
@@ -3425,9 +3429,15 @@ impl Center {
     }
 }
 
-/// What the checker matches on: the command line for `exec.run`, the path for
-/// an `fs` action, else `<cap>.<action>`.
-fn checker_target(route: &Route, args: &Map<String, Value>) -> String {
+/// What the checker matches on and the audit names: the command line for
+/// `exec.run`, the path for an `fs` action, the path arguments of any other
+/// action that takes paths (joined by `, `, as the node's audit names them),
+/// else `<cap>.<action>`.
+fn checker_target(
+    route: &Route,
+    args: &Map<String, Value>,
+    paths: &[(PathMark, String)],
+) -> String {
     match (route.cap.as_str(), route.action.as_str()) {
         ("exec", "run") => args
             .get("command")
@@ -3439,7 +3449,119 @@ fn checker_target(route: &Route, args: &Map<String, Value>) -> String {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
+        _ if !paths.is_empty() => paths
+            .iter()
+            .map(|(_, p)| p.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
         _ => format!("{}.{}", route.cap, route.action),
+    }
+}
+
+/// The owner's blocklist entries and allow rules that name a capability, or
+/// an action of one, that no paired node publishes (the one node for a
+/// rule of one node): they match no call now, which the checker page says,
+/// since a misspelt name looks like a rule in force. An `fs`, `fs.read` or
+/// `fs.write` blocklist entry also holds the path arguments of the other
+/// capabilities, so it is in force where some capability has an argument
+/// marked for it, `fs` published or not; an allow rule is matched against
+/// the call's own target only, so it is not. Nothing is said while no node
+/// has published anything, and the built-in entries name the node's own
+/// capabilities.
+fn unpublished_rules(cfg: &CheckerConfig, nodes: &BTreeMap<String, NodeRecord>) -> Vec<String> {
+    if nodes.values().all(|n| n.descriptor.is_none()) {
+        return Vec::new();
+    }
+    let publishes = |n: &NodeRecord, cap: &str, action: Option<&str>, by_path: bool| {
+        let Some(d) = n.descriptor.as_ref() else {
+            return false;
+        };
+        if d.capability(cap)
+            .is_some_and(|c| action.is_none_or(|a| c.actions.contains_key(a)))
+        {
+            return true;
+        }
+        let held = |mark: PathMark| match action {
+            None => true,
+            Some("read") => mark == PathMark::Read,
+            Some("write") => mark == PathMark::Write,
+            Some(_) => false,
+        };
+        by_path
+            && cap == "fs"
+            && d.capabilities
+                .iter()
+                .flat_map(|c| c.actions.values())
+                .flat_map(|a| nerve_proto::schema::path_args(&a.params))
+                .any(|(_, mark)| held(mark))
+    };
+    let own = cfg.blocklist.iter().filter(|e| !e.builtin);
+    let rules = own
+        .map(|e| (&e.rule, &e.node_id, true))
+        .chain(cfg.allow_rules.iter().map(|a| (&a.rule, &a.node_id, false)));
+    let mut out: Vec<String> = Vec::new();
+    for (rule, node, by_path) in rules {
+        let scope = rule.split_once(':').map_or(rule.as_str(), |(s, _)| s);
+        let (cap, action) = match scope.split_once('.') {
+            Some((c, a)) => (c, Some(a)),
+            None => (scope, None),
+        };
+        let known = match node {
+            // A rule for a machine no longer paired is shown as such.
+            Some(id) => nodes
+                .get(id)
+                .is_none_or(|n| publishes(n, cap, action, by_path)),
+            None => nodes.values().any(|n| publishes(n, cap, action, by_path)),
+        };
+        if !known && !out.contains(rule) {
+            out.push(rule.clone());
+        }
+    }
+    out
+}
+
+/// What the center's catalog says of the unit a call is for, as the action
+/// checker is shown it. Empty for a unit the catalog no longer has: the
+/// node refuses such a call anyway.
+#[derive(Default)]
+struct CheckerUnit {
+    /// The action's own text and the capability's summary, on one line.
+    description: String,
+    /// The arguments the unit's schema marks as paths.
+    marked: Vec<(String, PathMark)>,
+}
+
+impl CheckerUnit {
+    fn of(n: &NodeRecord, route: &Route) -> CheckerUnit {
+        let Some(u) = n.catalog.unit(&format!("{}.{}", route.cap, route.action)) else {
+            return CheckerUnit::default();
+        };
+        // The unit's own description, when it has one, tells what this
+        // action does; the capability's summary what it is for. The action
+        // goes first: the model's state clips the end, and a long summary
+        // must not push out the part that tells `unlock` from `status`. A
+        // unit without a summary of its own carries its capability's
+        // already.
+        let cap = n
+            .descriptor
+            .as_ref()
+            .and_then(|d| d.capability(&route.cap))
+            .map(|c| catalog::described(&c.summary).to_string())
+            .unwrap_or_default();
+        let description = checker::unit_description(&route.action, &u.description, &cap);
+        CheckerUnit {
+            description,
+            marked: nerve_proto::schema::path_args(&u.params),
+        }
+    }
+
+    /// The values of the call's path arguments, in the schema's order. An
+    /// argument that is absent or not a string names no path.
+    fn paths(&self, args: &Map<String, Value>) -> Vec<(PathMark, String)> {
+        self.marked
+            .iter()
+            .filter_map(|(field, mark)| Some((*mark, args.get(field)?.as_str()?.to_string())))
+            .collect()
     }
 }
 
@@ -3502,7 +3624,11 @@ pub fn audit_rule(
     wildcard: bool,
 ) -> Result<String, String> {
     // A cut target is no longer the call's, so no rule can be made from it.
-    if nerve_policy::audit::is_cut_target(target) {
+    // Only a command line or a path is named by a rule; any other action's
+    // rule is its `cap.action`, whatever its (path argument) target.
+    if (cap == "fs" || (cap, action) == ("exec", "run"))
+        && nerve_policy::audit::is_cut_target(target)
+    {
         return Err("the target was cut to its start, so a rule cannot name it".into());
     }
     match list {
@@ -3901,6 +4027,460 @@ mod tests {
             .unwrap_err();
         let CallError::Rpc(e) = e;
         assert_eq!(e.kind(), ErrorCode::ConnectionLost);
+    }
+
+    /// A program's action that takes a path is audited by the checker under
+    /// that path, as the node's audit names it, not as `cap.action`; the
+    /// model and the blocklist see the path too, and the model is told what
+    /// the capability says it does.
+    #[tokio::test]
+    async fn the_audit_target_of_a_path_capability_is_its_path() {
+        use crate::tools::tests::{cap, desc};
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let params = json!({"type": "object",
+            "properties": {"path": {"type": "string", "x-nerve-path": "write"},
+                           "text": {"type": "string"}}});
+        let mut notes = cap(
+            "notes",
+            "notes",
+            &[("save", nerve_proto::Effect::Write, params)],
+        );
+        notes.provider = "notesd".into();
+        c.update(|s| {
+            let mut n = node_record("n1", "linux");
+            n.set_descriptor(desc("n1", vec![notes]));
+            s.nodes.insert("n1".into(), n);
+            s.checker.allow_rules.push(AllowRule {
+                rule: "notes.save".into(),
+                node_id: None,
+            });
+        });
+        c.rebuild_checker();
+        online(&c, "n1");
+        let sess = c.new_session("test");
+        let route = Route {
+            node_id: "n1".into(),
+            node_name: "n1".into(),
+            cap: "notes".into(),
+            action: "save".into(),
+            effect: nerve_proto::Effect::Write,
+        };
+        let save = |path: &str| {
+            let mut m = Map::new();
+            m.insert("path".into(), json!(path));
+            m.insert("text".into(), json!("hello"));
+            m
+        };
+        // Into an ordinary file: the allow rule lets it go to the node, and
+        // the audit names the file.
+        let CallError::Rpc(e) = c
+            .call(&sess, &route, save("/home/me/notes/today.md"))
+            .await
+            .unwrap_err();
+        assert_eq!(e.kind(), ErrorCode::ConnectionLost, "{}", e.message);
+        let last = c.audit().pop().unwrap();
+        assert_eq!(last["checker"]["layer"], "allow rule");
+        assert_eq!(last["target"], "/home/me/notes/today.md");
+        // Into the SSH keys: the `fs.write` entry refuses it, under the path.
+        let CallError::Rpc(e) = c
+            .call(&sess, &route, save("/home/me/.ssh/authorized_keys"))
+            .await
+            .unwrap_err();
+        assert_eq!(e.kind(), ErrorCode::Forbidden, "{}", e.message);
+        let last = c.audit().pop().unwrap();
+        assert_eq!(last["checker"]["layer"], "blocklist");
+        assert_eq!(last["target"], "/home/me/.ssh/authorized_keys");
+        // What the checker is shown of the unit.
+        let seen = c.read(|s| CheckerUnit::of(&s.nodes["n1"], &route));
+        assert_eq!(seen.description, "save: save it (notes summary)");
+        assert_eq!(
+            seen.paths(&save("/x")),
+            vec![(PathMark::Write, "/x".to_string())]
+        );
+    }
+
+    /// The model is sent what the center's catalog says of the unit and the
+    /// path the call names: a real call through `Center::call` to a fake
+    /// System One endpoint, and the state it received is read back.
+    #[tokio::test]
+    async fn the_model_is_sent_a_provider_calls_effect_description_and_path() {
+        use crate::tools::tests::{cap, desc};
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let asked = std::thread::spawn(move || {
+            // A call that never asks the model fails the test, not hangs it.
+            let started = Instant::now();
+            let mut conn = loop {
+                match listener.accept() {
+                    Ok((conn, _)) => break conn,
+                    Err(_) if started.elapsed() < Duration::from_secs(10) => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => return Value::Null,
+                }
+            };
+            conn.set_nonblocking(false).unwrap();
+            conn.set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut got = Vec::new();
+            let mut buf = [0u8; 4096];
+            let body = loop {
+                let n = conn.read(&mut buf).unwrap();
+                got.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&got).into_owned();
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let want = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")?
+                                .parse()
+                                .ok()
+                        })
+                        .unwrap_or(0usize);
+                    if body.len() >= want {
+                        break body.to_string();
+                    }
+                }
+            };
+            let answer = r#"{"answers":{"danger":{"type":"noul","noul":0.01}}}"#;
+            let _ = write!(
+                conn,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                answer.len()
+            );
+            serde_json::from_str::<Value>(&body).unwrap()
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let params = json!({"type": "object",
+            "properties": {"path": {"type": "string", "x-nerve-path": "write"},
+                           "text": {"type": "string"}}});
+        let mut notes = cap(
+            "notes",
+            "notes",
+            &[("save", nerve_proto::Effect::Write, params)],
+        );
+        notes.provider = "notesd".into();
+        c.update(|s| {
+            let mut n = node_record("n1", "linux");
+            n.set_descriptor(desc("n1", vec![notes]));
+            s.nodes.insert("n1".into(), n);
+            s.checker.model_on = true;
+            s.checker.model.source = ModelSource::Endpoint;
+            s.checker.model.endpoint_url = format!("http://127.0.0.1:{port}");
+        });
+        c.rebuild_checker();
+        online(&c, "n1");
+        let sess = c.new_session("test");
+        let route = Route {
+            node_id: "n1".into(),
+            node_name: "n1".into(),
+            cap: "notes".into(),
+            action: "save".into(),
+            effect: nerve_proto::Effect::Write,
+        };
+        let mut args = Map::new();
+        args.insert("path".into(), json!("/home/me/notes/today.md"));
+        args.insert("text".into(), json!("hello"));
+        // The fake model scores it low, so the call goes on to the (test)
+        // link, which is gone.
+        let CallError::Rpc(e) = c.call(&sess, &route, args).await.unwrap_err();
+        assert_eq!(e.kind(), ErrorCode::ConnectionLost, "{}", e.message);
+        let body = asked.join().unwrap();
+        let state = &body["state"];
+        assert_eq!(state["capability"], "notes");
+        assert_eq!(state["action"], "save");
+        assert_eq!(state["effect"], "write");
+        assert_eq!(state["description"], "save: save it (notes summary)");
+        assert_eq!(state["target"], "/home/me/notes/today.md");
+        assert!(state["args"].as_str().unwrap().contains("hello"), "{state}");
+        let last = c.audit().pop().unwrap();
+        assert_eq!(last["checker"]["layer"], "model");
+        assert_eq!(last["target"], "/home/me/notes/today.md");
+    }
+
+    /// An `exec.run` command's working folder is a path it reads, so an
+    /// `fs.read` entry on that folder refuses the command, and the audit
+    /// still names the command.
+    #[tokio::test]
+    async fn a_commands_working_folder_meets_the_fs_read_entries() {
+        use crate::tools::tests::{cap, desc};
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let params = json!({"type": "object",
+            "properties": {"command": {"type": "string"},
+                           "cwd": {"type": "string", "x-nerve-path": "read"}}});
+        let exec = cap(
+            "exec",
+            "exec",
+            &[("run", nerve_proto::Effect::Execute, params)],
+        );
+        c.update(|s| {
+            let mut n = node_record("n1", "linux");
+            n.set_descriptor(desc("n1", vec![exec]));
+            s.nodes.insert("n1".into(), n);
+            s.checker.blocklist.push(checker::BlockEntry {
+                id: String::new(),
+                rule: "fs.read:/srv/secret/*".into(),
+                on: true,
+                builtin: false,
+                note: String::new(),
+                node_id: None,
+                off_for: Vec::new(),
+            });
+        });
+        c.rebuild_checker();
+        online(&c, "n1");
+        let sess = c.new_session("test");
+        let mut args = Map::new();
+        args.insert("command".into(), json!("make test"));
+        args.insert("cwd".into(), json!("/srv/secret/work"));
+        let CallError::Rpc(e) = c.call(&sess, &exec_route("n1"), args).await.unwrap_err();
+        assert_eq!(e.kind(), ErrorCode::Forbidden, "{}", e.message);
+        assert!(
+            e.message.contains("path argument /srv/secret/work"),
+            "{}",
+            e.message
+        );
+        let last = c.audit().pop().unwrap();
+        assert_eq!(last["checker"]["layer"], "blocklist");
+        assert_eq!(last["target"], "make test");
+    }
+
+    /// A unit without a summary of its own carries its capability's, which
+    /// the checker shows once, however the summary is spaced.
+    #[test]
+    fn a_capability_summary_is_not_repeated_for_a_unit_without_its_own() {
+        use crate::tools::tests::{cap, desc};
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let mut lamp = cap(
+            "lamp",
+            "lamp",
+            &[(
+                "set",
+                nerve_proto::Effect::Actuate,
+                json!({"type": "object"}),
+            )],
+        );
+        lamp.summary = "The office lamp.  Turns it on\n\nor off.".into();
+        lamp.actions.get_mut("set").unwrap().summary = String::new();
+        c.update(|s| {
+            let mut n = node_record("n1", "linux");
+            n.set_descriptor(desc("n1", vec![lamp]));
+            s.nodes.insert("n1".into(), n);
+        });
+        let route = Route {
+            node_id: "n1".into(),
+            node_name: "n1".into(),
+            cap: "lamp".into(),
+            action: "set".into(),
+            effect: nerve_proto::Effect::Actuate,
+        };
+        let seen = c.read(|s| CheckerUnit::of(&s.nodes["n1"], &route));
+        assert_eq!(seen.description, "The office lamp.  Turns it on  or off.");
+    }
+
+    /// A capability summary longer than the model's state carries must not
+    /// push out what the action itself does: that part goes first.
+    #[test]
+    fn a_long_capability_summary_does_not_crowd_out_the_actions_text() {
+        use crate::tools::tests::{cap, desc};
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let mut door = cap(
+            "door",
+            "door",
+            &[(
+                "unlock",
+                nerve_proto::Effect::Actuate,
+                json!({"type": "object"}),
+            )],
+        );
+        door.summary = "The front door. ".repeat(30);
+        door.actions.get_mut("unlock").unwrap().summary = "Unlocks it for a given time.".into();
+        c.update(|s| {
+            let mut n = node_record("n1", "linux");
+            n.set_descriptor(desc("n1", vec![door]));
+            s.nodes.insert("n1".into(), n);
+        });
+        let route = Route {
+            node_id: "n1".into(),
+            node_name: "n1".into(),
+            cap: "door".into(),
+            action: "unlock".into(),
+            effect: nerve_proto::Effect::Actuate,
+        };
+        let seen = c.read(|s| CheckerUnit::of(&s.nodes["n1"], &route));
+        assert!(seen.description.len() > checker::STATE_DESCRIPTION_MAX);
+        let args = Map::new();
+        let info = checker::CallInfo {
+            cap: "door",
+            action: "unlock",
+            effect: nerve_proto::Effect::Actuate,
+            description: &seen.description,
+            target: "door.unlock",
+            paths: &[],
+            args: &args,
+            node_id: "n1",
+            os: "linux",
+            tainted: false,
+        };
+        let state = checker::model_state(&info);
+        assert!(
+            state["description"]
+                .as_str()
+                .unwrap()
+                .starts_with("unlock: Unlocks it for a given time."),
+            "{}",
+            state["description"]
+        );
+    }
+
+    /// A pattern that cannot match anything is refused when the owner saves
+    /// it, and one already stored is left out of the checker and reported.
+    #[test]
+    fn a_rule_that_cannot_match_is_refused_on_save_and_reported_when_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let entry = |rule: &str| checker::BlockEntry {
+            id: String::new(),
+            rule: rule.into(),
+            on: true,
+            builtin: false,
+            note: String::new(),
+            node_id: None,
+            off_for: Vec::new(),
+        };
+        let mut cfg = c.read(|s| s.checker.clone());
+        cfg.blocklist.push(entry("lamp.set:office"));
+        let why = c.apply_checker_config(cfg).unwrap_err();
+        assert!(why.contains("cannot match anything"), "{why}");
+        let mut cfg = c.read(|s| s.checker.clone());
+        cfg.allow_rules.push(AllowRule {
+            rule: "exec:rm *".into(),
+            node_id: None,
+        });
+        let why = c.apply_checker_config(cfg).unwrap_err();
+        assert!(why.contains("exec.run:rm *"), "{why}");
+        // Stored by an older center: out of force, and named on the page.
+        c.update(|s| s.checker.blocklist.push(entry("lamp.set:office")));
+        c.rebuild_checker();
+        let rejected = c.checker_json()["rejected"].clone();
+        assert_eq!(rejected.as_array().unwrap().len(), 1, "{rejected}");
+        assert!(rejected[0].as_str().unwrap().contains("lamp.set:office"));
+        assert!(c.checker().rejected[0].contains("lamp.set:office"));
+    }
+
+    /// An `fs` entry holds the path arguments of other capabilities, so it
+    /// is not called dead where a program takes a path for it, `fs`
+    /// published or not; a typo and an entry no path argument can meet are.
+    #[test]
+    fn an_fs_entry_is_in_force_where_a_program_takes_a_path() {
+        use crate::tools::tests::{cap, desc};
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let entry = |rule: &str| checker::BlockEntry {
+            id: String::new(),
+            rule: rule.into(),
+            on: true,
+            builtin: false,
+            note: String::new(),
+            node_id: None,
+            off_for: Vec::new(),
+        };
+        let params = json!({"type": "object",
+            "properties": {"path": {"type": "string", "x-nerve-path": "write"}}});
+        let mut notes = cap(
+            "notes",
+            "notes",
+            &[("save", nerve_proto::Effect::Write, params)],
+        );
+        notes.provider = "notesd".into();
+        c.update(|s| {
+            let mut n = node_record("n1", "linux");
+            n.set_descriptor(desc("n1", vec![notes]));
+            s.nodes.insert("n1".into(), n);
+            s.checker.blocklist.extend([
+                entry("fs.write:/home/*/.config/autostart/*"),
+                entry("fs:/srv/*"),
+                entry("fs.read:/srv/secret/*"),
+                entry("fs.wirte:/etc/*"),
+            ]);
+            // An allow rule is matched against a call's own target only, so
+            // a path argument does not put it in force.
+            s.checker.allow_rules.push(AllowRule {
+                rule: "fs.write:/home/*/notes/*".into(),
+                node_id: None,
+            });
+        });
+        // The program writes a path; nothing reads one, and `fs` is not
+        // published here.
+        assert_eq!(
+            c.checker_json()["unpublished"],
+            json!([
+                "fs.read:/srv/secret/*",
+                "fs.wirte:/etc/*",
+                "fs.write:/home/*/notes/*"
+            ])
+        );
+    }
+
+    /// The checker page is told which of the owner's rules name a
+    /// capability or action no paired node publishes (for a rule of one
+    /// node, that node), and none while no node has published anything.
+    #[test]
+    fn a_rule_naming_a_capability_no_node_publishes_is_warned_about() {
+        use crate::tools::tests::{cap, desc};
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let rule = |r: &str, node: Option<&str>| AllowRule {
+            rule: r.into(),
+            node_id: node.map(str::to_string),
+        };
+        c.update(|s| {
+            s.nodes.insert("n1".into(), node_record("n1", "linux"));
+            s.nodes.insert("n2".into(), node_record("n2", "linux"));
+            s.checker.allow_rules = vec![
+                rule("lamp.set", None),
+                rule("lamp.sett", None),
+                rule("lamp", Some("n2")),
+                rule("notes", None),
+                rule("exec.run:make *", None),
+            ];
+            s.checker.blocklist.push(checker::BlockEntry {
+                id: String::new(),
+                rule: "fs.wirte:/etc/*".into(),
+                on: true,
+                builtin: false,
+                note: String::new(),
+                node_id: None,
+                off_for: Vec::new(),
+            });
+        });
+        assert_eq!(c.checker_json()["unpublished"], json!([]));
+        let lamp = cap(
+            "lamp",
+            "lamp",
+            &[("set", nerve_proto::Effect::Actuate, json!({}))],
+        );
+        let exec = cap(
+            "exec",
+            "exec",
+            &[("run", nerve_proto::Effect::Execute, json!({}))],
+        );
+        c.update(|s| {
+            let n1 = s.nodes.get_mut("n1").unwrap();
+            n1.set_descriptor(desc("n1", vec![lamp, exec]));
+        });
+        assert_eq!(
+            c.checker_json()["unpublished"],
+            json!(["fs.wirte:/etc/*", "lamp.sett", "lamp", "notes"])
+        );
     }
 
     /// A call to a node that is offline or disabled is `unavailable` before
@@ -5110,5 +5690,19 @@ mod tests {
             assert!(rule(list, "exec", "run", &cut, false).is_err(), "{list}");
             assert!(rule(list, "exec", "run", &cut, true).is_err(), "{list}");
         }
+        // A provider's call is long-pathed: the rule is its action, which the
+        // cut target does not change.
+        let cut = nerve_policy::audit::cut_target(&"/srv/a/".repeat(100)).into_owned();
+        assert!(nerve_policy::audit::is_cut_target(&cut));
+        assert_eq!(
+            rule("allow", "photos", "export", &cut, false).unwrap(),
+            "photos.export"
+        );
+        assert_eq!(
+            rule("deny", "photos", "export", &cut, true).unwrap(),
+            "photos"
+        );
+        assert!(rule("allow", "fs", "write", &cut, false).is_err());
+        assert!(rule("allow", "exec", "signal", &cut, false).is_ok());
     }
 }

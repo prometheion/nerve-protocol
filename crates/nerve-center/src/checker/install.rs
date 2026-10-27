@@ -117,9 +117,11 @@ pub const MODELS: [ModelPin; 2] = [
         bytes: 1_674_456_672,
         sha256: "16aff27ea2eefdc32b9897f43854a5d3170c1dc8dccb9c756905af30a4e22402",
         licence: "LFM Open License v1.0",
-        threshold: 0.8,
-        timeout_ms: 4000,
-        summary: "Faster: about 1.7 s per call on a desktop CPU. Catches about 60 % of dangerous actions and 67 % of injection attempts; refuses about 2.5 % of ordinary work.",
+        threshold: 0.85,
+        // p95 was 3.0 s on the test CPU (2.3 s before the state grew by the
+        // description): twice that, for a busy machine.
+        timeout_ms: 6000,
+        summary: "Faster: about 2.5 s per call on a desktop CPU. Catches about 57 % of dangerous actions and 73 % of injection attempts; refuses about 1.7 % of ordinary work.",
     },
     ModelPin {
         id: LocalModel::Kev4b,
@@ -130,10 +132,10 @@ pub const MODELS: [ModelPin; 2] = [
         bytes: 3_033_489_824,
         sha256: "33ae6b18926502b2209a1bf7d3b61a350d65938441515c686bb87d226a19eff9",
         licence: "Apache-2.0",
-        threshold: 0.5,
-        // p95 was 5.2 s on the test CPU; leave room for a busy machine.
+        threshold: 0.25,
+        // p95 was 5.6 s on the test CPU; leave room for a busy machine.
         timeout_ms: 15_000,
-        summary: "Catches more: about 79 % of dangerous actions and 93 % of injection attempts, refusing about 1.7 % of ordinary work, but about 4 to 5 s per call on a desktop CPU.",
+        summary: "Catches more: about 83 % of dangerous actions and 93 % of injection attempts, refusing about 1.7 % of ordinary work, but about 5 s per call on a desktop CPU.",
     },
 ];
 
@@ -865,9 +867,9 @@ mod tests {
         assert_eq!(MODELS[0].id, LocalModel::default());
         let d1 = model_pin(LocalModel::D1_3b);
         let kev = model_pin(LocalModel::Kev4b);
-        assert_eq!((d1.threshold, kev.threshold), (0.8, 0.5));
+        assert_eq!((d1.threshold, kev.threshold), (0.85, 0.25));
         assert!(kev.timeout_ms >= 10_000, "{}", kev.timeout_ms);
-        assert!(d1.timeout_ms >= 2_000);
+        assert!(d1.timeout_ms >= 6_000, "{}", d1.timeout_ms);
         assert_ne!(d1.file, kev.file);
         assert_eq!(kev.bytes, 3_033_489_824);
         assert_eq!(kev.licence, "Apache-2.0");
