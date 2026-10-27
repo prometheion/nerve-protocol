@@ -9286,6 +9286,10 @@ mod tests {
             "settings.set write built-in home: off (not granted)"
         );
         run(&paths, &["center", "grant", "settings", "write"]).unwrap();
+        // On Windows the change goes to the file and the running node takes
+        // it at its next reload (the service's reload event); on Unix the
+        // node took it already, and this finds nothing newer.
+        daemon.reload().unwrap();
         let ls = run(&paths, &["cap", "ls"]).unwrap();
         assert_eq!(
             settings(&ls),
