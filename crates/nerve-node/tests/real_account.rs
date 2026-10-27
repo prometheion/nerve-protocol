@@ -1099,7 +1099,7 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
                 "program",
                 "pathprov",
                 "conformance-center:",
-                "default"
+                "on"
             ]),
         "{ls}"
     );
@@ -1159,7 +1159,23 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     );
 
     // A process of a command the node runs (user mode, as the owner) is
-    // refused, though it runs the allowed program.
+    // refused, though it runs the allowed program, and the name is free:
+    // the owner lets the attached one go first.
+    for args in [
+        &["cap", "provider", "rm", "pathprov"][..],
+        &["cap", "provider", "allow", "pathprov", &python],
+    ] {
+        let (ok, said) = as_owner(&owner, args);
+        assert!(ok, "{said}");
+    }
+    let gone = std::time::Instant::now();
+    while as_owner(&owner, &["status"])
+        .1
+        .contains("provider pathprov attached")
+    {
+        assert!(gone.elapsed() < WAIT, "the provider stays attached");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     assert!(as_owner(&owner, &["mode", "set", "user"]).0);
     let hello = format!("{python} {script} - /dev/null");
     let r = run(&mut conn, &proj, &hello).await.unwrap();
