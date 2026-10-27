@@ -559,7 +559,12 @@ Which ones a node offers, with `provider: "config"`, one capability per
 and on a node run by hand only those with `account = "owner"` (it has no
 `nerve-run`). Windows parses them and offers none. The descriptor cuts them by
 the effect table like any capability (§3), and only the owner turns one on
-that senses or actuates (§5, `settings.set`).
+that senses or actuates (§5, `settings.set`). Since a center's earlier `on`
+of the capability (or of the action while it read) or allow rule would cover
+an action that comes to sense or actuate, `cap add` of such an action and
+`cap edit` that changes one to it write `caps."cap.action" = "off"` for each
+center whose `on` or allow rule covers it (a center cannot remove that), and
+name those centers.
 
 A call is decided like a provider's (§7, Paths), then runs:
 

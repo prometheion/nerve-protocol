@@ -2646,13 +2646,11 @@ impl Link {
             && self.shared.exe.is_some()
             && self.shared.confinement.landlock_abi.is_some())
         .then(|| {
-            let mut policy = entry.policy.clone();
-            if !self.shared.separate(&policy) {
-                policy.folders = account
-                    .as_ref()
-                    .map(|a| crate::account::built_in(&a.home))
-                    .unwrap_or_default();
-            }
+            let policy = crate::config_cap::confined(
+                &entry.policy,
+                self.shared.separate(&entry.policy),
+                account.as_ref().map(|a| a.home.as_path()),
+            );
             // The folders' entries are listed as the account.
             let _as = act_as(account.as_ref()).ok().flatten();
             let writable = exec::write_folders(cfg, &home);

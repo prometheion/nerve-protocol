@@ -517,13 +517,25 @@ account = "owner""#);
     let (mut p, first) = hello(&socket, desk).await;
     assert_eq!(first["ok"]["capabilities"], json!(["desk"]), "{first}");
     let paths = daemon.paths().clone();
-    owner_edit(&paths, |c| {
-        c.capabilities.push(cap(r#"name = "desk.off"
-effect = "write"
-command = ["true"]
-account = "owner""#));
-    })
+    let said = cli(
+        &paths,
+        &[
+            "cap",
+            "add",
+            "desk.off",
+            "--effect",
+            "write",
+            "--account",
+            "owner",
+            "--",
+            "true",
+        ],
+    )
     .await;
+    assert!(
+        said.contains("the program desk offered desk and is let go"),
+        "{said}"
+    );
     assert_eq!(p.next().await, None, "the connection ends");
     assert_eq!(daemon.status()["providers"], json!([]));
     daemon.stop().await;
@@ -690,6 +702,14 @@ account = "owner""#);
         invoke(&mut conn, "probe.temp", json!({})).await.unwrap(),
         json!("21\n")
     );
+    // The read the center turned on comes to sense: the center's `on` was
+    // for a read, so it waits for the owner's.
+    let said = cli(&paths, &["cap", "edit", "notes.list", "--effect", "sense"]).await;
+    assert!(said.contains("lab: a switch or allow rule"), "{said}");
+    let e = invoke(&mut conn, "notes.list", json!({}))
+        .await
+        .unwrap_err();
+    assert_eq!(code_of(&e), "disabled", "{}", e.message);
     daemon.stop().await;
 }
 

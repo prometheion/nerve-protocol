@@ -1222,9 +1222,11 @@ async fn config_call(conn: &mut Conn<TcpStream>, name: &str, args: Value) -> Res
 /// declares them with `cap add`; one runs as `nerve-run` (its `id` says so)
 /// from that account's home, with the call's arguments as whole arguments
 /// that no shell reads; its path argument is held to the folders and read
-/// with `nerve-run`'s access; its timeout ends it; and in a pairing whose
-/// commands run as the owner it still runs as `nerve-run`. For a test
-/// machine only, as root: it installs the node and removes it again.
+/// with `nerve-run`'s access; under Landlock it reaches only the folders,
+/// the system's and its own (CI's keyring job runs it there); its timeout
+/// ends it; and in a pairing whose commands run as the owner it still runs
+/// as `nerve-run`, held to its own folders. For a test machine only, as
+/// root: it installs the node and removes it again.
 ///
 /// `NERVE_NODE_REAL=<the nerve-node to install> NERVE_REAL_OWNER=<an account
 /// with a home, the owner> cargo test -p nerve-node --test real_account --
@@ -1270,6 +1272,17 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     chown(&base);
     chmod(&base, "755");
     chmod(&base.join("closed.txt"), "600");
+    // A file every account may read, outside the folders and the system's:
+    // Landlock, where the kernel has it, holds a command away from it.
+    let open = PathBuf::from("/srv/nerve-b5");
+    let _ = std::fs::remove_dir_all(&open);
+    std::fs::create_dir_all(&open).unwrap();
+    std::fs::write(open.join("open.txt"), "open-line\n").unwrap();
+    chmod(&open, "755");
+    chmod(&open.join("open.txt"), "644");
+    let scratch = "/tmp/nerve-b5-scratch";
+    let _ = std::fs::remove_file(scratch);
+    let landlock = nerve_sandbox::Confinement::detect().landlock_abi.is_some();
 
     let mut center = FakeCenter::start(false).await.unwrap();
     let link = center.link().render();
@@ -1321,13 +1334,35 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
             "sleep",
             "41.75",
         ],
+        &[
+            "cap",
+            "add",
+            "open.show",
+            "--effect",
+            "read",
+            "--",
+            "cat",
+            "--",
+            "/srv/nerve-b5/open.txt",
+        ],
+        &[
+            "cap",
+            "add",
+            "scratch.put",
+            "--effect",
+            "write",
+            "--",
+            "sh",
+            "-c",
+            "echo put > /tmp/nerve-b5-scratch && cat /tmp/nerve-b5-scratch",
+        ],
     ] {
         let (ok, said) = as_owner(&owner, args);
         assert!(ok, "{args:?}: {said}");
     }
     // In folder mode a read that names no path needs `on`; one with its
     // path in the folders does not.
-    for cap in ["who", "say", "slow"] {
+    for cap in ["who", "say", "slow", "open", "scratch"] {
         let (ok, said) = as_owner(&owner, &["cap", "set", cap, "on"]);
         assert!(ok, "{said}");
     }
@@ -1417,6 +1452,22 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
         "{e}"
     );
 
+    // Under Landlock it reaches the folders, the system's and its own
+    // (`/tmp`), nothing else: a file every account may read outside them is
+    // refused when it runs. Without Landlock nerve-run reads it.
+    let r = config_call(&mut conn, "open.show", json!({})).await;
+    if landlock {
+        // cat's own refusal, in the system's language.
+        let e = r.unwrap_err();
+        assert!(e.contains("open.show failed: exit code 1"), "{e}");
+    } else {
+        assert_eq!(r.unwrap(), json!("open-line\n"));
+    }
+    let r = config_call(&mut conn, "scratch.put", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(r, json!("put\n"));
+
     // The timeout ends it, and nothing of it is left.
     let started = std::time::Instant::now();
     let e = config_call(&mut conn, "slow.wait", json!({}))
@@ -1444,6 +1495,22 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     assert!(as_the_owner, "exec.run runs as the owner in user mode");
     let who = config_call(&mut conn, "who.am", json!({})).await.unwrap();
     assert!(who.as_str().unwrap().contains("(nerve-run)"), "{who}");
+    // Held to its own folders there, not the pairing's, which are the
+    // owner's now.
+    let _ = std::fs::remove_file(scratch);
+    let r = config_call(&mut conn, "scratch.put", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(r, json!("put\n"));
+    let r = config_call(
+        &mut conn,
+        "files.show",
+        json!({"path": proj.join("inside.txt").to_str().unwrap()}),
+    )
+    .await;
+    if landlock {
+        assert!(r.is_err(), "{r:?}");
+    }
     let audit = as_owner(&owner, &["audit"]).1;
     assert!(
         audit.contains("who.am  who.am  allowed")
@@ -1457,4 +1524,6 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     let (ok, said) = sh(Command::new(BIN).args(["uninstall", "--purge"]));
     assert!(ok, "{said}");
     std::fs::remove_dir_all(&base).unwrap();
+    std::fs::remove_dir_all(&open).unwrap();
+    let _ = std::fs::remove_file(scratch);
 }

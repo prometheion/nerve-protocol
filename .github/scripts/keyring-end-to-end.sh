@@ -18,7 +18,9 @@
 #    test: the owner's program attaches on the provider socket and its paths
 #    count by the folders the owner gave alone (not nerve-run's own), a
 #    folder nerve-run may not look into refuses its call, another account's
-#    program is refused; uninstall.
+#    program is refused; uninstall. Then its test of the capabilities of
+#    node.toml: they run as nerve-run, their arguments as data, held by
+#    Landlock to the folders and the account's own; uninstall.
 # 2. The keyring path as an owner takes it: install the node (with the
 #    owner's sudo), run `setup` in a terminal and answer yes to the keyring,
 #    which installs GNOME Keyring, a session for `nerve` and a login keyring
@@ -140,6 +142,11 @@ useradd --create-home --shell /bin/bash "$OTHER"
 NERVE_NODE_REAL=$NODE NERVE_REAL_OWNER=$OWNER NERVE_REAL_OTHER=$OTHER \
   "$TESTS" --ignored --exact --nocapture the_owners_program_attaches_and_is_held_to_the_folders
 userdel -r "$OTHER" >/dev/null 2>&1 || true
+[ ! -e "$BIN" ] || fail "the test left the node installed"
+
+step "1c. real_account.rs: capabilities of node.toml, run as nerve-run under Landlock"
+NERVE_NODE_REAL=$NODE NERVE_REAL_OWNER=$OWNER \
+  "$TESTS" --ignored --exact --nocapture a_config_capability_runs_as_nerve_run_in_a_folder_pairing
 [ ! -e "$BIN" ] || fail "the test left the node installed"
 
 step "2. Install the node as the owner"

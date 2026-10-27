@@ -2132,6 +2132,19 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             };
             let input = cap_stdin(&spec)?;
             cap_spec(&spec, input.as_deref(), &mut c)?;
+            // The programs that offer its capability now, which the node
+            // lets go once the config names it (a note only: where the
+            // listing fails, none is named).
+            let (before, _) = read_config(&paths).await?;
+            let programs = if crate::config_cap::names(&before, c.split().0) {
+                Vec::new()
+            } else {
+                cap_listing(&paths, &before)
+                    .await
+                    .map(|v| programs_offering(&v, c.split().0))
+                    .unwrap_or_default()
+            };
+            let held = std::sync::Mutex::new(Vec::new());
             edit(&paths, |cfg| {
                 if cfg.capabilities.iter().any(|d| d.name == name) {
                     return Err(format!(
@@ -2139,11 +2152,18 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                     ));
                 }
                 cfg.capabilities.push(c.clone());
+                *held.lock().unwrap() = hold_for_owner(cfg, &c);
                 Ok(())
             })
             .await?;
             w(out, format!("capability {name} added: {}", cap_line(&c)));
-            for note in cap_notes(&c, crate::service::is_service_node(&paths)) {
+            let notes = CapNotes {
+                installed: crate::service::is_service_node(&paths),
+                root: runs_as_root(&paths),
+                held: held.into_inner().unwrap(),
+                programs,
+            };
+            for note in notes.of(&c) {
                 w(out, note);
             }
             Ok(())
@@ -2154,19 +2174,30 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             command,
         }) => {
             let input = cap_stdin(&spec)?;
+            let held = std::sync::Mutex::new(Vec::new());
             edit(&paths, |cfg| {
                 let c = cfg
                     .capabilities
                     .iter_mut()
                     .find(|d| d.name == name)
                     .ok_or_else(|| format!("no capability {name} is declared"))?;
+                let was = c.effect;
                 if let Some(e) = &spec.effect {
                     c.effect = parse_enum(e, "read, write, execute, sense or actuate")?;
                 }
                 if !command.is_empty() {
                     c.command = command.clone();
                 }
-                cap_spec(&spec, input.as_deref(), c)
+                cap_spec(&spec, input.as_deref(), c)?;
+                // Only an action that comes to sense or actuate now: one
+                // that did already was held when it came to.
+                let c = c.clone();
+                *held.lock().unwrap() = if senses(was) {
+                    Vec::new()
+                } else {
+                    hold_for_owner(cfg, &c)
+                };
+                Ok(())
             })
             .await?;
             let (cfg, _) = read_config(&paths).await?;
@@ -2176,7 +2207,13 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                 .find(|d| d.name == name)
                 .ok_or_else(|| format!("no capability {name} is declared"))?;
             w(out, format!("capability {name} changed: {}", cap_line(c)));
-            for note in cap_notes(c, crate::service::is_service_node(&paths)) {
+            let notes = CapNotes {
+                installed: crate::service::is_service_node(&paths),
+                root: runs_as_root(&paths),
+                held: held.into_inner().unwrap(),
+                programs: Vec::new(),
+            };
+            for note in notes.of(c) {
                 w(out, note);
             }
             Ok(())
@@ -3579,23 +3616,127 @@ fn cap_line(c: &nerve_policy::config::ConfigCapability) -> String {
     line
 }
 
-/// What the owner should know of `c` once it is declared: where this node
-/// does not offer it, and that a center gets one that senses or actuates
-/// only once the owner turns it on.
-fn cap_notes(c: &nerve_policy::config::ConfigCapability, installed: bool) -> Vec<String> {
+/// Whether `effect` senses or acts on the world, which only the owner turns
+/// on for a center.
+fn senses(effect: nerve_proto::descriptor::Effect) -> bool {
     use nerve_proto::descriptor::Effect;
-    let mut notes = Vec::new();
-    if let Some(why) = crate::config_cap::left_out(c, std::env::consts::OS, installed) {
-        notes.push(format!("this node does not offer it: {why}"));
+    matches!(effect, Effect::Sense | Effect::Actuate)
+}
+
+/// Where `c` has come to sense or actuate, switches it off for every center
+/// whose earlier switch (`cap set` of its capability, or of the action while
+/// it only read) or allow rule would let that center use it at once: such a
+/// switch was set for what it did then, perhaps by the center itself, and
+/// only the owner turns on what senses or actuates. A center cannot take
+/// that `off` away. Returns those centers.
+fn hold_for_owner(cfg: &mut NodeConfig, c: &nerve_policy::config::ConfigCapability) -> Vec<String> {
+    if !senses(c.effect) {
+        return Vec::new();
     }
-    if matches!(c.effect, Effect::Sense | Effect::Actuate) {
-        notes.push(format!(
-            "it {}s: a center gets it only once you turn it on for that center (cap set {} on --center NAME)",
-            c.effect.as_str(),
-            c.name
-        ));
+    let (cap, action) = c.split();
+    let mut held = Vec::new();
+    for e in &mut cfg.centers {
+        let p = &mut e.policy;
+        let covered = match p.cap_setting(cap, Some(action)) {
+            Some(CapSetting::Off | CapSetting::Hidden) => false,
+            Some(CapSetting::On) => true,
+            None => rules::offers(&p.allow, cap, action),
+        };
+        if covered {
+            p.caps.insert(c.name.clone(), CapSetting::Off);
+            held.push(e.name.clone());
+        }
     }
-    notes
+    held
+}
+
+/// The programs whose rows in `listing` (`caps.list`) offer the capability
+/// `cap` now.
+fn programs_offering(listing: &Value, cap: &str) -> Vec<String> {
+    let mut found: Vec<String> = listing["capabilities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| {
+            r["name"]
+                .as_str()
+                .is_some_and(|n| n.split_once('.').map_or(n, |(c, _)| c) == cap)
+        })
+        .filter_map(|r| r["source"].as_str()?.strip_prefix("program "))
+        .map(str::to_string)
+        .collect();
+    found.dedup();
+    found
+}
+
+/// Whether a capability with `account = "owner"` runs as root here: the
+/// installed node's owner is root, or a node run by hand runs as root.
+fn runs_as_root(paths: &NodePaths) -> bool {
+    if crate::service::is_service_node(paths) {
+        crate::owner::is_root(crate::service::owner_of(paths).as_deref())
+    } else {
+        cfg!(unix) && nerve_transport::net::euid() == 0
+    }
+}
+
+/// What the owner should know of a capability once `cap add` or `cap edit`
+/// declared it.
+struct CapNotes {
+    /// Whether this is the installed node.
+    installed: bool,
+    /// Whether `account = "owner"` runs as root here ([`runs_as_root`]).
+    root: bool,
+    /// The centers [`hold_for_owner`] switched it off for.
+    held: Vec<String>,
+    /// The programs that offered its capability and are let go.
+    programs: Vec<String>,
+}
+
+impl CapNotes {
+    /// The notes on `c`: where this node does not offer it; that it runs as
+    /// root; that the agent sees no description; that a center gets one
+    /// that senses or actuates only once the owner allows it, and for which
+    /// centers it was switched off; and which programs lost their
+    /// capability to it.
+    fn of(&self, c: &nerve_policy::config::ConfigCapability) -> Vec<String> {
+        use nerve_policy::config::RunsAs;
+        let mut notes = Vec::new();
+        if let Some(why) = crate::config_cap::left_out(c, std::env::consts::OS, self.installed) {
+            notes.push(format!("this node does not offer it: {why}"));
+        }
+        if self.root && c.account == RunsAs::Owner {
+            notes.push(format!(
+                "Warning: root is the owner here, so {} runs as root: anything on this machine, Nerve and its keys included",
+                c.name
+            ));
+        }
+        if c.summary.is_empty() {
+            notes.push(format!(
+                "it has no summary, so the agent sees no description of it (cap edit {} --summary TEXT)",
+                c.name
+            ));
+        }
+        if senses(c.effect) {
+            notes.push(format!(
+                "it {}s: a center gets it only once you turn it on for that center (cap set {} on --center NAME), in allowlist mode once you add an allow rule for it",
+                c.effect.as_str(),
+                c.name
+            ));
+        }
+        for center in &self.held {
+            notes.push(format!(
+                "{center}: a switch or allow rule set before covered {}; it is off there now until you turn it on",
+                c.name
+            ));
+        }
+        for p in &self.programs {
+            notes.push(format!(
+                "the program {p} offered {} and is let go: node.toml's capability takes the name",
+                c.split().0
+            ));
+        }
+        notes
+    }
 }
 
 /// The lines of `cap ls` for the capabilities of node.toml: each one's
@@ -9534,6 +9675,161 @@ mod tests {
     /// node.toml, checked as the node checks them; `cap ls` lists them with
     /// their command and account, and says where this node does not offer
     /// one.
+    /// A capability of node.toml that comes to sense or actuate, added or
+    /// changed so, is switched off for each center whose earlier switch
+    /// (its capability's, or its own while it only read) or allow rule
+    /// covers it, and the owner is told; one switched off already, one that
+    /// sensed before, and a center nothing covers are left as they are.
+    #[test]
+    fn a_capability_that_comes_to_sense_waits_for_the_owner() {
+        let (_d, paths) = setup(&["lab", "ops", "quiet", "shut"]);
+        let caps = |paths: &NodePaths, center: &str| {
+            load(paths).center(center).unwrap().policy.caps.clone()
+        };
+        run(&paths, &["cap", "set", "probe", "on", "--center", "lab"]).unwrap();
+        run(
+            &paths,
+            &["config", "add", "center.ops.policy.allow", "probe"],
+        )
+        .unwrap();
+        run(&paths, &["cap", "set", "probe", "on", "--center", "shut"]).unwrap();
+        run(
+            &paths,
+            &["cap", "set", "probe.cam", "off", "--center", "shut"],
+        )
+        .unwrap();
+        let said = run(
+            &paths,
+            &[
+                "cap",
+                "add",
+                "probe.cam",
+                "--effect",
+                "sense",
+                "--summary",
+                "A frame.",
+                "--",
+                "cam",
+            ],
+        )
+        .unwrap();
+        for center in ["lab", "ops"] {
+            assert!(
+                said.contains(&format!("{center}: a switch or allow rule set before covered probe.cam; it is off there now")),
+                "{said}"
+            );
+            assert_eq!(
+                caps(&paths, center).get("probe.cam"),
+                Some(&CapSetting::Off),
+                "{center}"
+            );
+        }
+        assert!(
+            !said.contains("quiet:") && !said.contains("shut:"),
+            "{said}"
+        );
+        assert_eq!(caps(&paths, "quiet").get("probe.cam"), None);
+        assert!(
+            said.contains("in allowlist mode once you add an allow rule"),
+            "{said}"
+        );
+        // The owner turns it on; a change that leaves it sensing keeps that.
+        run(
+            &paths,
+            &["cap", "set", "probe.cam", "on", "--center", "lab"],
+        )
+        .unwrap();
+        let said = run(
+            &paths,
+            &["cap", "edit", "probe.cam", "--summary", "A photo."],
+        )
+        .unwrap();
+        assert!(!said.contains("off there now"), "{said}");
+        assert_eq!(caps(&paths, "lab").get("probe.cam"), Some(&CapSetting::On));
+        // One that read and comes to actuate: its own switch counts too.
+        let said = run(
+            &paths,
+            &[
+                "cap",
+                "add",
+                "probe.list",
+                "--effect",
+                "read",
+                "--summary",
+                "S.",
+                "--",
+                "ls",
+            ],
+        )
+        .unwrap();
+        assert!(!said.contains("off there now"), "{said}");
+        run(
+            &paths,
+            &["cap", "set", "probe.list", "on", "--center", "quiet"],
+        )
+        .unwrap();
+        let said = run(
+            &paths,
+            &["cap", "edit", "probe.list", "--effect", "actuate"],
+        )
+        .unwrap();
+        for center in ["lab", "ops", "quiet"] {
+            assert!(said.contains(&format!("{center}: a switch")), "{said}");
+            assert_eq!(
+                caps(&paths, center).get("probe.list"),
+                Some(&CapSetting::Off),
+                "{center}"
+            );
+        }
+    }
+
+    /// What `cap add` and `cap edit` tell the owner besides: that an
+    /// owner's capability runs as root where root is the owner, that one
+    /// with no summary shows the agent no description, and which programs
+    /// lost their capability to it.
+    #[test]
+    fn cap_notes_say_what_the_owner_should_know() {
+        let mut c = nerve_policy::config::ConfigCapability {
+            name: "x.run".into(),
+            summary: String::new(),
+            effect: nerve_proto::descriptor::Effect::Execute,
+            command: vec!["make".into()],
+            params: Value::Null,
+            result: Default::default(),
+            timeout_secs: None,
+            account: nerve_policy::config::RunsAs::Owner,
+            platform: Default::default(),
+        };
+        let notes = |root: bool, c: &nerve_policy::config::ConfigCapability| {
+            CapNotes {
+                installed: true,
+                root,
+                held: Vec::new(),
+                programs: vec!["desk".into()],
+            }
+            .of(c)
+            .join("\n")
+        };
+        let said = notes(true, &c);
+        assert!(
+            said.contains("Warning: root is the owner here, so x.run runs as root"),
+            "{said}"
+        );
+        assert!(said.contains("it has no summary"), "{said}");
+        assert!(
+            said.contains("the program desk offered x and is let go"),
+            "{said}"
+        );
+        assert!(!notes(false, &c).contains("root"));
+        c.account = nerve_policy::config::RunsAs::NerveRun;
+        c.summary = "Builds.".into();
+        let said = notes(true, &c);
+        assert!(
+            !said.contains("root") && !said.contains("summary"),
+            "{said}"
+        );
+    }
+
     #[test]
     fn cap_add_edit_and_rm_declare_capabilities_of_node_toml() {
         let (_d, paths) = setup(&["lab"]);

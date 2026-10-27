@@ -104,6 +104,24 @@ pub fn entry(c: &ConfigCapability) -> Value {
     })
 }
 
+/// The folders Landlock holds a command of a config capability to as
+/// `nerve-run`, from the pairing's `policy` (with the account's own folders
+/// where the link added them): where the pairing's commands run as
+/// `nerve-run` (`separate`), its folders; where they run as the owner, the
+/// folders are the owner's and not `nerve-run`'s, so only the account's own
+/// (`home` its home, none without one).
+pub fn confined(
+    policy: &nerve_policy::CenterPolicy,
+    separate: bool,
+    home: Option<&std::path::Path>,
+) -> nerve_policy::CenterPolicy {
+    let mut policy = policy.clone();
+    if !separate {
+        policy.folders = home.map(crate::account::built_in).unwrap_or_default();
+    }
+    policy
+}
+
 /// The config's entry for `cap.action`.
 pub fn find<'a>(cfg: &'a NodeConfig, cap: &str, action: &str) -> Option<&'a ConfigCapability> {
     cfg.capabilities.iter().find(|c| c.split() == (cap, action))
@@ -252,6 +270,31 @@ account = "owner"
         assert!(names(&c, "win") && names(&c, "sensors") && !names(&c, "lamp"));
         assert_eq!(find(&c, "sensors", "list").unwrap().name, "sensors.list");
         assert!(find(&c, "sensors", "other").is_none());
+    }
+
+    /// A command of `nerve-run` gets the pairing's folders where its
+    /// commands run as that account, and only the account's own where they
+    /// run as the owner: Landlock's rules are made of them.
+    #[test]
+    fn landlock_holds_a_nerve_run_command_to_the_right_folders() {
+        use nerve_policy::config::{Access, Folder};
+        use std::path::Path;
+        let proj = Folder {
+            path: "/srv/proj".into(),
+            access: Access::parse("rw").unwrap(),
+        };
+        let home = Path::new("/var/lib/nerve-run");
+        let mut folders = vec![proj.clone()];
+        folders.extend(crate::account::built_in(home));
+        let policy = nerve_policy::CenterPolicy {
+            mode: nerve_policy::Mode::Folder,
+            folders: folders.clone(),
+            ..Default::default()
+        };
+        assert_eq!(confined(&policy, true, Some(home)).folders, folders);
+        let own = confined(&policy, false, Some(home));
+        assert_eq!(own.folders, crate::account::built_in(home));
+        assert!(confined(&policy, false, None).folders.is_empty());
     }
 
     #[test]

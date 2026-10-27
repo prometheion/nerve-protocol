@@ -92,7 +92,7 @@ says how), and the program gets it as the node resolved it.
 | `account` | Runs as | Folders |
 |---|---|---|
 | `nerve-run` (default) | the installed node's command account, from its home `/var/lib/nerve-run` | in a `folder` or `allowlist` pairing whose commands run as `nerve-run`: that pairing's folders and the account's own (its home, `/tmp`, `/var/tmp`), held there by Landlock where the kernel has it. In a pairing whose commands run as you (`user` mode, `allowlist --as-owner`): the account's own folders alone, since your folders are not `nerve-run`'s. Without Landlock, what `nerve-run` itself may reach |
-| `owner` | you, with your rights, from your home (root where root is the owner) | like a [provider's](providers.md): only the folders you granted count for its paths, and no sandbox holds it |
+| `owner` | you, with your rights, from your home (root where root is the owner; `cap add` warns of it) | like a [provider's](providers.md): only the folders you granted count for its paths, and no sandbox holds it |
 
 A capability that runs as `nerve-run` is a command of that account: it reads
 a path outside the folders only where `nerve-run` may read it, never your
@@ -117,10 +117,19 @@ As any capability, by what it does ([modes](modes.md#what-each-mode-allows),
 | `folder` | a `read`: its paths are anything the account it runs as may read (above); a `write` or `execute`: its paths lie in folders that allow them; one that takes no path needs `nerve-node cap set logs.tail on` |
 | `user` | always |
 
-One that senses or acts on the world (`sense`, `actuate`) needs your `cap set
-NAME on` in every mode. A center with the [settings grant](settings-grant.md)
-may turn on or allow the others itself, never one that senses or acts, and
-cannot add, change or remove a capability of `node.toml`.
+One that senses or acts on the world (`sense`, `actuate`) needs you: your
+`cap set NAME on` in `folder` and `user` mode, an allow rule you add in
+`allowlist` mode. A center with the [settings grant](settings-grant.md) may
+turn on or allow the others itself, never one that senses or acts, and cannot
+add, change or remove a capability of `node.toml`.
+
+A switch or allow rule set earlier may cover a capability you add later: `cap
+set sensors on`, or an allow rule `sensors`, also covers a new
+`sensors.camera`, and a center may have set it while `sensors` only read.
+So when `cap add` declares an action that senses or acts, or `cap edit`
+changes one to, it switches that action off for every center such a switch
+or rule covers, and says which; turn it on for those you mean. A switch you
+set stays when you remove a capability.
 
 No program may [attach](providers.md) with the name of one of your
 capabilities, and one that is attached with such a name is let go when you
