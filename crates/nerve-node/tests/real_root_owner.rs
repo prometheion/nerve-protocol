@@ -520,8 +520,9 @@ fn started(user: Option<&str>, args: &[&str]) -> (Started, String) {
 /// installed node on its provider socket (issue #152, B4): the node, which
 /// may not look at a process of root's itself, starts its helper as root to
 /// tell the program. Another account's program is refused, as it is no
-/// owner. For a test machine only, as root: it installs the node and
-/// removes it again.
+/// owner. A folder of another account the node may not look into refuses
+/// a call that hands root's program the folder above it. For a test machine
+/// only, as root: it installs the node and removes it again.
 ///
 /// `NERVE_NODE_REAL=<the nerve-node to install> cargo test -p nerve-node
 /// --test real_root_owner -- --ignored --exact a_program_of_root_attaches_as_a_provider`
@@ -590,6 +591,33 @@ async fn a_program_of_root_attaches_as_a_provider() {
         .expect("an answer")
         .expect("served");
     assert_eq!(r, json!({"first": "root-line", "uid": 0}));
+    // A folder of another account that only it may look into, holding a
+    // link to a protected file of root's. The walk runs with root's file
+    // ids but the node's rights, so it cannot list the folder; root's
+    // program could, and follow the link: handing it the folder above is
+    // refused.
+    let shut = work.join("shut");
+    std::fs::create_dir(&shut).unwrap();
+    std::os::unix::fs::symlink("/root/.ssh/id_b4", shut.join("key")).unwrap();
+    assert!(
+        sh(Command::new("chown")
+            .args(["-h", "nobody"])
+            .arg(shut.join("key")))
+        .0
+    );
+    assert!(sh(Command::new("chown").arg("nobody").arg(&shut)).0);
+    assert!(sh(Command::new("chmod").args(["700"]).arg(&shut)).0);
+    let e = conn
+        .call(
+            "invoke",
+            json!({"cap": "files", "action": "open", "ctx": {},
+                   "args": {"path": work.display().to_string()}}),
+            WAIT,
+        )
+        .await
+        .expect("an answer")
+        .expect_err("refused");
+    assert!(e.message.contains("may not look into"), "{}", e.message);
     drop(conn);
 
     drop(provider);
