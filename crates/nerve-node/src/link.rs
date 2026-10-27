@@ -2614,8 +2614,17 @@ impl Link {
             let owner = runs_as.as_ref().ok().cloned().flatten();
             match self.shared.owner_command(cfg, &decl, owner.as_ref()) {
                 Err(why) => {
+                    // Where is the owner's to know: the place names words
+                    // of the owner's command and a folder some center may
+                    // write, perhaps another one's.
                     self.audit(inv, &target, "forbidden", Some("forbidden"), Some(&why));
-                    return Err(RpcError::new(ErrorCode::Forbidden, why));
+                    return Err(RpcError::new(
+                        ErrorCode::Forbidden,
+                        format!(
+                            "{} runs as the owner and its command names or starts in a place where a center may write; the node's audit log says which",
+                            decl.name
+                        ),
+                    ));
                 }
                 Ok(file) => found = file,
             }

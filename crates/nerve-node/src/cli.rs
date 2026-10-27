@@ -3677,14 +3677,17 @@ fn runs_as_root(paths: &NodePaths) -> bool {
 /// The running node judges it as it does before a call (`cap.refusal`): as
 /// the owner, from the owner's home, which the node's own user that runs
 /// this CLI on the installed node may not look into. A node that does not
-/// answer leaves it to [`written_by_centers`].
+/// answer leaves it to [`written_by_centers`]. One this node does not
+/// offer (`cap add` says why) has no calls here to refuse.
 async fn cap_refusal(
     paths: &NodePaths,
     cfg: &NodeConfig,
     c: &nerve_policy::config::ConfigCapability,
     installed: bool,
 ) -> Option<String> {
-    if c.account != nerve_policy::config::RunsAs::Owner {
+    if c.account != nerve_policy::config::RunsAs::Owner
+        || crate::config_cap::left_out(c, std::env::consts::OS, installed).is_some()
+    {
         return None;
     }
     #[cfg(unix)]
@@ -3726,6 +3729,7 @@ fn written_by_centers(
         cfg,
         &caps,
         &home,
+        now,
         |p| !installed || p.runs_as_owner(now),
     ));
     let path = std::env::var_os("PATH");

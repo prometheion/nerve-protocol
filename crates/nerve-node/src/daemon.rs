@@ -661,6 +661,7 @@ impl Shared {
             cfg,
             &caps,
             &home,
+            crate::now_ms(),
             |p| !self.separate(p),
         ));
         writable
@@ -2291,7 +2292,10 @@ pub(crate) fn control(
             let Some(decl) = cfg.capabilities.iter().find(|c| c.name == name) else {
                 return Reply::Err(format!("no capability {name} is declared"));
             };
-            if decl.account != nerve_policy::config::RunsAs::Owner {
+            // One this node does not offer has no calls here to refuse.
+            if decl.account != nerve_policy::config::RunsAs::Owner
+                || crate::config_cap::left_out(decl, std::env::consts::OS, shared.service).is_some()
+            {
                 return Reply::Ok(json!({"refusal": null}));
             }
             let owner = shared.owner_account(&cfg).ok().flatten();

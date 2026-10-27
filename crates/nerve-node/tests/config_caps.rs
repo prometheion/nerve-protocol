@@ -366,11 +366,15 @@ account = "owner""#);
             e.message
         );
         assert!(!ran.exists(), "{name}: the script did not run");
+        // The center is not told the place, which names a folder some
+        // center may write; the owner finds it in the audit log.
+        let place = work.display().to_string();
+        assert!(!e.message.contains(&place), "{name}: {}", e.message);
         let entries = audited(daemon.paths(), "proj");
         assert!(
-            entries
-                .iter()
-                .any(|e| e["decision"] == "forbidden" && e["target"] == name),
+            entries.iter().any(|e| e["decision"] == "forbidden"
+                && e["target"] == name
+                && e["reason"].as_str().is_some_and(|r| r.contains(&place))),
             "{entries:?}"
         );
     }
@@ -1276,6 +1280,36 @@ async fn cap_add_warns_as_the_node_judges_from_where_it_starts() {
         said.contains("finds no program no-such-program-b5"),
         "{said}"
     );
+    // One this node does not offer has no calls here to refuse: neither
+    // the CLI nor the node says it would.
+    let said = cli(
+        &paths,
+        &[
+            "cap",
+            "add",
+            "win.ip",
+            "--effect",
+            "read",
+            "--account",
+            "owner",
+            "--platform",
+            "windows",
+            "--",
+            "no-such-program-b5.exe",
+            "/all",
+        ],
+    )
+    .await;
+    assert!(said.contains("for windows only"), "{said}");
+    assert!(!said.contains("Warning: win.ip"), "{said}");
+    let asked = nerve_transport::ctl::call(
+        &paths.ctl_socket(),
+        "cap.refusal",
+        json!({"name": "win.ip"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(asked["refusal"], Value::Null, "{asked}");
     daemon.stop().await;
 }
 
