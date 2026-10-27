@@ -673,10 +673,23 @@ mod tests {
     #[test]
     fn the_command_line_quotes_what_holds_blanks() {
         let c = cap(
-            &["grep", "-e", "a b", "it's", "x\ny", "", "--", "{x}"],
+            &[
+                "grep",
+                "-e",
+                "a b",
+                "it's",
+                "x\ny",
+                "\u{1b}[1m",
+                "",
+                "--",
+                "{x}",
+            ],
             Value::Null,
         );
-        assert_eq!(c.command_line(), r#"grep -e "a b" "it's" "x\ny" "" -- {x}"#);
+        assert_eq!(
+            c.command_line(),
+            r#"grep -e "a b" "it's" "x\ny" "\u001b[1m" "" -- {x}"#
+        );
     }
 
     #[test]
