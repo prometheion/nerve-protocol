@@ -1299,7 +1299,7 @@ mod tests {
         assert!(c.model_on);
         assert_eq!(c.model.source, ModelSource::Local);
         assert_eq!(c.model.local_model, LocalModel::Kev4b);
-        assert_eq!(c.model.threshold, 0.3);
+        assert_eq!(c.model.threshold, 0.25);
         assert!(c.model.timeout_ms >= 10_000);
         c.model.threshold = 0.6;
         c.local_installed(true, LocalModel::Kev4b);

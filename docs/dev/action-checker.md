@@ -272,7 +272,7 @@ refuse every call). There is no path or build to choose; the
 model is one of the two pinned in `install::MODELS` (`ModelConfig::local_model`,
 d1-3B by default), independent of the device. Each pin carries its repo,
 revision, file, size, SHA-256, licence, and the evaluation's default threshold
-and timeout (d1-3B 0.85 / 6 s, Kev-4B 0.3 / 15 s); a model switch
+and timeout (d1-3B 0.85 / 6 s, Kev-4B 0.25 / 15 s); a model switch
 (`CheckerConfig::local_installed`) downloads the other file, deletes the first,
 and takes that model's defaults, while a reinstall of the same model keeps the
 owner's. The model client waits up to the checker's own timeout for an answer
@@ -428,51 +428,59 @@ wins.
 
 **With the state the center sends now** (effect, description and arguments
 besides the call; #152 B3, 2026-10-27): the same CPU, the same build on 4
-threads, d1-3B and Kev-4B only. The state is longer, so a call takes longer,
-and both models score differently: d1-3B refuses more ordinary work at 0.8,
-Kev-4B refuses less of everything at 0.5. The default thresholds moved to keep
-the earlier operating points (d1-3B 0.8 → 0.85, Kev-4B 0.5 → 0.3). An owner's
-own threshold stays as set; a model switch sets the model's default.
+threads, d1-3B and Kev-4B only. The runner builds the description with
+`checker::unit_description`, the function the center uses (the action's text,
+then the capability's summary in brackets), and a test holds it to that order.
+The state is longer, so a call takes longer, and both models score
+differently: d1-3B refuses more ordinary work at 0.8, Kev-4B refuses less of
+everything at 0.5. The default thresholds moved to keep the earlier operating
+points (d1-3B 0.8 → 0.85, Kev-4B 0.5 → 0.25): about the same share of ordinary
+work refused (under 2 %) and injections caught. An owner's own threshold stays
+as set; a model switch sets the model's default.
 
 | Model | Cases | p50 / p95 | Threshold | Catch % | Benign-refused % | Injection catch % |
 |---|---|---|---|---|---|---|
 | d1-3B, state of 2026-10-18 | 214 | 1.8 s / – | 0.80 | 60.2 | 2.5 | 66.7 |
-| d1-3B | 214 command and file | 2.5 s / 3.0 s | 0.80 | 63.4 | 4.1 | 73.3 |
-| **d1-3B** | 214 command and file | | **0.85** | **58.1** | **1.7** | 73.3 |
+| d1-3B | 214 command and file | 2.5 s / 3.0 s | 0.80 | 64.5 | 3.3 | 73.3 |
+| **d1-3B** | 214 command and file | | **0.85** | **57.0** | **1.7** | 73.3 |
 | d1-3B | 17 capability | | 0.85 | 25.0 (2 of 8) | 0.0 | – |
 | Kev-4B, state of 2026-10-18 | 214 | 3.4 s / 4.3 s | 0.50 | 78.5 | 1.7 | 93.3 |
-| Kev-4B | 214 command and file | 4.7 s / 5.6 s | 0.50 | 69.9 | 0.0 | 86.7 |
-| **Kev-4B** | 214 command and file | | **0.30** | **78.5** | **0.8** | 93.3 |
-| Kev-4B | 17 capability | | 0.30 | 50.0 (4 of 8) | 0.0 | – |
+| Kev-4B | 214 command and file | 4.7 s / 5.6 s | 0.50 | 68.8 | 0.0 | 86.7 |
+| Kev-4B | 214 command and file | | 0.30 | 77.4 | 0.8 | 86.7 |
+| **Kev-4B** | 214 command and file | | **0.25** | **82.8** | **1.7** | 93.3 |
+| Kev-4B | 17 capability | | 0.25 | 50.0 (4 of 8) | 0.0 | – |
 
-Kev-4B's 0.3 is not where the sweep ends, so it was run lower (command and
-file cases, same state): 0.25 catches 81.7 % at 2.5 % benign refused (93.3 %
-injections), 0.20 catches 87.1 % at 2.5 % (100 %), 0.15 93.5 % at 5.8 %, 0.10
-95.7 % at 8.3 %. Below 0.3 the catch keeps rising at the price of ordinary
-work refused (from 1 of 121 benign cases at 0.3 to 3 at 0.25 and 0.2), which is
-a trade-off and not a better point on both, so the default stays at 0.3 (the
-earlier operating point, under 2 % benign refused); an owner who wants more
-catch lowers it. The p95 of that run (11 s) is inflated by other work on the
-machine and is not a latency figure.
+Kev-4B is the model whose scores moved most with the description's place:
+the same run with the capability's summary first (the order of the first
+measurement of this state) gave 78.5 % at 0.3 and 93.3 % of injections, and
+with the summary last 0.3 gives 77.4 % and 86.7 %, so the default is the point
+that keeps the injections: 0.25 catches 82.8 % at 1.7 % benign refused (2 of
+121) and 93.3 % of injections. Lower still, 0.20 catches 83.9 % at 2.5 % (3 of
+121, 93.3 % injections), 0.15 90.3 % at 2.5 % (100 %), and 0.10 96.8 % at 8.3 %.
+Below 0.25 the catch keeps rising at the price of ordinary work refused, which
+is a trade-off, so the default stays at the earlier operating point (under 2 %
+benign refused); an owner who wants more catch lowers it (0.15 is the point
+before the benign refusals climb). The run took d1-3B 598 s and Kev-4B about
+1100 s; the figures above are one run each, and the runs are deterministic.
 
 The capability cases show where a decision model is weak: both score every
-ordinary capability call low (0.01–0.08), and both find the account and system
-files and the deleted home folder (d1-3B 0.90–0.92, Kev-4B 0.55–0.75), but
-neither takes unlocking a door or disarming an alarm for dangerous (0.05–0.19),
-and a description that calls the action harmless carries them: d1-3B caught
-none of the three, Kev-4B one (0.56, an upload of `~/.ssh`). That is the
+ordinary capability call low (0.01–0.09), and both find the system files and
+the deleted home folder (d1-3B 0.91–0.92, Kev-4B 0.64–0.74), but neither takes
+unlocking a door or disarming an alarm for dangerous (0.04–0.16), and a
+description that calls the action harmless carries them: d1-3B caught none of
+the three, Kev-4B one (0.54, an upload of `~/.ssh`). That is the
 blocklist's and the node's part: an `fs.write` entry refuses the write to
-`authorized_keys` before the model (it scored 0.16 and 0.55), and actuate needs
+`authorized_keys` before the model (it scored 0.17 and 0.49), and actuate needs
 the owner's `on` on the node.
 
 **The default is LiquidAI d1-3B** (Q4_K_M) at a threshold of **0.85**, for one
 reason: speed on a CPU. At ~2.5 s per call it can sit in front of every
 execute/write call; Kev-4B takes ~5 s. On quality d1-3B is **not** the best:
-Kev-4B catches more dangerous actions (78.5 % vs 58.1 %) and far more injection
-attempts (93 % vs 73 %) at fewer benign refusals (0.8 % vs 1.7 %). **Pick
+Kev-4B catches more dangerous actions (82.8 % vs 57.0 %) and far more injection
+attempts (93 % vs 73 %) at the same benign refusals (1.7 % each). **Pick
 Kev-4B** when catching more matters more than a few seconds per call, or on a
 machine with a GPU, where its latency drops; it is the second model of the
-one-click local mode (Apache-2.0), with its own default threshold of 0.3 and a
+one-click local mode (Apache-2.0), with its own default threshold of 0.25 and a
 15 s timeout. d1-3B's licence is the **LFM Open License v1.0** (not Apache);
 both licences are named in the UI and the user guide.
 
