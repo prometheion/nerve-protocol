@@ -9813,6 +9813,31 @@ mod tests {
                 "{center}"
             );
         }
+        // A switch left from a capability that was removed holds a new one
+        // of that name too.
+        run(
+            &paths,
+            &["cap", "set", "lamp.flash", "on", "--center", "quiet"],
+        )
+        .unwrap();
+        let said = run(
+            &paths,
+            &[
+                "cap",
+                "add",
+                "lamp.flash",
+                "--effect",
+                "actuate",
+                "--",
+                "flash",
+            ],
+        )
+        .unwrap();
+        assert!(said.contains("quiet: a switch"), "{said}");
+        assert_eq!(
+            caps(&paths, "quiet").get("lamp.flash"),
+            Some(&CapSetting::Off)
+        );
     }
 
     /// `cap add` and `cap edit` warn of a command that runs as the owner and
