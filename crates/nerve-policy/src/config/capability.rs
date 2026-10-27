@@ -400,17 +400,21 @@ impl ConfigCapability {
         Ok(out)
     }
 
-    /// The command as one line, for the audit and `cap ls`: each element
-    /// quoted where it holds a blank or a quote.
+    /// The command as one line, for the audit and `cap ls`: an element that
+    /// holds a blank, a quote, a backslash or a control character is quoted
+    /// with its escapes, as JSON writes a string, so the line stays one.
     pub fn command_line(&self) -> String {
         self.command
             .iter()
             .map(|e| {
-                if e.is_empty() || e.contains(|c: char| c.is_whitespace() || c == '\'' || c == '"')
-                {
-                    format!("'{}'", e.replace('\'', "'\\''"))
-                } else {
+                let plain = !e.is_empty()
+                    && !e.contains(|c: char| {
+                        c.is_whitespace() || c.is_control() || "'\"\\".contains(c)
+                    });
+                if plain {
                     e.clone()
+                } else {
+                    Value::String(e.clone()).to_string()
                 }
             })
             .collect::<Vec<_>>()
@@ -668,8 +672,11 @@ mod tests {
 
     #[test]
     fn the_command_line_quotes_what_holds_blanks() {
-        let c = cap(&["grep", "-e", "a b", "it's", "--", "{x}"], Value::Null);
-        assert_eq!(c.command_line(), r#"grep -e 'a b' 'it'\''s' -- {x}"#);
+        let c = cap(
+            &["grep", "-e", "a b", "it's", "x\ny", "", "--", "{x}"],
+            Value::Null,
+        );
+        assert_eq!(c.command_line(), r#"grep -e "a b" "it's" "x\ny" "" -- {x}"#);
     }
 
     #[test]

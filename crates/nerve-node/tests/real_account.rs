@@ -1325,13 +1325,23 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
         let (ok, said) = as_owner(&owner, args);
         assert!(ok, "{args:?}: {said}");
     }
+    // In folder mode a read that names no path needs `on`; one with its
+    // path in the folders does not.
+    for cap in ["who", "say", "slow"] {
+        let (ok, said) = as_owner(&owner, &["cap", "set", cap, "on"]);
+        assert!(ok, "{said}");
+    }
     let (_, ls) = as_owner(&owner, &["cap", "ls"]);
     assert!(
         ls.lines().any(|l| l.split_whitespace().collect::<Vec<_>>()
-            == ["who.am", "read", "config", "conformance-center:", "on"]),
+            == ["files.show", "read", "config", "conformance-center:", "on"]),
         "{ls}"
     );
     assert!(ls.contains("capability who.am: id; as nerve-run"), "{ls}");
+    assert!(
+        ls.contains(r#"capability say.back: printf "[%s]\n" {a} {b}; as nerve-run"#),
+        "{ls}"
+    );
     let paired = center.paired().expect("paired");
     let mut inc = center.next_link(WAIT).await.expect("the node dials");
     fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
@@ -1385,7 +1395,11 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     )
     .await
     .unwrap_err();
-    assert!(e.contains("may not read"), "{e}");
+    // Closed to other accounts: by the home (750) or by the file (600).
+    assert!(
+        e.contains("not open to every account") || e.contains("may not read"),
+        "{e}"
+    );
     let r = config_call(&mut conn, "files.show", json!({"path": "/etc/hostname"}))
         .await
         .unwrap();
@@ -1397,7 +1411,11 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     )
     .await
     .unwrap_err();
-    assert!(e.contains("belongs to the node"), "{e}");
+    // `nerve-run` cannot even resolve it, or the node names it its own.
+    assert!(
+        e.contains("belongs to the node") || e.contains("Permission denied"),
+        "{e}"
+    );
 
     // The timeout ends it, and nothing of it is left.
     let started = std::time::Instant::now();
