@@ -459,11 +459,19 @@ impl ConfigCapability {
         Ok(out)
     }
 
-    /// The command as one line, for the audit and `cap ls`: an element that
-    /// holds a blank, a quote, a backslash or a control character is quoted
-    /// with its escapes, as JSON writes a string, so the line stays one.
+    /// The command as declared, as one line ([`ConfigCapability::line`]),
+    /// for `cap ls`.
     pub fn command_line(&self) -> String {
-        self.command
+        Self::line(&self.command)
+    }
+
+    /// `words` as one line, such as the command with a call's values
+    /// filled in ([`ConfigCapability::argv`]) for the audit: an element
+    /// that holds a blank, a quote, a backslash or a control character is
+    /// quoted with its escapes, as JSON writes a string, so the line stays
+    /// one.
+    pub fn line(words: &[String]) -> String {
+        words
             .iter()
             .map(|e| {
                 let plain = !e.is_empty()

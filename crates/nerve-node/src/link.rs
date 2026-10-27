@@ -2600,6 +2600,14 @@ impl Link {
         let (args, targets, named, target) =
             self.marked_paths(inv, &params, &marked, known.as_ref())?;
         let mut argv = decl.argv(&args).map_err(RpcError::invalid_args)?;
+        // The audit names what it was given: the paths where it names
+        // some, else its command as it runs, with the call's values in it
+        // (as `exec.run`'s command line), which no folder or rule holds.
+        let target = if targets.is_empty() {
+            nerve_policy::config::ConfigCapability::line(&argv)
+        } else {
+            target
+        };
         // It starts in the home of the account it runs as (the node's own
         // by hand).
         let start_in = match &runs_as {

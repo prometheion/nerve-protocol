@@ -3705,9 +3705,9 @@ async fn cap_refusal(
 /// [`cap_refusal`] while no node runs, as `crate::config_cap::
 /// written_by_centers` judges it: a place a center may write is a `w`
 /// folder of `cfg`, `/tmp`, `/var/tmp`, on the installed node `nerve-run`'s
-/// home, and what an allow rule lets a center write as the owner; the
-/// command starts in the owner's home (this user's by hand). Looked at as
-/// this process can.
+/// home, and what an allow rule lets a center write as the owner, and
+/// what `nerve-run` owns or may change; the command starts in the owner's
+/// home (this user's by hand). Looked at as this process can.
 fn written_by_centers(
     paths: &NodePaths,
     cfg: &NodeConfig,
@@ -3732,8 +3732,17 @@ fn written_by_centers(
         now,
         |p| !installed || p.runs_as_owner(now),
     ));
+    let run = installed
+        .then(|| {
+            crate::account::lookup(crate::account::RUN_USER)
+                .ok()
+                .flatten()
+        })
+        .flatten();
     let path = std::env::var_os("PATH");
-    if let Some(why) = crate::config_cap::written_by_centers(c, &writable, path.as_deref(), &home) {
+    if let Some(why) =
+        crate::config_cap::written_by_centers(c, &writable, run.as_ref(), path.as_deref(), &home)
+    {
         return Some(why);
     }
     c.command

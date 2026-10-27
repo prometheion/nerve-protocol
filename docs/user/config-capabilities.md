@@ -4,8 +4,9 @@ You can give the agent a capability of your own without writing a program:
 a fixed command the node runs itself, such as `sensors.read` running
 `sensors -j`. You declare it once; every center then sees it next to `fs` and
 `exec`, the node decides each call to it by that center's mode and rules, as
-for any other capability, and writes it to the [audit log](audit.md). For a
-capability that keeps a connection or state of its own, write a
+for any other capability, and writes it to the [audit log](audit.md) (the
+paths a call names, else the command as it ran, with the call's values in
+it). For a capability that keeps a connection or state of its own, write a
 [provider](providers.md) instead.
 
 They run on Linux: the [installed node](service.md) offers all of them, a node
@@ -119,11 +120,17 @@ A command that runs as you must not run what a center may write: a center
 with `w` on a folder could put its own code there and have it run with your
 rights. A center may write in a `w` folder of its own, in `/tmp` and
 `/var/tmp`, in `nerve-run`'s home, and, in `allowlist` mode (also one a
-`--for` limit fell back to), wherever an allow rule lets a program of yours
-or a capability that runs as you write, and an allow rule for `fs` where
-its writes run as you (`--as-owner`, or any pairing of a node you run
-yourself): `fs.write:~/site/**` counts like a `w` folder `~/site`, a write
-rule with no path like your whole machine. So the node refuses its calls
+`--for` limit fell back to), wherever an allow rule lets an action of a
+program of yours, or of a capability that runs as you, write at a path it
+names (an argument marked `write`, whatever effect the action names), and an
+allow rule for `fs` where its writes run as you (`--as-owner`, or any
+pairing of a node you run yourself): `fs.write:~/site/**` counts like a `w`
+folder `~/site`, a write rule with no path like your whole machine. On the
+installed node a center may also write whatever belongs to `nerve-run` or
+`nerve-run` may change (a file it may write, a folder it may add to, or a
+folder above either): what a center wrote while it had `w` stays
+`nerve-run`'s once you take the `w` away, and any pairing whose commands
+run as `nerve-run` may still change it. So the node refuses its calls
 while one of these lies in such a place:
 
 - your home, where it starts (`make`, `npm test` or `python3 -m` read code
@@ -146,6 +153,13 @@ place. `cap add` and `cap edit` ask the running node and warn of it (not for
 a capability this node does not offer). Keep what such a command reads on its
 own (its configuration, a file a script loads) out of those folders too: the
 node cannot see what a program reads.
+
+What a center wrote stays when its right to write ends. The node tells
+`nerve-run`'s files apart, but not what a center wrote as you: through a
+program of yours, a capability that runs as you, `user` mode or
+`--as-owner`. Before such a capability runs again once you took a center's
+`w`, an allow rule or `user` mode away, look at what its command runs
+yourself.
 
 A node you run yourself has no `nerve-run`: it offers only capabilities with
 `account = "owner"`, run as you.

@@ -177,8 +177,62 @@ pub fn no_program(decl: &ConfigCapability) -> String {
 
 /// Whether the account this thread acts as (crate::account::FsAs) may
 /// execute `f`: asked with the effective ids, whose file system part that
-/// account is, not with the real ones a plain `access` would take.
-#[cfg(unix)]
+/// account is, not with the real ones a plain `access` would take. That is
+/// the `faccessat2` system call itself: where the kernel lacks it (before
+/// 5.8), the C library's `faccessat` falls back to the plain call, which
+/// asks with the real ids, the node's own, while they equal the effective
+/// ones.
+#[cfg(target_os = "linux")]
+fn executable(f: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    let Ok(c) = std::ffi::CString::new(f.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: a C string that lives across the call, and integer flags.
+    let asked = unsafe {
+        libc::syscall(
+            libc::SYS_faccessat2,
+            libc::AT_FDCWD,
+            c.as_ptr(),
+            libc::X_OK,
+            libc::AT_EACCESS,
+        )
+    };
+    if asked == 0 {
+        return true;
+    }
+    if std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOSYS) {
+        return false;
+    }
+    // An older kernel: by the mode bits, for the file system ids and the
+    // groups this thread has (ACLs are not read; execve refuses the rest).
+    let Ok(m) = std::fs::metadata(f) else {
+        return false;
+    };
+    // SAFETY: setfsuid and setfsgid with an impossible id change nothing
+    // and answer the ids in force (as crate::account::FsAs reads them);
+    // getgroups into a buffer of the size it asked for.
+    let (uid, gid, groups) = unsafe {
+        let n = libc::getgroups(0, std::ptr::null_mut()).max(0);
+        let mut groups = vec![0; n as usize];
+        let n = libc::getgroups(n, groups.as_mut_ptr()).max(0);
+        groups.truncate(n as usize);
+        (
+            libc::setfsuid(u32::MAX) as u32,
+            libc::setfsgid(u32::MAX) as u32,
+            groups,
+        )
+    };
+    m.is_file()
+        && if uid == 0 {
+            m.mode() & 0o111 != 0
+        } else {
+            may(&m, uid, gid, &groups, 0o1)
+        }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 fn executable(f: &std::path::Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     let Ok(c) = std::ffi::CString::new(f.as_os_str().as_bytes()) else {
@@ -191,6 +245,44 @@ fn executable(f: &std::path::Path) -> bool {
 #[cfg(not(unix))]
 fn executable(_: &std::path::Path) -> bool {
     true
+}
+
+/// Whether the account `uid` (in `gid` and `groups`) has `bits` (`0o1`
+/// run or search, `0o2` write, `0o4` read) on the file of `m` by its mode,
+/// from the class it is in: owner, group or other.
+#[cfg(unix)]
+fn may(m: &std::fs::Metadata, uid: u32, gid: u32, groups: &[u32], bits: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let mode = m.mode();
+    let class = if m.uid() == uid {
+        mode >> 6
+    } else if m.gid() == gid || groups.contains(&m.gid()) {
+        mode >> 3
+    } else {
+        mode
+    };
+    class & bits == bits
+}
+
+/// Whether `place` (itself, not where it leads) belongs to the account
+/// `run` or `run` may change it by its mode: a file it may write, a folder
+/// it may add to or take from. A device or a socket, such as `/dev/null`,
+/// is no code. ACLs are not read: the node's own grants are the `w`
+/// folders, and it takes them away again.
+#[cfg(unix)]
+fn run_writes(place: &std::path::Path, run: &crate::service::Account) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(m) = place.symlink_metadata() else {
+        return false;
+    };
+    m.uid() == run.uid
+        || (m.is_file() && may(&m, run.uid, run.gid, &run.groups, 0o2))
+        || (m.is_dir() && may(&m, run.uid, run.gid, &run.groups, 0o3))
+}
+
+#[cfg(not(unix))]
+fn run_writes(_: &std::path::Path, _: &crate::service::Account) -> bool {
+    false
 }
 
 /// Why the command of `decl`, which runs with the owner's rights in `cwd`,
@@ -209,9 +301,16 @@ fn executable(_: &std::path::Path) -> bool {
 /// target would be), and a place not there yet where the nearest folder
 /// above it leads, so a link out of such a folder counts too. The call's
 /// arguments are judged by the gate.
+///
+/// On the installed node, `run` is `nerve-run`: a place that belongs to it,
+/// that it may write, or in a folder (at any depth) that does or it may
+/// change, counts too, as written and where it leads. What a center wrote
+/// as that account while it had `w` stays that account's once the `w` is
+/// gone, and any pairing whose commands run as `nerve-run` may change it.
 pub fn written_by_centers(
     decl: &ConfigCapability,
     writable: &[std::path::PathBuf],
+    run: Option<&crate::service::Account>,
     path: Option<&std::ffi::OsStr>,
     cwd: &std::path::Path,
 ) -> Option<String> {
@@ -265,8 +364,34 @@ pub fn written_by_centers(
             f.display()
         )
     };
-    if let Some(f) = within(cwd) {
-        return Some(refused(format!("starts in {}", cwd.display()), f));
+    // The place itself or a folder above it, as written and where it
+    // leads, that `run` owns or may change.
+    let theirs = |place: &Path| {
+        let run = run?;
+        [place.to_path_buf(), real(place)]
+            .into_iter()
+            .find_map(|seen| {
+                seen.ancestors()
+                    .filter(|a| !a.as_os_str().is_empty())
+                    .find(|a| run_writes(a, run))
+                    .map(Path::to_path_buf)
+            })
+            .map(|p| (run.name.as_str(), p))
+    };
+    let judge = |what: String, place: &Path| {
+        if let Some(f) = within(place) {
+            return Some(refused(what, f));
+        }
+        theirs(place).map(|(name, p)| {
+            format!(
+                "{} runs as the owner and {what}, and {} is {name}'s or {name} may change it, so a center may write there: that center's code would run with the owner's rights",
+                decl.name,
+                p.display()
+            )
+        })
+    };
+    if let Some(why) = judge(format!("starts in {}", cwd.display()), cwd) {
+        return Some(why);
     }
     let program = decl.command.first()?;
     let found = program_file(program, path);
@@ -302,8 +427,8 @@ pub fn written_by_centers(
             (e.contains('/') || place.symlink_metadata().is_ok()).then_some(place)
         });
     for place in found.into_iter().chain(named) {
-        if let Some(f) = within(&place) {
-            return Some(refused(format!("its command names {}", place.display()), f));
+        if let Some(why) = judge(format!("its command names {}", place.display()), &place) {
+            return Some(why);
         }
     }
     None
@@ -314,8 +439,8 @@ pub fn written_by_centers(
 /// each center in `allowlist` mode at `now_ms` (a `folder` or `user` mode
 /// whose time ran out is `allowlist` again, with the rules it kept). A
 /// rule counts where it covers an action of `caps` that writes at a path
-/// the call names (`fs.write`, or a write action with a path argument
-/// marked `write`) and runs with the owner's rights: a program's, and a
+/// the call names (`fs.write`, or an action of any effect with a path
+/// argument marked `write`) and runs with the owner's rights: a program's, and a
 /// config capability's with `account = "owner"`, in every such pairing;
 /// the node's own `fs` only where the center's writes run as the owner
 /// (`as_owner`: `--as-owner` on the installed node, every pairing on a
@@ -348,9 +473,11 @@ pub fn written_by_rules(
                     // A program runs with the owner's rights.
                     _ => true,
                 };
+                // What an action does at a path is its mark, whatever the
+                // effect its author named: an `execute` action may write
+                // where an argument marked `write` says.
                 owners
-                    && a.effect == Effect::Write
-                    && (cap == "fs"
+                    && ((cap == "fs" && a.effect == Effect::Write)
                         || path_args(&a.params)
                             .iter()
                             .any(|(_, m)| *m == PathMark::Write))
@@ -794,7 +921,7 @@ account = "owner"
             vec!["java".into(), "@work/jvm.args".into()],
         ] {
             let c = decl(&bad.iter().map(String::as_str).collect::<Vec<_>>());
-            let why = written_by_centers(&c, w, Some(&path), &root);
+            let why = written_by_centers(&c, w, None, Some(&path), &root);
             assert!(
                 why.as_ref()
                     .is_some_and(|y| y.contains("where a center may write")),
@@ -818,14 +945,14 @@ account = "owner"
         ] {
             let c = decl(&good.iter().map(String::as_str).collect::<Vec<_>>());
             assert_eq!(
-                written_by_centers(&c, w, Some(&path), &root),
+                written_by_centers(&c, w, None, Some(&path), &root),
                 None,
                 "{good:?}"
             );
         }
         // One that starts where a center writes: `make`, `python3 -m` and
         // the like read their code from there.
-        let why = written_by_centers(&decl(&["id"]), w, Some(&path), &work);
+        let why = written_by_centers(&decl(&["id"]), w, None, Some(&path), &work);
         assert!(
             why.as_ref().is_some_and(|y| y.contains("starts in")),
             "{why:?}"
@@ -837,6 +964,100 @@ account = "owner"
         );
         assert_eq!(program_file("/bin/sh", None), Some("/bin/sh".into()));
         assert_eq!(program_file("no-such-b5", Some(&path)), None);
+    }
+
+    /// What `nerve-run` owns or may change counts as a place a center may
+    /// write, also once no folder gives it `w`: the file, a folder above it,
+    /// as written or where a link leads. A device such as `/dev/null` does
+    /// not, nor does anything on a node without that account.
+    #[cfg(unix)]
+    #[test]
+    fn what_nerve_run_owns_or_may_change_counts_where_a_center_writes() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::path::{Path, PathBuf};
+        // Beside the test's own binary, whose folders no other account may
+        // change (unlike a temporary folder in `/tmp` or `/var/tmp`).
+        let exe = std::env::current_exe().unwrap();
+        let d = tempfile::tempdir_in(exe.parent().unwrap()).unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let mode = |f: &Path, m: u32| {
+            std::fs::set_permissions(f, std::fs::Permissions::from_mode(m)).unwrap();
+        };
+        let shared = root.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        for (f, m) in [
+            (root.join("safe.sh"), 0o644),
+            (root.join("open.sh"), 0o646),
+            (shared.join("x.sh"), 0o644),
+            (root.join("mine.sh"), 0o444),
+        ] {
+            std::fs::write(&f, "true\n").unwrap();
+            mode(&f, m);
+        }
+        mode(&shared, 0o757);
+        mode(&root, 0o755);
+        std::os::unix::fs::symlink(&shared, root.join("via")).unwrap();
+        let account = |uid: u32| crate::service::Account {
+            name: crate::account::RUN_USER.into(),
+            uid,
+            gid: uid,
+            comment: String::new(),
+            home: "/var/lib/nerve-run".into(),
+            groups: vec![uid],
+        };
+        // An account no file here belongs to.
+        let run = account(4_242_424);
+        let decl = |command: &[&str]| ConfigCapability {
+            name: "proj.deploy".into(),
+            summary: String::new(),
+            effect: Effect::Execute,
+            command: command.iter().map(|s| s.to_string()).collect(),
+            params: Value::Null,
+            result: Output::Text,
+            timeout_secs: None,
+            account: RunsAs::Owner,
+            platform: Default::default(),
+        };
+        let judged = |command: &[&str], run: Option<&crate::service::Account>| {
+            written_by_centers(&decl(command), &[], run, None, &root)
+        };
+        let s = |p: PathBuf| p.display().to_string();
+        let good = s(root.join("safe.sh"));
+        if judged(&["/bin/sh", &good], Some(&run)).is_some() {
+            eprintln!(
+                "skipped: a folder above {} is open to every account",
+                root.display()
+            );
+            return;
+        }
+        assert_eq!(
+            judged(&["/bin/sh", "-c", "true", "/dev/null"], Some(&run)),
+            None
+        );
+        for bad in [
+            s(root.join("open.sh")),
+            s(shared.join("x.sh")),
+            // Not there yet, in a folder it may add to.
+            s(shared.join("later.sh")),
+            // Through a link into that folder.
+            s(root.join("via/x.sh")),
+        ] {
+            let why = judged(&["/bin/sh", &bad], Some(&run));
+            assert!(
+                why.as_ref()
+                    .is_some_and(|y| y.contains("nerve-run's or nerve-run may change it")),
+                "{bad}: {why:?}"
+            );
+            // A node without nerve-run has nothing of that account.
+            assert_eq!(judged(&["/bin/sh", &bad], None), None, "{bad}");
+        }
+        // A file of its own, even one it has no write bit on: it may give
+        // itself one.
+        let mine = root.join("mine.sh");
+        let me = account(mine.metadata().unwrap().uid());
+        assert!(run_writes(&mine, &me));
+        assert!(!run_writes(&mine, &run));
+        assert!(!run_writes(Path::new("/dev/null"), &run));
     }
 
     /// What an allow rule lets a center write with the owner's rights
@@ -857,7 +1078,7 @@ pin = "sha256:00"
 node_id = "n1"
 [center.policy]
 mode = "allowlist"
-allow = ["fs.read:~/docs/**", "fs.write:~/site/**", "fs.write:~/one.txt", "fs:/srv/a*/x", "notes.save:~/notes/*.md", "notes.list:~/list/**", "exec.run:make *", "site.deploy", "site.fetch:/srv/site/**", "prog.edit:/srv/prog/**", "prog.look:/srv/look/**"]
+allow = ["fs.read:~/docs/**", "fs.write:~/site/**", "fs.write:~/one.txt", "fs:/srv/a*/x", "notes.save:~/notes/*.md", "notes.list:~/list/**", "exec.run:make *", "site.deploy", "site.fetch:/srv/site/**", "prog.edit:/srv/prog/**", "prog.look:/srv/look/**", "prog.build:/srv/build/**", "site.render:/srv/render/**", "notes.build:/srv/nbuild/**"]
 
 [[center]]
 name = "ops"
@@ -887,16 +1108,27 @@ effect = "write"
 command = ["curl", "-o", "{out}", "--", "{url}"]
 params = '{"type": "object", "properties": {"out": {"type": "string", "x-nerve-path": "write"}, "url": {"type": "string"}}, "required": ["out", "url"]}'
 account = "owner"
+
+[[capability]]
+name = "site.render"
+effect = "execute"
+command = ["render", "--", "{tpl}", "{out}"]
+params = '{"type": "object", "properties": {"tpl": {"type": "string"}, "out": {"type": "string", "x-nerve-path": "write"}}, "required": ["tpl", "out"]}'
+account = "owner"
+
+[[capability]]
+name = "notes.build"
+effect = "execute"
+command = ["build", "--", "{out}"]
+params = '{"type": "object", "properties": {"out": {"type": "string", "x-nerve-path": "write"}}, "required": ["out"]}'
 "#);
         let mut caps = crate::descriptor::built_in(&c);
         caps.extend(declared(&c));
-        // A program's actions: one that writes at a path, one that reads.
-        let marked = |mark: &str| Action {
-            effect: if mark == "write" {
-                nerve_proto::descriptor::Effect::Write
-            } else {
-                nerve_proto::descriptor::Effect::Read
-            },
+        // A program's actions: one that writes at a path, one that reads,
+        // and one that runs something and writes where its mark says.
+        use nerve_proto::descriptor::Effect;
+        let marked = |effect: Effect, mark: &str| Action {
+            effect,
             summary: String::new(),
             params: json!({"type": "object", "properties": {"path": {"type": "string", "x-nerve-path": mark}}}),
             result: Value::Null,
@@ -910,8 +1142,9 @@ account = "owner"
             exposure: Exposure::On,
             summary: String::new(),
             actions: [
-                ("edit".into(), marked("write")),
-                ("look".into(), marked("read")),
+                ("edit".into(), marked(Effect::Write, "write")),
+                ("look".into(), marked(Effect::Read, "read")),
+                ("build".into(), marked(Effect::Execute, "write")),
             ]
             .into(),
             events: BTreeMap::new(),
@@ -931,12 +1164,18 @@ account = "owner"
                 "/srv/",
                 "/srv/site/",
                 "/srv/prog/",
+                "/srv/build/",
+                "/srv/render/",
             ])
         );
         // The node's `fs` writes as nerve-run there, held by that account's
         // own access, and so does a capability that runs as nerve-run; a
-        // program and an owner capability write as the owner all the same.
-        assert_eq!(places(&c, false), paths(&["/srv/site/", "/srv/prog/"]));
+        // program and an owner capability write as the owner all the same,
+        // whatever effect their action names.
+        assert_eq!(
+            places(&c, false),
+            paths(&["/srv/site/", "/srv/prog/", "/srv/build/", "/srv/render/"])
+        );
         // A mode set for a time that ran out is allowlist again; one whose
         // time runs on is not.
         let mut timed = c.clone();
@@ -955,6 +1194,10 @@ account = "owner"
         assert_eq!(places(&any, true), [std::path::PathBuf::from("/")]);
         any.centers[0].policy.allow = vec!["prog".into()];
         assert_eq!(places(&any, false), [std::path::PathBuf::from("/")]);
+        any.centers[0].policy.allow = vec!["prog.build".into()];
+        assert_eq!(places(&any, false), [std::path::PathBuf::from("/")]);
+        any.centers[0].policy.allow = vec!["notes.build".into()];
+        assert!(places(&any, false).is_empty());
     }
 
     /// Whoever brings an action that senses, an earlier switch or rule

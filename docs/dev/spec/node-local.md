@@ -589,10 +589,15 @@ center may write (a `w` folder of any center, `/tmp`, `/var/tmp`,
 `nerve-run`'s home, and for each center whose mode at that time
 (`mode_at`) is `allowlist`, each allow rule of an action that writes at a
 path it names with the owner's rights: a program's or an `owner`
-capability's with an argument marked `write` in every such pairing, `fs`
-where the pairing's writes run as the owner; its pattern up to the folder
-before its first wildcard, `/` without a pattern): the folder it
-starts in (the owner's home; a node by hand: its home); its program (the
+capability's with an argument marked `write`, whatever its effect, in every
+such pairing, `fs`'s write actions where the pairing's writes run as the
+owner; its pattern up to the folder before its first wildcard, `/` without
+a pattern), or, on the installed node, where it or a folder above it (as
+written or where it leads) belongs to `nerve-run` or `nerve-run` may change
+it by its mode bits (a regular file it may write, a folder it may write and
+search; ACLs are not read; another kind of file only where it is
+`nerve-run`'s): what a center wrote as `nerve-run` stays that account's once
+its `w` is gone. These are: the folder it starts in (the owner's home; a node by hand: its home); its program (the
 first file of that name in the node's `PATH` the owner may execute where it
 is a bare name, and that file is what runs; with none it fails `unavailable`
 after the gate); a fixed element that holds a `/` or names something in the
@@ -601,7 +606,9 @@ the rest of a single-dash element after its option letter or from its first
 `/` (`-Cdir`, `-I/x`), the rest of an element after a leading `@`, and each
 `:`-separated part of any of these, read from that folder where it is not
 absolute. The center's error is a fixed text; the reason with the place is
-in the audit entry. `cap add` and `cap edit` ask the running node
+in the audit entry. The audit target of a call that names no path is the
+command as it runs, the call's values filled in (one line, as `cap ls`
+quotes it), as `exec.run`'s is its command line. `cap add` and `cap edit` ask the running node
 (`cap.refusal`, §5; `null` for an entry this node does not offer) and warn
 of it,
 and of a string argument without `x-nerve-path` (passed as given, judged by

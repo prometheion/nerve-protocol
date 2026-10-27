@@ -178,12 +178,22 @@ account = "owner""#);
     .await
     .unwrap_err();
     assert_eq!(code_of(&e), "invalid_args", "{}", e.message);
-    // Decided and audited like any call; it names no path.
+    // Decided and audited like any call; it names no path, so the audit
+    // holds its command as it ran, with what the call gave it.
     let entries = audited(daemon.paths(), "say");
+    let ran = ConfigCapability::line(&[
+        "printf".into(),
+        "--".into(),
+        "[%s]\n".into(),
+        a.clone(),
+        b.into(),
+        "7".into(),
+    ]);
+    assert!(ran.contains("touch") && ran.contains("$(id)"), "{ran}");
     assert!(
         entries
             .iter()
-            .any(|e| e["decision"] == "allowed" && e["target"] == "say.back"),
+            .any(|e| e["decision"] == "allowed" && e["target"] == ran.as_str()),
         "{entries:?}"
     );
     daemon.stop().await;
@@ -371,9 +381,18 @@ account = "owner""#);
         let place = work.display().to_string();
         assert!(!e.message.contains(&place), "{name}: {}", e.message);
         let entries = audited(daemon.paths(), "proj");
+        let line = ConfigCapability::line(
+            &daemon
+                .config()
+                .capabilities
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap()
+                .command,
+        );
         assert!(
             entries.iter().any(|e| e["decision"] == "forbidden"
-                && e["target"] == name
+                && e["target"] == line.as_str()
                 && e["reason"].as_str().is_some_and(|r| r.contains(&place))),
             "{entries:?}"
         );
@@ -569,7 +588,11 @@ account = "owner""#)
         .collect();
     assert_eq!(killed.len(), 1, "{entries:?}");
     assert_eq!(killed[0]["code"], "memory", "{entries:?}");
-    assert_eq!(killed[0]["target"], "big.run", "{entries:?}");
+    assert_eq!(
+        killed[0]["target"],
+        ConfigCapability::line(&big.command),
+        "{entries:?}"
+    );
 }
 
 /// Only stdout's own cut counts for what a call returns: stderr past the

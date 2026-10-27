@@ -1229,7 +1229,8 @@ async fn config_call(conn: &mut Conn<TcpStream>, name: &str, args: Value) -> Res
 /// account included), and the center is no longer told it is a command of
 /// the pairing's account. One that runs as the owner is refused while its
 /// script lies where a center may write, judged as the owner, and runs as
-/// the owner once it does not. For a test machine only, as
+/// the owner once it does not, but not once the center wrote it as
+/// nerve-run. For a test machine only, as
 /// root: it installs the node and removes it again.
 ///
 /// `NERVE_NODE_REAL=<the nerve-node to install> NERVE_REAL_OWNER=<an account
@@ -1539,6 +1540,25 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     assert_eq!(r, json!(format!("{owner}\n")));
     let (ok, said) = as_owner(&owner, &["folder", "set", proj.to_str().unwrap(), "+w"]);
     assert!(ok, "{said}");
+    // What the center wrote as nerve-run while it had `w` stays that
+    // account's once the `w` is gone: the command is still refused.
+    fs_call(
+        &mut conn,
+        "write",
+        json!({"path": proj.join("run.sh").display().to_string(), "content": "id -un\n"}),
+    )
+    .await
+    .unwrap();
+    let (ok, said) = as_owner(&owner, &["folder", "set", proj.to_str().unwrap(), "-w"]);
+    assert!(ok, "{said}");
+    let e = config_call(&mut conn, "own.run", json!({}))
+        .await
+        .unwrap_err();
+    assert!(e.contains("where a center may write"), "{e}");
+    let audit = as_owner(&owner, &["audit"]).1;
+    assert!(audit.contains("nerve-run may change it"), "{audit}");
+    let (ok, said) = as_owner(&owner, &["folder", "set", proj.to_str().unwrap(), "+w"]);
+    assert!(ok, "{said}");
 
     // A pairing whose commands run as the owner: its commands run as the
     // owner once the node took the change, the capability still as
@@ -1584,7 +1604,7 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     assert_eq!(as_account(&mut conn, "files.show").await, Value::Null);
     let audit = as_owner(&owner, &["audit"]).1;
     assert!(
-        audit.contains("who.am  who.am  allowed")
+        audit.contains("who.am  id  allowed")
             && audit.contains(&format!(
                 "files.show  {}  forbidden",
                 base.join("closed.txt").display()

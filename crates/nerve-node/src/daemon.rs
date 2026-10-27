@@ -670,7 +670,8 @@ impl Shared {
     /// How the node judges the command of `decl`, which runs with the
     /// owner's rights as `owner` (the node's own user where `None`), from
     /// where it starts, that account's home (the node's own by hand): why
-    /// it may not run (crate::config_cap::written_by_centers), else the
+    /// it may not run (crate::config_cap::written_by_centers, with what
+    /// `nerve-run` owns or may change), else the
     /// program file it runs, `None` where none is found
     /// (crate::config_cap::program_file). Looked at as the owner, who may
     /// look into the owner's home and the folders where the node's own user
@@ -682,12 +683,17 @@ impl Shared {
         owner: Option<&crate::service::Account>,
     ) -> Result<Option<PathBuf>, String> {
         let writable = self.center_writes(cfg);
+        let run = self.run_account(cfg).ok().flatten();
         let start_in = owner.map_or_else(|| self.home.clone(), |a| a.home.clone());
         let _as = crate::link::act_as(owner).ok().flatten();
         let path = std::env::var_os("PATH");
-        if let Some(why) =
-            crate::config_cap::written_by_centers(decl, &writable, path.as_deref(), &start_in)
-        {
+        if let Some(why) = crate::config_cap::written_by_centers(
+            decl,
+            &writable,
+            run.as_ref(),
+            path.as_deref(),
+            &start_in,
+        ) {
             return Err(why);
         }
         Ok(decl
