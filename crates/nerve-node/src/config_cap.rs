@@ -304,9 +304,12 @@ fn run_writes(_: &std::path::Path, _: &crate::service::Account) -> bool {
 ///
 /// On the installed node, `run` is `nerve-run`: a place that belongs to it,
 /// that it may write, or in a folder (at any depth) that does or it may
-/// change, counts too, as written and where it leads. What a center wrote
-/// as that account while it had `w` stays that account's once the `w` is
-/// gone, and any pairing whose commands run as `nerve-run` may change it.
+/// change, counts too, as written and where it leads. What a center made
+/// as that account while it had `w`, or replaced (`fs.write` writes aside
+/// and renames over), stays that account's once the `w` is gone, and any
+/// pairing whose commands run as `nerve-run` may change it. A file of the
+/// owner's it wrote into in place, through the grant's ACL entry, stays the
+/// owner's and is not told apart (the docs tell the owner to look).
 pub fn written_by_centers(
     decl: &ConfigCapability,
     writable: &[std::path::PathBuf],

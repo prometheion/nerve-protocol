@@ -99,6 +99,44 @@ async fn invoke(
     .unwrap()
 }
 
+/// [`invoke`], and the `audit/decision` events the center was sent for the
+/// call (it subscribed): each event's data.
+async fn invoke_heard(
+    conn: &mut Conn<TcpStream>,
+    name: &str,
+    args: Value,
+) -> (Result<Value, nerve_proto::RpcError>, Vec<Value>) {
+    let (cap, action) = name.split_once('.').unwrap();
+    let id = conn
+        .request(
+            "invoke",
+            json!({"cap": cap, "action": action, "args": args, "ctx": {}}),
+        )
+        .await
+        .unwrap();
+    let mut others = Vec::new();
+    let r = conn.answer(id, WAIT, &mut others).await.unwrap();
+    // The decision is sent before the command runs; a call after it brings
+    // whatever is still on the way.
+    let flush = conn.request("get", json!({"cap": "node"})).await.unwrap();
+    conn.answer(flush, WAIT, &mut others)
+        .await
+        .unwrap()
+        .unwrap();
+    let heard = others
+        .into_iter()
+        .filter_map(|m| match m {
+            nerve_proto::Message::Notification { method, params }
+                if method == "event" && params["cap"] == "audit" =>
+            {
+                Some(params["data"].clone())
+            }
+            _ => None,
+        })
+        .collect();
+    (r, heard)
+}
+
 /// The actions the center is offered now, as `cap.action`, with their
 /// capability's provider.
 async fn offered(conn: &mut Conn<TcpStream>) -> Vec<(String, String)> {
@@ -150,6 +188,10 @@ account = "owner""#);
     // command starts in.
     std::fs::create_dir_all(home.join("x")).unwrap();
     let mut conn = linked(&mut center).await;
+    conn.call("sub", json!({"topics": ["audit/decision"]}), WAIT)
+        .await
+        .unwrap()
+        .expect("sub");
     assert!(
         offered(&mut conn)
             .await
@@ -158,9 +200,8 @@ account = "owner""#);
     let marker = dir.path().join("ran");
     let a = format!("; rm -rf x; touch {}", marker.display());
     let b = "$(id) `id` | cat > y && echo z";
-    let out = invoke(&mut conn, "say.back", json!({"a": a, "b": b, "c": 7}))
-        .await
-        .expect("it runs");
+    let (out, heard) = invoke_heard(&mut conn, "say.back", json!({"a": a, "b": b, "c": 7})).await;
+    let out = out.expect("it runs");
     assert_eq!(out, json!(format!("[{a}]\n[{b}]\n[7]\n")));
     assert!(home.join("x").is_dir(), "nothing was removed");
     assert!(!marker.exists() && !home.join("y").exists());
@@ -178,8 +219,13 @@ account = "owner""#);
     .await
     .unwrap_err();
     assert_eq!(code_of(&e), "invalid_args", "{}", e.message);
-    // Decided and audited like any call; it names no path, so the audit
-    // holds its command as it ran, with what the call gave it.
+    // Decided and audited like any call. It names no path, so its target
+    // is the action, which is all the center hears of it; the node's own
+    // log adds the command as it ran, with what the call gave it.
+    assert_eq!(heard.len(), 1, "{heard:?}");
+    assert_eq!(heard[0]["target"], "say.back", "{heard:?}");
+    assert!(heard[0].get("command").is_none(), "{heard:?}");
+    assert!(!heard[0].to_string().contains("printf"), "{heard:?}");
     let entries = audited(daemon.paths(), "say");
     let ran = ConfigCapability::line(&[
         "printf".into(),
@@ -191,9 +237,9 @@ account = "owner""#);
     ]);
     assert!(ran.contains("touch") && ran.contains("$(id)"), "{ran}");
     assert!(
-        entries
-            .iter()
-            .any(|e| e["decision"] == "allowed" && e["target"] == ran.as_str()),
+        entries.iter().any(|e| e["decision"] == "allowed"
+            && e["target"] == "say.back"
+            && e["command"] == ran.as_str()),
         "{entries:?}"
     );
     daemon.stop().await;
@@ -367,8 +413,13 @@ account = "owner""#);
     })
     .await;
     let mut conn = linked(&mut center).await;
+    conn.call("sub", json!({"topics": ["audit/decision"]}), WAIT)
+        .await
+        .unwrap()
+        .expect("sub");
     for name in ["proj.deploy", "proj.rel"] {
-        let e = invoke(&mut conn, name, json!({})).await.unwrap_err();
+        let (r, heard) = invoke_heard(&mut conn, name, json!({})).await;
+        let e = r.unwrap_err();
         assert_eq!(code_of(&e), "forbidden", "{name}: {}", e.message);
         assert!(
             e.message.contains("where a center may write"),
@@ -380,6 +431,11 @@ account = "owner""#);
         // center may write; the owner finds it in the audit log.
         let place = work.display().to_string();
         assert!(!e.message.contains(&place), "{name}: {}", e.message);
+        // Nor in the event it hears of the call, which names the action
+        // and no word of the owner's command.
+        assert_eq!(heard.len(), 1, "{name}: {heard:?}");
+        assert_eq!(heard[0]["target"], name, "{heard:?}");
+        assert!(!heard[0].to_string().contains("deploy.sh"), "{heard:?}");
         let entries = audited(daemon.paths(), "proj");
         let line = ConfigCapability::line(
             &daemon
@@ -392,7 +448,8 @@ account = "owner""#);
         );
         assert!(
             entries.iter().any(|e| e["decision"] == "forbidden"
-                && e["target"] == line.as_str()
+                && e["target"] == name
+                && e["command"] == line.as_str()
                 && e["reason"].as_str().is_some_and(|r| r.contains(&place))),
             "{entries:?}"
         );
@@ -588,8 +645,9 @@ account = "owner""#)
         .collect();
     assert_eq!(killed.len(), 1, "{entries:?}");
     assert_eq!(killed[0]["code"], "memory", "{entries:?}");
+    assert_eq!(killed[0]["target"], "big.run", "{entries:?}");
     assert_eq!(
-        killed[0]["target"],
+        killed[0]["command"],
         ConfigCapability::line(&big.command),
         "{entries:?}"
     );

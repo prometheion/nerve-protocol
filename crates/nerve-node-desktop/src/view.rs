@@ -1107,10 +1107,16 @@ fn action_of(e: &Value) -> Option<String> {
         .then(|| format!("{}.{}", s(&e["cap"]), s(&e["action"])))
 }
 
-/// Whether every word of `text` is in the entry's target or reason (a
-/// change: its keys), in any case.
+/// Whether every word of `text` is in the entry's target, reason or
+/// command (a change: its keys), in any case.
 fn finds(e: &Value, text: &str) -> bool {
-    let mut hay = format!("{} {} {}", s(&e["target"]), s(&e["reason"]), s(&e["file"]));
+    let mut hay = format!(
+        "{} {} {} {}",
+        s(&e["target"]),
+        s(&e["reason"]),
+        s(&e["command"]),
+        s(&e["file"])
+    );
     for c in e["changes"].as_array().into_iter().flatten() {
         hay.push(' ');
         hay.push_str(s(&c["key"]));
@@ -1277,11 +1283,15 @@ fn audit_row(e: &Value, index: usize, centers: &[String], now_ms: u64) -> AuditR
             row.tone = if refused { Tone::Danger } else { Tone::Ok };
             row.badge = if refused { "Refused" } else { "Allowed" }.into();
             row.target = s(&e["target"]).into();
-            row.detail = e["reason"]
-                .as_str()
-                .map(sentence)
-                .unwrap_or_default()
-                .into();
+            let mut detail = e["reason"].as_str().map(sentence).unwrap_or_default();
+            // What a capability of node.toml ran, or would have.
+            if let Some(command) = e["command"].as_str() {
+                if !detail.is_empty() && !detail.ends_with('.') {
+                    detail.push('.');
+                }
+                detail = format!("{detail} Command: {command}").trim().to_string();
+            }
+            row.detail = detail.into();
             let (rules, why) = rules_for(e, centers);
             row.rules = rules;
             row.rules_why = why.into();
@@ -1722,6 +1732,39 @@ mod tests {
         assert!(!rows[3].rules);
         assert_eq!(rows[4].when, "2 min ago");
         assert_eq!(rows[4].index, 4);
+    }
+
+    /// A capability of node.toml: the row names its action as the target,
+    /// with its buttons, and the command it ran in the detail, where the
+    /// search finds it too.
+    #[test]
+    fn the_audit_shows_what_a_capability_of_the_config_ran() {
+        let centers = vec!["home".to_string()];
+        let entries = [
+            json!({"ts": NOW, "center": "home", "cap": "svc", "action": "restart", "target": "svc.restart",
+                "decision": "allowed", "command": "systemctl restart -- nginx"}),
+            json!({"ts": NOW, "center": "home", "cap": "proj", "action": "deploy", "target": "proj.deploy",
+                "decision": "forbidden", "reason": "a center may write there", "command": "sh deploy.sh"}),
+        ];
+        let rows = audit_view(&entries, &centers, &AuditFilter::default(), 200, NOW).rows;
+        assert_eq!(rows[0].target, "svc.restart");
+        assert_eq!(rows[0].detail, "Command: systemctl restart -- nginx");
+        assert!(rows[0].rules);
+        assert_eq!(
+            rows[1].detail,
+            "A center may write there. Command: sh deploy.sh"
+        );
+        let found = audit_view(
+            &entries,
+            &centers,
+            &AuditFilter {
+                text: "nginx".into(),
+                ..Default::default()
+            },
+            200,
+            NOW,
+        );
+        assert_eq!(found.matches, 1);
     }
 
     /// The filters combine; each decision counts what the other filters

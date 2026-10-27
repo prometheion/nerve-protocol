@@ -1729,6 +1729,7 @@ impl Link {
                 None,
                 None,
                 target,
+                None,
                 known.as_ref(),
                 unconfined,
                 Some(program),
@@ -1762,6 +1763,7 @@ impl Link {
                     None,
                     None,
                     target,
+                    None,
                     None,
                     unconfined,
                     None,
@@ -1813,6 +1815,7 @@ impl Link {
                     None,
                     None,
                     call.target_text(),
+                    None,
                     known.as_ref(),
                     unconfined,
                     None,
@@ -2057,6 +2060,7 @@ impl Link {
         command: Option<&str>,
         cwd: Option<&std::path::Path>,
         target: String,
+        ran: Option<&str>,
         account: Option<&crate::service::Account>,
         unconfined: Option<&str>,
         program: Option<u32>,
@@ -2136,7 +2140,7 @@ impl Link {
                         }
                     }))
                 },
-                |decision, code, reason| self.audit(inv, &target, decision, code, reason),
+                |decision, code, reason| self.audit_ran(inv, &target, ran, decision, code, reason),
             )
             .await;
             walk.map_err(|e| RpcError::internal(e.to_string()))??
@@ -2144,7 +2148,7 @@ impl Link {
             decision
         };
         let audit = |decision: &str, code: Option<&str>, reason: Option<&str>| {
-            self.audit(inv, &target, decision, code, reason)
+            self.audit_ran(inv, &target, ran, decision, code, reason)
         };
         match decision {
             Decision::Allow => {
@@ -2188,6 +2192,20 @@ impl Link {
         code: Option<&str>,
         reason: Option<&str>,
     ) {
+        self.audit_ran(inv, target, None, decision, code, reason)
+    }
+
+    /// [`Link::audit`], with the command a capability of `node.toml` runs
+    /// for the call (`ran`), which only the node's own log keeps.
+    fn audit_ran(
+        &self,
+        inv: &Invoke,
+        target: &str,
+        ran: Option<&str>,
+        decision: &str,
+        code: Option<&str>,
+        reason: Option<&str>,
+    ) {
         self.shared.audit(&Entry {
             ts: crate::now_ms(),
             center: self.name.clone(),
@@ -2198,6 +2216,7 @@ impl Link {
             code: code.map(Into::into),
             session: inv.ctx.session.clone(),
             reason: reason.map(Into::into),
+            command: ran.map(Into::into),
         })
     }
 
@@ -2423,6 +2442,7 @@ impl Link {
             Some(&rc.command),
             Some(&rc.cwd),
             target,
+            None,
             looks_as.as_ref(),
             unconfined,
             None,
@@ -2511,7 +2531,7 @@ impl Link {
         drop(open);
         drop(guard);
         if let Ok(v) = &r {
-            self.audit_killed(inv, command, v);
+            self.audit_killed(inv, command, None, v);
         }
         if let Ok(v) = &r {
             self.handle.event(
@@ -2528,7 +2548,7 @@ impl Link {
     /// A command killed for its memory limit is a decision of the node's
     /// too: the audit log (with `target`, as the call's entry has it) and
     /// the node's log say so, as the result `v` does.
-    fn audit_killed(&self, inv: &Invoke, target: String, v: &Value) {
+    fn audit_killed(&self, inv: &Invoke, target: String, ran: Option<String>, v: &Value) {
         if v["killed"] != "memory" {
             return;
         }
@@ -2544,6 +2564,7 @@ impl Link {
             code: Some("memory".into()),
             session: inv.ctx.session.clone(),
             reason: Some(reason.into()),
+            command: ran,
         });
     }
 
@@ -2600,14 +2621,11 @@ impl Link {
         let (args, targets, named, target) =
             self.marked_paths(inv, &params, &marked, known.as_ref())?;
         let mut argv = decl.argv(&args).map_err(RpcError::invalid_args)?;
-        // The audit names what it was given: the paths where it names
-        // some, else its command as it runs, with the call's values in it
-        // (as `exec.run`'s command line), which no folder or rule holds.
-        let target = if targets.is_empty() {
-            nerve_policy::config::ConfigCapability::line(&argv)
-        } else {
-            target
-        };
+        // The audit's target is what the center named: the paths, else the
+        // action, which the event to the center and the rules take. The
+        // command as it runs, with the call's values in it, holds the
+        // owner's own words and stays in the node's own log.
+        let ran = nerve_policy::config::ConfigCapability::line(&argv);
         // It starts in the home of the account it runs as (the node's own
         // by hand).
         let start_in = match &runs_as {
@@ -2625,7 +2643,14 @@ impl Link {
                     // Where is the owner's to know: the place names words
                     // of the owner's command and a folder some center may
                     // write, perhaps another one's.
-                    self.audit(inv, &target, "forbidden", Some("forbidden"), Some(&why));
+                    self.audit_ran(
+                        inv,
+                        &target,
+                        Some(&ran),
+                        "forbidden",
+                        Some("forbidden"),
+                        Some(&why),
+                    );
                     return Err(RpcError::new(
                         ErrorCode::Forbidden,
                         format!(
@@ -2658,6 +2683,7 @@ impl Link {
             None,
             None,
             target.clone(),
+            Some(&ran),
             known.as_ref(),
             unconfined,
             program,
@@ -2742,7 +2768,7 @@ impl Link {
         let r = exec::run(&rc, &opts, |e| guard.started(e)).await;
         drop(guard);
         if let Ok(v) = &r {
-            self.audit_killed(inv, target, v);
+            self.audit_killed(inv, target, Some(ran), v);
         }
         let run = r.map_err(|e| match e.kind() {
             // Its own limit, not a `timeout_ms` the call never had.

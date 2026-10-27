@@ -42,6 +42,7 @@ fn decided(paths: &NodePaths, ts: u64, center: &str, cap: &str, action: &str, ta
             code: None,
             session: None,
             reason: Some("no allow rule matches it (allowlist mode)".into()),
+            command: None,
         })
         .unwrap();
 }

@@ -1180,6 +1180,7 @@ impl Shared {
         let mut e = e.clone();
         e.target = self.scrub(e.target);
         e.decision = self.scrub(e.decision);
+        e.command = e.command.map(|c| self.scrub(c));
         let e = &e;
         if let Err(err) = lock(&self.store).audit().decision(e) {
             tracing::error!("the audit log cannot be written: {err}");

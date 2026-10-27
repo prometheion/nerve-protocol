@@ -1604,7 +1604,7 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     assert_eq!(as_account(&mut conn, "files.show").await, Value::Null);
     let audit = as_owner(&owner, &["audit"]).1;
     assert!(
-        audit.contains("who.am  id  allowed")
+        audit.contains("who.am  who.am  allowed (command: id)")
             && audit.contains(&format!(
                 "files.show  {}  forbidden",
                 base.join("closed.txt").display()

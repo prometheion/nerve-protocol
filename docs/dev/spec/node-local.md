@@ -596,8 +596,10 @@ a pattern), or, on the installed node, where it or a folder above it (as
 written or where it leads) belongs to `nerve-run` or `nerve-run` may change
 it by its mode bits (a regular file it may write, a folder it may write and
 search; ACLs are not read; another kind of file only where it is
-`nerve-run`'s): what a center wrote as `nerve-run` stays that account's once
-its `w` is gone. These are: the folder it starts in (the owner's home; a node by hand: its home); its program (the
+`nerve-run`'s): what a center made as `nerve-run`, or replaced (as `fs.write`
+does, written aside and renamed over), stays that account's once its `w` is
+gone; a file of the owner's it wrote into in place, through the `w` grant's
+ACL entry, stays the owner's and is not told apart. These are: the folder it starts in (the owner's home; a node by hand: its home); its program (the
 first file of that name in the node's `PATH` the owner may execute where it
 is a bare name, and that file is what runs; with none it fails `unavailable`
 after the gate); a fixed element that holds a `/` or names something in the
@@ -606,9 +608,12 @@ the rest of a single-dash element after its option letter or from its first
 `/` (`-Cdir`, `-I/x`), the rest of an element after a leading `@`, and each
 `:`-separated part of any of these, read from that folder where it is not
 absolute. The center's error is a fixed text; the reason with the place is
-in the audit entry. The audit target of a call that names no path is the
-command as it runs, the call's values filled in (one line, as `cap ls`
-quotes it), as `exec.run`'s is its command line. `cap add` and `cap edit` ask the running node
+in the audit entry. A call's audit target is its paths, else `cap.action`,
+as for a program; the entry adds `command`, the command as it runs (or would
+have run), the call's values filled in (one line, as `cap ls` quotes it),
+which stays in the node's log: the `audit/decision` event leaves it out (as
+it leaves out the reason), since the descriptor gives a center no word of
+the command. `cap add` and `cap edit` ask the running node
 (`cap.refusal`, §5; `null` for an entry this node does not offer) and warn
 of it,
 and of a string argument without `x-nerve-path` (passed as given, judged by
@@ -1602,7 +1607,9 @@ file; counted, and `uninstall` says how many), and stops if an entry stays.
 ## 6. Audit log
 
 `<state>/audit.jsonl`, one JSON line per event: settings changes (with old
-and new value), calls allowed or forbidden (a refusal with its reason), commands killed
+and new value), calls allowed or forbidden (a refusal with its reason; a call of a
+capability of the config with `command`, its command as it runs, which the
+`audit/decision` event leaves out with the reason, §2), commands killed
 for their memory limit (`decision` `killed`, `code` `memory`, with the
 reason), the relay's tunnels (`"kind": "relay"`, one per tunnel when it ends: `node`,
 `center`, `from`, `start`, `end`, `reason`, `up`, `down`; never a token), and what happened to the config

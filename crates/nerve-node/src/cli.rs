@@ -4040,8 +4040,13 @@ fn audit_line(v: &Value) -> String {
         s("target"),
         s("decision")
     );
-    match v["reason"].as_str() {
+    let line = match v["reason"].as_str() {
         Some(reason) => format!("{line}: {reason}"),
+        None => line,
+    };
+    // What a capability of node.toml ran, or would have, for the call.
+    match v["command"].as_str() {
+        Some(command) => format!("{line} (command: {command})"),
         None => line,
     }
 }
@@ -9947,6 +9952,24 @@ mod tests {
         )
         .unwrap();
         assert!(said.contains(warning), "{said}");
+    }
+
+    /// `audit` shows what a capability of node.toml ran, after the
+    /// decision and its reason.
+    #[test]
+    fn an_audit_line_shows_the_command_a_capability_ran() {
+        let call = json!({"ts": 1, "center": "lab", "cap": "svc", "action": "restart",
+            "target": "svc.restart", "decision": "allowed", "command": "systemctl restart -- nginx"});
+        assert_eq!(
+            audit_line(&call),
+            "1  lab  svc.restart  svc.restart  allowed (command: systemctl restart -- nginx)"
+        );
+        let refused = json!({"ts": 2, "center": "lab", "cap": "proj", "action": "deploy",
+            "target": "proj.deploy", "decision": "forbidden", "reason": "no", "command": "sh x"});
+        assert_eq!(
+            audit_line(&refused),
+            "2  lab  proj.deploy  proj.deploy  forbidden: no (command: sh x)"
+        );
     }
 
     /// What `cap add` and `cap edit` tell the owner besides: that an

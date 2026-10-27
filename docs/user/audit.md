@@ -23,11 +23,18 @@ action, the target and the decision. A refusal adds its reason.
 The reason says what is missing. Use it to write the rule you want
 ([rules](rules.md)). The target of a call that names paths is its path (an
 `fs` call's, or the paths a program's capability takes, joined by `, `; a
-path that does not resolve is refused as given, with `bad_path`). A
-[capability of your `node.toml`](config-capabilities.md) whose call names no
-path has its command as it ran, with the values the call gave it, as
-`exec.run` has its command line
-(`1791834531502  lab  svc.restart  systemctl restart -- nginx  allowed`). The
+path that does not resolve is refused as given, with `bad_path`). A call that
+names no path has its action as the target. A call to a
+[capability of your `node.toml`](config-capabilities.md) adds the command as
+it ran, or would have run, with the values the call gave it:
+
+```
+1791834531502  lab  svc.restart  svc.restart  allowed (command: systemctl restart -- nginx)
+```
+
+That command stays in this log. The center hears of each of its own calls
+(`audit/decision`, which its web UI shows) with the target, never the
+command, since your command may hold words no center should see. The
 refusal the center gets names each path as it gave it; only the audit names
 where it led, which can be another place when the path goes through a link.
 A call to a capability you switched `off` is a refusal too, with the path or
