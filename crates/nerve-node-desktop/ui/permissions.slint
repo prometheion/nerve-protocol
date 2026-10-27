@@ -77,7 +77,7 @@ component ModeSection inherits Section {
         OptionTile {
             icon: @image-url("icons/folder.svg");
             title: "Folder";
-            text: Perm.separate ? "The folders below, as nerve-run, an account of its own." : "What each folder below allows.";
+            text: Perm.separate ? "The folders below, as nerve-run, an account of its own; reads also what every account may read." : "What each folder below allows.";
             selected: Perm.mode == "folder";
             badge: Perm.mode == "folder" ? "Now" : "";
             clicked => {

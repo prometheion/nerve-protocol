@@ -70,8 +70,9 @@ Get the programs from
    nerve-node run
    ```
 
-3. A new pairing is in `folder` mode and reaches no folder of yours. Give it
-   one:
+3. A new pairing is in `folder` mode: it writes and runs nothing of yours
+   until you give it a folder (on the installed node it may read what every
+   account may read). Give it one:
 
    ```sh
    nerve-node folder add ~/project +r +w +x

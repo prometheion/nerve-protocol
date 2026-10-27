@@ -317,7 +317,7 @@ export component AboutDialog inherits Dialog {
 export component ModeDialog inherits Dialog {
     title: Perm.mode-choice == "folder" ? "Folder mode for " + Perm.center : "User mode for " + Perm.center;
     subtitle: Perm.mode-choice == "folder"
-        ? (Perm.separate ? "Its commands run as nerve-run, an account of its own, in the folders you give it, /tmp and its home." : "It may do what each of its folders allows.")
+        ? (Perm.separate ? "It writes and runs commands as nerve-run, an account of its own, only in the folders you give it, /tmp and its home; it may read those and what every account on this machine may read." : "It may do what each of its folders allows.")
         : Perm.owner-is-root ? "Its commands run as root, the owner of this node: anything on this machine, Nerve and its keys included. Best for a while, not for good."
         : "Its commands run as you: anything you may do, protected files aside. Best for a while, not for good.";
     card-width: 480px;

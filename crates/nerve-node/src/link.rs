@@ -2,7 +2,7 @@
 //! center's requests (spec §4, §5, §7).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -15,9 +15,10 @@ use tokio::task::AbortHandle;
 use nerve_policy::audit::Entry;
 use nerve_policy::command::Shell;
 use nerve_policy::config::{Mode, SettingsGrant};
+use nerve_policy::decide::Reads;
 use nerve_policy::protected::Protected;
 use nerve_policy::rules::RuleSet;
-use nerve_policy::{Call, CenterEntry, Decision, Env, NodeConfig, SetError, Target};
+use nerve_policy::{Call, CenterEntry, Decision, Env, NodeConfig, PathAccess, SetError, Target};
 use nerve_proto::descriptor::{Detail, Effect, Exposure};
 use nerve_proto::frame::{self, Frame, FrameError};
 use nerve_proto::link::CenterUrl;
@@ -27,6 +28,7 @@ use nerve_proto::msg::{
 };
 use nerve_proto::resume;
 use nerve_proto::rpc::{Id, Message, params};
+use nerve_proto::schema::PathMark;
 use nerve_proto::{ErrorCode, PROTOCOL_VERSION, RpcError, limits};
 use nerve_transport::backoff::Backoff;
 use nerve_transport::keys::NodeKey;
@@ -37,7 +39,7 @@ use nerve_transport::ws::{self, ConnectError, WsMessage};
 use crate::daemon::{CenterState, LinkHandle, Shared, lock};
 use crate::descriptor;
 use crate::exec::{self, RunCall, RunOptions, Sig, SignalArgs};
-use crate::fs::{FsCall, conflict};
+use crate::fs::{FsCall, WirePath, conflict};
 
 /// Each handshake step must arrive within this (spec §4.2).
 const HANDSHAKE: Duration = Duration::from_secs(15);
@@ -1649,25 +1651,161 @@ impl Link {
             || entry.policy.cap_setting(&inv.cap, Some(&inv.action))
                 == Some(nerve_policy::config::CapSetting::Off);
         if off {
-            return Err(RpcError::new(
-                ErrorCode::Disabled,
-                format!("{}.{} is off", inv.cap, inv.action),
-            ));
+            // Refused before anything else, and in the audit as any refusal.
+            // Its target is what an allowed call's would name, as far as the
+            // arguments say it without resolving anything: the audit's rule
+            // buttons make a rule of it.
+            let why = format!("{}.{} is off", inv.cap, inv.action);
+            let target = off_target(&inv);
+            self.audit(&inv, &target, "forbidden", Some("disabled"), Some(&why));
+            return Err(RpcError::new(ErrorCode::Disabled, why));
         }
         // A provider's action (crate::provider) is decided and audited here
-        // like any other, with `cap.action` as its rule target; only an
-        // allowed call reaches the provider. Its arguments are checked first
-        // against the schema it published, so it never sees ones that do
-        // not fit, and the center learns which field is wrong.
+        // like any other; only an allowed call reaches the provider. Its
+        // arguments are checked first against the schema it published, so
+        // it never sees ones that do not fit, and the center learns which
+        // field is wrong.
         if cap.provider != "node" {
             let provider = cap.provider.clone();
             nerve_proto::schema::validate(&action.params, &Value::Object(inv.args.clone()))?;
-            let target = format!("{}.{}", inv.cap, inv.action);
-            self.gate(&entry, &inv, effect, &[], None, None, target, None, None)?;
+            let marked = nerve_proto::schema::path_args(&action.params);
+            // The arguments its schema marks as paths are the call's rule
+            // targets, resolved as the command account would see them, as an
+            // `fs` call's are: the folders, the rules and the protected and
+            // own paths judge them. Only one that may hold other paths (a
+            // folder, or where a write may make one) is judged by what lies
+            // below it too. The provider gets each path as resolved, so it
+            // works where the policy looked. An action with no path
+            // has `cap.action` as its target, and looks nobody up.
+            let account = if marked.is_empty() {
+                Ok(None)
+            } else {
+                self.shared.command_account(&cfg, &entry.policy)
+            };
+            let known = account.as_ref().ok().cloned().flatten();
+            if !marked.is_empty() && self.shared.separate(&entry.policy) {
+                self.acls_ready(&cfg).await?;
+            }
+            let mut args = inv.args.clone();
+            let mut targets = Vec::new();
+            // Each path as resolved (its wire form) and as given.
+            let mut named = Vec::new();
+            // One that does not resolve as the account (a place it may not
+            // look into, the node's own folders) is refused and in the audit
+            // as any refusal, with the path given. The entry is written once
+            // the switch is over: the account may not write the node's log.
+            let resolved = {
+                let _as = act_as(known.as_ref())?;
+                marked.iter().try_for_each(|(field, mark)| {
+                    // Left out (or null, which its schema may allow): no path.
+                    let Some(Value::String(given)) = inv.args.get(field) else {
+                        return Ok(());
+                    };
+                    let path = WirePath::parse(given).map_err(|e| (given, e, None))?;
+                    let write = *mark == PathMark::Write;
+                    // The program gets the path resolved, so where the path
+                    // given is itself a link, a write there (a removal, a
+                    // rename) would act on the place it leads to, which the
+                    // agent never named.
+                    let own: std::path::PathBuf = path.given.components().collect();
+                    if write
+                        && std::fs::symlink_metadata(&own).is_ok_and(|m| m.file_type().is_symlink())
+                    {
+                        return Err((
+                            given,
+                            crate::fs::bad_path(format!(
+                                "{given} is a link; name the place it leads to"
+                            )),
+                            None,
+                        ));
+                    }
+                    // It is handed the path judged, character for character:
+                    // a name that is no Unicode would reach it as another.
+                    let Some(real) = path
+                        .real
+                        .to_str()
+                        .map(|_| nerve_policy::paths::to_wire(&path.real))
+                    else {
+                        return Err((
+                            given,
+                            crate::fs::bad_path(format!(
+                                "{given} leads to a name the program cannot be handed as it is"
+                            )),
+                            None,
+                        ));
+                    };
+                    args.insert(field.clone(), Value::String(real.clone()));
+                    // Its schema holds the path as it is handed, too. Only the
+                    // audit names where it leads ([`as_given`]).
+                    nerve_proto::schema::validate(&action.params, &Value::Object(args.clone()))
+                        .map_err(|_| {
+                            let (cap, act) = (&inv.cap, &inv.action);
+                            (
+                                given,
+                                crate::fs::bad_path(format!(
+                                    "{given} leads to a path {cap}.{act} does not take"
+                                )),
+                                Some(format!(
+                                    "{given} leads to {real}, which {cap}.{act} does not take"
+                                )),
+                            )
+                        })?;
+                    named.push((real, given.clone()));
+                    targets.push(Target {
+                        holds: crate::fs::holds(&path.real, write),
+                        path: path.real,
+                        access: if write {
+                            PathAccess::Write
+                        } else {
+                            PathAccess::Read
+                        },
+                    });
+                    Ok(())
+                })
+            };
+            resolved.map_err(|(given, e, audited)| {
+                let mut entry = e.clone();
+                if let Some(why) = audited {
+                    entry.message = why;
+                }
+                self.audit_bad_path(&inv, given, &entry);
+                e
+            })?;
+            let target = if targets.is_empty() {
+                format!("{}.{}", inv.cap, inv.action)
+            } else {
+                targets
+                    .iter()
+                    .map(|t| nerve_policy::paths::to_wire(&t.path))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            // A program's execute action runs in the folders marked `x`
+            // where folder-mode commands could run: where they cannot be
+            // confined, `x` lets nothing start (crate::daemon::folder_refusal).
+            let unconfined = (effect == Effect::Execute)
+                .then(|| self.shared.unconfined_as(&cfg, || known.clone()))
+                .flatten();
+            self.gate(
+                &entry,
+                &inv,
+                effect,
+                &targets,
+                None,
+                None,
+                target,
+                known.as_ref(),
+                unconfined,
+            )
+            .await
+            .map_err(|e| as_given(e, &named))?;
+            // A missing account stops the call once it is decided and
+            // audited, as for `fs`.
+            account.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
             return self
                 .shared
                 .providers
-                .invoke(&provider, &inv.cap, &inv.action, inv.args)
+                .invoke(&provider, &inv.cap, &inv.action, args)
                 .await;
         }
         match (inv.cap.as_str(), inv.action.as_str()) {
@@ -1690,7 +1828,8 @@ impl Link {
                     target,
                     None,
                     unconfined,
-                )?;
+                )
+                .await?;
                 self.signal(&inv.args)
             }
             ("exec", "run") => self.exec_run(id, &cfg, &entry, effect, &inv).await,
@@ -1705,15 +1844,30 @@ impl Link {
                 if self.shared.separate(&entry.policy) {
                     self.acls_ready(&cfg).await?;
                 }
-                let call = {
+                // A path that does not resolve is in the audit once the
+                // switch is over, as for a provider's.
+                let parsed = {
                     let _as = act_as(known.as_ref())?;
-                    FsCall::parse(a, &inv.args)?
+                    FsCall::parse(a, &inv.args)
                 };
+                let call = parsed.inspect_err(|e| {
+                    if let Some(Value::String(given)) = inv.args.get("path") {
+                        self.audit_bad_path(&inv, given, e);
+                    }
+                })?;
                 // Taken before the gate: whenever the gate judged by the
                 // folders, the walk below does too, even if `until` passes
-                // in between.
+                // in between. Where the node reads as the command account,
+                // that account's access holds the reads in no folder
+                // (nerve_policy::decide::Reads), as in the gate.
                 let by_folders = entry.policy.mode_at(crate::now_ms()) == Mode::Folder;
+                let by_account = by_folders && self.reads_by_account(&entry, known.as_ref());
                 let unconfined = self.shared.unconfined_as(&cfg, || known.clone());
+                // Its refusal names the path as given, as a program's does.
+                let named = match inv.args.get("path") {
+                    Some(Value::String(given)) => vec![(call.target_text(), given.clone())],
+                    _ => Vec::new(),
+                };
                 self.gate(
                     &entry,
                     &inv,
@@ -1724,7 +1878,9 @@ impl Link {
                     call.target_text(),
                     known.as_ref(),
                     unconfined,
-                )?;
+                )
+                .await
+                .map_err(|e| as_given(e, &named))?;
                 account.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
                 let protected = self.protected(&entry);
                 let deny = RuleSet::new(&entry.policy.deny, &self.home());
@@ -1736,14 +1892,30 @@ impl Link {
                     // walk, so a folder without `r` inside one with `r` is
                     // sealed to grep, find and list too. A walk still passes
                     // through such a folder to a folder with `r` inside it,
-                    // and finds only the files there.
+                    // and finds only the files there. In no folder, where
+                    // the account holds the reads, the walk keeps to what is
+                    // open to every account and out of the node's own
+                    // process as the gate does; what that account may not
+                    // open the walk cannot read anyway.
+                    let open = |p: &std::path::Path| {
+                        if crate::fs::open_to_all(p) && !crate::fs::own_process(p) {
+                            Ok(())
+                        } else {
+                            Err(String::new())
+                        }
+                    };
+                    let reads = if by_account {
+                        Reads::Account(&open)
+                    } else {
+                        Reads::Folders
+                    };
                     let skip = |p: &std::path::Path, through: bool| {
                         protected.check(p, false, &folders).is_some()
                             || deny
                                 .find("fs", &action, &nerve_policy::paths::to_wire(p))
                                 .is_some()
                             || by_folders
-                                && !nerve_policy::folder_reach(&folders, p, false)
+                                && !nerve_policy::read_reach(&folders, p, reads)
                                 && !(through && nerve_policy::readable_below(&folders, p))
                     };
                     call.run(&skip)
@@ -1815,7 +1987,7 @@ impl Link {
     /// Runs the policy for one call: it either runs or is refused at once.
     /// Every outcome lands in the audit log.
     #[allow(clippy::too_many_arguments)]
-    fn gate(
+    async fn gate(
         &self,
         entry: &CenterEntry,
         inv: &Invoke,
@@ -1836,34 +2008,75 @@ impl Link {
             cwd,
             now_ms: crate::now_ms(),
         };
+        let judged = Judged {
+            home: self.home(),
+            protected: self.protected(entry),
+            unconfined: unconfined.map(Into::into),
+            sudo: self.shared.sudo_on(),
+            shell: self.shell_for(command),
+            by_account: self.reads_by_account(entry, account),
+            provider: inv.cap != "fs",
+        };
         // The policy looks at the paths as the account (crate::account::FsAs);
-        // the audit entry below is the node's own again. `~` is the owner's.
+        // the audit entry below is the node's own again.
         let decision = {
-            let protected = self.protected(entry);
-            let home = self.home();
-            let home = &home;
             let _as = act_as(account)?;
-            let env = Env {
-                home,
-                protected: &protected,
-                unconfined,
-                sudo: self.shared.sudo_on(),
-                shell: self.shell_for(command),
-            };
-            nerve_policy::decide(&entry.policy, &env, &call)
+            judged.with(|env| nerve_policy::decide(&entry.policy, env, &call))
+        };
+        // A program handed a folder follows the links in it: where they
+        // lead is judged too, once the call is allowed, so a folder the
+        // call may not use is never walked. The walk may be long (or hang
+        // on a mount that does not answer), so it runs off the link's
+        // threads, where the call's deadline still answers the center.
+        let decision = if decision == Decision::Allow
+            && nerve_policy::works_below(&call)
+            && targets.iter().any(|t| t.holds)
+        {
+            let policy = entry.policy.clone();
+            let (cap, action) = (inv.cap.clone(), inv.action.clone());
+            let targets = targets.to_vec();
+            let command = command.map(str::to_string);
+            let cwd = cwd.map(std::path::Path::to_path_buf);
+            let account = account.cloned();
+            let now_ms = call.now_ms;
+            // A call whose deadline passes, or that is cancelled, while its
+            // links are walked is dropped at the await below: the walk
+            // stops then, and the call is in the audit log all the same.
+            let walk = walk_off(
+                move |stop| {
+                    let call = Call {
+                        cap: &cap,
+                        action: &action,
+                        effect,
+                        targets: &targets,
+                        command: command.as_deref(),
+                        cwd: cwd.as_deref(),
+                        now_ms,
+                    };
+                    let _as = act_as(account.as_ref())?;
+                    Ok::<_, RpcError>(judged.with(|env| {
+                        let check = nerve_policy::LinkCheck::new(&policy, env, &call);
+                        let mut judge = |l: &nerve_policy::Link| check.refuse(l);
+                        match crate::fs::links_below(
+                            &targets,
+                            crate::fs::LINKS_LIMIT,
+                            stop,
+                            &mut judge,
+                        ) {
+                            Ok(()) => Decision::Allow,
+                            Err(why) => Decision::Forbidden(why),
+                        }
+                    }))
+                },
+                |decision, code, reason| self.audit(inv, &target, decision, code, reason),
+            )
+            .await;
+            walk.map_err(|e| RpcError::internal(e.to_string()))??
+        } else {
+            decision
         };
         let audit = |decision: &str, code: Option<&str>, reason: Option<&str>| {
-            self.shared.audit(&Entry {
-                ts: crate::now_ms(),
-                center: self.name.clone(),
-                cap: inv.cap.clone(),
-                action: inv.action.clone(),
-                target: target.clone(),
-                decision: decision.into(),
-                code: code.map(Into::into),
-                session: inv.ctx.session.clone(),
-                reason: reason.map(Into::into),
-            })
+            self.audit(inv, &target, decision, code, reason)
         };
         match decision {
             Decision::Allow => {
@@ -1879,6 +2092,59 @@ impl Link {
                 Err(RpcError::forbidden(why))
             }
         }
+    }
+
+    /// Writes the refusal of a call whose path `given` did not resolve
+    /// (`e`, a `bad_path`) to the audit log, with the path as given: an
+    /// attempt at a place the account may not look into is in the log as
+    /// any refusal. Any other error is about the arguments, not a place. An
+    /// `fs` entry names it only where it is as plain as a resolved path
+    /// ([`plain_path`]); the reason names it either way.
+    fn audit_bad_path(&self, inv: &Invoke, given: &str, e: &RpcError) {
+        if e.kind().as_str() == "bad_path" {
+            let target = if inv.cap == "fs" {
+                plain_path(given)
+            } else {
+                given
+            };
+            self.audit(inv, target, "forbidden", Some("bad_path"), Some(&e.message));
+        }
+    }
+
+    /// Writes one entry of this center's calls to the audit log.
+    fn audit(
+        &self,
+        inv: &Invoke,
+        target: &str,
+        decision: &str,
+        code: Option<&str>,
+        reason: Option<&str>,
+    ) {
+        self.shared.audit(&Entry {
+            ts: crate::now_ms(),
+            center: self.name.clone(),
+            cap: inv.cap.clone(),
+            action: inv.action.clone(),
+            target: target.to_string(),
+            decision: decision.into(),
+            code: code.map(Into::into),
+            session: inv.ctx.session.clone(),
+            reason: reason.map(Into::into),
+        })
+    }
+
+    /// Whether the node reads this center's files as its command account,
+    /// `account` as a call looked it up: on the installed Linux node, where
+    /// the commands run as `nerve-run` (crate::account::FsAs). That
+    /// account's own file access then holds what folder mode reads
+    /// (nerve_policy::decide::Reads). A call whose account could not be
+    /// found reads by the folders.
+    fn reads_by_account(
+        &self,
+        entry: &CenterEntry,
+        account: Option<&crate::service::Account>,
+    ) -> bool {
+        account.is_some() && self.shared.separate(&entry.policy)
     }
 
     fn settings_set(&self, args: &Map<String, Value>) -> Result<Value, RpcError> {
@@ -2064,6 +2330,15 @@ impl Link {
         let by_folders = entry.policy.mode_at(crate::now_ms()) == Mode::Folder;
         let separate = self.shared.separate(&entry.policy) && !sudo_call;
         let unconfined = self.shared.unconfined_as(cfg, || known.clone());
+        // Its refusal names the `cwd` given as given, as a program's paths
+        // are; the default one the center did not name.
+        let named: Vec<(String, String)> = inv
+            .args
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(|given| (nerve_policy::paths::to_wire(&rc.cwd), given.to_string()))
+            .into_iter()
+            .collect();
         self.gate(
             entry,
             inv,
@@ -2074,7 +2349,9 @@ impl Link {
             target,
             looks_as.as_ref(),
             unconfined,
-        )?;
+        )
+        .await
+        .map_err(|e| as_given(e, &named))?;
         let account = account.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
         // The policy let a sudo command through only with the switch on and
         // the sudo allow list naming it. It runs the node's sudo, with the
@@ -2247,6 +2524,100 @@ impl Link {
     }
 }
 
+/// The audit reason of a call that ended (its deadline passed, or it was
+/// cancelled) while the node walked the links below its paths. It never
+/// reached the program.
+const ENDED_IN_WALK: &str = "the call ended before the node had checked where the links below its paths lead; it did not run";
+
+/// Runs `walk` on a blocking thread, off the link's threads, and waits for
+/// it: [`Link::gate`]'s walk of the links below a call's paths. Dropped
+/// while it waits (the call's deadline passed, or the call was cancelled),
+/// it stops the walk through the flag it hands `walk`, and writes the call
+/// to the audit log with `audit` (decision, code, reason) as refused,
+/// `cancelled`: the gate that would have written it is gone.
+async fn walk_off<T: Send + 'static>(
+    walk: impl FnOnce(&AtomicBool) -> T + Send + 'static,
+    audit: impl FnOnce(&str, Option<&str>, Option<&str>),
+) -> Result<T, tokio::task::JoinError> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let ended = Ended::new(stop.clone(), move || {
+        audit("forbidden", Some("cancelled"), Some(ENDED_IN_WALK))
+    });
+    let walked = tokio::task::spawn_blocking(move || walk(&stop)).await;
+    ended.waited();
+    walked
+}
+
+/// Held by [`walk_off`] while it waits for the walk of a call's links.
+/// Dropped before [`Ended::waited`], the call was dropped while it waited:
+/// it stops the walk and writes the call to the audit log, which the gate
+/// no longer does.
+struct Ended<F: FnOnce()> {
+    stop: Arc<AtomicBool>,
+    audit: Option<F>,
+}
+
+impl<F: FnOnce()> Ended<F> {
+    fn new(stop: Arc<AtomicBool>, audit: F) -> Ended<F> {
+        Ended {
+            stop,
+            audit: Some(audit),
+        }
+    }
+
+    /// The walk answered; the gate writes the outcome itself.
+    fn waited(mut self) {
+        self.audit = None;
+    }
+}
+
+impl<F: FnOnce()> Drop for Ended<F> {
+    fn drop(&mut self) {
+        if let Some(audit) = self.audit.take() {
+            self.stop.store(true, Ordering::Relaxed);
+            audit();
+        }
+    }
+}
+
+/// What the policy needs to know of the node for one call
+/// (nerve_policy::Env), owned, so the links below a handed folder can be
+/// judged off the link's threads with the same view.
+struct Judged {
+    /// The `~` of the rules and the protected list.
+    home: std::path::PathBuf,
+    protected: Protected,
+    unconfined: Option<String>,
+    sudo: bool,
+    shell: Shell,
+    /// Whether the node reads as the command account (Link::reads_by_account).
+    by_account: bool,
+    /// Whether the call is a program's, not the node's own `fs`.
+    provider: bool,
+}
+
+impl Judged {
+    /// Runs `f` with the policy's view of the node. Where the node reads
+    /// as the command account, a path read in no folder in folder mode is
+    /// asked of that account (crate::fs::may_read_outside), so `f` runs
+    /// under the switch to it.
+    fn with<R>(&self, f: impl FnOnce(&Env) -> R) -> R {
+        let may_read = |p: &std::path::Path| crate::fs::may_read_outside(p, self.provider);
+        f(&Env {
+            home: &self.home,
+            protected: &self.protected,
+            unconfined: self.unconfined.as_deref(),
+            sudo: self.sudo,
+            shell: self.shell,
+            reads: if self.by_account {
+                Reads::Account(&may_read)
+            } else {
+                Reads::Folders
+            },
+        })
+    }
+}
+
 /// The node's file access as `account` on this thread while the result
 /// lives ([`crate::account::FsAs`]); nothing for the node's own user.
 #[cfg(target_os = "linux")]
@@ -2378,6 +2749,82 @@ impl Drop for Running<'_> {
     }
 }
 
+/// The audit target of a call to an off action, from its arguments as
+/// given: the path an `fs` call names (where it is plain, [`plain_path`])
+/// and the command line of `exec.run`, as an allowed call's target names
+/// them, else `cap.action`, the target of a call that names neither. An
+/// `fs` or `exec.run` call without that argument has none, so the audit's
+/// rule buttons make no rule of the action's name.
+fn off_target(inv: &Invoke) -> String {
+    let arg = |k: &str| {
+        inv.args
+            .get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    match (inv.cap.as_str(), inv.action.as_str()) {
+        ("fs", _) => plain_path(&arg("path")).to_string(),
+        ("exec", "run") => arg("command"),
+        _ => format!("{}.{}", inv.cap, inv.action),
+    }
+}
+
+/// `e`, the refusal of a call (a program's, an `fs` call, `exec.run` for
+/// its `cwd`), with each of its paths named as the center gave it, not as
+/// the node resolved it: `named` holds each as
+/// resolved (in its wire form) and as given, and a place below a resolved
+/// path is named below the given one. Resolved as the command account,
+/// which every pairing's commands share, a path given as a link of another
+/// of its processes (`/proc/<n>/cwd`) leads where that process works, which
+/// the center must not learn from a refusal. The audit entry names the
+/// resolved path; only the owner reads it.
+fn as_given(mut e: RpcError, named: &[(String, String)]) -> RpcError {
+    // The longest first, so a path is not taken for one it begins with.
+    let mut named: Vec<&(String, String)> = named.iter().filter(|(r, g)| r != g).collect();
+    named.sort_by_key(|(real, _)| std::cmp::Reverse(real.len()));
+    let text = &e.message;
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    'scan: while at < text.len() {
+        // A path in a reason starts the text or follows a space, a comma or
+        // a parenthesis, and ends it or comes before one of those, a colon
+        // or a `/` that goes below it.
+        let starts = at == 0 || text[..at].ends_with([' ', '(', ',']);
+        if starts {
+            for (real, given) in &named {
+                if let Some(rest) = text[at..].strip_prefix(real.as_str())
+                    && (rest.is_empty() || rest.starts_with([' ', '/', ')', ',', ':', ';']))
+                {
+                    out.push_str(given);
+                    at += real.len();
+                    continue 'scan;
+                }
+            }
+        }
+        let c = text[at..].chars().next().expect("inside the text");
+        out.push(c);
+        at += c.len_utf8();
+    }
+    e.message = out;
+    e
+}
+
+/// `given`, an `fs` path the node did not resolve, where it is written as a
+/// resolved path is (absolute, no `.` or `..` part, no empty one), else
+/// nothing. The audit's rule buttons make an `fs` rule of an entry's target
+/// and rules meet resolved paths only, so a rule made of `a/../b` would
+/// match nothing; an entry with no target gets no buttons.
+fn plain_path(given: &str) -> &str {
+    let plain = given == "/"
+        || given.starts_with('/')
+            && given[1..]
+                .split('/')
+                .all(|part| !matches!(part, "" | "." | ".."))
+            && !(cfg!(windows) && given.contains('\\'));
+    if plain { given } else { "" }
+}
+
 /// The shell a command line runs in, by the shell the machine is set to
 /// run commands in (`machine.shell`; none: the default of the platform).
 fn shell_of(configured: Option<&str>, command: Option<&str>) -> Shell {
@@ -2449,6 +2896,108 @@ mod tests {
             at - started < Duration::from_millis(300),
             "{:?}",
             at - started
+        );
+    }
+
+    /// A call dropped while the gate waits for the walk of its links (its
+    /// deadline passed, or it was cancelled) stops the walk and is written
+    /// to the audit log as refused, `cancelled`; one whose walk answered is
+    /// left to the gate.
+    #[tokio::test]
+    async fn a_call_that_ends_while_its_links_are_walked_is_audited() {
+        use std::sync::atomic::Ordering;
+        type Entry = (String, Option<String>, Option<String>);
+        let audited = std::sync::Mutex::new(Vec::<Entry>::new());
+        let gate = |answer: bool| {
+            let (done, finished) = std::sync::mpsc::channel();
+            let (stopped, seen) = std::sync::mpsc::channel();
+            let call = super::walk_off(
+                move |stop: &std::sync::atomic::AtomicBool| {
+                    let started = std::time::Instant::now();
+                    while !answer
+                        && !stop.load(Ordering::Relaxed)
+                        && started.elapsed() < Duration::from_secs(5)
+                    {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    let _ = stopped.send(stop.load(Ordering::Relaxed));
+                    let _ = done.send(());
+                },
+                |decision: &str, code: Option<&str>, reason: Option<&str>| {
+                    audited.lock().unwrap().push((
+                        decision.into(),
+                        code.map(Into::into),
+                        reason.map(Into::into),
+                    ))
+                },
+            );
+            (call, seen, finished)
+        };
+        let deadline = Duration::from_millis(50);
+        let (call, seen, _) = gate(true);
+        assert!(matches!(
+            tokio::time::timeout(deadline, call).await,
+            Ok(Ok(()))
+        ));
+        assert!(!seen.recv().unwrap());
+        assert!(audited.lock().unwrap().is_empty());
+        let (call, seen, finished) = gate(false);
+        let started = std::time::Instant::now();
+        assert!(tokio::time::timeout(deadline, call).await.is_err());
+        assert_eq!(
+            *audited.lock().unwrap(),
+            [(
+                "forbidden".to_string(),
+                Some("cancelled".to_string()),
+                Some(super::ENDED_IN_WALK.to_string())
+            )]
+        );
+        finished.recv().unwrap();
+        assert!(seen.recv().unwrap(), "the walk was not told to stop");
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "the walk ran on"
+        );
+    }
+
+    /// A program's refusal names each path as the center gave it, and a
+    /// place below it below the given one; a path that only begins like a
+    /// resolved one stays as it is.
+    #[test]
+    fn a_programs_refusal_names_its_paths_as_given() {
+        let named = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(r, g)| (r.to_string(), g.to_string()))
+                .collect()
+        };
+        let as_given = |why: &str, pairs: &[(&str, &str)]| {
+            let e = super::as_given(nerve_proto::RpcError::forbidden(why), &named(pairs));
+            assert_eq!(e.kind().as_str(), "forbidden");
+            e.message
+        };
+        let away = [("/home/u/clients/acme", "/proc/7/cwd")];
+        assert_eq!(
+            as_given("/home/u/clients/acme holds a place that is denied", &away),
+            "/proc/7/cwd holds a place that is denied"
+        );
+        assert_eq!(
+            as_given(
+                "/home/u/clients/acme/.env is protected (/home/u/clients/acme); not allowed",
+                &away
+            ),
+            "/proc/7/cwd/.env is protected (/proc/7/cwd); not allowed"
+        );
+        assert_eq!(
+            as_given("/home/u/clients/acme2 is outside the folders", &away),
+            "/home/u/clients/acme2 is outside the folders"
+        );
+        assert_eq!(
+            as_given(
+                "/a/b holds a protected path, /a: no",
+                &[("/a", "/x"), ("/a/b", "/y")]
+            ),
+            "/y holds a protected path, /x: no"
         );
     }
 

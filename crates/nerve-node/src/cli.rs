@@ -222,7 +222,9 @@ pub enum ModeCmd {
     /// Pick allowlist, folder or user mode.
     Set {
         /// `allowlist` (only what an allow rule names, as nerve-run), `folder`
-        /// (what each folder's rights allow, as nerve-run, the default) or
+        /// (what each folder's rights allow, as nerve-run, the default; on
+        /// the installed node a file call may also read what every account
+        /// may read) or
         /// `user` (anything you could do yourself, as you, protected files
         /// aside).
         mode: String,
@@ -2723,7 +2725,7 @@ async fn setup_steps(
         input,
         out,
         &format!(
-            "Mode for {center}: folder (the folders you give it, as nerve-run), allowlist (only what allow rules name) or user (all you may do, as you) [{now}]: "
+            "Mode for {center}: folder (writes and commands in the folders you give it, as nerve-run; reads also where every account may), allowlist (only what allow rules name) or user (all you may do, as you) [{now}]: "
         ),
     )?;
     let mode = if mode.is_empty() { now.clone() } else { mode };

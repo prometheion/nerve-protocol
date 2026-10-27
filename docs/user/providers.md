@@ -44,24 +44,112 @@ still make the allowed one attach for it. Allow only programs you trust.
 
 ## Allow its capabilities
 
-A provider's capability is decided like any other ([modes](modes.md),
-[rules](rules.md)):
+A provider's capability is decided like any other, by what it does
+([modes](modes.md#what-each-mode-allows), [rules](rules.md)):
 
 | Mode | A provider's action runs when |
 |---|---|
 | `allowlist` | an allow rule names it: `nerve-node config add center.<name>.policy.allow 'lamp.on'`, or `'lamp'` for all its actions |
-| `folder` | you set it on: `nerve-node cap set lamp on` (it lies in no folder) |
+| `folder` | it reads, writes or runs something at paths it marks ([below](#paths-it-takes)) that the folders allow; or you set it on: `nerve-node cap set lamp on` (one that names no path lies in no folder, a read included, a write whose only paths are ones it reads names no place it writes, and one that senses or acts on the world needs `on` anyway, its paths in your folders too) |
 | `user` | always, except one that senses or acts on the world, which needs `on` |
 
-Deny rules and `off` and `hidden` work as for `fs` and `exec`. A center with
-the [settings grant](settings-grant.md) can allow a provider's action itself
-while the provider is attached, except one that senses (a camera, a
-microphone): only you turn those on, and only you take away an `off` switch
-or a deny rule that keeps one off. While no provider offers a capability
-or one of its actions, only you can allow it or turn it on, as the node
-cannot tell yet what it does. An entry a center wrote while the capability
-did not sense stays when a new version of the program makes it sense: after
-such an update, check `nerve-node rule ls allow` and `nerve-node cap ls`.
+Deny rules and `off` and `hidden` work as for `fs` and `exec`. A call to an
+action that is `off` is refused with `disabled` and written to the audit log.
+A center with the [settings grant](settings-grant.md) can allow a provider's
+action itself while the provider is attached, except one that senses (a
+camera, a microphone) or acts on the world (a lamp, a lock): only you turn
+those on, and only you take away an `off` switch or a deny rule that keeps
+one off. While no provider offers a capability or one of its actions, only
+you can allow it or turn it on, as the node cannot tell yet what it does. An
+entry a center wrote while the capability did neither stays when a new
+version of the program makes it sense or act: after such an update, check
+`nerve-node rule ls allow` and `nerve-node cap ls`.
+
+## Paths it takes
+
+An action that reads or writes files names them as arguments its schema
+marks with `x-nerve-path`, `"read"` or `"write"`:
+
+```json
+"params": {"type": "object", "required": ["path"],
+           "properties": {"path": {"type": "string", "x-nerve-path": "read"}}}
+```
+
+The node then judges each such path as it judges an `fs` call's: in `folder`
+mode a path read needs an `r` folder and one written a `w` folder (one that
+runs something also `x`, and only where the machine can confine commands: where
+it cannot, `x` lets nothing start, so `folder` mode neither offers nor runs a
+program's `execute` action with paths, as it runs no command); [rules](rules.md#rule-syntax) match the path
+(`notes:~/private/*`); protected paths and the node's own files are refused;
+and the [audit log](audit.md) names the path, also one that does not resolve.
+On the installed Linux node a read outside every folder goes where every
+account may read ([reading in folder mode](modes.md#reading-in-folder-mode)),
+and only for a file. A path given that is a link is followed to where it
+leads and judged there. A path to write that is itself a link is refused
+(`bad_path`): the program would remove, rename or write the place it leads
+to, which you did not name, so name that place instead. The program gets the
+path as the node resolved it, links followed, so it works where the node
+looked; a path that resolves to a name that is not valid Unicode, or to one
+the program's own schema does not take, is refused (`bad_path`). A refusal
+names each path as the center gave it, never where it led: the
+[audit log](audit.md) says that. Only the
+top-level arguments can be marked, each a string. A call whose marked path
+it leaves out names no folder: it needs `on`, as an action without paths
+does.
+
+The node sees only the marked arguments. One the program does not mark is
+not a path to the node: no folder, rule, protected path or own file of the
+node holds it, and the program reads or writes there with your rights. So in
+`folder` mode an action that marks no path needs `on`, a read too. A program
+that reads or writes files should mark every path argument; one written
+before the marker existed marks none. Switch an action `off` that takes a
+path without the marker, or set it `on` only if you would let it read and
+write anywhere you can.
+
+A folder given as a path counts with everything below it, since the program
+may read or write anywhere in it: the call is refused when a protected path
+that no folder releases, the node's own files, a place a deny rule of that
+capability names (`notes:~/private/*` refuses `notes` the folder `~` too) or,
+in `folder` mode, a folder you gave less lies below it. An `execute` action
+runs its program there, so for it a folder below without `x`, or a protected
+path released without `x`, refuses the call too. The refusal names the
+folder handed over, not what lies below it. A file holds nothing below it:
+`notes:~/proj/*.env` refuses `notes` the folder `~/proj`, but not
+`~/proj/readme.md`. A path a write names that does not exist yet counts as a
+folder, since the program may make one there.
+
+A program follows the links in a folder it is handed, which the node's own
+walks never do. So before the call the node looks for them, as the command
+account: each link below the folder, and below a folder a link leads to, is
+judged where it leads, as if the call named that place in the folder's
+stead, its other paths unchanged, and one that leads where the call may not
+go (outside the folders, to a protected path, to a place a deny rule names)
+refuses the call. A link that stays inside the folder handed over, or
+inside the folder a link that passed leads to where it lies, is judged as
+the other names there, so in `allowlist` mode a rule that covers that
+folder covers it too. The node looks into a folder a link leads to only
+when that link passed, and the refusal names the link, not where it leads.
+A link that leads nowhere counts only for a write, at the place it names. A
+call whose folders hold more than 200 000 entries in all, counting those of
+the folders their links lead to, is refused, since the node cannot check
+them all. A call that ends (its deadline passes, or it is cancelled) while
+the node looks for the links stops that search and never reaches the
+program; the [audit log](audit.md) has it as refused, `cancelled`. An `fs:` rule covers `fs` calls
+only: to keep every capability out of a place, deny it for each one that
+takes paths (`notes:~/private/*`), or make it a [protected
+path](protected-paths.md).
+
+A folder a program writes in is not checked for the places whose writes
+run code later, as an `fs.write` is (`.git`, `.envrc`, `.vscode`, `.idea`):
+the program may make them anywhere below it, so the node cannot check them
+before the call. An `fs.write` there is refused; a program that unpacks or
+syncs into a folder of yours can write them. Let such an action run only
+where every folder with `w` can take that, or switch it `off`.
+
+The node checks the path when the call comes; the program reads or writes it
+afterwards with your rights, so a link put in or swapped in between is not
+caught: a command with `w` in a folder can make one.
+Allow only programs you trust.
 
 When the program exits, its capabilities leave what `list` shows the centers,
 and a call that was waiting for it fails with `unavailable`.

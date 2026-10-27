@@ -26,7 +26,8 @@ open port.
    administrator), or on a desktop open the
    [desktop app](desktop.md).
 4. Give the pairing a [folder](modes.md#folders): a new pairing is in `folder`
-   mode, and until you do it reaches nothing of yours. Or choose another
+   mode, and until you do it writes and runs nothing of yours (on the
+   installed node it may read what every account may read). Or choose another
    [mode](modes.md) and [rules](rules.md).
 
 ## All pages

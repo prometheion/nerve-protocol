@@ -641,10 +641,11 @@ impl SettingsStore {
     }
 
     /// `settings.set` from `center`: the whole document, checked against
-    /// `if_version`. `is_sense(scope)` says whether a capability (`cap`) or
-    /// an action (`cap.action`) senses (camera, microphone, screen), or may for
-    /// all the node knows: only the owner may turn those on. It gets the
-    /// whole scope of a `caps` key or an allow rule.
+    /// `if_version`. `owner_only(scope)` says whether a capability (`cap`) or
+    /// an action (`cap.action`) senses (camera, microphone, screen) or
+    /// actuates (a lamp, a lock), or may for all the node knows: only the
+    /// owner may turn those on. It gets the whole scope of a `caps` key or an
+    /// allow rule.
     /// `protected(opts)` is this node's protected list with a center's
     /// options: only the owner may release an entry of it.
     pub fn set_center_document(
@@ -652,7 +653,7 @@ impl SettingsStore {
         center: &str,
         document: Value,
         if_version: u64,
-        is_sense: impl Fn(&str) -> bool,
+        owner_only: impl Fn(&str) -> bool,
         protected: impl Fn(&ProtectedOptions) -> Protected,
     ) -> Result<u64, SetError> {
         let entry = self
@@ -682,7 +683,7 @@ impl SettingsStore {
             paused: entry.paused,
             policy: entry.policy.clone(),
         };
-        client_only(&old, &new, &is_sense, &protected).map_err(SetError::Forbidden)?;
+        client_only(&old, &new, &owner_only, &protected).map_err(SetError::Forbidden)?;
         let mut cfg = self.config.clone();
         let e = cfg.center_mut(center).expect("checked above");
         e.paused = new.paused;
@@ -776,7 +777,7 @@ fn to_json(c: &NodeConfig) -> Value {
 fn client_only(
     old: &CenterDocument,
     new: &CenterDocument,
-    is_sense: &dyn Fn(&str) -> bool,
+    owner_only: &dyn Fn(&str) -> bool,
     protected: &dyn Fn(&ProtectedOptions) -> Protected,
 ) -> Result<(), String> {
     if old.paused && !new.paused {
@@ -784,31 +785,32 @@ fn client_only(
     }
     let (o, n) = (&old.policy, &new.policy);
     for (key, setting) in &n.caps {
-        if *setting == CapSetting::On && o.caps.get(key) != Some(&CapSetting::On) && is_sense(key) {
+        if *setting == CapSetting::On && o.caps.get(key) != Some(&CapSetting::On) && owner_only(key)
+        {
             return Err(format!(
-                "policy.caps.{key}: only the owner can turn sensing on, and a capability the node does not offer now may sense"
+                "policy.caps.{key}: only the owner can turn on what senses or actuates, and a capability the node does not offer now may do either"
             ));
         }
     }
     // An `off` or `hidden` entry, kept or set by the owner under a wider
-    // `on`, is what keeps a sense action off: taking it away turns it on
-    // as surely as an `on` would.
+    // `on`, is what keeps a sense or actuate action off: taking it away
+    // turns it on as surely as an `on` would.
     for (key, setting) in &o.caps {
         let kept = matches!(setting, CapSetting::Off | CapSetting::Hidden);
         let still = matches!(n.caps.get(key), Some(CapSetting::Off | CapSetting::Hidden));
-        if kept && !still && is_sense(key) {
+        if kept && !still && owner_only(key) {
             return Err(format!(
-                "policy.caps.{key}: only the owner can turn sensing on, and a capability the node does not offer now may sense"
+                "policy.caps.{key}: only the owner can turn on what senses or actuates, and a capability the node does not offer now may do either"
             ));
         }
     }
-    // An allow rule would let a sense capability through in allowlist mode,
+    // An allow rule would let such a capability through in allowlist mode,
     // whatever `caps` says; so adding one for it is the owner's call as well.
     for rule in n.allow.iter().filter(|r| !o.allow.contains(r)) {
         let scope = crate::rules::scope_of(rule);
-        if is_sense(scope) {
+        if owner_only(scope) {
             return Err(format!(
-                "policy.allow {rule}: only the owner can turn sensing on, and a capability the node does not offer now may sense"
+                "policy.allow {rule}: only the owner can turn on what senses or actuates, and a capability the node does not offer now may do either"
             ));
         }
     }
@@ -816,9 +818,9 @@ fn client_only(
     // allow rule or mode.
     for rule in o.deny.iter().filter(|r| !n.deny.contains(r)) {
         let scope = crate::rules::scope_of(rule);
-        if is_sense(scope) {
+        if owner_only(scope) {
             return Err(format!(
-                "policy.deny {rule}: only the owner can turn sensing on, and a capability the node does not offer now may sense"
+                "policy.deny {rule}: only the owner can turn on what senses or actuates, and a capability the node does not offer now may do either"
             ));
         }
     }
@@ -1493,10 +1495,12 @@ mod tests {
             unconfined: None,
             sudo: false,
             shell: crate::command::Shell::native(),
+            reads: crate::decide::Reads::Folders,
         };
         let targets = [crate::decide::Target {
             path: file.into(),
             access: crate::decide::PathAccess::Write,
+            holds: true,
         }];
         let call = crate::decide::Call {
             cap: "fs",

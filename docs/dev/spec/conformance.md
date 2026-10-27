@@ -86,7 +86,7 @@ points the node at a fake `sudo` (`machine.sudo_path`) for this.
 | 4.1 | the node dials the center |
 | 4.1 | the `Nerve-Node` header names the paired node id |
 | 4.2 | the hello is signed and names version "0" |
-| 6 | describe full returns a well-formed descriptor, every schema in the subset of §6.1, and its `access` block (§6.2), when it has one, well formed: a known mode, folders only in folder mode, each an absolute path in the center's form that reads the same on one line (no control character, U+2028 or U+2029, no blank at either end) with one to three of `r`, `w`, `x` in order, `own` and `closed_below` booleans, no place twice; `sudo` a boolean and `unnamed` a count, each set only in folder mode |
+| 6 | describe full returns a well-formed descriptor, every schema in the subset of §6.1, and its `access` block (§6.2), when it has one, well formed: a known mode, folders only in folder mode, each an absolute path in the center's form that reads the same on one line (no control character, U+2028 or U+2029, no blank at either end) with one to three of `r`, `w`, `x` in order, `own` and `closed_below` booleans, no place twice; `sudo` and `reads_by_account` booleans and `unnamed` a count, each set only in folder mode |
 | 5.1 | describe capability without cap is `invalid_args` |
 | 5.2 | an unknown method is `method_not_found` |
 | 5.3 | invoke of an unknown capability is `unknown_capability` |
@@ -187,10 +187,12 @@ settings grant `write`, allows the program that runs the part
 (`std::env::current_exe()`) in `providers.allowed` under `Setup::provider`,
 and starts the node; `Setup::socket` is its control socket. The part writes its
 own policy with `settings.set` (`user` mode and a deny rule for `echo.shout`
-before the provider comes, allow rules for `echo.say` and `echo.fail` once it
-is there) and attaches an `echo` provider with the actions `say` (a string
-`text`), `shout`, `fail` and `odd`, whose schema has a `oneOf` and so is
-outside the subset of protocol.md §6.1. Every check names node-local §7.
+before the provider comes, allow rules for `echo.say`, `echo.fail` and
+`echo.peek:/nerve-conformance/inside/*` once it is there) and attaches an
+`echo` provider with the actions `say` (a string `text`), `shout`, `fail`,
+`odd`, whose schema has a `oneOf` and so is outside the subset of
+protocol.md §6.1, and `peek`, whose `path` is marked `x-nerve-path: "read"`.
+Every check names node-local §7.
 
 | Check |
 |---|
@@ -206,6 +208,7 @@ outside the subset of protocol.md §6.1. Every check names node-local §7.
 | a provider's error comes back with its code |
 | a call the policy refuses never reaches the provider |
 | a call whose arguments do not fit the action's schema is `invalid_args` and never reaches the provider |
+| a path argument keeps its `x-nerve-path` marker, and the node decides the call by that path (one below the allowed folder reaches the provider with it, one elsewhere is `forbidden` and never does) |
 | when the provider exits its capability leaves the descriptor |
 | a call to a provider that left is `unknown_capability` |
 

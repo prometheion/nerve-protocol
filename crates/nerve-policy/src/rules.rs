@@ -3,10 +3,12 @@
 //! A rule is `<scope>` or `<scope>:<pattern>`. The scope is a capability or
 //! `cap.action`, as in `caps`. The pattern is a glob over the call's target:
 //! the whole command line for `exec.run`, the resolved path for every `fs`
-//! action (in the center's form, `/c/Users/x` on Windows, and `~/` is the
-//! owner's home), and `<cap>.<action>` for any other action. `*` matches
-//! across `/` and spaces. A rule without a pattern covers every target of its
-//! scope.
+//! action and for each path argument of any other action (one its schema
+//! marks with `x-nerve-path`), and `<cap>.<action>` for an action that names
+//! no path. A path is in the center's form (`/c/Users/x` on Windows, where a
+//! path pattern ignores case as NTFS does), and `~/` in a pattern is the
+//! owner's home. `*` matches across `/` and spaces. A rule without a pattern
+//! covers every target of its scope.
 //!
 //! A pattern ending in ` *` also covers the bare program (`git *` covers
 //! `git`), and one ending in `/*` the folder itself, so the wildcard the
@@ -26,8 +28,8 @@ use crate::decide::sudo_command;
 use crate::guard::Guard;
 use crate::paths::to_wire;
 
-/// The capability whose targets are paths.
-const FS: &str = "fs";
+/// The capability whose targets are all paths.
+pub(crate) const FS: &str = "fs";
 
 /// Whether `s` is `cap` or `cap.action`: the shape of a `caps` key.
 pub fn valid_scope(s: &str) -> bool {
@@ -56,7 +58,9 @@ fn split(rule: &str) -> Result<(&str, Option<&str>), String> {
     Ok((scope, pattern))
 }
 
-fn is_path_scope(scope: &str) -> bool {
+/// Whether every target of `scope` is a path (`fs`). Any other scope's
+/// target is a path where its call names one ([`RuleSet::find_path`]).
+fn always_paths(scope: &str) -> bool {
     scope.split('.').next() == Some(FS)
 }
 
@@ -102,7 +106,10 @@ pub fn validate(rule: &str) -> Result<(), String> {
     }
     let (scope, pattern) = split(rule)?;
     if let Some(p) = pattern {
-        build(p, is_path_scope(scope)).map_err(|e| format!("rule {rule:?}: {e}"))?;
+        // Any scope's pattern may meet a path.
+        for path in [always_paths(scope), true] {
+            build(p, path).map_err(|e| format!("rule {rule:?}: {e}"))?;
+        }
     }
     Ok(())
 }
@@ -173,8 +180,21 @@ struct Compiled {
     /// The pattern with `~/` resolved; [`RuleSet::find_exact`] compares it.
     pattern: Option<String>,
     globs: Vec<GlobMatcher>,
+    /// The globs a path target is matched with: `~/` resolved and, on
+    /// Windows, without case, whatever the scope.
+    path_globs: Vec<GlobMatcher>,
+    /// The pattern as a path target reads it (`~/` resolved), which
+    /// [`RuleSet::find_below`] looks at.
+    path_pattern: Option<String>,
     /// A rule of the guard: it matches parsed commands, not the text.
     guard: Option<Guard>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many rule sets this thread compiled, for the tests that check
+    /// a decision does not compile its rules again for each link it judges.
+    pub(crate) static COMPILED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// An allow or deny list, compiled.
@@ -190,6 +210,8 @@ impl RuleSet {
     /// `home`. The guard reads a command line as the node's default shell
     /// does; [`RuleSet::with_shell`] names another.
     pub fn new(rules: &[String], home: &Path) -> RuleSet {
+        #[cfg(test)]
+        COMPILED.with(|c| c.set(c.get() + 1));
         let home = to_wire(home);
         let rules = rules
             .iter()
@@ -201,6 +223,8 @@ impl RuleSet {
                         action: Some("run".into()),
                         pattern: None,
                         globs: Vec::new(),
+                        path_globs: Vec::new(),
+                        path_pattern: None,
                         guard: Some(guard),
                     });
                 }
@@ -212,24 +236,24 @@ impl RuleSet {
                     Some((c, a)) => (c, Some(a)),
                     None => (scope, None),
                 };
-                let path = is_path_scope(scope);
-                let pattern = pattern.map(|p| expand_home(p, &home, path));
-                let globs = match &pattern {
+                let path = always_paths(scope);
+                let globs_of = |path: bool| match pattern {
                     Some(p) => {
-                        let g = matchers(p, path);
-                        if g.is_empty() {
-                            return None;
-                        }
-                        g
+                        let g = matchers(&expand_home(p, &home, path), path);
+                        (!g.is_empty()).then_some(g)
                     }
-                    None => Vec::new(),
+                    None => Some(Vec::new()),
                 };
+                let globs = globs_of(path)?;
+                let path_globs = globs_of(true)?;
                 Some(Compiled {
                     text: text.clone(),
                     cap: cap.into(),
                     action: action.map(Into::into),
-                    pattern,
+                    pattern: pattern.map(|p| expand_home(p, &home, path)),
                     globs,
+                    path_globs,
+                    path_pattern: pattern.map(|p| expand_home(p, &home, true)),
                     guard: None,
                 })
             })
@@ -262,6 +286,56 @@ impl RuleSet {
                     Err(e) => g.refuses(&e.read) || fallback(g).iter().any(|m| m.is_match(target)),
                 },
                 None => r.globs.is_empty() || r.globs.iter().any(|g| g.is_match(target)),
+            })
+            .map(|r| r.text.as_str())
+    }
+
+    /// The first rule that covers the path `target` of `cap.action`: a path
+    /// argument of any action, matched as `fs` paths are (`~/` is the
+    /// owner's home, Windows ignores case). The guard's rules look at
+    /// command lines only.
+    pub fn find_path(&self, cap: &str, action: &str, target: &str) -> Option<&str> {
+        self.rules
+            .iter()
+            .filter(|r| r.guard.is_none() && r.covers(cap, action))
+            .find(|r| r.path_globs.is_empty() || r.path_globs.iter().any(|g| g.is_match(target)))
+            .map(|r| r.text.as_str())
+    }
+
+    /// The first rule that may cover a path strictly below the folder `dir`
+    /// of `cap.action`, a path argument as [`RuleSet::find_path`] reads one:
+    /// a program handed `dir` works below it. A rule may cover such a path
+    /// where the text its pattern starts with, up to its first wildcard,
+    /// lies below `dir`, or `dir` below that text when a wildcard follows. That is wider than the pattern, which is the
+    /// side to err on: the rule is the owner's "no".
+    pub fn find_below(&self, cap: &str, action: &str, dir: &str) -> Option<&str> {
+        let fold = |s: &str| {
+            if cfg!(windows) {
+                s.replace('\\', "/").to_lowercase()
+            } else {
+                s.to_string()
+            }
+        };
+        let dir = fold(dir);
+        let below = if dir.ends_with('/') {
+            dir
+        } else {
+            format!("{dir}/")
+        };
+        self.rules
+            .iter()
+            .filter(|r| r.guard.is_none() && r.covers(cap, action))
+            .find(|r| {
+                let Some(pattern) = &r.path_pattern else {
+                    // A rule without a pattern covers every path.
+                    return true;
+                };
+                let pattern = fold(pattern);
+                let wild = pattern.find(['*', '?', '[', '{']);
+                let fixed = &pattern[..wild.unwrap_or(pattern.len())];
+                // A pattern with no wildcard names one path; after its
+                // first wildcard it may go on with anything below.
+                fixed.starts_with(&below) || wild.is_some() && below.starts_with(fixed)
             })
             .map(|r| r.text.as_str())
     }
@@ -847,6 +921,66 @@ mod tests {
         // `~` means nothing in a command.
         let s = set(&["exec.run:~/bin/*"]);
         assert!(s.find("exec", "run", "/h/bin/x").is_none());
+    }
+
+    /// A path target of any scope is matched as an `fs` path: `~/` is the
+    /// owner's home and a Windows path rule ignores case. The same rule
+    /// still reads its pattern as text where the target is no path, and the
+    /// guard's rules never cover a path.
+    #[test]
+    fn a_path_target_of_any_scope_is_matched_as_a_path() {
+        let s = set(&["notes:~/secret/*", "lamp.set", "guard:node-paths"]);
+        assert!(s.find_path("notes", "open", "/h/secret/a").is_some());
+        assert!(s.find_path("notes", "open", "/h/secret").is_some());
+        assert!(s.find_path("notes", "open", "/h/other").is_none());
+        assert!(s.find("notes", "open", "/h/secret/a").is_none());
+        assert!(s.find_path("lamp", "set", "/anywhere").is_some());
+        assert!(s.find_path("exec", "run", "/h/.config/nerve").is_none());
+        let s = set(&["notes:/W/Secret/*"]);
+        assert_eq!(
+            s.find_path("notes", "open", "/w/secret/a").is_some(),
+            cfg!(windows)
+        );
+        assert!(s.find("notes", "open", "/w/secret/a").is_none());
+    }
+
+    /// A rule covers what lies below a folder where its pattern may go on
+    /// below it: its fixed start lies there, or the folder lies below that
+    /// start and a wildcard follows.
+    #[test]
+    fn a_rule_may_cover_a_place_below_a_folder() {
+        let s = set(&["notes:~/work/clients/*", "notes:/h/data/key.pem"]);
+        for dir in ["/h", "/h/work", "/h/work/", "/h/work/clients", "/h/data"] {
+            assert!(s.find_below("notes", "search", dir).is_some(), "{dir}");
+        }
+        for dir in [
+            "/h/workshop",
+            "/h/other",
+            "/h/data/key.pem",
+            "/h/work/clientele",
+        ] {
+            assert!(s.find_below("notes", "search", dir).is_none(), "{dir}");
+        }
+        assert!(s.find_below("files", "search", "/h").is_none());
+        // A wildcard may go on with anything: one in the middle of a name,
+        // or one before any folder.
+        let s = set(&["notes:/h/wo*", "sync:**/.env"]);
+        assert!(s.find_below("notes", "search", "/h/work/a").is_some());
+        assert!(s.find_below("notes", "search", "/h/other").is_none());
+        assert!(s.find_below("sync", "pull", "/srv/proj").is_some());
+        // A rule of the whole scope covers every path.
+        assert!(set(&["notes"]).find_below("notes", "x", "/").is_some());
+        // The guard's rules never cover a path.
+        assert!(
+            set(&["guard:node-paths"])
+                .find_below("exec", "run", "/")
+                .is_none()
+        );
+        let s = set(&["notes:/W/Secret/*"]);
+        assert_eq!(
+            s.find_below("notes", "search", "/w").is_some(),
+            cfg!(windows)
+        );
     }
 
     #[test]

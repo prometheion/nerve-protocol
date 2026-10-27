@@ -8,7 +8,7 @@
 //! and `null`), properties, items, enums and bounds; no references,
 //! alternatives, conditions, patterns or formats. `check` says whether a
 //! schema keeps to the subset, `validate` whether arguments fit a schema that
-//! does.
+//! does, and `path_args` which arguments are paths (`x-nerve-path`).
 //!
 //! Both walk with a stack of their own instead of recursing, so a schema or
 //! arguments nested ten thousand deep cannot overflow the stack.
@@ -265,8 +265,8 @@ pub fn check(schema: &Value, role: Role) -> Result<(), SchemaError> {
         });
     }
     let max = role.max_depth();
-    let mut stack = vec![(schema, String::new(), 1)];
-    while let Some((s, at, depth)) = stack.pop() {
+    let mut stack = vec![(schema, String::new(), 1, false)];
+    while let Some((s, at, depth, argument)) = stack.pop() {
         if depth > max {
             return Err(SchemaError {
                 pointer: at,
@@ -280,19 +280,28 @@ pub fn check(schema: &Value, role: Role) -> Result<(), SchemaError> {
             });
         };
         let mut next = Vec::new();
-        node(m, &at, depth == 1, &mut next)?;
-        stack.extend(next.into_iter().rev().map(|(s, p)| (s, p, depth + 1)));
+        let at_root = depth == 1;
+        node(m, &at, at_root, argument, &mut next)?;
+        // The properties of an arguments schema's root are its arguments.
+        let arguments = at_root && role == Role::Params;
+        stack.extend(
+            next.into_iter()
+                .rev()
+                .map(|(s, p, property)| (s, p, depth + 1, arguments && property)),
+        );
     }
     Ok(())
 }
 
 /// Checks the keywords of one schema object and adds the schemas below it to
-/// `next`.
+/// `next`, each with whether it is a property's. `argument` says whether
+/// this one is an argument: a property of an arguments schema's root.
 fn node<'a>(
     m: &'a Map<String, Value>,
     at: &str,
     root: bool,
-    next: &mut Vec<(&'a Value, String)>,
+    argument: bool,
+    next: &mut Vec<(&'a Value, String, bool)>,
 ) -> Result<(), SchemaError> {
     let fail = |word: &str, reason: String| SchemaError {
         pointer: below(at, word),
@@ -330,7 +339,7 @@ fn node<'a>(
                     ));
                 }
                 let at = below(at, word);
-                next.extend(props.iter().map(|(k, s)| (s, below(&at, k))));
+                next.extend(props.iter().map(|(k, s)| (s, below(&at, k), true)));
             }
             "required" => {
                 needs(word, &[Ty::Object], "object")?;
@@ -361,7 +370,7 @@ fn node<'a>(
             }
             "items" => {
                 needs(word, &[Ty::Array], "array")?;
-                next.push((v, below(at, word)));
+                next.push((v, below(at, word), false));
             }
             "enum" => match v.as_array() {
                 Some(e) if e.len() > MAX_ENUM_VALUES => {
@@ -404,6 +413,14 @@ fn node<'a>(
                 needs(word, &[Ty::String], "string")?;
                 if v != "read" && v != "write" {
                     return Err(fail(word, "must be \"read\" or \"write\"".into()));
+                }
+                // The node checks only the arguments themselves against its
+                // folders and rules: a path deeper down would pass unchecked.
+                if !argument {
+                    return Err(fail(
+                        word,
+                        "marks an argument only: a property of the arguments schema's root".into(),
+                    ));
                 }
             }
             "description" | "title" => {
@@ -642,6 +659,43 @@ enum Todo<'a> {
         next: usize,
         depth: usize,
     },
+}
+
+/// What an action does at a path argument (`x-nerve-path`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathMark {
+    Read,
+    Write,
+}
+
+impl PathMark {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PathMark::Read => "read",
+            PathMark::Write => "write",
+        }
+    }
+}
+
+/// The arguments of the arguments schema `params` that are paths: each
+/// property of its root marked `x-nerve-path`, with what the action does
+/// there, in the schema's order. `check` keeps the marker to those
+/// properties, of type string.
+pub fn path_args(params: &Value) -> Vec<(String, PathMark)> {
+    let Some(props) = params.get("properties").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    props
+        .iter()
+        .filter_map(|(name, s)| {
+            let mark = match s.get("x-nerve-path")?.as_str()? {
+                "read" => PathMark::Read,
+                "write" => PathMark::Write,
+                _ => return None,
+            };
+            Some((name.clone(), mark))
+        })
+        .collect()
 }
 
 /// Whether `args` fit `schema`, a schema that passed `check`. The first
@@ -1014,6 +1068,49 @@ mod tests {
         for s in root {
             assert_eq!(check(&s, Role::Params), Ok(()), "{s}");
         }
+    }
+
+    /// The arguments marked `x-nerve-path`, with what the action does there:
+    /// the properties of the root only, in order.
+    #[test]
+    fn path_args_names_the_marked_arguments() {
+        let params = json!({"type": "object", "properties": {
+            "from": {"type": "string", "x-nerve-path": "read"},
+            "name": {"type": "string"},
+            "to": {"type": ["string", "null"], "x-nerve-path": "write"}}});
+        assert_eq!(check(&params, Role::Params), Ok(()));
+        assert_eq!(
+            path_args(&params),
+            [
+                ("from".to_string(), PathMark::Read),
+                ("to".to_string(), PathMark::Write)
+            ]
+        );
+        assert_eq!(path_args(&json!({"type": "object"})), []);
+    }
+
+    /// A marker deeper down than an argument, or in a result, would mark a
+    /// path the node never checks: the schema is refused.
+    #[test]
+    fn a_path_marker_below_the_arguments_is_refused() {
+        let marked = json!({"type": "string", "x-nerve-path": "read"});
+        for (params, pointer) in [
+            (
+                with(json!({"type": "object", "properties": {"p": marked.clone()}})),
+                "/properties/a/properties/p/x-nerve-path",
+            ),
+            (
+                with(json!({"type": "array", "items": marked.clone()})),
+                "/properties/a/items/x-nerve-path",
+            ),
+        ] {
+            let e = check(&params, Role::Params).expect_err(pointer);
+            assert_eq!(e.pointer, pointer, "{e}");
+            assert!(e.reason.contains("marks an argument only"), "{e}");
+        }
+        let result = json!({"type": "object", "properties": {"p": marked}});
+        let e = check(&result, Role::Result).expect_err("in a result");
+        assert_eq!(e.pointer, "/properties/p/x-nerve-path", "{e}");
     }
 
     #[test]

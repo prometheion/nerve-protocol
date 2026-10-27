@@ -218,7 +218,8 @@ A rule is `<scope>` or `<scope>:<pattern>`.
 | Target of | Is |
 |---|---|
 | `exec.run` | The whole command line |
-| every `fs` action | The resolved path. `~/` is your home. On Windows the form is `/c/Users/x` |
+| every `fs` action | The resolved path. `~/` is your home. On Windows the form is `/c/Users/x`, and case does not count |
+| any other action that takes paths | Each resolved path it takes (the arguments its schema marks with `x-nerve-path`), read as an `fs` path is |
 | any other action | `<cap>.<action>` |
 
 | Rule | Covers |
@@ -227,10 +228,21 @@ A rule is `<scope>` or `<scope>:<pattern>`.
 | `exec.run:git *` | `git` and anything after it |
 | `fs.read:/home/u/notes/*` | Reading the folder and below (not `list` or `grep`) |
 | `fs:~/private/*` | Every `fs` action on the folder and below |
+| `notes:~/private/*` | Every action of the capability `notes` that takes a path there; as a deny rule also one handed a folder above it, such as `~` |
 | `exec` | Every `exec` action, so every command |
 
-Commands and paths never mix: `fs:/tmp/*` is not a command rule. An unknown
-rule shape is refused when you add it.
+Commands and paths never mix: `fs:/tmp/*` is not a command rule. A path rule
+covers the capability it names only: `fs:~/private/*` does not keep a
+[program's capability](providers.md#paths-it-takes) that takes paths out of
+that folder. Deny each such capability too, or make the place a
+[protected path](protected-paths.md), which every capability respects. A
+program handed a folder works below it, so a deny rule of its capability that
+may cover a place below that folder refuses the folder as well (and a new
+path it would write to, where it may make a folder; a file it is handed holds
+nothing below it); an `fs` walk
+(`grep`, `find`, `list`) skips the denied place instead. A path rule covers
+only the paths a program marks as such. An unknown rule shape is refused
+when you add it.
 
 ## What a wildcard covers
 

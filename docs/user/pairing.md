@@ -38,7 +38,10 @@ Pairing links a machine to a center. Do it once per machine and center.
 The new pairing starts in mode `folder`, with no folder of yours, and the
 center may not change settings. On the node installed as a service its
 commands run as `nerve-run`, with `/tmp`, `/var/tmp` and its own home and
-nothing of yours until you give it a folder:
+nothing of yours until you give it a folder. There its file calls may still
+read what every account on the machine may read
+([reading in folder mode](modes.md#reading-in-folder-mode)); writes and
+commands wait for a folder:
 `nerve-node folder add ~/project +r +w +x` ([modes](modes.md),
 [rules](rules.md)). Its deny list holds the
 guard, which keeps commands off this node itself

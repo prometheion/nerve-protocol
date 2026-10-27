@@ -344,6 +344,50 @@ async fn a_cancel_reaches_the_provider_and_a_leaving_provider_fails_its_calls() 
     daemon.stop().await;
 }
 
+/// A change the center makes to its own policy with `settings.set`, in a
+/// document of its own (`allow=<rule>` or `caps=<key>` for `on`): the
+/// answer.
+async fn center_sets(
+    conn: &mut Conn<TcpStream>,
+    change: &str,
+) -> Result<Value, nerve_proto::RpcError> {
+    let got = conn
+        .call(
+            "get",
+            json!({"cap": "settings", "keys": ["document", "version"]}),
+            WAIT,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut doc = got["document"].clone();
+    let (key, value) = change.split_once('=').unwrap();
+    match key {
+        "allow" => doc["policy"]["allow"] = json!([value]),
+        _ => doc["policy"]["caps"] = json!({value: "on"}),
+    }
+    conn.call(
+        "invoke",
+        json!({"cap": "settings", "action": "set", "ctx": {},
+               "args": {"document": doc, "if_version": got["version"]}}),
+        WAIT,
+    )
+    .await
+    .unwrap()
+}
+
+/// The answer of `settings.set` refuses a change only the owner may make.
+fn only_the_owner(r: Result<Value, nerve_proto::RpcError>) {
+    let e = r.expect_err("refused");
+    assert_eq!(code_of(&e), "forbidden");
+    assert!(
+        e.message
+            .contains("only the owner can turn on what senses or actuates"),
+        "{}",
+        e.message
+    );
+}
+
 /// A center with the settings grant may not allow or turn on a capability
 /// that senses, nor one no provider offers now, nor an action an offered
 /// capability does not have now, which may sense once it comes: only the
@@ -367,44 +411,9 @@ async fn a_center_may_not_allow_a_sensing_provider_itself() {
     let daemon = Daemon::start(o).await.unwrap();
     let mut conn = linked(&mut center).await;
 
-    // Each change in its own document; the answer of settings.set.
-    async fn set(conn: &mut Conn<TcpStream>, change: &str) -> Result<Value, nerve_proto::RpcError> {
-        let got = conn
-            .call(
-                "get",
-                json!({"cap": "settings", "keys": ["document", "version"]}),
-                WAIT,
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        let mut doc = got["document"].clone();
-        let (key, value) = change.split_once('=').unwrap();
-        match key {
-            "allow" => doc["policy"]["allow"] = json!([value]),
-            _ => doc["policy"]["caps"] = json!({value: "on"}),
-        }
-        conn.call(
-            "invoke",
-            json!({"cap": "settings", "action": "set", "ctx": {},
-                   "args": {"document": doc, "if_version": got["version"]}}),
-            WAIT,
-        )
-        .await
-        .unwrap()
-    }
-    let refused = |r: Result<Value, nerve_proto::RpcError>| {
-        let e = r.expect_err("refused");
-        assert_eq!(code_of(&e), "forbidden");
-        assert!(
-            e.message.contains("only the owner can turn sensing on"),
-            "{}",
-            e.message
-        );
-    };
     // Nothing offers `camera` yet: a center cannot arm it before it comes.
     for change in ["allow=camera.snap", "caps=camera"] {
-        refused(set(&mut conn, change).await);
+        only_the_owner(center_sets(&mut conn, change).await);
     }
 
     let token =
@@ -431,15 +440,56 @@ async fn a_center_may_not_allow_a_sensing_provider_itself() {
         "allow=lamp.snap",
         "caps=lamp.snap",
     ] {
-        refused(set(&mut conn, change).await);
+        only_the_owner(center_sets(&mut conn, change).await);
     }
     let paths: PathBuf = daemon.paths().config_file();
     assert!(!std::fs::read_to_string(&paths).unwrap().contains("camera"));
     assert!(!std::fs::read_to_string(&paths).unwrap().contains("snap"));
     // The lamp is offered and does not sense: its action and the whole of it.
-    set(&mut conn, "allow=lamp.on").await.expect("allowed");
+    center_sets(&mut conn, "allow=lamp.on")
+        .await
+        .expect("allowed");
     assert!(std::fs::read_to_string(&paths).unwrap().contains("lamp.on"));
-    set(&mut conn, "caps=lamp").await.expect("allowed");
+    center_sets(&mut conn, "caps=lamp").await.expect("allowed");
+    daemon.stop().await;
+}
+
+/// Actuating is the owner's call as sensing is: a center with the settings
+/// grant may not turn on or allow a capability with an action that
+/// actuates (a lamp, a lock), nor one of its actions. One that only reads,
+/// it may.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_center_may_not_turn_actuate_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let o = options(dir.path());
+    nerve_node::pair::pair(&o.paths, &center.link(), Some("lab"))
+        .await
+        .unwrap();
+    owner_edit(&o.paths, |c| {
+        c.centers[0].settings = SettingsGrant::Write;
+        c.providers.allowed = vec![AllowedProvider {
+            name: "desk".into(),
+            exe: me(),
+        }];
+    })
+    .await;
+    let daemon = Daemon::start(o).await.unwrap();
+    let mut conn = linked(&mut center).await;
+    let caps = json!([{"id": "lamp", "actions": {"set": {"effect": "actuate"},
+                                                 "get": {"effect": "read"}}},
+                      {"id": "notes", "actions": {"get": {"effect": "read"}}}]);
+    let (_p, first) = hello_with(&daemon.paths().ctl_socket(), caps).await;
+    assert!(first.get("ok").is_some(), "{first}");
+    for change in ["caps=lamp", "caps=lamp.set", "allow=lamp", "allow=lamp.set"] {
+        only_the_owner(center_sets(&mut conn, change).await);
+    }
+    let config = daemon.paths().config_file();
+    assert!(!std::fs::read_to_string(&config).unwrap().contains("lamp"));
+    center_sets(&mut conn, "caps=notes").await.expect("allowed");
+    center_sets(&mut conn, "allow=notes.get")
+        .await
+        .expect("allowed");
     daemon.stop().await;
 }
 
@@ -501,12 +551,24 @@ async fn large_calls_at_once_do_not_wedge_a_provider() {
         }
         p
     });
+    // The two calls race to the provider, so their answers come in either
+    // order: one that comes while the other is awaited is kept.
+    let mut others = Vec::new();
     for (i, id) in ids.into_iter().enumerate() {
-        let v = conn
-            .answer(id, WAIT, &mut Vec::new())
-            .await
-            .unwrap()
-            .expect("answered");
+        let early = others.iter().position(
+            |m| matches!(m, Message::Result { id: got, .. } if *got == nerve_proto::rpc::Id::Num(id)),
+        );
+        let v = match early {
+            Some(at) => match others.remove(at) {
+                Message::Result { result, .. } => result,
+                _ => unreachable!(),
+            },
+            None => conn
+                .answer(id, WAIT, &mut others)
+                .await
+                .unwrap()
+                .expect("answered"),
+        };
         assert_eq!(v["n"], i);
         assert_eq!(v["pad"].as_str().map(str::len), Some(big.len()));
     }
@@ -627,5 +689,680 @@ async fn wrong_args_never_reach_the_provider() {
         .collect();
     assert_eq!(decided.len(), 1, "{decided:?}");
     assert_eq!(decided[0]["decision"], "allowed", "{decided:?}");
+    daemon.stop().await;
+}
+
+/// A provider's action that takes paths (`x-nerve-path`) is held to the
+/// folders in folder mode as `fs` is, on a node run by hand, which reads by
+/// the folders: a path it reads needs `r`, one it writes `w`, and one left
+/// out leaves a write needing `on`. The protected paths and a link that
+/// leads out are refused, every decision names the path in the audit, and
+/// only an allowed call reaches the provider, with the path the node
+/// checked. A call to an action the owner turned off is audited too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_path_taking_provider_is_held_to_the_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let (work, ro, outside) = (root.join("work"), root.join("ro"), root.join("outside"));
+    let ssh = root.join("home/.ssh");
+    for d in [&work, &ro, &outside, &ssh] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(outside.join("secret.txt"), "s").unwrap();
+    std::fs::write(ssh.join("id_test"), "k").unwrap();
+    std::os::unix::fs::symlink(outside.join("secret.txt"), work.join("link")).unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let folder = |p: &Path, access: &str| nerve_policy::config::Folder {
+        path: p.display().to_string(),
+        access: nerve_policy::config::Access::parse(access).unwrap(),
+    };
+    let folders = vec![
+        folder(&work, "rw"),
+        folder(&ro, "r"),
+        folder(&root.join("home"), "rw"),
+    ];
+    let daemon = node(&root, &center, &me(), |p| {
+        p.mode = nerve_policy::Mode::Folder;
+        p.folders = folders.clone();
+    })
+    .await;
+    let mut conn = linked(&mut center).await;
+    let path = |mark: &str, ty: Value| json!({"type": ty, "x-nerve-path": mark});
+    let one = |name: &str, p: Value, required: &[&str]| json!({"type": "object", "properties": {name: p}, "required": required});
+    let caps = json!([{"id": "files", "summary": "Files of the desk.", "actions": {
+        "open": {"effect": "read", "params": one("path", path("read", json!("string")), &["path"])},
+        "save": {"effect": "write", "params": one("path", path("write", json!("string")), &["path"])},
+        "tidy": {"effect": "write",
+                 "params": one("path", path("write", json!(["string", "null"])), &[])},
+        "peek": {"effect": "read", "params": one("path", json!({"type": "string"}), &["path"])}}}]);
+    let (mut p, first) = hello_with(&daemon.paths().ctl_socket(), caps).await;
+    assert_eq!(first["ok"]["broken"], json!([]), "{first}");
+    descriptor_changed(&mut conn).await;
+    // The marker is published, and folder mode offers three: a call with
+    // its paths in the folders, or `tidy` with none and `on`, could run.
+    // `peek` marks no path, so the node could not hold where the program
+    // reads: like any read that names no path, it needs `on`.
+    let d = conn
+        .call("describe", json!({"detail": "full"}), WAIT)
+        .await
+        .unwrap()
+        .unwrap();
+    let files = d["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "files")
+        .expect("files is listed")
+        .clone();
+    assert_eq!(
+        files["actions"]["open"]["params"]["properties"]["path"]["x-nerve-path"],
+        "read"
+    );
+    let offered: Vec<&String> = files["actions"].as_object().unwrap().keys().collect();
+    assert_eq!(offered, ["open", "save", "tidy"]);
+
+    // The provider answers with the arguments it got.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let got = seen.clone();
+    let served = tokio::spawn(async move {
+        while let Some(call) = p.next().await {
+            got.lock().unwrap().push(call["params"].clone());
+            p.send(json!({"id": call["id"], "ok": call["params"]["args"]}))
+                .await;
+        }
+    });
+    let wire = |p: &Path| p.display().to_string();
+    let call = |action: &str, at: Value| json!({"cap": "files", "action": action, "args": {"path": at}, "ctx": {}});
+    // Given the long way round, checked and passed on as resolved.
+    let given = wire(&work.join("../work/a.txt"));
+    let in_work = wire(&work.join("a.txt"));
+    let saved = wire(&work.join("b.txt"));
+    let secret = wire(&outside.join("secret.txt"));
+    let allowed = [("open", &given, &in_work), ("save", &saved, &saved)];
+    let refused = [
+        (
+            "open",
+            secret.clone(),
+            "outside the folders that allow reading",
+        ),
+        (
+            "save",
+            wire(&ro.join("b")),
+            "outside the folders that allow writing",
+        ),
+        (
+            "save",
+            wire(&outside.join("b")),
+            "outside the folders that allow writing",
+        ),
+        ("open", wire(&ssh.join("id_test")), "is protected"),
+        // Resolved, the link is the file it leads to.
+        (
+            "open",
+            wire(&work.join("link")),
+            "outside the folders that allow reading",
+        ),
+        // The provider would read below a folder it is handed, the
+        // protected entries in it (`.ssh` and the like) too.
+        ("open", wire(&root.join("home")), "holds a protected path"),
+    ];
+    for (action, at, why) in &refused {
+        let e = conn
+            .call("invoke", call(action, json!(at)), WAIT)
+            .await
+            .unwrap()
+            .expect_err("refused");
+        assert_eq!(code_of(&e), "forbidden", "{action} {at}: {}", e.message);
+        assert!(e.message.contains(why), "{action} {at}: {}", e.message);
+    }
+    // A write that names no path lies in no folder: it needs `on`.
+    let e = conn
+        .call("invoke", call("tidy", Value::Null), WAIT)
+        .await
+        .unwrap()
+        .expect_err("refused");
+    assert!(e.message.contains("touches no folder"), "{}", e.message);
+    let e = conn
+        .call("invoke", call("peek", json!(secret)), WAIT)
+        .await
+        .unwrap()
+        .expect_err("refused");
+    assert!(
+        e.message.contains("files.peek touches no folder"),
+        "{}",
+        e.message
+    );
+    // A path that does not resolve is refused, and in the audit as given.
+    let e = conn
+        .call("invoke", call("open", json!("not/absolute")), WAIT)
+        .await
+        .unwrap()
+        .expect_err("refused");
+    assert_eq!(code_of(&e), "bad_path", "{}", e.message);
+    for (action, at, resolved) in allowed {
+        let v = conn
+            .call("invoke", call(action, json!(at)), WAIT)
+            .await
+            .unwrap()
+            .expect("allowed");
+        assert_eq!(v["path"], json!(resolved));
+    }
+    // Only the allowed calls reached it, with the paths the node checked.
+    let reached: Vec<Value> = seen.lock().unwrap().clone();
+    assert_eq!(
+        reached
+            .iter()
+            .map(|c| (c["action"].clone(), c["args"]["path"].clone()))
+            .collect::<Vec<_>>(),
+        [
+            (json!("open"), json!(in_work)),
+            (json!("save"), json!(saved))
+        ]
+    );
+
+    // The owner turns `open` off: the call is refused, and audited too.
+    let paths = daemon.paths().clone();
+    owner_edit(&paths, |c| {
+        c.centers[0]
+            .policy
+            .caps
+            .insert("files.open".into(), nerve_policy::config::CapSetting::Off);
+    })
+    .await;
+    let e = conn
+        .call("invoke", call("open", json!(in_work)), WAIT)
+        .await
+        .unwrap()
+        .expect_err("off");
+    assert_eq!(code_of(&e), "disabled", "{}", e.message);
+
+    let audit: Vec<Value> = std::fs::read_to_string(paths.audit_log())
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e["cap"] == "files")
+        .collect();
+    let entries: Vec<(String, String, String)> = audit
+        .iter()
+        .map(|e| {
+            (
+                e["action"].as_str().unwrap().to_string(),
+                e["target"].as_str().unwrap().to_string(),
+                e["decision"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let mut want: Vec<(String, String, String)> = refused
+        .iter()
+        .map(|(a, at, _)| (a.to_string(), at.clone(), "forbidden".into()))
+        .collect();
+    // The link is named as the file it leads to.
+    want[4].1 = secret.clone();
+    want.push(("tidy".into(), "files.tidy".into(), "forbidden".into()));
+    want.push(("peek".into(), "files.peek".into(), "forbidden".into()));
+    want.push(("open".into(), "not/absolute".into(), "forbidden".into()));
+    want.extend(
+        allowed
+            .iter()
+            .map(|(a, _, at)| (a.to_string(), at.to_string(), "allowed".into())),
+    );
+    want.push(("open".into(), "files.open".into(), "forbidden".into()));
+    assert_eq!(entries, want, "{audit:#?}");
+    assert_eq!(audit.last().unwrap()["code"], "disabled");
+    let unresolved = audit
+        .iter()
+        .find(|e| e["target"] == "not/absolute")
+        .unwrap();
+    assert_eq!(unresolved["code"], "bad_path", "{unresolved}");
+
+    // An `fs` path that does not resolve is in the audit too. Its target
+    // is the path where it is as plain as a resolved one, which the audit's
+    // rule buttons can make a rule of; else there is none, and the reason
+    // names it.
+    let fs_read =
+        |at: &str| json!({"cap": "fs", "action": "read", "args": {"path": at}, "ctx": {}});
+    let fs_audit = || -> Vec<Value> {
+        std::fs::read_to_string(paths.audit_log())
+            .unwrap()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|e| e["cap"] == "fs")
+            .collect()
+    };
+    std::os::unix::fs::symlink(root.join("gone"), work.join("dangling")).unwrap();
+    let dangling = wire(&work.join("dangling/a.txt"));
+    let roundabout = wire(&work.join("missing/../a.txt"));
+    for (at, target) in [
+        ("not/absolute", ""),
+        (roundabout.as_str(), ""),
+        (dangling.as_str(), dangling.as_str()),
+    ] {
+        let e = conn
+            .call("invoke", fs_read(at), WAIT)
+            .await
+            .unwrap()
+            .expect_err("refused");
+        assert_eq!(code_of(&e), "bad_path", "{}", e.message);
+        assert!(e.message.contains(at), "{}", e.message);
+        let last = fs_audit().pop().expect("the refusal is audited");
+        assert_eq!(
+            (&last["target"], &last["code"], &last["reason"]),
+            (&json!(target), &json!("bad_path"), &json!(e.message)),
+            "{last}"
+        );
+    }
+
+    // An off `fs` call is in the audit with the path it names, as an
+    // allowed one would be, not with the action's name, which the audit's
+    // rule buttons would make a rule of.
+    owner_edit(&paths, |c| {
+        c.centers[0]
+            .policy
+            .caps
+            .insert("fs.read".into(), nerve_policy::config::CapSetting::Off);
+    })
+    .await;
+    let e = conn
+        .call("invoke", fs_read(&in_work), WAIT)
+        .await
+        .unwrap()
+        .expect_err("off");
+    assert_eq!(code_of(&e), "disabled", "{}", e.message);
+    let off = fs_audit().pop().unwrap();
+    assert_eq!(
+        (&off["action"], &off["target"], &off["code"]),
+        (&json!("read"), &json!(in_work), &json!("disabled")),
+        "{off}"
+    );
+    conn.call("invoke", fs_read(&roundabout), WAIT)
+        .await
+        .unwrap()
+        .expect_err("off");
+    let off = fs_audit().pop().unwrap();
+    assert_eq!(
+        (&off["target"], &off["code"]),
+        (&json!(""), &json!("disabled"))
+    );
+    // An off command is in the audit with its command line, which an
+    // `exec` rule is written for.
+    owner_edit(&paths, |c| {
+        c.centers[0]
+            .policy
+            .caps
+            .insert("exec.run".into(), nerve_policy::config::CapSetting::Off);
+    })
+    .await;
+    let run = json!({"cap": "exec", "action": "run",
+                     "args": {"command": "echo off", "cwd": in_work}, "ctx": {}});
+    let e = conn
+        .call("invoke", run, WAIT)
+        .await
+        .unwrap()
+        .expect_err("off");
+    assert_eq!(code_of(&e), "disabled", "{}", e.message);
+    let off = std::fs::read_to_string(paths.audit_log())
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .rfind(|e| e["cap"] == "exec")
+        .expect("the off command is audited");
+    assert_eq!(
+        (&off["action"], &off["target"], &off["code"]),
+        (&json!("run"), &json!("echo off"), &json!("disabled")),
+        "{off}"
+    );
+    served.abort();
+    daemon.stop().await;
+}
+
+/// A file handed to a provider holds nothing below it, so a deny rule that
+/// names places below its folder (`files:**/.env`) refuses the folder and a
+/// path a write may make a folder at, not the files beside those places. A
+/// path given as a link is refused by the name given: the refusal does not
+/// say where it leads (a link of another process under `/proc` leads where
+/// that process works), and only the audit does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deny_rule_below_a_folder_leaves_the_files_there_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("readme.md"), "r").unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let folders = vec![nerve_policy::config::Folder {
+        path: work.display().to_string(),
+        access: nerve_policy::config::Access::parse("rw").unwrap(),
+    }];
+    let daemon = node(&root, &center, &me(), |p| {
+        p.mode = nerve_policy::Mode::Folder;
+        p.folders = folders.clone();
+        p.deny = vec!["files:**/.env".into()];
+    })
+    .await;
+    let mut conn = linked(&mut center).await;
+    let path = |mark: &str| {
+        json!({"type": "object", "required": ["path"],
+                                   "properties": {"path": {"type": "string", "x-nerve-path": mark}}})
+    };
+    // A link that leads to the folder, by a name shorter than the folder's.
+    let away = root.join("w");
+    std::os::unix::fs::symlink(&work, &away).unwrap();
+    let short = away.display().to_string().len();
+    let caps = json!([{"id": "files", "summary": "Files of the desk.", "actions": {
+        "open": {"effect": "read", "params": path("read")},
+        "save": {"effect": "write", "params": path("write")},
+        "peek": {"effect": "read", "params": {"type": "object", "required": ["path"],
+                 "properties": {"path": {"type": "string", "maxLength": short,
+                                         "x-nerve-path": "read"}}}}}}]);
+    let (mut p, first) = hello_with(&daemon.paths().ctl_socket(), caps).await;
+    assert_eq!(first["ok"]["broken"], json!([]), "{first}");
+    descriptor_changed(&mut conn).await;
+    let served = tokio::spawn(async move {
+        while let Some(call) = p.next().await {
+            p.send(json!({"id": call["id"], "ok": call["params"]["args"]}))
+                .await;
+        }
+    });
+    let call = |action: &str, at: &Path| {
+        json!({"cap": "files", "action": action,
+                                                "args": {"path": at.display().to_string()}, "ctx": {}})
+    };
+    // A file, there to read or write, and one a read finds missing.
+    for (action, at) in [
+        ("open", work.join("readme.md")),
+        ("save", work.join("readme.md")),
+        ("open", work.join("missing.md")),
+    ] {
+        conn.call("invoke", call(action, &at), WAIT)
+            .await
+            .unwrap()
+            .unwrap_or_else(|e| panic!("{action} {}: {}", at.display(), e.message));
+    }
+    // The folder, and a new path the program may make a folder at.
+    for (action, at) in [("open", work.clone()), ("save", work.join("new"))] {
+        let e = conn
+            .call("invoke", call(action, &at), WAIT)
+            .await
+            .unwrap()
+            .expect_err("refused");
+        assert_eq!(
+            e.message,
+            format!("{} holds a place that is denied", at.display()),
+            "{action}"
+        );
+    }
+    let named = |m: &str| m.contains(&*work.display().to_string());
+    let e = conn
+        .call("invoke", call("open", &away), WAIT)
+        .await
+        .unwrap()
+        .expect_err("refused");
+    assert_eq!(
+        e.message,
+        format!("{} holds a place that is denied", away.display())
+    );
+    // Resolved, it no longer fits the program's schema.
+    let e = conn
+        .call("invoke", call("peek", &away), WAIT)
+        .await
+        .unwrap()
+        .expect_err("refused");
+    assert_eq!(code_of(&e), "bad_path", "{}", e.message);
+    assert!(!named(&e.message), "{}", e.message);
+    let audit = std::fs::read_to_string(daemon.paths().audit_log()).unwrap();
+    let last: Vec<Value> = audit
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e["cap"] == "files")
+        .collect();
+    let (open, peek) = (&last[last.len() - 2], &last[last.len() - 1]);
+    assert_eq!(open["target"], json!(work.display().to_string()), "{open}");
+    assert!(
+        named(peek["reason"].as_str().unwrap()),
+        "the audit says where it leads: {peek}"
+    );
+    served.abort();
+    daemon.stop().await;
+}
+
+/// A program is handed no more than the node judged. It follows the links
+/// in a folder it is handed, so where they lead counts too; a path to write
+/// that is itself a link is refused, since the program would act on the
+/// place it leads to; the path handed must still fit the program's schema
+/// and read as the one judged. A link the node cannot follow refuses the
+/// call, and a link that is refused is not followed: no refusal names what
+/// lies where it leads. Where folder-mode commands cannot be
+/// confined (this test's node runs them unconfined), a program's execute
+/// action is neither offered nor run in an `x` folder.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_program_is_handed_no_more_than_the_node_judged() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+    let wire = |p: &Path| p.display().to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let (work, outside) = (root.join("work"), root.join("outside"));
+    let ssh = root.join("home/.ssh");
+    for d in [
+        work.join("plain"),
+        work.join("env"),
+        work.join("keys"),
+        work.join("inner"),
+        work.join("chain"),
+        work.join("relay"),
+        work.join("new"),
+        work.join("loop"),
+        outside.clone(),
+        ssh.clone(),
+    ] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(work.join("plain/a.txt"), "a").unwrap();
+    std::fs::write(outside.join("secret.txt"), "s").unwrap();
+    std::fs::write(ssh.join("id_test"), "k").unwrap();
+    symlink(outside.join("secret.txt"), work.join("env/.env")).unwrap();
+    symlink(&ssh, work.join("keys/ssh")).unwrap();
+    symlink(work.join("plain"), work.join("inner/data")).unwrap();
+    // A link to a folder in the folders that holds a link out.
+    symlink(work.join("relay"), work.join("chain/next")).unwrap();
+    symlink(&outside, work.join("relay/out")).unwrap();
+    // Where the call may not go, a link the node could not follow.
+    symlink(outside.join("loop"), outside.join("loop")).unwrap();
+    symlink(work.join("loop/l"), work.join("loop/l")).unwrap();
+    // Nothing is there to read, but a write through it makes the place.
+    symlink(outside.join("made.txt"), work.join("new/made")).unwrap();
+    // A name that is no Unicode, and a link to it.
+    let odd = work
+        .join("plain")
+        .join(std::ffi::OsStr::from_bytes(b"odd\xff"));
+    std::fs::write(&odd, "o").unwrap();
+    symlink(&odd, work.join("odd")).unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let folders = vec![nerve_policy::config::Folder {
+        path: work.display().to_string(),
+        access: nerve_policy::config::Access::parse("rwx").unwrap(),
+    }];
+    let daemon = node(&root, &center, &me(), |p| {
+        p.mode = nerve_policy::Mode::Folder;
+        p.folders = folders.clone();
+    })
+    .await;
+    let mut conn = linked(&mut center).await;
+    let path = |mark: &str| {
+        json!({"type": "object", "required": ["path"],
+               "properties": {"path": {"type": "string", "x-nerve-path": mark}}})
+    };
+    let only = wire(&work.join("inner/data"));
+    let caps = json!([{"id": "files", "summary": "Files of the desk.", "actions": {
+        "open": {"effect": "read", "params": path("read")},
+        "save": {"effect": "write", "params": path("write")},
+        "build": {"effect": "execute", "params": path("read")},
+        "pick": {"effect": "read", "params": {"type": "object", "required": ["path"],
+            "properties": {"path": {"type": "string", "x-nerve-path": "read", "enum": [only]}}}}}}]);
+    let (mut p, first) = hello_with(&daemon.paths().ctl_socket(), caps).await;
+    assert_eq!(first["ok"]["broken"], json!([]), "{first}");
+    descriptor_changed(&mut conn).await;
+    let d = conn
+        .call("describe", json!({"detail": "full"}), WAIT)
+        .await
+        .unwrap()
+        .unwrap();
+    let files = d["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "files")
+        .expect("files is listed")
+        .clone();
+    let offered: Vec<&String> = files["actions"].as_object().unwrap().keys().collect();
+    assert_eq!(offered, ["open", "pick", "save"]);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let got = seen.clone();
+    let served = tokio::spawn(async move {
+        while let Some(call) = p.next().await {
+            got.lock()
+                .unwrap()
+                .push(call["params"]["args"]["path"].clone());
+            p.send(json!({"id": call["id"], "ok": call["params"]["args"]}))
+                .await;
+        }
+    });
+    let call = |action: &str, at: &str| json!({"cap": "files", "action": action, "args": {"path": at}, "ctx": {}});
+    let allowed = [
+        ("open", wire(&work.join("plain"))),
+        ("open", wire(&work.join("inner"))),
+        ("open", wire(&work.join("new"))),
+        ("save", wire(&work.join("plain"))),
+        // Through a link to read it is the place it leads to.
+        ("open", wire(&work.join("inner/data"))),
+    ];
+    for (action, at) in &allowed {
+        conn.call("invoke", call(action, at), WAIT)
+            .await
+            .unwrap()
+            .unwrap_or_else(|e| panic!("{action} {at}: {}", e.message));
+    }
+    let link = |dir: &str, name: &str| {
+        format!(
+            "{} holds a link ({}) that leads where this call may not reach",
+            wire(&work.join(dir)),
+            wire(&work.join(dir).join(name))
+        )
+    };
+    let refused = [
+        (
+            "open",
+            wire(&work.join("env")),
+            "forbidden",
+            link("env", ".env"),
+        ),
+        (
+            "open",
+            wire(&work.join("keys")),
+            "forbidden",
+            link("keys", "ssh"),
+        ),
+        (
+            "open",
+            wire(&work.join("chain")),
+            "forbidden",
+            format!(
+                "{} holds a link ({}) that leads where this call may not reach",
+                wire(&work.join("chain")),
+                wire(&work.join("relay/out"))
+            ),
+        ),
+        (
+            "open",
+            wire(&work.join("loop")),
+            "forbidden",
+            format!(
+                "{} holds a link ({}) the node cannot follow",
+                wire(&work.join("loop")),
+                wire(&work.join("loop/l"))
+            ),
+        ),
+        (
+            "save",
+            wire(&work.join("new")),
+            "forbidden",
+            link("new", "made"),
+        ),
+        (
+            "save",
+            wire(&work.join("inner/data")),
+            "bad_path",
+            format!(
+                "{} is a link; name the place it leads to",
+                wire(&work.join("inner/data"))
+            ),
+        ),
+        (
+            "pick",
+            only.clone(),
+            "bad_path",
+            // Not where it leads: only the audit says that.
+            format!("{only} leads to a path files.pick does not take"),
+        ),
+        (
+            "open",
+            wire(&work.join("odd")),
+            "bad_path",
+            format!(
+                "{} leads to a name the program cannot be handed as it is",
+                wire(&work.join("odd"))
+            ),
+        ),
+        (
+            "build",
+            wire(&work.join("plain")),
+            "forbidden",
+            String::new(),
+        ),
+    ];
+    for (action, at, code, why) in &refused {
+        let e = conn
+            .call("invoke", call(action, at), WAIT)
+            .await
+            .unwrap()
+            .expect_err("refused");
+        assert_eq!(code_of(&e), *code, "{action} {at}: {}", e.message);
+        if why.is_empty() {
+            assert!(e.message.contains("cannot be confined"), "{}", e.message);
+        } else {
+            assert_eq!(&e.message, why, "{action} {at}");
+        }
+    }
+    // Only the allowed calls reached it, with the paths it was handed.
+    let mut want: Vec<Value> = allowed.iter().map(|(_, at)| json!(at)).collect();
+    want[4] = json!(wire(&work.join("plain")));
+    assert_eq!(*seen.lock().unwrap(), want);
+    // Each refusal is in the audit, with the path given.
+    let audit: Vec<(String, String)> = std::fs::read_to_string(daemon.paths().audit_log())
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e["cap"] == "files" && e["decision"] == "forbidden")
+        .map(|e| {
+            (
+                e["target"].as_str().unwrap().to_string(),
+                e["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(audit.len(), refused.len(), "{audit:#?}");
+    for ((target, reason), (action, at, _, why)) in audit.iter().zip(&refused) {
+        assert_eq!(target, at);
+        // The audit says where a path the program does not take leads.
+        let why = match *action {
+            "pick" => format!(
+                "{at} leads to {}, which files.pick does not take",
+                wire(&work.join("plain"))
+            ),
+            _ => why.clone(),
+        };
+        assert!(why.is_empty() || *reason == why, "{reason}");
+    }
+    served.abort();
     daemon.stop().await;
 }

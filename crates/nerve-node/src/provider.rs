@@ -125,20 +125,24 @@ impl Providers {
 
     /// What only the owner may turn on or allow, as a test of a `caps` key
     /// or an allow rule's scope (`cap` or `cap.action`): a capability an
-    /// attached provider offers with an action that senses; one that is
-    /// neither the node's own nor offered now; and an action that an offered
-    /// capability does not have now. The node cannot tell what such a
-    /// capability or action will do once a provider offers it, so a center's
-    /// entry for it waits for the owner. An entry for an offered capability
-    /// that does not sense, or for one of its actions, passes; the node cannot
-    /// check it ahead, so it still counts when a provider later offers that
-    /// capability or action with a sense action under the same name.
+    /// attached provider offers with an action that senses or actuates; one
+    /// that is neither the node's own nor offered now; and an action that an
+    /// offered capability does not have now. The node cannot tell what such
+    /// a capability or action will do once a provider offers it, so a
+    /// center's entry for it waits for the owner. An entry for an offered
+    /// capability that neither senses nor actuates, or for one of its
+    /// actions, passes; the node cannot check it ahead, so it still counts
+    /// when a provider later offers that capability or action with a sense
+    /// or actuate action under the same name.
     pub fn owner_only(&self) -> impl Fn(&str) -> bool + use<> {
         let mut sensing = BTreeSet::new();
         let mut offered: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for c in lock(&self.attached).values().flat_map(|a| a.caps.iter()) {
             offered.insert(c.id.clone(), c.actions.keys().cloned().collect());
-            if c.actions.values().any(|a| a.effect == Effect::Sense) {
+            if c.actions
+                .values()
+                .any(|a| matches!(a.effect, Effect::Sense | Effect::Actuate))
+            {
                 sensing.insert(c.id.clone());
             }
         }

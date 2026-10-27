@@ -4,7 +4,10 @@
 //! and nothing else of the owner's; the owner socket refuses it; `folder rm`
 //! takes the ACL off; `uninstall` removes the account, its home and every
 //! entry, also on what nerve-run made, which becomes the owner's (issue
-//! #142). Where the kernel has no Landlock, folder mode runs as nerve-run all
+//! #142). A file call reads, as nerve-run, beyond the folders what every
+//! account may read, but not the owner's files that only the node's
+//! pass-through entry lets nerve-run reach, nor the node's own files, and
+//! writes only in the folders (issue #152). Where the kernel has no Landlock, folder mode runs as nerve-run all
 //! the same, and the node says what that leaves of the owner's home open.
 //! The owner runs `setup` without sudo, its answers passed on. An allowed sudo
 //! command of nerve-run runs as root without the owner's password, in its
@@ -104,6 +107,19 @@ async fn run(conn: &mut Conn<TcpStream>, cwd: &Path, command: &str) -> Result<Va
         "invoke",
         json!({"cap": "exec", "action": "run", "args": {
             "command": command, "cwd": cwd.display().to_string()}}),
+        WAIT,
+    )
+    .await
+    .expect("an answer")
+    .map_err(|e| e.message)
+}
+
+/// The `fs` call `action` with `args`, as a center sends it: its result, or
+/// the refusal.
+async fn fs_call(conn: &mut Conn<TcpStream>, action: &str, args: Value) -> Result<Value, String> {
+    conn.call(
+        "invoke",
+        json!({"cap": "fs", "action": action, "args": args}),
         WAIT,
     )
     .await
@@ -375,6 +391,133 @@ except OSError as e:
         let shown = r.as_ref().map(out).unwrap_or_else(|e| e.clone());
         assert!(!shown.contains("secret"), "{f}: {shown}");
     }
+    // Folder mode reads, as nerve-run, beyond the folders what is open to
+    // every account: a file of the system, and one of the owner's in a
+    // folder everyone may enter, but not one closed to others, nor one
+    // open to them in the owner's home that only the node's pass-through
+    // entry lets nerve-run into, nor the node's own. It writes only in its
+    // folders. The descriptor says so, and the audit names each path.
+    let public = PathBuf::from("/srv/nerve-real-public");
+    let _ = std::fs::remove_dir_all(&public);
+    std::fs::create_dir_all(&public).unwrap();
+    std::fs::write(public.join("open.txt"), "public-secret\n").unwrap();
+    std::fs::write(public.join("closed.txt"), "closed-secret\n").unwrap();
+    chown(&public);
+    chmod(&public, "755");
+    chmod(&public.join("open.txt"), "644");
+    chmod(&public.join("closed.txt"), "600");
+    let d = conn
+        .call("describe", json!({"detail": "summary"}), WAIT)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(d["access"]["reads_by_account"], true, "{d}");
+    let at = |p: &Path| json!({"path": p.display().to_string()});
+    let r = fs_call(&mut conn, "read", at(&public.join("open.txt")))
+        .await
+        .unwrap();
+    assert_eq!(r["content"], "public-secret\n", "{r}");
+    assert!(
+        fs_call(&mut conn, "read", at(Path::new("/etc/hostname")))
+            .await
+            .is_ok()
+    );
+    for closed in [
+        public.join("closed.txt"),
+        base.join("open.txt"),
+        base.join("closed.txt"),
+    ] {
+        let r = fs_call(&mut conn, "read", at(&closed)).await;
+        assert!(
+            r.as_ref()
+                .is_err_and(|e| e.contains("not open to every account")),
+            "{closed:?}: {r:?}"
+        );
+    }
+    // The node's own folder is closed to nerve-run: the path does not even
+    // resolve as that account, and the policy would refuse it anyway.
+    let own = fs_call(&mut conn, "read", at(Path::new("/etc/nerve/node.toml"))).await;
+    assert!(
+        own.as_ref()
+            .is_err_and(|e| e.contains("belongs to the node") || e.contains("Permission denied")),
+        "{own:?}"
+    );
+    // The node's own process is not nerve-run's, though its files under
+    // `/proc` are open to all by their mode: the kernel would let the node's
+    // thread read them whatever account it acts as.
+    for own in ["/proc/self/maps", "/proc/thread-self/stat"] {
+        let r = fs_call(&mut conn, "read", at(Path::new(own))).await;
+        assert!(
+            r.as_ref()
+                .is_err_and(|e| e.contains("the node's own process")),
+            "{own}: {r:?}"
+        );
+    }
+    let r = fs_call(
+        &mut conn,
+        "grep",
+        json!({"path": "/proc/self", "pattern": "x"}),
+    )
+    .await;
+    assert!(r.is_err(), "{r:?}");
+    let write = fs_call(
+        &mut conn,
+        "write",
+        json!({"path": base.join("new.txt").display().to_string(), "content": "x"}),
+    )
+    .await;
+    assert!(
+        write
+            .as_ref()
+            .is_err_and(|e| e.contains("outside the folders that allow writing")),
+        "{write:?}"
+    );
+    assert!(!base.join("new.txt").exists());
+    // A walk finds what is open to every account, and passes over the
+    // rest; the owner's home is not walked at all.
+    let grep = |at: &Path| json!({"path": at.display().to_string(), "pattern": "secret"});
+    let r = fs_call(&mut conn, "grep", grep(&public)).await.unwrap();
+    let found: Vec<&str> = r["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["path"].as_str())
+        .collect();
+    assert_eq!(
+        found,
+        [public.join("open.txt").display().to_string()],
+        "{r}"
+    );
+    let r = fs_call(&mut conn, "grep", grep(&base)).await;
+    assert!(
+        r.as_ref()
+            .is_err_and(|e| e.contains("not open to every account")),
+        "{r:?}"
+    );
+    let audit = std::fs::read_to_string(
+        nerve_node::NodePaths::new("/etc/nerve", "/var/lib/nerve/state").audit_log(),
+    )
+    .unwrap();
+    let decided = |target: &Path, decision: &str| {
+        audit.lines().any(|l| {
+            serde_json::from_str::<Value>(l).is_ok_and(|e| {
+                e["cap"] == "fs"
+                    && e["target"] == target.display().to_string()
+                    && e["decision"] == decision
+            })
+        })
+    };
+    assert!(decided(&public.join("open.txt"), "allowed"), "{audit}");
+    // Also a path that does not resolve as nerve-run: the node writes the
+    // entry as itself, not as the account, which may not write its log.
+    assert!(
+        decided(Path::new("/etc/nerve/node.toml"), "forbidden"),
+        "{audit}"
+    );
+    assert!(decided(&base.join("open.txt"), "forbidden"), "{audit}");
+    assert!(decided(&base.join("closed.txt"), "forbidden"), "{audit}");
+    let _ = std::fs::remove_dir_all(&public);
+    assert!(decided(&base.join("new.txt"), "forbidden"), "{audit}");
     // No socket in a folder of the owner's own.
     let r = run(&mut conn, &proj, "python3 dial.py").await.unwrap();
     assert!(out(&r).contains("refused"), "{r}");

@@ -13,7 +13,7 @@ pub mod settings;
 
 pub use config::{CenterDocument, CenterEntry, CenterPolicy, Mode, NodeConfig, OldPin};
 pub use decide::{
-    COMMAND_MAX_BYTES, Call, Decision, Env, Need, PathAccess, PathArgs, Target, decide,
-    effect_rule, folder_reach, readable_below, sudo_command,
+    COMMAND_MAX_BYTES, Call, Decision, Env, Link, LinkCheck, Need, PathAccess, PathArgs, Target,
+    decide, effect_rule, folder_reach, read_reach, readable_below, sudo_command, works_below,
 };
 pub use settings::{SetError, SettingsStore, Writer};

@@ -246,7 +246,8 @@ fn nerve_center_and_nerve_node_work_together() {
     );
     assert_ne!(status, 200, "{v}");
     assert!(
-        v.to_string().contains("only the owner can turn sensing on"),
+        v.to_string()
+            .contains("only the owner can turn on what senses or actuates"),
         "{v}"
     );
     assert_eq!(
@@ -347,6 +348,17 @@ fn nerve_center_and_nerve_node_work_together() {
     let r = mcp.run(&node_name, "fs.read", json!({"path": path}));
     assert_eq!(r["isError"], json!(true), "{r}");
     node.ok(&["mode", "set", "folder"]);
+    // The mode changes the folder note of `fs.read`, so a `list` that the
+    // center answered before the new descriptor reached it is stale: wait
+    // until it tells folder mode.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !text_of(&mcp.list(json!({"node": node_name}))).contains("Mode: folder") {
+        assert!(
+            Instant::now() < deadline,
+            "the center never saw folder mode"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     let r = mcp.run(&node_name, "fs.read", json!({"path": path}));
     assert_eq!(r["isError"], json!(false), "{r}");
     assert!(text_of(&r).contains("hello from the node"), "{r}");
@@ -872,8 +884,8 @@ fn provider_part_passes_against_nerve_node() {
     }));
     assert!(report.ok(), "{report}");
     // Every check ran; a count that shrinks silently would hide a lost check.
-    assert_eq!(report.outcomes.len(), 14, "{report}");
-    assert_eq!(provider_part::CHECKS.len(), 14);
+    assert_eq!(report.outcomes.len(), 15, "{report}");
+    assert_eq!(provider_part::CHECKS.len(), 15);
     drop(node);
 }
 

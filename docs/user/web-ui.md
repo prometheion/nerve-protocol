@@ -105,9 +105,9 @@ Each entry with a known target has four buttons:
 A sudo command goes on the sudo list when you press Allow. A button adds the
 rule on the machine, so it works only if the machine gave the center the
 [settings grant](settings-grant.md). Otherwise the buttons are off and the
-entry says why. Even with the grant, Allow for something that senses (a
-camera), or for a capability no program on the machine offers now, is
-refused: that is the owner's, on the machine
+entry says why. Even with the grant, Allow for something that senses or acts
+on the world (a camera, a lock), or for a capability no program on the machine
+offers now, is refused: that is the owner's, on the machine
 ([providers](providers.md)). A target that was cut to its start gets no
 buttons.
 

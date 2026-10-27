@@ -7,10 +7,12 @@
 //! that runs this part (`std::env::current_exe()`) as a provider under
 //! [`Setup::provider`], and start the node. The part writes its own policy
 //! with `settings.set` (`user` mode and a deny rule for `echo.shout` before
-//! the provider comes, allow rules for `echo.say` and `echo.fail` once it is
-//! there), attaches an echo provider, and calls it through the center's
-//! link. One action of the provider, `odd`, has a schema outside the subset
-//! a center can check (protocol.md §6), so the node must leave it out.
+//! the provider comes, allow rules for `echo.say`, `echo.fail` and
+//! `echo.peek` below one folder once it is there), attaches an echo
+//! provider, and calls it through the center's link. One action of the
+//! provider, `odd`, has a schema outside the subset a center can check
+//! (protocol.md §6), so the node must leave it out. Another, `peek`, takes
+//! a path it reads (`x-nerve-path`), which the node decides the call by.
 //!
 //! Unix only: the provider attaches on the control socket.
 
@@ -41,6 +43,10 @@ const SECTION: &str = "node-local 7";
 /// The capability the part's provider adds.
 pub const CAP: &str = "echo";
 
+/// The folder the allow rule for `echo.peek` names. It need not exist: the
+/// node resolves a path whose end is missing as it is written.
+const PEEK_INSIDE: &str = "/nerve-conformance/inside";
+
 /// What the caller says about the node it started.
 #[derive(Debug, Clone)]
 pub struct Setup {
@@ -64,6 +70,7 @@ pub const CHECKS: &[&str] = &[
     "a provider's error comes back with its code",
     "a call the policy refuses never reaches the provider",
     "a call whose arguments do not fit the action's schema is invalid_args and never reaches the provider",
+    "a path argument keeps its x-nerve-path marker, and the node decides the call by that path",
     "when the provider exits its capability leaves the descriptor",
     "a call to a provider that left is unknown_capability",
 ];
@@ -155,11 +162,15 @@ async fn hello(socket: &Path, name: &str) -> Result<(Provider, Result<Value, Str
     let mut odd = read("Never offered: its schema is outside the subset.");
     odd["params"]["properties"] =
         json!({"n": {"oneOf": [{"type": "string"}, {"type": "integer"}]}});
+    let mut peek = read("Return the path it reads.");
+    peek["params"] = json!({"type": "object", "required": ["path"],
+                            "properties": {"path": {"type": "string", "x-nerve-path": "read"}}});
     let fragment = json!([{"id": CAP, "summary": "Says back what it is sent.",
         "actions": {"say": say,
                     "shout": read("Never called: no rule allows it."),
                     "fail": read("Fails with io."),
-                    "odd": odd}}]);
+                    "odd": odd,
+                    "peek": peek}}]);
     let line = json!({"method": "hello", "token": token.trim(),
                       "params": {"role": "provider", "name": name, "capabilities": fragment}});
     w.write_all(format!("{line}\n").as_bytes())
@@ -403,7 +414,9 @@ async fn steps(
 
     step(actions(conn, &setup.provider).await.and_then(|actions| {
         ensure(
-            actions.contains(&"say".to_string()) && actions.contains(&"fail".to_string()),
+            ["say", "fail", "peek"]
+                .iter()
+                .all(|a| actions.contains(&a.to_string())),
             format!("its actions are {actions:?}"),
         )
     }))?;
@@ -425,19 +438,24 @@ async fn steps(
         )
     }))?;
 
-    // Default deny again, with rules for two of its actions: `echo` is
-    // offered now and does not sense, so the center may write them.
+    // Default deny again, with rules for three of its actions, `peek` only
+    // below one folder: `echo` is offered now and does not sense, so the
+    // center may write them.
     step(
         async {
             ok(set_policy(conn, |p| {
                 p["mode"] = json!("allowlist");
-                p["allow"] = json!([format!("{CAP}.say"), format!("{CAP}.fail")]);
+                p["allow"] = json!([
+                    format!("{CAP}.say"),
+                    format!("{CAP}.fail"),
+                    format!("{CAP}.peek:{PEEK_INSIDE}/*")
+                ]);
             })
             .await)?;
             let actions = actions(conn, &setup.provider).await?;
             // No rule allows shout, so the center is not shown it.
             ensure(
-                actions == ["fail", "say"],
+                actions == ["fail", "peek", "say"],
                 format!("its actions are {actions:?}"),
             )
         }
@@ -489,6 +507,40 @@ async fn steps(
             let seen = seen.lock().unwrap().clone();
             ensure(
                 seen.len() == before + 1,
+                format!("the provider was called for {:?}", &seen[before..]),
+            )
+        }
+        .await,
+    )?;
+
+    // The marker is published as the provider wrote it, and the path is
+    // the call's rule target: below the folder the rule names the call
+    // reaches the provider with that path; elsewhere it is refused and, as
+    // above, never forwarded.
+    step(
+        async {
+            let cap = listed(conn)
+                .await?
+                .ok_or("the descriptor does not list it")?;
+            let mark = &cap["actions"]["peek"]["params"]["properties"]["path"]["x-nerve-path"];
+            ensure(mark == "read", format!("peek's path is marked {mark}"))?;
+            let inside = format!("{PEEK_INSIDE}/a");
+            let v = ok(invoke(conn, "peek", json!({"path": inside})).await)?;
+            ensure(v["path"] == json!(inside), format!("got {v}"))?;
+            let before = seen.lock().unwrap().len();
+            expect_code(
+                invoke(
+                    conn,
+                    "peek",
+                    json!({"path": "/nerve-conformance/outside/a"}),
+                )
+                .await,
+                ErrorCode::Forbidden,
+            )?;
+            ok(invoke(conn, "say", json!({"text": "after"})).await)?;
+            let seen = seen.lock().unwrap().clone();
+            ensure(
+                seen[before..] == ["say"],
                 format!("the provider was called for {:?}", &seen[before..]),
             )
         }

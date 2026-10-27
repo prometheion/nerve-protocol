@@ -102,11 +102,14 @@ fn descriptor(key: &NodeKey, name: &str) -> Value {
         "capabilities": [
             {"id": "fs", "profile": "fs", "exposure": "on", "summary": "Files.",
              "actions": {"read": {"effect": "read", "summary": "Read a file.",
-                                  "params": {"type": "object", "properties": {"path": {"type": "string"}},
+                                  "params": {"type": "object", "properties": {
+                                      "path": {"type": "string", "x-nerve-path": "read"}},
                                              "required": ["path"]}}}},
             {"id": "exec", "profile": "exec", "exposure": "on", "summary": "Commands.",
              "actions": {"run": {"effect": "execute", "summary": "Run a command.",
-                                 "params": {"type": "object", "properties": {"command": {"type": "string"}},
+                                 "params": {"type": "object", "properties": {
+                                     "command": {"type": "string"},
+                                     "cwd": {"type": ["string", "null"], "x-nerve-path": "read"}},
                                             "required": ["command"]}}}},
             {"id": "settings", "profile": "settings", "exposure": "on", "summary": "Settings.",
              "actions": {"set": {"effect": "write"}}}
