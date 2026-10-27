@@ -1,6 +1,8 @@
 //! Capability providers (docs/dev/spec/node-local.md §7): local programs
 //! the owner allowed in `providers.allowed` that add capabilities to the
-//! node over its control socket.
+//! node: over the provider socket of the installed node ([`serve`]), which
+//! the owner's programs and root's reach, or over the control socket of a
+//! node run by hand.
 //!
 //! A provider sends `hello` with role `provider` and a descriptor fragment.
 //! The node checks that the program on the other end is the one the owner
@@ -97,6 +99,9 @@ struct Attached {
     name: String,
     /// The program the node checked it against, as the config named it.
     exe: String,
+    /// The account its program runs as, as the kernel named it.
+    #[allow(dead_code)]
+    uid: u32,
     /// Tells this attachment from a later one of the same name.
     serial: u64,
     caps: Vec<Capability>,
@@ -352,6 +357,147 @@ fn same_program(running: &Path, allowed: &Path) -> Result<bool, String> {
     Ok(running == allowed)
 }
 
+/// The program `pid` runs, and whether it is the one `allowed` names, both
+/// as this thread sees the files.
+fn compare(pid: u32, allowed: &Path) -> Result<(PathBuf, bool), String> {
+    let running = program_of(pid)?;
+    let same = same_program(&running, allowed)?;
+    Ok((running, same))
+}
+
+/// Who asks to attach: the account and the process the kernel names for
+/// the caller, and that process's pidfd where the socket gave one.
+pub(crate) struct Caller {
+    pub uid: u32,
+    pub pid: Option<u32>,
+    pub pidfd: Option<std::os::fd::OwnedFd>,
+}
+
+/// Why a program of root is refused where the node cannot tell which one
+/// it is.
+const ROOT_UNTOLD: &str = "refused: the node cannot tell which program of root asks";
+
+/// The program `pid` of the account `uid` runs, and whether it is the one
+/// `allowed` names, looked at with that account's rights: the kernel shows
+/// a process's program only to its own account (or to a process that holds
+/// at least every right it holds), and `allowed` may lie where only that
+/// account may look. The node's own processes and a node of root look
+/// themselves. For another account the installed node takes its file ids
+/// (crate::account::FsAs). For root it starts `exe` as root to look
+/// ([`check_main`]), as it starts root's commands: the node itself holds
+/// too few rights to see a process of root's. Blocks.
+fn identify(
+    uid: u32,
+    pid: u32,
+    allowed: &Path,
+    exe: Option<&Path>,
+) -> Result<(PathBuf, bool), String> {
+    let me = crate::account::own_uid();
+    if me == 0 || uid == me {
+        return compare(pid, allowed);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if !crate::account::can_switch() {
+            return Err(format!(
+                "refused: the node may not look at the programs of another account (uid {uid})"
+            ));
+        }
+        if uid == 0 {
+            let exe = exe.ok_or(ROOT_UNTOLD)?;
+            return as_root(exe, pid, allowed);
+        }
+        let account = crate::account::of_uid(uid)
+            .and_then(|a| crate::account::lookup(&a.name).ok().flatten())
+            .ok_or_else(|| format!("refused: the node cannot look up the account uid {uid}"))?;
+        let _as = crate::account::FsAs::new(&account)
+            .map_err(|e| format!("refused: the node cannot look as {}: {e}", account.name))?;
+        compare(pid, allowed)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (exe, allowed);
+        Err("refused: providers attach on Linux only for now".into())
+    }
+}
+
+/// The argument that starts the node's program as the helper that tells
+/// root's program ([`check_main`]). Not a command the owner types.
+pub const CHECK_ARG: &str = "__provider-check";
+
+/// Runs `exe` as root with [`CHECK_ARG`] for `pid` and `allowed`, and
+/// reads its answer. The child takes root's ids before its program starts,
+/// as a command of root does (crate::account::Switch), and so runs with
+/// root's rights; it gets nothing from the node's environment.
+#[cfg(target_os = "linux")]
+fn as_root(exe: &Path, pid: u32, allowed: &Path) -> Result<(PathBuf, bool), String> {
+    use std::os::unix::process::CommandExt;
+    let switch = crate::account::Switch::new(&crate::account::root(), None, &[])
+        .map_err(|e| format!("{ROOT_UNTOLD}: {e}"))?;
+    let mut c = std::process::Command::new(exe);
+    c.arg(CHECK_ARG)
+        .arg(pid.to_string())
+        .arg(allowed)
+        .env_clear()
+        .current_dir("/")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: plain system calls on memory moved into the closure.
+    unsafe {
+        c.pre_exec(move || switch.apply());
+    }
+    let out = c.output().map_err(|e| format!("{ROOT_UNTOLD}: {e}"))?;
+    let v: Value = serde_json::from_slice(&out.stdout)
+        .map_err(|_| format!("{ROOT_UNTOLD}: its helper did not answer"))?;
+    if let Some(e) = v["error"].as_str() {
+        return Err(e.to_string());
+    }
+    match (v["running"].as_str(), v["same"].as_bool()) {
+        (Some(r), Some(same)) => Ok((PathBuf::from(r), same)),
+        _ => Err(format!("{ROOT_UNTOLD}: its helper did not answer")),
+    }
+}
+
+/// The helper [`as_root`] starts: `<CHECK_ARG> <pid> <allowed>` prints
+/// `{"running": path, "same": bool}`, or `{"error": text}`. The exit code
+/// is 0 either way.
+pub fn check_main() -> i32 {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(2).collect();
+    let answer = match (
+        args.first()
+            .and_then(|p| p.to_str())
+            .and_then(|p| p.parse::<u32>().ok()),
+        args.get(1),
+    ) {
+        (Some(pid), Some(allowed)) if args.len() == 2 => match compare(pid, Path::new(allowed)) {
+            Ok((running, same)) => {
+                json!({"running": running.to_string_lossy(), "same": same})
+            }
+            Err(e) => json!({"error": e}),
+        },
+        _ => json!({"error": format!("usage: {CHECK_ARG} <pid> <program>")}),
+    };
+    println!("{answer}");
+    0
+}
+
+/// Whether the process `pidfd` stands for has ended. One that has not
+/// still holds its pid, so what was read under that pid was its own.
+#[cfg(target_os = "linux")]
+fn ended(pidfd: &std::os::fd::OwnedFd) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut p = libc::pollfd {
+        fd: pidfd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one pollfd, no wait. A pidfd is readable once its process
+    // ended.
+    let n = unsafe { libc::poll(&mut p, 1, 0) };
+    n != 0
+}
+
 /// Why an action's schemas are outside the subset a center checks, if they
 /// are. A missing `params` takes any arguments, a missing `result` says
 /// nothing of the result. The reason is brief: `status`, the hello answer
@@ -469,17 +615,17 @@ fn capabilities(
     Ok((caps, broken))
 }
 
-/// `hello` on the control socket from the process `pid`: attaches it as the
-/// provider it names when `providers.allowed` names that provider with the
-/// program it runs. The answer keeps the connection
+/// `hello` from `caller`, on the provider socket or the control socket:
+/// attaches it as the provider it names when `providers.allowed` names that
+/// provider with the program it runs. The answer keeps the connection
 /// ([`nerve_transport::ctl::Reply::Session`]); its end detaches it.
-pub(crate) fn attach(
+pub(crate) async fn attach(
     shared: &Arc<Shared>,
     params: Value,
-    pid: Option<u32>,
+    caller: Caller,
 ) -> nerve_transport::ctl::Reply {
     use nerve_transport::ctl::Reply;
-    match check(shared, params, pid) {
+    match check(shared, params, caller).await {
         Ok(reply) => reply,
         Err(e) => {
             tracing::warn!("a provider was not attached: {e}");
@@ -488,10 +634,10 @@ pub(crate) fn attach(
     }
 }
 
-fn check(
+async fn check(
     shared: &Arc<Shared>,
     params: Value,
-    pid: Option<u32>,
+    caller: Caller,
 ) -> Result<nerve_transport::ctl::Reply, String> {
     let hello: Hello = serde_json::from_value(params).map_err(|e| format!("bad hello: {e}"))?;
     if hello.role != "provider" {
@@ -505,12 +651,31 @@ fn check(
     let allowed = cfg
         .providers
         .get(&name)
-        .ok_or_else(|| format!("refused: providers.allowed names no provider {name}"))?;
-    let pid = pid.ok_or("refused: the node cannot tell which process asks")?;
-    let running = program_of(pid)?;
-    let want = Path::new(&allowed.exe);
-    if !same_program(&running, want).map_err(|e| format!("refused: the provider {name}: {e}"))? {
-        return Err(other_program(&name, &running, want));
+        .ok_or_else(|| format!("refused: providers.allowed names no provider {name}"))?
+        .clone();
+    let pid = caller
+        .pid
+        .ok_or("refused: the node cannot tell which process asks")?;
+    let want = PathBuf::from(&allowed.exe);
+    let (uid, exe) = (caller.uid, shared.exe.clone());
+    let looked = {
+        let want = want.clone();
+        tokio::task::spawn_blocking(move || identify(uid, pid, &want, exe.as_deref()))
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    let (running, same) = looked.map_err(|e| match e.starts_with("refused:") {
+        true => e,
+        false => format!("refused: the provider {name}: {e}"),
+    })?;
+    // A process that ended while the node looked may have left its pid to
+    // another: what was read is then no answer for the caller.
+    #[cfg(target_os = "linux")]
+    if caller.pidfd.as_ref().is_some_and(ended) {
+        return Err("refused: the program that asked has ended".into());
+    }
+    if !same {
+        return Err(other_program(&name, &running, &want));
     }
     let (out_tx, out_rx) = mpsc::channel(QUEUE);
     let (in_tx, mut in_rx) = mpsc::channel::<Value>(QUEUE);
@@ -527,6 +692,7 @@ fn check(
         let a = Arc::new(Attached {
             name: name.clone(),
             exe: allowed.exe.clone(),
+            uid,
             serial: shared.providers.serial.fetch_add(1, Ordering::Relaxed),
             caps,
             broken,
@@ -570,6 +736,73 @@ fn check(
         out: out_rx,
         inbound: in_tx,
     })
+}
+
+/// The provider socket's file name, beside the owner socket in the
+/// installed unit's runtime folder (crate::owner::RUNTIME_DIR).
+pub const SOCKET_NAME: &str = "provider.sock";
+
+/// Why the provider socket refuses an account that is neither an owner of
+/// the node nor root.
+pub const NOT_AN_OWNER: &str =
+    "refused: only the owner of the installed node and root attach a provider to it";
+
+/// Serves the provider socket `at` of the installed node until the task is
+/// aborted: open to every account, 0666, in a folder everyone may enter.
+/// An account that is not one of `owners` (root always is) is refused as
+/// it connects, so it holds none of the socket's places, which are its own
+/// ([`nerve_transport::ctl::MAX_PROVIDERS`]): a provider's connection
+/// stays, and neither this socket nor the owner socket can take the
+/// other's. A process below a command of the node is refused, as on the
+/// owner socket. The token-gated control socket stays the way in for a
+/// node run by hand.
+#[cfg(target_os = "linux")]
+pub(crate) async fn serve(
+    shared: Arc<Shared>,
+    at: PathBuf,
+    owners: crate::owner::Owners,
+) -> Result<tokio::task::JoinHandle<()>, String> {
+    use nerve_transport::ctl::Reply;
+    let listener = nerve_transport::ctl::bind_open(&at)
+        .await
+        .map_err(|e| format!("{}: {e}", at.display()))?;
+    let task = tokio::spawn(async move {
+        let admit = move |peer: &nerve_transport::ctl::Peer| {
+            crate::owner::owner_name(&owners, peer.uid)
+                .map(|_| ())
+                .ok_or_else(|| NOT_AN_OWNER.to_string())
+        };
+        let r = nerve_transport::ctl::serve_providers(
+            listener,
+            nerve_transport::ctl::MAX_PROVIDERS,
+            admit,
+            move |req, peer, pidfd| {
+                let s = shared.clone();
+                async move {
+                    if req.method != "hello" {
+                        return Reply::Err(format!(
+                            "the provider socket takes a provider's hello only, not {:?}",
+                            req.method
+                        ));
+                    }
+                    if crate::owner::from_a_command(&s, peer.pid) {
+                        return Reply::Err(crate::owner::FROM_A_COMMAND.into());
+                    }
+                    let caller = Caller {
+                        uid: peer.uid,
+                        pid: peer.pid,
+                        pidfd,
+                    };
+                    attach(&s, req.params, caller).await
+                }
+            },
+        )
+        .await;
+        if let Err(e) = r {
+            tracing::error!("the provider socket stopped: {e}");
+        }
+    });
+    Ok(task)
 }
 
 #[cfg(test)]
@@ -793,6 +1026,45 @@ mod tests {
         assert!(same_program(&running, &d.path().join("none")).is_err());
         let deleted = PathBuf::from(format!("{} (deleted)", running.display()));
         assert_eq!(same_program(&deleted, &real), Ok(false));
+    }
+
+    /// The pidfd of a process says when it ended, so a pid read before is
+    /// known to be its own while it has not.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_pidfd_tells_whether_its_process_ended() {
+        use std::os::fd::FromRawFd;
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        // SAFETY: pidfd_open of a child this test holds; the fd is new.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) };
+        assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+        let pidfd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) };
+        assert!(!ended(&pidfd));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(ended(&pidfd));
+    }
+
+    /// The node's own program, and a program of its own account, is looked
+    /// at as the node itself; the helper says the same for root.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_program_of_the_nodes_own_account_is_told_directly() {
+        let me = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let (running, same) =
+            identify(crate::account::own_uid(), std::process::id(), &me, None).unwrap();
+        assert_eq!((running.as_path(), same), (me.as_path(), true));
+        let (_, same) = identify(
+            crate::account::own_uid(),
+            std::process::id(),
+            Path::new("/bin/sh"),
+            None,
+        )
+        .unwrap();
+        assert!(!same);
     }
 
     #[cfg(target_os = "linux")]

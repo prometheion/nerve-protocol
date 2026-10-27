@@ -30,6 +30,13 @@ pub fn main() -> i32 {
     {
         return crate::keyring_setup::probe_main();
     }
+    // So is the helper that tells the node which program of root asks to
+    // attach as a provider (crate::provider::check_main).
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(crate::provider::CHECK_ARG))
+    {
+        return crate::provider::check_main();
+    }
     // Events go to stderr. The daemon adds the log file in the state folder and
     // takes its level from `node.toml`.
     nerve_transport::log::install(nerve_transport::log::Level::Info, true);

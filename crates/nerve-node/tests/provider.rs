@@ -1366,3 +1366,285 @@ async fn a_program_is_handed_no_more_than_the_node_judged() {
     served.abort();
     daemon.stop().await;
 }
+
+/// The options of a node in `root` with the owner endpoint the installed
+/// node has, for `owners`: `root/run/owner.sock` and the provider socket
+/// beside it.
+fn installed_options(root: &Path, owners: Vec<u32>) -> (NodeOptions, PathBuf, PathBuf) {
+    use nerve_node::owner::{Endpoint, Owners};
+    let mut o = options(root);
+    let run = root.join("run");
+    std::fs::create_dir_all(&run).unwrap();
+    let endpoint = Endpoint {
+        at: run.join("owner.sock"),
+        owners: Owners::Uids(owners),
+        program: env!("CARGO_BIN_EXE_nerve-node").into(),
+    };
+    let (owner_sock, provider_sock) = (endpoint.at.clone(), endpoint.provider_socket());
+    o.owners = Some(endpoint);
+    (o, owner_sock, provider_sock)
+}
+
+fn uid() -> u32 {
+    // SAFETY: a plain getter.
+    unsafe { libc::getuid() }
+}
+
+/// The real path of the `python3` this machine runs, which a test allows as
+/// a provider; `None` without one.
+fn python() -> Option<String> {
+    let o = std::process::Command::new("python3")
+        .args([
+            "-c",
+            "import os, sys; print(os.path.realpath(sys.executable))",
+        ])
+        .output()
+        .ok()?;
+    o.status
+        .success()
+        .then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// A python program that sends the provider `desk`'s hello on the socket
+/// its first argument names and prints the first line it gets back.
+const HELLO_PY: &str = r#"import json, socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+caps = [{"id": "lamp", "actions": {"on": {"effect": "write"}}}]
+hello = {"method": "hello", "params": {"role": "provider", "name": "desk", "capabilities": caps}}
+try:
+    s.sendall((json.dumps(hello) + "\n").encode())
+except OSError:
+    pass
+print(s.makefile().readline())
+"#;
+
+/// `hello` as the provider `desk` (one capability `lamp`) on the provider
+/// socket `at`, which takes no token: the connection and the first answer.
+/// A caller the socket refuses is told before it writes; what it writes then
+/// may not arrive.
+async fn hello_on(at: &Path) -> (Provider, Value) {
+    let (r, mut w) = UnixStream::connect(at).await.unwrap().into_split();
+    let caps = json!([{"id": "lamp", "summary": "A lamp.",
+                       "actions": {"on": {"effect": "write"}}}]);
+    let line = json!({"method": "hello",
+                      "params": {"role": "provider", "name": "desk", "capabilities": caps}});
+    let _ = w.write_all(format!("{line}\n").as_bytes()).await;
+    let mut p = Provider {
+        lines: BufReader::new(r).lines(),
+        w,
+    };
+    let first = p.next().await.expect("an answer");
+    (p, first)
+}
+
+/// On the installed node a program of the owner attaches on the provider
+/// socket, which is open to every account and takes no token: the node
+/// tells it by the account and the program the kernel names. The socket
+/// takes nothing but a hello.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owners_program_attaches_on_the_provider_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let (o, _, at) = installed_options(&root, vec![uid()]);
+    nerve_node::pair::pair(&o.paths, &center.link(), Some("lab"))
+        .await
+        .unwrap();
+    owner_edit(&o.paths, |c| {
+        c.providers.allowed = vec![AllowedProvider {
+            name: "desk".into(),
+            exe: me(),
+        }];
+        c.centers[0].policy.mode = nerve_policy::Mode::User;
+    })
+    .await;
+    let daemon = Daemon::start(o).await.unwrap();
+    let mut conn = linked(&mut center).await;
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&at).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o666);
+    assert!(!at.with_file_name("ctl.token").exists());
+
+    let (_p, first) = hello_on(&at).await;
+    assert_eq!(first["ok"]["capabilities"], json!(["lamp"]), "{first}");
+    descriptor_changed(&mut conn).await;
+    assert!(lamp_listed(&mut conn).await);
+
+    let s = UnixStream::connect(&at).await.unwrap();
+    let e = nerve_transport::ctl::call_on(s, "status", json!({}))
+        .await
+        .unwrap_err();
+    assert!(e.contains("takes a provider's hello only"), "{e}");
+    daemon.stop().await;
+    assert!(!at.exists(), "the socket goes with the node");
+}
+
+/// The provider socket refuses an account that is no owner as it
+/// connects, a program other than the allowed one, and a process of a
+/// command the node runs (below it, or with `no_new_privs` as a confined
+/// one keeps), also when it runs the allowed program.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_provider_socket_refuses_others_and_the_commands_of_the_node() {
+    let Some(python) = python() else {
+        eprintln!("skipped: no python3");
+        return;
+    };
+    // An account that is no owner. Root always is one.
+    if uid() != 0 {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (o, _, at) = installed_options(&root, Vec::new());
+        owner_edit(&o.paths, |c| {
+            c.providers.allowed = vec![AllowedProvider {
+                name: "desk".into(),
+                exe: me(),
+            }];
+        })
+        .await;
+        let daemon = Daemon::start(o).await.unwrap();
+        let (_p, first) = hello_on(&at).await;
+        let e = first["error"].as_str().expect("refused");
+        assert!(
+            e.contains("only the owner of the installed node and root"),
+            "{e}"
+        );
+        assert_eq!(daemon.status()["providers"], json!([]));
+        daemon.stop().await;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let (o, _, at) = installed_options(&root, vec![uid()]);
+    nerve_node::pair::pair(&o.paths, &center.link(), Some("lab"))
+        .await
+        .unwrap();
+    let other = root.join("other-program");
+    std::fs::write(&other, "").unwrap();
+    owner_edit(&o.paths, |c| {
+        c.providers.allowed = vec![AllowedProvider {
+            name: "desk".into(),
+            exe: other.display().to_string(),
+        }];
+        c.centers[0].policy.mode = nerve_policy::Mode::User;
+    })
+    .await;
+    let paths = o.paths.clone();
+    let daemon = Daemon::start(o).await.unwrap();
+    let mut conn = linked(&mut center).await;
+    // Another program under the allowed name.
+    let (_p, first) = hello_on(&at).await;
+    let e = first["error"].as_str().expect("refused");
+    assert!(e.contains("must be") && e.contains("other-program"), "{e}");
+
+    // From here on the allowed program is python, so only the caller's
+    // place refuses it.
+    owner_edit(&paths, |c| c.providers.allowed[0].exe = python.clone()).await;
+    let script = root.join("hello.py");
+    std::fs::write(&script, HELLO_PY).unwrap();
+    // A command the center runs (user mode, as the owner).
+    let r = conn
+        .call(
+            "invoke",
+            json!({"cap": "exec", "action": "run", "ctx": {},
+                   "args": {"command": format!("python3 {} {}", script.display(), at.display())}}),
+            WAIT,
+        )
+        .await
+        .unwrap()
+        .expect("the command runs");
+    let said = r["stdout"].as_str().unwrap_or_default();
+    assert!(said.contains("comes from a command the node runs"), "{r}");
+    // A process with no_new_privs.
+    let mut c = std::process::Command::new("python3");
+    c.arg(&script).arg(&at);
+    use std::os::unix::process::CommandExt;
+    // SAFETY: one plain system call between fork and exec.
+    unsafe {
+        c.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let o = tokio::task::spawn_blocking(move || c.output())
+        .await
+        .unwrap()
+        .unwrap();
+    let said = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        said.contains("comes from a command the node runs"),
+        "{said}"
+    );
+    // The same program as the owner's own process attaches.
+    let script_at = (script.clone(), at.clone());
+    let o = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("python3")
+            .arg(&script_at.0)
+            .arg(&script_at.1)
+            .output()
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let said = String::from_utf8_lossy(&o.stdout);
+    assert!(said.contains("\"ok\""), "{said}");
+    daemon.stop().await;
+}
+
+/// The owner socket and the provider socket each have places of their
+/// own: with every place of one held, the other still serves. A provider
+/// over the provider socket's places is told the node is busy.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_owner_socket_does_not_block_the_provider_socket_and_the_reverse() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (o, owner_at, at) = installed_options(&root, vec![uid()]);
+    owner_edit(&o.paths, |c| {
+        c.providers.allowed = vec![AllowedProvider {
+            name: "desk".into(),
+            exe: me(),
+        }];
+    })
+    .await;
+    let daemon = Daemon::start(o).await.unwrap();
+    let status = async |at: &Path| {
+        let s = UnixStream::connect(at).await.unwrap();
+        nerve_transport::ctl::call_on(s, "status", json!({})).await
+    };
+    let settle = || tokio::time::sleep(Duration::from_millis(300));
+
+    let mut held = Vec::new();
+    for _ in 0..nerve_transport::ctl::MAX_CONNECTIONS {
+        held.push(UnixStream::connect(&owner_at).await.unwrap());
+    }
+    settle().await;
+    assert_eq!(
+        status(&owner_at).await,
+        Err(nerve_transport::ctl::BUSY.to_string())
+    );
+    let (p, first) = hello_on(&at).await;
+    assert_eq!(first["ok"]["capabilities"], json!(["lamp"]), "{first}");
+    drop((p, held));
+
+    let mut held = Vec::new();
+    for _ in 0..nerve_transport::ctl::MAX_PROVIDERS {
+        held.push(UnixStream::connect(&at).await.unwrap());
+    }
+    settle().await;
+    let (_p, first) = hello_on(&at).await;
+    assert_eq!(first["error"], nerve_transport::ctl::BUSY, "{first}");
+    let mut answered = status(&owner_at).await;
+    for _ in 0..50 {
+        if answered.is_ok() {
+            break;
+        }
+        settle().await;
+        answered = status(&owner_at).await;
+    }
+    assert_eq!(answered, Ok(json!({"running": true})));
+    drop(held);
+    daemon.stop().await;
+}

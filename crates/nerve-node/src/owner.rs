@@ -1004,6 +1004,13 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
+    /// The provider socket beside the owner socket (Linux;
+    /// crate::provider::serve).
+    #[cfg(target_os = "linux")]
+    pub fn provider_socket(&self) -> PathBuf {
+        self.at.with_file_name(crate::provider::SOCKET_NAME)
+    }
+
     /// The installed node's, when the node at `paths` is it: on Linux in the
     /// runtime folder systemd made for it (`RUNTIME_DIRECTORY`), for the
     /// owner the unit names ([`of_service`]), on Windows
@@ -1067,7 +1074,7 @@ fn keeps_no_new_privs(pid: u32) -> bool {
 
 /// Why the node refuses an owner request from a process of a center's
 /// command.
-const FROM_A_COMMAND: &str = "refused: this request comes from a command the node runs for a center, or a program it started";
+pub(crate) const FROM_A_COMMAND: &str = "refused: this request comes from a command the node runs for a center, or a program it started";
 
 /// The backup file that came with an owner's request: opened by the
 /// owner's own program and handed over, so the node never opens a path in
@@ -1635,7 +1642,7 @@ pub(crate) async fn serve(
 
 /// The owner's name when the account `uid` is one.
 #[cfg(unix)]
-fn owner_name(owners: &Owners, uid: u32) -> Option<String> {
+pub(crate) fn owner_name(owners: &Owners, uid: u32) -> Option<String> {
     let owner = match owners {
         Owners::Named(n) => {
             uid == 0
@@ -1656,7 +1663,7 @@ fn owner_name(owners: &Owners, uid: u32) -> Option<String> {
 /// against mistakes: `pid` is the process that connected, which may have
 /// ended before the request came on its connection.
 #[cfg(unix)]
-fn from_a_command(shared: &crate::daemon::Shared, pid: Option<u32>) -> bool {
+pub(crate) fn from_a_command(shared: &crate::daemon::Shared, pid: Option<u32>) -> bool {
     let Some(pid) = pid else {
         return true;
     };

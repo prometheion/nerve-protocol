@@ -1295,6 +1295,8 @@ pub struct Daemon {
     ctl: Option<JoinHandle<()>>,
     /// The owner endpoint's task and its socket (crate::owner).
     owner: Option<(JoinHandle<()>, PathBuf)>,
+    /// The provider socket's task and its path (crate::provider::serve).
+    providers: Option<(JoinHandle<()>, PathBuf)>,
     /// Held while the node runs: a CLI moves the keys only while no node
     /// reads them.
     _keys: crate::secrets::KeysLock,
@@ -1477,9 +1479,28 @@ impl Daemon {
         } else {
             None
         };
+        let endpoint = opts.owners.filter(|_| opts.ctl);
+        // A node whose provider socket cannot be made runs on without it:
+        // no program of its owner attaches then.
+        #[cfg(target_os = "linux")]
+        let providers = match &endpoint {
+            Some(e) => {
+                let at = e.provider_socket();
+                match crate::provider::serve(shared.clone(), at.clone(), e.owners.clone()).await {
+                    Ok(task) => Some((task, at)),
+                    Err(e) => {
+                        tracing::error!("{e}; no program of the owner attaches as a provider");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        #[cfg(not(target_os = "linux"))]
+        let providers = None;
         // A node whose owner endpoint cannot be made runs on without it:
         // its owners then need root, as before there was one.
-        let owner = match opts.owners.filter(|_| opts.ctl) {
+        let owner = match endpoint {
             Some(e) => {
                 let at = e.at.clone();
                 match crate::owner::serve(shared.clone(), e).await {
@@ -1521,6 +1542,7 @@ impl Daemon {
             relay,
             ctl,
             owner,
+            providers,
             _keys: keys,
         })
     }
@@ -1590,6 +1612,11 @@ impl Daemon {
             let _ = std::fs::remove_file(socket);
         }
         if let Some((task, _at)) = self.owner {
+            task.abort();
+            #[cfg(unix)]
+            let _ = std::fs::remove_file(_at);
+        }
+        if let Some((task, _at)) = self.providers {
             task.abort();
             #[cfg(unix)]
             let _ = std::fs::remove_file(_at);
@@ -1984,7 +2011,12 @@ async fn answer(
             if shared.below_command(peer.pid) {
                 return nerve_transport::ctl::Reply::Err(FROM_A_COMMAND.into());
             }
-            crate::provider::attach(shared, req.params, peer.pid)
+            let caller = crate::provider::Caller {
+                uid: peer.uid,
+                pid: peer.pid,
+                pidfd: None,
+            };
+            crate::provider::attach(shared, req.params, caller).await
         }
         m => control(shared, m, req.params, peer.pid),
     }
