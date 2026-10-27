@@ -911,10 +911,79 @@ pub const SOCKET_NAME: &str = "provider.sock";
 pub const NOT_AN_OWNER: &str =
     "refused: only the owner of the installed node and root attach a provider to it";
 
+/// How long the provider socket keeps the owner's uid before it looks the
+/// account up again ([`Admits`]).
+#[cfg(target_os = "linux")]
+const OWNER_AGAIN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How [`Admits`] looks an account up: its uid by its name.
+#[cfg(target_os = "linux")]
+type Lookup = Box<dyn Fn(&str) -> Option<u32> + Send + Sync>;
+
+/// Who the provider socket lets in, told by the caller's uid alone: the
+/// check runs on the runtime for every connection, from any account, while
+/// the caller holds one of the socket's places, so it looks nothing up. The
+/// owner's account (`Owners::Named`) is looked up as the socket starts, and
+/// again, off the runtime, by a connection that comes once the last lookup
+/// is [`OWNER_AGAIN`] old: an account made or changed while the node runs
+/// counts after that, and a flood of connections costs at most one lookup
+/// in that time. Root is always let in.
+#[cfg(target_os = "linux")]
+struct Admits {
+    owners: crate::owner::Owners,
+    /// The owner's uid as last looked up, and when.
+    known: Mutex<(Option<u32>, std::time::Instant)>,
+    looking: std::sync::atomic::AtomicBool,
+    again: std::time::Duration,
+    lookup: Lookup,
+}
+
+#[cfg(target_os = "linux")]
+impl Admits {
+    /// Looks the owner up once now. Blocks.
+    fn new(owners: crate::owner::Owners, again: std::time::Duration, lookup: Lookup) -> Arc<Self> {
+        let uid = match &owners {
+            crate::owner::Owners::Named(n) => lookup(n),
+            _ => None,
+        };
+        Arc::new(Admits {
+            owners,
+            known: Mutex::new((uid, std::time::Instant::now())),
+            looking: Default::default(),
+            again,
+            lookup,
+        })
+    }
+
+    /// Whether `uid` may attach a provider. Never blocks.
+    fn admits(self: &Arc<Self>, uid: u32) -> bool {
+        use crate::owner::Owners;
+        if uid == 0 {
+            return true;
+        }
+        let name = match &self.owners {
+            Owners::Named(n) => n,
+            Owners::Uids(u) => return u.contains(&uid),
+            Owners::Sids(_) => return false,
+        };
+        let (known, at) = *lock(&self.known);
+        if at.elapsed() >= self.again && !self.looking.swap(true, Ordering::SeqCst) {
+            let (me, name) = (self.clone(), name.clone());
+            tokio::task::spawn_blocking(move || {
+                let uid = (me.lookup)(&name);
+                *lock(&me.known) = (uid, std::time::Instant::now());
+                me.looking.store(false, Ordering::SeqCst);
+            });
+        }
+        known == Some(uid)
+    }
+}
+
 /// Serves the provider socket `at` of the installed node until the task is
 /// aborted: open to every account, 0666, in a folder everyone may enter.
 /// An account that is not one of `owners` (root always is) is refused as
-/// it connects, so it holds none of the socket's places, which are its own
+/// it connects, told by its uid alone ([`Admits`]), so it holds a place
+/// only for that comparison. The socket's places are its own
 /// ([`nerve_transport::ctl::MAX_PROVIDERS`]): a provider's connection
 /// stays, and neither this socket nor the owner socket can take the
 /// other's. A process below a command of the node is refused, as on the
@@ -930,11 +999,19 @@ pub(crate) async fn serve(
     let listener = nerve_transport::ctl::bind_open(&at)
         .await
         .map_err(|e| format!("{}: {e}", at.display()))?;
+    let admits = tokio::task::spawn_blocking(move || {
+        Admits::new(
+            owners,
+            OWNER_AGAIN,
+            Box::new(|n| crate::account::lookup(n).ok().flatten().map(|a| a.uid)),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     let task = tokio::spawn(async move {
-        let admit = move |peer: &nerve_transport::ctl::Peer| {
-            crate::owner::owner_name(&owners, peer.uid)
-                .map(|_| ())
-                .ok_or_else(|| NOT_AN_OWNER.to_string())
+        let admit = move |peer: &nerve_transport::ctl::Peer| match admits.admits(peer.uid) {
+            true => Ok(()),
+            false => Err(NOT_AN_OWNER.to_string()),
         };
         let r = nerve_transport::ctl::serve_providers(
             listener,
@@ -1253,6 +1330,65 @@ mod tests {
             ..caller
         };
         assert!(read_caller(&caller, &me, None).unwrap().1);
+    }
+
+    /// The provider socket tells the owner by a uid it looked up before:
+    /// however many connections come, from whichever account, the account
+    /// is looked up again at most once a while, off the connections, and
+    /// what that lookup finds counts from then on.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_provider_socket_looks_the_owner_up_once_a_while_only() {
+        use std::sync::atomic::{AtomicU32, AtomicUsize};
+        let looked = Arc::new(AtomicUsize::new(0));
+        let owner = Arc::new(AtomicU32::new(1000));
+        let lookup = |looked: Arc<AtomicUsize>, owner: Arc<AtomicU32>| {
+            Box::new(move |n: &str| {
+                assert_eq!(n, "own");
+                looked.fetch_add(1, Ordering::SeqCst);
+                Some(owner.load(Ordering::SeqCst))
+            }) as Lookup
+        };
+        let named = || crate::owner::Owners::Named("own".into());
+        let a = Admits::new(
+            named(),
+            std::time::Duration::from_secs(3600),
+            lookup(looked.clone(), owner.clone()),
+        );
+        assert_eq!(looked.load(Ordering::SeqCst), 1);
+        for _ in 0..100 {
+            assert!(!a.admits(1001));
+        }
+        assert!(a.admits(1000));
+        assert!(a.admits(0));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(looked.load(Ordering::SeqCst), 1, "looked up per connection");
+
+        // Once the last lookup is old, a connection starts the next one and
+        // is told by the old uid; the ones after it by the new.
+        let looked = Arc::new(AtomicUsize::new(0));
+        let a = Admits::new(
+            named(),
+            std::time::Duration::ZERO,
+            lookup(looked.clone(), owner.clone()),
+        );
+        owner.store(1001, Ordering::SeqCst);
+        assert!(!a.admits(1001));
+        let t = std::time::Instant::now();
+        while lock(&a.known).0 != Some(1001) {
+            assert!(t.elapsed().as_secs() < 10, "not looked up again");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(a.admits(1001));
+        assert!(!a.admits(1000));
+        assert!(looked.load(Ordering::SeqCst) >= 2);
+
+        let uids = Admits::new(
+            crate::owner::Owners::Uids(vec![1002]),
+            std::time::Duration::ZERO,
+            lookup(Arc::new(AtomicUsize::new(0)), owner.clone()),
+        );
+        assert!(uids.admits(1002) && uids.admits(0) && !uids.admits(1001));
     }
 
     fn allowing(name: &str, exe: &str) -> NodeConfig {

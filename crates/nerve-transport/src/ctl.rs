@@ -420,7 +420,9 @@ mod unix {
     /// connections stay: at most `max` at once, places of its own apart from
     /// any other socket's, so neither starves the other. A caller that
     /// `admit` refuses is told why and closed before it may hold a place for
-    /// its request. The handler gets the caller's pidfd where the kernel
+    /// its request. `admit` runs on the runtime for every connection, while
+    /// the caller holds a place, so it must answer at once: no lookup, no
+    /// program started. The handler gets the caller's pidfd where the kernel
     /// gives one (SO_PEERPIDFD, Linux 6.5 on), which stays with that process
     /// however its pid is reused; no files are taken.
     pub async fn serve_providers<A, F, Fut>(

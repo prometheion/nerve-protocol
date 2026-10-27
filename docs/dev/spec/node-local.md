@@ -1531,7 +1531,9 @@ connects to the provider socket (§5), which takes no token: the node tells
 the caller by the account the kernel names for it (`SO_PEERCRED`). An
 account that is not the owner (root always is one) is told `refused: only
 the owner of the installed node and root attach a provider to it` as it
-connects, before it can hold a place; a process below a command of a center
+connects, by its uid alone, so it holds a place only for that comparison
+(the node looks the owner's account up as the socket starts, and again at
+most once a minute, off the connections); a process below a command of a center
 is refused as on the owner socket, and one with `no_new_privs` (every
 confined command keeps it) too, told so: `refused: this program runs with
 no_new_privs, …`. The provider socket takes `hello` only.

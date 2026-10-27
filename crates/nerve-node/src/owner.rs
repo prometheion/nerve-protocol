@@ -1644,7 +1644,7 @@ pub(crate) async fn serve(
 
 /// The owner's name when the account `uid` is one.
 #[cfg(unix)]
-pub(crate) fn owner_name(owners: &Owners, uid: u32) -> Option<String> {
+fn owner_name(owners: &Owners, uid: u32) -> Option<String> {
     let owner = match owners {
         Owners::Named(n) => {
             uid == 0
