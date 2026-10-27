@@ -131,53 +131,6 @@ impl Providers {
             .collect()
     }
 
-    /// What only the owner may turn on or allow, as a test of a `caps` key
-    /// or an allow rule's scope (`cap` or `cap.action`): a capability an
-    /// attached provider offers with an action that senses or actuates; one
-    /// that is neither the node's own nor offered now; and an action that an
-    /// offered capability does not have now. The node cannot tell what such
-    /// a capability or action will do once a provider offers it, so a
-    /// center's entry for it waits for the owner. An entry for an offered
-    /// capability that neither senses nor actuates, or for one of its
-    /// actions, passes; the node cannot check it ahead, so it still counts
-    /// when a provider later offers that capability or action with a sense
-    /// or actuate action under the same name.
-    ///
-    /// `config` are the capabilities the config declares
-    /// (crate::config_cap::declared), offered now or not, which count alike.
-    pub fn owner_only(&self, config: &[Capability]) -> impl Fn(&str) -> bool + use<> {
-        let mut sensing = BTreeSet::new();
-        let mut offered: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        let attached = lock(&self.attached);
-        for c in attached.values().flat_map(|a| a.caps.iter()).chain(config) {
-            offered.insert(c.id.clone(), c.actions.keys().cloned().collect());
-            if c.actions
-                .values()
-                .any(|a| matches!(a.effect, Effect::Sense | Effect::Actuate))
-            {
-                sensing.insert(c.id.clone());
-            }
-        }
-        drop(attached);
-        move |scope| {
-            let (cap, action) = match scope.split_once('.') {
-                Some((c, a)) => (c, Some(a)),
-                None => (scope, None),
-            };
-            if BUILT_IN.contains(&cap) {
-                return false;
-            }
-            if sensing.contains(cap) {
-                return true;
-            }
-            match (offered.get(cap), action) {
-                (None, _) => true,
-                (Some(actions), Some(a)) => !actions.contains(a),
-                (Some(_), None) => false,
-            }
-        }
-    }
-
     /// The account the program of the provider `name` runs as, and which
     /// attachment of that name it is, while it is attached.
     pub fn held(&self, name: &str) -> Option<(u32, u64)> {
@@ -1200,6 +1153,55 @@ pub(crate) async fn serve(
         }
     });
     Ok(task)
+}
+
+/// What only the owner may turn on or allow, as a test of a `caps` key
+/// or an allow rule's scope (`cap` or `cap.action`): a capability an
+/// attached provider offers with an action that senses or actuates; one
+/// that is neither the node's own nor offered now; and an action that an
+/// offered capability does not have now. The node cannot tell what such
+/// a capability or action will do once a provider offers it, so a
+/// center's entry for it waits for the owner. An entry for an offered
+/// capability that neither senses nor actuates, or for one of its
+/// actions, passes; the node cannot check it ahead, so it still counts
+/// when a provider later offers that capability or action with a sense
+/// or actuate action under the same name.
+///
+/// `caps` are those the attached programs offer and those the config
+/// declares (crate::config_cap::declared), offered now or not, which count
+/// alike.
+pub fn owner_only_of(caps: &[Capability]) -> impl Fn(&str) -> bool + use<> {
+    let mut sensing = BTreeSet::new();
+    let mut offered: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for c in caps {
+        offered
+            .entry(c.id.clone())
+            .or_default()
+            .extend(c.actions.keys().cloned());
+        if c.actions
+            .values()
+            .any(|a| matches!(a.effect, Effect::Sense | Effect::Actuate))
+        {
+            sensing.insert(c.id.clone());
+        }
+    }
+    move |scope| {
+        let (cap, action) = match scope.split_once('.') {
+            Some((c, a)) => (c, Some(a)),
+            None => (scope, None),
+        };
+        if BUILT_IN.contains(&cap) {
+            return false;
+        }
+        if sensing.contains(cap) {
+            return true;
+        }
+        match (offered.get(cap), action) {
+            (None, _) => true,
+            (Some(actions), Some(a)) => !actions.contains(a),
+            (Some(_), None) => false,
+        }
+    }
 }
 
 #[cfg(test)]

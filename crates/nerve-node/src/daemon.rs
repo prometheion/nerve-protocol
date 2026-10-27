@@ -638,6 +638,63 @@ impl Shared {
         caps
     }
 
+    /// The places a center may write, where a command of the config that
+    /// runs with the owner's rights may neither start nor name a place
+    /// (crate::config_cap::written_by_centers): the `w` folders of every
+    /// center, `nerve-run`'s own folders (`/tmp` and `/var/tmp` on a node
+    /// run by hand, which has no such account), and what the allow rules of
+    /// a center whose writes run as the owner let it write
+    /// (crate::config_cap::written_by_rules).
+    pub fn center_writes(&self, cfg: &NodeConfig) -> Vec<PathBuf> {
+        let home = self.rules_home(cfg);
+        let mut writable = crate::exec::write_folders(cfg, &home);
+        writable.extend(match self.run_account(cfg) {
+            Ok(Some(a)) => crate::account::built_in(&a.home)
+                .into_iter()
+                .map(|f| f.path.into())
+                .collect(),
+            _ => vec!["/tmp".into(), "/var/tmp".into()],
+        });
+        let mut caps = crate::descriptor::built_in(cfg);
+        caps.extend(self.added_caps(cfg));
+        writable.extend(crate::config_cap::written_by_rules(
+            cfg,
+            &caps,
+            &home,
+            |p| !self.separate(p),
+        ));
+        writable
+    }
+
+    /// How the node judges the command of `decl`, which runs with the
+    /// owner's rights as `owner` (the node's own user where `None`), from
+    /// where it starts, that account's home (the node's own by hand): why
+    /// it may not run (crate::config_cap::written_by_centers), else the
+    /// program file it runs, `None` where none is found
+    /// (crate::config_cap::program_file). Looked at as the owner, who may
+    /// look into the owner's home and the folders where the node's own user
+    /// may not.
+    pub fn owner_command(
+        &self,
+        cfg: &NodeConfig,
+        decl: &nerve_policy::config::ConfigCapability,
+        owner: Option<&crate::service::Account>,
+    ) -> Result<Option<PathBuf>, String> {
+        let writable = self.center_writes(cfg);
+        let start_in = owner.map_or_else(|| self.home.clone(), |a| a.home.clone());
+        let _as = crate::link::act_as(owner).ok().flatten();
+        let path = std::env::var_os("PATH");
+        if let Some(why) =
+            crate::config_cap::written_by_centers(decl, &writable, path.as_deref(), &start_in)
+        {
+            return Err(why);
+        }
+        Ok(decl
+            .command
+            .first()
+            .and_then(|p| crate::config_cap::program_file(p, path.as_deref())))
+    }
+
     /// The owner's account, which sudo runs as and whose files the folders
     /// and rules name; `None` on a node run by hand, whose own user it is.
     pub fn owner_account(
@@ -2205,20 +2262,12 @@ pub(crate) fn control(
         "config.accept" => {
             let r = {
                 let mut store = lock(&shared.store);
-                let before = store.config().clone();
                 store.set_user(str_of("user"));
-                // The file as the owner wrote it, then, before any call sees
-                // it (the store stays locked), an action that came to sense
-                // in it switched off where an earlier switch covered it
-                // (crate::config_cap::hold_new).
-                let r = store.accept().and_then(|v| {
-                    let mut held_cfg = store.config().clone();
-                    let held = crate::config_cap::hold_new(&before, &mut held_cfg);
-                    if held.is_empty() {
-                        return Ok((v, held));
-                    }
-                    store.set_local(held_cfg, Some(v)).map(|v| (v, held))
-                });
+                // The file as the owner wrote it, with an action that came to
+                // sense in it switched off where an earlier switch covered it
+                // (crate::config_cap::hold_new), in the one write that puts
+                // it in force.
+                let r = store.accept_with(crate::config_cap::hold_new);
                 store.set_user(None);
                 r
             };
@@ -2230,6 +2279,28 @@ pub(crate) fn control(
                 }
                 Err(e) => Reply::Err(e.to_string()),
             }
+        }
+        "cap.refusal" => {
+            // Why the node refuses calls of the owner's command now, as it
+            // judges it before a call: as the owner, from the owner's home
+            // (`cap add` and `cap edit` warn of it).
+            let Some(name) = str_of("name") else {
+                return Reply::Err("name is missing".into());
+            };
+            let cfg = shared.config();
+            let Some(decl) = cfg.capabilities.iter().find(|c| c.name == name) else {
+                return Reply::Err(format!("no capability {name} is declared"));
+            };
+            if decl.account != nerve_policy::config::RunsAs::Owner {
+                return Reply::Ok(json!({"refusal": null}));
+            }
+            let owner = shared.owner_account(&cfg).ok().flatten();
+            let refusal = match shared.owner_command(&cfg, decl, owner.as_ref()) {
+                Err(why) => Some(why),
+                Ok(None) => Some(crate::config_cap::no_program(decl)),
+                Ok(Some(_)) => None,
+            };
+            Reply::Ok(json!({"refusal": refusal}))
         }
         "reload" => match shared.reload() {
             Ok(changed) => Reply::Ok(json!({"changed": changed})),

@@ -485,6 +485,18 @@ impl SettingsStore {
     /// config accept`: the owner has looked at it). Its MAC is not checked;
     /// it must still parse and validate, and the node signs it.
     pub fn accept(&mut self) -> Result<u64, SetError> {
+        self.accept_with(|_, _| ()).map(|(v, _)| v)
+    }
+
+    /// [`SettingsStore::accept`], with `change(before, taken)` made to the
+    /// file's config before it is written and in force, so one write
+    /// carries both: no reader, and no node that stops between two writes,
+    /// sees the file without the change. Returns the version and what
+    /// `change` returned.
+    pub fn accept_with<T>(
+        &mut self,
+        change: impl FnOnce(&NodeConfig, &mut NodeConfig) -> T,
+    ) -> Result<(u64, T), SetError> {
         let missing = || SetError::Invalid(format!("{} is missing", self.path.display()));
         let text = read_file(&self.path)
             .map_err(SetError::Io)?
@@ -496,6 +508,7 @@ impl SettingsStore {
         // record that cannot be read is written again.
         let last = self.secrets.accepted_version().ok().flatten().unwrap_or(0);
         new.version = self.config.version.max(new.version).max(last) + 1;
+        let made = change(&self.config, &mut new);
         // Taken as it is: whoever wrote it last.
         self.write(&new, None)?;
         let changes = diff(&to_json(&self.config), &to_json(&new));
@@ -505,7 +518,7 @@ impl SettingsStore {
             .audit
             .config("accepted", &self.path, "the owner took the file as it was");
         self.changed(&Writer::Local.label(), version, &changes);
-        Ok(version)
+        Ok((version, made))
     }
 
     /// Audits a refused file and says why it was refused.

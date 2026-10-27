@@ -2229,17 +2229,19 @@ impl Link {
         // (crate::provider, crate::config_cap). Every one the config
         // declares counts, also one not offered here now: a center's `on`
         // for it would cover its sensing action once the owner makes it
-        // offered.
-        let cfg = self.shared.config();
-        let config = crate::config_cap::declared(&cfg);
-        let owner_only = self.shared.providers.owner_only(&config);
-        let r = lock(&self.shared.store).set_center_document(
-            &self.name,
-            s.document,
-            s.if_version,
-            owner_only,
-            |opts| self.protected_with(opts, account.as_ref(), &own),
-        );
+        // offered. They are read from the config the document is checked
+        // against, under the store's lock, so an owner's change that
+        // commits meanwhile is not missed; the programs' are taken before
+        // (crate::provider::Providers::hold takes them, then the store).
+        let attached = self.shared.providers.caps();
+        let mut store = lock(&self.shared.store);
+        let mut known = crate::config_cap::declared(store.config());
+        known.extend(attached);
+        let owner_only = crate::provider::owner_only_of(&known);
+        let r =
+            store.set_center_document(&self.name, s.document, s.if_version, owner_only, |opts| {
+                self.protected_with(opts, account.as_ref(), &own)
+            });
         settings_result(r)
     }
 
@@ -2605,39 +2607,17 @@ impl Link {
             _ => self.shared.home.clone(),
         };
         // With the owner's rights it may not run what a center may write,
-        // nor start there: the `w` folders of every center and
-        // `nerve-run`'s own. Looked at as the owner, who may look into them.
+        // nor start there, and runs the program file judged, not another
+        // one a second look in PATH might find.
+        let mut found = None;
         if as_owner {
-            let mut writable = exec::write_folders(cfg, &self.shared.rules_home(cfg));
-            writable.extend(match self.shared.run_account(cfg) {
-                Ok(Some(a)) => crate::account::built_in(&a.home)
-                    .into_iter()
-                    .map(|f| f.path.into())
-                    .collect(),
-                _ => vec!["/tmp".into(), "/var/tmp".into()],
-            });
-            let (why, file) = {
-                let owner = runs_as.as_ref().ok().cloned().flatten();
-                let _as = act_as(owner.as_ref()).ok().flatten();
-                let path = std::env::var_os("PATH");
-                (
-                    crate::config_cap::written_by_centers(
-                        &decl,
-                        &writable,
-                        path.as_deref(),
-                        &start_in,
-                    ),
-                    crate::config_cap::program_file(&argv[0], path.as_deref()),
-                )
-            };
-            if let Some(why) = why {
-                self.audit(inv, &target, "forbidden", Some("forbidden"), Some(&why));
-                return Err(RpcError::new(ErrorCode::Forbidden, why));
-            }
-            // The file judged runs, not another one a second look in PATH
-            // might find.
-            if let Some(f) = file {
-                argv[0] = f.display().to_string();
+            let owner = runs_as.as_ref().ok().cloned().flatten();
+            match self.shared.owner_command(cfg, &decl, owner.as_ref()) {
+                Err(why) => {
+                    self.audit(inv, &target, "forbidden", Some("forbidden"), Some(&why));
+                    return Err(RpcError::new(ErrorCode::Forbidden, why));
+                }
+                Ok(file) => found = file,
             }
         }
         // A program of the owner's account: the link walk refuses a folder
@@ -2670,6 +2650,17 @@ impl Link {
         // A missing account stops the call once it is decided and audited.
         looks_as.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
         let account = runs_as.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
+        // A program the owner may not run, or none, is not left for a
+        // second look in PATH when it starts.
+        if as_owner {
+            let Some(f) = found else {
+                return Err(RpcError::new(
+                    ErrorCode::Unavailable,
+                    crate::config_cap::no_program(&decl),
+                ));
+            };
+            argv[0] = f.display().to_string();
+        }
         // Only the installed Linux node has `nerve-run`, and only it offers
         // what runs as that account (crate::config_cap::offered).
         if !as_owner && account.is_none() {
@@ -2928,7 +2919,7 @@ pub(crate) fn act_as(
 /// [`act_as`] on Windows: the thread impersonates the account, logged on
 /// with its stored password ([`crate::win_user::FsAs`]).
 #[cfg(windows)]
-fn act_as(
+pub(crate) fn act_as(
     account: Option<&crate::service::Account>,
 ) -> Result<Option<crate::win_user::FsAs>, RpcError> {
     account

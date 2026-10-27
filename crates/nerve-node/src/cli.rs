@@ -2165,7 +2165,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                 root: runs_as_root(&paths),
                 held: held.into_inner().unwrap(),
                 programs,
-                written: written_by_centers(&cfg, &c, installed),
+                written: cap_refusal(&paths, &cfg, &c, installed).await,
             };
             for note in notes.of(&c) {
                 w(out, note);
@@ -2210,7 +2210,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                 root: runs_as_root(&paths),
                 held: held.into_inner().unwrap(),
                 programs: Vec::new(),
-                written: written_by_centers(&cfg, c, installed),
+                written: cap_refusal(&paths, &cfg, c, installed).await,
             };
             for note in notes.of(c) {
                 w(out, note);
@@ -3672,12 +3672,14 @@ fn runs_as_root(paths: &NodePaths) -> bool {
     }
 }
 
-/// Why the node refuses calls of `c` now, as `crate::config_cap::
-/// written_by_centers` judges it: it runs as the owner and names a place a
-/// center may write (the `w` folders of `cfg`, `/tmp`, `/var/tmp`, and on the
-/// installed node `nerve-run`'s home), or starts there (in this user's
-/// home, as the owner's command does). Looked at as this process can.
-fn written_by_centers(
+/// Why the node refuses calls of `c` now: it runs as the owner and names a
+/// place a center may write, or starts there, or finds no program to run.
+/// The running node judges it as it does before a call (`cap.refusal`): as
+/// the owner, from the owner's home, which the node's own user that runs
+/// this CLI on the installed node may not look into. A node that does not
+/// answer leaves it to [`written_by_centers`].
+async fn cap_refusal(
+    paths: &NodePaths,
     cfg: &NodeConfig,
     c: &nerve_policy::config::ConfigCapability,
     installed: bool,
@@ -3685,17 +3687,56 @@ fn written_by_centers(
     if c.account != nerve_policy::config::RunsAs::Owner {
         return None;
     }
-    let mut writable = crate::exec::write_folders(cfg, &crate::paths::home_dir());
+    #[cfg(unix)]
+    {
+        let asked =
+            nerve_transport::ctl::call(&paths.ctl_socket(), "cap.refusal", json!({"name": c.name}))
+                .await;
+        if let Ok(v) = asked {
+            return v["refusal"].as_str().map(str::to_string);
+        }
+    }
+    written_by_centers(paths, cfg, c, installed)
+}
+
+/// [`cap_refusal`] while no node runs, as `crate::config_cap::
+/// written_by_centers` judges it: a place a center may write is a `w`
+/// folder of `cfg`, `/tmp`, `/var/tmp`, on the installed node `nerve-run`'s
+/// home, and what an allow rule lets a center write as the owner; the
+/// command starts in the owner's home (this user's by hand). Looked at as
+/// this process can.
+fn written_by_centers(
+    paths: &NodePaths,
+    cfg: &NodeConfig,
+    c: &nerve_policy::config::ConfigCapability,
+    installed: bool,
+) -> Option<String> {
+    let home = crate::service::owner_of(paths)
+        .and_then(|o| crate::account::lookup(&o).ok().flatten())
+        .map_or_else(crate::paths::home_dir, |a| a.home);
+    let mut writable = crate::exec::write_folders(cfg, &home);
     writable.extend([PathBuf::from("/tmp"), PathBuf::from("/var/tmp")]);
     if installed {
         writable.push(crate::account::RUN_HOME.into());
     }
-    crate::config_cap::written_by_centers(
-        c,
-        &writable,
-        std::env::var_os("PATH").as_deref(),
-        &crate::paths::home_dir(),
-    )
+    let mut caps = crate::descriptor::built_in(cfg);
+    caps.extend(crate::config_cap::offered(cfg, installed));
+    let now = crate::now_ms();
+    writable.extend(crate::config_cap::written_by_rules(
+        cfg,
+        &caps,
+        &home,
+        |p| !installed || p.runs_as_owner(now),
+    ));
+    let path = std::env::var_os("PATH");
+    if let Some(why) = crate::config_cap::written_by_centers(c, &writable, path.as_deref(), &home) {
+        return Some(why);
+    }
+    c.command
+        .first()
+        .and_then(|p| crate::config_cap::program_file(p, path.as_deref()))
+        .is_none()
+        .then(|| crate::config_cap::no_program(c))
 }
 
 /// What the owner should know of a capability once `cap add` or `cap edit`
@@ -3709,7 +3750,7 @@ struct CapNotes {
     held: Vec<(String, String)>,
     /// The programs that offered its capability and are let go.
     programs: Vec<String>,
-    /// Why the node refuses its calls ([`written_by_centers`]).
+    /// Why the node refuses its calls ([`cap_refusal`]).
     written: Option<String>,
 }
 
