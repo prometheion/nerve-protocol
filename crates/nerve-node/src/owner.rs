@@ -1976,6 +1976,8 @@ mod tests {
             &["config", "get", "log.level"],
             &["relay", "ls"],
             &["service", "status"],
+            &["cap", "ls"],
+            &["cap", "provider", "ls"],
         ] {
             assert!(only_reads(&cli(args).cmd), "{args:?}");
         }
@@ -1986,6 +1988,7 @@ mod tests {
             &["panic"],
             &["log", "clear"],
             &["audit", "clear"],
+            &["cap", "provider", "rm", "desk"],
         ] {
             assert!(!only_reads(&cli(args).cmd), "{args:?}");
         }

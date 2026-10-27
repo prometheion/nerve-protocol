@@ -2077,6 +2077,9 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             })
             .await?;
             w(out, format!("provider {name} allowed: {exe}"));
+            if let Some(note) = NO_PROVIDERS_HERE {
+                w(out, note.to_string());
+            }
             Ok(())
         }
         Cmd::Cap(CapCmd::Provider(ProviderCmd::Rm { name })) => {
@@ -3343,6 +3346,14 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
     lines
 }
 
+/// What `cap provider allow` and `ls` add where no program attaches: the
+/// node tells a provider's program by what Linux shows of it.
+const NO_PROVIDERS_HERE: Option<&str> = if cfg!(target_os = "linux") {
+    None
+} else {
+    Some("programs attach as providers on Linux only for now: this node takes none")
+};
+
 /// The lines of `cap provider ls`: each program allowed, and whether it is
 /// attached.
 fn program_lines(v: &Value) -> Vec<String> {
@@ -3350,7 +3361,7 @@ fn program_lines(v: &Value) -> Vec<String> {
     if programs.is_empty() {
         return vec!["no program is allowed as a provider".into()];
     }
-    programs
+    let mut lines: Vec<String> = programs
         .iter()
         .map(|p| {
             let state = match p["attached"].as_bool() {
@@ -3364,7 +3375,9 @@ fn program_lines(v: &Value) -> Vec<String> {
                 p["exe"].as_str().unwrap_or_default()
             )
         })
-        .collect()
+        .collect();
+    lines.extend(NO_PROVIDERS_HERE.map(str::to_string));
+    lines
 }
 
 fn enum_str<T: serde::Serialize>(v: &T) -> String {
@@ -9298,6 +9311,13 @@ mod tests {
             said.starts_with(&format!("provider desk allowed: {a}\n")),
             "{said}"
         );
+        // Where no program attaches, the owner is told so.
+        let elsewhere = "programs attach as providers on Linux only for now";
+        assert_eq!(
+            said.contains(elsewhere),
+            cfg!(not(target_os = "linux")),
+            "{said}"
+        );
         run(&paths, &["cap", "provider", "allow", "desk", &b]).unwrap();
         run(&paths, &["cap", "provider", "allow", "lamp-2", &lamp]).unwrap();
         let cfg =
@@ -9309,11 +9329,15 @@ mod tests {
             .map(|p| (p.name.as_str(), p.exe.as_str()))
             .collect();
         assert_eq!(allowed, [("desk", b.as_str()), ("lamp-2", lamp.as_str())]);
+        let note = match cfg!(target_os = "linux") {
+            true => String::new(),
+            false => format!("{elsewhere}: this node takes none\n"),
+        };
         assert_eq!(
             run(&paths, &["cap", "provider", "ls"]).unwrap(),
             format!(
                 "program desk: {b}, the node does not run\nprogram lamp-2: {lamp}, the node does \
-                 not run\n"
+                 not run\n{note}"
             )
         );
         let v = json_of(&paths, &["cap", "provider", "ls"]);
