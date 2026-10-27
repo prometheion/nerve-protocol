@@ -228,13 +228,16 @@ impl Reach {
         // account may. A program other
         // than the node reads with the owner's rights, so the node hands it
         // no folder there, and the command account's own folders do not
-        // count for it.
+        // count for it. A capability of the node's config that runs as the
+        // command account is held like fs, and its details say so.
         const OPEN: &str = "what is open to every account on the machine, except protected \
                             paths and the node's own files";
         const NO_FOLDER: &str = "An action of any capability but fs may name a file there, \
                                  never a folder: its program would read below it with the \
                                  owner's rights. For such an action a folder marked own counts \
-                                 as none: it is the command account's, not the owner's.";
+                                 as none: it is the command account's, not the owner's. One \
+                                 whose details say it runs as the command account is held like \
+                                 fs.";
         let reads = self.reads_by_account;
         if self.no_folder() && !commands {
             return Some(if reads {
@@ -398,6 +401,10 @@ pub struct Unit {
     /// covers it, so a sudo list or sandbox that changes what `exec.run`'s
     /// says asks for a new `list` of it, not of the file calls.
     pub advice: Option<Arc<str>>,
+    /// The node runs it as its command account and holds it like `fs`
+    /// (a capability of its config, `Action::as_account`): the details say
+    /// so, as the advice on the folders tells such an action apart.
+    pub as_account: bool,
 }
 
 impl Unit {
@@ -424,6 +431,11 @@ impl Unit {
         ] {
             ctx.update(&(part.len() as u64).to_be_bytes());
             ctx.update(part.as_bytes());
+        }
+        // Only where it is set, so the units of programs and the node keep
+        // their numbers.
+        if self.as_account {
+            ctx.update(b"as_account");
         }
         let d = ctx.finish();
         let mut first = [0u8; 8];
@@ -587,6 +599,7 @@ impl Catalog {
                         file_advice.clone()
                     }
                     .filter(|_| bound),
+                    as_account: def.as_account,
                 });
             }
         }
@@ -689,6 +702,7 @@ pub fn center_units() -> Vec<Unit> {
         off: false,
         note: None,
         advice: None,
+        as_account: false,
     };
     vec![
         unit(
@@ -840,6 +854,7 @@ mod tests {
                 off: false,
                 note: None,
                 advice: None,
+                as_account: false,
             }
         );
         assert!(c.offers("fs", "write"));
@@ -1251,6 +1266,7 @@ mod tests {
             off: false,
             note: None,
             advice: None,
+            as_account: false,
         };
         assert_ne!(unit("x1", json!(2)).hash(), unit("x", json!(12)).hash());
     }
@@ -1414,11 +1430,13 @@ mod tests {
         let open = "what is open to every account on the machine, except protected paths and \
                     the node's own files";
         // A program other than the node's `fs` is never handed a folder
-        // outside the folders.
+        // outside the folders; a capability of the config that runs as the
+        // command account is held like fs.
         let never = "An action of any capability but fs may name a file there, never a folder: \
                      its program would read below it with the owner's rights. For such an action \
                      a folder marked own counts as none: it is the command account's, not the \
-                     owner's.";
+                     owner's. One whose details say it runs as the command account is held like \
+                     fs.";
         let granted = json!([{"path": "/a", "access": "rw"}]);
         let r = reach(true, granted.clone(), false);
         let a = r.file_advice().unwrap();
@@ -1941,6 +1959,7 @@ mod tests {
                 params: Value::Null,
                 result: json!({"type": "object", long.clone(): 1}),
                 exposure: None,
+                as_account: false,
             },
         );
         let mut door = cap("door", "", &[("open", Effect::Actuate, path())]);
@@ -1992,6 +2011,7 @@ mod tests {
                 off: false,
                 note: None,
                 advice: None,
+                as_account: false,
             })
             .collect();
         let c = Catalog {

@@ -47,6 +47,7 @@ fn action(effect: Effect, summary: &str, params: Value, result: Value) -> Action
         params,
         result,
         exposure: None,
+        as_account: false,
     }
 }
 

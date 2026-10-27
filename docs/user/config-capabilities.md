@@ -96,8 +96,11 @@ says how), and the program gets it as the node resolved it.
 
 A capability that runs as `nerve-run` is a command of that account: it reads
 a path outside the folders only where `nerve-run` may read it, never your
-files closed to others nor the node's own. Choose `owner` only for a command
-that needs your rights; it can do whatever you can.
+files closed to others nor the node's own. The agent's `list` says so: the
+details of such an action read `runs as: the command account, held like fs`,
+while those of one that runs as you are held to the folders as a program's.
+Choose `owner` only for a command that needs your rights; it can do whatever
+you can.
 
 A command that runs as you must not run what a center may write: a center
 with `w` on a folder could put its own code there and have it run with your

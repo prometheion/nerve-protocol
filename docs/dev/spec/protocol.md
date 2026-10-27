@@ -622,6 +622,11 @@ over the center's message limit: the call fails with `too_large` instead.
   An action the owner switched off while its capability stays on carries
   `"exposure": "off"` itself (absent means on); a call of it fails
   `disabled`. The actions of a capability that is `off` carry it too.
+- `"as_account": true` on an action says the node runs it itself as its
+  command account (`access.account`) and holds it like that account's
+  commands: a capability of the node's config (node-local.md §2). A center
+  tells the agent that such an action is held like `fs`, not like a
+  program's (harness.md §4.2). Absent means false.
 - `access` says what this center may do on the node now (§6.2). It is
   for that center alone, like the rest of the descriptor.
 - The descriptor is filtered per center. `rev` changes whenever that center's

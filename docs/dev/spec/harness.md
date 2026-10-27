@@ -192,7 +192,10 @@ the `result` of the envelope described below.
   schema, compact) and its result (in words; the schema in
   `structuredContent`). A unit whose schema marks arguments as paths
   (`x-nerve-path`, protocol.md §6.1) adds a line `paths:` with them as JSON
-  (`{"path":"read"}`; `paths` in `structuredContent`). Every such unit
+  (`{"path":"read"}`; `paths` in `structuredContent`). An action the
+  descriptor marks `as_account` (a capability of the node's config that runs
+  as the command account, protocol.md §6) adds a line `runs as: the command
+  account, held like fs` (`runs_as: "command account"`). Every such unit
   (`fs.*`, `exec.run`, a provider's action with a marked path) in folder
   mode adds a line `folders:` with the folder note: the folders and their
   flags as in `list(node)` (`none granted` when there are none). After the
@@ -202,7 +205,8 @@ the `result` of the envelope described below.
   account on the machine, except protected paths and the node's own files,
   that an action of any capability but `fs` may name a file there, never a
   folder, and that for such an action a folder marked `own` counts as none
-  (it is the command account's, not the owner's), and may write only in the folders marked `w` (`exec.run`'s advice says
+  (it is the command account's, not the owner's), while one whose details
+  say it runs as the command account is held like `fs`, and may write only in the folders marked `w` (`exec.run`'s advice says
   none of that, only that a command starts in a folder marked `x`; details of
   both give both), else
   that calls may name paths only in these folders and that a command starts

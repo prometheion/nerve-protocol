@@ -79,6 +79,8 @@ pub fn offered_on(cfg: &NodeConfig, os: &str, installed: bool) -> Vec<Capability
                 params: c.params_schema(),
                 result: c.result.schema(),
                 exposure: None,
+                // A center's advice on its paths follows the account.
+                as_account: c.account == RunsAs::NerveRun,
             },
         );
     }
@@ -312,6 +314,10 @@ account = "owner"
         assert_eq!(sensors.actions["read"].result, json!({"type": "object"}));
         assert_eq!(sensors.actions["list"].result, json!({"type": "string"}));
         assert_eq!(sensors.actions["list"].summary, "The sensors.");
+        // The center tells the agent that one that runs as nerve-run is
+        // held like fs, and one that runs as the owner like a program.
+        assert!(sensors.actions["read"].as_account);
+        assert!(!sensors.actions["list"].as_account);
         assert_eq!(
             sensors.actions["list"].params,
             json!({"type": "object", "properties": {}, "additionalProperties": false})

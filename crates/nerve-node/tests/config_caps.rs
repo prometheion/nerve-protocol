@@ -383,6 +383,48 @@ account = "owner""#);
     daemon.stop().await;
 }
 
+/// A call the center cancels ends its command, as a timeout does: the call
+/// fails `cancelled` and the command is gone within seconds.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_call_ends_the_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let slow = cap(r#"name = "slow.wait"
+effect = "read"
+command = ["sleep", "41.5"]
+account = "owner""#);
+    let daemon = node(dir.path(), &center, vec![slow], user_mode).await;
+    let mut conn = linked(&mut center).await;
+    let id = conn
+        .request(
+            "invoke",
+            json!({"cap": "slow", "action": "wait", "args": {}, "ctx": {}}),
+        )
+        .await
+        .unwrap();
+    let started = Instant::now();
+    while !sleeping("41.5") {
+        assert!(started.elapsed() < WAIT, "the command never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    conn.notify("cancel", json!({"id": id})).await.unwrap();
+    let e = conn
+        .answer(id, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .expect_err("cancelled");
+    assert_eq!(code_of(&e), "cancelled");
+    let started = Instant::now();
+    while sleeping("41.5") {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a cancelled command outlived its call"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    daemon.stop().await;
+}
+
 /// A command the kernel killed for its memory limit fails, whatever its
 /// first process's exit, and the audit log says so as for `exec.run`. The
 /// cgroups are plain folders here, and the command writes what the kernel

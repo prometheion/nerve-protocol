@@ -74,7 +74,8 @@
               "summary": {"type": "string"},
               "params": {"type": "object"},
               "result": {"type": "object"},
-              "exposure": {"enum": ["on", "off"]}
+              "exposure": {"enum": ["on", "off"]},
+              "as_account": {"type": "boolean", "default": false}
             }
           }
         },

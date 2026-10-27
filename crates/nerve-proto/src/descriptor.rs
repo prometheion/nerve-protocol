@@ -82,6 +82,13 @@ pub struct Action {
     /// `disabled`. Absent means on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exposure: Option<Exposure>,
+    /// The node runs this action itself as its command account
+    /// (`access.account`) and holds it like that account's commands (a
+    /// capability of its config, node-local.md §2): a folder may be named
+    /// for its paths, and the account's own folders count. Absent means
+    /// false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub as_account: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

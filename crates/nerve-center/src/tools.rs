@@ -52,6 +52,7 @@ pub(crate) mod tests {
                             params: p.clone(),
                             result: Value::Null,
                             exposure: None,
+                            as_account: false,
                         },
                     )
                 })

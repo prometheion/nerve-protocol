@@ -780,6 +780,7 @@ fn capabilities(
                     params,
                     result: decl.result,
                     exposure: None,
+                    as_account: false,
                 },
             );
         }
