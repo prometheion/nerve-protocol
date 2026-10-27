@@ -118,11 +118,13 @@ you can.
 A command that runs as you must not run what a center may write: a center
 with `w` on a folder could put its own code there and have it run with your
 rights. A center may write in a `w` folder of its own, in `/tmp` and
-`/var/tmp`, in `nerve-run`'s home, and, in `allowlist` mode where its writes
-run as you (`--as-owner`, or any pairing of a node you run yourself),
-wherever an allow rule lets it write (`fs.write:~/site/**` counts like a
-`w` folder `~/site`, a write rule with no path like your whole machine). So
-the node refuses its calls while one of these lies in such a place:
+`/var/tmp`, in `nerve-run`'s home, and, in `allowlist` mode (also one a
+`--for` limit fell back to), wherever an allow rule lets a program of yours
+or a capability that runs as you write, and an allow rule for `fs` where
+its writes run as you (`--as-owner`, or any pairing of a node you run
+yourself): `fs.write:~/site/**` counts like a `w` folder `~/site`, a write
+rule with no path like your whole machine. So the node refuses its calls
+while one of these lies in such a place:
 
 - your home, where it starts (`make`, `npm test` or `python3 -m` read code
   from where they start, so a center with `w` on your whole home blocks every
@@ -132,11 +134,16 @@ the node refuses its calls while one of these lies in such a place:
 - a place a word of its command names: a full path, a path from your home
   (`make -C proj`, `sh proj/ci.sh`), a name of something in your home, also
   as an option's or a variable's value (`--manifest-path=proj/Cargo.toml`,
-  `-Cproj`, `-I/srv/lib`, `PYTHONPATH=proj`). A place not there yet counts
-  by where the folder it would be in leads.
+  `-Cproj`, `-I/srv/lib`, `PYTHONPATH=proj`), each part of a list of paths
+  (`PYTHONPATH=lib:proj`, `-cp app.jar:proj/*`), the path of a URL
+  (`file:///srv/pkg`) and the file of `@file`. A place not there yet counts
+  by where the folder it would be in leads, and a link whose target is gone
+  by where that target would be.
 
-The node judges this as you, from your home, before each call; `cap add`
-and `cap edit` ask the running node and warn of it. Keep what such a command reads on its
+The node judges this as you, from your home, before each call; the center
+is told only that the call is refused, and the node's audit log says which
+place. `cap add` and `cap edit` ask the running node and warn of it (not for
+a capability this node does not offer). Keep what such a command reads on its
 own (its configuration, a file a script loads) out of those folders too: the
 node cannot see what a program reads.
 
