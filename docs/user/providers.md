@@ -199,9 +199,12 @@ syncs into a folder of yours can write them. Let such an action run only
 where every folder with `w` can take that, or switch it `off`.
 
 The node checks the path when the call comes; the program reads or writes it
-afterwards with your rights, so a link put in or swapped in between is not
-caught: a command with `w` in a folder can make one.
-Allow only programs you trust.
+afterwards with its own account's rights (yours, or root's for a program
+root runs), so a link put in or swapped in between is not caught: a command
+with `w` in a folder can make one. Allow only programs you trust. A program
+root runs reaches with such a link everything root may read or write, so
+let it take no paths in a folder a center may write in: switch its actions
+that take paths `off` for such a center, or run the program as yourself.
 
 When the program exits, its capabilities leave what `list` shows the centers,
 and a call that was waiting for it fails with `unavailable`.

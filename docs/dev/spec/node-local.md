@@ -1538,8 +1538,13 @@ is refused as on the owner socket, and one with `no_new_privs` (every
 confined command keeps it) too, told so: `refused: this program runs with
 no_new_privs, …`. The node reads the process's status and parents for that
 with the same rights it looks at its program with (below), so a `/proc`
-mounted `hidepid` hides nothing from it; a status it cannot read refuses
-(`refused: the node cannot tell how the program that asks runs`). The
+mounted `hidepid` hides no command that runs as the caller's account; a
+status it cannot read refuses (`refused: the node cannot tell how the
+program that asks runs`). A command that runs as root (the sudo list, or
+root as its account) keeps no `no_new_privs`, so a program it starts as the
+owner through two or more of root's processes may pass where `/proc` hides
+root's processes from the owner: the check is a guard against mistakes, as
+the owner socket's is. The
 provider socket takes `hello` only.
 
 The provider sends one request, `hello`, with the control socket's token on
@@ -1657,8 +1662,10 @@ owner or root, while the walk is `nerve-run`'s), or as root while the node is
 not root (a walk with root's file ids, `account::FsAs`, keeps the node's
 rights, not root's), a folder the walk may not list refuses the call (`<path> holds a folder the node may not look into, so
 it cannot tell where the links there lead`), as the program could follow a
-link there; where both are one account, such a folder is left out, as the
-program cannot list it either. The node judges the
+link there, and so does an entry whose type the walk cannot tell (on a
+filesystem that names no types, in a folder the walk may list but not
+enter); where both are one account, such a folder or entry is left out, as
+the program cannot look there either. The node judges the
 place each link leads to in the stead of the path it lies below, with the
 same access and the call's other paths; one the call may not reach refuses
 it, and the refusal names the path handed over and the link, not where it
@@ -1704,8 +1711,12 @@ answer. The provider learns nothing of the center: not its name, its session
 or its policy.
 
 The path is checked when the call comes; the provider uses it afterwards
-with the owner's rights, so a link put in or swapped in between is not caught. A
-provider is a program the owner allowed and trusts.
+with its own account's rights (the owner's, or root's for a program of root
+on the installed node), so a link put in or swapped in between is not
+caught. A provider is a program the owner allowed and trusts. For root's
+program such a link reaches root's rights, also from a command of
+`nerve-run` with `w` in a granted folder; the owner keeps its actions that
+take paths away from the folders a center may write in.
 
 A center with the settings grant may add allow rules and `on` entries for a
 provider's capability like for any other, and take away `off` and `hidden`

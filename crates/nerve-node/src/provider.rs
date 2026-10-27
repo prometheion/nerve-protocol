@@ -473,9 +473,14 @@ fn no_new_privs(pid: u32) -> Result<bool, String> {
 
 /// `pid` and its parents, up to the first one that cannot be read. One
 /// that cannot be read, as the account that asks, belongs to another
-/// account, and a process of a command never becomes another account's
-/// (`no_new_privs` keeps a setuid program from changing it), so no command
-/// of the node lies above it that the caller descends from.
+/// account. A command that runs as the caller's account keeps
+/// `no_new_privs`, so no process of it becomes another account's (a setuid
+/// program cannot change it), and the caller is refused for that flag if
+/// not for its chain. A command that runs as root (the sudo list, or root
+/// as its account) sets no `no_new_privs`: a process it starts as the
+/// caller's account through several of root's in between can lose the
+/// command from its chain where `/proc` is mounted `hidepid`. The check is
+/// a guard against mistakes, as the owner socket's is.
 #[cfg(target_os = "linux")]
 fn ancestry(pid: u32) -> Vec<u32> {
     let mut chain = vec![pid];
