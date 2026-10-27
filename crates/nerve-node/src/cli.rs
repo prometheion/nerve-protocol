@@ -9124,6 +9124,15 @@ mod tests {
         }
     }
 
+    /// A full path of a program on this platform, from `/`-separated parts.
+    fn program_path(parts: &str) -> String {
+        if cfg!(windows) {
+            format!("C:\\{}", parts.replace('/', "\\"))
+        } else {
+            format!("/{parts}")
+        }
+    }
+
     /// `cap ls` lists every action of the node's own capabilities with its
     /// effect, where it comes from and each center's setting (`--center`:
     /// that one's), a setting for what nothing offers now, and the programs
@@ -9131,17 +9140,14 @@ mod tests {
     #[test]
     fn cap_ls_lists_every_capability_with_its_effect_and_settings() {
         let (_d, paths) = setup(&["home", "lab"]);
+        let desk = program_path("usr/bin/desk");
         run(
             &paths,
             &["cap", "set", "fs.write", "off", "--center", "home"],
         )
         .unwrap();
         run(&paths, &["cap", "set", "lamp", "on", "--center", "lab"]).unwrap();
-        run(
-            &paths,
-            &["cap", "provider", "allow", "desk", "/usr/bin/desk"],
-        )
-        .unwrap();
+        run(&paths, &["cap", "provider", "allow", "desk", &desk]).unwrap();
         let ls = run(&paths, &["cap", "ls"]).unwrap();
         let line = |name: &str| {
             ls.lines()
@@ -9162,7 +9168,7 @@ mod tests {
         assert!(ls.contains("lab: lamp on (offered by nothing now)"), "{ls}");
         assert!(ls.contains("the node does not run"), "{ls}");
         assert!(
-            ls.contains("program desk: /usr/bin/desk, the node does not run"),
+            ls.contains(&format!("program desk: {desk}, the node does not run")),
             "{ls}"
         );
         let one = run(&paths, &["cap", "ls", "--center", "lab"]).unwrap();
@@ -9183,7 +9189,7 @@ mod tests {
         assert_eq!(v["running"], false, "{v}");
         assert_eq!(
             v["programs"],
-            json!([{"name": "desk", "exe": "/usr/bin/desk", "attached": null}])
+            json!([{"name": "desk", "exe": desk, "attached": null}])
         );
         // Two centers and none picked: no one center's switches.
         assert!(v.get("known").is_none(), "{v}");
@@ -9198,14 +9204,19 @@ mod tests {
     #[test]
     fn cap_provider_allows_lists_and_removes_programs() {
         let (_d, paths) = setup(&["home"]);
-        let said = run(&paths, &["cap", "provider", "allow", "desk", "/usr/bin/a"]).unwrap();
+        let (a, b, lamp) = (
+            program_path("usr/bin/a"),
+            program_path("usr/bin/b"),
+            program_path("opt/lamp"),
+        );
+        let said = run(&paths, &["cap", "provider", "allow", "desk", &a]).unwrap();
         // A stopped node takes it at its next start, and is told so.
         assert!(
-            said.starts_with("provider desk allowed: /usr/bin/a\n"),
+            said.starts_with(&format!("provider desk allowed: {a}\n")),
             "{said}"
         );
-        run(&paths, &["cap", "provider", "allow", "desk", "/usr/bin/b"]).unwrap();
-        run(&paths, &["cap", "provider", "allow", "lamp-2", "/opt/lamp"]).unwrap();
+        run(&paths, &["cap", "provider", "allow", "desk", &b]).unwrap();
+        run(&paths, &["cap", "provider", "allow", "lamp-2", &lamp]).unwrap();
         let cfg =
             NodeConfig::parse(&std::fs::read_to_string(paths.config_file()).unwrap()).unwrap();
         let allowed: Vec<(&str, &str)> = cfg
@@ -9214,22 +9225,24 @@ mod tests {
             .iter()
             .map(|p| (p.name.as_str(), p.exe.as_str()))
             .collect();
-        assert_eq!(allowed, [("desk", "/usr/bin/b"), ("lamp-2", "/opt/lamp")]);
+        assert_eq!(allowed, [("desk", b.as_str()), ("lamp-2", lamp.as_str())]);
         assert_eq!(
             run(&paths, &["cap", "provider", "ls"]).unwrap(),
-            "program desk: /usr/bin/b, the node does not run\n\
-             program lamp-2: /opt/lamp, the node does not run\n"
+            format!(
+                "program desk: {b}, the node does not run\nprogram lamp-2: {lamp}, the node does \
+                 not run\n"
+            )
         );
         let v = json_of(&paths, &["cap", "provider", "ls"]);
         assert_eq!(v["programs"][1]["name"], "lamp-2", "{v}");
         assert_eq!(v["running"], false, "{v}");
         for (bad, why) in [
             (
-                &["cap", "provider", "allow", "Desk", "/usr/bin/a"][..],
+                &["cap", "provider", "allow", "Desk", &a][..],
                 "cannot name a provider",
             ),
             (
-                &["cap", "provider", "allow", "node", "/usr/bin/a"],
+                &["cap", "provider", "allow", "node", &a],
                 "cannot name a provider",
             ),
             (
