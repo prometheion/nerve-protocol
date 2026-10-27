@@ -1393,11 +1393,6 @@ mod tests {
         }
     }
 
-    /// The links below a folder handed to a program, and where they lead:
-    /// a link to a folder is looked into, each folder once; a link that
-    /// leads nowhere counts only for a write, at the place it names. Too
-    /// many entries, and nothing can be told.
-    #[cfg(unix)]
     /// A folder the walk may not list is left out where the program runs as
     /// the walking account, which could not list it either, and refuses the
     /// call where it runs as another, which could follow a link in it. The
@@ -1437,6 +1432,11 @@ mod tests {
         );
     }
 
+    /// The links below a folder handed to a program, and where they lead:
+    /// a link to a folder is looked into, each folder once; a link that
+    /// leads nowhere counts only for a write, at the place it names. Too
+    /// many entries, and nothing can be told.
+    #[cfg(unix)]
     #[test]
     fn the_links_below_a_handed_folder_are_found() {
         use std::os::unix::fs::symlink;

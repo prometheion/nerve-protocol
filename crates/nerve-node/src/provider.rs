@@ -33,7 +33,9 @@ use nerve_proto::descriptor::{Action, Capability, Effect, Exposure, bad_member_n
 use nerve_proto::schema::{self, Role};
 use nerve_proto::{ErrorCode, RpcError};
 
-use crate::daemon::{Shared, lock};
+#[cfg(unix)]
+use crate::daemon::Shared;
+use crate::daemon::lock;
 
 /// The capabilities and profiles that are the node's own, and the ones the
 /// center serves itself on every node (`job`, `stream`): a provider may not
@@ -372,6 +374,7 @@ fn compare(pid: u32, allowed: &Path) -> Result<(PathBuf, bool), String> {
 
 /// Who asks to attach: the account and the process the kernel names for
 /// the caller, and that process's pidfd where the socket gave one.
+#[cfg(unix)]
 pub(crate) struct Caller {
     pub uid: u32,
     pub pid: Option<u32>,
@@ -380,6 +383,7 @@ pub(crate) struct Caller {
 
 /// Why a program of root is refused where the node cannot tell which one
 /// it is.
+#[cfg(target_os = "linux")]
 const ROOT_UNTOLD: &str = "refused: the node cannot tell which program of root asks";
 
 /// The program `pid` of the account `uid` runs, and whether it is the one
@@ -391,6 +395,7 @@ const ROOT_UNTOLD: &str = "refused: the node cannot tell which program of root a
 /// (crate::account::FsAs). For root it starts `exe` as root to look
 /// ([`check_main`]), as it starts root's commands: the node itself holds
 /// too few rights to see a process of root's. Blocks.
+#[cfg(unix)]
 fn identify(
     uid: u32,
     pid: u32,
@@ -624,6 +629,7 @@ fn capabilities(
 /// attaches it as the provider it names when `providers.allowed` names that
 /// provider with the program it runs. The answer keeps the connection
 /// ([`nerve_transport::ctl::Reply::Session`]); its end detaches it.
+#[cfg(unix)]
 pub(crate) async fn attach(
     shared: &Arc<Shared>,
     params: Value,
@@ -639,6 +645,7 @@ pub(crate) async fn attach(
     }
 }
 
+#[cfg(unix)]
 async fn check(
     shared: &Arc<Shared>,
     params: Value,
