@@ -352,6 +352,17 @@ pub fn links_below(
                     Ok(rd) => rd,
                     // Gone since it was found: nothing there to follow.
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    // The folder handed over is the one it may not list,
+                    // most often one granted `w` without `r`: the walk may
+                    // enter it but not list it. Saying so points at the
+                    // grant, not at a closed folder below it.
+                    Err(_) if closed == Closed::Refuse && dir == t.path => {
+                        return Err(format!(
+                            "{given} is a folder the node may not list (one granted without \
+                             `r`, or one only its owner may enter), so it cannot tell where the \
+                             links in it lead"
+                        ));
+                    }
                     Err(_) if closed == Closed::Refuse => return Err(shut()),
                     Err(_) => continue,
                 };
@@ -1452,6 +1463,42 @@ mod tests {
                 "{} holds a folder the node may not look into, so it cannot tell where the \
                  links there lead",
                 to_wire(&proj)
+            )
+        );
+    }
+
+    /// A handed folder the walk may enter but not list (granted `w`
+    /// without `r`) refuses another account's program with a text that
+    /// names that folder as the one it may not list, and is left out for
+    /// the walking account's.
+    #[cfg(unix)]
+    #[test]
+    fn a_handed_folder_the_walk_may_not_list_names_itself() {
+        use std::os::unix::fs::PermissionsExt;
+        if nerve_transport::net::euid() == 0 {
+            eprintln!("skipped: root lists every folder");
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let inbox = d.path().canonicalize().unwrap().join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::set_permissions(&inbox, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let handed = [Target {
+            path: inbox.clone(),
+            access: PathAccess::Write,
+            holds: true,
+        }];
+        let mut pass = |_: &Link| None;
+        let skipped = links_below(&handed, LINKS_LIMIT, Closed::Skip, &GOES_ON, &mut pass);
+        let refused = links_below(&handed, LINKS_LIMIT, Closed::Refuse, &GOES_ON, &mut pass);
+        std::fs::set_permissions(&inbox, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(skipped, Ok(()));
+        assert_eq!(
+            refused.unwrap_err(),
+            format!(
+                "{} is a folder the node may not list (one granted without `r`, or one only \
+                 its owner may enter), so it cannot tell where the links in it lead",
+                to_wire(&inbox)
             )
         );
     }

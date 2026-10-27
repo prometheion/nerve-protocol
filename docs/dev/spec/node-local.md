@@ -1664,7 +1664,10 @@ program runs as another account than the walk (on the installed node: the
 owner or root, while the walk is `nerve-run`'s), or as root while the node is
 not root (a walk with root's file ids, `account::FsAs`, keeps the node's
 rights, not root's), a folder the walk may not list refuses the call (`<path> holds a folder the node may not look into, so
-it cannot tell where the links there lead`), as the program could follow a
+it cannot tell where the links there lead`; where it is the handed folder
+itself, as one granted `w` without `r` is, `<path> is a folder the node may
+not list (one granted without `r`, or one only its owner may enter), so it
+cannot tell where the links in it lead`), as the program could follow a
 link there, and so does an entry whose type the walk cannot tell (on a
 filesystem that names no types, in a folder the walk may list but not
 enter); where both are one account, such a folder or entry is left out, as

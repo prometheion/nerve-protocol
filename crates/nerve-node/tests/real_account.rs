@@ -1021,13 +1021,21 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     let proj = base.join("proj");
     let shut = proj.join("shut");
     std::fs::create_dir_all(&shut).unwrap();
-    std::fs::create_dir_all(home.join(".ssh")).unwrap();
-    std::fs::write(home.join(".ssh/id_b4"), "key\n").unwrap();
+    // The account may be one the tester logs in with: what its ~/.ssh held
+    // stays as it was, and the folder goes again only where the test made it.
+    let ssh = home.join(".ssh");
+    let made_ssh = !ssh.exists();
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(ssh.join("id_b4"), "key\n").unwrap();
     std::fs::write(proj.join("inside.txt"), "inside-line\n").unwrap();
     std::fs::write(base.join("script.py"), PROVIDER_PY).unwrap();
     std::os::unix::fs::symlink(home.join(".ssh/id_b4"), shut.join("key")).unwrap();
     chown(&base);
-    chown(&home.join(".ssh"));
+    chown(&ssh.join("id_b4"));
+    if made_ssh {
+        chown(&ssh);
+        chmod(&ssh, "700");
+    }
     chmod(&base, "755");
     chmod(&base.join("script.py"), "644");
     // Files in nerve-run's own /tmp: one only the owner may read.
@@ -1190,5 +1198,8 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     let _ = std::fs::remove_file(tmp_closed);
     let _ = std::fs::remove_file(open_copy);
     std::fs::remove_dir_all(&base).unwrap();
-    std::fs::remove_dir_all(home.join(".ssh")).unwrap();
+    std::fs::remove_file(ssh.join("id_b4")).unwrap();
+    if made_ssh {
+        std::fs::remove_dir(&ssh).unwrap();
+    }
 }

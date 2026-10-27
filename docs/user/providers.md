@@ -178,7 +178,10 @@ On the installed node the program runs as you (or root) and the search as
 `nerve-run`: a folder below that `nerve-run` may not look into, which your
 program could, refuses the call, since the node cannot tell where the links
 there lead. Give `nerve-run` that folder too, or hand the program a folder
-that does not hold it. A program of root is held so whenever the node itself
+that does not hold it. A folder granted `w` or `x` without `r` counts as one
+`nerve-run` may not look into: it may make entries there but not list them.
+So a program handed such a folder, or a folder that holds one, is refused;
+grant it `r` too, or hand the program a file in it. A program of root is held so whenever the node itself
 does not run as root, also where root is the owner and the search runs as
 root: the node still lacks root's rights to look into another account's
 folder.
