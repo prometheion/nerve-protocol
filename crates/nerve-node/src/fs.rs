@@ -1515,6 +1515,10 @@ mod tests {
             Err("refused".into())
         );
         assert_eq!(judged, [root.join("proj/far")]);
+        // Without the loop for the limit: which of the two a walk meets first
+        // follows the order a file system lists a folder in (ext4 and btrfs
+        // differ).
+        std::fs::remove_file(far.join("loop")).unwrap();
         let mut pass = |_: &Link| None;
         let e = links_below(&proj, 5, &GOES_ON, &mut pass).unwrap_err();
         assert!(
@@ -1523,6 +1527,7 @@ mod tests {
             ),
             "{e}"
         );
+        symlink(far.join("loop"), far.join("loop")).unwrap();
         let e = links_below(&proj, LINKS_LIMIT, &GOES_ON, &mut pass).unwrap_err();
         assert!(e.contains("far/loop) the node cannot follow"), "{e}");
     }
