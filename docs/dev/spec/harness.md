@@ -201,7 +201,8 @@ the `result` of the envelope described below.
   in the folders marked `r` and, outside every folder, what is open to every
   account on the machine, except protected paths and the node's own files,
   that an action of any capability but `fs` may name a file there, never a
-  folder, and may write only in the folders marked `w` (`exec.run`'s advice says
+  folder, and that for such an action a folder marked `own` counts as none
+  (it is the command account's, not the owner's), and may write only in the folders marked `w` (`exec.run`'s advice says
   none of that, only that a command starts in a folder marked `x`; details of
   both give both), else
   that calls may name paths only in these folders and that a command starts

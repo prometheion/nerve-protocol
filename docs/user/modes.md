@@ -71,7 +71,9 @@ closed to `nerve-run`, nor the node's own process under `/proc`. Writing,
 commands, and a path a write or a run reads stay in the folders. A program
 that reads a path for a call ([provider](providers.md)) gets the call outside
 the folders only for a file open to every account, never for a folder, since
-it would read below it with your rights. With
+it would read below it with your rights. `nerve-run`'s own folders (its home,
+`/tmp`, `/var/tmp`, marked `own`) are no folders for a program: it runs with
+your rights, so only the folders you gave count for it. With
 [Landlock](#the-account-nerve-run-linux), a command of `nerve-run` reads less
 than a file call: the system's folders and its `r` and `x` folders.
 
