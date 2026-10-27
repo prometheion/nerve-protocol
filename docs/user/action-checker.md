@@ -329,7 +329,8 @@ allow-and-log if you would rather let calls through when the model is down.
 
 A session becomes **tainted** once a call of it returned outside content: a
 successful read, a search, or a command's output, also output read from a
-running command's stream. While taint is on, a tainted
+running command's stream, and what a failed capability of the machine's
+`node.toml` printed to stderr. While taint is on, a tainted
 session is marked for the model (and the "only tainted sessions" scope applies).
 The idea is that a session that has read untrusted content is the one where a
 later dangerous call is most suspicious.

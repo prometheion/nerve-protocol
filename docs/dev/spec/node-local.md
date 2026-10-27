@@ -559,12 +559,20 @@ Which ones a node offers, with `provider: "config"`, one capability per
 and on a node run by hand only those with `account = "owner"` (it has no
 `nerve-run`). Windows parses them and offers none. The descriptor cuts them by
 the effect table like any capability (§3), and only the owner turns one on
-that senses or actuates (§5, `settings.set`). Since a center's earlier `on`
-of the capability (or of the action while it read) or allow rule would cover
-an action that comes to sense or actuate, `cap add` of such an action and
-`cap edit` that changes one to it write `caps."cap.action" = "off"` for each
-center whose `on` or allow rule covers it (a center cannot remove that), and
-name those centers.
+that senses or actuates (§5, `settings.set`); for that every `[[capability]]`
+counts, offered on this node or not, so a center cannot turn on `probe` while
+a declared `probe.cam` senses for another platform. Since a center's earlier
+`on` of the capability (or of the action while it read) or allow rule would
+cover an action that comes to sense or actuate (new, or one that did neither
+before), every write of the config writes `caps."cap.action" = "off"` for
+each center whose `on` or allow rule covers it (a center cannot remove that):
+`cap add` and `cap edit` (which name those centers), the daemon's
+`config.write`, and its `config.accept` before any call sees the file (its
+answer's `held` lists `[center, action]` pairs). An `on` of that very action
+the same change brings is the owner's and stays. A `config accept` while no
+node runs takes the file as it is, since nothing tells what it held before.
+`descriptor` marks an action of `account = "nerve-run"` `as_account` only for
+a center whose commands run as `nerve-run` (protocol.md §6).
 
 A call is decided like a provider's (§7, Paths), then runs:
 
@@ -574,11 +582,15 @@ A call is decided like a provider's (§7, Paths), then runs:
 | `owner` | the owner (root where root is the owner), the owner's home; a node by hand: its own user | as a program's (§7): the granted folders only, as the pairing's command account, closed folders refusing the walk | none |
 
 An `owner` one is refused `forbidden` (and audited so) before the gate when
-its program (looked up in the node's `PATH` where it is a bare name) or a fixed
-element that is an absolute path lies, as written or where it leads (looked at
-as the owner), at or below a place a center's commands may write: a `w` folder
-of any center, `/tmp`, `/var/tmp`, `nerve-run`'s home. `cap add` and `cap edit`
-warn of it.
+one of these lies, as written or where it leads (looked at as the owner), at
+or below a place a center's commands may write (a `w` folder of any center,
+`/tmp`, `/var/tmp`, `nerve-run`'s home): the folder it starts in (the owner's
+home; a node by hand: its home); its program (looked up in the node's `PATH`
+where it is a bare name, and that file is what runs); a fixed element that
+holds a `/` or names something in the folder it starts in, also as the part
+after `=` of an element that starts with `-`, read from that folder where it is
+not absolute. `cap add` and `cap edit` warn of it, and of a string argument
+without `x-nerve-path` (passed as given, judged by nothing).
 
 Both count toward `limits.max_running`, run in a cgroup of their own with the
 default `limits.command`, and end at `timeout_secs` (else
@@ -588,8 +600,11 @@ ends with a note), or stdout parsed as JSON and validated against the result
 schema (`io` when it is not; `too_large` when stdout was cut; stderr past the
 cap cuts neither). An exit code other than 0, a signal or a memory kill
 (whatever the exit code; audited `killed`/`memory` as for `exec.run`) is an
-`io` error naming it, with `data.exit_code` and `data.stderr` (the first 16
-KiB).
+`io` error whose message names it ("<name> failed: exit code 2"), with
+`data.exit_code` and `data.stderr` (the first 16 KiB, left out when it is
+blank). What the command printed stays out of the message: it is the
+command's text, not the node's, and the center hands it on as device content
+(protocol.md §6).
 
 ### Commands
 

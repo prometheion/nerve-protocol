@@ -793,6 +793,21 @@ pub fn by_node(e: &RpcError) -> bool {
     e.data.as_ref().and_then(|d| d.get("from")) == Some(&json!("node"))
 }
 
+/// What the command of a failed call printed to stderr, where the node's
+/// error carries it (`data.stderr`, a capability of its config that failed:
+/// node-local.md §2). Those are the command's words, content from that
+/// machine as a result is, not the node's.
+pub fn output_of(e: &RpcError) -> Option<&str> {
+    if !by_node(e) {
+        return None;
+    }
+    e.data
+        .as_ref()?
+        .get("stderr")?
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+}
+
 fn lost() -> RpcError {
     RpcError::new(ErrorCode::ConnectionLost, "the link to the node ended")
 }

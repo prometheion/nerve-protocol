@@ -2659,8 +2659,10 @@ impl Center {
     ) {
         let ms = started.elapsed().as_millis() as u64;
         // A call that returned outside content taints the session, so the
-        // model's "only tainted sessions" scope and its state can take it in.
-        if failed.is_none() && self.checker().taint_on() && checker::taints(route.effect) {
+        // model's "only tainted sessions" scope and its state can take it in:
+        // a result, or what a failed command printed (link::output_of).
+        let outside = failed.is_none_or(|e| crate::link::output_of(e).is_some());
+        if outside && self.checker().taint_on() && checker::taints(route.effect) {
             sess.set_tainted();
             self.changed(Change::Sessions);
         }

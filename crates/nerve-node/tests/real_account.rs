@@ -1225,7 +1225,9 @@ async fn config_call(conn: &mut Conn<TcpStream>, name: &str, args: Value) -> Res
 /// with `nerve-run`'s access; under Landlock it reaches only the folders,
 /// the system's and its own (CI's keyring job runs it there); its timeout
 /// ends it; and in a pairing whose commands run as the owner it still runs
-/// as `nerve-run`, held to its own folders. For a test machine only, as
+/// as `nerve-run`, held to its own folders (a granted folder open to every
+/// account included), and the center is no longer told it is a command of
+/// the pairing's account. For a test machine only, as
 /// root: it installs the node and removes it again.
 ///
 /// `NERVE_NODE_REAL=<the nerve-node to install> NERVE_REAL_OWNER=<an account
@@ -1280,6 +1282,14 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     std::fs::write(open.join("open.txt"), "open-line\n").unwrap();
     chmod(&open, "755");
     chmod(&open.join("open.txt"), "644");
+    // A granted folder every account may read: only Landlock can hold a
+    // command of nerve-run away from it.
+    let shared = PathBuf::from("/srv/nerve-b5-shared");
+    let _ = std::fs::remove_dir_all(&shared);
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(shared.join("shared.txt"), "shared-line\n").unwrap();
+    chmod(&shared, "755");
+    chmod(&shared.join("shared.txt"), "644");
     let scratch = "/tmp/nerve-b5-scratch";
     let _ = std::fs::remove_file(scratch);
     let landlock = nerve_sandbox::Confinement::detect().landlock_abi.is_some();
@@ -1289,6 +1299,8 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     let (ok, said) = as_owner(&owner, &["center", "add", &link, "--yes"]);
     assert!(ok, "{said}");
     let (ok, said) = as_owner(&owner, &["folder", "add", proj.to_str().unwrap(), "+rw"]);
+    assert!(ok, "{said}");
+    let (ok, said) = as_owner(&owner, &["folder", "add", shared.to_str().unwrap(), "+r"]);
     assert!(ok, "{said}");
     let path_params = r#"{"type": "object", "properties": {"path": {"type": "string", "x-nerve-path": "read"}}, "required": ["path"]}"#;
     let word_params = r#"{"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}, "required": ["a", "b"]}"#;
@@ -1403,6 +1415,9 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
         .await
         .unwrap();
     assert_eq!(r, json!("/var/lib/nerve-run\n"));
+    // The center is told it is a command of the pairing's command account,
+    // which nerve-run is here.
+    assert_eq!(as_account(&mut conn, "files.show").await, json!(true));
 
     // The arguments stay data.
     let a = "; touch /tmp/nerve-b5-ran";
@@ -1423,6 +1438,14 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     .await
     .unwrap();
     assert_eq!(r, json!("inside-line\n"));
+    let r = config_call(
+        &mut conn,
+        "files.show",
+        json!({"path": shared.join("shared.txt").to_str().unwrap()}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r, json!("shared-line\n"));
     let e = config_call(
         &mut conn,
         "files.show",
@@ -1502,15 +1525,24 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
         .await
         .unwrap();
     assert_eq!(r, json!("put\n"));
+    // A granted folder every account may read: the pairing's folders are
+    // the owner's now, so Landlock holds the command away from it; without
+    // Landlock nerve-run reads it.
     let r = config_call(
         &mut conn,
         "files.show",
-        json!({"path": proj.join("inside.txt").to_str().unwrap()}),
+        json!({"path": shared.join("shared.txt").to_str().unwrap()}),
     )
     .await;
     if landlock {
-        assert!(r.is_err(), "{r:?}");
+        let e = r.unwrap_err();
+        assert!(e.contains("files.show failed: exit code 1"), "{e}");
+    } else {
+        assert_eq!(r.unwrap(), json!("shared-line\n"));
     }
+    // The command account the center knows is the owner here: the action
+    // is not marked as one of its commands.
+    assert_eq!(as_account(&mut conn, "files.show").await, Value::Null);
     let audit = as_owner(&owner, &["audit"]).1;
     assert!(
         audit.contains("who.am  who.am  allowed")
@@ -1525,5 +1557,24 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     assert!(ok, "{said}");
     std::fs::remove_dir_all(&base).unwrap();
     std::fs::remove_dir_all(&open).unwrap();
+    std::fs::remove_dir_all(&shared).unwrap();
     let _ = std::fs::remove_file(scratch);
+}
+
+/// The `as_account` mark of the action `name` in the descriptor the center
+/// gets now (null when it is not there).
+async fn as_account(conn: &mut Conn<TcpStream>, name: &str) -> Value {
+    let (cap, action) = name.split_once('.').unwrap();
+    let d = conn
+        .call("describe", json!({"detail": "full"}), WAIT)
+        .await
+        .unwrap()
+        .expect("describe");
+    d["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == cap)
+        .map(|c| c["actions"][action]["as_account"].clone())
+        .unwrap_or_default()
 }

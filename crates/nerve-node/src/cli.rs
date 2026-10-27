@@ -65,7 +65,7 @@ pub enum Cmd {
     /// Keep the lists of commands that are allowed, forbidden or run with sudo.
     #[command(subcommand)]
     Rule(RuleCmd),
-    /// Turn capabilities and single actions on or off.
+    /// Turn capabilities and single actions on or off, declare capabilities of your own in node.toml, and allow the programs that add capabilities.
     #[command(subcommand)]
     Cap(CapCmd),
     /// Use sudo for the commands on the sudo list.
@@ -319,7 +319,7 @@ pub enum CapCmd {
         #[command(flatten)]
         center: CenterArg,
     },
-    /// Show every capability: the node's own and those of the programs you allow, each action with what it does (its effect), where it comes from, and how each center has it set. A stopped node shows its own and the programs you allow.
+    /// Show every capability: the node's own, those of node.toml and those of the programs you allow, each action with what it does (its effect), where it comes from, and how each center has it set. A stopped node shows its own and those of node.toml, and lists the programs you allow without their capabilities.
     Ls {
         /// Only this center's settings.
         #[arg(long)]
@@ -2151,8 +2151,9 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                         "a capability {name} is declared already; `cap edit` changes it"
                     ));
                 }
+                let before = cfg.clone();
                 cfg.capabilities.push(c.clone());
-                *held.lock().unwrap() = hold_for_owner(cfg, &c);
+                *held.lock().unwrap() = crate::config_cap::hold_new(&before, cfg);
                 Ok(())
             })
             .await?;
@@ -2179,12 +2180,12 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             let input = cap_stdin(&spec)?;
             let held = std::sync::Mutex::new(Vec::new());
             edit(&paths, |cfg| {
+                let before = cfg.clone();
                 let c = cfg
                     .capabilities
                     .iter_mut()
                     .find(|d| d.name == name)
                     .ok_or_else(|| format!("no capability {name} is declared"))?;
-                let was = c.effect;
                 if let Some(e) = &spec.effect {
                     c.effect = parse_enum(e, "read, write, execute, sense or actuate")?;
                 }
@@ -2192,14 +2193,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                     c.command = command.clone();
                 }
                 cap_spec(&spec, input.as_deref(), c)?;
-                // Only an action that comes to sense or actuate now: one
-                // that did already was held when it came to.
-                let c = c.clone();
-                *held.lock().unwrap() = if senses(was) {
-                    Vec::new()
-                } else {
-                    hold_for_owner(cfg, &c)
-                };
+                *held.lock().unwrap() = crate::config_cap::hold_new(&before, cfg);
                 Ok(())
             })
             .await?;
@@ -3621,38 +3615,32 @@ fn cap_line(c: &nerve_policy::config::ConfigCapability) -> String {
     line
 }
 
-/// Whether `effect` senses or acts on the world, which only the owner turns
-/// on for a center.
-fn senses(effect: nerve_proto::descriptor::Effect) -> bool {
-    use nerve_proto::descriptor::Effect;
-    matches!(effect, Effect::Sense | Effect::Actuate)
+/// The string arguments of `c` that are not marked as paths
+/// (`x-nerve-path`): the node judges no path in them.
+fn unmarked_strings(c: &nerve_policy::config::ConfigCapability) -> Vec<String> {
+    let params = c.params_schema();
+    let Some(props) = params.get("properties").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let takes_string = |t: &Value| match t {
+        Value::String(t) => t == "string",
+        Value::Array(ts) => ts.iter().any(|t| t == "string"),
+        _ => false,
+    };
+    props
+        .iter()
+        .filter(|(_, p)| p.get("x-nerve-path").is_none())
+        .filter(|(_, p)| p.get("type").is_some_and(takes_string))
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
-/// Where `c` has come to sense or actuate, switches it off for every center
-/// whose earlier switch (`cap set` of its capability, or of the action while
-/// it only read) or allow rule would let that center use it at once: such a
-/// switch was set for what it did then, perhaps by the center itself, and
-/// only the owner turns on what senses or actuates. A center cannot take
-/// that `off` away. Returns those centers.
-fn hold_for_owner(cfg: &mut NodeConfig, c: &nerve_policy::config::ConfigCapability) -> Vec<String> {
-    if !senses(c.effect) {
-        return Vec::new();
-    }
-    let (cap, action) = c.split();
-    let mut held = Vec::new();
-    for e in &mut cfg.centers {
-        let p = &mut e.policy;
-        let covered = match p.cap_setting(cap, Some(action)) {
-            Some(CapSetting::Off | CapSetting::Hidden) => false,
-            Some(CapSetting::On) => true,
-            None => rules::offers(&p.allow, cap, action),
-        };
-        if covered {
-            p.caps.insert(c.name.clone(), CapSetting::Off);
-            held.push(e.name.clone());
-        }
-    }
-    held
+/// What the owner is told of an action `name` that came to sense or
+/// actuate and was switched off for `center` (crate::config_cap::hold_new).
+fn held_note(center: &str, name: &str) -> String {
+    format!(
+        "{center}: a switch or allow rule set before covered {name}; it is off there now until you turn it on"
+    )
 }
 
 /// The programs whose rows in `listing` (`caps.list`) offer the capability
@@ -3687,7 +3675,8 @@ fn runs_as_root(paths: &NodePaths) -> bool {
 /// Why the node refuses calls of `c` now, as `crate::config_cap::
 /// written_by_centers` judges it: it runs as the owner and names a place a
 /// center may write (the `w` folders of `cfg`, `/tmp`, `/var/tmp`, and on the
-/// installed node `nerve-run`'s home). Looked at as this process can.
+/// installed node `nerve-run`'s home), or starts there (in this user's
+/// home, as the owner's command does). Looked at as this process can.
 fn written_by_centers(
     cfg: &NodeConfig,
     c: &nerve_policy::config::ConfigCapability,
@@ -3701,7 +3690,12 @@ fn written_by_centers(
     if installed {
         writable.push(crate::account::RUN_HOME.into());
     }
-    crate::config_cap::written_by_centers(c, &writable, std::env::var_os("PATH").as_deref())
+    crate::config_cap::written_by_centers(
+        c,
+        &writable,
+        std::env::var_os("PATH").as_deref(),
+        &crate::paths::home_dir(),
+    )
 }
 
 /// What the owner should know of a capability once `cap add` or `cap edit`
@@ -3711,8 +3705,8 @@ struct CapNotes {
     installed: bool,
     /// Whether `account = "owner"` runs as root here ([`runs_as_root`]).
     root: bool,
-    /// The centers [`hold_for_owner`] switched it off for.
-    held: Vec<String>,
+    /// The centers and actions `crate::config_cap::hold_new` switched off.
+    held: Vec<(String, String)>,
     /// The programs that offered its capability and are let go.
     programs: Vec<String>,
     /// Why the node refuses its calls ([`written_by_centers`]).
@@ -3742,24 +3736,29 @@ impl CapNotes {
                 "Warning: {why}; the node refuses its calls while that holds"
             ));
         }
+        if c.account == RunsAs::Owner {
+            for field in unmarked_strings(c) {
+                notes.push(format!(
+                    "Warning: {} runs as you and passes {{{field}}} as given: if it names a path, no folder, protected path or rule on paths holds it; mark it \"x-nerve-path\": \"read\" or \"write\" in --params",
+                    c.name
+                ));
+            }
+        }
         if c.summary.is_empty() {
             notes.push(format!(
                 "it has no summary, so the agent sees no description of it (cap edit {} --summary TEXT)",
                 c.name
             ));
         }
-        if senses(c.effect) {
+        if crate::config_cap::senses(c.effect) {
             notes.push(format!(
                 "it {}s: a center gets it only once you turn it on for that center (cap set {} on --center NAME), in allowlist mode once you add an allow rule for it",
                 c.effect.as_str(),
                 c.name
             ));
         }
-        for center in &self.held {
-            notes.push(format!(
-                "{center}: a switch or allow rule set before covered {}; it is off there now until you turn it on",
-                c.name
-            ));
+        for (center, name) in &self.held {
+            notes.push(held_note(center, name));
         }
         for p in &self.programs {
             notes.push(format!(
@@ -4263,8 +4262,11 @@ pub const NO_ACCOUNT_TO_CHOOSE: &str = "machine.user is Windows's: on Linux comm
 /// a `[[center]]` entry by its name.
 async fn config_cmd(paths: &NodePaths, c: ConfigCmd, out: &mut dyn Write) -> Result<(), String> {
     if let ConfigCmd::Accept = c {
-        let v = accept(paths).await?;
+        let (v, held) = accept(paths).await?;
         let _ = writeln!(out, "accepted node.toml as version {v}");
+        for (center, name) in held {
+            let _ = writeln!(out, "{}", held_note(&center, &name));
+        }
         return Ok(());
     }
     if let ConfigCmd::Get { key } = &c {
@@ -5286,8 +5288,10 @@ fn pct_decode(s: &str) -> Option<String> {
 }
 
 /// `config accept`: the running daemon takes the file, or, when none runs,
-/// the file is signed here.
-async fn accept(paths: &NodePaths) -> Result<u64, String> {
+/// the file is signed here. Also the centers and actions the daemon
+/// switched off as it took it (crate::config_cap::hold_new); a stopped node
+/// cannot tell what the file had before, so it switches off none.
+async fn accept(paths: &NodePaths) -> Result<(u64, Vec<(String, String)>), String> {
     // Keys already in the keyring move nowhere when the file is taken, so
     // the settings store alone would not refuse it.
     if crate::secrets::stated_storage(paths) == SecretStorage::Keyring
@@ -5307,7 +5311,10 @@ async fn accept(paths: &NodePaths) -> Result<u64, String> {
     )
     .await
     {
-        Ok(v) => return Ok(v["version"].as_u64().unwrap_or_default()),
+        Ok(v) => {
+            let held = serde_json::from_value(v["held"].clone()).unwrap_or_default();
+            return Ok((v["version"].as_u64().unwrap_or_default(), held));
+        }
         Err(e) if e != nerve_transport::ctl::NOT_RUNNING => return Err(e),
         Err(_) => {}
     }
@@ -5316,7 +5323,7 @@ async fn accept(paths: &NodePaths) -> Result<u64, String> {
         Box::new(crate::secrets::NodeSecrets::for_accept(paths)),
         AuditLog::new(paths.audit_log()),
     )?;
-    Ok(v)
+    Ok((v, Vec::new()))
 }
 
 fn as_table(cfg: &NodeConfig) -> Result<toml::Table, String> {
@@ -9927,11 +9934,28 @@ mod tests {
             "{said}"
         );
         assert!(!notes(false, &c).contains("root"));
+        // A string argument with no path mark is passed as given.
+        c.command = vec![
+            "make".into(),
+            "-C".into(),
+            "{dir}".into(),
+            "{n}".into(),
+            "{log}".into(),
+        ];
+        c.params = json!({"type": "object", "required": ["dir", "n", "log"], "properties": {
+            "dir": {"type": "string"}, "n": {"type": "integer"},
+            "log": {"type": "string", "x-nerve-path": "write"}}});
+        let said = notes(false, &c);
+        assert!(
+            said.contains("Warning: x.run runs as you and passes {dir} as given"),
+            "{said}"
+        );
+        assert!(!said.contains("{n}") && !said.contains("{log}"), "{said}");
         c.account = nerve_policy::config::RunsAs::NerveRun;
         c.summary = "Builds.".into();
         let said = notes(true, &c);
         assert!(
-            !said.contains("root") && !said.contains("summary"),
+            !said.contains("root") && !said.contains("summary") && !said.contains("as given"),
             "{said}"
         );
     }

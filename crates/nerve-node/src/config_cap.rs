@@ -53,12 +53,25 @@ pub fn left_out(c: &ConfigCapability, os: &str, installed: bool) -> Option<Strin
 /// The config's capabilities a node on `os` offers: those [`left_out`] does
 /// not leave out.
 pub fn offered_on(cfg: &NodeConfig, os: &str, installed: bool) -> Vec<Capability> {
+    capabilities(
+        cfg.capabilities
+            .iter()
+            .filter(|c| left_out(c, os, installed).is_none()),
+    )
+}
+
+/// Every capability the config declares, offered here or not: what only
+/// the owner may turn on goes by them (crate::provider::Providers::
+/// owner_only), since the node knows ahead what each one will do once it is
+/// offered.
+pub fn declared(cfg: &NodeConfig) -> Vec<Capability> {
+    capabilities(cfg.capabilities.iter())
+}
+
+/// `entries` as capabilities, one per `cap` with its actions.
+fn capabilities<'a>(entries: impl Iterator<Item = &'a ConfigCapability>) -> Vec<Capability> {
     let mut caps: BTreeMap<&str, Capability> = BTreeMap::new();
-    for c in cfg
-        .capabilities
-        .iter()
-        .filter(|c| left_out(c, os, installed).is_none())
-    {
+    for c in entries {
         let (cap, action) = c.split();
         let entry = caps.entry(cap).or_insert_with(|| Capability {
             id: cap.to_string(),
@@ -124,53 +137,141 @@ pub fn confined(
     policy
 }
 
-/// Why the command of `decl`, which runs with the owner's rights, may not
-/// run: its program (looked up in `path`, the `PATH` it runs with, where it
-/// is a bare name) or a fixed element that is a full path lies at or below a
-/// folder of `writable`, where a center's commands may write. A center could
-/// put its own code there (the program, a script, a Makefile) and have it
-/// run as the owner. Each is looked at where it leads, so a link out of
-/// such a folder counts too. The call's arguments are judged by the gate.
+/// The file the program `program` of a command runs: as written where it
+/// names a path, else the first file of that name in `path`, the `PATH` it
+/// runs with. The node runs that file, so `PATH` is looked up once, where
+/// [`written_by_centers`] judged it.
+pub fn program_file(program: &str, path: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
+    if program.contains('/') {
+        return Some(program.into());
+    }
+    path.and_then(|p| {
+        std::env::split_paths(p)
+            .map(|d| d.join(program))
+            .find(|f| f.is_file())
+    })
+}
+
+/// Why the command of `decl`, which runs with the owner's rights in `cwd`,
+/// may not run: `cwd` itself, its program (looked up in `path` where it is a
+/// bare name, [`program_file`]), or a place a fixed element names lies at
+/// or below a folder of `writable`, where a center's commands may write. A
+/// center could put its own code there (the program, a script, a Makefile,
+/// a module the program loads from where it starts) and have it run as the
+/// owner. An element names a place where it is a full path, holds a `/`,
+/// or names something that is there in `cwd`, also as the value of an
+/// option (`--manifest-path=...`); one that is not a full path counts from
+/// `cwd`. Each is looked at where it leads, so a link out of such a folder
+/// counts too. The call's arguments are judged by the gate.
 pub fn written_by_centers(
     decl: &ConfigCapability,
     writable: &[std::path::PathBuf],
     path: Option<&std::ffi::OsStr>,
+    cwd: &std::path::Path,
 ) -> Option<String> {
     use std::path::{Path, PathBuf};
     let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let folders: Vec<PathBuf> = writable.iter().map(|f| real(f)).collect();
-    let program = decl.command.first()?;
-    let found = if program.contains('/') {
-        Some(PathBuf::from(program))
-    } else {
-        path.and_then(|p| {
-            std::env::split_paths(p)
-                .map(|d| d.join(program))
-                .find(|f| f.is_file())
-        })
-    };
-    let fixed = decl.command[1..]
-        .iter()
-        .filter(|e| !(e.starts_with('{') && e.ends_with('}')) && e.starts_with('/'))
-        .map(PathBuf::from);
-    for place in found.into_iter().chain(fixed) {
+    let within = |place: &Path| {
         // Where it leads, and as it is written: a file not there yet may
         // still be put there.
-        for seen in [real(&place), place.clone()] {
-            if let Some(f) = folders
-                .iter()
-                .find(|f| nerve_policy::paths::within(&seen, f))
-            {
-                return Some(format!(
-                    "{} runs as the owner and its command names {}, which lies in {}, where a center may write: that center's code would run with the owner's rights",
-                    decl.name,
-                    place.display(),
-                    f.display()
-                ));
-            }
+        [real(place), place.to_path_buf()]
+            .into_iter()
+            .find_map(|seen| {
+                folders
+                    .iter()
+                    .find(|f| nerve_policy::paths::within(&seen, f))
+                    .cloned()
+            })
+    };
+    let refused = |what: String, f: PathBuf| {
+        format!(
+            "{} runs as the owner and {what}, which lies in {}, where a center may write: that center's code would run with the owner's rights",
+            decl.name,
+            f.display()
+        )
+    };
+    if let Some(f) = within(cwd) {
+        return Some(refused(format!("starts in {}", cwd.display()), f));
+    }
+    let program = decl.command.first()?;
+    let found = program_file(program, path);
+    let named = decl.command[1..]
+        .iter()
+        .filter(|e| !(e.starts_with('{') && e.ends_with('}')))
+        .flat_map(|e| {
+            // The value of `--opt=value` names a place as the element would.
+            let value = e
+                .starts_with('-')
+                .then(|| e.split_once('=').map(|(_, v)| v))
+                .flatten();
+            std::iter::once(e.as_str()).chain(value)
+        })
+        .filter_map(|e| {
+            let place = cwd.join(e);
+            (e.contains('/') || place.symlink_metadata().is_ok()).then_some(place)
+        });
+    for place in found.into_iter().chain(named) {
+        if let Some(f) = within(&place) {
+            return Some(refused(format!("its command names {}", place.display()), f));
         }
     }
     None
+}
+
+/// Whether `effect` senses or acts on the world, which only the owner turns
+/// on for a center.
+pub fn senses(effect: nerve_proto::descriptor::Effect) -> bool {
+    use nerve_proto::descriptor::Effect;
+    matches!(effect, Effect::Sense | Effect::Actuate)
+}
+
+/// Where an action of `after` has come to sense or actuate (new, or one
+/// that did neither in `before`), switches it off for every center whose
+/// earlier switch (`cap set` of its capability, or of the action while it
+/// only read) or allow rule would let that center use it at once: such a
+/// switch was set for what it did then, perhaps by the center itself, and
+/// only the owner turns on what senses or actuates. A center cannot take
+/// that `off` away. Returns those centers, each with the action. Whoever
+/// changes the config's capabilities does it: `cap add` and `cap edit`, and
+/// the node as it takes a file the owner wrote (`config accept`).
+pub fn hold_new(before: &NodeConfig, after: &mut NodeConfig) -> Vec<(String, String)> {
+    use nerve_policy::config::CapSetting;
+    let came: Vec<ConfigCapability> = after
+        .capabilities
+        .iter()
+        .filter(|c| senses(c.effect))
+        .filter(|c| {
+            !before
+                .capabilities
+                .iter()
+                .any(|b| b.name == c.name && senses(b.effect))
+        })
+        .cloned()
+        .collect();
+    let mut held = Vec::new();
+    for c in came {
+        let (cap, action) = c.split();
+        for e in &mut after.centers {
+            // An `on` for this very action that the change itself brings is
+            // the owner's: a center may set none for an action not offered.
+            let on = |p: &nerve_policy::CenterPolicy| p.caps.get(&c.name) == Some(&CapSetting::On);
+            if on(&e.policy) && before.center(&e.name).is_none_or(|b| !on(&b.policy)) {
+                continue;
+            }
+            let p = &mut e.policy;
+            let covered = match p.cap_setting(cap, Some(action)) {
+                Some(CapSetting::Off | CapSetting::Hidden) => false,
+                Some(CapSetting::On) => true,
+                None => nerve_policy::rules::offers(&p.allow, cap, action),
+            };
+            if covered {
+                p.caps.insert(c.name.clone(), CapSetting::Off);
+                held.push((e.name.clone(), c.name.clone()));
+            }
+        }
+    }
+    held
 }
 
 /// The config's entry for `cap.action`.
@@ -188,8 +289,8 @@ pub fn names(cfg: &NodeConfig, cap: &str) -> bool {
 /// (crate::exec::run): what it printed, as text or as JSON that fits the
 /// result schema. A command that did not end with exit code 0, or was killed
 /// for its memory limit (whatever its first process's exit), is an error
-/// with its exit code (or signal, or the reason) and what it printed to
-/// stderr.
+/// whose message gives its exit code (or signal, or the reason), with what
+/// it printed to stderr in its data.
 pub fn result(decl: &ConfigCapability, run: &Value) -> Result<Value, RpcError> {
     let stdout = run["stdout"].as_str().unwrap_or_default();
     let stderr = run["stderr"].as_str().unwrap_or_default();
@@ -207,14 +308,17 @@ pub fn result(decl: &ConfigCapability, run: &Value) -> Result<Value, RpcError> {
             Some((end, _)) => format!("{}…", &stderr[..end]),
             None => stderr.to_string(),
         };
-        let text = if shown.trim().is_empty() {
-            format!("{} failed: {how}", decl.name)
+        // What it printed is the command's, not the node's words: it goes
+        // in `data.stderr`, which the center hands on as content from this
+        // machine (docs/dev/spec/protocol.md §6), never in the message.
+        let text = format!("{} failed: {how}", decl.name);
+        let e = RpcError::new(ErrorCode::Other("io".into()), text)
+            .with("exit_code", run["exit_code"].clone());
+        return Err(if shown.trim().is_empty() {
+            e
         } else {
-            format!("{} failed: {how}; stderr: {}", decl.name, shown.trim_end())
-        };
-        return Err(RpcError::new(ErrorCode::Other("io".into()), text)
-            .with("exit_code", run["exit_code"].clone())
-            .with("stderr", Value::String(shown)));
+            e.with("stderr", Value::String(shown))
+        });
     }
     match &decl.result {
         Output::Text if cut => Ok(Value::String(format!(
@@ -323,6 +427,11 @@ account = "owner"
             json!({"type": "object", "properties": {}, "additionalProperties": false})
         );
         assert!(names(&c, "win") && names(&c, "sensors") && !names(&c, "lamp"));
+        // Declared: also what this node leaves out.
+        assert_eq!(
+            ids(&declared(&c)),
+            ["lin.only", "sensors.list", "sensors.read", "win.only"]
+        );
         assert_eq!(find(&c, "sensors", "list").unwrap().name, "sensors.list");
         assert!(find(&c, "sensors", "other").is_none());
     }
@@ -353,9 +462,10 @@ account = "owner"
     }
 
     /// An owner's command whose program, script or other fixed path lies
-    /// where a center may write is refused, also through `PATH` or a link;
-    /// one that names only places outside, or takes its path from the call,
-    /// is not.
+    /// where a center may write is refused, also through `PATH` or a link,
+    /// named from where it starts or as an option's value, and so is one that
+    /// starts there; one that names only places outside, or takes its path
+    /// from the call, is not.
     #[cfg(unix)]
     #[test]
     fn an_owners_command_may_not_name_what_a_center_writes() {
@@ -391,9 +501,19 @@ account = "owner"
             vec!["sh".into(), s(&other.join("link.sh"))],
             // Not there yet: a center may put it there.
             vec!["sh".into(), s(&work.join("later.sh"))],
+            // From where it starts (`root`), and as an option's value.
+            vec!["make".into(), "-C".into(), "work".into()],
+            vec!["sh".into(), "work/deploy.sh".into()],
+            vec!["sh".into(), "work/later.sh".into()],
+            vec![
+                "cargo".into(),
+                "test".into(),
+                format!("--manifest-path={}", s(&work.join("Cargo.toml"))),
+            ],
+            vec!["make".into(), "--directory=work".into()],
         ] {
             let c = decl(&bad.iter().map(String::as_str).collect::<Vec<_>>());
-            let why = written_by_centers(&c, w, Some(&path));
+            let why = written_by_centers(&c, w, Some(&path), &root);
             assert!(
                 why.as_ref()
                     .is_some_and(|y| y.contains("where a center may write")),
@@ -404,10 +524,103 @@ account = "owner"
             vec!["sh".to_string(), s(&other.join("safe.sh"))],
             vec!["id".into()],
             vec!["cat".into(), "--".into(), "{path}".into()],
+            vec!["make".into(), "-C".into(), "other".into(), "test".into()],
+            vec!["sh".into(), "--file=other/safe.sh".into()],
         ] {
             let c = decl(&good.iter().map(String::as_str).collect::<Vec<_>>());
-            assert_eq!(written_by_centers(&c, w, Some(&path)), None, "{good:?}");
+            assert_eq!(
+                written_by_centers(&c, w, Some(&path), &root),
+                None,
+                "{good:?}"
+            );
         }
+        // One that starts where a center writes: `make`, `python3 -m` and
+        // the like read their code from there.
+        let why = written_by_centers(&decl(&["id"]), w, Some(&path), &work);
+        assert!(
+            why.as_ref().is_some_and(|y| y.contains("starts in")),
+            "{why:?}"
+        );
+        // The file run is the one found in PATH.
+        assert_eq!(
+            program_file("tool-b5", Some(&path)),
+            Some(bin.join("tool-b5"))
+        );
+        assert_eq!(program_file("/bin/sh", None), Some("/bin/sh".into()));
+        assert_eq!(program_file("no-such-b5", Some(&path)), None);
+    }
+
+    /// Whoever brings an action that senses, an earlier switch or rule
+    /// that covers it is switched off for it; one that sensed before, or an
+    /// `on` for that very action the change brings itself, stays.
+    #[test]
+    fn an_action_that_comes_to_sense_is_held_whoever_brings_it() {
+        use nerve_policy::config::CapSetting;
+        let before = cfg(r#"
+[[center]]
+name = "lab"
+center_id = "c1"
+url = "https://lab.example"
+pin = "sha256:00"
+node_id = "n1"
+[center.policy]
+mode = "folder"
+caps = { probe = "on" }
+
+[[center]]
+name = "ops"
+center_id = "c2"
+url = "https://ops.example"
+pin = "sha256:00"
+node_id = "n1"
+[center.policy]
+mode = "folder"
+
+[[capability]]
+name = "probe.list"
+effect = "read"
+command = ["sensors", "-l"]
+"#);
+        let with = |toml: &str| {
+            let mut c = before.clone();
+            c.capabilities
+                .extend(cfg(&format!("[[capability]]\n{toml}")).capabilities);
+            c
+        };
+        let cam = "name = \"probe.cam\"\neffect = \"sense\"\ncommand = [\"cam\"]";
+        let mut after = with(cam);
+        assert_eq!(
+            hold_new(&before, &mut after),
+            [("lab".to_string(), "probe.cam".to_string())]
+        );
+        assert_eq!(
+            after.center("lab").unwrap().policy.caps.get("probe.cam"),
+            Some(&CapSetting::Off)
+        );
+        assert!(after.center("ops").unwrap().policy.caps.is_empty());
+        // Sensing before already: it was held when it came to.
+        let mut again = after.clone();
+        again.centers[0]
+            .policy
+            .caps
+            .insert("probe.cam".into(), CapSetting::On);
+        let kept = again.clone();
+        assert!(hold_new(&kept, &mut again).is_empty());
+        // A read that comes to sense.
+        let read = with("name = \"probe.cam\"\neffect = \"read\"\ncommand = [\"cam\"]");
+        let mut sensing = with(cam);
+        assert_eq!(hold_new(&read, &mut sensing).len(), 1);
+        // The owner's own `on` for it, in the same change.
+        let mut owned = with(cam);
+        owned.centers[0]
+            .policy
+            .caps
+            .insert("probe.cam".into(), CapSetting::On);
+        assert!(hold_new(&before, &mut owned).is_empty());
+        assert_eq!(
+            owned.center("lab").unwrap().policy.caps.get("probe.cam"),
+            Some(&CapSetting::On)
+        );
     }
 
     #[test]
@@ -426,14 +639,13 @@ account = "owner"
         );
         let e = result(text_cap, &run(json!(2), "", "no sensors found\n", false)).unwrap_err();
         assert_eq!(e.kind().as_str(), "io");
-        assert!(
-            e.message.contains("exit code 2") && e.message.contains("no sensors found"),
-            "{}",
-            e.message
-        );
+        // Its stderr is the command's words, kept out of the node's.
+        assert_eq!(e.message, "sensors.list failed: exit code 2");
         let data = e.data.clone().unwrap();
         assert_eq!(data["exit_code"], 2);
         assert_eq!(data["stderr"], "no sensors found\n");
+        let quiet = result(text_cap, &run(json!(1), "", " \n", false)).unwrap_err();
+        assert!(quiet.data.unwrap().get("stderr").is_none());
         let mut killed = run(Value::Null, "", "", false);
         killed["signal"] = json!("kill");
         assert!(

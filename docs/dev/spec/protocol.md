@@ -624,9 +624,13 @@ over the center's message limit: the call fails with `too_large` instead.
   `disabled`. The actions of a capability that is `off` carry it too.
 - `"as_account": true` on an action says the node runs it itself as its
   command account (`access.account`) and holds it like that account's
-  commands: a capability of the node's config (node-local.md §2). A center
-  tells the agent that such an action is held like `fs`, not like a
-  program's (harness.md §4.2). Absent means false.
+  commands: a capability of the node's config (node-local.md §2). The node
+  sets it only for a center whose commands run as that account; elsewhere
+  the capability runs as an account the center is not told of. A center
+  tells the agent that such an action is held like that account's commands
+  (it reads what the account may, and where `access.confined`, only in the
+  folders and the system's files), not like a program's (harness.md §4.2).
+  Absent means false.
 - `access` says what this center may do on the node now (§6.2). It is
   for that center alone, like the rest of the descriptor.
 - The descriptor is filtered per center. `rev` changes whenever that center's

@@ -195,7 +195,7 @@ the `result` of the envelope described below.
   (`{"path":"read"}`; `paths` in `structuredContent`). An action the
   descriptor marks `as_account` (a capability of the node's config that runs
   as the command account, protocol.md §6) adds a line `runs as: the command
-  account, held like fs` (`runs_as: "command account"`). Every such unit
+  account, held like its commands` (`runs_as: "command account"`). Every such unit
   (`fs.*`, `exec.run`, a provider's action with a marked path) in folder
   mode adds a line `folders:` with the folder note: the folders and their
   flags as in `list(node)` (`none granted` when there are none). After the
@@ -206,7 +206,10 @@ the `result` of the envelope described below.
   that an action of any capability but `fs` may name a file there, never a
   folder, and that for such an action a folder marked `own` counts as none
   (it is the command account's, not the owner's), while one whose details
-  say it runs as the command account is held like `fs`, and may write only in the folders marked `w` (`exec.run`'s advice says
+  say it runs as the command account is a command of that account: it reads
+  what that account may, and where the machine's sandbox holds the commands,
+  only in the folders of the `folders:` line and the system's files; and that
+  a call may write only in the folders marked `w` (`exec.run`'s advice says
   none of that, only that a command starts in a folder marked `x`; details of
   both give both), else
   that calls may name paths only in these folders and that a command starts
@@ -344,7 +347,12 @@ has no `structuredContent`. The code is one of [protocol.md](protocol.md) §5
 `list_first`, becomes `internal`. The message, and a `reason` the node gives,
 are cut at 4 KiB each. Every error text of `execute` is one line, whoever wrote
 its words (a node's message, or a field of the node's schema that the center's
-own `invalid_args` names): a line break in them becomes a space.
+own `invalid_args` names): a line break in them becomes a space. A failed
+capability of the node's config carries what its command printed to stderr in
+`data.stderr` (node-local.md §2): those are the command's words, not the
+node's, so they follow the line framed as device content (`[device content
+from node "box-1", proj.test, what its command printed to stderr — …]`, up to
+256 KiB as shown), and the call taints the session as its result would have.
 
 A node's text that the center puts in by lines (a string result, a
 stream's output) cannot end the framing or start a line that reads as it:

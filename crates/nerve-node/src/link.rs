@@ -595,7 +595,7 @@ async fn session(
             &cfg,
             entry,
             &shared.reach(&cfg, entry),
-            &shared.added_caps(&cfg),
+            &shared.offered_caps(&cfg, &entry.policy),
         )
         .rev;
         let hello = Hello {
@@ -1446,7 +1446,7 @@ impl Link {
             cfg,
             entry,
             &self.shared.reach(cfg, entry),
-            &self.shared.added_caps(cfg),
+            &self.shared.offered_caps(cfg, &entry.policy),
         )
     }
 
@@ -2226,9 +2226,12 @@ impl Link {
         let account = self.account();
         let own = self.own();
         // Only a program's capability, or one of the config, can sense
-        // (crate::provider, crate::config_cap).
+        // (crate::provider, crate::config_cap). Every one the config
+        // declares counts, also one not offered here now: a center's `on`
+        // for it would cover its sensing action once the owner makes it
+        // offered.
         let cfg = self.shared.config();
-        let config = crate::config_cap::offered(&cfg, self.shared.service);
+        let config = crate::config_cap::declared(&cfg);
         let owner_only = self.shared.providers.owner_only(&config);
         let r = lock(&self.shared.store).set_center_document(
             &self.name,
@@ -2594,10 +2597,16 @@ impl Link {
         }
         let (args, targets, named, target) =
             self.marked_paths(inv, &params, &marked, known.as_ref())?;
-        let argv = decl.argv(&args).map_err(RpcError::invalid_args)?;
-        // With the owner's rights it may not run what a center may write:
-        // the `w` folders of every center and `nerve-run`'s own. Looked at
-        // as the owner, who may look into them.
+        let mut argv = decl.argv(&args).map_err(RpcError::invalid_args)?;
+        // It starts in the home of the account it runs as (the node's own
+        // by hand).
+        let start_in = match &runs_as {
+            Ok(Some(a)) => a.home.clone(),
+            _ => self.shared.home.clone(),
+        };
+        // With the owner's rights it may not run what a center may write,
+        // nor start there: the `w` folders of every center and
+        // `nerve-run`'s own. Looked at as the owner, who may look into them.
         if as_owner {
             let mut writable = exec::write_folders(cfg, &self.shared.rules_home(cfg));
             writable.extend(match self.shared.run_account(cfg) {
@@ -2607,18 +2616,28 @@ impl Link {
                     .collect(),
                 _ => vec!["/tmp".into(), "/var/tmp".into()],
             });
-            let why = {
+            let (why, file) = {
                 let owner = runs_as.as_ref().ok().cloned().flatten();
                 let _as = act_as(owner.as_ref()).ok().flatten();
-                crate::config_cap::written_by_centers(
-                    &decl,
-                    &writable,
-                    std::env::var_os("PATH").as_deref(),
+                let path = std::env::var_os("PATH");
+                (
+                    crate::config_cap::written_by_centers(
+                        &decl,
+                        &writable,
+                        path.as_deref(),
+                        &start_in,
+                    ),
+                    crate::config_cap::program_file(&argv[0], path.as_deref()),
                 )
             };
             if let Some(why) = why {
                 self.audit(inv, &target, "forbidden", Some("forbidden"), Some(&why));
                 return Err(RpcError::new(ErrorCode::Forbidden, why));
+            }
+            // The file judged runs, not another one a second look in PATH
+            // might find.
+            if let Some(f) = file {
+                argv[0] = f.display().to_string();
             }
         }
         // A program of the owner's account: the link walk refuses a folder
@@ -2663,9 +2682,6 @@ impl Link {
                 ),
             ));
         }
-        let start_in = account
-            .as_ref()
-            .map_or_else(|| self.shared.home.clone(), |a| a.home.clone());
         let home = self.shared.rules_home(cfg);
         let own = self.shared.own(cfg);
         let landlock = (!as_owner

@@ -622,6 +622,26 @@ impl Shared {
         caps
     }
 
+    /// [`Shared::added_caps`] as the pairing with `policy` is offered them:
+    /// a config capability that runs as `nerve-run` is marked a command of
+    /// the pairing's command account (`as_account`) only where its commands
+    /// run as that account. Where they run as the owner, the command account
+    /// the center knows is the owner, and that account's folders are not
+    /// the capability's (crate::config_cap::confined).
+    pub fn offered_caps(
+        &self,
+        cfg: &NodeConfig,
+        policy: &nerve_policy::config::CenterPolicy,
+    ) -> Vec<nerve_proto::descriptor::Capability> {
+        let mut caps = self.added_caps(cfg);
+        if !self.separate(policy) {
+            for a in caps.iter_mut().flat_map(|c| c.actions.values_mut()) {
+                a.as_account = false;
+            }
+        }
+        caps
+    }
+
     /// The owner's account, which sudo runs as and whose files the folders
     /// and rules name; `None` on a node run by hand, whose own user it is.
     pub fn owner_account(
@@ -2135,7 +2155,7 @@ pub(crate) fn control(
             let Some(text) = str_of("config") else {
                 return Reply::Err("config is missing".into());
             };
-            let new = match NodeConfig::parse(&text) {
+            let mut new = match NodeConfig::parse(&text) {
                 Ok(c) => c,
                 Err(e) => return Reply::Err(e),
             };
@@ -2146,6 +2166,9 @@ pub(crate) fn control(
                     "machine.sudo changes only through nerve-node sudo on|off".into(),
                 );
             }
+            // An action that comes to sense waits for the owner's `on`,
+            // whichever program of the owner's wrote the change.
+            let held = crate::config_cap::hold_new(store.config(), &mut new);
             // Who made it, as the CLI names its user (crate::cli::invoker):
             // only the owner's programs hold the token.
             store.set_user(str_of("user"));
@@ -2155,7 +2178,7 @@ pub(crate) fn control(
             match r {
                 Ok(v) => {
                     shared.bump();
-                    Reply::Ok(json!({"version": v}))
+                    Reply::Ok(json!({"version": v, "held": held}))
                 }
                 Err(SetError::Conflict { current }) => {
                     Reply::Err(format!("conflict: the config changed (version {current})"))
@@ -2186,16 +2209,28 @@ pub(crate) fn control(
         "config.accept" => {
             let r = {
                 let mut store = lock(&shared.store);
+                let before = store.config().clone();
                 store.set_user(str_of("user"));
-                let r = store.accept();
+                // The file as the owner wrote it, then, before any call sees
+                // it (the store stays locked), an action that came to sense
+                // in it switched off where an earlier switch covered it
+                // (crate::config_cap::hold_new).
+                let r = store.accept().and_then(|v| {
+                    let mut held_cfg = store.config().clone();
+                    let held = crate::config_cap::hold_new(&before, &mut held_cfg);
+                    if held.is_empty() {
+                        return Ok((v, held));
+                    }
+                    store.set_local(held_cfg, Some(v)).map(|v| (v, held))
+                });
                 store.set_user(None);
                 r
             };
             match r {
-                Ok(v) => {
+                Ok((v, held)) => {
                     shared.settle_sudo();
                     shared.bump();
-                    Reply::Ok(json!({"version": v}))
+                    Reply::Ok(json!({"version": v, "held": held}))
                 }
                 Err(e) => Reply::Err(e.to_string()),
             }

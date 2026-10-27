@@ -229,15 +229,21 @@ impl Reach {
         // than the node reads with the owner's rights, so the node hands it
         // no folder there, and the command account's own folders do not
         // count for it. A capability of the node's config that runs as the
-        // command account is held like fs, and its details say so.
+        // command account is a command of that account, and its details say
+        // so: it reads what that account may, but where a sandbox holds the
+        // commands, only within the folders and the system's files. Said
+        // whether one does, so the advice of file calls stays apart from
+        // the sandbox.
         const OPEN: &str = "what is open to every account on the machine, except protected \
                             paths and the node's own files";
         const NO_FOLDER: &str = "An action of any capability but fs may name a file there, \
                                  never a folder: its program would read below it with the \
                                  owner's rights. For such an action a folder marked own counts \
                                  as none: it is the command account's, not the owner's. One \
-                                 whose details say it runs as the command account is held like \
-                                 fs.";
+                                 whose details say it runs as the command account is a command \
+                                 of that account: it reads what that account may, and where the \
+                                 machine's sandbox holds the commands, only in the folders of \
+                                 the `folders:` line and the system's files.";
         let reads = self.reads_by_account;
         if self.no_folder() && !commands {
             return Some(if reads {
@@ -1431,12 +1437,14 @@ mod tests {
                     the node's own files";
         // A program other than the node's `fs` is never handed a folder
         // outside the folders; a capability of the config that runs as the
-        // command account is held like fs.
+        // command account is held like that account's commands.
         let never = "An action of any capability but fs may name a file there, never a folder: \
                      its program would read below it with the owner's rights. For such an action \
                      a folder marked own counts as none: it is the command account's, not the \
-                     owner's. One whose details say it runs as the command account is held like \
-                     fs.";
+                     owner's. One whose details say it runs as the command account is a command \
+                     of that account: it reads what that account may, and where the machine's \
+                     sandbox holds the commands, only in the folders of the `folders:` line and \
+                     the system's files.";
         let granted = json!([{"path": "/a", "access": "rw"}]);
         let r = reach(true, granted.clone(), false);
         let a = r.file_advice().unwrap();

@@ -66,7 +66,10 @@ nerve-node cap add logs.tail --effect read \
 - Each `{field}` becomes one whole argument of the program, exactly as the
   call gave it. No shell reads the command, so `;`, `|`, `$(...)` and quotes
   in a value are just characters. A placeholder is always a word of its own:
-  `--file={path}` is refused.
+  `--file={path}` is refused. That holds for the node only: a program that
+  hands its arguments to a shell of its own reads a value as code again, as
+  `ssh host cmd {arg}` does on the other machine and `sh -c`, `su -c` or
+  `flock -c` do here. Fill no placeholder into such a command.
 - An argument may be a string, a number, an integer or a boolean. One the
   call leaves out (or gives as null) is left out of the command, so the words
   after it would move up: an option before it would take the next word as its
@@ -85,7 +88,12 @@ nerve-node cap add logs.tail --effect read \
 
 An argument marked `"x-nerve-path": "read"` or `"write"` is a path. The node
 judges it as it judges an `fs` call's path ([providers.md](providers.md#paths-it-takes)
-says how), and the program gets it as the node resolved it.
+says how), and the program gets it as the node resolved it. An argument that
+names a path but is not marked is passed as given: no folder, protected path
+or rule on paths holds it, and in `folder` mode the call counts as one that
+names no path. For a capability that runs as you that means your whole
+access, so `cap add` and `cap edit` warn of a string argument without the
+mark there.
 
 ## The account it runs as
 
@@ -96,26 +104,40 @@ says how), and the program gets it as the node resolved it.
 
 A capability that runs as `nerve-run` is a command of that account: it reads
 a path outside the folders only where `nerve-run` may read it, never your
-files closed to others nor the node's own. The agent's `list` says so: the
-details of such an action read `runs as: the command account, held like fs`,
+files closed to others nor the node's own, and where Landlock holds the
+commands, only in the pairing's folders and the system's files. In a pairing
+whose commands run as `nerve-run`, the agent's `list` says so: the details of
+such an action read `runs as: the command account, held like its commands`,
 while those of one that runs as you are held to the folders as a program's.
 Choose `owner` only for a command that needs your rights; it can do whatever
 you can.
 
 A command that runs as you must not run what a center may write: a center
 with `w` on a folder could put its own code there and have it run with your
-rights. So the node refuses its calls while its program, or a full path in its
-command (a script it runs, a folder it works in), lies in a `w` folder of any
-center, in `/tmp` or `/var/tmp`, or in `nerve-run`'s home; `cap add` warns of
-it. Keep what such a command reads on its own (its configuration, a Makefile)
-out of those folders too: the node cannot see what a program reads. A node you run yourself
-has no `nerve-run`: it offers only capabilities with `account = "owner"`, run
-as you.
+rights. So the node refuses its calls while one of these lies in a `w` folder
+of any center, in `/tmp` or `/var/tmp`, or in `nerve-run`'s home:
+
+- your home, where it starts (`make`, `npm test` or `python3 -m` read code
+  from where they start, so a center with `w` on your whole home blocks every
+  such command);
+- its program, as found in `PATH` (the node then runs that very file);
+- a place a word of its command names: a full path, a path from your home
+  (`make -C proj`, `sh proj/ci.sh`), a name of something in your home, also
+  as an option's value (`--manifest-path=proj/Cargo.toml`).
+
+`cap add` and `cap edit` warn of it. Keep what such a command reads on its
+own (its configuration, a file a script loads) out of those folders too: the
+node cannot see what a program reads.
+
+A node you run yourself has no `nerve-run`: it offers only capabilities with
+`account = "owner"`, run as you.
 
 Each run counts towards `limits.max_running`, runs in a cgroup of its own
 held to `[limits.command]` ([limits.md](limits.md)) and ends at its timeout.
 A cancelled call ends it too. A command that does not end with exit code 0
-fails: the agent gets its exit code and what it printed to stderr.
+fails: the agent gets its exit code and what it printed to stderr, marked as
+content from your machine, as a result is (and, like a result, it marks the
+session for the action checker).
 
 ## When a center may use it
 
@@ -139,8 +161,15 @@ set sensors on`, or an allow rule `sensors`, also covers a new
 `sensors.camera`, and a center may have set it while `sensors` only read.
 So when `cap add` declares an action that senses or acts, or `cap edit`
 changes one to, it switches that action off for every center such a switch
-or rule covers, and says which; turn it on for those you mean. A switch you
-set stays when you remove a capability.
+or rule covers, and says which; turn it on for those you mean. `nerve-node
+config accept` does the same for what you wrote into `node.toml` yourself,
+while the node runs; a node that is stopped cannot see what the file had
+before, so take such a change while it runs, or check `cap ls` after. A
+switch you set stays when you remove a capability.
+
+A center cannot turn on a capability of yours that has an action that senses
+or acts, whether or not this node offers that action now (one for another
+platform, or one that runs as `nerve-run` on a node you run yourself).
 
 No program may [attach](providers.md) with the name of one of your
 capabilities, and one that is attached with such a name is let go when you

@@ -820,7 +820,22 @@ fn job_error(route: &Route, e: &RpcError, lead: &str, tail: &str) -> Value {
     // or a field of the node's schema in the center's own `invalid_args`. A
     // line break would let a later line read as another refusal of the
     // center's.
-    text_result(&listing::one_line(&t), true)
+    let mut text = listing::one_line(&t);
+    // What a failed command printed is no word of the node's: it follows,
+    // marked as content from that machine as a result would be.
+    if let Some(out) = link::output_of(e) {
+        let (body, _) = listing::guarded_clip(out, RESULT_TEXT);
+        text.push('\n');
+        text.push_str(&listing::framed(
+            &format!(
+                "node {:?}, {}.{}, what its command printed to stderr",
+                route.node_name, route.cap, route.action
+            ),
+            false,
+            &body,
+        ));
+    }
+    text_result(&text, true)
 }
 
 /// The answer of an `execute` whose call became the job `job` after `wait`:

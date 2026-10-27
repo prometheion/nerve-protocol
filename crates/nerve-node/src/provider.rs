@@ -143,8 +143,8 @@ impl Providers {
     /// when a provider later offers that capability or action with a sense
     /// or actuate action under the same name.
     ///
-    /// `config` are the config's capabilities offered now
-    /// (crate::config_cap), which count alike.
+    /// `config` are the capabilities the config declares
+    /// (crate::config_cap::declared), offered now or not, which count alike.
     pub fn owner_only(&self, config: &[Capability]) -> impl Fn(&str) -> bool + use<> {
         let mut sensing = BTreeSet::new();
         let mut offered: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();

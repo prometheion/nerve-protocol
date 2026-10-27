@@ -775,11 +775,11 @@ pub fn details(o: &Offer, asked: &[String]) -> Answer {
             None => String::new(),
         };
         // A capability of the node's config that runs as the command
-        // account is held like fs, which the advice on the folders tells
-        // apart from a program's action by this line.
+        // account is held like that account's commands, which the advice on
+        // the folders tells apart from a program's action by this line.
         let runs = if u.as_account {
             entry["runs_as"] = json!("command account");
-            "runs as: the command account, held like fs\n"
+            "runs as: the command account, held like its commands\n"
         } else {
             ""
         };
@@ -1271,13 +1271,16 @@ mod tests {
         d.access = Some(serde_json::from_value(access).unwrap());
         let node = record("box-1", Some(d.clone()));
         let o = offer(&node, true);
-        let line = "runs as: the command account, held like fs\n";
+        let line = "runs as: the command account, held like its commands\n";
         let shown = details(&o, &["probe.show".into()]);
         assert!(shown.text.contains(line), "{}", shown.text);
         assert!(
-            shown
-                .text
-                .contains("One whose details say it runs as the command account is held like fs."),
+            shown.text.contains(
+                "One whose details say it runs as the command account is a command of that \
+                     account: it reads what that account may, and where the machine's sandbox \
+                     holds the commands, only in the folders of the `folders:` line and the \
+                     system's files."
+            ),
             "{}",
             shown.text
         );
