@@ -1319,6 +1319,16 @@ mod tests {
         assert_eq!((e.model.threshold, e.model.timeout_ms), (0.85, 4000));
     }
 
+    /// The config a fresh center starts with, and a stored model section
+    /// without a threshold, take the default model's measured threshold.
+    #[test]
+    fn the_default_threshold_is_the_default_models() {
+        let pin = crate::checker::install::model_pin(LocalModel::default());
+        assert_eq!(ModelConfig::default().threshold, pin.threshold);
+        let stored: ModelConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(stored.threshold, pin.threshold);
+    }
+
     /// An install switches the model on for every node only when nothing has
     /// it on yet: with it on for one node only, a device or model switch
     /// keeps it that way (review r9, finding 1).
