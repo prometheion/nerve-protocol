@@ -3379,6 +3379,50 @@ mod tests {
         daemon.stop().await;
     }
 
+    /// A hello the node checks while it stops (for an owner's restore, too)
+    /// is not held: the stop detached every provider already, and one held
+    /// after would stay with the stopped node, its program never told.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_hello_checked_while_the_node_stops_is_not_held() {
+        use nerve_transport::ctl::Reply;
+        let (_d, daemon) = daemon().await;
+        let s = daemon.shared.clone();
+        let me = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        lock(&s.store)
+            .update(|c| {
+                c.providers
+                    .allowed
+                    .push(nerve_policy::config::AllowedProvider {
+                        name: "desk".into(),
+                        exe: me.to_string_lossy().into(),
+                    });
+                Ok(())
+            })
+            .unwrap();
+        let hello = || {
+            json!({"role": "provider", "name": "desk", "capabilities": [
+                {"id": "echo", "actions": {"say": {"effect": "read"}}}]})
+        };
+        let caller = || crate::provider::Caller {
+            uid: crate::account::own_uid(),
+            pid: Some(std::process::id()),
+            pidfd: None,
+        };
+        s.stop.send_replace(true);
+        let Reply::Err(e) = crate::provider::attach(&s, hello(), caller()).await else {
+            panic!("held while the node stops");
+        };
+        assert!(e.contains("the node stops"), "{e}");
+        assert_eq!(s.providers.held("desk"), None);
+        // The same hello is held while the node runs.
+        s.stop.send_replace(false);
+        let r = crate::provider::attach(&s, hello(), caller()).await;
+        assert!(matches!(r, Reply::Session { .. }), "not held");
+        assert!(s.providers.held("desk").is_some());
+        daemon.stop().await;
+    }
+
     /// Windows' pipe answers `cap ls` as the socket does: the running node's
     /// listing.
     #[tokio::test]

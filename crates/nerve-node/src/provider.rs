@@ -112,6 +112,10 @@ struct Attached {
     next: AtomicU64,
 }
 
+/// Why a provider is refused while the node stops (for an owner's restore,
+/// too): it connects again to the node that runs next.
+const STOPPING: &str = "refused: the node stops; connect again once it runs";
+
 /// The attached providers, by name.
 #[derive(Default)]
 pub(crate) struct Providers {
@@ -234,7 +238,9 @@ impl Providers {
     /// the config, and the owner may have removed or changed the entry
     /// meanwhile: [`Providers::follow_config`] then found nothing to
     /// detach. `now` is read while the attachments are held, so a change
-    /// after it finds this one.
+    /// after it finds this one. It gives none once the node stops: its
+    /// stop detaches every provider once ([`Providers::detach_all`]), and
+    /// one held after that would stay with the stopped node, never told.
     fn hold(
         &self,
         name: &str,
@@ -242,10 +248,13 @@ impl Providers {
         uid: u32,
         fragment: Vec<Fragment>,
         tx: mpsc::Sender<Value>,
-        now: impl FnOnce() -> NodeConfig,
+        now: impl FnOnce() -> Option<NodeConfig>,
     ) -> Result<Arc<Attached>, String> {
         let mut held = lock(&self.attached);
-        if now().providers.get(name).is_none_or(|p| p.exe != exe) {
+        let Some(now) = now() else {
+            return Err(STOPPING.into());
+        };
+        if now.providers.get(name).is_none_or(|p| p.exe != exe) {
             return Err(format!(
                 "refused: providers.allowed changed while the node looked at the provider {name}; try again"
             ));
@@ -756,7 +765,8 @@ async fn check(
         shared
             .providers
             .hold(&name, &allowed.exe, uid, hello.capabilities, out_tx, || {
-                shared.config()
+                // Set before the stop detaches them all (daemon.rs `stop`).
+                (!*shared.stop.borrow()).then(|| shared.config())
             })?;
     let ids: Vec<String> = attached.caps.iter().map(|c| c.id.clone()).collect();
     let broken = attached.broken.clone();
@@ -1256,7 +1266,7 @@ mod tests {
 
     /// A provider whose entry the owner removed or changed while the node
     /// looked at its program is not held: the config is read again as it is
-    /// held.
+    /// held. Nor is one while the node stops.
     #[test]
     fn a_provider_the_owner_dropped_while_it_was_checked_is_not_held() {
         let p = Providers::default();
@@ -1269,7 +1279,7 @@ mod tests {
                     1000,
                     fragment(echo()),
                     tx.clone(),
-                    || now,
+                    || Some(now),
                 )
                 .err()
                 .expect("not held");
@@ -1277,8 +1287,21 @@ mod tests {
         }
         assert_eq!(p.held("desk"), None);
         let a = p
+            .hold(
+                "desk",
+                "/opt/desk",
+                1000,
+                fragment(echo()),
+                tx.clone(),
+                || None,
+            )
+            .err()
+            .expect("not held while the node stops");
+        assert_eq!(a, STOPPING);
+        assert_eq!(p.held("desk"), None);
+        let a = p
             .hold("desk", "/opt/desk", 1000, fragment(echo()), tx, || {
-                allowing("desk", "/opt/desk")
+                Some(allowing("desk", "/opt/desk"))
             })
             .unwrap();
         assert_eq!(p.held("desk"), Some((1000, a.serial)));
@@ -1292,7 +1315,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let hold = |tx| {
             p.hold("desk", "/opt/desk", 1000, fragment(echo()), tx, || {
-                allowing("desk", "/opt/desk")
+                Some(allowing("desk", "/opt/desk"))
             })
             .unwrap()
             .serial
