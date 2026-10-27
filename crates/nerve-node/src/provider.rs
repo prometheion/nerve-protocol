@@ -930,13 +930,18 @@ async fn check(
 /// each center may use the action now (`now`: `on` where its descriptor
 /// offers it and it is not off, else `off`), which its mode and machine
 /// decide besides the switch.
-pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>) -> Value {
+///
+/// The capabilities of the config (crate::config_cap) are listed with
+/// source `config` and the account they run as, or, where this node does
+/// not offer one (`installed` tells a node run by hand), with why it is
+/// left out; `config` holds each entry as the owner declared it.
+pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>, installed: bool) -> Value {
     use nerve_policy::config::CapSetting;
     let attached = live.map(|s| &s.providers);
     // Each center's descriptor as it would see it now, built as the link
     // builds it.
     let seen: Option<BTreeMap<&str, Vec<Capability>>> = live.map(|s| {
-        let provided = s.providers.caps();
+        let provided = s.added_caps(cfg);
         cfg.centers
             .iter()
             .map(|c| {
@@ -1003,6 +1008,30 @@ pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>) -> Value {
         .iter()
         .flat_map(|c| row(c, "built-in"))
         .collect();
+    let offered = crate::config_cap::offered(cfg, installed);
+    for c in offered {
+        for mut r in row(&c, crate::config_cap::PROVIDER) {
+            let name = r["name"].as_str().unwrap_or_default().to_string();
+            if let Some(decl) = cfg.capabilities.iter().find(|d| d.name == name) {
+                r["account"] = json!(decl.account.as_str());
+            }
+            rows.push(r);
+        }
+    }
+    for decl in &cfg.capabilities {
+        if let Some(why) = crate::config_cap::left_out(decl, std::env::consts::OS, installed) {
+            let (cap, action) = decl.split();
+            rows.push(json!({"name": decl.name, "effect": decl.effect,
+                             "source": crate::config_cap::PROVIDER,
+                             "account": decl.account.as_str(), "left_out": why,
+                             "centers": centers(cap, action)}));
+        }
+    }
+    let config: Vec<Value> = cfg
+        .capabilities
+        .iter()
+        .map(crate::config_cap::entry)
+        .collect();
     let held = attached.map(|p| lock(&p.attached).clone());
     for a in held.iter().flat_map(|h| h.values()) {
         let source = format!("program {}", a.name);
@@ -1024,7 +1053,8 @@ pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>) -> Value {
             json!({"name": p.name, "exe": p.exe, "attached": on})
         })
         .collect();
-    json!({"capabilities": rows, "programs": programs, "running": live.is_some()})
+    json!({"capabilities": rows, "programs": programs, "config": config,
+           "running": live.is_some()})
 }
 
 /// The provider socket's file name, beside the owner socket in the

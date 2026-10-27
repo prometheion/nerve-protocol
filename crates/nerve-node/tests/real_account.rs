@@ -1203,3 +1203,240 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
         std::fs::remove_dir(&ssh).unwrap();
     }
 }
+
+/// The config capability `name` with `args`, as a center calls it: its
+/// result, or the refusal.
+async fn config_call(conn: &mut Conn<TcpStream>, name: &str, args: Value) -> Result<Value, String> {
+    let (cap, action) = name.split_once('.').unwrap();
+    conn.call(
+        "invoke",
+        json!({"cap": cap, "action": action, "args": args, "ctx": {}}),
+        WAIT,
+    )
+    .await
+    .expect("an answer")
+    .map_err(|e| e.message)
+}
+
+/// Capabilities of node.toml on the installed node (issue #152): the owner
+/// declares them with `cap add`; one runs as `nerve-run` (its `id` says so)
+/// from that account's home, with the call's arguments as whole arguments
+/// that no shell reads; its path argument is held to the folders and read
+/// with `nerve-run`'s access; its timeout ends it; and in a pairing whose
+/// commands run as the owner it still runs as `nerve-run`. For a test
+/// machine only, as root: it installs the node and removes it again.
+///
+/// `NERVE_NODE_REAL=<the nerve-node to install> NERVE_REAL_OWNER=<an account
+/// with a home, the owner> cargo test -p nerve-node --test real_account --
+/// --ignored --exact a_config_capability_runs_as_nerve_run_in_a_folder_pairing`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "installs the node on this machine; NERVE_NODE_REAL and NERVE_REAL_OWNER name it"]
+async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
+    let (Some(exe), Some(owner)) = (
+        std::env::var_os("NERVE_NODE_REAL").map(PathBuf::from),
+        std::env::var("NERVE_REAL_OWNER").ok(),
+    ) else {
+        eprintln!("NERVE_NODE_REAL or NERVE_REAL_OWNER is not set");
+        return;
+    };
+    assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
+    let home =
+        sh(Command::new("sh").args(["-c", &format!("getent passwd {owner} | cut -d: -f6")])).1;
+    let home = PathBuf::from(home.trim());
+    let chmod = |p: &Path, m: &str| assert!(sh(Command::new("chmod").arg(m).arg(p)).0);
+    let chown = |p: &Path| {
+        assert!(
+            sh(Command::new("chown")
+                .args(["-R", &format!("{owner}:{owner}")])
+                .arg(p))
+            .0
+        )
+    };
+
+    let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
+    assert!(ok, "{said}");
+    chmod(&home, "750");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "real-b5\n\n\n");
+    assert!(ok, "{said}");
+
+    // The owner's files: a folder to give, a file only the owner may read
+    // outside it.
+    let base = home.join("nerve-b5");
+    let _ = std::fs::remove_dir_all(&base);
+    let proj = base.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("inside.txt"), "inside-line\n").unwrap();
+    std::fs::write(base.join("closed.txt"), "closed-line\n").unwrap();
+    chown(&base);
+    chmod(&base, "755");
+    chmod(&base.join("closed.txt"), "600");
+
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let link = center.link().render();
+    let (ok, said) = as_owner(&owner, &["center", "add", &link, "--yes"]);
+    assert!(ok, "{said}");
+    let (ok, said) = as_owner(&owner, &["folder", "add", proj.to_str().unwrap(), "+rw"]);
+    assert!(ok, "{said}");
+    let path_params = r#"{"type": "object", "properties": {"path": {"type": "string", "x-nerve-path": "read"}}, "required": ["path"]}"#;
+    let word_params = r#"{"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}, "required": ["a", "b"]}"#;
+    for args in [
+        &["cap", "add", "who.am", "--effect", "read", "--", "id"][..],
+        &["cap", "add", "who.where", "--effect", "read", "--", "pwd"],
+        &[
+            "cap",
+            "add",
+            "files.show",
+            "--effect",
+            "read",
+            "--params",
+            path_params,
+            "--",
+            "cat",
+            "--",
+            "{path}",
+        ],
+        &[
+            "cap",
+            "add",
+            "say.back",
+            "--effect",
+            "read",
+            "--params",
+            word_params,
+            "--",
+            "printf",
+            "[%s]\n",
+            "{a}",
+            "{b}",
+        ],
+        &[
+            "cap",
+            "add",
+            "slow.wait",
+            "--effect",
+            "read",
+            "--timeout",
+            "1",
+            "--",
+            "sleep",
+            "41.75",
+        ],
+    ] {
+        let (ok, said) = as_owner(&owner, args);
+        assert!(ok, "{args:?}: {said}");
+    }
+    let (_, ls) = as_owner(&owner, &["cap", "ls"]);
+    assert!(
+        ls.lines().any(|l| l.split_whitespace().collect::<Vec<_>>()
+            == ["who.am", "read", "config", "conformance-center:", "on"]),
+        "{ls}"
+    );
+    assert!(ls.contains("capability who.am: id; as nerve-run"), "{ls}");
+    let paired = center.paired().expect("paired");
+    let mut inc = center.next_link(WAIT).await.expect("the node dials");
+    fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
+        .await
+        .expect("handshake");
+    let mut conn = inc.conn;
+    // The node took the capabilities before the link came; they are offered
+    // once it sees them.
+    let mut who = Err(String::new());
+    for _ in 0..100 {
+        who = config_call(&mut conn, "who.am", json!({})).await;
+        if who.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let who = who.unwrap();
+    let who = who.as_str().unwrap();
+    assert!(
+        who.contains("(nerve-run)") && !who.contains(&owner),
+        "{who}"
+    );
+    let r = config_call(&mut conn, "who.where", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(r, json!("/var/lib/nerve-run\n"));
+
+    // The arguments stay data.
+    let a = "; touch /tmp/nerve-b5-ran";
+    let b = "$(id) `id`";
+    let r = config_call(&mut conn, "say.back", json!({"a": a, "b": b}))
+        .await
+        .unwrap();
+    assert_eq!(r, json!(format!("[{a}]\n[{b}]\n")));
+    assert!(!Path::new("/tmp/nerve-b5-ran").exists());
+
+    // Its path: in the folder it reads; outside, what nerve-run may read,
+    // never the owner's closed file.
+    let r = config_call(
+        &mut conn,
+        "files.show",
+        json!({"path": proj.join("inside.txt").to_str().unwrap()}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r, json!("inside-line\n"));
+    let e = config_call(
+        &mut conn,
+        "files.show",
+        json!({"path": base.join("closed.txt").to_str().unwrap()}),
+    )
+    .await
+    .unwrap_err();
+    assert!(e.contains("may not read"), "{e}");
+    let r = config_call(&mut conn, "files.show", json!({"path": "/etc/hostname"}))
+        .await
+        .unwrap();
+    assert!(!r.as_str().unwrap().is_empty(), "{r}");
+    let e = config_call(
+        &mut conn,
+        "files.show",
+        json!({"path": "/etc/nerve/node.toml"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(e.contains("belongs to the node"), "{e}");
+
+    // The timeout ends it, and nothing of it is left.
+    let started = std::time::Instant::now();
+    let e = config_call(&mut conn, "slow.wait", json!({}))
+        .await
+        .unwrap_err();
+    assert!(e.contains("slow.wait ran past its limit of 1 s"), "{e}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let left = sh(Command::new("pgrep").args(["-f", "sleep 41.75"]));
+    assert!(!left.0, "{}", left.1);
+
+    // A pairing whose commands run as the owner: its commands run as the
+    // owner once the node took the change, the capability still as
+    // nerve-run.
+    assert!(as_owner(&owner, &["mode", "set", "user"]).0);
+    let mut as_the_owner = false;
+    for _ in 0..100 {
+        if let Ok(r) = run(&mut conn, &home, "id -un").await
+            && out(&r).trim() == owner
+        {
+            as_the_owner = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(as_the_owner, "exec.run runs as the owner in user mode");
+    let who = config_call(&mut conn, "who.am", json!({})).await.unwrap();
+    assert!(who.as_str().unwrap().contains("(nerve-run)"), "{who}");
+    let audit = as_owner(&owner, &["audit"]).1;
+    assert!(
+        audit.contains("who.am  who.am  allowed")
+            && audit.contains(&format!(
+                "files.show  {}  forbidden",
+                base.join("closed.txt").display()
+            )),
+        "{audit}"
+    );
+
+    let (ok, said) = sh(Command::new(BIN).args(["uninstall", "--purge"]));
+    assert!(ok, "{said}");
+    std::fs::remove_dir_all(&base).unwrap();
+}

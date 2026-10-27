@@ -83,6 +83,11 @@ center reads, or the node refuses the whole change and names the field.
    away its own deny rule for such a capability either.
 10. The programs that may attach as capability providers,
     `providers.allowed` ([node-local §7](spec/node-local.md#7-capability-providers)).
+11. The owner's own capabilities, `[[capability]]` (`cap add`, `edit`, `rm`;
+    [node-local §2](spec/node-local.md#capabilities-of-the-config)): each runs a
+    fixed command, as `nerve-run` or as the owner, so none is in a center's
+    document. A center with the grant may switch them by `caps` and its rules
+    like any capability, within item 9.
 
 One item is in the document a center reads and is still the owner's: the
 record of the folders' real places, `policy.places`

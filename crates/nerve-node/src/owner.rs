@@ -408,14 +408,17 @@ impl FileJob {
 }
 
 /// Whether `cmd` reads this process's input: the questions of `setup`, the
-/// question of `center add` without `--yes`, and what `proxy set` takes
-/// from stdin. Only then is the input passed to the node; for any other
+/// question of `center add` without `--yes`, what `proxy set` takes from
+/// stdin, and the schema `cap add` or `cap edit` takes from it. Only then is the input passed to the node; for any other
 /// command it stays unread, as a script that pipes lines into a loop of
 /// commands expects.
 pub fn reads_input(cmd: &Cmd) -> bool {
-    use crate::cli::{CenterCmd, ProxyCmd};
+    use crate::cli::{CapCmd, CenterCmd, ProxyCmd};
     match cmd {
         Cmd::Setup => true,
+        Cmd::Cap(CapCmd::Add { spec, .. } | CapCmd::Edit { spec, .. }) => {
+            spec.params_stdin || spec.result_stdin
+        }
         Cmd::Center(CenterCmd::Add { yes, .. }) => !yes,
         Cmd::Proxy(ProxyCmd::Set {
             password_stdin,
@@ -2182,6 +2185,32 @@ mod tests {
             &cli(&["proxy", "set", "http://u@h:1", "--password-stdin"]).cmd
         ));
         assert!(!reads_input(&cli(&["proxy", "set", "http://h:1"]).cmd));
+        // A capability's schema comes on stdin when the owner says so.
+        for (args, reads) in [
+            (
+                &[
+                    "cap",
+                    "add",
+                    "a.b",
+                    "--effect",
+                    "read",
+                    "--params-stdin",
+                    "--",
+                    "x",
+                ][..],
+                true,
+            ),
+            (&["cap", "edit", "a.b", "--result-stdin"], true),
+            (
+                &[
+                    "cap", "add", "a.b", "--effect", "read", "--params", "none", "--", "x",
+                ],
+                false,
+            ),
+            (&["cap", "edit", "a.b", "--timeout", "5"], false),
+        ] {
+            assert_eq!(reads_input(&cli(args).cmd), reads, "{args:?}");
+        }
         // Setup asks its questions: its input goes to the node.
         assert!(reads_input(&cli(&["setup"]).cmd));
         assert!(matches!(input_for(&cli(&["setup"]).cmd), Input::Stdin));

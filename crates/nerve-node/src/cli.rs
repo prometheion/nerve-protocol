@@ -325,9 +325,68 @@ pub enum CapCmd {
         #[arg(long)]
         center: Option<String>,
     },
+    /// Declare a capability of your own, NAME (`cap.action`, like sensors.read), that runs a fixed command: the words after `--`, the program first. A word written `{field}` is the call's argument `field`, as one whole argument; no shell reads it. It runs as nerve-run on the installed Linux node, or as you with --account owner.
+    Add {
+        /// `cap.action`, like sensors.read.
+        name: String,
+        #[command(flatten)]
+        spec: CapSpec,
+        /// The program and its arguments, after `--`.
+        #[arg(last = true, required = true, value_name = "COMMAND")]
+        command: Vec<String>,
+    },
+    /// Change a capability you declared: what you give replaces what it has, and a command after `--` its command.
+    Edit {
+        /// The capability, `cap.action`.
+        name: String,
+        #[command(flatten)]
+        spec: CapSpec,
+        /// The program and its arguments, after `--`.
+        #[arg(last = true, value_name = "COMMAND")]
+        command: Vec<String>,
+    },
+    /// Remove a capability you declared; it leaves every center at once.
+    Rm {
+        /// The capability, `cap.action`.
+        name: String,
+    },
     /// Allow a program on this machine to add capabilities (a provider), remove it, or list them.
     #[command(subcommand)]
     Provider(ProviderCmd),
+}
+
+/// What `cap add` and `cap edit` set of a capability of node.toml
+/// (docs/user/config-capabilities.md). The schemas come inline or on stdin,
+/// never from a file the node would open.
+#[derive(Debug, Args, Clone, Default)]
+pub struct CapSpec {
+    /// What it does: read, write, execute, sense or actuate. Sense and actuate need your `cap set NAME on` for a center.
+    #[arg(long)]
+    pub effect: Option<String>,
+    /// One line for the agent: what it does.
+    #[arg(long)]
+    pub summary: Option<String>,
+    /// The JSON Schema of its arguments, an object; `none` takes no arguments. A property marked "x-nerve-path": "read" or "write" is a path the node holds to the folders.
+    #[arg(long, value_name = "JSON")]
+    pub params: Option<String>,
+    /// Read the arguments' schema from stdin instead.
+    #[arg(long, conflicts_with_all = ["params", "result_stdin"])]
+    pub params_stdin: bool,
+    /// What it returns: `text`, what the command prints (the default), or a JSON Schema the printed JSON must fit.
+    #[arg(long, value_name = "text|JSON")]
+    pub result: Option<String>,
+    /// Read the result's schema from stdin instead.
+    #[arg(long, conflicts_with = "result")]
+    pub result_stdin: bool,
+    /// How long it may run, in seconds, up to limits.max_timeout_secs; `default` for the node's default.
+    #[arg(long, value_name = "SECS")]
+    pub timeout: Option<String>,
+    /// Who runs it: nerve-run (the default), held to the folders, or owner, you, with your rights.
+    #[arg(long)]
+    pub account: Option<String>,
+    /// Where it runs: any (the default), linux or windows. A node offers only those of its platform.
+    #[arg(long)]
+    pub platform: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2051,6 +2110,90 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             }
             Ok(())
         }
+        Cmd::Cap(CapCmd::Add {
+            name,
+            spec,
+            command,
+        }) => {
+            let effect = spec
+                .effect
+                .as_deref()
+                .ok_or("cap add needs --effect: read, write, execute, sense or actuate")?;
+            let mut c = nerve_policy::config::ConfigCapability {
+                name: name.clone(),
+                summary: String::new(),
+                effect: parse_enum(effect, "read, write, execute, sense or actuate")?,
+                command,
+                params: Value::Null,
+                result: Default::default(),
+                timeout_secs: None,
+                account: Default::default(),
+                platform: Default::default(),
+            };
+            let input = cap_stdin(&spec)?;
+            cap_spec(&spec, input.as_deref(), &mut c)?;
+            edit(&paths, |cfg| {
+                if cfg.capabilities.iter().any(|d| d.name == name) {
+                    return Err(format!(
+                        "a capability {name} is declared already; `cap edit` changes it"
+                    ));
+                }
+                cfg.capabilities.push(c.clone());
+                Ok(())
+            })
+            .await?;
+            w(out, format!("capability {name} added: {}", cap_line(&c)));
+            for note in cap_notes(&c, crate::service::is_service_node(&paths)) {
+                w(out, note);
+            }
+            Ok(())
+        }
+        Cmd::Cap(CapCmd::Edit {
+            name,
+            spec,
+            command,
+        }) => {
+            let input = cap_stdin(&spec)?;
+            edit(&paths, |cfg| {
+                let c = cfg
+                    .capabilities
+                    .iter_mut()
+                    .find(|d| d.name == name)
+                    .ok_or_else(|| format!("no capability {name} is declared"))?;
+                if let Some(e) = &spec.effect {
+                    c.effect = parse_enum(e, "read, write, execute, sense or actuate")?;
+                }
+                if !command.is_empty() {
+                    c.command = command.clone();
+                }
+                cap_spec(&spec, input.as_deref(), c)
+            })
+            .await?;
+            let (cfg, _) = read_config(&paths).await?;
+            let c = cfg
+                .capabilities
+                .iter()
+                .find(|d| d.name == name)
+                .ok_or_else(|| format!("no capability {name} is declared"))?;
+            w(out, format!("capability {name} changed: {}", cap_line(c)));
+            for note in cap_notes(c, crate::service::is_service_node(&paths)) {
+                w(out, note);
+            }
+            Ok(())
+        }
+        Cmd::Cap(CapCmd::Rm { name }) => {
+            edit(&paths, |c| {
+                let before = c.capabilities.len();
+                c.capabilities.retain(|d| d.name != name);
+                if c.capabilities.len() == before {
+                    return Err(format!("no capability {name} is declared"));
+                }
+                Ok(())
+            })
+            .await?;
+            w(out, format!("capability {name} removed"));
+            Ok(())
+        }
         Cmd::Cap(CapCmd::Provider(ProviderCmd::Allow { name, exe })) => {
             if !nerve_policy::config::valid_provider_name(&name) {
                 return Err(format!(
@@ -3270,7 +3413,11 @@ async fn cap_listing(paths: &NodePaths, cfg: &NodeConfig) -> Result<Value, Strin
     };
     match r {
         Ok(v) => Ok(v),
-        Err(e) if e == nerve_transport::ctl::NOT_RUNNING => Ok(crate::provider::listing(cfg, None)),
+        Err(e) if e == nerve_transport::ctl::NOT_RUNNING => Ok(crate::provider::listing(
+            cfg,
+            None,
+            crate::service::is_service_node(paths),
+        )),
         Err(e) => Err(e),
     }
 }
@@ -3283,10 +3430,16 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
     let text = |r: &Value, k: &str| r[k].as_str().unwrap_or("-").to_string();
     let names: Vec<String> = rows.iter().map(|r| text(r, "name")).collect();
     let width = |k: &str| rows.iter().map(|r| text(r, k).len()).max().unwrap_or(0);
-    let (wn, we, ws) = (width("name"), width("effect"), width("source"));
+    // A capability of the config that runs as the owner says so.
+    let source = |r: &Value| match (r["source"].as_str(), r["account"].as_str()) {
+        (Some(s), Some("owner")) => format!("{s} (owner)"),
+        _ => text(r, "source"),
+    };
+    let (wn, we) = (width("name"), width("effect"));
+    let ws = rows.iter().map(|r| source(r).len()).max().unwrap_or(0);
     let mut lines = Vec::new();
     for r in &rows {
-        let what = match r["broken"].as_str() {
+        let what = match r["broken"].as_str().or(r["left_out"].as_str()) {
             Some(why) => format!("left out: {why}"),
             None => r["centers"]
                 .as_object()
@@ -3313,7 +3466,7 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
             "{:wn$}  {:we$}  {:ws$}  {what}",
             text(r, "name"),
             text(r, "effect"),
-            text(r, "source"),
+            source(r),
         );
         lines.push(line.trim_end().to_string());
     }
@@ -3342,8 +3495,143 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
                 .into(),
         );
     }
+    lines.extend(config_lines(v));
     lines.extend(program_lines(v));
     lines
+}
+
+/// The schema `spec` takes from stdin, if it takes one: read in the
+/// command, from the owner's input (crate::owner::reads_input), never from
+/// a file the node would open.
+fn cap_stdin(spec: &CapSpec) -> Result<Option<String>, String> {
+    if !(spec.params_stdin || spec.result_stdin) {
+        return Ok(None);
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+        .map_err(|e| format!("cannot read stdin: {e}"))?;
+    Ok(Some(text))
+}
+
+/// Sets what `spec` gives of `c`, with `stdin` the schema [`cap_stdin`]
+/// read: each one given replaces what `c` has.
+fn cap_spec(
+    spec: &CapSpec,
+    stdin: Option<&str>,
+    c: &mut nerve_policy::config::ConfigCapability,
+) -> Result<(), String> {
+    use nerve_policy::config::{Output, Platform, RunsAs};
+    let stdin = || {
+        stdin
+            .map(str::to_string)
+            .ok_or("nothing came on stdin".to_string())
+    };
+    if let Some(s) = &spec.summary {
+        c.summary = s.trim().to_string();
+    }
+    let params = match (&spec.params, spec.params_stdin) {
+        (_, true) => Some(stdin()?),
+        (p, false) => p.clone(),
+    };
+    if let Some(p) = params {
+        c.params = if p.trim() == "none" {
+            Value::Null
+        } else {
+            serde_json::from_str(&p).map_err(|e| format!("--params: not JSON: {e}"))?
+        };
+    }
+    let result = match (&spec.result, spec.result_stdin) {
+        (_, true) => Some(stdin()?),
+        (r, false) => r.clone(),
+    };
+    if let Some(r) = result {
+        c.result = Output::parse(&r)?;
+    }
+    if let Some(t) = &spec.timeout {
+        c.timeout_secs = match t.as_str() {
+            "default" => None,
+            n => Some(
+                n.parse()
+                    .map_err(|_| format!("--timeout {n}: seconds, or default"))?,
+            ),
+        };
+    }
+    if let Some(a) = &spec.account {
+        c.account = RunsAs::parse(a).ok_or_else(|| format!("--account {a}: nerve-run or owner"))?;
+    }
+    if let Some(p) = &spec.platform {
+        c.platform =
+            Platform::parse(p).ok_or_else(|| format!("--platform {p}: any, linux or windows"))?;
+    }
+    Ok(())
+}
+
+/// One config capability in words: its command, who runs it, and what
+/// else the owner set.
+fn cap_line(c: &nerve_policy::config::ConfigCapability) -> String {
+    let mut line = format!("{}; as {}", c.command_line(), c.account.as_str());
+    if !c.platform.is_any() {
+        line.push_str(&format!("; {} only", c.platform.as_str()));
+    }
+    if let Some(t) = c.timeout_secs {
+        line.push_str(&format!("; timeout {t} s"));
+    }
+    line
+}
+
+/// What the owner should know of `c` once it is declared: where this node
+/// does not offer it, and that a center gets one that senses or actuates
+/// only once the owner turns it on.
+fn cap_notes(c: &nerve_policy::config::ConfigCapability, installed: bool) -> Vec<String> {
+    use nerve_proto::descriptor::Effect;
+    let mut notes = Vec::new();
+    if let Some(why) = crate::config_cap::left_out(c, std::env::consts::OS, installed) {
+        notes.push(format!("this node does not offer it: {why}"));
+    }
+    if matches!(c.effect, Effect::Sense | Effect::Actuate) {
+        notes.push(format!(
+            "it {}s: a center gets it only once you turn it on for that center (cap set {} on --center NAME)",
+            c.effect.as_str(),
+            c.name
+        ));
+    }
+    notes
+}
+
+/// The lines of `cap ls` for the capabilities of node.toml: each one's
+/// command and who runs it.
+fn config_lines(v: &Value) -> Vec<String> {
+    v["config"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| serde_json::from_value::<ConfigEntry>(e.clone()).ok())
+        .map(|e| {
+            let c = nerve_policy::config::ConfigCapability {
+                name: e.name,
+                summary: String::new(),
+                effect: e.effect,
+                command: e.command,
+                params: Value::Null,
+                result: Default::default(),
+                timeout_secs: e.timeout_secs,
+                account: nerve_policy::config::RunsAs::parse(&e.account).unwrap_or_default(),
+                platform: nerve_policy::config::Platform::parse(&e.platform).unwrap_or_default(),
+            };
+            format!("capability {}: {}", c.name, cap_line(&c))
+        })
+        .collect()
+}
+
+/// What [`config_lines`] reads of an entry of `cap ls --json`'s `config`.
+#[derive(serde::Deserialize)]
+struct ConfigEntry {
+    name: String,
+    effect: nerve_proto::descriptor::Effect,
+    command: Vec<String>,
+    timeout_secs: Option<u64>,
+    account: String,
+    platform: String,
 }
 
 /// What `cap provider allow` and `ls` add where no program attaches: the
@@ -7872,6 +8160,9 @@ mod tests {
             &["cap", "provider", "allow", "desk", "/usr/bin/desk"],
             &["cap", "provider", "rm", "desk"],
             &["cap", "provider", "ls"],
+            &["cap", "add", "a.b", "--effect", "read", "--", "true"],
+            &["cap", "edit", "a.b", "--timeout", "5"],
+            &["cap", "rm", "a.b"],
             &["proxy", "set", "http://p:1"],
             &["proxy", "rm"],
             &["proxy", "ls"],
@@ -9237,6 +9528,234 @@ mod tests {
         let v = json_of(&paths, &["cap", "ls", "--center", "lab"]);
         assert_eq!(v["center"], "lab");
         assert_eq!(v["caps"], json!({"lamp": "on"}));
+    }
+
+    /// `cap add`, `edit` and `rm` declare the owner's own capabilities in
+    /// node.toml, checked as the node checks them; `cap ls` lists them with
+    /// their command and account, and says where this node does not offer
+    /// one.
+    #[test]
+    fn cap_add_edit_and_rm_declare_capabilities_of_node_toml() {
+        let (_d, paths) = setup(&["lab"]);
+        let params = r#"{"type": "object", "properties": {"path": {"type": "string", "x-nerve-path": "read"}}, "required": ["path"]}"#;
+        let said = run(
+            &paths,
+            &[
+                "cap",
+                "add",
+                "logs.tail",
+                "--effect",
+                "read",
+                "--summary",
+                "The end of a log.",
+                "--params",
+                params,
+                "--timeout",
+                "5",
+                "--",
+                "tail",
+                "-n",
+                "20",
+                "--",
+                "{path}",
+            ],
+        )
+        .unwrap();
+        assert!(
+            said.contains(
+                "capability logs.tail added: tail -n 20 -- {path}; as nerve-run; timeout 5 s"
+            ),
+            "{said}"
+        );
+        let c = load(&paths).capabilities[0].clone();
+        assert_eq!(c.command, ["tail", "-n", "20", "--", "{path}"]);
+        assert_eq!(c.params["required"], json!(["path"]));
+        assert_eq!(c.summary, "The end of a log.");
+        assert_eq!(c.timeout_secs, Some(5));
+        // A node run by hand has no nerve-run; Windows offers none yet.
+        let not_here = if cfg!(target_os = "linux") {
+            "this node does not offer it: runs as nerve-run"
+        } else {
+            "this node does not offer it: a node on"
+        };
+        assert!(said.contains(not_here), "{said}");
+        // Checked as the node checks it.
+        for (args, why) in [
+            (
+                &["cap", "add", "logs.tail", "--effect", "read", "--", "tail"][..],
+                "declared already",
+            ),
+            (&["cap", "add", "logs.x", "--", "tail"], "needs --effect"),
+            (
+                &[
+                    "cap", "add", "logs.x", "--effect", "read", "--", "cat", "{path}",
+                ],
+                "names no argument",
+            ),
+            (
+                &["cap", "add", "fs.x", "--effect", "read", "--", "cat"],
+                "the node's or the center's own",
+            ),
+            (
+                &["cap", "add", "logs.x", "--effect", "look", "--", "cat"],
+                "expected read, write",
+            ),
+            (
+                &[
+                    "cap", "add", "logs.x", "--effect", "read", "--params", "{", "--", "cat",
+                ],
+                "not JSON",
+            ),
+            (
+                &[
+                    "cap",
+                    "add",
+                    "logs.x",
+                    "--effect",
+                    "read",
+                    "--account",
+                    "root",
+                    "--",
+                    "cat",
+                ],
+                "nerve-run or owner",
+            ),
+            (
+                &[
+                    "cap",
+                    "add",
+                    "logs.x",
+                    "--effect",
+                    "read",
+                    "--timeout",
+                    "99999",
+                    "--",
+                    "cat",
+                ],
+                "max_timeout_secs",
+            ),
+            (
+                &["cap", "edit", "logs.none", "--timeout", "5"],
+                "no capability logs.none",
+            ),
+            (&["cap", "rm", "logs.none"], "no capability logs.none"),
+        ] {
+            let e = run(&paths, args).unwrap_err();
+            assert!(e.contains(why), "{args:?}: {e}");
+        }
+        assert!(run(&paths, &["cap", "add", "logs.x", "--effect", "read"]).is_err());
+        assert_eq!(load(&paths).capabilities.len(), 1);
+        // Edit: what is given replaces, the rest stays.
+        let said = run(
+            &paths,
+            &[
+                "cap",
+                "edit",
+                "logs.tail",
+                "--account",
+                "owner",
+                "--timeout",
+                "default",
+                "--effect",
+                "sense",
+            ],
+        )
+        .unwrap();
+        assert!(
+            said.contains("capability logs.tail changed: tail -n 20 -- {path}; as owner"),
+            "{said}"
+        );
+        assert!(
+            said.contains("a center gets it only once you turn it on"),
+            "{said}"
+        );
+        let c = load(&paths).capabilities[0].clone();
+        assert_eq!((c.timeout_secs, c.account.as_str()), (None, "owner"));
+        assert_eq!(c.command, ["tail", "-n", "20", "--", "{path}"]);
+        run(
+            &paths,
+            &[
+                "cap",
+                "edit",
+                "logs.tail",
+                "--params",
+                "none",
+                "--",
+                "uptime",
+            ],
+        )
+        .unwrap();
+        let c = load(&paths).capabilities[0].clone();
+        assert!(c.params.is_null());
+        assert_eq!(c.command, ["uptime"]);
+        // A new one for another platform.
+        run(
+            &paths,
+            &[
+                "cap",
+                "add",
+                "win.who",
+                "--effect",
+                "read",
+                "--platform",
+                "windows",
+                "--account",
+                "owner",
+                "--result",
+                r#"{"type": "string"}"#,
+                "--",
+                "whoami",
+            ],
+        )
+        .unwrap();
+        let ls = run(&paths, &["cap", "ls"]).unwrap();
+        let line = |name: &str| {
+            ls.lines()
+                .find(|l| l.split_whitespace().next() == Some(name))
+                .unwrap_or_else(|| panic!("no {name}: {ls}"))
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                line("logs.tail"),
+                "logs.tail sense config (owner) lab: default"
+            );
+            assert!(
+                line("win.who").ends_with("left out: for windows only"),
+                "{ls}"
+            );
+        }
+        assert!(
+            ls.contains("capability logs.tail: uptime; as owner"),
+            "{ls}"
+        );
+        assert!(
+            ls.contains("capability win.who: whoami; as owner; windows only"),
+            "{ls}"
+        );
+        let v = json_of(&paths, &["cap", "ls"]);
+        assert_eq!(
+            v["config"][1],
+            json!({"name": "win.who", "summary": "", "effect": "read", "command": ["whoami"],
+                   "params": null, "result": {"type": "string"}, "timeout_secs": null,
+                   "account": "owner", "platform": "windows"})
+        );
+        assert_eq!(v["config"][0]["result"], "text");
+        let row = v["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "win.who")
+            .unwrap();
+        assert_eq!(row["source"], "config", "{row}");
+        assert!(row["left_out"].is_string(), "{row}");
+        // The changing commands say what they did as messages.
+        let v = json_of(&paths, &["cap", "rm", "win.who"]);
+        assert_eq!(v["messages"][0], "capability win.who removed", "{v}");
+        run(&paths, &["cap", "rm", "logs.tail"]).unwrap();
+        assert!(load(&paths).capabilities.is_empty());
     }
 
     /// `cap ls` of a running node asks it, on Windows over its pipe: it

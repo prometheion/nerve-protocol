@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use nerve_policy::NodeConfig;
 use nerve_policy::config::{ConfigCapability, Output, RunsAs};
@@ -30,18 +30,34 @@ pub fn offered(cfg: &NodeConfig, installed: bool) -> Vec<Capability> {
     offered_on(cfg, std::env::consts::OS, installed)
 }
 
-/// The config's capabilities a node on `os` offers: on Linux only, those of
-/// its platform, and on a node run by hand (not `installed`) only those
-/// that run as the owner.
-pub fn offered_on(cfg: &NodeConfig, os: &str, installed: bool) -> Vec<Capability> {
+/// Why a node on `os` does not offer `c`, if it does not: it offers them on
+/// Linux only for now, those of its platform, and on a node run by hand
+/// (not `installed`) only those that run as the owner.
+pub fn left_out(c: &ConfigCapability, os: &str, installed: bool) -> Option<String> {
     if os != "linux" {
-        return Vec::new();
+        Some(format!(
+            "a node on {os} offers no capability of node.toml yet (Linux only for now)"
+        ))
+    } else if !c.platform.takes(os) {
+        Some(format!("for {} only", c.platform.as_str()))
+    } else if !installed && c.account == RunsAs::NerveRun {
+        Some(format!(
+            "runs as {}, which a node run by hand does not have (account = \"owner\" runs it as you)",
+            crate::account::RUN_USER
+        ))
+    } else {
+        None
     }
+}
+
+/// The config's capabilities a node on `os` offers: those [`left_out`] does
+/// not leave out.
+pub fn offered_on(cfg: &NodeConfig, os: &str, installed: bool) -> Vec<Capability> {
     let mut caps: BTreeMap<&str, Capability> = BTreeMap::new();
     for c in cfg
         .capabilities
         .iter()
-        .filter(|c| c.platform.takes(os) && (installed || c.account == RunsAs::Owner))
+        .filter(|c| left_out(c, os, installed).is_none())
     {
         let (cap, action) = c.split();
         let entry = caps.entry(cap).or_insert_with(|| Capability {
@@ -67,6 +83,25 @@ pub fn offered_on(cfg: &NodeConfig, os: &str, installed: bool) -> Vec<Capability
         );
     }
     caps.into_values().collect()
+}
+
+/// `c` as `cap ls --json` gives it: as the owner declared it, the schemas
+/// as JSON.
+pub fn entry(c: &ConfigCapability) -> Value {
+    json!({
+        "name": c.name,
+        "summary": c.summary,
+        "effect": c.effect,
+        "command": c.command,
+        "params": c.params,
+        "result": match &c.result {
+            Output::Text => json!(Output::Text.to_string()),
+            Output::Json(s) => s.clone(),
+        },
+        "timeout_secs": c.timeout_secs,
+        "account": c.account.as_str(),
+        "platform": c.platform.as_str(),
+    })
 }
 
 /// The config's entry for `cap.action`.
@@ -146,7 +181,6 @@ pub fn result(decl: &ConfigCapability, run: &Value) -> Result<Value, RpcError> {
 mod tests {
     use super::*;
     use nerve_proto::descriptor::Effect;
-    use serde_json::json;
 
     fn cfg(entries: &str) -> NodeConfig {
         NodeConfig::parse(entries).unwrap()

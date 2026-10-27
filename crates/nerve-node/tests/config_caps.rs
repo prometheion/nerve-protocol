@@ -683,3 +683,110 @@ async fn hello(socket: &Path, caps: Value) -> (Provider, Value) {
     let first = p.next().await.expect("an answer");
     (p, first)
 }
+
+/// What `nerve-node <words>` prints, run in this process.
+async fn cli(paths: &NodePaths, words: &[&str]) -> String {
+    use clap::Parser;
+    let mut args = vec![
+        "nerve-node".into(),
+        "--config-dir".into(),
+        paths.config_dir.clone(),
+        "--state-dir".into(),
+        paths.state_dir.clone(),
+    ];
+    args.extend(words.iter().map(PathBuf::from));
+    let cli = nerve_node::cli::Cli::parse_from(args);
+    let mut out = Vec::new();
+    nerve_node::cli::execute(cli, &mut out).await.unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+/// `cap add` takes a schema on stdin, as the owner pipes it in, and the
+/// running node offers what it declares at once; `cap ls` asks the node.
+#[tokio::test(flavor = "multi_thread")]
+async fn cap_add_takes_the_schema_on_stdin_and_the_running_node_offers_it() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let daemon = node(dir.path(), &center, Vec::new(), user_mode).await;
+    let mut conn = linked(&mut center).await;
+    let paths = daemon.paths().clone();
+    let schema =
+        r#"{"type": "object", "properties": {"word": {"type": "string"}}, "required": ["word"]}"#;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_nerve-node"))
+        .arg("--config-dir")
+        .arg(&paths.config_dir)
+        .arg("--state-dir")
+        .arg(&paths.state_dir)
+        .args([
+            "cap",
+            "add",
+            "say.word",
+            "--effect",
+            "read",
+            "--account",
+            "owner",
+            "--params-stdin",
+            "--",
+            "printf",
+            "%s",
+            "{word}",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(schema.as_bytes())
+        .unwrap();
+    let o = child.wait_with_output().unwrap();
+    let said = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        o.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(
+        said.contains("capability say.word added: printf %s {word}; as owner"),
+        "{said}"
+    );
+    // The node took the change: it offers it, and the call runs.
+    let mut seen = false;
+    for _ in 0..100 {
+        if offered(&mut conn)
+            .await
+            .iter()
+            .any(|(n, _)| n == "say.word")
+        {
+            seen = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(seen, "say.word is offered");
+    assert_eq!(
+        invoke(&mut conn, "say.word", json!({"word": "hi there"}))
+            .await
+            .unwrap(),
+        json!("hi there")
+    );
+    let ls = cli(&paths, &["cap", "ls"]).await;
+    let row = ls
+        .lines()
+        .find(|l| l.starts_with("say.word"))
+        .unwrap_or_else(|| panic!("{ls}"));
+    assert_eq!(
+        row.split_whitespace().collect::<Vec<_>>(),
+        ["say.word", "read", "config", "(owner)", "lab:", "on"],
+        "{ls}"
+    );
+    assert!(
+        ls.contains("capability say.word: printf %s {word}; as owner"),
+        "{ls}"
+    );
+    daemon.stop().await;
+}
