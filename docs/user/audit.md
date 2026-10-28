@@ -35,7 +35,10 @@ you with the program file the node found in `PATH`):
 
 That command stays in this log. The center hears of each of its own calls
 (`audit/decision`, which its web UI shows) with the target, never the
-command, since your command may hold words no center should see. The
+command, since your command may hold words no center should see (while it
+runs, though, its line is open to every account on the machine, as every
+program's is: keep a secret out of it, see
+[config-capabilities.md](config-capabilities.md#keep-secrets-out-of-the-command)). The
 refusal the center gets names each path as it gave it; only the audit names
 where it led, which can be another place when the path goes through a link.
 A call to a capability you switched `off` is a refusal too, with the path or

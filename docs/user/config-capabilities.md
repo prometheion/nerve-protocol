@@ -5,7 +5,9 @@ a fixed command the node runs itself, such as `sensors.read` running
 `sensors -j`. You declare it once; every center then sees it next to `fs` and
 `exec`, the node decides each call to it by that center's mode and rules, as
 for any other capability, and writes it to the [audit log](audit.md) (with
-the command as it ran, the call's values in it, which no center sees). For a capability that keeps a connection or state of its own, write a
+the command as it ran, the call's values in it, which the node sends no
+center; while it runs, though, anyone on the machine can read it, see
+[below](#keep-secrets-out-of-the-command)). For a capability that keeps a connection or state of its own, write a
 [provider](providers.md) instead.
 
 They run on Linux: the [installed node](service.md) offers all of them, a node
@@ -118,6 +120,19 @@ while those of one that runs as you are held to the folders as a program's.
 Choose `owner` only for a command that needs your rights; it can do whatever
 you can.
 
+### Keep secrets out of the command
+
+While a command runs, its line, with the call's values in it, is there for
+every account on the machine to read, as every program's is (`ps`, `/proc`):
+for the centers' commands and file reads too. So a token or a password in
+the command is a token any center may read while it runs, and a value one
+center gives a call another may read the same way. Put a secret in a file
+the program reads (`curl -H @file`, a `--config` file): for a capability
+that runs as you, a file only you may read, outside every folder a center
+may write. A capability that runs as `nerve-run` cannot keep a secret from
+the centers whose commands run as that account, since they read what it
+reads.
+
 A command that runs as you must not run what a center may write: a center
 with `w` on a folder could put its own code there and have it run with your
 rights. A center may write in a `w` folder of its own, in `/tmp` and
@@ -153,7 +168,11 @@ while one of these lies in such a place:
   shell reads (`sh -c "cd /srv/site && ./deploy.sh"` names `/srv/site`). In
   such a line `~` and `$HOME` are your home, and a word after a `cd` or
   `pushd` counts from your home and from the folder it went to as well
-  (`cd /srv && site/deploy.sh` names `/srv/site/deploy.sh`). Other variables,
+  (`cd /srv && site/deploy.sh` names `/srv/site/deploy.sh`). So does a word
+  after an option that changes the folder, among the words of the command
+  or of such a line: `-C dir`, `-Cdir`, `--chdir=dir` and `--directory=dir`,
+  as `env`, `make`, `git` and `tar` take them (`env -C /srv site/deploy.sh`
+  names `/srv/site/deploy.sh`). Other variables,
   `~name` and `$(...)` are not read: write such a place as a full path. A
   word of a message names a place this way too: write `/tmp` in a commit
   message and the node refuses the command. A place not there yet counts

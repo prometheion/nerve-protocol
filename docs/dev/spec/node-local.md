@@ -614,14 +614,19 @@ absolute; one that is `~`, `$HOME` or `${HOME}`, alone or before a `/`, is
 also read from that folder (the home the command runs with), and a word of an
 element whose shell words hold `cd` or `pushd` is also read from each folder
 the first word after it not starting with `-` names (from the start folder
-and from the folder named before it, where relative). Only an element that is
+and from the folder named before it, where relative); so is every element
+and word after an option that changes the folder, among the elements or the
+shell words of one: `-C`, `--chdir` or `--directory` with that first word,
+or with the value glued on (`-Cdir`, `--chdir=dir`, `--directory=dir`). Only an element that is
 a placeholder is passed over; any other, braces and all, is judged. The center's error is a fixed text; the reason with the place is
 in the audit entry. A call's audit target is its paths, else `cap.action`,
 as for a program; the entry adds `command`, the command as it runs (or would
 have run), the call's values filled in (one line, as `cap ls` quotes it),
 which stays in the node's log: the `audit/decision` event leaves it out (as
 it leaves out the reason), since the descriptor gives a center no word of
-the command. `cap add` and `cap edit` ask the running node
+the command. While it runs, its argv is open to every account in `/proc`,
+as any process's is; the user docs tell the owner to keep a secret out of
+it. `cap add` and `cap edit` ask the running node
 (`cap.refusal`, §5; `null` for an entry this node does not offer) and warn
 of it,
 and of a string argument without `x-nerve-path` (passed as given, judged by

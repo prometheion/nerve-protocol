@@ -456,17 +456,27 @@ pub fn written_by_centers(
             rest.strip_prefix('/').map(|r| cwd.join(r))
         })
     };
-    // Where the words of a shell line count from: `cwd`, and each folder a
-    // `cd` or `pushd` in it names, a relative one from `cwd` and from the
-    // folder named before it (`cd /srv && site/x.sh` runs `/srv/site/x.sh`).
-    let folders_of = |words: &[String]| {
-        let mut from = vec![cwd.to_path_buf()];
-        for (i, _) in words
-            .iter()
-            .enumerate()
-            .filter(|(_, w)| *w == "cd" || *w == "pushd")
-        {
-            let Some(to) = words[i + 1..].iter().find(|w| !w.starts_with('-')) else {
+    // Where words count from: the folders of `base`, and each folder that
+    // a `cd` or `pushd` in them names, or an option that changes the
+    // folder (`-C dir`, `-Cdir`, `--chdir=dir`, `--directory dir`, as
+    // `env`, `make`, `git` and `tar` take it), a relative one from `cwd`
+    // and from the folder named before it (`cd /srv && site/x.sh` and
+    // `env -C /srv site/x.sh` run `/srv/site/x.sh`). An option of another
+    // program spelt alike only adds folders, which refuses more.
+    let folders_of = |words: &[String], base: &[PathBuf]| {
+        let mut from = base.to_vec();
+        for (i, w) in words.iter().enumerate() {
+            let glued = ["--chdir=", "--directory="]
+                .into_iter()
+                .find_map(|o| w.strip_prefix(o))
+                .or_else(|| w.strip_prefix("-C").filter(|r| !r.is_empty()));
+            let to = match w.as_str() {
+                "cd" | "pushd" | "-C" | "--chdir" | "--directory" => {
+                    words[i + 1..].iter().find(|w| !w.starts_with('-'))
+                }
+                _ => None,
+            };
+            let Some(to) = to.map(String::as_str).or(glued) else {
                 continue;
             };
             let named = match home_of(to) {
@@ -482,6 +492,9 @@ pub fn written_by_centers(
         }
         from
     };
+    // An option that changes the folder, among the elements, moves the
+    // elements as `cd` moves the words of a line.
+    let top = folders_of(&decl.command[1..], &[cwd.to_path_buf()]);
     // An element, and each word a shell would read in it: a line handed
     // to `sh -c` names its places as the elements of a command do. Only a
     // placeholder is passed over (the gate judges the call's arguments);
@@ -491,7 +504,7 @@ pub fn written_by_centers(
         .filter(|e| ConfigCapability::placeholder(e).is_none())
         .flat_map(|e| {
             let words = shell_words(e);
-            let from = folders_of(&words);
+            let from = folders_of(&words, &top);
             let words = words.into_iter().filter(move |w| w != e);
             std::iter::once(e.clone())
                 .chain(words)
@@ -967,6 +980,10 @@ account = "owner"
         };
         let w = std::slice::from_ref(&work);
         let s = |p: &std::path::Path| p.display().to_string();
+        let (parent, name) = (
+            root.parent().unwrap(),
+            root.file_name().unwrap().to_string_lossy().to_string(),
+        );
         for bad in [
             vec!["sh".to_string(), s(&work.join("deploy.sh"))],
             vec![s(&work.join("deploy.sh"))],
@@ -1073,6 +1090,45 @@ account = "owner"
                 "-c".into(),
                 format!("{{ cd {} && ./deploy.sh; }}", s(&work)),
             ],
+            // An element after an option that changes the folder counts
+            // from that folder.
+            vec![
+                "env".into(),
+                "-C".into(),
+                s(parent),
+                format!("{name}/work/deploy.sh"),
+            ],
+            vec![
+                "env".into(),
+                format!("--chdir={}", s(parent)),
+                format!("{name}/work/deploy.sh"),
+            ],
+            vec![
+                "make".into(),
+                "-C".into(),
+                s(parent),
+                "-f".into(),
+                format!("{name}/work/Makefile"),
+            ],
+            vec![
+                "make".into(),
+                format!("-C{}", s(parent)),
+                "-f".into(),
+                format!("{name}/work/Makefile"),
+            ],
+            vec![
+                "make".into(),
+                "--directory".into(),
+                s(parent),
+                "-f".into(),
+                format!("{name}/work/Makefile"),
+            ],
+            vec![
+                "make".into(),
+                format!("--directory={}", s(parent)),
+                "-f".into(),
+                format!("{name}/work/Makefile"),
+            ],
         ] {
             let c = decl(&bad.iter().map(String::as_str).collect::<Vec<_>>());
             let why = written_by_centers(&c, w, None, Some(&path), &root);
@@ -1103,6 +1159,12 @@ account = "owner"
             ],
             vec!["sh".into(), "-c".into(), "cd ~/other && ./safe.sh".into()],
             vec!["sh".into(), "-c".into(), "{ cd ~/other; }".into()],
+            vec![
+                "env".into(),
+                "-C".into(),
+                "other".into(),
+                "./safe.sh".into(),
+            ],
         ] {
             let c = decl(&good.iter().map(String::as_str).collect::<Vec<_>>());
             assert_eq!(
@@ -1111,6 +1173,42 @@ account = "owner"
                 "{good:?}"
             );
         }
+        // From a home (`other`) that holds a link `up` to the folder that
+        // holds `work`: a word counts from where a `cd` or `pushd` went, by
+        // `~`, from the home, and from the folder a `cd` went to before,
+        // though neither that folder nor the home is one a center writes.
+        std::os::unix::fs::symlink(&root, other.join("up")).unwrap();
+        for bad in [
+            "cd ~/up && work/deploy.sh".to_string(),
+            "cd up && work/deploy.sh".into(),
+            "pushd up && work/deploy.sh".into(),
+            format!("cd {}; cd {name}; work/deploy.sh", s(parent)),
+        ] {
+            let c = decl(&["sh", "-c", &bad]);
+            let why = written_by_centers(&c, w, None, Some(&path), &other);
+            assert!(
+                why.as_ref()
+                    .is_some_and(|y| y.contains("where a center may write")),
+                "{bad:?}: {why:?}"
+            );
+        }
+        let c = decl(&[
+            "git",
+            "-C",
+            &s(parent),
+            "-C",
+            &name,
+            "apply",
+            "work/x.patch",
+        ]);
+        let why = written_by_centers(&c, w, None, Some(&path), &other);
+        assert!(
+            why.as_ref()
+                .is_some_and(|y| y.contains("where a center may write")),
+            "{why:?}"
+        );
+        let c = decl(&["sh", "-c", "cd ~/up"]);
+        assert_eq!(written_by_centers(&c, w, None, Some(&path), &other), None);
         // One that starts where a center writes: `make`, `python3 -m` and
         // the like read their code from there.
         let why = written_by_centers(&decl(&["id"]), w, None, Some(&path), &work);
