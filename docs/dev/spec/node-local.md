@@ -617,7 +617,14 @@ the first word after it not starting with `-` names (from the start folder
 and from the folder named before it, where relative); so is every element
 and word after an option that changes the folder, among the elements or the
 shell words of one: `-C`, `--chdir` or `--directory` with that first word,
-or with the value glued on (`-Cdir`, `--chdir=dir`, `--directory=dir`). Only an element that is
+or with the value glued on (`-Cdir`, `--chdir=dir`, `--directory=dir`). A place
+that holds `*`, `?`, `[` or `{` (whatever the quotes were) is read as a shell
+expands it: its brace lists as bash makes them (a sequence `{x..y}` as `*`), and
+each of these by every existing path it matches (component by component,
+through links) and by every place above where a center may write that its components may
+name (that place or one below it), its part before the first wildcard taken
+as written and where it leads; more than 64 words of one place's braces or
+10,000 names read for one command refuse it. Only an element that is
 a placeholder is passed over; any other, braces and all, is judged. The center's error is a fixed text; the reason with the place is
 in the audit entry. A call's audit target is its paths, else `cap.action`,
 as for a program; the entry adds `command`, the command as it runs (or would

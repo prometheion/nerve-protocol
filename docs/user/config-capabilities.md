@@ -120,19 +120,6 @@ while those of one that runs as you are held to the folders as a program's.
 Choose `owner` only for a command that needs your rights; it can do whatever
 you can.
 
-### Keep secrets out of the command
-
-While a command runs, its line, with the call's values in it, is there for
-every account on the machine to read, as every program's is (`ps`, `/proc`):
-for the centers' commands and file reads too. So a token or a password in
-the command is a token any center may read while it runs, and a value one
-center gives a call another may read the same way. Put a secret in a file
-the program reads (`curl -H @file`, a `--config` file): for a capability
-that runs as you, a file only you may read, outside every folder a center
-may write. A capability that runs as `nerve-run` cannot keep a secret from
-the centers whose commands run as that account, since they read what it
-reads.
-
 A command that runs as you must not run what a center may write: a center
 with `w` on a folder could put its own code there and have it run with your
 rights. A center may write in a `w` folder of its own, in `/tmp` and
@@ -172,7 +159,11 @@ while one of these lies in such a place:
   after an option that changes the folder, among the words of the command
   or of such a line: `-C dir`, `-Cdir`, `--chdir=dir` and `--directory=dir`,
   as `env`, `make`, `git` and `tar` take them (`env -C /srv site/deploy.sh`
-  names `/srv/site/deploy.sh`). Other variables,
+  names `/srv/site/deploy.sh`). A word with a wildcard or a brace list
+  (`/srv/*/deploy.sh`, `/srv/{a,b}`) counts by every place it matches and by
+  every folder a center may write that it may match, also one that holds
+  nothing yet, quoted or not; one that stands for very many places is
+  refused, so write those out. Other variables,
   `~name` and `$(...)` are not read: write such a place as a full path. A
   word of a message names a place this way too: write `/tmp` in a commit
   message and the node refuses the command. A place not there yet counts
@@ -207,6 +198,19 @@ A cancelled call ends it too. A command that does not end with exit code 0
 fails: the agent gets its exit code and what it printed to stderr, marked as
 content from your machine, as a result is (and, like a result, it marks the
 session for the action checker).
+
+### Keep secrets out of the command
+
+While a command runs, its line, with the call's values in it, is there for
+every account on the machine to read, as every program's is (`ps`, `/proc`):
+for the centers' commands and file reads too. So a token or a password in
+the command is a token any center may read while it runs, and a value one
+center gives a call another may read the same way. Put a secret in a file
+the program reads (`curl -H @file`, a `--config` file): for a capability
+that runs as you, a file only you may read, outside every folder a center
+may write. A capability that runs as `nerve-run` cannot keep a secret from
+the centers whose commands run as that account, since they read what it
+reads.
 
 ## When a center may use it
 
