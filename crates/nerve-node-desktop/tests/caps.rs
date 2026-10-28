@@ -93,9 +93,12 @@ fn a_capability_is_added_through_the_dialog() {
     );
     assert_eq!(caps.get_declared().row_count(), 0);
 
-    // A new one: the dialog opens empty, without errors.
+    // A new one: the dialog opens empty, without errors, its Arguments box
+    // at the top whatever an earlier dialog left.
+    caps.set_params_scrolled(-40.0);
     caps.invoke_add();
     assert!(caps.get_edit_open() && caps.get_edit_new());
+    assert_eq!(caps.get_params_scrolled(), 0.0);
     assert_eq!(caps.get_name_error(), "");
     assert!(!caps.get_edit_ready());
     screen.draw();
@@ -104,11 +107,20 @@ fn a_capability_is_added_through_the_dialog() {
     caps.invoke_edit_save();
     assert!(caps.get_edit_open() && caps.get_edit_error().is_empty());
     assert!(!caps.get_name_error().is_empty(), "no name asked for");
+    // Typing in another field does not take the message away again.
+    caps.set_edit_summary("Says a word.".into());
+    caps.invoke_edit_check();
+    assert!(!caps.get_name_error().is_empty(), "the name error went");
     caps.set_edit_name("say.back".into());
     caps.set_edit_summary("Says a word back.".into());
     caps.invoke_edit_save();
     assert!(caps.get_edit_open() && caps.get_edit_error().is_empty());
     assert!(!caps.get_command_error().is_empty(), "no command asked for");
+    caps.invoke_edit_check();
+    assert!(
+        !caps.get_command_error().is_empty(),
+        "the command error went"
+    );
     assert!(config(&paths).capabilities.is_empty());
     caps.set_edit_command(r#"printf "[%s]" {word}"#.into());
     // A schema outside the subset: its reason at the field while it is
@@ -261,6 +273,26 @@ fn a_capability_is_added_through_the_dialog() {
         (c.summary.as_str(), c.timeout_secs),
         ("Says one word back.", Some(20))
     );
+    // The owner empties the field again (Settings > Limits unsets the
+    // key): the node is back at its default, which the dialog checks
+    // against, not the 7200 it read before.
+    run(&["config", "unset", "limits.max_timeout_secs"]);
+    caps.invoke_refresh();
+    caps.invoke_edit("say.back".into());
+    assert_eq!(caps.get_edit_timeout(), "20");
+    caps.set_edit_timeout("5400".into());
+    caps.invoke_edit_check();
+    assert!(
+        caps.get_timeout_error().contains("(3600)"),
+        "{}",
+        caps.get_timeout_error()
+    );
+    assert!(!caps.get_edit_ready());
+    caps.set_edit_timeout("3000".into());
+    caps.invoke_edit_check();
+    assert_eq!(caps.get_timeout_error(), "");
+    assert!(caps.get_edit_ready());
+    caps.set_edit_open(false);
     // A field emptied in an edit is cleared, not kept.
     caps.invoke_edit("say.back".into());
     assert_eq!(caps.get_edit_timeout(), "20");

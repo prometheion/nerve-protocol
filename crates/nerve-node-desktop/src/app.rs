@@ -155,6 +155,9 @@ pub struct Ctl {
     /// The capability dialog that is open, or was last: a count, so an
     /// answer of a save that comes later knows whether it is still its own.
     cap_dialogs: Cell<u64>,
+    /// Whether the open capability dialog was saved once: its empty fields
+    /// then show as errors until it closes.
+    cap_tried: Cell<bool>,
     caps_listing: RefCell<Value>,
     /// Restarts the service a moment after a change it takes only then.
     restart_timer: slint::Timer,
@@ -314,6 +317,7 @@ impl Ctl {
             caps_asked: Cell::new(0),
             caps_max_timeout: Cell::new(nerve_policy::config::Limits::default().max_timeout_secs),
             cap_dialogs: Cell::new(0),
+            cap_tried: Cell::new(false),
             caps_listing: RefCell::new(Value::Null),
             restart_timer: slint::Timer::default(),
             restart_waits: Cell::new(false),

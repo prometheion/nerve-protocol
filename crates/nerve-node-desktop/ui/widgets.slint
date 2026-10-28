@@ -1791,6 +1791,9 @@ export component TextArea {
     in property <string> label;
     in property <length> lines-high: 76px;
     in property <bool> invalid;
+    // How far the text is scrolled up: 0, or less once it is longer than
+    // the box.
+    in-out property <length> scrolled;
     callback edited(string);
     forward-focus: input;
     height: root.lines-high;
@@ -1809,19 +1812,38 @@ export component TextArea {
         width: parent.width - 24px;
         height: parent.height - 18px;
         clip: true;
-        input := TextInput {
+        // A TextInput does not scroll itself: the lines past the box's
+        // height are reached with the wheel, and the box follows the
+        // cursor to the line it moves to.
+        flick := Flickable {
             width: parent.width;
             height: parent.height;
-            text <=> root.text;
-            single-line: false;
-            wrap: word-wrap;
-            color: Theme.text;
-            font-size: Type.small;
-            font-family: root.mono ? Type.mono : "";
-            selection-background-color: Theme.accent.transparentize(0.6);
-            selection-foreground-color: Theme.text;
-            edited => {
-                root.edited(self.text);
+            content-width: self.width;
+            content-height: max(self.height, input.preferred-height);
+            content-y <=> root.scrolled;
+            input := TextInput {
+                width: parent.content-width;
+                height: parent.content-height;
+                text <=> root.text;
+                single-line: false;
+                wrap: word-wrap;
+                color: Theme.text;
+                font-size: Type.small;
+                font-family: root.mono ? Type.mono : "";
+                selection-background-color: Theme.accent.transparentize(0.6);
+                selection-foreground-color: Theme.text;
+                edited => {
+                    root.edited(self.text);
+                }
+                cursor-position-changed(cursor) => {
+                    // The cursor's line is a line high from its top.
+                    let line = self.font-size * 1.5;
+                    if (cursor.y + flick.content-y < 0px) {
+                        flick.content-y = min(0px, max(flick.height - self.height, -cursor.y));
+                    } else if (cursor.y + line + flick.content-y > flick.height) {
+                        flick.content-y = min(0px, max(flick.height - self.height, flick.height - cursor.y - line));
+                    }
+                }
             }
         }
         Text {

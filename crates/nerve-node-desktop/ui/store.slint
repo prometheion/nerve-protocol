@@ -290,6 +290,9 @@ export global Caps {
     in-out property <int> edit-effect;
     in-out property <string> edit-command;
     in-out property <string> edit-params;
+    // How far the Arguments box is scrolled: the dialog starts it at 0,
+    // and the tests read where it went.
+    in-out property <length> params-scrolled;
     in-out property <string> edit-result;
     in-out property <string> edit-timeout;
     in-out property <int> edit-platform;

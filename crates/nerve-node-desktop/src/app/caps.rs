@@ -59,7 +59,7 @@ impl Ctl {
         };
         let asked = self.caps_asked.get() + 1;
         self.caps_asked.set(asked);
-        // Not set: the default, which the CLI leaves out.
+        // Not set: the default, which node.toml leaves out.
         let default_max = nerve_policy::config::Limits::default().max_timeout_secs;
         self.job(
             move |r| {
@@ -68,10 +68,10 @@ impl Ctl {
                     args.push(format!("--center={center}"));
                 }
                 // The dialog holds a time limit to the node's own maximum.
-                let max = r
-                    .run(&["config", "get", "limits.max_timeout_secs"])
-                    .ok()
-                    .map(|v| v["value"].as_u64().unwrap_or(default_max));
+                let max = view::max_timeout(
+                    &r.run(&["config", "get", "limits.max_timeout_secs"]),
+                    default_max,
+                );
                 (center, r.run(&super::strings(&args)), max)
             },
             move |c, (center, answer, max)| {
@@ -172,10 +172,12 @@ impl Ctl {
             c.set_edit_platform(at(&view::PLATFORMS, &form.platform));
             c.set_edit_error(SharedString::new());
             c.set_edit_busy(false);
+            c.set_params_scrolled(Default::default());
             c.set_edit_open(true);
         });
         self.cap_dialogs.set(self.cap_dialogs.get() + 1);
-        self.cap_check(false);
+        self.cap_tried.set(false);
+        self.cap_check();
     }
 
     fn cap_add(&self) {
@@ -217,15 +219,15 @@ impl Ctl {
 
     /// Checks the dialog's fields as the node will, and says what is wrong
     /// with each: a field left empty only once the owner tried to save
-    /// (`tried`), so a new dialog does not open full of errors. Whether it
-    /// may be saved.
-    fn cap_check(&self, tried: bool) -> bool {
+    /// (`cap_tried`), so a new dialog does not open full of errors. Whether
+    /// it may be saved.
+    fn cap_check(&self) -> bool {
         let Some(form) = self.cap_form() else {
             return false;
         };
         let e = view::cap_form_check(&form, self.caps_max_timeout.get());
         let typed = |text: &str, error: &str| -> SharedString {
-            if tried || !text.trim().is_empty() {
+            if self.cap_tried.get() || !text.trim().is_empty() {
                 error.into()
             } else {
                 SharedString::new()
@@ -248,7 +250,11 @@ impl Ctl {
     /// nothing wrong with it; the node checks it again, and what it refuses
     /// stays in the dialog with its reason.
     fn cap_save(self: &Rc<Self>) {
-        if self.with_caps(|c| c.get_edit_busy()) != Some(false) || !self.cap_check(true) {
+        if self.with_caps(|c| c.get_edit_busy()) != Some(false) {
+            return;
+        }
+        self.cap_tried.set(true);
+        if !self.cap_check() {
             return;
         }
         let (Some(form), Some(new)) = (self.cap_form(), self.with_caps(|c| c.get_edit_new()))
@@ -417,7 +423,7 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     k.on_edit(move |name| c.cap_edit(&name));
     let c = ctl.clone();
     k.on_edit_check(move || {
-        c.cap_check(false);
+        c.cap_check();
     });
     let c = ctl.clone();
     k.on_edit_save(move || c.cap_save());

@@ -334,7 +334,90 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
         saved.get(),
         "the dialog's Add is not at the end of its scroll"
     );
+
+    // The Arguments box holds more lines than it shows, and a TextInput
+    // does not scroll itself: the wheel over the box moves its text, and
+    // the cursor sent to the end brings the last line into view. The window
+    // is tall for this, so the dialog's own body has nothing to scroll and
+    // only the box takes the wheel; the box is found by where it does.
+    screen.resize(ROOM.0 as u32, 1600);
+    caps.set_params_scrolled(0.0);
+    screen.draw();
+    let wheel = |x: f32, y: f32, delta_y: f32| {
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+                position: slint::LogicalPosition::new(x, y),
+                delta_x: 0.0,
+                delta_y,
+            });
+        screen.draw();
+    };
+    let mut over = None;
+    'find: for y in (0..1600).step_by(8) {
+        for x in [380.0, 450.0, 520.0, 600.0, 680.0, 760.0, 840.0, 900.0] {
+            wheel(x, y as f32, -20.0);
+            if caps.get_params_scrolled() < 0.0 {
+                over = Some((x, y as f32));
+                break 'find;
+            }
+        }
+    }
+    let (x, y) = over.expect("the wheel does not scroll the Arguments box");
+    wheel(x, y, -5000.0);
+    let end = caps.get_params_scrolled();
+    assert!(end < -20.0, "the box scrolls {end} pixels at most");
+    wheel(x, y, 5000.0);
+    assert_eq!(caps.get_params_scrolled(), 0.0);
+    // Focused by a click, Ctrl+End puts the cursor after the last line.
+    for event in [
+        slint::platform::WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(x, y),
+        },
+        slint::platform::WindowEvent::PointerPressed {
+            position: slint::LogicalPosition::new(x, y),
+            button: slint::platform::PointerEventButton::Left,
+        },
+        slint::platform::WindowEvent::PointerReleased {
+            position: slint::LogicalPosition::new(x, y),
+            button: slint::platform::PointerEventButton::Left,
+        },
+    ] {
+        window.window().dispatch_event(event);
+    }
+    let control: SharedString = slint::platform::Key::Control.into();
+    let w = window.window();
+    w.dispatch_event(slint::platform::WindowEvent::KeyPressed {
+        text: control.clone(),
+    });
+    let key: SharedString = slint::platform::Key::End.into();
+    w.dispatch_event(slint::platform::WindowEvent::KeyPressed { text: key.clone() });
+    w.dispatch_event(slint::platform::WindowEvent::KeyReleased { text: key });
+    w.dispatch_event(slint::platform::WindowEvent::KeyReleased {
+        text: control.clone(),
+    });
+    screen.draw();
+    let followed = caps.get_params_scrolled();
+    assert!(
+        followed < end / 2.0,
+        "the box did not follow the cursor to the last line: {followed} of {end}"
+    );
+    // And back to the first line with Ctrl+Home.
+    let key: SharedString = slint::platform::Key::Home.into();
+    w.dispatch_event(slint::platform::WindowEvent::KeyPressed {
+        text: control.clone(),
+    });
+    w.dispatch_event(slint::platform::WindowEvent::KeyPressed { text: key.clone() });
+    w.dispatch_event(slint::platform::WindowEvent::KeyReleased { text: key });
+    w.dispatch_event(slint::platform::WindowEvent::KeyReleased { text: control });
+    screen.draw();
+    assert_eq!(
+        caps.get_params_scrolled(),
+        0.0,
+        "the box did not follow the cursor back to the first line"
+    );
     caps.set_edit_open(false);
+    screen.resize(ROOM.0 as u32, ROOM.1 as u32);
     screen.draw();
 
     // The sidebar at the window's least height: each page's item, About,

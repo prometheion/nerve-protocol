@@ -537,6 +537,7 @@ export component CapDialog inherits Dialog {
         error: Caps.params-error;
         TextArea {
             text <=> Caps.edit-params;
+            scrolled <=> Caps.params-scrolled;
             mono: true;
             invalid: Caps.params-error != "";
             lines-high: 110px;

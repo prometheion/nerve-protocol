@@ -881,6 +881,17 @@ fn schema_field(text: &str, role: nerve_proto::schema::Role) -> Result<Value, St
     Ok(v)
 }
 
+/// The node's `limits.max_timeout_secs` from the answer of `config get` for
+/// it. A limit at its default is not in node.toml, and `config get` then
+/// says it is not set: the default. Any other failure tells nothing (`None`).
+pub fn max_timeout(answer: &Result<Value, String>, default: u64) -> Option<u64> {
+    match answer {
+        Ok(v) => Some(v["value"].as_u64().unwrap_or(default)),
+        Err(e) if e.contains("is not set") => Some(default),
+        Err(_) => None,
+    }
+}
+
 /// Checks `form` with the node's own rules for a capability of node.toml
 /// (nerve_policy's `ConfigCapability::validate`, the schemas with the
 /// center's), so the dialog says what is wrong while the owner types; the
@@ -2479,6 +2490,18 @@ mod tests {
     /// What the dialog saves: `cap add` with what is given, `cap edit` with
     /// every field, the arguments' schema on stdin; and an entry of `cap
     /// ls` back in the dialog's fields.
+    #[test]
+    fn the_nodes_time_limit_is_its_default_once_unset() {
+        let set = Ok(json!({"key": "limits.max_timeout_secs", "value": 1800}));
+        assert_eq!(max_timeout(&set, 3600), Some(1800));
+        // `config unset` takes the key out of node.toml.
+        let unset = Err("limits.max_timeout_secs is not set".to_string());
+        assert_eq!(max_timeout(&unset, 3600), Some(3600));
+        // A node that did not answer says nothing about its limit.
+        let down = Err("nerve-node did not end".to_string());
+        assert_eq!(max_timeout(&down, 3600), None);
+    }
+
     #[test]
     fn the_dialog_saves_with_cap_add_or_edit() {
         let form = CapForm {
