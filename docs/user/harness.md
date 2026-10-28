@@ -275,7 +275,8 @@ A stream belongs to its session, as its job does. The center keeps at most
 1 MiB of a stream that was not read, in memory only; when more comes, the
 oldest part goes and the next read says how much; a read ends where output
 was dropped, so its text never has a hole inside it. A session holds at most
-16 streams, and has at most 8 open on one machine at once, so other
+16 streams, and has at most 8 open on one machine at once (or on their
+way there), so other
 sessions' streams find room there: a further stream opens once one of its
 own ends (reads give nothing new until then). A stream goes when it is closed, when the job's result is read with
 `job.status`, when the session ends, and 10 minutes after it ended unread.
@@ -300,6 +301,12 @@ names each with its kind (`- sensors.temperature (state): …`, `- door.opened
 | a state key, with `{}` | its value now |
 | an event, with `{}` | `Subscribed to door.opened … stream s-…`: from then on each event comes in that stream as one JSON line `{"name", "seq", "ts", "data"}`, read with `stream.read` |
 | a stream, with its args | `Opened camera.log … as stream s-…`, read with `stream.read` until it ends |
+
+Like any call, `execute` of an event or a stream answers within the call
+wait. When the action checker or the program takes longer, it answers
+`Subscribing to …` or `Opening … as stream s-…` with the stream id at
+once, and the subscription or stream goes on by itself; if the machine then
+refuses it, `stream.read` says why (`it ended (it did not open: …)`).
 
 `stream.close` ends a subscription, as the session's end does. A
 subscription keeps at most 1 MiB of events that were not read and drops the

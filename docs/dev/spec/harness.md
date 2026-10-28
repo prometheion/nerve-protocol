@@ -481,12 +481,16 @@ stderr in the order it read them; the result still carries the output as
 before. When the stream cannot be opened (the job ended first, the node
 refused, or the command did not start or the node did not answer within
 that minute; a link has at most 4 `stream.open`s that went unanswered for
-10 s each, and asks for no more until their answers come) it ends, and a read
+their whole wait, 10 s each here, and asks for no more until their answers
+come; an open whose `execute` was cancelled before its wait passed does not
+count) it ends, and a read
 says why in the center's words: `it ended (the node refused to open it
 (forbidden))`. A session has at most half of a node's stream places open at
 once (8 of its `limits.streams` 16), so other sessions' streams find room; a
 further stream of it, or one the node has no place for yet (`busy`), opens
-once a place frees up, and reads give nothing new until then. Only when the session holds 16 streams that still run, or it ended,
+once a place frees up, and reads give nothing new until then. A stream
+on its way to the node holds its place too, as a program's stream does
+(below), so the two kinds together keep to the share. Only when the session holds 16 streams that still run, or it ended,
 does the answer name none: `Its output is not streamed (…); job.status gives
 it with the result.` The answer counts as the details of `stream.read` and
 `stream.close` (§4.3), as of `job.*`.
@@ -573,7 +577,13 @@ one:
   closed, by `stream.close` or by its session's end. A link that ends ends the subscriptions; one that resumes
   keeps them, as the node keeps them and sends again what it sent
   meanwhile. A subscription whose node came back on another link while the
-  action checker decided it fails with `connection_lost`.
+  action checker decided it fails with `connection_lost`. One that is not
+  done within the call wait (§4.4; the checker or the node takes long) is
+  answered `Subscribing to sensors.alarm on node box-1 for this session:
+  not done after 20 s, it goes on. …` with `"opening": true` in
+  `structuredContent`; if the checker or the node then refuses it, the
+  stream ends with the words why (`it ended (it did not open: error
+  forbidden: node box-1 answered: …)`).
 - **Stream** (`kind: stream`): `execute` with args that fit its `params`
   sends `stream.open {cap, stream: name, params: args, ctx: {session}}` and
   answers `Opened sensors.feed on node box-1 as stream s-…` with the same
@@ -583,10 +593,19 @@ one:
   one of the node's stream places from when it is asked for: with the
   session's half of them (8) held by its streams there, open or being
   opened, it is refused with `busy` (`… its share of the node's streams:
-  close one with stream.close`) and not asked for. The center waits 35 s for
-  the node's answer, as the node waits up to 30 s for the program
-  (node-local §7). A node the owner disabled while the action checker
-  decided it is `error unavailable`, and its stream is not opened.
+  close one with stream.close`) and not asked for. The `execute` waits for
+  the checker and the node's answer at most the call wait (§4.4), as for
+  any call. A stream not open by then is answered `Opening sensors.feed on
+  node box-1 as stream s-…: not open after 20 s, it goes on. …` with
+  `"opening": true` in `structuredContent`, and opens by itself: the center
+  waits 35 s for the node's answer, as the node waits up to 30 s for the
+  program (node-local §7), and a stream that then does not open ends with
+  the words why, as a subscription does. A node the owner disabled while
+  the action checker decided it is `error unavailable`, and its stream is
+  not opened. A stream the agent closed, or the owner's **Disable** took,
+  while it opened is `error cancelled: the stream was closed while it
+  opened (the node was disabled in the center)`, its reason in brackets,
+  and the node's stream is closed.
 
 Such an answer counts as the details of `stream.read` and `stream.close`.
 The stream ids count toward the session's 16 streams, and another session's

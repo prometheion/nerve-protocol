@@ -245,7 +245,9 @@ state key gives its value now; an event subscribes the agent's session and
 answers a stream id, which `stream.read` reads, one event a line; a stream
 opens and answers a stream id the same way. There are no notifications: the
 agent reads with `stream.read` when it wants, waiting a while if nothing is
-there yet.
+there yet. A program has 30 seconds to answer the opening of a stream; the
+agent's `execute` does not wait that long, but gets the stream id once the
+center's call wait passed, and the stream opens when the program answers.
 
 The node decides each one like an action that names no path, by its effect
 and name: `nerve-node cap set sensors.temperature on`, an allow rule
