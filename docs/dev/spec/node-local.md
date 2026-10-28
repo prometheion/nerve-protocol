@@ -466,7 +466,6 @@ command = ["tail", "-n", "{lines}", "--", "{path}"]
 params = '{"type": "object", "required": ["path", "lines"], "properties": {"path": {"type": "string", "x-nerve-path": "read"}, "lines": {"type": "integer"}}}'
 result = "text"             # text | a JSON Schema as text
 timeout_secs = 10           # optional, 1 to limits.max_timeout_secs
-account = "nerve-run"       # nerve-run | owner
 platform = "any"            # any | linux | windows
 
 [relay]                     # optional; the relay for other nodes (protocol §4.8)
@@ -544,7 +543,10 @@ them). The node refuses a file where:
 - a placeholder whose argument a call may leave out (not in `required`, or
   its schema takes null) stands before the first literal `--`, or an element
   other than its own placeholder follows it: the elements after a dropped one
-  move up, so an option before it would take the next one as its value.
+  move up, so an option before it would take the next one as its value;
+- an entry names `account` (with any value): every one runs as `nerve-run`,
+  and the message says so and that an action with the owner's rights comes
+  from a program (§7).
 
 A call's arguments are validated against `params` first. Each `{field}`
 element becomes the argument's value as one element of the program's argv (a
@@ -556,8 +558,9 @@ an option. No shell reads the argv: the node starts the program itself
 
 Which ones a node offers, with `provider: "config"`, one capability per
 `cap` (crate::config_cap): on Linux only, those whose `platform` takes it,
-and on a node run by hand only those with `account = "owner"` (it has no
-`nerve-run`). Windows parses them and offers none. The descriptor cuts them by
+and only on the installed node: they run as `nerve-run`, which a node run by
+hand lacks, so it offers none (its `caps.list` rows say why, §5). Windows
+parses them and offers none. The descriptor cuts them by
 the effect table like any capability (§3), and only the owner turns one on
 that senses or actuates (§5, `settings.set`); for that every `[[capability]]`
 counts, offered on this node or not, so a center cannot turn on `probe` while
@@ -571,75 +574,28 @@ each center whose `on` or allow rule covers it (a center cannot remove that):
 answer's `held` lists `[center, action]` pairs). An `on` of that very action
 the same change brings is the owner's and stays. A `config accept` while no
 node runs takes the file as it is, since nothing tells what it held before.
-`descriptor` marks an action of `account = "nerve-run"` `as_account` only for
-a center whose commands run as `nerve-run` (protocol.md §6).
+`descriptor` marks each action `as_account` only for a center whose commands
+run as `nerve-run` (protocol.md §6).
 
-A call is decided like a provider's (§7, Paths), then runs:
+A call is decided like a provider's (§7, Paths), then runs as `nerve-run`
+from its home. Its paths are judged as `nerve-run`, with the pairing's folders
+and, where the pairing's commands run as `nerve-run`, its built-in ones; a read
+outside them by `nerve-run`'s own access; the link walk as that account. It
+runs under Landlock where present: the pairing's folders and the built-ins
+where its commands run as `nerve-run`, else the built-ins alone (§1,
+Commands). No `[[capability]]` runs with the owner's rights: such an action
+comes from a program the owner allows (§7).
 
-| `account` | Runs as, from | Paths judged | Confinement |
-|---|---|---|---|
-| `nerve-run` | `nerve-run`, its home | as `nerve-run`, with the pairing's folders and, where the pairing's commands run as `nerve-run`, its built-in ones; a read outside them by `nerve-run`'s own access; the link walk as that account | Landlock where present: the pairing's folders and the built-ins where its commands run as `nerve-run`, else the built-ins alone (§1, Commands) |
-| `owner` | the owner (root where root is the owner), the owner's home; a node by hand: its own user | as a program's (§7): the granted folders only, as the pairing's command account, closed folders refusing the walk | none |
-
-An `owner` one is refused `forbidden` (and audited so) before the gate when
-one of these lies, as written or where it leads (looked at as the owner; a
-place not there yet where its nearest existing folder leads, a link whose
-target is not there where that target would be), at or below a place a
-center may write (a `w` folder of any center, `/tmp`, `/var/tmp`,
-`nerve-run`'s home, and for each center whose mode at that time
-(`mode_at`) is `allowlist`, each allow rule of an action that writes at a
-path it names with the owner's rights: a program's or an `owner`
-capability's with an argument marked `write`, whatever its effect, in every
-such pairing, `fs`'s write actions where the pairing's writes run as the
-owner; its pattern up to the folder before its first wildcard, `/` without
-a pattern), or, on the installed node, where it or a folder above it (as
-written or where it leads) belongs to `nerve-run` or `nerve-run` may change
-it by its mode bits (a regular file it may write, a folder it may write and
-search; ACLs are not read; another kind of file only where it is
-`nerve-run`'s): what a center made as `nerve-run`, or replaced (as `fs.write`
-does, written aside and renamed over), stays that account's once its `w` is
-gone; a file of the owner's it wrote into in place, through the `w` grant's
-ACL entry, stays the owner's and is not told apart. These are: the folder it starts in (the owner's home; a node by hand: its home); its program (the
-first file of that name in a full-path folder of the node's `PATH` the owner
-may execute where it is a bare name, and that file is what runs and what
-the entry's `command` names; with none it fails `unavailable` after the
-gate, the center's error a fixed text and the program in the node's log); a
-fixed element, and each word of it as a shell splits it (at blanks and
-`;&|()<>` and a backquote, quotes and backslashes taken away), that holds a
-`/` or names something in the folder it starts in, also as the part after the first `=` of any element and
-the rest of a single-dash element after its option letter or from its first
-`/` (`-Cdir`, `-I/x`), the rest of an element after a leading `@`, and each
-`:`-separated part of any of these, read from that folder where it is not
-absolute; one that is `~`, `$HOME` or `${HOME}`, alone or before a `/`, is
-also read from that folder (the home the command runs with), and a word of an
-element whose shell words hold `cd` or `pushd` is also read from each folder
-the first word after it not starting with `-` names (from the start folder
-and from the folder named before it, where relative); so is every element
-and word after an option that changes the folder, among the elements or the
-shell words of one: `-C`, `--chdir` or `--directory` with that first word,
-or with the value glued on (`-Cdir`, `--chdir=dir`, `--directory=dir`). A place
-that holds `*`, `?`, `[` or `{` (whatever the quotes were) is read as a shell
-expands it: its brace lists as bash makes them (a sequence `{x..y}` as `*`), and
-each of these by every existing path it matches (component by component,
-through links) and by every place above where a center may write that its components may
-name (that place or one below it), its part before the first wildcard taken
-as written and where it leads; more than 64 words of one place's braces or
-10,000 names read for one command refuse it. Only an element that is
-a placeholder is passed over; any other, braces and all, is judged. The center's error is a fixed text; the reason with the place is
-in the audit entry. A call's audit target is its paths, else `cap.action`,
+A call's audit target is its paths, else `cap.action`,
 as for a program; the entry adds `command`, the command as it runs (or would
 have run), the call's values filled in (one line, as `cap ls` quotes it),
 which stays in the node's log: the `audit/decision` event leaves it out (as
 it leaves out the reason), since the descriptor gives a center no word of
 the command. While it runs, its argv is open to every account in `/proc`,
 as any process's is; the user docs tell the owner to keep a secret out of
-it. `cap add` and `cap edit` ask the running node
-(`cap.refusal`, §5; `null` for an entry this node does not offer) and warn
-of it,
-and of a string argument without `x-nerve-path` (passed as given, judged by
-nothing); a stopped node's CLI judges it as its own user can.
+it.
 
-Both count toward `limits.max_running`, run in a cgroup of their own with the
+Each call counts toward `limits.max_running`, run in a cgroup of their own with the
 default `limits.command`, and end at `timeout_secs` (else
 `limits.default_timeout_secs`, at most the maximum): `timeout` "<name> ran
 past its limit of …". The result is stdout as a string (`text`; cut stdout
@@ -1429,7 +1385,6 @@ Methods:
 | `config.read` | | `node.toml` and its `version` |
 | `config.write` | `config`, `if_version` | replaces it when the version matches |
 | `config.accept` | | takes `node.toml` as it is after it was refused, and signs it (§1); an action that came to sense or actuate in it is switched off, in the same write, for each center whose earlier switch or allow rule covered it: `{version, held: [[center, action]]}` |
-| `cap.refusal` | `name` | why the node refuses calls of that `[[capability]]` with `account = "owner"` now, judged as before a call (§2): `{refusal: text \| null}`, `null` for one this node does not offer |
 | `folder.add` | `center`, `path`, `access` | `folder add`, done by the node so that it is judged as the owner (`exec::settle`): the path is followed a link at a time and must resolve to itself, the folder is stored at that place with `access` (replacing the entry there) and recorded in `policy.places`; `{stored, recorded, mode, counts}` (`counts`: whether the
 center's folders hold its commands, in folder mode or as `nerve-run`). An error, with nothing changed, when the path crosses a link inside a `w` folder of any center, leads nowhere, or changed while it was looked at. Where the node cannot tell either (a folder it may not look into, or a `w` folder it cannot resolve) the folder is stored as given, `recorded` is false, and a record it had stays. The CLI uses it whenever a node runs |
 | `folder.grants` | | the installed Linux node brings the folder ACLs in line at once (§Folder ACLs) and answers what that left: `{errors, stale, failed, skipped}`; `null` elsewhere. `folder add`, `set` and `rm` ask it |
@@ -1439,7 +1394,7 @@ center's folders hold its commands, in folder mode or as `nerve-run`). An error,
 | `sudo.off` | | turns the switch off and drops the password |
 | `center.rotate-key` | `center`, `end_grace` | rotates the node's key for `center` over the live link, or with `end_grace` ends the grace of the old one (protocol §4.10); `{center, public_key}`, the new key once. Waits for the center's answer, at most 15 s; an error when the node has no link to it or the center does not speak `rotate`. Also served on the control pipe (Windows) |
 | `owner.check` | | changes nothing; the CLI asks it before `install`, `setup`, `update`, `uninstall`, `backup` and `restore` |
-| `caps.list` | | what `cap ls` shows: `{capabilities, programs, config, running}`; each capability row `{name: "cap.action", effect, source: "built-in" \| "config" \| "program <name>", summary, centers: {<center>: "on"\|"off"\|"hidden"\|"default"}, now: {<center>: "on"\|"off"}}`, `centers` the switch (`cap set`; `default` where none is set; for `settings`, which has none, `"granted"`\|`"not granted"` by the center's `settings` grant) and `now` whether the center's descriptor offers the action now and it is not off (§3: mode, rules, switches, the machine); an action a program offered that the node left out with `broken` (its reason), no effect and no `now`; a config capability's row has `account` (`"nerve-run"`\|`"owner"`), and one this node does not offer (§2) `left_out` (why) and no `now`; `config` each `[[capability]]` as declared, `{name, summary, effect, command, params, result, timeout_secs, account, platform}`, the schemas as JSON (`result` `"text"` or a schema); `programs` the entries of `providers.allowed`, each `{name, exe, attached}`. A stopped node's CLI makes the same from `node.toml`, with the node's own capabilities and the config's (no program's), no `now` and `attached` null. Also served on the control pipe (Windows), where no program attaches |
+| `caps.list` | | what `cap ls` shows: `{capabilities, programs, config, running}`; each capability row `{name: "cap.action", effect, source: "built-in" \| "config" \| "program <name>", summary, centers: {<center>: "on"\|"off"\|"hidden"\|"default"}, now: {<center>: "on"\|"off"}}`, `centers` the switch (`cap set`; `default` where none is set; for `settings`, which has none, `"granted"`\|`"not granted"` by the center's `settings` grant) and `now` whether the center's descriptor offers the action now and it is not off (§3: mode, rules, switches, the machine); an action a program offered that the node left out with `broken` (its reason), no effect and no `now`; a config capability's row that this node does not offer (§2; a node run by hand offers none) has `left_out` (why) and no `now`; `config` each `[[capability]]` as declared, `{name, summary, effect, command, params, result, timeout_secs, platform}`, the schemas as JSON (`result` `"text"` or a schema); `programs` the entries of `providers.allowed`, each `{name, exe, attached}`. A stopped node's CLI makes the same from `node.toml`, with the node's own capabilities and the config's (no program's), no `now` and `attached` null. Also served on the control pipe (Windows), where no program attaches |
 | `hello` | `role` (`provider`), `name`, `capabilities` | a capability provider attaches; the connection stays (§7); on a node run by hand only, the installed node takes it on its provider socket |
 
 Every method is refused from a process that runs below a command the node

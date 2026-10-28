@@ -10,9 +10,9 @@ center; while it runs, though, anyone on the machine can read it, see
 [below](#keep-secrets-out-of-the-command)). For a capability that keeps a connection or state of its own, write a
 [provider](providers.md) instead.
 
-They run on Linux: the [installed node](service.md) offers all of them, a node
-you run yourself only those that run as you (below). Windows keeps them in
-`node.toml` and offers none yet.
+They run on Linux, as the command account `nerve-run` of the [installed
+node](service.md) (below): a node you run yourself has no such account and
+offers none. Windows keeps them in `node.toml` and offers none yet.
 
 ## Add one
 
@@ -37,7 +37,6 @@ What follows `--` is the command: the program first (a name looked up in
 | `--params` | the JSON Schema of its arguments, an object (below); `none` takes none |
 | `--result` | `text`, what the command prints (the default), or a JSON Schema: the node then reads what it prints as JSON that must fit it |
 | `--timeout` | seconds it may run, at most `limits.max_timeout_secs`; `default` for `limits.default_timeout_secs` |
-| `--account` | `nerve-run` (the default) or `owner` (below) |
 | `--platform` | `any` (the default), `linux` or `windows`: a node offers only those of its own platform |
 
 `--params-stdin` and `--result-stdin` read the schema from stdin instead, for
@@ -98,99 +97,37 @@ An argument marked `"x-nerve-path": "read"` or `"write"` is a path. The node
 judges it as it judges an `fs` call's path ([providers.md](providers.md#paths-it-takes)
 says how), and the program gets it as the node resolved it. An argument that
 names a path but is not marked is passed as given: no folder, protected path
-or rule on paths holds it, and in `folder` mode the call counts as one that
-names no path. For a capability that runs as you that means your whole
-access, so `cap add` and `cap edit` warn of a string argument without the
-mark there.
+or rule on paths holds it beyond what `nerve-run` itself may reach, and in
+`folder` mode the call counts as one that names no path.
 
 ## The account it runs as
 
-| `account` | Runs as | Folders |
-|---|---|---|
-| `nerve-run` (default) | the installed node's command account, from its home `/var/lib/nerve-run` | in a `folder` or `allowlist` pairing whose commands run as `nerve-run`: that pairing's folders and the account's own (its home, `/tmp`, `/var/tmp`), held there by Landlock where the kernel has it. In a pairing whose commands run as you (`user` mode, `allowlist --as-owner`): the account's own folders alone, since your folders are not `nerve-run`'s. Without Landlock, what `nerve-run` itself may reach |
-| `owner` | you, with your rights, from your home (root where root is the owner; `cap add` warns of it) | like a [provider's](providers.md): only the folders you granted count for its paths, and no sandbox holds it |
+Every capability of `node.toml` runs as the installed node's command account
+`nerve-run`, from its home `/var/lib/nerve-run`, held like that account's
+commands:
 
-A capability that runs as `nerve-run` is a command of that account: it reads
-a path outside the folders only where `nerve-run` may read it, never your
-files closed to others nor the node's own, and where Landlock holds the
+- In a `folder` or `allowlist` pairing whose commands run as `nerve-run`: that
+  pairing's folders and the account's own (its home, `/tmp`, `/var/tmp`),
+  held there by Landlock where the kernel has it.
+- In a pairing whose commands run as you (`user` mode, `allowlist
+  --as-owner`): the account's own folders alone, since your folders are not
+  `nerve-run`'s.
+- Without Landlock: what `nerve-run` itself may reach.
+
+It reads a path outside the folders only where `nerve-run` may read it, never
+your files closed to others nor the node's own, and where Landlock holds the
 commands, only in the pairing's folders and the system's files. In a pairing
 whose commands run as `nerve-run`, the agent's `list` says so: the details of
-such an action read `runs as: the command account, held like its commands`,
-while those of one that runs as you are held to the folders as a program's.
-Choose `owner` only for a command that needs your rights; it can do whatever
-you can.
+such an action read `runs as: the command account, held like its commands`.
 
-A command that runs as you must not run what a center may write: a center
-with `w` on a folder could put its own code there and have it run with your
-rights. A center may write in a `w` folder of its own, in `/tmp` and
-`/var/tmp`, in `nerve-run`'s home, and, in `allowlist` mode (also one a
-`--for` limit fell back to), wherever an allow rule lets an action of a
-program of yours, or of a capability that runs as you, write at a path it
-names (an argument marked `write`, whatever effect the action names), and an
-allow rule for `fs` where its writes run as you (`--as-owner`, or any
-pairing of a node you run yourself): `fs.write:~/site/**` counts like a `w`
-folder `~/site`, a write rule with no path like your whole machine. On the
-installed node a center may also write whatever belongs to `nerve-run` or
-`nerve-run` may change (a file it may write, a folder it may add to, or a
-folder above either): a file a center made while it had `w`, or replaced
-(as `fs.write` writes a file), stays `nerve-run`'s once you take the `w`
-away, and any pairing whose commands run as `nerve-run` may still change
-it. So the node refuses its calls
-while one of these lies in such a place:
+There is no other account: a capability of `node.toml` never runs with your
+rights. A command that needs them belongs in a [program you
+allow](providers.md), which runs as you and whose paths count only in the
+folders you grant. An entry with an `account` line, from an earlier version,
+is refused: remove the line.
 
-- your home, where it starts (`make`, `npm test` or `python3 -m` read code
-  from where they start, so a center with `w` on your whole home blocks every
-  such command);
-- its program, as found in `PATH` (the node then runs that very file, and
-  the audit log names it; a folder of `PATH` that is no full path, such as
-  `.`, is passed over; a program it finds none of that you may run does not
-  start, the center is told no more than that, and the node's log names the
-  program);
-- a place a word of its command names: a full path, a path from your home
-  (`make -C proj`, `sh proj/ci.sh`), a name of something in your home, also
-  as an option's or a variable's value (`--manifest-path=proj/Cargo.toml`,
-  `-Cproj`, `-I/srv/lib`, `PYTHONPATH=proj`), each part of a list of paths
-  (`PYTHONPATH=lib:proj`, `-cp app.jar:proj/*`), the path of a URL
-  (`file:///srv/pkg`) and the file of `@file`, and each word of a line a
-  shell reads (`sh -c "cd /srv/site && ./deploy.sh"` names `/srv/site`). In
-  such a line `~` and `$HOME` are your home, and a word after a `cd` or
-  `pushd` counts from your home and from the folder it went to as well
-  (`cd /srv && site/deploy.sh` names `/srv/site/deploy.sh`). So does a word
-  after an option that changes the folder, among the words of the command
-  or of such a line: `-C dir`, `-Cdir`, `--chdir=dir` and `--directory=dir`,
-  as `env`, `make`, `git` and `tar` take them (`env -C /srv site/deploy.sh`
-  names `/srv/site/deploy.sh`). A word with a wildcard or a brace list
-  (`/srv/*/deploy.sh`, `/srv/{a,b}`) counts by every place it matches and by
-  every folder a center may write that it may match, also one that holds
-  nothing yet, quoted or not; one that stands for very many places is
-  refused, so write those out. Other variables,
-  `~name` and `$(...)` are not read: write such a place as a full path. A
-  word of a message names a place this way too: write `/tmp` in a commit
-  message and the node refuses the command. A place not there yet counts
-  by where the folder it would be in leads, and a link whose target is gone
-  by where that target would be.
-
-The node judges this as you, from your home, before each call; the center
-is told only that the call is refused, and the node's audit log says which
-place. `cap add` and `cap edit` ask the running node and warn of it (not for
-a capability this node does not offer). Keep what such a command reads on its
-own (its configuration, a file a script loads) out of those folders too: the
-node cannot see what a program reads.
-
-What a center wrote stays when its right to write ends. The node tells
-apart what `nerve-run` made or replaced, but not:
-
-- a file of yours that a center wrote into in place while it had `w` (a
-  command's `cat > deploy.sh` or `cp new.sh deploy.sh`): it stays yours,
-  with your mode, and holds what the center wrote;
-- what a center wrote as you: through a program of yours, a capability that
-  runs as you, `user` mode or `--as-owner`.
-
-So before such a capability runs again once you took a center's `w`, an
-allow rule or `user` mode away, look at what its command runs yourself.
-
-A node you run yourself has no `nerve-run`: it offers only capabilities with
-`account = "owner"`, run as you.
+A node you run yourself has no `nerve-run`, so it offers none: `cap ls` shows
+each one as left out, and why.
 
 Each run counts towards `limits.max_running`, runs in a cgroup of its own
 held to `[limits.command]` ([limits.md](limits.md)) and ends at its timeout.
@@ -206,11 +143,10 @@ every account on the machine to read, as every program's is (`ps`, `/proc`):
 for the centers' commands and file reads too. So a token or a password in
 the command is a token any center may read while it runs, and a value one
 center gives a call another may read the same way. Put a secret in a file
-the program reads (`curl -H @file`, a `--config` file): for a capability
-that runs as you, a file only you may read, outside every folder a center
-may write. A capability that runs as `nerve-run` cannot keep a secret from
-the centers whose commands run as that account, since they read what it
-reads.
+the program reads (`curl -H @file`, a `--config` file). Even then a
+capability cannot keep a secret from the centers whose commands run as
+`nerve-run`, since they read what it reads: a secret that must stay yours
+belongs in a [program](providers.md).
 
 ## When a center may use it
 
@@ -220,7 +156,7 @@ As any capability, by what it does ([modes](modes.md#what-each-mode-allows),
 | Mode | It runs when |
 |---|---|
 | `allowlist` | an allow rule names it: `nerve-node config add center.<name>.policy.allow 'logs.tail'` |
-| `folder` | a `read`: its paths are, for one that runs as `nerve-run`, anything `nerve-run` may read; for one that runs as you, the folders granted and what every account may read (above); a `write` or `execute`: its paths lie in folders that allow them; one that takes no path needs `nerve-node cap set logs.tail on` |
+| `folder` | a `read`: its paths are anything `nerve-run` may read (above); a `write` or `execute`: its paths lie in folders that allow them; one that takes no path needs `nerve-node cap set logs.tail on` |
 | `user` | always |
 
 One that senses or acts on the world (`sense`, `actuate`) needs you: your
@@ -242,7 +178,7 @@ switch you set stays when you remove a capability.
 
 A center cannot turn on a capability of yours that has an action that senses
 or acts, whether or not this node offers that action now (one for another
-platform, or one that runs as `nerve-run` on a node you run yourself).
+platform, or any on a node you run yourself).
 
 No program may [attach](providers.md) with the name of one of your
 capabilities, and one that is attached with such a name is let go when you
@@ -250,16 +186,16 @@ declare it.
 
 ## See what is there
 
-`nerve-node cap ls` lists them with the source `config` (`config (owner)` for
-those that run as you), each with its command:
+`nerve-node cap ls` lists them with the source `config`, each with its
+command:
 
 ```
-sensors.read  sense    config          lab: off
-logs.tail     read     config          lab: on
-win.who       read     config (owner)  left out: for windows only
-capability sensors.read: sensors -j; as nerve-run
-capability logs.tail: tail -n {lines} -- {path}; as nerve-run
-capability win.who: whoami; as owner; windows only
+sensors.read  sense  config  lab: off
+logs.tail     read   config  lab: on
+win.who       read   config  left out: for windows only
+capability sensors.read: sensors -j
+capability logs.tail: tail -n {lines} -- {path}
+capability win.who: whoami; windows only
 ```
 
 A capability this node does not offer says why. `nerve-node cap ls --json`
@@ -278,6 +214,5 @@ command = ["tail", "-n", "{lines}", "--", "{path}"]
 params = '{"type": "object", "required": ["path", "lines"], "properties": {"path": {"type": "string", "x-nerve-path": "read"}, "lines": {"type": "integer"}}}'
 result = "text"         # or a JSON Schema
 timeout_secs = 10       # optional
-account = "nerve-run"   # or "owner"
 platform = "linux"      # any | linux | windows
 ```

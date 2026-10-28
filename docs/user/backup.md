@@ -121,7 +121,7 @@ nothing. If the machine dies in the middle of it, run it again.
 Restore only a backup you made yourself. It is the whole `node.toml`, with
 everything the file can set: the programs allowed to attach as providers, the
 [capabilities of your own](config-capabilities.md) with their commands (run
-as `nerve-run` or as you), the `sudo` program, the account commands run as,
+as `nerve-run`), the `sudo` program, the account commands run as,
 the folders and rules of every center. The passphrase proves that whoever made the file knew it, not that the
 file is yours.
 

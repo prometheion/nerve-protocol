@@ -26,8 +26,7 @@ The reason says what is missing. Use it to write the rule you want
 path that does not resolve is refused as given, with `bad_path`). A call that
 names no path has its action as the target. A call to a
 [capability of your `node.toml`](config-capabilities.md) adds the command as
-it ran, or would have run, with the values the call gave it (one that runs as
-you with the program file the node found in `PATH`):
+it ran, or would have run, with the values the call gave it:
 
 ```
 1791834531502  lab  svc.restart  svc.restart  allowed (command: systemctl restart -- nginx)

@@ -85,7 +85,7 @@ center reads, or the node refuses the whole change and names the field.
     `providers.allowed` ([node-local §7](spec/node-local.md#7-capability-providers)).
 11. The owner's own capabilities, `[[capability]]` (`cap add`, `edit`, `rm`;
     [node-local §2](spec/node-local.md#capabilities-of-the-config)): each runs a
-    fixed command, as `nerve-run` or as the owner, so none is in a center's
+    fixed command as `nerve-run`, so none is in a center's
     document. A center with the grant may switch them by `caps` and its rules
     like any capability, within item 9.
 
@@ -132,7 +132,6 @@ after `hello` and carries its calls.
 | `config.read` | Read `node.toml` and its `version` |
 | `config.write` | Replace it when `if_version` matches |
 | `config.accept` | Take a refused `node.toml` as it is (an action that came to sense or actuate in it held in the same write) |
-| `cap.refusal` | Why the node refuses calls of a capability of `node.toml` that runs as the owner, judged as before a call (`cap add` and `cap edit` warn of it) |
 | `reload` | Reread `node.toml` (only a file the node signed) |
 | `sudo.status`, `sudo.on`, `sudo.off` | The sudo switch |
 | `folder.add` | `folder add`, judged by the node as the owner; it stores and records the real place |

@@ -9,6 +9,9 @@ commands, and writes it to the [audit log](audit.md).
 
 For a fixed command, such as `sensors -j`, no program is needed: declare it in
 `node.toml` with `nerve-node cap add` ([capabilities of your own](config-capabilities.md)).
+Such a command runs as the node's command account `nerve-run`, held to the
+folders; an action that needs your own rights, such as restarting a service of
+yours or reading your files, comes from a program you allow here.
 
 Providers work on Linux: a program of yours (or of root) attaches to the
 [installed node](service.md) on its provider socket (its control socket

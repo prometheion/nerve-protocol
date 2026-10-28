@@ -87,7 +87,6 @@ command = ["sensors", "-j"] # the program and its arguments; {field} takes a cal
 params = '{"type": "object", "properties": {}}'  # optional: its arguments' JSON Schema, as text
 result = '{"type": "object"}'                    # text (the default), or a JSON Schema as text
 timeout_secs = 10           # optional, up to max_timeout_secs
-account = "nerve-run"       # nerve-run (the default) | owner
 platform = "linux"          # any (the default) | linux | windows
 
 [[center]]

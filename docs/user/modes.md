@@ -75,10 +75,10 @@ the folders only for a file open to every account, never for a folder, since
 it would read below it with your rights. `nerve-run`'s own folders (its home,
 `/tmp`, `/var/tmp`, marked `own`) are no folders for a program: it runs with
 your rights, so only the folders you gave count for it. A [capability of
-your `node.toml`](config-capabilities.md#the-account-it-runs-as) that runs
-as `nerve-run` is read like a command of that account instead: its own
+your `node.toml`](config-capabilities.md#the-account-it-runs-as) runs as
+`nerve-run` and is read like a command of that account instead: its own
 folders count, and a path outside the folders is read with that account's
-access; one that runs as you is read like a program's. With
+access. With
 [Landlock](#the-account-nerve-run-linux), a command of `nerve-run` reads less
 than a file call: the system's folders and its `r` and `x` folders.
 
