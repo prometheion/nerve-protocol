@@ -1679,7 +1679,10 @@ one set of names: each is one unit `<cap>.<name>` to the harness
 event and a stream read or sense (`effect` `read` or `sense`); what changes
 the world is an action. A state key's `schema` and an event's `data` say
 what the value holds, a stream's `params` what its `stream.open` takes
-(none takes any object); all keep to the subset of protocol.md §6.1.
+(none takes any object); all keep to the subset of protocol.md §6.1. A
+stream's `params` mark no path (`x-nerve-path`): its open is decided as a
+call that names none, so a path there would reach the program unjudged; what
+a program reads at a path the center names is an action.
 
 The node refuses it, with nothing attached, when:
 
@@ -1731,7 +1734,8 @@ protocol.md §6.1; an action without `params` takes any arguments, as
 `{"type": "object"}`. The node leaves out an action whose schemas do not
 keep to it, with the reason (`params: /properties/n/oneOf: oneOf:
 alternatives are not supported: …`), and likewise a state key (`value: …`),
-an event (`data: …`) or a stream (`params: …`); a capability with no unit
+an event (`data: …`) or a stream (`params: …`, also one that marks a
+path); a capability with no unit
 left goes. The provider's other units attach.
 
 The check tells programs apart, not users: a process of the same user can

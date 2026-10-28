@@ -277,7 +277,8 @@ any other
 
 Each action describes its arguments and its result with a JSON Schema, a
 state key its value, an event its data and a stream the arguments it opens
-with. The
+with (it marks no path: an open names none, so a program that reads at a
+path the agent names offers that as an action). The
 center hands them to the agent and checks every call's arguments against
 them, so only a small, plain part of JSON Schema is allowed: one type per
 value (or one type and `null`), properties, required fields, lists, a list of

@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 
 use nerve_proto::link::PairLink;
 use nerve_proto::msg::method;
-use nerve_proto::schema::{Role, check};
+use nerve_proto::schema::{Role, check, check_stream_params};
 use nerve_proto::{Descriptor, ErrorCode, PROTOCOL_VERSION};
 
 use nerve_transport::sudo::{Offer, seal};
@@ -930,7 +930,7 @@ fn check_schemas(d: &Descriptor) -> Result<(), String> {
         }
         for (n, decl) in &c.streams {
             if !decl.params.is_null() {
-                check(&decl.params, Role::Params)
+                check_stream_params(&decl.params)
                     .map_err(|e| format!("{}.{n} stream params: {e}", c.id))?;
             }
         }
@@ -1183,6 +1183,13 @@ mod tests {
                 json!({"feed": {"kind": "reliable", "direction": "up", "effect": "read",
                                 "params": {"type": "string"}}}),
                 "echo.feed stream params: ",
+            ),
+            (
+                "/capabilities/1/streams",
+                json!({"tail": {"kind": "reliable", "direction": "up", "effect": "read",
+                                "params": {"type": "object", "properties": {
+                                    "file": {"type": "string", "x-nerve-path": "read"}}}}}),
+                "echo.tail stream params: /properties/file/x-nerve-path: a stream takes no path",
             ),
         ];
         for (at, schema, want) in cases {

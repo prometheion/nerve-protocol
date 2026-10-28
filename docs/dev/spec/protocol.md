@@ -683,7 +683,10 @@ in the subset when:
   schema's root: the node resolves each such argument of a call and decides
   the call by those paths as it does an `fs` call's, node-local.md §3, so a
   marker deeper down would mark a path nobody checks. The program gets each
-  path resolved, and the arguments must fit its schema with it too).
+  path resolved, and the arguments must fit its schema with it too. A
+  stream's `params` mark no path: its `stream.open` is decided as a call
+  that names none, so a node leaves such a stream out, and so does a
+  center).
 - A keyword fits its type: `properties`, `required` and
   `additionalProperties` need `object`; `items`, `minItems` and `maxItems`
   `array`; `minLength`, `maxLength` and `x-nerve-path` `string`; the

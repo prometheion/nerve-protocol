@@ -1083,7 +1083,13 @@ fn capabilities(
                 };
                 (n, d.effect, d.summary, params)
             })
-            .filter(|(n, _, _, params)| left_out(n, outside_subset(params, &Value::Null)))
+            // A stream marks no path: its open names none (schema::check_stream_params).
+            .filter(|(n, _, _, params)| {
+                let bad = schema::check_stream_params(params)
+                    .err()
+                    .map(|e| schema::brief(&format!("params: {e}")));
+                left_out(n, bad)
+            })
             .map(|(n, effect, summary, params)| {
                 let decl = StreamDecl {
                     kind: StreamKind::Reliable,
@@ -1679,7 +1685,10 @@ mod tests {
             "streams": {"feed": {"effect": "read",
                                  "params": {"type": "object", "properties": {
                                      "every_ms": {"type": "integer"}}}},
-                        "raw": {"effect": "sense"}}}]);
+                        "raw": {"effect": "sense"},
+                        "tail": {"effect": "read",
+                                 "params": {"type": "object", "properties": {
+                                     "file": {"type": "string", "x-nerve-path": "read"}}}}}}]);
         let (caps, broken) =
             capabilities("board", fragment(frag), &BTreeSet::new(), |_| false).unwrap();
         let c = &caps[0];
@@ -1695,8 +1704,15 @@ mod tests {
         assert_eq!(c.streams["raw"].params, json!({"type": "object"}));
         assert_eq!(c.streams["raw"].direction, Direction::Up);
         let names: Vec<&str> = broken.iter().map(|b| b.name.as_str()).collect();
-        assert_eq!(names, ["sensors.bad"]);
+        assert_eq!(names, ["sensors.bad", "sensors.tail"]);
         assert!(broken[0].reason.starts_with("value: "), "{broken:?}");
+        // A stream's open names no path, so its params may mark none.
+        assert!(
+            broken[1]
+                .reason
+                .starts_with("params: /properties/file/x-nerve-path: a stream takes no path"),
+            "{broken:?}"
+        );
     }
 
     /// Actions, state keys, events and streams share one set of names: a

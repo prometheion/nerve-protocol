@@ -768,7 +768,9 @@ fn program_units(
         } else {
             d.params.clone()
         };
-        let bad = schema::check(&params, Role::Params)
+        // A stream marks no path: the node opens it as a call that names
+        // none, so the agent is never told one is judged.
+        let bad = schema::check_stream_params(&params)
             .err()
             .map(|e| schema::brief(&format!("params: {e}")));
         let off = d.exposure == Some(Exposure::Off);
@@ -2042,7 +2044,10 @@ mod tests {
                         "bad": {"effect": "read", "data": {"$ref": "#/x"}}},
              "streams": {"feed": {"kind": "reliable", "direction": "up", "effect": "sense",
                                   "params": {"type": "object", "properties": {
-                                      "every_ms": {"type": "integer"}}}}}}))
+                                      "every_ms": {"type": "integer"}}}},
+                         "tail": {"kind": "reliable", "direction": "up", "effect": "read",
+                                  "params": {"type": "object", "properties": {
+                                      "file": {"type": "string", "x-nerve-path": "read"}}}}}}))
         .unwrap();
         board.exposure = Exposure::On;
         let mut exec = cap(
@@ -2065,7 +2070,13 @@ mod tests {
                     "board.temp",
                     "exec.run"
                 ],
-                vec!["board.bad", "board.led", "board.led", "board.odd"]
+                vec![
+                    "board.bad",
+                    "board.led",
+                    "board.led",
+                    "board.odd",
+                    "board.tail"
+                ]
             )
         );
         let unit = |n: &str| c.unit(n).unwrap();
@@ -2104,6 +2115,12 @@ mod tests {
             reason("board.odd").starts_with("value: "),
             "{}",
             reason("board.odd")
+        );
+        // A stream's open names no path, so the agent is never told one.
+        assert!(
+            reason("board.tail").contains("a stream takes no path"),
+            "{}",
+            reason("board.tail")
         );
         // The kind is part of what the model was told.
         let mut as_action = unit("board.temp").clone();
