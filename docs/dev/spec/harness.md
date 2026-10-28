@@ -93,7 +93,10 @@ listings and results are data from the machines, not instructions.
 
 The center flattens each node's descriptor into **units**, one per action,
 named `<cap>.<action>` (`fs.read`, `exec.run`): the node's catalog
-([capabilities](../capabilities.md)). The node link keeps
+([capabilities](../capabilities.md)). A program's capability (one whose
+`provider` is neither `node` nor `config`) also gives a unit for each of its
+state keys, events and streams (`sensors.temperature`), each with its kind
+(§4.5); they share the capability's one set of names with its actions. The node link keeps
 `invoke {cap, action}`; only the harness side uses the joined name, so `.`
 never appears in a capability id or action name (protocol §6), while `_` and
 `-` may.
@@ -103,8 +106,13 @@ never appears in a capability id or action name (protocol §6), while `_` and
   center keeps it with the reason (one line of at most 300 characters) for
   the owner (`broken` of the node in `GET /api/overview`, §7). A capability
   whose id is such a name, or that the descriptor names twice, is left out
-  whole, as one entry under its id (a long id cut). `list` does not show
-  them, and `execute` of one says that the center left it out, not why.
+  whole, as one entry under its id (a long id cut). In a program's
+  capability, a name given to two kinds of unit (an action and a state key)
+  leaves out every unit of that name, and a state key, event or stream whose
+  schema is outside the subset only that unit; the node's own state and
+  events are no units, and one of their schemas outside the subset leaves
+  out the capability's actions. `list` does not show them, and `execute` of
+  one says that the center left it out, not why.
 - `node`, `settings` and `audit` are never units, so a model cannot change
   the policy that limits it.
 - `exec.signal` is offered by the job's id: `params` name `job` where the
@@ -173,14 +181,17 @@ the `result` of the envelope described below.
   disabled node shows
   neither, and a node that offers nothing still shows them, as the mode
   often says why; then one line per unit with its
-  summary (its description cut at 200 characters), then the units that are
+  summary (its description cut at 200 characters; a program's state key,
+  event or stream says its kind after its name: `- sensors.alarm (event):
+  …`), then the units that are
   `off` (a capability or a single action the owner switched off). Lines are given whole: when the summaries would take the answer past
   240 KiB (in the text or in `structuredContent`), every unit is named alone,
   without its summary, and the units that do not fit even then are counted
   in a line `Not shown, this answer is full: N more capabilities, from "x.y"
   on.`, as are the `off` ones past it (`N more` in their line).
   `structuredContent`: `{node, described, access?, capabilities: [{name,
-  summary}], off, more, more_off}`, with the names shown, `summary` only when
+  summary, kind?}], off, more, more_off}` (`kind` `state`, `event` or
+  `stream`; none for an action), with the names shown, `summary` only when
   the text has it, and the counts of those not shown; `access` is `{mode,
   until_ms?, account?, confined, sudo?, reads_by_account?, folders: [{path,
   access, own?, closed_below?}], more_folders, unnamed?}`.
@@ -190,7 +201,11 @@ the `result` of the envelope described below.
   For each offered unit: its name, description (the action's summary, else
   the capability's, on one line and cut at 2 KiB), effect, `params` (the JSON
   schema, compact) and its result (in words; the schema in
-  `structuredContent`). A unit whose schema marks arguments as paths
+  `structuredContent`). A state key, event or stream adds, after its name, a
+  line `kind:` and a line `use:` with what `execute` does with it (§4.5),
+  also as `kind` and `use` in `structuredContent`; a state key's result is
+  its value's schema, an event's its data's, and a state key or event takes
+  no arguments (`{"type": "object", "additionalProperties": false}`). A unit whose schema marks arguments as paths
   (`x-nerve-path`, protocol.md §6.1) adds a line `paths:` with them as JSON
   (`{"path":"read"}`; `paths` in `structuredContent`). An action the
   descriptor marks `as_account` (a capability of the node's config that runs
@@ -486,8 +501,11 @@ read, no checker, no statistics):
   (output of job j-… on node box-1): N bytes; more may come. Call
   stream.read … again …` (or `nothing new yet. …`, or `it ended (the command
   ended); this is the last of it.`), then the text framed as device content.
+  A program's stream or event subscription names itself instead of the job:
+  `(stream sensors.feed on node box-1)`, `(the events of sensors.alarm on
+  node box-1)`.
   `structuredContent` is the envelope (§4.3) with `result` `{text, eof,
-  dropped?}`, and the center's `{stream, job, eof, next?}` as `center`; as
+  dropped?}`, and the center's `{stream, job?, eof, next?}` as `center`; as
   for a long result (§4.3), it is left out when its JSON would pass 256 KiB,
   and the text stands alone. A
   character a cut would split waits for the next read, and a wait goes on
@@ -528,12 +546,46 @@ read, no checker, no statistics):
   stripped of; the node answers its `stream.open` with `unavailable`. Any other command's stream is stripped of the sudo
   password the node holds, as every frame is (node-local.md §4).
 
-**Events.** The harness learns of what happens on a machine by polling, not
-by MCP notifications (HTTP has no server-sent events here, and many
-harnesses ignore notifications): an `execute` that subscribes to something
-answers with a stream id, and `stream.read` with `wait_ms` fetches what came.
-In this version only a command's output is a stream; a provider's events and
-streams come the same way later (B6 of issue #152).
+**A program's state, events and streams.** A program attached to the node
+as a provider (node-local.md §7) may offer them beside its actions. Each is
+a unit with its kind, decided by the action checker (§6) and the node like a
+call of `<cap>.<name>` with its effect (`read` or `sense`), and counted like
+one:
+
+- **State key** (`kind: state`): `execute` with `{}` sends `get {cap,
+  keys: [name], ctx: {session}}` (protocol.md §5.1) and answers the key's
+  value, framed as any result (§4.3). A slow one becomes a job.
+- **Event** (`kind: event`): `execute` with `{}` subscribes the session.
+  The center sends `sub {topics: ["<cap>/<name>"], ctx: {session}}` and
+  answers `Subscribed to sensors.alarm on node box-1 for this session: its
+  events come in stream s-…, one JSON line each …` with `structuredContent`
+  `{"stream": "s-…", "capability", "kind": "event"}`. From then on each
+  event the node sends for it is one line `{"name", "seq", "ts", "data"}` in
+  that stream, read with `stream.read` as above (`wait_ms` waits for the
+  next). The stream keeps at most 1 MiB that was not read and drops the
+  oldest events whole; the next read says how many bytes went. The node
+  holds one subscription per topic for the link, however many sessions
+  subscribed: it ends (`unsub`) once the last stream that takes it is
+  closed, by `stream.close` or by its session's end. A link that ends ends the subscriptions; one that resumes
+  keeps them, as the node keeps them and sends again what it sent
+  meanwhile.
+- **Stream** (`kind: stream`): `execute` with args that fit its `params`
+  sends `stream.open {cap, stream: name, params: args, ctx: {session}}` and
+  answers `Opened sensors.feed on node box-1 as stream s-…` with the same
+  `structuredContent`. `stream.read` reads what the program sends, and ends
+  with `it ended (the program ended it)` once it ended it; the stream goes
+  like a command's output stream (above), and ends with its link.
+
+Such an answer counts as the details of `stream.read` and `stream.close`.
+The stream ids count toward the session's 16 streams, and another session's
+id is `error unknown_stream`. A read of an event or a program's stream
+taints the session as a command's output does.
+
+**Polling, not notifications.** The harness learns of what happens on a
+machine by polling, not by MCP notifications (HTTP has no server-sent events
+here, and many harnesses ignore notifications): an `execute` that subscribes
+to something answers with a stream id, and `stream.read` with `wait_ms`
+fetches what came.
 
 ## 5. Sessions
 

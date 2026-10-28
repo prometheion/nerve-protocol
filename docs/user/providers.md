@@ -225,12 +225,45 @@ a program that takes paths as yourself, or grant it only folders that hold
 nothing of root's or another account's.
 
 When the program exits, its capabilities leave what `list` shows the centers,
-and a call that was waiting for it fails with `unavailable`.
+a call that was waiting for it fails with `unavailable`, and its streams end.
+
+## State, events and streams
+
+Besides actions, a program's capability can offer what it only tells:
+
+- a **state key**, a value the agent reads when it wants (`sensors.temperature`);
+- an **event**, something the program reports when it happens (`door.opened`);
+- a **stream**, text the program sends for as long as it runs (`camera.log`).
+
+Each reads (`read`) or senses (`sense`); anything that changes the machine
+is an action. All four share the capability's names: `sensors.temperature`
+is either an action or a state key, never both, and the node refuses a
+program that names one twice. The agent sees each one in `list` with its
+kind (`- sensors.temperature (state): …`) and uses it with `execute`: a
+state key gives its value now; an event subscribes the agent's session and
+answers a stream id, which `stream.read` reads, one event a line; a stream
+opens and answers a stream id the same way. There are no notifications: the
+agent reads with `stream.read` when it wants, waiting a while if nothing is
+there yet.
+
+The node decides each one like an action that names no path, by its effect
+and name: `nerve-node cap set sensors.temperature on`, an allow rule
+`sensors.temperature`, `off` and deny rules work as above, and reading a
+state, subscribing to an event or opening a stream is in the [audit
+log](audit.md). An event goes only to a center that may have it when it
+happens, so a center you take `on` from gets no more of it, even while it is
+still subscribed. `nerve-node cap ls` lists them with their kind after the
+effect (`sense state`, `read event`).
+
+A capability of [`node.toml`](config-capabilities.md) has actions only: a
+value it reads is an action with effect `read` or `sense`.
 
 ## What it may name
 
-Each capability and action has a name of 1 to 64 letters, digits, `-` and
-`_`, such as `lamp` and `set_level`; the agent sees them joined, `lamp.set_level`.
+Each capability, action, state key, event and stream has a name of 1 to 64
+letters, digits, `-` and
+`_`, such as `lamp` and `set_level`; the agent sees them joined,
+`lamp.set_level`. An event may not be named `state`.
 The node refuses a program that gives another name, or a capability that is
 the node's own (`fs`, `exec`, …) or the center's (`job`, `stream`), or another
 provider's already, and the program's attach fails with the reason. The
@@ -242,7 +275,9 @@ any other
 
 ## What its schemas may say
 
-Each action describes its arguments and its result with a JSON Schema. The
+Each action describes its arguments and its result with a JSON Schema, a
+state key its value, an event its data and a stream the arguments it opens
+with. The
 center hands them to the agent and checks every call's arguments against
 them, so only a small, plain part of JSON Schema is allowed: one type per
 value (or one type and `null`), properties, required fields, lists, a list of
@@ -252,10 +287,10 @@ patterns and formats are not, nor is nesting more than three levels deep in
 the arguments. What a text must look like goes into its `description`. The
 exact list is in the [spec](../dev/spec/protocol.md#61-schemas).
 
-An action whose schema goes beyond that is left out, and the program's other
-actions attach: `nerve-node status` names it with the reason, and the node's
-log has a warning. If none of its actions is left, the node refuses the
-program.
+An action (or a state key, event or stream) whose schema goes beyond that
+is left out, and the program's others attach: `nerve-node status` names it
+with the reason, and the node's log has a warning. If nothing is left, the
+node refuses the program.
 
 Arguments that do not fit an action's schema never reach the program: the
 node answers `invalid_args`, naming the field and what it expected

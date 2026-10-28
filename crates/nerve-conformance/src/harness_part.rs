@@ -363,11 +363,14 @@ impl Session {
 
 /// The units a harness is offered on each harness node, sorted: the node's
 /// own, and the center's `job.cancel` and `job.status` beside them.
-const OFFERED: [&str; 10] = [
+const OFFERED: [&str; 13] = [
     "echo.fail",
     "echo.lines",
     "echo.say",
     "echo.wait",
+    "gauge.feed",
+    "gauge.level",
+    "gauge.tick",
     "job.cancel",
     "job.status",
     "mirror.say",
@@ -390,6 +393,9 @@ struct Seen {
     waits: Vec<Value>,
     /// The id every `cancel` names.
     cancels: Vec<Value>,
+    /// The method and params of every `get`, `sub`, `unsub` and
+    /// `stream.open` of the program's capability.
+    gauge: Vec<(String, Value)>,
 }
 
 struct HarnessNode {
@@ -453,6 +459,10 @@ impl HarnessNode {
 
     fn cancels(&self) -> Vec<Value> {
         self.seen.lock().unwrap().cancels.clone()
+    }
+
+    fn gauge(&self) -> Vec<(String, Value)> {
+        self.seen.lock().unwrap().gauge.clone()
     }
 
     /// The node describes itself anew: `f` changes its descriptor, the rev
@@ -530,6 +540,62 @@ async fn serve(
                 {
                     seen.lock().unwrap().calls.push(s.to_string());
                 }
+                // The program's capability: `get` gives its level, a
+                // subscription to its tick gets a few events at once, its
+                // stream as many lines as asked, then the node's close.
+                let gauge = p.get("cap").is_some_and(|c| c == echo::GAUGE)
+                    || p.get("topics")
+                        .is_some_and(|t| t[0] == format!("{}/tick", echo::GAUGE));
+                if gauge
+                    && matches!(
+                        m.as_str(),
+                        method::GET | method::SUB | method::UNSUB | method::STREAM_OPEN
+                    )
+                {
+                    seen.lock()
+                        .unwrap()
+                        .gauge
+                        .push((m.clone(), Value::Object(p.clone())));
+                    let sid = 40 + seq;
+                    let answer = match m.as_str() {
+                        method::GET => json!({"level": echo::GAUGE_LEVEL}),
+                        method::STREAM_OPEN => json!({"sid": sid}),
+                        _ => json!({}),
+                    };
+                    if conn.send(&Message::result(id, answer)).await.is_err() {
+                        return;
+                    }
+                    if m == method::SUB {
+                        for n in 1..=echo::GAUGE_TICKS {
+                            seq += 1;
+                            let ev = json!({"cap": echo::GAUGE, "name": "tick", "seq": seq,
+                                            "ts": 1, "data": {"n": n}});
+                            let _ = later.send(Message::notification(method::EVENT, ev));
+                        }
+                    }
+                    if m == method::STREAM_OPEN {
+                        seq += 1;
+                        let lines = p["params"]["lines"].as_u64().unwrap_or(1);
+                        for i in 0..lines {
+                            let f = nerve_proto::frame::stream_frame(
+                                sid as u32,
+                                i as u32,
+                                format!("reading {}\n", i + 1).into_bytes(),
+                            );
+                            let Ok(bytes) = f.encode() else { return };
+                            if conn.send_binary(bytes).await.is_err() {
+                                return;
+                            }
+                        }
+                        let close = Message::request(
+                            sid,
+                            method::STREAM_CLOSE,
+                            json!({"sid": sid, "reason": "ended"}),
+                        );
+                        let _ = later.send(close);
+                    }
+                    continue;
+                }
                 let wait = (m == method::INVOKE && p["cap"] == "echo" && p["action"] == "wait")
                     .then(|| p["args"]["ms"].as_u64())
                     .flatten();
@@ -571,6 +637,38 @@ async fn serve(
             Recv::Bye(_) | Recv::Closed | Recv::Garbage(_) => return,
         }
     }
+}
+
+/// That `node` was sent `method` with `params` and a `ctx` that names one
+/// session: the one in `session`, or, the first time, the one kept there.
+fn sent_for(
+    node: &HarnessNode,
+    method: &str,
+    params: Value,
+    session: &Mutex<Option<Value>>,
+) -> Result<(), String> {
+    let sent = node.gauge();
+    let (_, got) = sent
+        .iter()
+        .rev()
+        .find(|(m, _)| m == method)
+        .ok_or_else(|| format!("the node was not sent {method}: {sent:?}"))?;
+    let mut rest = got.clone();
+    let ctx = rest
+        .as_object_mut()
+        .and_then(|o| o.remove("ctx"))
+        .unwrap_or_default();
+    ensure(rest == params, format!("{method} was sent {got}"))?;
+    let named = ctx
+        .get("session")
+        .filter(|s| s.is_string())
+        .ok_or_else(|| format!("{method} names no session: {got}"))?;
+    let mut kept = session.lock().unwrap();
+    let want = kept.get_or_insert_with(|| named.clone());
+    ensure(
+        named == want,
+        format!("{method} names the session {named}, the session's first {want}"),
+    )
 }
 
 /// The params of `unit` (`cap.action`) in the harness nodes' descriptor.
@@ -1758,6 +1856,146 @@ pub async fn run(target: &Target) -> Report {
                 check_error_result(&res, "unknown_stream").map_err(|e| format!("{unit}: {e}"))?;
             }
             Ok(())
+        }
+        .await,
+    );
+
+    // harness 4.5: a program's state key, event and stream are units of
+    // their own, named with their kind; execute reads the state with `get`,
+    // subscribes to the event and opens the stream, and the session reads
+    // both with stream.read.
+    r.check(
+        "harness 4.5",
+        "list names a program's state key, event and stream with their kinds",
+        async {
+            let res = s3.list(json!({"node": A})).await?;
+            let text = text_of(&res);
+            for line in [
+                "- gauge.feed (stream): ",
+                "- gauge.level (state): ",
+                "- gauge.tick (event): ",
+            ] {
+                ensure(text.contains(line), format!("no {line:?} in {text}"))?;
+            }
+            let res = s3
+                .list(json!({"node": A, "capability": ["gauge.level", "gauge.tick", "gauge.feed"]}))
+                .await?;
+            let caps = enveloped(&res, &source(A, &a.id), false)?["capabilities"].clone();
+            let kinds: Vec<&str> = caps
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c["kind"].as_str())
+                .collect();
+            ensure(
+                kinds == ["state", "event", "stream"],
+                format!("the details give the kinds {kinds:?}: {caps}"),
+            )
+        }
+        .await,
+    );
+    // The session the center names in what it sends for s3, taken from
+    // its first `get`: the later requests must name the same.
+    let session3 = Arc::new(Mutex::new(None::<Value>));
+    r.check(
+        "harness 4.5",
+        "execute of a program's state key reads it with get for the session",
+        async {
+            let res = s3.execute(A, "gauge.level", json!({})).await?;
+            not_error(&res)?;
+            let result = &enveloped(&res, &source(A, &a.id), false)?;
+            ensure(
+                **result == json!(echo::GAUGE_LEVEL),
+                format!("the result is {result}"),
+            )?;
+            sent_for(
+                &a,
+                method::GET,
+                json!({"cap": echo::GAUGE, "keys": ["level"]}),
+                &session3,
+            )
+        }
+        .await,
+    );
+    r.check(
+        "harness 4.5",
+        "execute of a program's event subscribes the session, and stream.read gives its events, one JSON line each",
+        async {
+            let res = s3.execute(A, "gauge.tick", json!({})).await?;
+            not_error(&res)?;
+            let stream = res["structuredContent"]["stream"]
+                .as_str()
+                .ok_or(format!("no stream id: {res}"))?
+                .to_string();
+            sent_for(&a, method::SUB, json!({"topics": ["gauge/tick"]}), &session3)?;
+            let mut text = String::new();
+            for _ in 0..20 {
+                let got = s3
+                    .execute(A, "stream.read", json!({"stream": stream, "wait_ms": 500}))
+                    .await?;
+                not_error(&got)?;
+                text.push_str(
+                    enveloped(&got, &source(A, &a.id), false)?["text"]
+                        .as_str()
+                        .unwrap_or(""),
+                );
+                if text.lines().count() >= echo::GAUGE_TICKS as usize {
+                    break;
+                }
+            }
+            let ticks: Vec<Value> = text
+                .lines()
+                .map(|l| serde_json::from_str::<Value>(l).map(|v| v["data"]["n"].clone()))
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("not JSON lines ({e}): {text:?}"))?;
+            ensure(
+                ticks == [json!(1), json!(2)],
+                format!("the events read are {text:?}"),
+            )?;
+            // Its stream closed, the node's subscription ends.
+            not_error(&s3.execute(A, "stream.close", json!({"stream": stream})).await?)?;
+            eventually(|| async {
+                ensure(
+                    a.gauge().iter().any(|(m, _)| m == method::UNSUB),
+                    format!("the node was sent {:?}", a.gauge()),
+                )
+            })
+            .await
+        }
+        .await,
+    );
+    r.check(
+        "harness 4.5",
+        "execute of a program's stream opens it for the session, and stream.read gives what it sends, then its end",
+        async {
+            let res = s3.execute(A, "gauge.feed", json!({"lines": 2})).await?;
+            not_error(&res)?;
+            let stream = res["structuredContent"]["stream"]
+                .as_str()
+                .ok_or(format!("no stream id: {res}"))?
+                .to_string();
+            sent_for(
+                &a,
+                method::STREAM_OPEN,
+                json!({"cap": echo::GAUGE, "stream": "feed", "params": {"lines": 2}}),
+                &session3,
+            )?;
+            let mut text = String::new();
+            for _ in 0..20 {
+                let got = s3
+                    .execute(A, "stream.read", json!({"stream": stream, "wait_ms": 500}))
+                    .await?;
+                not_error(&got)?;
+                let data = enveloped(&got, &source(A, &a.id), false)?;
+                text.push_str(data["text"].as_str().unwrap_or(""));
+                if data["eof"] == true {
+                    return ensure(
+                        text == "reading 1\nreading 2\n",
+                        format!("the stream gave {text:?}"),
+                    );
+                }
+            }
+            Err(format!("the stream did not end: {text:?}"))
         }
         .await,
     );

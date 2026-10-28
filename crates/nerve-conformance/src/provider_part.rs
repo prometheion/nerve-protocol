@@ -86,6 +86,12 @@ pub const CHECKS: &[&str] = &[
     "a call the policy refuses never reaches the provider",
     "a call whose arguments do not fit the action's schema is invalid_args and never reaches the provider",
     "a path argument keeps its x-nerve-path marker, and the node decides the call by that path",
+    "the descriptor lists the provider's state key, event and stream with their effects",
+    "a get of a state key the policy allows reaches the provider, and only the keys asked for come back",
+    "a get the policy refuses never reaches the provider",
+    "an event the policy allows reaches the center that subscribed to it",
+    "an event the policy no longer allows does not reach the center, though it stays subscribed",
+    "a stream the policy allows is forwarded from the provider, and ends when the provider ends it",
     "when the provider exits its capability leaves the descriptor",
     "a call to a provider that left is unknown_capability",
 ];
@@ -191,12 +197,20 @@ async fn hello(
     let mut peek = read("Return the path it reads.");
     peek["params"] = json!({"type": "object", "required": ["path"],
                             "properties": {"path": {"type": "string", "x-nerve-path": "read"}}});
+    // Beside its actions: a state key, an event and a stream
+    // (node-local.md §7), and a state key no rule allows.
     let fragment = json!([{"id": CAP, "summary": "Says back what it is sent.",
         "actions": {"say": say,
                     "shout": read("Never called: no rule allows it."),
                     "fail": read("Fails with io."),
                     "odd": odd,
-                    "peek": peek}}]);
+                    "peek": peek},
+        "state": {"level": {"effect": "read", "summary": "Its level.",
+                            "schema": {"type": "integer"}},
+                  "secret": {"effect": "read", "summary": "Never read: no rule allows it."}},
+        "events": {"ping": {"effect": "read", "summary": "Sent when say is sent ping.",
+                            "data": {"type": "object", "properties": {"n": {"type": "integer"}}}}},
+        "streams": {"talk": {"effect": "read", "summary": "Two lines, then its end."}}}]);
     let mut line = json!({"method": "hello",
                           "params": {"role": "provider", "name": name, "capabilities": fragment}});
     if let Some(t) = token {
@@ -221,8 +235,11 @@ async fn hello(
 }
 
 /// Serves the provider's calls until `stop` fires, then closes: `say`
-/// returns its arguments, `fail` fails with `io`. Every action it is called
-/// for lands in `seen`.
+/// returns its arguments (and sends the event `ping` first when its text
+/// is `ping`), `fail` fails with `io`, `get` gives `level` 7 and a key
+/// nobody asked for, and the stream `talk` sends two lines and ends.
+/// Every action it is called for lands in `seen`, a `get` as `get`, a
+/// `stream.open` as `stream.open`.
 async fn serve(mut p: Provider, seen: Arc<Mutex<Vec<String>>>, mut stop: oneshot::Receiver<()>) {
     loop {
         let line = tokio::select! {
@@ -235,25 +252,40 @@ async fn serve(mut p: Provider, seen: Arc<Mutex<Vec<String>>>, mut stop: oneshot
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if v["method"] != "invoke" {
-            continue;
+        let mut out = Vec::new();
+        match v["method"].as_str() {
+            Some("invoke") => {
+                let action = v["params"]["action"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                seen.lock().unwrap().push(action.clone());
+                if action == "say" && v["params"]["args"]["text"] == "ping" {
+                    out.push(json!({"cap": CAP, "event": "ping", "data": {"n": 1}}));
+                }
+                out.push(if action == "fail" {
+                    json!({"id": v["id"], "error": "it failed on purpose", "code": "io"})
+                } else {
+                    json!({"id": v["id"], "ok": v["params"]["args"]})
+                });
+            }
+            Some("get") => {
+                seen.lock().unwrap().push("get".into());
+                out.push(json!({"id": v["id"], "ok": {"level": 7, "other": 1}}));
+            }
+            Some("stream.open") => {
+                seen.lock().unwrap().push("stream.open".into());
+                out.push(json!({"id": v["id"], "ok": {}}));
+                out.push(json!({"stream": v["id"], "data": "first\n"}));
+                out.push(json!({"stream": v["id"], "data": "second\n"}));
+                out.push(json!({"stream": v["id"], "end": true}));
+            }
+            _ => continue,
         }
-        let action = v["params"]["action"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        seen.lock().unwrap().push(action.clone());
-        let reply = if action == "fail" {
-            json!({"id": v["id"], "error": "it failed on purpose", "code": "io"})
-        } else {
-            json!({"id": v["id"], "ok": v["params"]["args"]})
-        };
-        if p.w
-            .write_all(format!("{reply}\n").as_bytes())
-            .await
-            .is_err()
-        {
-            return;
+        for line in out {
+            if p.w.write_all(format!("{line}\n").as_bytes()).await.is_err() {
+                return;
+            }
         }
     }
 }
@@ -277,6 +309,30 @@ fn ok(got: Result<Result<Value, nerve_proto::RpcError>, String>) -> Result<Value
         Ok(Err(e)) => Err(format!("error {} ({})", code_of(&e), e.message)),
         Err(e) => Err(e),
     }
+}
+
+/// Calls `say` with `ping`, whose provider sends the event `ping` first:
+/// the data of each `ping` that came before the answer.
+async fn pinged(conn: &mut Conn) -> Result<Vec<Value>, String> {
+    let id = conn
+        .request(
+            method::INVOKE,
+            json!({"cap": CAP, "action": "say", "args": {"text": "ping"}, "ctx": {}}),
+        )
+        .await?;
+    let mut others = Vec::new();
+    ok(conn.answer(id, WAIT, &mut others).await)?;
+    Ok(others
+        .into_iter()
+        .filter_map(|m| match m {
+            Message::Notification { method: m, params }
+                if m == method::EVENT && params["cap"] == CAP && params["name"] == "ping" =>
+            {
+                Some(params["data"].clone())
+            }
+            _ => None,
+        })
+        .collect())
 }
 
 /// The descriptor's `rev` now.
@@ -479,7 +535,10 @@ async fn steps(
                 p["allow"] = json!([
                     format!("{CAP}.say"),
                     format!("{CAP}.fail"),
-                    format!("{CAP}.peek:{PEEK_INSIDE}/*")
+                    format!("{CAP}.peek:{PEEK_INSIDE}/*"),
+                    format!("{CAP}.level"),
+                    format!("{CAP}.ping"),
+                    format!("{CAP}.talk")
                 ]);
             })
             .await)?;
@@ -573,6 +632,147 @@ async fn steps(
             ensure(
                 seen[before..] == ["say"],
                 format!("the provider was called for {:?}", &seen[before..]),
+            )
+        }
+        .await,
+    )?;
+
+    step(
+        async {
+            let cap = listed(conn)
+                .await?
+                .ok_or("the descriptor does not list it")?;
+            let effects = [
+                &cap["state"]["level"]["effect"],
+                &cap["events"]["ping"]["effect"],
+                &cap["streams"]["talk"]["effect"],
+            ];
+            ensure(
+                effects.iter().all(|e| **e == "read"),
+                format!("it lists {cap}"),
+            )?;
+            // No rule allows it, so the center is not shown it.
+            ensure(
+                cap["state"].get("secret").is_none(),
+                format!("it lists {cap}"),
+            )
+        }
+        .await,
+    )?;
+
+    step(
+        async {
+            let v = ok(conn
+                .call(
+                    method::GET,
+                    json!({"cap": CAP, "keys": ["level"], "ctx": {"session": "conformance-1"}}),
+                    WAIT,
+                )
+                .await)?;
+            ensure(v == json!({"level": 7}), format!("got {v}"))?;
+            let seen = seen.lock().unwrap().clone();
+            ensure(
+                seen.last().is_some_and(|a| a == "get"),
+                format!("the provider was called for {seen:?}"),
+            )
+        }
+        .await,
+    )?;
+
+    step(
+        async {
+            let before = seen.lock().unwrap().len();
+            expect_code(
+                conn.call(method::GET, json!({"cap": CAP, "keys": ["secret"]}), WAIT)
+                    .await,
+                ErrorCode::Forbidden,
+            )?;
+            ok(invoke(conn, "say", json!({"text": "after"})).await)?;
+            let seen = seen.lock().unwrap().clone();
+            ensure(
+                seen[before..] == ["say"],
+                format!("the provider was called for {:?}", &seen[before..]),
+            )
+        }
+        .await,
+    )?;
+
+    // The provider sends `ping` before it answers `say`: the node passes
+    // the event on before the answer.
+    step(
+        async {
+            ok(conn
+                .call(
+                    method::SUB,
+                    json!({"topics": [format!("{CAP}/ping")], "ctx": {"session": "conformance-1"}}),
+                    WAIT,
+                )
+                .await)?;
+            let pings = pinged(conn).await?;
+            ensure(
+                pings == [json!({"n": 1})],
+                format!("the center got the pings {pings:?}"),
+            )
+        }
+        .await,
+    )?;
+
+    step(
+        async {
+            ok(set_policy(conn, |p| {
+                if let Some(a) = p["allow"].as_array_mut() {
+                    a.retain(|r| *r != json!(format!("{CAP}.ping")));
+                }
+            })
+            .await)?;
+            let pings = pinged(conn).await?;
+            ensure(
+                pings.is_empty(),
+                format!("the center got the pings {pings:?}"),
+            )
+        }
+        .await,
+    )?;
+
+    step(
+        async {
+            let v = ok(conn
+                .call(
+                    method::STREAM_OPEN,
+                    json!({"cap": CAP, "stream": "talk", "params": {},
+                           "ctx": {"session": "conformance-1"}}),
+                    WAIT,
+                )
+                .await)?;
+            let sid = v["sid"].as_u64().ok_or(format!("no sid in {v}"))?;
+            // Frames that came with the answer were put aside.
+            let mut text: Vec<u8> = conn
+                .take_frames()
+                .into_iter()
+                .filter(|f| u64::from(f.id) == sid)
+                .flat_map(|f| f.payload)
+                .collect();
+            let deadline = tokio::time::Instant::now() + WAIT;
+            let reason = loop {
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                match conn.recv(left).await {
+                    Recv::Frame(f) if u64::from(f.id) == sid => text.extend(f.payload),
+                    Recv::Msg(Message::Request {
+                        id,
+                        method: m,
+                        params,
+                    }) if m == method::STREAM_CLOSE && params["sid"] == json!(sid) => {
+                        let _ = conn.send(&Message::result(id, json!({}))).await;
+                        break params["reason"].clone();
+                    }
+                    Recv::Msg(_) | Recv::Frame(_) => {}
+                    other => return Err(format!("the stream did not end: {other:?}")),
+                }
+            };
+            let text = String::from_utf8_lossy(&text);
+            ensure(
+                text == "first\nsecond\n" && reason == "ended",
+                format!("the stream gave {text:?} and ended with {reason}"),
             )
         }
         .await,

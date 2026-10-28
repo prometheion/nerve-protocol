@@ -286,6 +286,27 @@ When the machine's link drops, its streams end (also when the link resumes):
 streamed; it comes in the result. Every other stream is stripped of the sudo
 password the machine holds, as its results are.
 
+## A program's state, events and streams
+
+A program on the machine that you allow as a [provider](providers.md) may
+offer, beside its actions, a value to read, events and streams. `list(node)`
+names each with its kind (`- sensors.temperature (state): …`, `- door.opened
+(event): …`, `- camera.log (stream): …`), and its details say what
+`execute` does with it:
+
+| `execute` of | Gives |
+|---|---|
+| a state key, with `{}` | its value now |
+| an event, with `{}` | `Subscribed to door.opened … stream s-…`: from then on each event comes in that stream as one JSON line `{"name", "seq", "ts", "data"}`, read with `stream.read` |
+| a stream, with its args | `Opened camera.log … as stream s-…`, read with `stream.read` until it ends |
+
+`stream.close` ends a subscription, as the session's end does. A
+subscription keeps at most 1 MiB of events that were not read and drops the
+oldest whole, saying how much went. The machine decides each one by its
+mode and rules, as a call: in `folder` mode they need `on` (`nerve-node cap
+set door.opened on`), and an event the machine no longer lets this center
+have stops coming, though the subscription stays.
+
 ## Sessions
 
 Each MCP connection is one session. The center tells the machines a session

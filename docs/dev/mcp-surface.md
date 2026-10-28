@@ -177,8 +177,12 @@ at most 1 MiB per stream that was not read, drops the oldest past it and
 says how much; streams are the session's own, at most 16, in memory only,
 and go on close, when the job's result is read (unless that result lacks
 output the stream holds, which its answer then names), with the session, or
-when the link ends. Events come the same way, by polling: there are no MCP
-notifications. Details: [harness spec §4.5](spec/harness.md#45-streams-and-events).
+when the link ends. A program's state keys, events and streams (a provider,
+node-local spec §7) are units with their kind: `execute` reads a state key
+(`get`), subscribes the session to an event and answers a stream id whose
+`stream.read` gives the events as JSON lines, and opens a program's stream
+the same way. Events come by polling: there are no MCP notifications.
+Details: [harness spec §4.5](spec/harness.md#45-streams-and-events).
 
 ## Sessions
 
