@@ -98,9 +98,11 @@ export struct CapRow {
     // when it offers it.
     left-out: string,
     // Its switch for the page's center, when it has one: -1 not set (the
-    // mode decides), 0 on, 1 off, 2 hidden.
+    // mode decides), 0 on, 1 off, 2 hidden. `inherited`: a unit with none
+    // of its own, which takes its capability's.
     switchable: bool,
     setting: int,
+    inherited: bool,
     // Whether the center may use it now, as the running node said: on,
     // off, or "" while the node does not run.
     now: string,

@@ -717,6 +717,11 @@ fn the_app_drives_the_cli_end_to_end() {
     assert_eq!(row("exec.run").unwrap().setting, 1, "{}", store.get_toast());
     caps.invoke_cap_set("exec".into(), 2);
     assert_eq!(row("exec").unwrap().setting, 2);
+    // An action with no switch of its own shows its capability's, marked,
+    // as the node reads it; exec.run keeps its own.
+    let signal = row("exec.signal").expect("exec.signal is listed");
+    assert_eq!((signal.setting, signal.inherited), (2, true));
+    assert!(!row("exec.run").unwrap().inherited);
     caps.invoke_cap_set("exec".into(), 0);
     caps.invoke_cap_set("exec.run".into(), 0);
     assert_eq!(row("exec.run").unwrap().setting, 0);

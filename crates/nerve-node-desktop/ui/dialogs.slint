@@ -443,7 +443,7 @@ export component CapDialog inherits Dialog {
         Caps.edit-open = false;
     }
     enter => {
-        if (Caps.edit-ready && !Caps.edit-busy) {
+        if (!Caps.edit-busy) {
             Caps.edit-save();
         }
     }
@@ -587,7 +587,6 @@ export component CapDialog inherits Dialog {
         Button {
             text: Caps.edit-new ? "Add" : "Save";
             kind: ButtonKind.primary;
-            enabled: Caps.edit-ready;
             busy: Caps.edit-busy;
             clicked => {
                 Caps.edit-save();

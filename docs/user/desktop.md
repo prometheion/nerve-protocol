@@ -289,8 +289,10 @@ does: its own capabilities, the [capabilities of your
 stream of a program, has its effect (`read`, `write`, `execute`, `sense`,
 `actuate`), its line for the agent and, while the node runs, whether the
 chosen center may use it now. **On**, **Off** and **Hidden** switch a
-capability or one of its actions for that center (`cap set`); with none
-chosen its mode decides, and `sense` and `actuate` need your **On**. One the
+capability or one of its actions for that center (`cap set`). An action
+with no switch of its own takes its capability's, as the node does, and
+shows it marked "like its capability"; with neither chosen its mode decides,
+and `sense` and `actuate` need your **On**. One the
 node leaves out, such as a program's action whose schema is outside what a
 center takes, says why in red and has no switch. A stopped node shows its
 own capabilities and those of `node.toml`; the programs' show while it runs.
@@ -301,10 +303,12 @@ a summary, the command (the program first; a word with blanks in quotes, a
 word `{field}` the call's argument `field`), the arguments' JSON Schema
 (empty for none), the result (empty for the printed text, or a JSON Schema),
 a time limit and the system it runs on. The form checks each field as the
-node and the center do while you type, and says what is wrong below it; a
-schema outside the subset says where and why, and nothing is saved. The node
-checks again when you save (`cap add`, `cap edit`), and what it refuses, such
-as a time over its limit, stays in the form with its reason. Removing one
+node and the center do while you type, and says what is wrong below it (the
+time against the node's `limits.max_timeout_secs`); a schema outside the
+subset says where and why, and nothing is saved, and **Add** with a name or
+command missing shows which. The node checks again when you save (`cap add`,
+`cap edit`), and what it refuses, such as a limit changed since the page
+read it, stays in the form with its reason. Removing one
 (`cap rm`) asks first.
 
 **Programs** lists the programs allowed as providers, whether each is

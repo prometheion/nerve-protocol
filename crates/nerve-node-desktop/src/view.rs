@@ -648,12 +648,13 @@ pub fn pattern_rule(text: &str) -> bool {
 /// now. A unit the node leaves out says why, and has no switch; neither has
 /// `settings`, which the center's settings grant governs.
 pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
-    let setting = |name: &str| match v["caps"][name].as_str() {
+    let word = |w: &Value| match w.as_str() {
         Some("on") => 0,
         Some("off") => 1,
         Some("hidden") => 2,
         _ => -1,
     };
+    let setting = |name: &str| word(&v["caps"][name]);
     // The units by their capability and where they come from: a program's
     // left-out units come after all its others.
     let mut groups: Vec<(&str, &str, Vec<&Value>)> = Vec::new();
@@ -683,6 +684,7 @@ pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
             left_out: SharedString::new(),
             switchable: switches && units.iter().any(|r| left_out(r).is_empty()),
             setting: setting(cap),
+            inherited: false,
             now: SharedString::new(),
         });
         for r in units {
@@ -704,6 +706,14 @@ pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
             } else {
                 ""
             };
+            // A unit with no switch of its own takes its capability's, as
+            // the node does; `cap ls` says it in the unit's `centers`.
+            let own = setting(name);
+            let shown = if own < 0 && !center.is_empty() {
+                word(&r["centers"][center])
+            } else {
+                own
+            };
             rows.push(CapRow {
                 name: name.into(),
                 action: true,
@@ -713,7 +723,8 @@ pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
                 summary: s(&r["summary"]).into(),
                 switchable: switches && why.is_empty(),
                 left_out: why.into(),
-                setting: setting(name),
+                setting: shown,
+                inherited: own < 0 && shown >= 0,
                 now: now.into(),
             });
         }
@@ -2306,13 +2317,18 @@ mod tests {
         );
         let row = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
         assert!(!row("fs").action && row("fs").switchable);
-        assert_eq!((row("fs").setting, row("fs.read").setting), (2, -1));
+        // fs.read has no switch of its own: it shows its capability's, as
+        // the node reads it, and says so; exec.run's own is its own.
+        assert_eq!((row("fs").setting, row("fs.read").setting), (2, 2));
+        assert!(row("fs.read").inherited && !row("fs").inherited);
         assert_eq!(row("exec.run").setting, 1);
+        assert!(!row("exec.run").inherited);
         assert_eq!(row("exec.run").tone, Tone::Accent);
         assert_eq!(
             (row("who.am").setting, row("who.am").now.as_str()),
             (-1, "on")
         );
+        assert!(!row("who.am").inherited, "nothing chosen is nothing shown");
         assert_eq!(row("who").source, "config");
         // A program's state key says its kind; it senses, in the warning's
         // colour.

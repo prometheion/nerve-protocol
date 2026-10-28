@@ -18,7 +18,7 @@ component OfferedSection inherits Section {
     icon: @image-url("icons/plug.svg");
     title: "What this node offers";
     text: Caps.center == "" ? "Pair a center to switch them for it."
-        : "Off: " + Caps.center + " may not use it. Hidden: it does not see it. None chosen: its mode decides.";
+        : "Off: " + Caps.center + " may not use it. Hidden: it does not see it. \"Like its capability\": it has no switch of its own. None chosen: its mode decides.";
     Reveal {
         shown: !Caps.running;
         HorizontalLayout {
@@ -94,6 +94,14 @@ component OfferedSection inherits Section {
                     text: c.now == "on" ? "In use" : "Not now";
                     tone: c.now == "on" ? Tone.ok : Tone.neutral;
                     dot: true;
+                }
+            }
+            if c.switchable && c.inherited: VerticalLayout {
+                alignment: center;
+                Text {
+                    text: "like its capability";
+                    color: Theme.text-muted;
+                    font-size: Type.small;
                 }
             }
             if c.switchable: Segmented {

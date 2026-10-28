@@ -297,7 +297,8 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
     ] {
         set(&caps, long.into());
     }
-    caps.set_edit_ready(true);
+    // Add is there with the fields not ready: a click shows what is missing.
+    caps.set_edit_ready(false);
     caps.set_edit_open(true);
     assert!(
         bottom(&screen.draw(), 20) == foot,

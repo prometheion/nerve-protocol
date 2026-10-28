@@ -149,6 +149,12 @@ pub struct Ctl {
     /// The same for the Capabilities page, and what `cap ls` said last:
     /// the entries of node.toml its dialog edits.
     caps_asked: Cell<u64>,
+    /// The node's `limits.max_timeout_secs` as the page last read it: the
+    /// most a capability's time limit may be.
+    caps_max_timeout: Cell<u64>,
+    /// The capability dialog that is open, or was last: a count, so an
+    /// answer of a save that comes later knows whether it is still its own.
+    cap_dialogs: Cell<u64>,
     caps_listing: RefCell<Value>,
     /// Restarts the service a moment after a change it takes only then.
     restart_timer: slint::Timer,
@@ -306,6 +312,8 @@ impl Ctl {
             first_run: Cell::new(false),
             perm_asked: Cell::new(0),
             caps_asked: Cell::new(0),
+            caps_max_timeout: Cell::new(nerve_policy::config::Limits::default().max_timeout_secs),
+            cap_dialogs: Cell::new(0),
             caps_listing: RefCell::new(Value::Null),
             restart_timer: slint::Timer::default(),
             restart_waits: Cell::new(false),

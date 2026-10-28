@@ -51,8 +51,8 @@ fn a_capability_is_added_through_the_dialog() {
         "home",
         "--yes",
     ]);
-    // The node's own limit for a capability's time, lower than the default
-    // the app checks with: only the node can tell.
+    // The node's own limit for a capability's time, lower than the default:
+    // the dialog checks against it.
     run(&["config", "set", "limits.max_timeout_secs", "30"]);
 
     // The node runs, by hand, and offers the capabilities of node.toml as
@@ -76,14 +76,40 @@ fn a_capability_is_added_through_the_dialog() {
     assert_eq!(caps.get_center(), "home");
     assert_eq!(caps.get_declared().row_count(), 0);
 
+    // The answer of a reading the page asked for before its last one (the
+    // owner picked another center meanwhile) comes late: it is dropped.
+    let stale = ctl.caps_asked();
+    caps.invoke_refresh();
+    assert!(ctl.caps_asked() > stale);
+    let elsewhere = serde_json::json!({"running": true, "capabilities": [
+        {"name": "elsewhere.go", "effect": "read", "source": "built-in", "summary": "",
+         "centers": {"other": "on"}, "now": {"other": "on"}}
+    ], "config": [{"name": "elsewhere.go", "effect": "read", "command": ["true"]}]});
+    ctl.caps_loaded(stale, "other", Ok(elsewhere));
+    assert!(
+        caps.get_rows()
+            .iter()
+            .all(|r| !r.name.starts_with("elsewhere"))
+    );
+    assert_eq!(caps.get_declared().row_count(), 0);
+
     // A new one: the dialog opens empty, without errors.
     caps.invoke_add();
     assert!(caps.get_edit_open() && caps.get_edit_new());
     assert_eq!(caps.get_name_error(), "");
     assert!(!caps.get_edit_ready());
     screen.draw();
+    // Save is offered with nothing typed: a click shows what is missing,
+    // and runs nothing.
+    caps.invoke_edit_save();
+    assert!(caps.get_edit_open() && caps.get_edit_error().is_empty());
+    assert!(!caps.get_name_error().is_empty(), "no name asked for");
     caps.set_edit_name("say.back".into());
     caps.set_edit_summary("Says a word back.".into());
+    caps.invoke_edit_save();
+    assert!(caps.get_edit_open() && caps.get_edit_error().is_empty());
+    assert!(!caps.get_command_error().is_empty(), "no command asked for");
+    assert!(config(&paths).capabilities.is_empty());
     caps.set_edit_command(r#"printf "[%s]" {word}"#.into());
     // A schema outside the subset: its reason at the field while it is
     // typed, Save off, and a save that tries anyway saves nothing.
@@ -154,15 +180,53 @@ fn a_capability_is_added_through_the_dialog() {
     }
     assert!(offered, "{:?}", row("say.back"));
 
+    // The answer of a save belongs to the dialog that sent it. The owner
+    // closed it before the node refused: the reason is a toast. Another
+    // dialog is open by now: it keeps what was typed and shows nothing of
+    // the old answer; its own answer comes to it.
+    caps.invoke_edit("say.back".into());
+    let first = ctl.cap_dialog_id();
+    caps.set_edit_open(false);
+    ctl.cap_saved(first, Err("the first reason".into()));
+    assert!(
+        store.get_toast().contains("the first reason"),
+        "a refusal after Esc is lost"
+    );
+    assert_eq!(caps.get_edit_error(), "");
+    caps.invoke_edit("say.back".into());
+    assert!(ctl.cap_dialog_id() > first);
+    caps.set_edit_summary("typed after".into());
+    ctl.cap_saved(first, Ok(serde_json::json!({})));
+    assert!(caps.get_edit_open(), "an old answer closed the new dialog");
+    ctl.cap_saved(first, Err("the first reason".into()));
+    assert_eq!(caps.get_edit_error(), "");
+    assert_eq!(caps.get_edit_summary(), "typed after");
+    ctl.cap_saved(ctl.cap_dialog_id(), Err("its own reason".into()));
+    assert_eq!(caps.get_edit_error(), "its own reason");
+    assert!(!caps.get_edit_busy());
+    caps.set_edit_open(false);
+
     // An edit: the fields as declared; the name stays. A time over the
-    // node's limit passes the app's check and the node refuses it, in the
-    // dialog, which stays open; without it, the change is saved.
+    // node's limit (30, as the page read it) is refused by the dialog
+    // itself, with that number.
     caps.invoke_edit("say.back".into());
     assert!(caps.get_edit_open() && !caps.get_edit_new());
     assert_eq!(caps.get_edit_command(), "printf [%s] {word}");
     assert!(caps.get_edit_params().contains("\"word\""));
     caps.set_edit_summary("Says one word back.".into());
     caps.set_edit_timeout("100".into());
+    caps.invoke_edit_check();
+    assert!(!caps.get_edit_ready());
+    assert!(
+        caps.get_timeout_error().contains("(30)"),
+        "{}",
+        caps.get_timeout_error()
+    );
+    // What the app cannot know: the limit was lowered by hand since the
+    // page read it. The node refuses the save, in the dialog, which stays
+    // open.
+    run(&["config", "set", "limits.max_timeout_secs", "10"]);
+    caps.set_edit_timeout("20".into());
     caps.invoke_edit_check();
     assert!(caps.get_edit_ready(), "{}", caps.get_timeout_error());
     caps.invoke_edit_save();
@@ -173,6 +237,22 @@ fn a_capability_is_added_through_the_dialog() {
         caps.get_edit_error()
     );
     assert_eq!(config(&paths).capabilities[0].summary, "Says a word back.");
+    // The owner raises the node's limit (Settings > Limits): the dialog
+    // checks against that one, not the default 3600, so a time above that
+    // is saved, and an entry declared with one opens without an error.
+    run(&["config", "set", "limits.max_timeout_secs", "7200"]);
+    caps.invoke_refresh();
+    caps.set_edit_timeout("5400".into());
+    caps.invoke_edit_check();
+    assert!(caps.get_edit_ready(), "{}", caps.get_timeout_error());
+    caps.invoke_edit_save();
+    assert!(!caps.get_edit_open(), "{}", caps.get_edit_error());
+    assert_eq!(config(&paths).capabilities[0].timeout_secs, Some(5400));
+    caps.invoke_edit("say.back".into());
+    assert_eq!(caps.get_edit_timeout(), "5400");
+    assert_eq!(caps.get_timeout_error(), "");
+    assert!(caps.get_edit_ready());
+    caps.set_edit_summary("Says one word back.".into());
     caps.set_edit_timeout("20".into());
     caps.invoke_edit_save();
     assert!(!caps.get_edit_open(), "{}", caps.get_edit_error());

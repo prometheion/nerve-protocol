@@ -59,15 +59,27 @@ impl Ctl {
         };
         let asked = self.caps_asked.get() + 1;
         self.caps_asked.set(asked);
+        // Not set: the default, which the CLI leaves out.
+        let default_max = nerve_policy::config::Limits::default().max_timeout_secs;
         self.job(
             move |r| {
                 let mut args = vec!["cap".to_string(), "ls".into()];
                 if !center.is_empty() {
                     args.push(format!("--center={center}"));
                 }
-                (center, r.run(&super::strings(&args)))
+                // The dialog holds a time limit to the node's own maximum.
+                let max = r
+                    .run(&["config", "get", "limits.max_timeout_secs"])
+                    .ok()
+                    .map(|v| v["value"].as_u64().unwrap_or(default_max));
+                (center, r.run(&super::strings(&args)), max)
             },
-            move |c, (center, answer)| c.caps_loaded(asked, &center, answer),
+            move |c, (center, answer, max)| {
+                if let Some(max) = max {
+                    c.caps_max_timeout.set(max);
+                }
+                c.caps_loaded(asked, &center, answer)
+            },
         );
     }
 
@@ -162,6 +174,7 @@ impl Ctl {
             c.set_edit_busy(false);
             c.set_edit_open(true);
         });
+        self.cap_dialogs.set(self.cap_dialogs.get() + 1);
         self.cap_check(false);
     }
 
@@ -210,8 +223,7 @@ impl Ctl {
         let Some(form) = self.cap_form() else {
             return false;
         };
-        let max = nerve_policy::config::Limits::default().max_timeout_secs;
-        let e = view::cap_form_check(&form, max);
+        let e = view::cap_form_check(&form, self.caps_max_timeout.get());
         let typed = |text: &str, error: &str| -> SharedString {
             if tried || !text.trim().is_empty() {
                 error.into()
@@ -236,7 +248,7 @@ impl Ctl {
     /// nothing wrong with it; the node checks it again, and what it refuses
     /// stays in the dialog with its reason.
     fn cap_save(self: &Rc<Self>) {
-        if !self.cap_check(true) {
+        if self.with_caps(|c| c.get_edit_busy()) != Some(false) || !self.cap_check(true) {
             return;
         }
         let (Some(form), Some(new)) = (self.cap_form(), self.with_caps(|c| c.get_edit_new()))
@@ -248,19 +260,38 @@ impl Ctl {
             c.set_edit_busy(true);
             c.set_edit_error(SharedString::new());
         });
-        self.command(args, input, move |c, answer| {
-            c.with_caps(|k| k.set_edit_busy(false));
-            match answer {
-                Ok(v) => {
-                    c.with_caps(|k| k.set_edit_open(false));
-                    c.done(&v, "");
+        let dialog = self.cap_dialogs.get();
+        self.command(args, input, move |c, answer| c.cap_saved(dialog, answer));
+    }
+
+    /// The answer of the save that `dialog` started. The dialog closes on
+    /// success, or keeps the node's reason; when the owner closed it
+    /// meanwhile, or opened another, the reason goes to a toast instead and
+    /// the other dialog stays as it is.
+    pub fn cap_saved(self: &Rc<Self>, dialog: u64, answer: Result<Value, String>) {
+        let open =
+            dialog == self.cap_dialogs.get() && self.with_caps(|k| k.get_edit_open()) == Some(true);
+        if open {
+            self.with_caps(|k| k.set_edit_busy(false));
+        }
+        match answer {
+            Ok(v) => {
+                if open {
+                    self.with_caps(|k| k.set_edit_open(false));
                 }
-                Err(e) => {
-                    c.with_caps(|k| k.set_edit_error(e.into()));
-                }
+                self.done(&v, "");
             }
-            c.caps_load();
-        });
+            Err(e) if open => {
+                self.with_caps(|k| k.set_edit_error(e.into()));
+            }
+            Err(e) => self.toast(e, Tone::Danger),
+        }
+        self.caps_load();
+    }
+
+    /// The capability dialog that is open now, or was last.
+    pub fn cap_dialog_id(&self) -> u64 {
+        self.cap_dialogs.get()
     }
 
     fn ask_cap_remove(&self, name: &str) {

@@ -305,6 +305,7 @@ export global Caps {
     in-out property <string> edit-error;
     in-out property <bool> edit-busy;
     // Whether the fields are fine to save, as far as the app can tell.
+    // Save is offered anyway: a click on it shows what is missing.
     in-out property <bool> edit-ready;
     callback add();
     callback edit(string);
