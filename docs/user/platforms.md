@@ -14,6 +14,8 @@ Fedora 36 and later) and fontconfig.
 | `allowlist` and `user` mode run commands | Yes | Yes, in a Job Object, not confined to folders |
 | Sudo switch | Yes | On the [installed service](service.md#windows), with the administrator token of the account commands run as ([sudo on Windows](sudo.md#sudo-on-windows)) |
 | Control socket | Yes | A control pipe: `status`, `center rotate-key` and folder changes, no other change |
+| [Providers](providers.md) | Yes | Not yet |
+| [Capabilities of `node.toml`](config-capabilities.md) | Yes: the installed node, as `nerve-run`; a node you run yourself offers none | Kept in `node.toml`, offered not yet |
 | Install as a service | Yes, with systemd, the node and the [center](center.md#run-it-as-a-service) | The node |
 | The center's [action checker](action-checker.md) | Yes. Its local model on x86_64 and aarch64, on the CPU or a Vulkan GPU; the installed center service runs it on the CPU only | Yes. Its local model on x86_64, on the CPU or a Vulkan GPU |
 | Config folder | `~/.config/nerve` | `%USERPROFILE%\.config\nerve` |
@@ -69,6 +71,9 @@ Fedora 36 and later) and fontconfig.
   list is yours to choose.
 - A node that runs as root is refused unless `machine.allow_root` is set
   ([root and administrator](#root-and-administrator)).
+- A [capability of `node.toml`](config-capabilities.md) runs as `nerve-run`,
+  held to the pairing's folders and its own, by Landlock where the kernel has
+  it; a node you run yourself has no `nerve-run` and offers none.
 
 ## Windows
 
@@ -101,6 +106,8 @@ Fedora 36 and later) and fontconfig.
 - Paths in rules and over the wire look like `/c/Users/x`.
 - A node that runs elevated (as an administrator) is refused unless
   `machine.allow_root` is set ([root and administrator](#root-and-administrator)).
+- `cap add` keeps a [capability of your own](config-capabilities.md) in
+  `node.toml`, also one for `windows`, but the node offers none yet.
 
 ### Root and administrator
 

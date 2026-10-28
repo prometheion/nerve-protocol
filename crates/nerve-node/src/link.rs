@@ -595,7 +595,7 @@ async fn session(
             &cfg,
             entry,
             &shared.reach(&cfg, entry),
-            &shared.providers.caps(),
+            &shared.offered_caps(&cfg, &entry.policy),
         )
         .rev;
         let hello = Hello {
@@ -1446,7 +1446,7 @@ impl Link {
             cfg,
             entry,
             &self.shared.reach(cfg, entry),
-            &self.shared.providers.caps(),
+            &self.shared.offered_caps(cfg, &entry.policy),
         )
     }
 
@@ -1636,7 +1636,7 @@ impl Link {
         let granted = entry.clone();
         let entry = self.shared.with_built_in(&cfg, entry);
         let view =
-            descriptor::for_call(&cfg, &entry, crate::now_ms(), &self.shared.providers.caps());
+            descriptor::for_call(&cfg, &entry, crate::now_ms(), &self.shared.added_caps(&cfg));
         let cap = view.capability(&inv.cap).ok_or_else(|| {
             RpcError::new(
                 ErrorCode::UnknownCapability,
@@ -1662,6 +1662,21 @@ impl Link {
             let target = off_target(&inv);
             self.audit(&inv, &target, "forbidden", Some("disabled"), Some(&why));
             return Err(RpcError::new(ErrorCode::Disabled, why));
+        }
+        // A capability of the config (crate::config_cap) runs the owner's
+        // command, decided and audited like any other call.
+        if cap.provider == crate::config_cap::PROVIDER {
+            let decl = crate::config_cap::find(&cfg, &inv.cap, &inv.action)
+                .cloned()
+                .ok_or_else(|| {
+                    RpcError::new(
+                        ErrorCode::UnknownMember,
+                        format!("{}.{} is not served", inv.cap, inv.action),
+                    )
+                })?;
+            return self
+                .config_call(id, &cfg, granted, effect, &inv, decl)
+                .await;
         }
         // A provider's action (crate::provider) is decided and audited here
         // like any other; only an allowed call reaches the provider. Its
@@ -1698,100 +1713,8 @@ impl Link {
             if !marked.is_empty() && self.shared.separate(&entry.policy) {
                 self.acls_ready(&cfg).await?;
             }
-            let mut args = inv.args.clone();
-            let mut targets = Vec::new();
-            // Each path as resolved (its wire form) and as given.
-            let mut named = Vec::new();
-            // One that does not resolve as the account (a place it may not
-            // look into, the node's own folders) is refused and in the audit
-            // as any refusal, with the path given. The entry is written once
-            // the switch is over: the account may not write the node's log.
-            let resolved = {
-                let _as = act_as(known.as_ref())?;
-                marked.iter().try_for_each(|(field, mark)| {
-                    // Left out (or null, which its schema may allow): no path.
-                    let Some(Value::String(given)) = inv.args.get(field) else {
-                        return Ok(());
-                    };
-                    let path = WirePath::parse(given).map_err(|e| (given, e, None))?;
-                    let write = *mark == PathMark::Write;
-                    // The program gets the path resolved, so where the path
-                    // given is itself a link, a write there (a removal, a
-                    // rename) would act on the place it leads to, which the
-                    // agent never named.
-                    let own: std::path::PathBuf = path.given.components().collect();
-                    if write
-                        && std::fs::symlink_metadata(&own).is_ok_and(|m| m.file_type().is_symlink())
-                    {
-                        return Err((
-                            given,
-                            crate::fs::bad_path(format!(
-                                "{given} is a link; name the place it leads to"
-                            )),
-                            None,
-                        ));
-                    }
-                    // It is handed the path judged, character for character:
-                    // a name that is no Unicode would reach it as another.
-                    let Some(real) = path
-                        .real
-                        .to_str()
-                        .map(|_| nerve_policy::paths::to_wire(&path.real))
-                    else {
-                        return Err((
-                            given,
-                            crate::fs::bad_path(format!(
-                                "{given} leads to a name the program cannot be handed as it is"
-                            )),
-                            None,
-                        ));
-                    };
-                    args.insert(field.clone(), Value::String(real.clone()));
-                    // Its schema holds the path as it is handed, too. Only the
-                    // audit names where it leads ([`as_given`]).
-                    nerve_proto::schema::validate(&action.params, &Value::Object(args.clone()))
-                        .map_err(|_| {
-                            let (cap, act) = (&inv.cap, &inv.action);
-                            (
-                                given,
-                                crate::fs::bad_path(format!(
-                                    "{given} leads to a path {cap}.{act} does not take"
-                                )),
-                                Some(format!(
-                                    "{given} leads to {real}, which {cap}.{act} does not take"
-                                )),
-                            )
-                        })?;
-                    named.push((real, given.clone()));
-                    targets.push(Target {
-                        holds: crate::fs::holds(&path.real, write),
-                        path: path.real,
-                        access: if write {
-                            PathAccess::Write
-                        } else {
-                            PathAccess::Read
-                        },
-                    });
-                    Ok(())
-                })
-            };
-            resolved.map_err(|(given, e, audited)| {
-                let mut entry = e.clone();
-                if let Some(why) = audited {
-                    entry.message = why;
-                }
-                self.audit_bad_path(&inv, given, &entry);
-                e
-            })?;
-            let target = if targets.is_empty() {
-                format!("{}.{}", inv.cap, inv.action)
-            } else {
-                targets
-                    .iter()
-                    .map(|t| nerve_policy::paths::to_wire(&t.path))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
+            let (args, targets, named, target) =
+                self.marked_paths(&inv, &action.params, &marked, known.as_ref())?;
             // A program's execute action runs in the folders marked `x`
             // where folder-mode commands could run: where they cannot be
             // confined, `x` lets nothing start (crate::daemon::folder_refusal).
@@ -1806,6 +1729,7 @@ impl Link {
                 None,
                 None,
                 target,
+                None,
                 known.as_ref(),
                 unconfined,
                 Some(program),
@@ -1839,6 +1763,7 @@ impl Link {
                     None,
                     None,
                     target,
+                    None,
                     None,
                     unconfined,
                     None,
@@ -1890,6 +1815,7 @@ impl Link {
                     None,
                     None,
                     call.target_text(),
+                    None,
                     known.as_ref(),
                     unconfined,
                     None,
@@ -1943,6 +1869,129 @@ impl Link {
                 format!("{}.{} is not served", inv.cap, inv.action),
             )),
         }
+    }
+
+    /// The paths of a call to a program or a config capability: each
+    /// argument its schema `params` marks as a path (`marked`), resolved as
+    /// `account` would see it, as an `fs` call's are: the folders, the rules
+    /// and the protected and own paths judge them. Only one that may hold
+    /// other paths (a folder, or where a write may make one) is judged by
+    /// what lies below it too. Returns the arguments with each path as
+    /// resolved, so the call works where the policy looked; the targets;
+    /// each path as resolved and as given; and the audit target (the paths,
+    /// or `cap.action` for a call that names none, which looks nobody up).
+    #[allow(clippy::type_complexity)]
+    fn marked_paths(
+        &self,
+        inv: &Invoke,
+        params: &Value,
+        marked: &[(String, PathMark)],
+        known: Option<&crate::service::Account>,
+    ) -> Result<
+        (
+            Map<String, Value>,
+            Vec<Target>,
+            Vec<(String, String)>,
+            String,
+        ),
+        RpcError,
+    > {
+        let mut args = inv.args.clone();
+        let mut targets = Vec::new();
+        // Each path as resolved (its wire form) and as given.
+        let mut named = Vec::new();
+        // One that does not resolve as the account (a place it may not
+        // look into, the node's own folders) is refused and in the audit
+        // as any refusal, with the path given. The entry is written once
+        // the switch is over: the account may not write the node's log.
+        let resolved = {
+            let _as = act_as(known)?;
+            marked.iter().try_for_each(|(field, mark)| {
+                // Left out (or null, which its schema may allow): no path.
+                let Some(Value::String(given)) = inv.args.get(field) else {
+                    return Ok(());
+                };
+                let path = WirePath::parse(given).map_err(|e| (given, e, None))?;
+                let write = *mark == PathMark::Write;
+                // The program gets the path resolved, so where the path
+                // given is itself a link, a write there (a removal, a
+                // rename) would act on the place it leads to, which the
+                // agent never named.
+                let own: std::path::PathBuf = path.given.components().collect();
+                if write
+                    && std::fs::symlink_metadata(&own).is_ok_and(|m| m.file_type().is_symlink())
+                {
+                    return Err((
+                        given,
+                        crate::fs::bad_path(format!(
+                            "{given} is a link; name the place it leads to"
+                        )),
+                        None,
+                    ));
+                }
+                // It is handed the path judged, character for character:
+                // a name that is no Unicode would reach it as another.
+                let Some(real) = path
+                    .real
+                    .to_str()
+                    .map(|_| nerve_policy::paths::to_wire(&path.real))
+                else {
+                    return Err((
+                        given,
+                        crate::fs::bad_path(format!(
+                            "{given} leads to a name the program cannot be handed as it is"
+                        )),
+                        None,
+                    ));
+                };
+                args.insert(field.clone(), Value::String(real.clone()));
+                // Its schema holds the path as it is handed, too. Only the
+                // audit names where it leads ([`as_given`]).
+                nerve_proto::schema::validate(params, &Value::Object(args.clone())).map_err(
+                    |_| {
+                        let (cap, act) = (&inv.cap, &inv.action);
+                        (
+                            given,
+                            crate::fs::bad_path(format!(
+                                "{given} leads to a path {cap}.{act} does not take"
+                            )),
+                            Some(format!(
+                                "{given} leads to {real}, which {cap}.{act} does not take"
+                            )),
+                        )
+                    },
+                )?;
+                named.push((real, given.clone()));
+                targets.push(Target {
+                    holds: crate::fs::holds(&path.real, write),
+                    path: path.real,
+                    access: if write {
+                        PathAccess::Write
+                    } else {
+                        PathAccess::Read
+                    },
+                });
+                Ok(())
+            })
+        };
+        resolved.map_err(|(given, e, audited)| {
+            let mut entry = e.clone();
+            if let Some(why) = audited {
+                entry.message = why;
+            }
+            self.audit_bad_path(inv, given, &entry);
+            e
+        })?;
+        let target = if targets.is_empty() {
+            format!("{}.{}", inv.cap, inv.action)
+        } else {
+            targets
+                .iter()
+                .map(|t| nerve_policy::paths::to_wire(&t.path))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        Ok((args, targets, named, target))
     }
 
     /// The `~` of the rules and the protected list (Shared::rules_home).
@@ -2011,6 +2060,7 @@ impl Link {
         command: Option<&str>,
         cwd: Option<&std::path::Path>,
         target: String,
+        ran: Option<&str>,
         account: Option<&crate::service::Account>,
         unconfined: Option<&str>,
         program: Option<u32>,
@@ -2031,7 +2081,10 @@ impl Link {
             sudo: self.shared.sudo_on(),
             shell: self.shell_for(command),
             by_account: self.reads_by_account(entry, account),
-            provider: inv.cap != "fs",
+            // The node's own `fs` and the commands of a config capability
+            // (as `nerve-run`) read with that account's rights; a program
+            // with the owner's.
+            provider: program.is_some(),
         };
         // The policy looks at the paths as the account (crate::account::FsAs);
         // the audit entry below is the node's own again.
@@ -2087,7 +2140,7 @@ impl Link {
                         }
                     }))
                 },
-                |decision, code, reason| self.audit(inv, &target, decision, code, reason),
+                |decision, code, reason| self.audit_ran(inv, &target, ran, decision, code, reason),
             )
             .await;
             walk.map_err(|e| RpcError::internal(e.to_string()))??
@@ -2095,7 +2148,7 @@ impl Link {
             decision
         };
         let audit = |decision: &str, code: Option<&str>, reason: Option<&str>| {
-            self.audit(inv, &target, decision, code, reason)
+            self.audit_ran(inv, &target, ran, decision, code, reason)
         };
         match decision {
             Decision::Allow => {
@@ -2139,6 +2192,20 @@ impl Link {
         code: Option<&str>,
         reason: Option<&str>,
     ) {
+        self.audit_ran(inv, target, None, decision, code, reason)
+    }
+
+    /// [`Link::audit`], with the command a capability of `node.toml` runs
+    /// for the call (`ran`), which only the node's own log keeps.
+    fn audit_ran(
+        &self,
+        inv: &Invoke,
+        target: &str,
+        ran: Option<&str>,
+        decision: &str,
+        code: Option<&str>,
+        reason: Option<&str>,
+    ) {
         self.shared.audit(&Entry {
             ts: crate::now_ms(),
             center: self.name.clone(),
@@ -2149,6 +2216,7 @@ impl Link {
             code: code.map(Into::into),
             session: inv.ctx.session.clone(),
             reason: reason.map(Into::into),
+            command: ran.map(Into::into),
         })
     }
 
@@ -2176,15 +2244,23 @@ impl Link {
         let s: Set = params(args)?;
         let account = self.account();
         let own = self.own();
-        // Only a provider's capability can sense (crate::provider).
-        let owner_only = self.shared.providers.owner_only();
-        let r = lock(&self.shared.store).set_center_document(
-            &self.name,
-            s.document,
-            s.if_version,
-            owner_only,
-            |opts| self.protected_with(opts, account.as_ref(), &own),
-        );
+        // Only a program's capability, or one of the config, can sense
+        // (crate::provider, crate::config_cap). Every one the config
+        // declares counts, also one not offered here now: a center's `on`
+        // for it would cover its sensing action once the owner makes it
+        // offered. They are read from the config the document is checked
+        // against, under the store's lock, so an owner's change that
+        // commits meanwhile is not missed; the programs' are taken before
+        // (crate::provider::Providers::hold takes them, then the store).
+        let attached = self.shared.providers.caps();
+        let mut store = lock(&self.shared.store);
+        let mut known = crate::config_cap::declared(store.config());
+        known.extend(attached);
+        let owner_only = crate::provider::owner_only_of(&known);
+        let r =
+            store.set_center_document(&self.name, s.document, s.if_version, owner_only, |opts| {
+                self.protected_with(opts, account.as_ref(), &own)
+            });
         settings_result(r)
     }
 
@@ -2366,6 +2442,7 @@ impl Link {
             Some(&rc.command),
             Some(&rc.cwd),
             target,
+            None,
             looks_as.as_ref(),
             unconfined,
             None,
@@ -2453,24 +2530,8 @@ impl Link {
         let r = exec::run(&rc, &opts, |e| guard.started(e)).await;
         drop(open);
         drop(guard);
-        // A command killed for its memory limit is a decision of the node's
-        // too: the audit log and the node's log say so, as the result does.
-        if let Ok(v) = &r
-            && v["killed"] == "memory"
-        {
-            let reason = v["reason"].as_str().unwrap_or_default();
-            tracing::warn!("a command of {} was killed: {reason}", self.name);
-            self.shared.audit(&Entry {
-                ts: crate::now_ms(),
-                center: self.name.clone(),
-                cap: inv.cap.clone(),
-                action: inv.action.clone(),
-                target: command,
-                decision: "killed".into(),
-                code: Some("memory".into()),
-                session: inv.ctx.session.clone(),
-                reason: Some(reason.into()),
-            });
+        if let Ok(v) = &r {
+            self.audit_killed(inv, command, None, v);
         }
         if let Ok(v) = &r {
             self.handle.event(
@@ -2480,6 +2541,177 @@ impl Link {
             );
         }
         r
+    }
+}
+
+impl Link {
+    /// A command killed for its memory limit is a decision of the node's
+    /// too: the audit log (with `target`, as the call's entry has it) and
+    /// the node's log say so, as the result `v` does.
+    fn audit_killed(&self, inv: &Invoke, target: String, ran: Option<String>, v: &Value) {
+        if v["killed"] != "memory" {
+            return;
+        }
+        let reason = v["reason"].as_str().unwrap_or_default();
+        tracing::warn!("a command of {} was killed: {reason}", self.name);
+        self.shared.audit(&Entry {
+            ts: crate::now_ms(),
+            center: self.name.clone(),
+            cap: inv.cap.clone(),
+            action: inv.action.clone(),
+            target,
+            decision: "killed".into(),
+            code: Some("memory".into()),
+            session: inv.ctx.session.clone(),
+            reason: Some(reason.into()),
+            command: ran,
+        });
+    }
+
+    /// A call of the config capability `decl` (crate::config_cap): its
+    /// arguments checked against its schema, its marked paths resolved and
+    /// the call decided and audited like a program's; then its command runs
+    /// with no shell as `nerve-run`, from that account's home, under the
+    /// node's limits on commands (the running count, the cgroup, the
+    /// timeout).
+    ///
+    /// It is a command of that account, held like one: its paths are looked
+    /// at as that account, which reads them with its own rights, and it runs
+    /// under Landlock where the kernel has it, with the pairing's folders and
+    /// the account's own (its home, `/tmp`, `/var/tmp`) where the pairing's
+    /// commands run as `nerve-run`; where they run as the owner (user mode, a
+    /// pairing set to run as the owner), the folders are not `nerve-run`'s,
+    /// and it gets its own alone.
+    async fn config_call(
+        self: &Arc<Self>,
+        id: &Id,
+        cfg: &NodeConfig,
+        granted: CenterEntry,
+        effect: Effect,
+        inv: &Invoke,
+        decl: nerve_policy::config::ConfigCapability,
+    ) -> Result<Value, RpcError> {
+        let params = decl.params_schema();
+        nerve_proto::schema::validate(&params, &Value::Object(inv.args.clone()))?;
+        let marked = nerve_proto::schema::path_args(&params);
+        let runs_as = self.shared.run_account(cfg);
+        let entry = self.shared.with_built_in(cfg, granted);
+        let known = runs_as.as_ref().ok().cloned().flatten();
+        // `nerve-run` sees the folders once their ACLs are on; a grant that
+        // should have come off and has not stops it whatever the pairing.
+        self.acls_ready(cfg).await?;
+        let (args, targets, named, target) =
+            self.marked_paths(inv, &params, &marked, known.as_ref())?;
+        let argv = decl.argv(&args).map_err(RpcError::invalid_args)?;
+        // The audit's target is what the center named: the paths, else the
+        // action, which the event to the center and the rules take. The
+        // command as it runs, the call's values in it, holds the owner's own
+        // words and stays in the node's own log.
+        let ran = nerve_policy::config::ConfigCapability::line(&argv);
+        let unconfined = (effect == Effect::Execute)
+            .then(|| self.shared.unconfined_as(cfg, || known.clone()))
+            .flatten();
+        self.gate(
+            &entry,
+            inv,
+            effect,
+            &targets,
+            None,
+            None,
+            target.clone(),
+            Some(&ran),
+            known.as_ref(),
+            unconfined,
+            None,
+        )
+        .await
+        .map_err(|e| as_given(e, &named))?;
+        // A missing account stops the call once it is decided and audited.
+        let account = runs_as.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
+        // Only the installed Linux node has `nerve-run`, and only it offers
+        // what runs as that account (crate::config_cap::offered); a test's
+        // node by hand stands for it with its own user
+        // (crate::daemon::NodeOptions::config_caps_by_hand).
+        if account.is_none() && !self.shared.config_caps {
+            return Err(RpcError::new(
+                ErrorCode::Unavailable,
+                format!(
+                    "{} runs as {}, which only the installed node has",
+                    decl.name,
+                    crate::account::RUN_USER
+                ),
+            ));
+        }
+        // It starts in the account's home (the node's own by hand).
+        let start_in = account
+            .as_ref()
+            .map_or_else(|| self.shared.home.clone(), |a| a.home.clone());
+        let home = self.shared.rules_home(cfg);
+        let own = self.shared.own(cfg);
+        let landlock = (self.shared.exe.is_some()
+            && self.shared.confinement.landlock_abi.is_some())
+        .then(|| {
+            let policy = crate::config_cap::confined(
+                &entry.policy,
+                self.shared.separate(&entry.policy),
+                account.as_ref().map(|a| a.home.as_path()),
+            );
+            // The folders' entries are listed as the account.
+            let _as = act_as(account.as_ref()).ok().flatten();
+            let writable = exec::write_folders(cfg, &home);
+            exec::landlock_spec(&policy, &home, &own, &writable)
+        });
+        let granted = cfg
+            .limits
+            .command
+            .grant(None, None, None)
+            .map_err(RpcError::invalid_args)?;
+        let rc = RunCall::program(
+            argv,
+            decl.command_line(),
+            start_in,
+            decl.timeout_secs.map(Duration::from_secs),
+        );
+        let guard = Running::start(self, id.clone(), cfg.limits.max_running as usize)?;
+        let timeouts = exec::Timeouts::from_limits(&cfg.limits);
+        let opts = RunOptions {
+            shell: None,
+            landlock,
+            container: None,
+            exe: self.shared.exe.clone().unwrap_or_default(),
+            output_cap: (cfg.limits.output_cap_bytes as usize).min(exec::OUTPUT_HARD_CAP),
+            timeouts,
+            sudo: None,
+            account,
+            separate: true,
+            own,
+            root: None,
+            limits: self
+                .shared
+                .cgroups
+                .as_ref()
+                .ok()
+                .map(|c| (c.clone(), granted)),
+            tap: guard.tap(true),
+        };
+        let r = exec::run(&rc, &opts, |e| guard.started(e)).await;
+        drop(guard);
+        if let Ok(v) = &r {
+            self.audit_killed(inv, target, Some(ran), v);
+        }
+        let run = r.map_err(|e| match e.kind() {
+            // Its own limit, not a `timeout_ms` the call never had.
+            ErrorCode::Timeout => RpcError::new(
+                ErrorCode::Timeout,
+                format!(
+                    "{} ran past its limit of {} and was killed",
+                    decl.name,
+                    span(timeouts.limit(rc.timeout).after)
+                ),
+            ),
+            _ => e,
+        })?;
+        crate::config_cap::result(&decl, &run)
     }
 }
 
@@ -2659,7 +2891,7 @@ pub(crate) fn act_as(
 /// [`act_as`] on Windows: the thread impersonates the account, logged on
 /// with its stored password ([`crate::win_user::FsAs`]).
 #[cfg(windows)]
-fn act_as(
+pub(crate) fn act_as(
     account: Option<&crate::service::Account>,
 ) -> Result<Option<crate::win_user::FsAs>, RpcError> {
     account

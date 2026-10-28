@@ -24,7 +24,8 @@ type and `null`), properties, items, enums and bounds; no `$ref`, `oneOf`,
 conditions, `pattern` or `format`. `nerve_proto::schema::check` says whether
 a schema keeps to it, `nerve_proto::schema::validate` whether arguments fit
 one. The node runs `check` on every schema it publishes (a test covers each
-built-in one) and on a provider's, and `validate` on a provider's arguments;
+built-in one), on a provider's and on those of the owner's config
+capabilities, and `validate` on the arguments of both;
 the center runs `check` on every schema of a descriptor it reads (event data
 and state included) and `validate` before every call it sends.
 
@@ -71,10 +72,15 @@ and state included) and `validate` before every call it sends.
   while its hash is the one `list` gave the session
   ([harness.md](spec/harness.md) §4.3).
 - `provider` says which process serves the capability: `node` for the node's
-  own, else the name of a local program the owner allowed to attach to the
+  own, `config` for one the owner declared in `node.toml` (`[[capability]]`:
+  a fixed command the node runs itself, [node-local §2](spec/node-local.md#capabilities-of-the-config)),
+  else the name of a local program the owner allowed to attach to the
   node ([node-local §7](spec/node-local.md#7-capability-providers)). Such a
   capability has actions only, and the node decides each call to it by the
-  center's policy before the program sees it.
+  center's policy before the program or the command sees it. The names
+  `node`, `fs`, `exec`, `settings`, `audit`, `job` and `stream`
+  (`nerve_policy::config::BUILT_IN`) are taken by neither, and no program may
+  add a capability the config declares.
 
 ## Effects
 

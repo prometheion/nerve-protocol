@@ -79,6 +79,16 @@ level = "info"              # error | warn | info | debug: how much the node log
 [providers]                 # programs that may add capabilities (providers.md)
 allowed = [{ name = "desk", exe = "/usr/lib/nerve-desktop/nerve-desktop" }]
 
+[[capability]]              # one of yours, added by `nerve-node cap add` (config-capabilities.md)
+name = "sensors.read"       # cap.action
+summary = "Temperatures of this machine."
+effect = "sense"            # read | write | execute | sense | actuate
+command = ["sensors", "-j"] # the program and its arguments; {field} takes a call's argument
+params = '{"type": "object", "properties": {}}'  # optional: its arguments' JSON Schema, as text
+result = '{"type": "object"}'                    # text (the default), or a JSON Schema as text
+timeout_secs = 10           # optional, up to max_timeout_secs
+platform = "linux"          # any (the default) | linux | windows
+
 [[center]]
 name = "lab"
 url = "https://lab.example:7443"

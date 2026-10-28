@@ -14,6 +14,7 @@ pub mod backup;
 mod caller_file;
 pub mod cgroup;
 pub mod cli;
+mod config_cap;
 pub mod daemon;
 pub mod descriptor;
 pub mod edition;

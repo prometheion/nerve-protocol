@@ -7,6 +7,12 @@ next to `fs` and `exec`. The program never talks to a center. The node decides
 every call to it by that center's mode and rules, as it does for files and
 commands, and writes it to the [audit log](audit.md).
 
+For a fixed command, such as `sensors -j`, no program is needed: declare it in
+`node.toml` with `nerve-node cap add` ([capabilities of your own](config-capabilities.md)).
+Such a command runs as the node's command account `nerve-run`, held to the
+folders; an action that needs your own rights, such as restarting a service of
+yours or reading your files, comes from a program you allow here.
+
 Providers work on Linux: a program of yours (or of root) attaches to the
 [installed node](service.md) on its provider socket (its control socket
 takes none), and to a node you run yourself on its control socket. Windows
@@ -14,8 +20,9 @@ takes no provider yet.
 
 ## Allow a program
 
-No program may attach until you name it, with a name of your choice and the
-full path of its executable:
+No program may attach until you name it, with a name of your choice (not
+`node` or `config`, which stand for the node's own capabilities and those of
+[`node.toml`](config-capabilities.md)) and the full path of its executable:
 
 ```sh
 nerve-node cap provider allow desk /usr/lib/nerve-desktop/nerve-desktop
@@ -58,7 +65,8 @@ still make the allowed one attach for it. Allow only programs you trust.
 ## See what is there
 
 `nerve-node cap ls` lists every capability, one action a line: what it does
-(its effect), where it comes from (`built-in`, or `program desk`), and for
+(its effect), where it comes from (`built-in`, `config` for
+[your own](config-capabilities.md), or `program desk`), and for
 each center whether it may use it now (`on` or `off`, as its mode, rules and
 switches decide), with the switch in brackets where you set one with `cap
 set` (`hidden` ones say just that), for one center with `--center`. The

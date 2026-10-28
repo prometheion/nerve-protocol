@@ -509,6 +509,16 @@ fn serve_changing(
                         Some("boom") => {
                             Some(RpcError::internal("the node could not start the command"))
                         }
+                        // A capability of the node's config whose command
+                        // failed: what it printed is in the error's data.
+                        Some("printfail") => Some(
+                            RpcError::new(
+                                nerve_proto::ErrorCode::Other("io".into()),
+                                "proj.test failed: exit code 101",
+                            )
+                            .with("exit_code", json!(101))
+                            .with("stderr", json!(FAKE_END)),
+                        ),
                         // A node that answers in the center's voice, at length,
                         // and on lines of their own.
                         Some("pose") => Some(RpcError {
@@ -3298,6 +3308,40 @@ async fn taint_and_stats_come_with_the_end_of_a_job() {
     assert!(log_lines(&c, "exec.run").is_empty());
     _task.abort();
     wait_for(|| (!log_lines(&c, "exec.run").is_empty()).then_some(())).await;
+    r.stop().await;
+}
+
+/// What a failed command printed reaches the model as content from that
+/// machine, after the node's one line, and taints the session as its
+/// output would have; a refusal of the node's carries none and does not.
+#[tokio::test]
+async fn a_failed_commands_output_is_device_content_and_taints() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, _node, _seen, _task) = job_box(&r).await;
+    let sess = e.session();
+    let refused = execute_as(&e, json!(1), "exec.run", json!({"command": "refuse"})).await;
+    assert!(said(&refused).1, "{refused}");
+    assert!(!sess.tainted(), "the node's own words");
+    let got = execute_as(&e, json!(2), "exec.run", json!({"command": "printfail"})).await;
+    let (text, err) = said(&got);
+    assert!(err, "{got}");
+    let (first, rest) = text
+        .split_once('\n')
+        .expect("the output on lines of its own");
+    assert_eq!(
+        first,
+        "error io: node box-1 answered: proj.test failed: exit code 101"
+    );
+    assert!(
+        rest.starts_with(
+            "[device content from node \"box-1\", exec.run, what its command printed to stderr"
+        ),
+        "{rest}"
+    );
+    stays_framed(rest);
+    assert!(rest.contains("\\[end of device content]"), "{rest}");
+    assert!(sess.tainted(), "outside content");
     r.stop().await;
 }
 

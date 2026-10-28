@@ -230,7 +230,9 @@ so the node checks a value as it checks the command line's.
 The settings without a control of their own are under **Advanced**:
 `machine.allow_root` and `machine.sudo_path` (for a node run by hand, not
 the installed one), `providers.allowed` ([providers](providers.md)), and
-`policy.protected` of a center ([protected paths](protected-paths.md)).
+`policy.protected` of a center ([protected paths](protected-paths.md)). The
+[capabilities of your `node.toml`](config-capabilities.md) have no page yet:
+`nerve-node cap add`, `cap edit` and `cap rm` change them.
 A center's other settings are on **Centers** and **Permissions**.
 
 On **Permissions**, the commands that count in the center's mode come first:

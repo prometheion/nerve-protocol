@@ -65,7 +65,7 @@ pub enum Cmd {
     /// Keep the lists of commands that are allowed, forbidden or run with sudo.
     #[command(subcommand)]
     Rule(RuleCmd),
-    /// Turn capabilities and single actions on or off.
+    /// Turn capabilities and single actions on or off, declare capabilities of your own in node.toml, and allow the programs that add capabilities.
     #[command(subcommand)]
     Cap(CapCmd),
     /// Use sudo for the commands on the sudo list.
@@ -319,15 +319,71 @@ pub enum CapCmd {
         #[command(flatten)]
         center: CenterArg,
     },
-    /// Show every capability: the node's own and those of the programs you allow, each action with what it does (its effect), where it comes from, and how each center has it set. A stopped node shows its own and the programs you allow.
+    /// Show every capability: the node's own, those of node.toml and those of the programs you allow, each action with what it does (its effect), where it comes from, and how each center has it set. A stopped node shows its own and those of node.toml, and lists the programs you allow without their capabilities.
     Ls {
         /// Only this center's settings.
         #[arg(long)]
         center: Option<String>,
     },
+    /// Declare a capability of your own, NAME (`cap.action`, like sensors.read), that runs a fixed command: the words after `--`, the program first. A word written `{field}` is the call's argument `field`, as one whole argument; no shell reads it. It runs as nerve-run on the installed Linux node, held to the folders; a node run by hand offers none.
+    Add {
+        /// `cap.action`, like sensors.read.
+        name: String,
+        #[command(flatten)]
+        spec: CapSpec,
+        /// The program and its arguments, after `--`.
+        #[arg(last = true, required = true, value_name = "COMMAND")]
+        command: Vec<String>,
+    },
+    /// Change a capability you declared: what you give replaces what it has, and a command after `--` its command.
+    Edit {
+        /// The capability, `cap.action`.
+        name: String,
+        #[command(flatten)]
+        spec: CapSpec,
+        /// The program and its arguments, after `--`.
+        #[arg(last = true, value_name = "COMMAND")]
+        command: Vec<String>,
+    },
+    /// Remove a capability you declared; it leaves every center at once.
+    Rm {
+        /// The capability, `cap.action`.
+        name: String,
+    },
     /// Allow a program on this machine to add capabilities (a provider), remove it, or list them.
     #[command(subcommand)]
     Provider(ProviderCmd),
+}
+
+/// What `cap add` and `cap edit` set of a capability of node.toml
+/// (docs/user/config-capabilities.md). The schemas come inline or on stdin,
+/// never from a file the node would open.
+#[derive(Debug, Args, Clone, Default)]
+pub struct CapSpec {
+    /// What it does: read, write, execute, sense or actuate. Sense and actuate need your `cap set NAME on` for a center.
+    #[arg(long)]
+    pub effect: Option<String>,
+    /// One line for the agent: what it does.
+    #[arg(long)]
+    pub summary: Option<String>,
+    /// The JSON Schema of its arguments, an object; `none` takes no arguments. A property marked "x-nerve-path": "read" or "write" is a path the node holds to the folders.
+    #[arg(long, value_name = "JSON")]
+    pub params: Option<String>,
+    /// Read the arguments' schema from stdin instead.
+    #[arg(long, conflicts_with_all = ["params", "result_stdin"])]
+    pub params_stdin: bool,
+    /// What it returns: `text`, what the command prints (the default), or a JSON Schema the printed JSON must fit.
+    #[arg(long, value_name = "text|JSON")]
+    pub result: Option<String>,
+    /// Read the result's schema from stdin instead.
+    #[arg(long, conflicts_with = "result")]
+    pub result_stdin: bool,
+    /// How long it may run, in seconds, up to limits.max_timeout_secs; `default` for the node's default.
+    #[arg(long, value_name = "SECS")]
+    pub timeout: Option<String>,
+    /// Where it runs: any (the default), linux or windows. A node offers only those of its platform.
+    #[arg(long)]
+    pub platform: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2051,10 +2107,122 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             }
             Ok(())
         }
+        Cmd::Cap(CapCmd::Add {
+            name,
+            spec,
+            command,
+        }) => {
+            let effect = spec
+                .effect
+                .as_deref()
+                .ok_or("cap add needs --effect: read, write, execute, sense or actuate")?;
+            let mut c = nerve_policy::config::ConfigCapability {
+                name: name.clone(),
+                summary: String::new(),
+                effect: parse_enum(effect, "read, write, execute, sense or actuate")?,
+                command,
+                params: Value::Null,
+                result: Default::default(),
+                timeout_secs: None,
+                platform: Default::default(),
+            };
+            let input = cap_stdin(&spec)?;
+            cap_spec(&spec, input.as_deref(), &mut c)?;
+            // The programs that offer its capability now, which the node
+            // lets go once the config names it (a note only: where the
+            // listing fails, none is named).
+            let (before, _) = read_config(&paths).await?;
+            let programs = if crate::config_cap::names(&before, c.split().0) {
+                Vec::new()
+            } else {
+                cap_listing(&paths, &before)
+                    .await
+                    .map(|v| programs_offering(&v, c.split().0))
+                    .unwrap_or_default()
+            };
+            let held = std::sync::Mutex::new(Vec::new());
+            edit(&paths, |cfg| {
+                if cfg.capabilities.iter().any(|d| d.name == name) {
+                    return Err(format!(
+                        "a capability {name} is declared already; `cap edit` changes it"
+                    ));
+                }
+                let before = cfg.clone();
+                cfg.capabilities.push(c.clone());
+                *held.lock().unwrap() = crate::config_cap::hold_new(&before, cfg);
+                Ok(())
+            })
+            .await?;
+            w(out, format!("capability {name} added: {}", cap_line(&c)));
+            let notes = CapNotes {
+                installed: crate::service::is_service_node(&paths),
+                held: held.into_inner().unwrap(),
+                programs,
+            };
+            for note in notes.of(&c) {
+                w(out, note);
+            }
+            Ok(())
+        }
+        Cmd::Cap(CapCmd::Edit {
+            name,
+            spec,
+            command,
+        }) => {
+            let input = cap_stdin(&spec)?;
+            let held = std::sync::Mutex::new(Vec::new());
+            edit(&paths, |cfg| {
+                let before = cfg.clone();
+                let c = cfg
+                    .capabilities
+                    .iter_mut()
+                    .find(|d| d.name == name)
+                    .ok_or_else(|| format!("no capability {name} is declared"))?;
+                if let Some(e) = &spec.effect {
+                    c.effect = parse_enum(e, "read, write, execute, sense or actuate")?;
+                }
+                if !command.is_empty() {
+                    c.command = command.clone();
+                }
+                cap_spec(&spec, input.as_deref(), c)?;
+                *held.lock().unwrap() = crate::config_cap::hold_new(&before, cfg);
+                Ok(())
+            })
+            .await?;
+            let (cfg, _) = read_config(&paths).await?;
+            let c = cfg
+                .capabilities
+                .iter()
+                .find(|d| d.name == name)
+                .ok_or_else(|| format!("no capability {name} is declared"))?;
+            w(out, format!("capability {name} changed: {}", cap_line(c)));
+            let notes = CapNotes {
+                installed: crate::service::is_service_node(&paths),
+                held: held.into_inner().unwrap(),
+                programs: Vec::new(),
+            };
+            for note in notes.of(c) {
+                w(out, note);
+            }
+            Ok(())
+        }
+        Cmd::Cap(CapCmd::Rm { name }) => {
+            edit(&paths, |c| {
+                let before = c.capabilities.len();
+                c.capabilities.retain(|d| d.name != name);
+                if c.capabilities.len() == before {
+                    return Err(format!("no capability {name} is declared"));
+                }
+                Ok(())
+            })
+            .await?;
+            w(out, format!("capability {name} removed"));
+            Ok(())
+        }
         Cmd::Cap(CapCmd::Provider(ProviderCmd::Allow { name, exe })) => {
             if !nerve_policy::config::valid_provider_name(&name) {
                 return Err(format!(
-                    "{name:?} cannot name a provider: 1 to 32 of a-z, 0-9 and -, starting and ending with a letter or digit, and not node"
+                    "{name:?} cannot name a provider: 1 to 32 of a-z, 0-9 and -, starting and ending with a letter or digit, and not node or config"
                 ));
             }
             if !Path::new(&exe).is_absolute() {
@@ -3270,7 +3438,11 @@ async fn cap_listing(paths: &NodePaths, cfg: &NodeConfig) -> Result<Value, Strin
     };
     match r {
         Ok(v) => Ok(v),
-        Err(e) if e == nerve_transport::ctl::NOT_RUNNING => Ok(crate::provider::listing(cfg, None)),
+        Err(e) if e == nerve_transport::ctl::NOT_RUNNING => Ok(crate::provider::listing(
+            cfg,
+            None,
+            crate::service::is_service_node(paths),
+        )),
         Err(e) => Err(e),
     }
 }
@@ -3286,7 +3458,7 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
     let (wn, we, ws) = (width("name"), width("effect"), width("source"));
     let mut lines = Vec::new();
     for r in &rows {
-        let what = match r["broken"].as_str() {
+        let what = match r["broken"].as_str().or(r["left_out"].as_str()) {
             Some(why) => format!("left out: {why}"),
             None => r["centers"]
                 .as_object()
@@ -3342,8 +3514,194 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
                 .into(),
         );
     }
+    lines.extend(config_lines(v));
     lines.extend(program_lines(v));
     lines
+}
+
+/// The schema `spec` takes from stdin, if it takes one: read in the
+/// command, from the owner's input (crate::owner::reads_input), never from
+/// a file the node would open.
+fn cap_stdin(spec: &CapSpec) -> Result<Option<String>, String> {
+    if !(spec.params_stdin || spec.result_stdin) {
+        return Ok(None);
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+        .map_err(|e| format!("cannot read stdin: {e}"))?;
+    Ok(Some(text))
+}
+
+/// Sets what `spec` gives of `c`, with `stdin` the schema [`cap_stdin`]
+/// read: each one given replaces what `c` has.
+fn cap_spec(
+    spec: &CapSpec,
+    stdin: Option<&str>,
+    c: &mut nerve_policy::config::ConfigCapability,
+) -> Result<(), String> {
+    use nerve_policy::config::{Output, Platform};
+    let stdin = || {
+        stdin
+            .map(str::to_string)
+            .ok_or("nothing came on stdin".to_string())
+    };
+    if let Some(s) = &spec.summary {
+        c.summary = s.trim().to_string();
+    }
+    let params = match (&spec.params, spec.params_stdin) {
+        (_, true) => Some(stdin()?),
+        (p, false) => p.clone(),
+    };
+    if let Some(p) = params {
+        c.params = if p.trim() == "none" {
+            Value::Null
+        } else {
+            serde_json::from_str(&p).map_err(|e| format!("--params: not JSON: {e}"))?
+        };
+    }
+    let result = match (&spec.result, spec.result_stdin) {
+        (_, true) => Some(stdin()?),
+        (r, false) => r.clone(),
+    };
+    if let Some(r) = result {
+        c.result = Output::parse(&r)?;
+    }
+    if let Some(t) = &spec.timeout {
+        c.timeout_secs = match t.as_str() {
+            "default" => None,
+            n => Some(
+                n.parse()
+                    .map_err(|_| format!("--timeout {n}: seconds, or default"))?,
+            ),
+        };
+    }
+    if let Some(p) = &spec.platform {
+        c.platform =
+            Platform::parse(p).ok_or_else(|| format!("--platform {p}: any, linux or windows"))?;
+    }
+    Ok(())
+}
+
+/// One config capability in words: its command, and what else the owner
+/// set.
+fn cap_line(c: &nerve_policy::config::ConfigCapability) -> String {
+    let mut line = c.command_line();
+    if !c.platform.is_any() {
+        line.push_str(&format!("; {} only", c.platform.as_str()));
+    }
+    if let Some(t) = c.timeout_secs {
+        line.push_str(&format!("; timeout {t} s"));
+    }
+    line
+}
+
+/// What the owner is told of an action `name` that came to sense or
+/// actuate and was switched off for `center` (crate::config_cap::hold_new).
+fn held_note(center: &str, name: &str) -> String {
+    format!(
+        "{center}: a switch or allow rule set before covered {name}; it is off there now until you turn it on"
+    )
+}
+
+/// The programs whose rows in `listing` (`caps.list`) offer the capability
+/// `cap` now.
+fn programs_offering(listing: &Value, cap: &str) -> Vec<String> {
+    let mut found: Vec<String> = listing["capabilities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| {
+            r["name"]
+                .as_str()
+                .is_some_and(|n| n.split_once('.').map_or(n, |(c, _)| c) == cap)
+        })
+        .filter_map(|r| r["source"].as_str()?.strip_prefix("program "))
+        .map(str::to_string)
+        .collect();
+    found.dedup();
+    found
+}
+
+/// What the owner should know of a capability once `cap add` or `cap edit`
+/// declared it.
+struct CapNotes {
+    /// Whether this is the installed node.
+    installed: bool,
+    /// The centers and actions `crate::config_cap::hold_new` switched off.
+    held: Vec<(String, String)>,
+    /// The programs that offered its capability and are let go.
+    programs: Vec<String>,
+}
+
+impl CapNotes {
+    /// The notes on `c`: where this node does not offer it; that the agent
+    /// sees no description; that a center gets one
+    /// that senses or actuates only once the owner allows it, and for which
+    /// centers it was switched off; and which programs lost their
+    /// capability to it.
+    fn of(&self, c: &nerve_policy::config::ConfigCapability) -> Vec<String> {
+        let mut notes = Vec::new();
+        if let Some(why) = crate::config_cap::left_out(c, std::env::consts::OS, self.installed) {
+            notes.push(format!("this node does not offer it: {why}"));
+        }
+        if c.summary.is_empty() {
+            notes.push(format!(
+                "it has no summary, so the agent sees no description of it (cap edit {} --summary TEXT)",
+                c.name
+            ));
+        }
+        if crate::config_cap::senses(c.effect) {
+            notes.push(format!(
+                "it {}s: a center gets it only once you turn it on for that center (cap set {} on --center NAME), in allowlist mode once you add an allow rule for it",
+                c.effect.as_str(),
+                c.name
+            ));
+        }
+        for (center, name) in &self.held {
+            notes.push(held_note(center, name));
+        }
+        for p in &self.programs {
+            notes.push(format!(
+                "the program {p} offered {} and is let go: node.toml's capability takes the name",
+                c.split().0
+            ));
+        }
+        notes
+    }
+}
+
+/// The lines of `cap ls` for the capabilities of node.toml: each one's
+/// command and what else the owner set.
+fn config_lines(v: &Value) -> Vec<String> {
+    v["config"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| serde_json::from_value::<ConfigEntry>(e.clone()).ok())
+        .map(|e| {
+            let c = nerve_policy::config::ConfigCapability {
+                name: e.name,
+                summary: String::new(),
+                effect: e.effect,
+                command: e.command,
+                params: Value::Null,
+                result: Default::default(),
+                timeout_secs: e.timeout_secs,
+                platform: nerve_policy::config::Platform::parse(&e.platform).unwrap_or_default(),
+            };
+            format!("capability {}: {}", c.name, cap_line(&c))
+        })
+        .collect()
+}
+
+/// What [`config_lines`] reads of an entry of `cap ls --json`'s `config`.
+#[derive(serde::Deserialize)]
+struct ConfigEntry {
+    name: String,
+    effect: nerve_proto::descriptor::Effect,
+    command: Vec<String>,
+    timeout_secs: Option<u64>,
+    platform: String,
 }
 
 /// What `cap provider allow` and `ls` add where no program attaches: the
@@ -3526,8 +3884,13 @@ fn audit_line(v: &Value) -> String {
         s("target"),
         s("decision")
     );
-    match v["reason"].as_str() {
+    let line = match v["reason"].as_str() {
         Some(reason) => format!("{line}: {reason}"),
+        None => line,
+    };
+    // What a capability of node.toml ran, or would have, for the call.
+    match v["command"].as_str() {
+        Some(command) => format!("{line} (command: {command})"),
         None => line,
     }
 }
@@ -3802,8 +4165,11 @@ pub const NO_ACCOUNT_TO_CHOOSE: &str = "machine.user is Windows's: on Linux comm
 /// a `[[center]]` entry by its name.
 async fn config_cmd(paths: &NodePaths, c: ConfigCmd, out: &mut dyn Write) -> Result<(), String> {
     if let ConfigCmd::Accept = c {
-        let v = accept(paths).await?;
+        let (v, held) = accept(paths).await?;
         let _ = writeln!(out, "accepted node.toml as version {v}");
+        for (center, name) in held {
+            let _ = writeln!(out, "{}", held_note(&center, &name));
+        }
         return Ok(());
     }
     if let ConfigCmd::Get { key } = &c {
@@ -4825,8 +5191,10 @@ fn pct_decode(s: &str) -> Option<String> {
 }
 
 /// `config accept`: the running daemon takes the file, or, when none runs,
-/// the file is signed here.
-async fn accept(paths: &NodePaths) -> Result<u64, String> {
+/// the file is signed here. Also the centers and actions the daemon
+/// switched off as it took it (crate::config_cap::hold_new); a stopped node
+/// cannot tell what the file had before, so it switches off none.
+async fn accept(paths: &NodePaths) -> Result<(u64, Vec<(String, String)>), String> {
     // Keys already in the keyring move nowhere when the file is taken, so
     // the settings store alone would not refuse it.
     if crate::secrets::stated_storage(paths) == SecretStorage::Keyring
@@ -4846,7 +5214,10 @@ async fn accept(paths: &NodePaths) -> Result<u64, String> {
     )
     .await
     {
-        Ok(v) => return Ok(v["version"].as_u64().unwrap_or_default()),
+        Ok(v) => {
+            let held = serde_json::from_value(v["held"].clone()).unwrap_or_default();
+            return Ok((v["version"].as_u64().unwrap_or_default(), held));
+        }
         Err(e) if e != nerve_transport::ctl::NOT_RUNNING => return Err(e),
         Err(_) => {}
     }
@@ -4855,7 +5226,7 @@ async fn accept(paths: &NodePaths) -> Result<u64, String> {
         Box::new(crate::secrets::NodeSecrets::for_accept(paths)),
         AuditLog::new(paths.audit_log()),
     )?;
-    Ok(v)
+    Ok((v, Vec::new()))
 }
 
 fn as_table(cfg: &NodeConfig) -> Result<toml::Table, String> {
@@ -7872,6 +8243,9 @@ mod tests {
             &["cap", "provider", "allow", "desk", "/usr/bin/desk"],
             &["cap", "provider", "rm", "desk"],
             &["cap", "provider", "ls"],
+            &["cap", "add", "a.b", "--effect", "read", "--", "true"],
+            &["cap", "edit", "a.b", "--timeout", "5"],
+            &["cap", "rm", "a.b"],
             &["proxy", "set", "http://p:1"],
             &["proxy", "rm"],
             &["proxy", "ls"],
@@ -9239,6 +9613,411 @@ mod tests {
         assert_eq!(v["caps"], json!({"lamp": "on"}));
     }
 
+    /// `cap add`, `edit` and `rm` declare the owner's own capabilities in
+    /// node.toml, checked as the node checks them; `cap ls` lists them with
+    /// their command and account, and says where this node does not offer
+    /// one.
+    /// A capability of node.toml that comes to sense or actuate, added or
+    /// changed so, is switched off for each center whose earlier switch
+    /// (its capability's, or its own while it only read) or allow rule
+    /// covers it, and the owner is told; one switched off already, one that
+    /// sensed before, and a center nothing covers are left as they are.
+    #[test]
+    fn a_capability_that_comes_to_sense_waits_for_the_owner() {
+        let (_d, paths) = setup(&["lab", "ops", "quiet", "shut"]);
+        let caps = |paths: &NodePaths, center: &str| {
+            load(paths).center(center).unwrap().policy.caps.clone()
+        };
+        run(&paths, &["cap", "set", "probe", "on", "--center", "lab"]).unwrap();
+        run(
+            &paths,
+            &["config", "add", "center.ops.policy.allow", "probe"],
+        )
+        .unwrap();
+        run(&paths, &["cap", "set", "probe", "on", "--center", "shut"]).unwrap();
+        run(
+            &paths,
+            &["cap", "set", "probe.cam", "off", "--center", "shut"],
+        )
+        .unwrap();
+        let said = run(
+            &paths,
+            &[
+                "cap",
+                "add",
+                "probe.cam",
+                "--effect",
+                "sense",
+                "--summary",
+                "A frame.",
+                "--",
+                "cam",
+            ],
+        )
+        .unwrap();
+        for center in ["lab", "ops"] {
+            assert!(
+                said.contains(&format!("{center}: a switch or allow rule set before covered probe.cam; it is off there now")),
+                "{said}"
+            );
+            assert_eq!(
+                caps(&paths, center).get("probe.cam"),
+                Some(&CapSetting::Off),
+                "{center}"
+            );
+        }
+        assert!(
+            !said.contains("quiet:") && !said.contains("shut:"),
+            "{said}"
+        );
+        assert_eq!(caps(&paths, "quiet").get("probe.cam"), None);
+        assert!(
+            said.contains("in allowlist mode once you add an allow rule"),
+            "{said}"
+        );
+        // The owner turns it on; a change that leaves it sensing keeps that.
+        run(
+            &paths,
+            &["cap", "set", "probe.cam", "on", "--center", "lab"],
+        )
+        .unwrap();
+        let said = run(
+            &paths,
+            &["cap", "edit", "probe.cam", "--summary", "A photo."],
+        )
+        .unwrap();
+        assert!(!said.contains("off there now"), "{said}");
+        assert_eq!(caps(&paths, "lab").get("probe.cam"), Some(&CapSetting::On));
+        // One that read and comes to actuate: its own switch counts too.
+        let said = run(
+            &paths,
+            &[
+                "cap",
+                "add",
+                "probe.list",
+                "--effect",
+                "read",
+                "--summary",
+                "S.",
+                "--",
+                "ls",
+            ],
+        )
+        .unwrap();
+        assert!(!said.contains("off there now"), "{said}");
+        run(
+            &paths,
+            &["cap", "set", "probe.list", "on", "--center", "quiet"],
+        )
+        .unwrap();
+        let said = run(
+            &paths,
+            &["cap", "edit", "probe.list", "--effect", "actuate"],
+        )
+        .unwrap();
+        for center in ["lab", "ops", "quiet"] {
+            assert!(said.contains(&format!("{center}: a switch")), "{said}");
+            assert_eq!(
+                caps(&paths, center).get("probe.list"),
+                Some(&CapSetting::Off),
+                "{center}"
+            );
+        }
+        // A switch left from a capability that was removed holds a new one
+        // of that name too.
+        run(
+            &paths,
+            &["cap", "set", "lamp.flash", "on", "--center", "quiet"],
+        )
+        .unwrap();
+        let said = run(
+            &paths,
+            &[
+                "cap",
+                "add",
+                "lamp.flash",
+                "--effect",
+                "actuate",
+                "--",
+                "flash",
+            ],
+        )
+        .unwrap();
+        assert!(said.contains("quiet: a switch"), "{said}");
+        assert_eq!(
+            caps(&paths, "quiet").get("lamp.flash"),
+            Some(&CapSetting::Off)
+        );
+    }
+
+    /// `audit` shows what a capability of node.toml ran, after the
+    /// decision and its reason.
+    #[test]
+    fn an_audit_line_shows_the_command_a_capability_ran() {
+        let call = json!({"ts": 1, "center": "lab", "cap": "svc", "action": "restart",
+            "target": "svc.restart", "decision": "allowed", "command": "systemctl restart -- nginx"});
+        assert_eq!(
+            audit_line(&call),
+            "1  lab  svc.restart  svc.restart  allowed (command: systemctl restart -- nginx)"
+        );
+        let refused = json!({"ts": 2, "center": "lab", "cap": "proj", "action": "deploy",
+            "target": "proj.deploy", "decision": "forbidden", "reason": "no", "command": "sh x"});
+        assert_eq!(
+            audit_line(&refused),
+            "2  lab  proj.deploy  proj.deploy  forbidden: no (command: sh x)"
+        );
+    }
+
+    /// What `cap add` and `cap edit` tell the owner besides: that one with
+    /// no summary shows the agent no description, and which programs lost
+    /// their capability to it.
+    #[test]
+    fn cap_notes_say_what_the_owner_should_know() {
+        let mut c = nerve_policy::config::ConfigCapability {
+            name: "x.run".into(),
+            summary: String::new(),
+            effect: nerve_proto::descriptor::Effect::Execute,
+            command: vec!["make".into()],
+            params: Value::Null,
+            result: Default::default(),
+            timeout_secs: None,
+            platform: Default::default(),
+        };
+        let notes = |c: &nerve_policy::config::ConfigCapability| {
+            CapNotes {
+                installed: true,
+                held: Vec::new(),
+                programs: vec!["desk".into()],
+            }
+            .of(c)
+            .join("\n")
+        };
+        let said = notes(&c);
+        assert!(said.contains("it has no summary"), "{said}");
+        assert!(
+            said.contains("the program desk offered x and is let go"),
+            "{said}"
+        );
+        c.summary = "Builds.".into();
+        assert!(!notes(&c).contains("summary"));
+    }
+
+    #[test]
+    fn cap_add_edit_and_rm_declare_capabilities_of_node_toml() {
+        let (_d, paths) = setup(&["lab"]);
+        let params = r#"{"type": "object", "properties": {"path": {"type": "string", "x-nerve-path": "read"}}, "required": ["path"]}"#;
+        let said = run(
+            &paths,
+            &[
+                "cap",
+                "add",
+                "logs.tail",
+                "--effect",
+                "read",
+                "--summary",
+                "The end of a log.",
+                "--params",
+                params,
+                "--timeout",
+                "5",
+                "--",
+                "tail",
+                "-n",
+                "20",
+                "--",
+                "{path}",
+            ],
+        )
+        .unwrap();
+        assert!(
+            said.contains("capability logs.tail added: tail -n 20 -- {path}; timeout 5 s"),
+            "{said}"
+        );
+        let c = load(&paths).capabilities[0].clone();
+        assert_eq!(c.command, ["tail", "-n", "20", "--", "{path}"]);
+        assert_eq!(c.params["required"], json!(["path"]));
+        assert_eq!(c.summary, "The end of a log.");
+        assert_eq!(c.timeout_secs, Some(5));
+        // A node run by hand has no nerve-run; Windows offers none yet.
+        let not_here = if cfg!(target_os = "linux") {
+            "this node does not offer it: runs as nerve-run"
+        } else {
+            "this node does not offer it: a node on"
+        };
+        assert!(said.contains(not_here), "{said}");
+        // Checked as the node checks it.
+        for (args, why) in [
+            (
+                &["cap", "add", "logs.tail", "--effect", "read", "--", "tail"][..],
+                "declared already",
+            ),
+            (&["cap", "add", "logs.x", "--", "tail"], "needs --effect"),
+            (
+                &[
+                    "cap", "add", "logs.x", "--effect", "read", "--", "cat", "{path}",
+                ],
+                "names no argument",
+            ),
+            (
+                &["cap", "add", "fs.x", "--effect", "read", "--", "cat"],
+                "the node's or the center's own",
+            ),
+            (
+                &["cap", "add", "logs.x", "--effect", "look", "--", "cat"],
+                "expected read, write",
+            ),
+            (
+                &[
+                    "cap", "add", "logs.x", "--effect", "read", "--params", "{", "--", "cat",
+                ],
+                "not JSON",
+            ),
+            (
+                &[
+                    "cap",
+                    "add",
+                    "logs.x",
+                    "--effect",
+                    "read",
+                    "--account",
+                    "owner",
+                    "--",
+                    "cat",
+                ],
+                "unexpected argument '--account'",
+            ),
+            (
+                &[
+                    "cap",
+                    "add",
+                    "logs.x",
+                    "--effect",
+                    "read",
+                    "--timeout",
+                    "99999",
+                    "--",
+                    "cat",
+                ],
+                "max_timeout_secs",
+            ),
+            (
+                &["cap", "edit", "logs.none", "--timeout", "5"],
+                "no capability logs.none",
+            ),
+            (&["cap", "rm", "logs.none"], "no capability logs.none"),
+        ] {
+            let e = run(&paths, args).unwrap_err();
+            assert!(e.contains(why), "{args:?}: {e}");
+        }
+        assert!(run(&paths, &["cap", "add", "logs.x", "--effect", "read"]).is_err());
+        assert_eq!(load(&paths).capabilities.len(), 1);
+        // Edit: what is given replaces, the rest stays.
+        let said = run(
+            &paths,
+            &[
+                "cap",
+                "edit",
+                "logs.tail",
+                "--timeout",
+                "default",
+                "--effect",
+                "sense",
+            ],
+        )
+        .unwrap();
+        assert!(
+            said.contains("capability logs.tail changed: tail -n 20 -- {path}\n"),
+            "{said}"
+        );
+        assert!(
+            said.contains("a center gets it only once you turn it on"),
+            "{said}"
+        );
+        let c = load(&paths).capabilities[0].clone();
+        assert_eq!(c.timeout_secs, None);
+        assert_eq!(c.command, ["tail", "-n", "20", "--", "{path}"]);
+        run(
+            &paths,
+            &[
+                "cap",
+                "edit",
+                "logs.tail",
+                "--params",
+                "none",
+                "--",
+                "uptime",
+            ],
+        )
+        .unwrap();
+        let c = load(&paths).capabilities[0].clone();
+        assert!(c.params.is_null());
+        assert_eq!(c.command, ["uptime"]);
+        // A new one for another platform.
+        run(
+            &paths,
+            &[
+                "cap",
+                "add",
+                "win.who",
+                "--effect",
+                "read",
+                "--platform",
+                "windows",
+                "--result",
+                r#"{"type": "string"}"#,
+                "--",
+                "whoami",
+            ],
+        )
+        .unwrap();
+        let ls = run(&paths, &["cap", "ls"]).unwrap();
+        let line = |name: &str| {
+            ls.lines()
+                .find(|l| l.split_whitespace().next() == Some(name))
+                .unwrap_or_else(|| panic!("no {name}: {ls}"))
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        if cfg!(target_os = "linux") {
+            // A node run by hand offers none and says why.
+            assert_eq!(
+                line("logs.tail"),
+                "logs.tail sense config left out: runs as nerve-run, which only the installed node has (sudo nerve-node install)"
+            );
+            assert!(
+                line("win.who").ends_with("left out: for windows only"),
+                "{ls}"
+            );
+        }
+        assert!(ls.contains("capability logs.tail: uptime\n"), "{ls}");
+        assert!(
+            ls.contains("capability win.who: whoami; windows only"),
+            "{ls}"
+        );
+        let v = json_of(&paths, &["cap", "ls"]);
+        assert_eq!(
+            v["config"][1],
+            json!({"name": "win.who", "summary": "", "effect": "read", "command": ["whoami"],
+                   "params": null, "result": {"type": "string"}, "timeout_secs": null,
+                   "platform": "windows"})
+        );
+        assert_eq!(v["config"][0]["result"], "text");
+        let row = v["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "win.who")
+            .unwrap();
+        assert_eq!(row["source"], "config", "{row}");
+        assert!(row["left_out"].is_string(), "{row}");
+        // The changing commands say what they did as messages.
+        let v = json_of(&paths, &["cap", "rm", "win.who"]);
+        assert_eq!(v["messages"][0], "capability win.who removed", "{v}");
+        run(&paths, &["cap", "rm", "logs.tail"]).unwrap();
+        assert!(load(&paths).capabilities.is_empty());
+    }
+
     /// `cap ls` of a running node asks it, on Windows over its pipe: it
     /// does not say the node does not run, and tells each center's state
     /// now.
@@ -9354,6 +10133,10 @@ mod tests {
             ),
             (
                 &["cap", "provider", "allow", "node", &a],
+                "cannot name a provider",
+            ),
+            (
+                &["cap", "provider", "allow", "config", &a],
                 "cannot name a provider",
             ),
             (

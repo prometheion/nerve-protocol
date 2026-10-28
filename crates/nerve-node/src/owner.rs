@@ -408,14 +408,17 @@ impl FileJob {
 }
 
 /// Whether `cmd` reads this process's input: the questions of `setup`, the
-/// question of `center add` without `--yes`, and what `proxy set` takes
-/// from stdin. Only then is the input passed to the node; for any other
+/// question of `center add` without `--yes`, what `proxy set` takes from
+/// stdin, and the schema `cap add` or `cap edit` takes from it. Only then is the input passed to the node; for any other
 /// command it stays unread, as a script that pipes lines into a loop of
 /// commands expects.
 pub fn reads_input(cmd: &Cmd) -> bool {
-    use crate::cli::{CenterCmd, ProxyCmd};
+    use crate::cli::{CapCmd, CenterCmd, ProxyCmd};
     match cmd {
         Cmd::Setup => true,
+        Cmd::Cap(CapCmd::Add { spec, .. } | CapCmd::Edit { spec, .. }) => {
+            spec.params_stdin || spec.result_stdin
+        }
         Cmd::Center(CenterCmd::Add { yes, .. }) => !yes,
         Cmd::Proxy(ProxyCmd::Set {
             password_stdin,
@@ -461,6 +464,9 @@ pub fn forwarded_args(
     let mut out = Vec::new();
     let mut skip = false;
     let mut made_whole = false;
+    // After `--` the words are the command's own (`cap add NAME -- PROGRAM
+    // ...`): they go as they are, flags of the same names too.
+    let mut words = false;
     for a in given {
         if std::mem::take(&mut skip) {
             continue;
@@ -471,6 +477,11 @@ pub fn forwarded_args(
                 a.to_string_lossy()
             ));
         };
+        if words || s == "--" {
+            words = true;
+            out.push(s.to_string());
+            continue;
+        }
         if s == "--config-dir" || s == "--state-dir" || (own_passphrase && s == "--passphrase-file")
         {
             skip = true;
@@ -2169,6 +2180,27 @@ mod tests {
         );
         assert_eq!(FileJob::of(&c.cmd, None).unwrap().backup, None);
         assert!(FileJob::of(&cli(&["status"]).cmd, None).is_none());
+        // The words of a command after `--` are its own, flags of the same
+        // names too; one before it still goes.
+        let given = [
+            "--config-dir",
+            "/etc/nerve",
+            "cap",
+            "add",
+            "certs.list",
+            "--effect",
+            "read",
+            "--",
+            "certbot",
+            "certificates",
+            "--config-dir",
+            "/etc/letsencrypt",
+            "--state-dir=/x",
+        ];
+        assert_eq!(
+            forwarded_args(&cli(&given), os(&given), None).unwrap(),
+            given[2..]
+        );
     }
 
     /// Only the commands that read the input get it.
@@ -2182,6 +2214,32 @@ mod tests {
             &cli(&["proxy", "set", "http://u@h:1", "--password-stdin"]).cmd
         ));
         assert!(!reads_input(&cli(&["proxy", "set", "http://h:1"]).cmd));
+        // A capability's schema comes on stdin when the owner says so.
+        for (args, reads) in [
+            (
+                &[
+                    "cap",
+                    "add",
+                    "a.b",
+                    "--effect",
+                    "read",
+                    "--params-stdin",
+                    "--",
+                    "x",
+                ][..],
+                true,
+            ),
+            (&["cap", "edit", "a.b", "--result-stdin"], true),
+            (
+                &[
+                    "cap", "add", "a.b", "--effect", "read", "--params", "none", "--", "x",
+                ],
+                false,
+            ),
+            (&["cap", "edit", "a.b", "--timeout", "5"], false),
+        ] {
+            assert_eq!(reads_input(&cli(args).cmd), reads, "{args:?}");
+        }
         // Setup asks its questions: its input goes to the node.
         assert!(reads_input(&cli(&["setup"]).cmd));
         assert!(matches!(input_for(&cli(&["setup"]).cmd), Input::Stdin));

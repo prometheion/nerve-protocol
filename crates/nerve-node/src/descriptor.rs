@@ -47,6 +47,7 @@ fn action(effect: Effect, summary: &str, params: Value, result: Value) -> Action
         params,
         result,
         exposure: None,
+        as_account: false,
     }
 }
 
@@ -1240,6 +1241,36 @@ mod tests {
         c
     }
 
+    /// `echo.say` with `effect` (taking a path it reads or writes, `mark`)
+    /// as `by` offers it: the program `desk`, or a capability of the config
+    /// (crate::config_cap) on the installed Linux node.
+    fn provided_by(by: &str, effect: Effect, mark: Option<PathMark>) -> Capability {
+        if by != crate::config_cap::PROVIDER {
+            return match mark {
+                Some(m) => provided_at(effect, m),
+                None => provided(effect),
+            };
+        }
+        let (command, params) = match mark {
+            Some(m) => (
+                r#"["echo", "--", "{path}"]"#.to_string(),
+                format!(
+                    r#"params = '{{"type": "object", "properties": {{"path": {{"type": "string", "x-nerve-path": "{}"}}}}, "required": ["path"]}}'"#,
+                    m.as_str()
+                ),
+            ),
+            None => (r#"["echo"]"#.to_string(), String::new()),
+        };
+        let cfg = NodeConfig::parse(&format!(
+            "[[capability]]\nname = \"echo.say\"\neffect = \"{}\"\ncommand = {command}\n{params}\n",
+            effect.as_str()
+        ))
+        .unwrap();
+        let mut caps = crate::config_cap::offered_on(&cfg, "linux", true);
+        assert_eq!(caps.len(), 1);
+        caps.remove(0)
+    }
+
     /// [`provided`] whose action takes a path it reads or writes (`mark`).
     fn provided_at(effect: Effect, mark: PathMark) -> Capability {
         let mut c = provided(effect);
@@ -1453,13 +1484,16 @@ mod tests {
         for mode in [Mode::Allowlist, Mode::Folder, Mode::User] {
             for setting in settings {
                 for confined in [true, false] {
-                    // A provider's action: no path.
-                    for effect in effects {
-                        let provided = [provided(effect)];
+                    // A provider's action, or the config's: no path.
+                    for (effect, by) in effects
+                        .iter()
+                        .flat_map(|e| ["desk", "config"].map(|by| (*e, by)))
+                    {
+                        let provided = [provided_by(by, effect, None)];
                         for allow in [&[][..], &["echo.say"], &["echo"], &["echo.other"]] {
                             let e = policy_of(mode, "echo.say", setting, allow);
                             let what = format!(
-                                "echo.say {effect:?} {mode:?} {setting:?} {allow:?} confined={confined}"
+                                "echo.say of {by} {effect:?} {mode:?} {setting:?} {allow:?} confined={confined}"
                             );
                             let d = for_center(&cfg, &e, 0, confined, &provided);
                             let call = Call {
@@ -1484,21 +1518,26 @@ mod tests {
                         }
                     }
                     // The built-in actions that name their paths per call,
-                    // and a provider's that reads or writes a path.
-                    let mut path_actions: Vec<(&str, &str, Effect, Option<PathMark>)> = vec![
-                        ("fs", "read", Effect::Read, None),
-                        ("fs", "write", Effect::Write, None),
-                        ("exec", "run", Effect::Execute, None),
+                    // and a provider's or the config's that reads or writes a
+                    // path.
+                    let mut path_actions: Vec<(&str, &str, Effect, Option<PathMark>, &str)> = vec![
+                        ("fs", "read", Effect::Read, None, "node"),
+                        ("fs", "write", Effect::Write, None, "node"),
+                        ("exec", "run", Effect::Execute, None, "node"),
                     ];
                     for effect in effects {
                         for mark in [PathMark::Read, PathMark::Write] {
-                            path_actions.push(("echo", "say", effect, Some(mark)));
+                            for by in ["desk", "config"] {
+                                path_actions.push(("echo", "say", effect, Some(mark), by));
+                            }
                         }
                     }
-                    for (cap, action, effect, mark) in path_actions {
+                    for (cap, action, effect, mark, by) in path_actions {
                         let key = format!("{cap}.{action}");
-                        let provided: Vec<Capability> =
-                            mark.map(|m| provided_at(effect, m)).into_iter().collect();
+                        let provided: Vec<Capability> = mark
+                            .map(|m| provided_by(by, effect, Some(m)))
+                            .into_iter()
+                            .collect();
                         let other = if cap == "echo" {
                             "echo.other"
                         } else {
@@ -1507,7 +1546,7 @@ mod tests {
                         for allow in [&[][..], &[key.as_str()], &[cap], &[other]] {
                             let e = policy_of(mode, &key, setting, allow);
                             let what = format!(
-                                "{key} {effect:?} {mark:?} {mode:?} {setting:?} {allow:?} confined={confined}"
+                                "{key} of {by} {effect:?} {mark:?} {mode:?} {setting:?} {allow:?} confined={confined}"
                             );
                             let d = for_center(&cfg, &e, 0, confined, &provided);
                             let covered = allow.len() == 1 && allow[0] != other;
@@ -1584,9 +1623,10 @@ mod tests {
                 }
             }
         }
-        // 3 modes × 4 settings × 2 confinements × (5 effects + 3 built-in
-        // path actions + 5 effects × 2 marks) × 4 allow lists.
-        assert_eq!(rows, 3 * 4 * 2 * 18 * 4);
+        // 3 modes × 4 settings × 2 confinements × (5 effects × 2 providers +
+        // 3 built-in path actions + 5 effects × 2 marks × 2 providers) × 4
+        // allow lists.
+        assert_eq!(rows, 3 * 4 * 2 * 33 * 4);
     }
 
     #[test]

@@ -52,6 +52,11 @@ pub struct NodeOptions {
     /// folders are (crate::service::is_service_node). A test sets it, to
     /// stand for the installed node.
     pub service: Option<bool>,
+    /// Whether a node run by hand offers the capabilities of node.toml and
+    /// runs them as its own user, standing for `nerve-run`, which only the
+    /// installed node has. A test sets it, to run them in process: the node
+    /// never does, and by hand offers none (crate::config_cap::left_out).
+    pub config_caps_by_hand: bool,
     /// Where commands are held to their limits, or why they are not,
     /// instead of looking for the process's cgroup (crate::cgroup), which
     /// moves the process. A test sets it.
@@ -96,6 +101,7 @@ impl NodeOptions {
             full_rights: None,
             confinement: None,
             service: None,
+            config_caps_by_hand: false,
             cgroups: None,
             resume_grace: resume::GRACE,
             aside: None,
@@ -522,6 +528,10 @@ pub(crate) struct Shared {
     pub paths: NodePaths,
     /// Whether this is the installed service (crate::service::is_service_node).
     pub service: bool,
+    /// Whether the capabilities of node.toml are offered: on the installed
+    /// node, which has `nerve-run` to run them as, or where a test's node by
+    /// hand stands for it ([`NodeOptions::config_caps_by_hand`]).
+    pub config_caps: bool,
     pub exe: Option<PathBuf>,
     pub home: PathBuf,
     /// Which protected list applies, and where its system folders are.
@@ -605,6 +615,37 @@ impl Shared {
         policy: &nerve_policy::config::CenterPolicy,
     ) -> Result<Option<crate::service::Account>, String> {
         self.account_as(cfg, policy.runs_as_owner(crate::now_ms()))
+    }
+
+    /// The account `nerve-run` (crate::account), which the config's
+    /// capabilities run as, whatever a pairing's commands run as; `None` on
+    /// a node run by hand, which has none.
+    pub fn run_account(&self, cfg: &NodeConfig) -> Result<Option<crate::service::Account>, String> {
+        self.account_as(cfg, false)
+    }
+
+    /// The capabilities offered besides the node's own: the attached
+    /// programs' (crate::provider) and the config's (crate::config_cap).
+    pub fn added_caps(&self, cfg: &NodeConfig) -> Vec<nerve_proto::descriptor::Capability> {
+        let mut caps = self.providers.caps();
+        caps.extend(crate::config_cap::offered(cfg, self.config_caps));
+        caps
+    }
+
+    /// [`Shared::added_caps`] as the pairing with `policy` is offered them:
+    /// a config capability that runs as `nerve-run` is marked a command of
+    /// the pairing's command account (`as_account`) only where its commands
+    /// run as that account. Where they run as the owner, the command account
+    /// the center knows is the owner, and that account's folders are not
+    /// the capability's (crate::config_cap::confined).
+    pub fn offered_caps(
+        &self,
+        cfg: &NodeConfig,
+        policy: &nerve_policy::config::CenterPolicy,
+    ) -> Vec<nerve_proto::descriptor::Capability> {
+        let mut caps = self.added_caps(cfg);
+        crate::config_cap::as_account_for(&mut caps, self.separate(policy));
+        caps
     }
 
     /// The owner's account, which sudo runs as and whose files the folders
@@ -1085,6 +1126,7 @@ impl Shared {
         let mut e = e.clone();
         e.target = self.scrub(e.target);
         e.decision = self.scrub(e.decision);
+        e.command = e.command.map(|c| self.scrub(c));
         let e = &e;
         if let Err(err) = lock(&self.store).audit().decision(e) {
             tracing::error!("the audit log cannot be written: {err}");
@@ -1452,6 +1494,7 @@ impl Daemon {
         let shared = Arc::new(Shared {
             paths: paths.clone(),
             service,
+            config_caps: service || opts.config_caps_by_hand,
             exe: opts.exe,
             home: opts.home,
             platform: crate::paths::platform(),
@@ -1897,7 +1940,11 @@ pub(crate) async fn pipe_control(
     }
     match method {
         "status" => Reply::Ok(shared.status()),
-        "caps.list" => Reply::Ok(crate::provider::listing(&shared.config(), Some(shared))),
+        "caps.list" => Reply::Ok(crate::provider::listing(
+            &shared.config(),
+            Some(shared),
+            shared.config_caps,
+        )),
         "center.rotate-key" => rotate_key(shared, &params).await,
         "folder.add" | "folder.set" | "folder.rm" => {
             let (center, change) =
@@ -2097,7 +2144,11 @@ pub(crate) fn control(
         "status" => Reply::Ok(shared.status()),
         // Every capability with its effect and settings, the programs'
         // too (crate::provider::listing), for `cap ls`.
-        "caps.list" => Reply::Ok(crate::provider::listing(&shared.config(), Some(shared))),
+        "caps.list" => Reply::Ok(crate::provider::listing(
+            &shared.config(),
+            Some(shared),
+            shared.config_caps,
+        )),
         "owner.check" => Reply::Ok(json!({})),
         "sudo.status" => Reply::Ok(json!({"sudo": if shared.sudo_on() { "on" } else { "off" }})),
         "sudo.off" => match shared.sudo_switch_off(nerve_policy::Writer::Local) {
@@ -2112,7 +2163,7 @@ pub(crate) fn control(
             let Some(text) = str_of("config") else {
                 return Reply::Err("config is missing".into());
             };
-            let new = match NodeConfig::parse(&text) {
+            let mut new = match NodeConfig::parse(&text) {
                 Ok(c) => c,
                 Err(e) => return Reply::Err(e),
             };
@@ -2123,6 +2174,9 @@ pub(crate) fn control(
                     "machine.sudo changes only through nerve-node sudo on|off".into(),
                 );
             }
+            // An action that comes to sense waits for the owner's `on`,
+            // whichever program of the owner's wrote the change.
+            let held = crate::config_cap::hold_new(store.config(), &mut new);
             // Who made it, as the CLI names its user (crate::cli::invoker):
             // only the owner's programs hold the token.
             store.set_user(str_of("user"));
@@ -2132,7 +2186,7 @@ pub(crate) fn control(
             match r {
                 Ok(v) => {
                     shared.bump();
-                    Reply::Ok(json!({"version": v}))
+                    Reply::Ok(json!({"version": v, "held": held}))
                 }
                 Err(SetError::Conflict { current }) => {
                     Reply::Err(format!("conflict: the config changed (version {current})"))
@@ -2164,15 +2218,19 @@ pub(crate) fn control(
             let r = {
                 let mut store = lock(&shared.store);
                 store.set_user(str_of("user"));
-                let r = store.accept();
+                // The file as the owner wrote it, with an action that came to
+                // sense in it switched off where an earlier switch covered it
+                // (crate::config_cap::hold_new), in the one write that puts
+                // it in force.
+                let r = store.accept_with(crate::config_cap::hold_new);
                 store.set_user(None);
                 r
             };
             match r {
-                Ok(v) => {
+                Ok((v, held)) => {
                     shared.settle_sudo();
                     shared.bump();
-                    Reply::Ok(json!({"version": v}))
+                    Reply::Ok(json!({"version": v, "held": held}))
                 }
                 Err(e) => Reply::Err(e.to_string()),
             }

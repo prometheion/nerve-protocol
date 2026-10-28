@@ -57,12 +57,15 @@ No grant lets a center change:
   that yours do not
 - the audit log
 - the programs that may add capabilities ([providers](providers.md))
-- turning on a [program's capability](providers.md) that senses (a camera,
-  a microphone) or acts on the world (a lamp, a lock): an allow rule or an
-  `on` switch for it, and taking away an `off` or `hidden` switch or a deny
-  rule that keeps it off. The same holds for a capability no program offers
-  now, or an action an offered one lacks, as the machine cannot tell yet what
-  it does
+- turning on a [program's capability](providers.md) or a
+  [capability of your `node.toml`](config-capabilities.md) that senses (a
+  camera, a microphone) or acts on the world (a lamp, a lock): an allow rule
+  or an `on` switch for it, and taking away an `off` or `hidden` switch or a
+  deny rule that keeps it off. The same holds for a capability no program
+  offers now, or an action an offered one lacks, as the machine cannot tell
+  yet what it does; a capability of `node.toml` with an action that senses or
+  acts counts whether this machine offers that action now or not
+- adding, changing or removing a capability of `node.toml`
 
 A change that touches one of these is refused as a whole, and the refusal names
 the field.

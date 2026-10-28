@@ -774,8 +774,17 @@ pub fn details(o: &Offer, asked: &[String]) -> Answer {
             }
             None => String::new(),
         };
+        // A capability of the node's config that runs as the command
+        // account is held like that account's commands, which the advice on
+        // the folders tells apart from a program's action by this line.
+        let runs = if u.as_account {
+            entry["runs_as"] = json!("command account");
+            "runs as: the command account, held like its commands\n"
+        } else {
+            ""
+        };
         let block = format!(
-            "capability: {}\ndescription: {}\neffect: {}\nparams: {}\n{paths}result: {}\n{folders}\n",
+            "capability: {}\ndescription: {}\neffect: {}\nparams: {}\n{paths}result: {}\n{runs}{folders}\n",
             u.name,
             u.description,
             u.effect.as_str(),
@@ -1237,6 +1246,65 @@ mod tests {
         ] {
             assert!(both.text.contains(part), "{part}: {}", both.text);
         }
+    }
+
+    /// A capability of the node's config that runs as the command account
+    /// says so in its details, which the advice on the folders tells apart
+    /// from a program's action; a program's action says nothing of it, and
+    /// the mark is part of what the unit's hash covers.
+    #[test]
+    fn details_say_which_action_runs_as_the_command_account() {
+        let mut d = box_node().descriptor.unwrap();
+        let mut probe = cap(
+            "probe",
+            "",
+            &[
+                ("show", Effect::Read, path()),
+                ("own", Effect::Read, path()),
+            ],
+        );
+        probe.provider = "config".into();
+        probe.actions.get_mut("show").unwrap().as_account = true;
+        d.capabilities.push(probe);
+        let mut access = folder_access();
+        access["reads_by_account"] = json!(true);
+        d.access = Some(serde_json::from_value(access).unwrap());
+        let node = record("box-1", Some(d.clone()));
+        let o = offer(&node, true);
+        let line = "runs as: the command account, held like its commands\n";
+        let shown = details(&o, &["probe.show".into()]);
+        assert!(shown.text.contains(line), "{}", shown.text);
+        assert!(
+            shown.text.contains(
+                "One whose details say it runs as the command account is a command of that \
+                     account: it reads what that account may, and where the machine's sandbox \
+                     holds the commands, only in the folders of the `folders:` line and the \
+                     system's files."
+            ),
+            "{}",
+            shown.text
+        );
+        assert_eq!(
+            shown.data["result"]["capabilities"][0]["runs_as"],
+            "command account"
+        );
+        let other = details(&o, &["probe.own".into()]);
+        assert!(!other.text.contains("runs as:"), "{}", other.text);
+        assert!(
+            other.data["result"]["capabilities"][0]
+                .get("runs_as")
+                .is_none()
+        );
+        let hash = node.catalog.unit("probe.show").unwrap().hash();
+        d.capabilities
+            .last_mut()
+            .unwrap()
+            .actions
+            .get_mut("show")
+            .unwrap()
+            .as_account = false;
+        let plain = record("box-1", Some(d));
+        assert_ne!(plain.catalog.unit("probe.show").unwrap().hash(), hash);
     }
 
     /// With no folder named, the folders line says whether the node left

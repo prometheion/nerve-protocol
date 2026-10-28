@@ -83,6 +83,7 @@ async fn a_folder_mode_command_of_the_account_stays_in_its_folders_and_off_the_k
     let account = me(&home);
     let call = |cmd: &str| RunCall {
         command: cmd.into(),
+        argv: None,
         cwd: work.clone(),
         timeout: Some(Duration::from_secs(20)),
         limits: Default::default(),
@@ -197,6 +198,7 @@ async fn a_command_of_nerve_run_has_its_home_and_the_temporary_folders() {
     );
     let call = RunCall {
         command: probe,
+        argv: None,
         cwd: work.clone(),
         timeout: Some(Duration::from_secs(20)),
         limits: Default::default(),

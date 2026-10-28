@@ -30,6 +30,11 @@ pub struct Entry {
     /// Why a call was refused, as the error to the center says it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The command a capability of `node.toml` runs for this call, with the
+    /// call's values in it. It holds the owner's own words, which no center
+    /// is shown, so it stays in this log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 impl Entry {
@@ -43,6 +48,9 @@ impl Entry {
             // The center has the reason in the error already, and the
             // event's fields are fixed (docs/dev/spec/protocol.md §7.5).
             o.remove("reason");
+            // The owner's command is the owner's: a center sees the
+            // capability's name and summary, never what it runs.
+            o.remove("command");
         }
         v["target"] = cut_target(&self.target).into();
         v
@@ -229,6 +237,9 @@ impl AuditLog {
         if let Some(reason) = &e.reason {
             // A reason may quote the whole command line.
             v["reason"] = cut_target(reason).into();
+        }
+        if let Some(command) = &e.command {
+            v["command"] = cut_target(command).into();
         }
         self.append(&v)
     }
@@ -474,6 +485,7 @@ mod tests {
             code: Some("forbidden".into()),
             session: None,
             reason: None,
+            command: None,
         };
         log.decision(&e).unwrap();
         log.settings(
@@ -518,6 +530,7 @@ mod tests {
             code: Some("forbidden".into()),
             session: None,
             reason: Some(format!("the command {:?} is denied", "ü".repeat(3000))),
+            command: Some(format!("tool --token=secret -- {}", "ü".repeat(3000))),
         };
         log.decision(&e).unwrap();
         let line = &log.read().unwrap()[0];
@@ -532,6 +545,13 @@ mod tests {
         let reason = line["reason"].as_str().unwrap();
         assert!(reason.ends_with("characters]"), "{reason}");
         assert!(e.event_data().get("reason").is_none());
+        // So is the command of a capability of node.toml, which the log
+        // keeps and the event to the center leaves out.
+        let command = line["command"].as_str().unwrap();
+        assert!(command.starts_with("tool --token=secret -- "), "{command}");
+        assert!(command.ends_with("characters]"), "{command}");
+        assert!(e.event_data().get("command").is_none());
+        assert!(!e.event_data().to_string().contains("secret"));
         // The event to the center carries the same cut target, so the full
         // one never crosses the link.
         let sent = e.event_data()["target"].as_str().unwrap().to_string();
@@ -698,6 +718,7 @@ mod tests {
             code: Some("forbidden".into()),
             session: None,
             reason: None,
+            command: None,
         }
     }
 

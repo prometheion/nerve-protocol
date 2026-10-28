@@ -79,8 +79,10 @@ Entries are in the machine's own rule syntax, `<scope>:<pattern>`:
   the flags that must be present, then an operand pattern.
 - `fs.write:/etc/sudoers` — a write to a path. `~` stands for any user's home.
   `fs.read:` holds a read of a path, `fs:` both. These entries also hold the
-  paths of every other capability: an argument a program marks as a path it
-  reads or writes ([providers](providers.md#paths-it-takes)) is matched like
+  paths of every other capability: an argument a program, or a
+  [capability of your `node.toml`](config-capabilities.md#arguments), marks
+  as a path it reads or writes ([providers](providers.md#paths-it-takes)) is
+  matched like
   an `fs.read` or `fs.write` call's path, so `fs.write:~/.ssh/authorized_keys`
   also refuses a notes program's `notes.save` into that file. So does an
   `exec.run` command whose working folder (`cwd`) an `fs.read:` entry names,
@@ -90,7 +92,8 @@ Entries are in the machine's own rule syntax, `<scope>:<pattern>`:
   would, so `fs.read:/srv/secret/*` holds a walk of `/srv/secret` itself; a
   walk from a folder above it (`/srv`) is not held. Only the blocklist does
   this: an allow rule `fs.write:~/notes/*` skips the model for `fs.write`
-  calls only, not for a program's `notes.save` into that folder.
+  calls only, not for a program's or a `node.toml` capability's
+  `notes.save` into that folder.
 - `lamp.set`, or `lamp` for all its actions — any other capability, named
   whole. A pattern after it (`lamp.set:office`) is refused for now: it would
   have nothing to match until rules on a capability's arguments come.
@@ -329,7 +332,8 @@ allow-and-log if you would rather let calls through when the model is down.
 
 A session becomes **tainted** once a call of it returned outside content: a
 successful read, a search, or a command's output, also output read from a
-running command's stream. While taint is on, a tainted
+running command's stream, and what a failed capability of the machine's
+`node.toml` printed to stderr. While taint is on, a tainted
 session is marked for the model (and the "only tainted sessions" scope applies).
 The idea is that a session that has read untrusted content is the one where a
 later dangerous call is most suspicious.

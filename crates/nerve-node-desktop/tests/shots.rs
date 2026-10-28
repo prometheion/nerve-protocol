@@ -142,6 +142,7 @@ fn decided(
             code: None,
             session: None,
             reason: reason.map(str::to_string),
+            command: None,
         })
         .unwrap();
 }

@@ -458,6 +458,16 @@ headers = ["X-Proxy-Token"] # names of extra headers on the CONNECT request;
 [providers]                 # programs that may add capabilities (§7); none by default
 allowed = [{ name = "desk", exe = "/usr/lib/nerve-desktop/nerve-desktop" }]
 
+[[capability]]              # the owner's own (below); none by default
+name = "logs.tail"          # cap.action
+summary = "The end of a log file."
+effect = "read"             # read | write | execute | sense | actuate
+command = ["tail", "-n", "{lines}", "--", "{path}"]
+params = '{"type": "object", "required": ["path", "lines"], "properties": {"path": {"type": "string", "x-nerve-path": "read"}, "lines": {"type": "integer"}}}'
+result = "text"             # text | a JSON Schema as text
+timeout_secs = 10           # optional, 1 to limits.max_timeout_secs
+platform = "any"            # any | linux | windows
+
 [relay]                     # optional; the relay for other nodes (protocol §4.8)
 listen = "0.0.0.0:7490"     # ip:port; the relay is off without it
 pin = "<pin>"               # the pin of the relay's TLS certificate; its key is a node key
@@ -508,6 +518,96 @@ with one name are refused. Folder paths are absolute in the platform's own
 form, kept without a doubled or trailing separator or a `.` part; a path with
 `..`, and one place named twice with different access, are refused. On the
 wire they travel as `/c/Users/...` on Windows (protocol §7.2).
+
+### Capabilities of the config
+
+Each `[[capability]]` is one action, `cap.action`, that the node serves itself
+by running `command` (`nerve_policy::config::ConfigCapability`; the owner's
+`cap add`, `cap edit` and `cap rm` write them, and no center document holds
+them). The node refuses a file where:
+
+- the name is not `cap.action` of member names (protocol §6), its `cap` is
+  built in (`node`, `fs`, `exec`, `settings`, `audit`, `job`, `stream`), or
+  two entries share it; there are more than 64;
+- `params` (JSON text) is not an object schema of the subset (protocol §6.1),
+  or `result` is neither `text` nor a schema of the subset;
+- `timeout_secs` is 0 or above `limits.max_timeout_secs`; the summary is not
+  one plain line;
+- `command` is empty, its first element (the program: a name looked up in
+  `PATH`, or an absolute path in the form of the entry's `platform`, either
+  form for `any`) is a placeholder or a relative path, it has
+  more than 64 elements or a NUL, an element `{field}` (no blank or brace
+  inside) names no property of `params`, or one whose schema takes more than
+  a string, number, integer, boolean or null; a property appears inside a
+  longer element (`--f={field}`), or no element names it;
+- a placeholder whose argument a call may leave out (not in `required`, or
+  its schema takes null) stands before the first literal `--`, or an element
+  other than its own placeholder follows it: the elements after a dropped one
+  move up, so an option before it would take the next one as its value;
+- an entry names `account` (with any value): every one runs as `nerve-run`,
+  and the message says so and that an action with the owner's rights comes
+  from a program (§7).
+
+A call's arguments are validated against `params` first. Each `{field}`
+element becomes the argument's value as one element of the program's argv (a
+string as it is, a number or boolean as JSON text); an argument left out or
+null drops its element. A value that starts with `-` in an element before the
+first literal `--` is refused `invalid_args`, as the program would read it as
+an option. No shell reads the argv: the node starts the program itself
+(through the shim where it confines it), never through sudo or as root.
+
+Which ones a node offers, with `provider: "config"`, one capability per
+`cap` (crate::config_cap): on Linux only, those whose `platform` takes it,
+and only on the installed node: they run as `nerve-run`, which a node run by
+hand lacks, so it offers none (its `caps.list` rows say why, §5). Windows
+parses them and offers none. The descriptor cuts them by
+the effect table like any capability (§3), and only the owner turns one on
+that senses or actuates (§5, `settings.set`); for that every `[[capability]]`
+counts, offered on this node or not, so a center cannot turn on `probe` while
+a declared `probe.cam` senses for another platform. Since a center's earlier
+`on` of the capability (or of the action while it read) or allow rule would
+cover an action that comes to sense or actuate (new, or one that did neither
+before), every write of the config writes `caps."cap.action" = "off"` for
+each center whose `on` or allow rule covers it (a center cannot remove that):
+`cap add` and `cap edit` (which name those centers), the daemon's
+`config.write`, and its `config.accept` before any call sees the file (its
+answer's `held` lists `[center, action]` pairs). An `on` of that very action
+the same change brings is the owner's and stays. A `config accept` while no
+node runs takes the file as it is, since nothing tells what it held before.
+`descriptor` marks each action `as_account` only for a center whose commands
+run as `nerve-run` (protocol.md §6).
+
+A call is decided like a provider's (§7, Paths), then runs as `nerve-run`
+from its home. Its paths are judged as `nerve-run`, with the pairing's folders
+and, where the pairing's commands run as `nerve-run`, its built-in ones; a read
+outside them by `nerve-run`'s own access; the link walk as that account. It
+runs under Landlock where present: the pairing's folders and the built-ins
+where its commands run as `nerve-run`, else the built-ins alone (§1,
+Commands). No `[[capability]]` runs with the owner's rights: such an action
+comes from a program the owner allows (§7).
+
+A call's audit target is its paths, else `cap.action`,
+as for a program; the entry adds `command`, the command as it runs (or would
+have run), the call's values filled in (one line, as `cap ls` quotes it),
+which stays in the node's log: the `audit/decision` event leaves it out (as
+it leaves out the reason), since the descriptor gives a center no word of
+the command. While it runs, its argv is open to every account in `/proc`,
+as any process's is; the user docs tell the owner to keep a secret out of
+it.
+
+Each call counts toward `limits.max_running`, run in a cgroup of their own with the
+default `limits.command`, and end at `timeout_secs` (else
+`limits.default_timeout_secs`, at most the maximum): `timeout` "<name> ran
+past its limit of …". The result is stdout as a string (`text`; cut stdout
+ends with a note), or stdout parsed as JSON and validated against the result
+schema (`io` when it is not, naming the field only where the schema names
+it; `too_large` when stdout was cut; stderr past the cap cuts neither). An exit code other than 0, a signal or a memory kill
+(whatever the exit code; audited `killed`/`memory` as for `exec.run`) is an
+`io` error whose message names it ("<name> failed: exit code 2"), with
+`data.exit_code` and `data.stderr` (the first 16 KiB, left out when it is
+blank). What the command printed stays out of the message: it is the
+command's text, not the node's, and the center hands it on as device content
+(protocol.md §6).
 
 ### Commands
 
@@ -1284,7 +1384,7 @@ Methods:
 | `status` | | daemon and links; under `relay`, the relay's state, its pin, its nodes with their centers and its tunnels (§2, Relay) |
 | `config.read` | | `node.toml` and its `version` |
 | `config.write` | `config`, `if_version` | replaces it when the version matches |
-| `config.accept` | | takes `node.toml` as it is after it was refused, and signs it (§1) |
+| `config.accept` | | takes `node.toml` as it is after it was refused, and signs it (§1); an action that came to sense or actuate in it is switched off, in the same write, for each center whose earlier switch or allow rule covered it: `{version, held: [[center, action]]}` |
 | `folder.add` | `center`, `path`, `access` | `folder add`, done by the node so that it is judged as the owner (`exec::settle`): the path is followed a link at a time and must resolve to itself, the folder is stored at that place with `access` (replacing the entry there) and recorded in `policy.places`; `{stored, recorded, mode, counts}` (`counts`: whether the
 center's folders hold its commands, in folder mode or as `nerve-run`). An error, with nothing changed, when the path crosses a link inside a `w` folder of any center, leads nowhere, or changed while it was looked at. Where the node cannot tell either (a folder it may not look into, or a `w` folder it cannot resolve) the folder is stored as given, `recorded` is false, and a record it had stays. The CLI uses it whenever a node runs |
 | `folder.grants` | | the installed Linux node brings the folder ACLs in line at once (§Folder ACLs) and answers what that left: `{errors, stale, failed, skipped}`; `null` elsewhere. `folder add`, `set` and `rm` ask it |
@@ -1294,7 +1394,7 @@ center's folders hold its commands, in folder mode or as `nerve-run`). An error,
 | `sudo.off` | | turns the switch off and drops the password |
 | `center.rotate-key` | `center`, `end_grace` | rotates the node's key for `center` over the live link, or with `end_grace` ends the grace of the old one (protocol §4.10); `{center, public_key}`, the new key once. Waits for the center's answer, at most 15 s; an error when the node has no link to it or the center does not speak `rotate`. Also served on the control pipe (Windows) |
 | `owner.check` | | changes nothing; the CLI asks it before `install`, `setup`, `update`, `uninstall`, `backup` and `restore` |
-| `caps.list` | | what `cap ls` shows: `{capabilities, programs, running}`; each capability row `{name: "cap.action", effect, source: "built-in" \| "program <name>", summary, centers: {<center>: "on"\|"off"\|"hidden"\|"default"}, now: {<center>: "on"\|"off"}}`, `centers` the switch (`cap set`; `default` where none is set; for `settings`, which has none, `"granted"`\|`"not granted"` by the center's `settings` grant) and `now` whether the center's descriptor offers the action now and it is not off (§3: mode, rules, switches, the machine); an action a program offered that the node left out with `broken` (its reason), no effect and no `now`; `programs` the entries of `providers.allowed`, each `{name, exe, attached}`. A stopped node's CLI makes the same from `node.toml`, with the node's own capabilities only, no `now` and `attached` null. Also served on the control pipe (Windows), where no program attaches |
+| `caps.list` | | what `cap ls` shows: `{capabilities, programs, config, running}`; each capability row `{name: "cap.action", effect, source: "built-in" \| "config" \| "program <name>", summary, centers: {<center>: "on"\|"off"\|"hidden"\|"default"}, now: {<center>: "on"\|"off"}}`, `centers` the switch (`cap set`; `default` where none is set; for `settings`, which has none, `"granted"`\|`"not granted"` by the center's `settings` grant) and `now` whether the center's descriptor offers the action now and it is not off (§3: mode, rules, switches, the machine); an action a program offered that the node left out with `broken` (its reason), no effect and no `now`; a config capability's row that this node does not offer (§2; a node run by hand offers none) has `left_out` (why) and no `now`; `config` each `[[capability]]` as declared, `{name, summary, effect, command, params, result, timeout_secs, platform}`, the schemas as JSON (`result` `"text"` or a schema); `programs` the entries of `providers.allowed`, each `{name, exe, attached}`. A stopped node's CLI makes the same from `node.toml`, with the node's own capabilities and the config's (no program's), no `now` and `attached` null. Also served on the control pipe (Windows), where no program attaches |
 | `hello` | `role` (`provider`), `name`, `capabilities` | a capability provider attaches; the connection stays (§7); on a node run by hand only, the installed node takes it on its provider socket |
 
 Every method is refused from a process that runs below a command the node
@@ -1482,7 +1582,9 @@ file; counted, and `uninstall` says how many), and stops if an entry stays.
 ## 6. Audit log
 
 `<state>/audit.jsonl`, one JSON line per event: settings changes (with old
-and new value), calls allowed or forbidden (a refusal with its reason), commands killed
+and new value), calls allowed or forbidden (a refusal with its reason; a call of a
+capability of the config with `command`, its command as it runs, which the
+`audit/decision` event leaves out with the reason, §2), commands killed
 for their memory limit (`decision` `killed`, `code` `memory`, with the
 reason), the relay's tunnels (`"kind": "relay"`, one per tunnel when it ends: `node`,
 `center`, `from`, `start`, `end`, `reason`, `up`, `down`; never a token), and what happened to the config
@@ -1522,7 +1624,8 @@ absolute path of its executable (`nerve-node cap provider allow desk
 /usr/lib/nerve-desktop/nerve-desktop`; `cap provider rm desk` takes it off).
 None is allowed by default; only the owner changes the list, as no center document
 holds it. A name is 1 to 32 of `a-z`, `0-9` and `-`, starting and ending with a letter
-or digit, and not `node`.
+or digit, and not `node` or `config` (the providers of the node's own capabilities
+and of those in `node.toml`).
 
 On a node run by hand the provider connects like the CLI: the socket's user
 check (its own user or root) and the token hold for it too, and so does the
@@ -1594,8 +1697,9 @@ The node refuses it, with nothing attached, when:
   name or the profile of one of the node's own (`node`, `fs`, `exec`,
   `settings`, `audit`) or of the center's (`job`, `stream`: the center
   serves `job.status`, `job.cancel`, `stream.read` and `stream.close` on
-  every node itself, harness.md §4.4, §4.5), or is added by another attached
-  provider; or a
+  every node itself, harness.md §4.4, §4.5), is added by another attached
+  provider, or is the `cap` of one of the config's capabilities (§2, any
+  platform, offered or not); or a
   capability declares anything but `id`, `profile`, `summary` and `actions`
   (no events, state or streams: the node forwards calls only, and the node,
   not the provider, says `provider` and `exposure`);
@@ -1748,7 +1852,9 @@ entries after such an update.
 
 The capabilities go when the connection does: the provider closes it or
 exits, sends a line that is no JSON or longer than 1 MiB, the owner takes it
-off `providers.allowed` or names another program for it, or the node stops.
+off `providers.allowed` or names another program for it, the owner declares
+one of its capabilities in `node.toml` (`[[capability]]`, §2), or the node
+stops.
 The descriptor's `rev` changes again, a call that waited for an answer fails
 `unavailable`, and a call that names the capability afterwards is
 `unknown_capability`. A provider that comes back sends `hello` again.

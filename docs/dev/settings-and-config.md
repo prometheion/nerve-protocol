@@ -83,6 +83,11 @@ center reads, or the node refuses the whole change and names the field.
    away its own deny rule for such a capability either.
 10. The programs that may attach as capability providers,
     `providers.allowed` ([node-local §7](spec/node-local.md#7-capability-providers)).
+11. The owner's own capabilities, `[[capability]]` (`cap add`, `edit`, `rm`;
+    [node-local §2](spec/node-local.md#capabilities-of-the-config)): each runs a
+    fixed command as `nerve-run`, so none is in a center's
+    document. A center with the grant may switch them by `caps` and its rules
+    like any capability, within item 9.
 
 One item is in the document a center reads and is still the owner's: the
 record of the folders' real places, `policy.places`
@@ -126,7 +131,7 @@ after `hello` and carries its calls.
 | `status` | Daemon and links |
 | `config.read` | Read `node.toml` and its `version` |
 | `config.write` | Replace it when `if_version` matches |
-| `config.accept` | Take a refused `node.toml` as it is |
+| `config.accept` | Take a refused `node.toml` as it is (an action that came to sense or actuate in it held in the same write) |
 | `reload` | Reread `node.toml` (only a file the node signed) |
 | `sudo.status`, `sudo.on`, `sudo.off` | The sudo switch |
 | `folder.add` | `folder add`, judged by the node as the owner; it stores and records the real place |

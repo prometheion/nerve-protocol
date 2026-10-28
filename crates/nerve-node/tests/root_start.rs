@@ -61,6 +61,7 @@ fn opts(account: &Account, root: AsRoot) -> RunOptions {
 fn call(command: &str, cwd: &Path) -> RunCall {
     RunCall {
         command: command.into(),
+        argv: None,
         cwd: cwd.to_path_buf(),
         timeout: Some(Duration::from_secs(20)),
         limits: Default::default(),

@@ -55,10 +55,15 @@ pub struct Asked {
     pub processes: Option<u32>,
 }
 
-/// A parsed `exec.run`.
+/// A parsed `exec.run`, or the command of a config capability.
 #[derive(Debug, Clone)]
 pub struct RunCall {
     pub command: String,
+    /// A config capability's program and its arguments (crate::config_cap),
+    /// which run as they are: no shell reads them, and `command` is only
+    /// their line for the audit. Such a call never runs through sudo or as
+    /// root.
+    pub argv: Option<Vec<String>>,
     pub cwd: PathBuf,
     /// What the call asked for; `None` when it gave no `timeout_ms` (0 counts
     /// as none). [`Timeouts`] turns it into the limit the command runs under.
@@ -90,6 +95,7 @@ impl RunCall {
         }
         Ok(RunCall {
             command: a.command,
+            argv: None,
             cwd,
             timeout: a.timeout_ms.filter(|t| *t > 0).map(Duration::from_millis),
             limits: Asked {
@@ -98,6 +104,23 @@ impl RunCall {
                 processes: a.processes,
             },
         })
+    }
+
+    /// The program and arguments `argv` (its program first), run in `cwd`
+    /// with no shell, for at most `timeout` (the node's default when none).
+    pub fn program(
+        argv: Vec<String>,
+        line: String,
+        cwd: PathBuf,
+        timeout: Option<Duration>,
+    ) -> RunCall {
+        RunCall {
+            command: line,
+            argv: Some(argv),
+            cwd,
+            timeout,
+            limits: Asked::default(),
+        }
     }
 
     /// The working directory is judged as the place the command runs in
@@ -1625,7 +1648,22 @@ pub async fn run(
 ) -> Result<Value, RpcError> {
     // Root's command runs in /bin/sh, whatever shell the others use.
     let shell = opts.shell.as_deref().filter(|_| opts.root.is_none());
-    let (program, mut args) = shell_command(shell, &call.command);
+    let (program, mut args) = match &call.argv {
+        // A config capability's program gets its arguments as they are, each
+        // one whole: no shell reads them, so no value in them is code.
+        Some(argv) => {
+            if opts.sudo.is_some() || opts.root.is_some() {
+                return Err(RpcError::internal(
+                    "a program with arguments of its own runs through no sudo and never as root",
+                ));
+            }
+            let (program, args) = argv
+                .split_first()
+                .ok_or_else(|| RpcError::internal("no program to run"))?;
+            (program.clone(), args.to_vec())
+        }
+        None => shell_command(shell, &call.command),
+    };
     // PowerShell in a container would stand somewhere else than its folder.
     if opts.container.is_some()
         && powershell(&program)
@@ -1895,6 +1933,11 @@ pub async fn run(
         "stderr": decode(&err.0, err.1),
         "truncated": out.1 || err.1,
     });
+    // A program's caller (crate::config_cap) returns its stdout alone, so it
+    // needs to know whether that was cut; exec.run's result keeps its schema.
+    if call.argv.is_some() {
+        result["stdout_truncated"] = out.1.into();
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
@@ -2042,12 +2085,16 @@ async fn run_as(
     };
     drop(group);
     let code = code.map_err(|e| RpcError::internal(format!("waiting for the command: {e}")))?;
-    Ok(json!({
+    let mut result = json!({
         "exit_code": code as i32,
         "stdout": decode(&out.0, out.1),
         "stderr": decode(&err.0, err.1),
         "truncated": out.1 || err.1,
-    }))
+    });
+    if call.argv.is_some() {
+        result["stdout_truncated"] = out.1.into();
+    }
+    Ok(result)
 }
 
 /// The command lines a command of another account gets on Windows.
@@ -2139,6 +2186,7 @@ mod tests {
     fn call(cmd: &str) -> RunCall {
         RunCall {
             command: cmd.into(),
+            argv: None,
             cwd: std::env::temp_dir(),
             timeout: Some(Duration::from_secs(10)),
             limits: Default::default(),
@@ -3573,6 +3621,7 @@ mod windows_tests {
     fn call(cmd: &str, cwd: &Path, timeout: Duration) -> RunCall {
         RunCall {
             command: cmd.into(),
+            argv: None,
             cwd: cwd.to_path_buf(),
             timeout: Some(timeout),
             limits: Default::default(),

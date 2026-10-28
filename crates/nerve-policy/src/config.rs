@@ -15,6 +15,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::paths::within;
 
+mod capability;
+pub use capability::{
+    BUILT_IN, ConfigCapability, MAX_CAPABILITIES, Output, Platform, validate_all,
+};
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeConfig {
@@ -44,6 +49,10 @@ pub struct NodeConfig {
     /// control socket. Only the owner sets it.
     #[serde(default, skip_serializing_if = "Providers::is_empty")]
     pub providers: Providers,
+    /// The capabilities the owner declares here (`[[capability]]`), each
+    /// one action that runs a fixed command (docs/user/config-capabilities.md).
+    #[serde(default, rename = "capability", skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<ConfigCapability>,
     #[serde(default, rename = "center", skip_serializing_if = "Vec::is_empty")]
     pub centers: Vec<CenterEntry>,
 }
@@ -88,9 +97,11 @@ pub struct AllowedProvider {
 }
 
 /// Whether `name` can name a provider: a node name's shape (1 to 32 of
-/// a-z, 0-9 and `-`, starting and ending with a letter or digit), and not `node`, which stands for the node itself.
+/// a-z, 0-9 and `-`, starting and ending with a letter or digit), and not
+/// `node`, which stands for the node itself, or `config`, which stands for
+/// the capabilities of `node.toml` (the node routes a call by it).
 pub fn valid_provider_name(name: &str) -> bool {
-    nerve_proto::valid_node_name(name) && name != "node"
+    nerve_proto::valid_node_name(name) && !["node", "config"].contains(&name)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1033,7 +1044,11 @@ pub struct CenterDocument {
 impl NodeConfig {
     /// Parses and checks `node.toml`; unknown keys are errors.
     pub fn parse(text: &str) -> Result<NodeConfig, String> {
-        refuse_proxy_secrets(text)?;
+        // Not TOML at all: the typed parse says why.
+        if let Ok(doc) = toml::from_str::<toml::Table>(text) {
+            refuse_proxy_secrets(&doc)?;
+            capability::refuse_account(&doc)?;
+        }
         let mut c: NodeConfig = toml::from_str(text).map_err(|e| e.to_string())?;
         c.validate()?;
         Ok(c)
@@ -1156,7 +1171,7 @@ impl NodeConfig {
         for p in &self.providers.allowed {
             if !valid_provider_name(&p.name) {
                 return Err(format!(
-                    "providers.allowed name {:?}: 1 to 32 characters of a-z, 0-9 and -, starting and ending with a letter or digit, not node",
+                    "providers.allowed name {:?}: 1 to 32 characters of a-z, 0-9 and -, starting and ending with a letter or digit, not node or config",
                     p.name
                 ));
             }
@@ -1170,6 +1185,7 @@ impl NodeConfig {
                 ));
             }
         }
+        validate_all(&self.capabilities, self.limits.max_timeout_secs)?;
         self.relay.validate()?;
         let mut names = std::collections::BTreeSet::new();
         for c in &mut self.centers {
@@ -1230,11 +1246,7 @@ impl NodeConfig {
 /// errors quote the offending line and so would quote the secret. Anything
 /// but a list of strings in `connection.headers` is refused the same way
 /// without quoting it.
-fn refuse_proxy_secrets(text: &str) -> Result<(), String> {
-    let Ok(doc) = toml::from_str::<toml::Table>(text) else {
-        // Not TOML at all: the typed parse says why.
-        return Ok(());
-    };
+fn refuse_proxy_secrets(doc: &toml::Table) -> Result<(), String> {
     let Some(conn) = doc.get("connection").and_then(toml::Value::as_table) else {
         return Ok(());
     };
@@ -1363,7 +1375,7 @@ mod tests {
             assert!(!valid_center_name(bad), "{bad}");
         }
         assert!(valid_provider_name("desk-2"));
-        for bad in ["-desk", "desk-", "node"] {
+        for bad in ["-desk", "desk-", "node", "config"] {
             assert!(!valid_provider_name(bad), "{bad}");
         }
         for (key, toml) in [

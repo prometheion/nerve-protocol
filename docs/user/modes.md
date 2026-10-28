@@ -20,8 +20,9 @@ waits for an answer.
 
 ## What each mode allows
 
-A mode allows the same for every capability, the node's own (`fs`, `exec`)
-and those a [program adds](providers.md), by what the capability does (its
+A mode allows the same for every capability, the node's own (`fs`, `exec`),
+those a [program adds](providers.md) and [your own in
+`node.toml`](config-capabilities.md), by what the capability does (its
 effect, which `list` shows the agent):
 
 | Effect | `allowlist` | `folder` | `user` |
@@ -73,7 +74,11 @@ that reads a path for a call ([provider](providers.md)) gets the call outside
 the folders only for a file open to every account, never for a folder, since
 it would read below it with your rights. `nerve-run`'s own folders (its home,
 `/tmp`, `/var/tmp`, marked `own`) are no folders for a program: it runs with
-your rights, so only the folders you gave count for it. With
+your rights, so only the folders you gave count for it. A [capability of
+your `node.toml`](config-capabilities.md#the-account-it-runs-as) runs as
+`nerve-run` and is read like a command of that account instead: its own
+folders count, and a path outside the folders is read with that account's
+access. With
 [Landlock](#the-account-nerve-run-linux), a command of `nerve-run` reads less
 than a file call: the system's folders and its `r` and `x` folders.
 

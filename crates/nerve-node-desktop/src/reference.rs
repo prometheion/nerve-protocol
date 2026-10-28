@@ -249,6 +249,17 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         (Some(Page::Policy), -1, "Permissions › Capabilities"),
     ),
     (
+        "cap add",
+        "nerve-node cap add sensors.read --effect sense -- sensors -j",
+        NOT_HERE,
+    ),
+    (
+        "cap edit",
+        "nerve-node cap edit sensors.read --timeout 10",
+        NOT_HERE,
+    ),
+    ("cap rm", "nerve-node cap rm sensors.read", NOT_HERE),
+    (
         "cap provider allow",
         "nerve-node cap provider allow desk /usr/lib/nerve-desktop/nerve-desktop",
         (Some(Page::Settings), 6, "Settings › Advanced › Add"),
