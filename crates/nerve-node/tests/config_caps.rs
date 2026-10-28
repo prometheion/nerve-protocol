@@ -1026,6 +1026,47 @@ command = ["echo", "sound"]"#));
     daemon.stop().await;
 }
 
+/// A node.toml that names an `account` for a capability is refused in
+/// words wherever the node takes the file: by `config accept` to the
+/// running node, which keeps the config it had, and to a stopped one.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_accept_refuses_an_account_in_words() {
+    let dir = scratch();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let list = cap(r#"name = "probe.list"
+effect = "read"
+command = ["echo", "temp"]"#);
+    let daemon = node(dir.path(), &center, vec![list], user_mode).await;
+    let paths = daemon.paths().clone();
+    let mut conn = linked(&mut center).await;
+    let had = daemon.config();
+    let file = paths.config_file();
+    let text = std::fs::read_to_string(&file).unwrap();
+    let named = "name = \"probe.list\"\n";
+    assert!(text.contains(named), "{text}");
+    std::fs::write(
+        &file,
+        text.replace(named, &format!("{named}account = \"owner\"\n")),
+    )
+    .unwrap();
+    let why = "capability probe.list: account is no setting any more: a capability of node.toml always runs as nerve-run";
+    let e = try_cli(&paths, &["config", "accept"])
+        .await
+        .expect_err("an account is refused");
+    assert!(e.contains(why), "{e}");
+    assert_eq!(daemon.config(), had);
+    assert_eq!(
+        invoke(&mut conn, "probe.list", json!({})).await.unwrap(),
+        json!("temp\n")
+    );
+    // So is it while no node runs.
+    daemon.stop().await;
+    let e = try_cli(&paths, &["config", "accept"])
+        .await
+        .expect_err("an account is refused");
+    assert!(e.contains(why), "{e}");
+}
+
 /// The command of a config capability runs through the shim under Landlock
 /// like a folder-mode command, its arguments whole: it reads in its folders
 /// and nowhere else. (The installed node runs those of `nerve-run` so;
@@ -1119,6 +1160,11 @@ async fn hello(socket: &Path, caps: Value) -> (Provider, Value) {
 
 /// What `nerve-node <words>` prints, run in this process.
 async fn cli(paths: &NodePaths, words: &[&str]) -> String {
+    try_cli(paths, words).await.unwrap()
+}
+
+/// The same, or the error it ends with.
+async fn try_cli(paths: &NodePaths, words: &[&str]) -> Result<String, String> {
     use clap::Parser;
     let mut args = vec![
         "nerve-node".into(),
@@ -1130,8 +1176,8 @@ async fn cli(paths: &NodePaths, words: &[&str]) -> String {
     args.extend(words.iter().map(PathBuf::from));
     let cli = nerve_node::cli::Cli::parse_from(args);
     let mut out = Vec::new();
-    nerve_node::cli::execute(cli, &mut out).await.unwrap();
-    String::from_utf8(out).unwrap()
+    nerve_node::cli::execute(cli, &mut out).await?;
+    Ok(String::from_utf8(out).unwrap())
 }
 
 /// `cap add` takes a schema on stdin, as the owner pipes it in, and the
