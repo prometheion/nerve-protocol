@@ -27,7 +27,8 @@ pub fn descriptor(node_id: &str, name: &str) -> Descriptor {
         "summary": "Conformance echo node: answers echo.say with what it was sent and fails echo.fail.",
         "capabilities": [
             {"id": "node", "profile": "node", "exposure": "on", "summary": "The node itself.",
-             "events": {"descriptor_changed": {"implicit": true}, "going_away": {"implicit": true}}},
+             "events": {"descriptor_changed": {"effect": "read", "implicit": true},
+                        "going_away": {"effect": "read", "implicit": true}}},
             {"id": "echo", "exposure": "on", "summary": "Says back what it is sent.",
              "actions": {"say": {"effect": "read", "summary": "Return the text.",
                 "params": {"type": "object", "properties": {"text": {"type": "string"}},

@@ -922,8 +922,27 @@ fn check_schemas(d: &Descriptor) -> Result<(), String> {
                 check(&ev.data, Role::Result).map_err(|e| format!("{}/{n} data: {e}", c.id))?;
             }
         }
-        if !c.state.is_null() {
-            check(&c.state, Role::Result).map_err(|e| format!("{} state: {e}", c.id))?;
+        for (k, decl) in &c.state {
+            if !decl.schema.is_null() {
+                check(&decl.schema, Role::Result)
+                    .map_err(|e| format!("{} state {k}: {e}", c.id))?;
+            }
+        }
+        for (n, decl) in &c.streams {
+            if !decl.params.is_null() {
+                check(&decl.params, Role::Params)
+                    .map_err(|e| format!("{}.{n} stream params: {e}", c.id))?;
+            }
+        }
+        // A program's capability has one set of names: a unit `cap.name`
+        // names one thing. The node's own state and events are not units.
+        if c.provider != "node"
+            && let Some(n) = c.names_twice().first()
+        {
+            return Err(format!(
+                "{}: {n} names more than one of its actions, state keys, events and streams",
+                c.id
+            ));
         }
     }
     Ok(())
@@ -1156,8 +1175,14 @@ mod tests {
             ),
             (
                 "/capabilities/1/state",
-                json!({"type": "object", "if": {"type": "object"}}),
-                "echo state: /if: ",
+                json!({"temp": {"effect": "read", "schema": {"type": "object", "if": {"type": "object"}}}}),
+                "echo state temp: /if: ",
+            ),
+            (
+                "/capabilities/1/streams",
+                json!({"feed": {"kind": "reliable", "direction": "up", "effect": "read",
+                                "params": {"type": "string"}}}),
+                "echo.feed stream params: ",
             ),
         ];
         for (at, schema, want) in cases {

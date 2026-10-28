@@ -81,7 +81,7 @@ fn capabilities<'a>(entries: impl Iterator<Item = &'a ConfigCapability>) -> Vec<
             summary: String::new(),
             actions: BTreeMap::new(),
             events: BTreeMap::new(),
-            state: Value::Null,
+            state: Default::default(),
             streams: BTreeMap::new(),
         });
         entry.actions.insert(

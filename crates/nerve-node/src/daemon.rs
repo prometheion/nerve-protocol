@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -16,9 +16,9 @@ use nerve_policy::SetError;
 use nerve_policy::audit::{AuditLog, Change, Entry, diff};
 use nerve_policy::config::SecretStorage;
 use nerve_policy::{NodeConfig, SettingsStore};
-use nerve_proto::Message;
 use nerve_proto::msg::{Topic, method};
 use nerve_proto::resume::{self, Replay};
+use nerve_proto::{Effect, Message};
 use nerve_sandbox::Confinement;
 use nerve_transport::log::{Level, Log};
 use nerve_transport::ws::WsMessage;
@@ -1106,11 +1106,62 @@ impl Shared {
             .clone()
     }
 
-    /// Sends an event to `center`'s link.
+    /// Sends an event to `center`'s link. An event of a program's
+    /// capability goes only to a center that may subscribe to it now: its
+    /// policy allows the event as it would allow a call of `cap.name`
+    /// (crate::link::may_take), so a center the owner did not give it, or
+    /// switched it off for, never gets it.
     pub fn emit(&self, center: &str, cap: &str, name: &str, data: Value) {
-        if let Some(l) = lock(&self.centers).get(center).and_then(|c| c.link()) {
-            l.event(cap, name, data);
+        let Some(l) = lock(&self.centers).get(center).and_then(|c| c.link()) else {
+            return;
+        };
+        if let Some(effect) = self.providers.event_effect(cap, name)
+            && !self.may_take(center, cap, name, effect)
+        {
+            return;
         }
+        l.event(cap, name, data);
+    }
+
+    /// An event of a program's capability, for every center ([`Shared::emit`]
+    /// cuts it per center).
+    pub fn emit_all(&self, cap: &str, name: &str, data: Value) {
+        for center in self.config().centers.iter().map(|c| c.name.clone()) {
+            self.emit(&center, cap, name, data.clone());
+        }
+    }
+
+    /// A change of the state of a program's capability, for every center:
+    /// each gets the keys it may read now, as [`Shared::emit`] cuts events.
+    pub fn state_all(&self, cap: &str, changed: Map<String, Value>) {
+        let Some(effects) = self.providers.state_effects(cap) else {
+            return;
+        };
+        for center in self.config().centers.iter().map(|c| c.name.clone()) {
+            let Some(l) = lock(&self.centers).get(&center).and_then(|c| c.link()) else {
+                continue;
+            };
+            let mine: Map<String, Value> = changed
+                .iter()
+                .filter(|(k, _)| {
+                    effects
+                        .get(*k)
+                        .is_some_and(|e| self.may_take(&center, cap, k, *e))
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if !mine.is_empty() {
+                l.state(cap, Value::Object(mine));
+            }
+        }
+    }
+
+    /// Whether `center` may have the unit `cap.name` of a program now: its
+    /// policy allows it as a call that names no path.
+    fn may_take(&self, center: &str, cap: &str, name: &str, effect: Effect) -> bool {
+        let cfg = self.config();
+        cfg.center(center)
+            .is_some_and(|entry| crate::link::may_take(self, &cfg, entry, cap, name, effect))
     }
 
     /// Records a rotation of a key in the audit log (crate::rotate).

@@ -1287,8 +1287,23 @@ impl Link {
                 self.start_invoke(id, p).await;
                 return;
             }
+            // A program's state is read from the program: as its own task,
+            // so a slow program does not hold up the link.
+            method::GET if self.programs(&p) => {
+                let link = self.clone();
+                tokio::spawn(async move {
+                    let r = link.program_get(&p).await;
+                    link.reply(id, r).await;
+                });
+                return;
+            }
             method::GET => self.get(&p),
-            method::SUB | method::UNSUB => self.sub(&p, m == method::SUB),
+            method::SUB | method::UNSUB => self.sub(&p, m == method::SUB).await,
+            method::STREAM_OPEN if self.programs(&p) => {
+                let link = self.clone();
+                tokio::spawn(async move { link.program_stream_open(id, p).await });
+                return;
+            }
             method::STREAM_OPEN => {
                 self.stream_open(id, p).await;
                 return;
@@ -1462,10 +1477,17 @@ impl Link {
         serde_json::to_value(out).map_err(|e| RpcError::internal(e.to_string()))
     }
 
-    fn sub(&self, p: &Map<String, Value>, on: bool) -> Result<Value, RpcError> {
+    /// `sub` and `unsub`. A subscription to an event of a program's
+    /// capability is decided and audited like a call of `cap.event` that
+    /// names no path; the events themselves are cut again as they come
+    /// (Shared::emit), so a change of the policy afterwards holds too. Its
+    /// `state` and `*` are cut as they come only.
+    async fn sub(&self, p: &Map<String, Value>, on: bool) -> Result<Value, RpcError> {
         let t: Topics = params(p)?;
+        t.check()?;
         let view = self.view()?;
         let mut topics = Vec::new();
+        let mut decide = Vec::new();
         for s in &t.topics {
             let topic = Topic::parse(s)
                 .ok_or_else(|| RpcError::invalid_args(format!("bad topic {s:?}")))?;
@@ -1475,10 +1497,226 @@ impl Link {
                     format!("no capability {}", topic.cap()),
                 ));
             }
+            if on
+                && let Topic::Event(cap, name) = &topic
+                && self.shared.providers.event_effect(cap, name).is_some()
+            {
+                decide.push((cap.clone(), name.clone()));
+            }
             topics.push(topic);
+        }
+        if !decide.is_empty() {
+            let (cfg, entry) = self
+                .entry()
+                .ok_or_else(|| RpcError::new(ErrorCode::Unavailable, "this center was removed"))?;
+            let all =
+                descriptor::for_call(&cfg, &entry, crate::now_ms(), &self.shared.added_caps(&cfg));
+            for (cap, name) in decide {
+                let c = all.capability(&cap).ok_or_else(|| {
+                    RpcError::new(ErrorCode::UnknownCapability, format!("no capability {cap}"))
+                })?;
+                let decl = c.events.get(&name).ok_or_else(|| {
+                    RpcError::new(
+                        ErrorCode::UnknownMember,
+                        format!("{cap} has no event {name}"),
+                    )
+                })?;
+                let (program, _) = self.program(&c.provider)?;
+                let inv = unit_call(&cap, &name, Map::new(), t.ctx.clone());
+                let off = c.exposure == Exposure::Off;
+                self.decide_unit(&entry, &inv, decl.effect, off, program)
+                    .await?;
+            }
         }
         self.handle.sub(topics, on);
         Ok(json!({}))
+    }
+
+    /// Whether the request `p` names a capability a program adds.
+    fn programs(&self, p: &Map<String, Value>) -> bool {
+        let Some(cap) = p.get("cap").and_then(Value::as_str) else {
+            return false;
+        };
+        self.shared.providers.caps().iter().any(|c| c.id == cap)
+    }
+
+    /// The program `provider`'s account and which attachment it is, while
+    /// it is attached.
+    fn program(&self, provider: &str) -> Result<(u32, u64), RpcError> {
+        self.shared.providers.held(provider).ok_or_else(|| {
+            RpcError::new(
+                ErrorCode::Unavailable,
+                format!("the provider {provider} is not attached now"),
+            )
+        })
+    }
+
+    /// Decides the unit of a program's capability that `inv` names (a
+    /// state key, an event or a stream), which names no path: off (the
+    /// capability, `off`, or the unit's own switch) is refused at once,
+    /// anything else goes through the gate as a call would. Either way it
+    /// is in the audit.
+    async fn decide_unit(
+        &self,
+        entry: &CenterEntry,
+        inv: &Invoke,
+        effect: Effect,
+        off: bool,
+        program: u32,
+    ) -> Result<(), RpcError> {
+        let target = format!("{}.{}", inv.cap, inv.action);
+        let off = off
+            || entry.policy.cap_setting(&inv.cap, Some(&inv.action))
+                == Some(nerve_policy::config::CapSetting::Off);
+        if off {
+            let why = format!("{target} is off");
+            self.audit(inv, &target, "forbidden", Some("disabled"), Some(&why));
+            return Err(RpcError::new(ErrorCode::Disabled, why));
+        }
+        self.gate(
+            entry,
+            inv,
+            effect,
+            &[],
+            None,
+            None,
+            target,
+            None,
+            None,
+            None,
+            Some(program),
+        )
+        .await
+    }
+
+    /// `get` of a program's state keys (all of them when `keys` is empty):
+    /// each decided and audited like a call of `cap.key` that names no path;
+    /// only when all are allowed does the program get the request.
+    async fn program_get(&self, p: &Map<String, Value>) -> Result<Value, RpcError> {
+        let g: Get = params(p)?;
+        g.check()?;
+        let (cfg, entry) = self
+            .entry()
+            .ok_or_else(|| RpcError::new(ErrorCode::Unavailable, "this center was removed"))?;
+        let view =
+            descriptor::for_call(&cfg, &entry, crate::now_ms(), &self.shared.added_caps(&cfg));
+        let cap = view.capability(&g.cap).ok_or_else(|| {
+            RpcError::new(
+                ErrorCode::UnknownCapability,
+                format!("no capability {}", g.cap),
+            )
+        })?;
+        let (program, serial) = self.program(&cap.provider)?;
+        let keys: Vec<String> = if g.keys.is_empty() {
+            cap.state.keys().cloned().collect()
+        } else {
+            g.keys
+        };
+        if keys.is_empty() {
+            return Err(RpcError::new(
+                ErrorCode::UnknownMember,
+                format!("{} has no state", g.cap),
+            ));
+        }
+        for k in &keys {
+            let decl = cap.state.get(k).ok_or_else(|| {
+                RpcError::new(
+                    ErrorCode::UnknownMember,
+                    format!("{} has no state {k}", g.cap),
+                )
+            })?;
+            let inv = unit_call(&g.cap, k, Map::new(), g.ctx.clone());
+            let off = cap.exposure == Exposure::Off;
+            self.decide_unit(&entry, &inv, decl.effect, off, program)
+                .await?;
+        }
+        let asked = self
+            .shared
+            .providers
+            .get(&cap.provider, serial, &g.cap, &keys);
+        tokio::time::timeout(PROGRAM_WAIT, asked)
+            .await
+            .unwrap_or_else(|_| Err(program_late(&cap.provider)))
+    }
+
+    /// `stream.open` of a program's stream: decided and audited like a
+    /// call of `cap.stream` with the stream's params, whose schema the
+    /// params must fit; then the program is asked to open it. What it sends
+    /// goes out as the stream's frames, as a command's output does; the
+    /// stream ends when the program ends it or its connection ends, and a
+    /// close from the center tells the program.
+    async fn program_stream_open(self: &Arc<Self>, id: Id, p: Map<String, Value>) {
+        let opened = self.open_program(p).await;
+        let (sid, reader, held) = match opened {
+            Ok(o) => o,
+            Err(e) => return self.reply(id, Err(e)).await,
+        };
+        let (go, start) = oneshot::channel::<()>();
+        let link = self.clone();
+        let task = tokio::spawn(async move {
+            // Held while the stream runs: dropped, it tells the program.
+            let _held = held;
+            if start.await.is_ok() {
+                link.pump(sid, reader).await;
+            }
+        });
+        lock(&self.streams).insert(sid, task.abort_handle());
+        self.reply(id, Ok(json!({ "sid": sid }))).await;
+        let _ = go.send(());
+    }
+
+    async fn open_program(
+        &self,
+        p: Map<String, Value>,
+    ) -> Result<(u32, Arc<crate::tap::Reader>, crate::provider::ProgramStream), RpcError> {
+        let o: StreamOpen = params(&p)?;
+        o.check()?;
+        let (cfg, entry) = self
+            .entry()
+            .ok_or_else(|| RpcError::new(ErrorCode::Unavailable, "this center was removed"))?;
+        let view =
+            descriptor::for_call(&cfg, &entry, crate::now_ms(), &self.shared.added_caps(&cfg));
+        let cap = view.capability(&o.cap).ok_or_else(|| {
+            RpcError::new(
+                ErrorCode::UnknownCapability,
+                format!("no capability {}", o.cap),
+            )
+        })?;
+        let decl = cap.streams.get(&o.stream).ok_or_else(|| {
+            RpcError::new(
+                ErrorCode::UnknownMember,
+                format!("{} has no stream {}", o.cap, o.stream),
+            )
+        })?;
+        let (program, serial) = self.program(&cap.provider)?;
+        let args = o.params;
+        nerve_proto::schema::validate(&decl.params, &Value::Object(args.clone()))?;
+        let inv = unit_call(&o.cap, &o.stream, args.clone(), o.ctx.clone());
+        let off = cap.exposure == Exposure::Off;
+        self.decide_unit(&entry, &inv, decl.effect, off, program)
+            .await?;
+        if lock(&self.streams).len() >= limits::STREAMS as usize {
+            return Err(RpcError::new(
+                ErrorCode::Busy,
+                format!("{} streams are open already", limits::STREAMS),
+            ));
+        }
+        // Its text is scrubbed of the sudo password as a command's output
+        // is: a program may print what it read.
+        let shared = Arc::downgrade(&self.shared);
+        let secret: crate::tap::Held =
+            Arc::new(move || shared.upgrade().and_then(|s| s.held_secret()));
+        let tap = Arc::new(crate::tap::Tap::new(Some(secret), None));
+        let reader = tap.reader();
+        let asked =
+            self.shared
+                .providers
+                .open_stream(&cap.provider, serial, &o.cap, &o.stream, args, tap);
+        let held = tokio::time::timeout(PROGRAM_WAIT, asked)
+            .await
+            .unwrap_or_else(|_| Err(program_late(&cap.provider)))?;
+        let sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
+        Ok((sid, reader, held))
     }
 
     fn get(&self, p: &Map<String, Value>) -> Result<Value, RpcError> {
@@ -2830,6 +3068,68 @@ impl<F: FnOnce()> Drop for Ended<F> {
             audit();
         }
     }
+}
+
+/// How long the node waits for a program's answer to a `get` or a
+/// `stream.open`: they read or open, and a program that takes longer does
+/// not answer.
+const PROGRAM_WAIT: Duration = Duration::from_secs(30);
+
+/// Why a program's `get` or `stream.open` failed: it did not answer.
+fn program_late(provider: &str) -> RpcError {
+    RpcError::new(
+        ErrorCode::Timeout,
+        format!(
+            "the provider {provider} did not answer within {} s",
+            PROGRAM_WAIT.as_secs()
+        ),
+    )
+}
+
+/// The unit `name` of the program's capability `cap` (a state key, an
+/// event or a stream) as the call the policy and the audit see.
+fn unit_call(cap: &str, name: &str, args: Map<String, Value>, ctx: msg::Ctx) -> Invoke {
+    Invoke {
+        cap: cap.into(),
+        action: name.into(),
+        args,
+        ctx,
+        deadline_ms: None,
+        blobs: Vec::new(),
+    }
+}
+
+/// Whether `entry` may have the unit `cap.name` of a program now (an
+/// event, or a state key's change): its policy allows it as a call that
+/// names no path. Nothing is audited: the subscription was.
+pub(crate) fn may_take(
+    shared: &Shared,
+    cfg: &NodeConfig,
+    entry: &CenterEntry,
+    cap: &str,
+    name: &str,
+    effect: Effect,
+) -> bool {
+    let home = shared.rules_home(cfg);
+    let judged = Judged {
+        protected: Protected::new(&shared.platform, &home, &[], &entry.policy.protected),
+        home,
+        unconfined: None,
+        sudo: false,
+        shell: shell_of(cfg.machine.shell.as_deref(), None),
+        by_account: false,
+        provider: true,
+    };
+    let call = Call {
+        cap,
+        action: name,
+        effect,
+        targets: &[],
+        command: None,
+        cwd: None,
+        now_ms: crate::now_ms(),
+    };
+    judged.with(|env| nerve_policy::decide(&entry.policy, env, &call)) == Decision::Allow
 }
 
 /// What the policy needs to know of the node for one call

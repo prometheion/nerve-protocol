@@ -3447,15 +3447,22 @@ async fn cap_listing(paths: &NodePaths, cfg: &NodeConfig) -> Result<Value, Strin
     }
 }
 
-/// The lines of `cap ls`: one per action, with its effect, where it comes
+/// The lines of `cap ls`: one per action (and a program's state key, event
+/// or stream, with its kind), with its effect, where it comes
 /// from and each center's setting (`center` only), the settings that name
 /// no action offered now, and the programs.
 fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
     let rows = v["capabilities"].as_array().cloned().unwrap_or_default();
     let text = |r: &Value, k: &str| r[k].as_str().unwrap_or("-").to_string();
     let names: Vec<String> = rows.iter().map(|r| text(r, "name")).collect();
+    // A program's state key, event or stream says its kind after its effect.
+    let effect = |r: &Value| match r["kind"].as_str() {
+        Some(kind) => format!("{} {kind}", text(r, "effect")),
+        None => text(r, "effect"),
+    };
     let width = |k: &str| rows.iter().map(|r| text(r, k).len()).max().unwrap_or(0);
-    let (wn, we, ws) = (width("name"), width("effect"), width("source"));
+    let (wn, ws) = (width("name"), width("source"));
+    let we = rows.iter().map(|r| effect(r).len()).max().unwrap_or(0);
     let mut lines = Vec::new();
     for r in &rows {
         let what = match r["broken"].as_str().or(r["left_out"].as_str()) {
@@ -3484,7 +3491,7 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
         let line = format!(
             "{:wn$}  {:we$}  {:ws$}  {what}",
             text(r, "name"),
-            text(r, "effect"),
+            effect(r),
             text(r, "source"),
         );
         lines.push(line.trim_end().to_string());

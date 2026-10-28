@@ -771,10 +771,12 @@ fn shown_name(name: &str) -> String {
 /// reason is brief, as on the node: it holds the node's own names, and the
 /// Overview and the log repeat it.
 fn cap_outside_subset(cap: &nerve_proto::Capability) -> Option<String> {
-    if !cap.state.is_null()
-        && let Err(e) = schema::check(&cap.state, Role::Result)
-    {
-        return Some(schema::brief(&format!("state: {e}")));
+    for (k, decl) in &cap.state {
+        if !decl.schema.is_null()
+            && let Err(e) = schema::check(&decl.schema, Role::Result)
+        {
+            return Some(schema::brief(&format!("state {k}: {e}")));
+        }
     }
     cap.events.iter().find_map(|(name, ev)| {
         if ev.data.is_null() {
@@ -1879,6 +1881,19 @@ mod tests {
         );
     }
 
+    /// One state key `value` with `schema`.
+    fn state_of(
+        schema: Value,
+    ) -> std::collections::BTreeMap<String, nerve_proto::descriptor::StateDecl> {
+        let decl = nerve_proto::descriptor::StateDecl {
+            effect: Effect::Read,
+            summary: String::new(),
+            schema,
+            exposure: None,
+        };
+        [("value".to_string(), decl)].into()
+    }
+
     /// Event data and state are published schemas too: one outside the
     /// subset leaves out every action of its capability, and a capability
     /// without actions is named on its own.
@@ -1892,26 +1907,30 @@ mod tests {
                 ("off", Effect::Actuate, json!({"type": "object"})),
             ],
         );
-        lamp.state = json!({"$ref": "#/x"});
+        lamp.state = state_of(json!({"$ref": "#/x"}));
         let mut door = cap("door", "", &[("open", Effect::Actuate, path())]);
         door.events.insert(
             "opened".into(),
             nerve_proto::descriptor::EventDecl {
+                effect: Effect::Read,
                 summary: "It opened.".into(),
                 implicit: false,
                 data: json!({"oneOf": [{"type": "string"}]}),
+                exposure: None,
             },
         );
         let mut bell = cap("bell", "", &[]);
         bell.events = door.events.clone();
         let mut fine = cap("fine", "", &[("go", Effect::Read, path())]);
-        fine.state = json!({"type": "object", "properties": {"on": {"type": "boolean"}}});
+        fine.state = state_of(json!({"type": "boolean"}));
         fine.events.insert(
             "went".into(),
             nerve_proto::descriptor::EventDecl {
+                effect: Effect::Read,
                 summary: "It went.".into(),
                 implicit: false,
                 data: json!({"type": "integer"}),
+                exposure: None,
             },
         );
         let c = Catalog::build(&desc("box", vec![lamp, door, bell, fine]));
@@ -1931,7 +1950,7 @@ mod tests {
                 .clone()
         };
         assert!(
-            reason("lamp.on").starts_with("state: "),
+            reason("lamp.on").starts_with("state value: "),
             "{}",
             reason("lamp.on")
         );
@@ -1971,14 +1990,16 @@ mod tests {
             },
         );
         let mut door = cap("door", "", &[("open", Effect::Actuate, path())]);
-        door.state = json!({"type": "object", long.clone(): 1});
+        door.state = state_of(json!({"type": "object", long.clone(): 1}));
         let mut bell = cap("bell", "", &[]);
         bell.events.insert(
             "rang".into(),
             nerve_proto::descriptor::EventDecl {
+                effect: Effect::Read,
                 summary: "It rang.".into(),
                 implicit: false,
                 data: json!({"type": "object", long: 1}),
+                exposure: None,
             },
         );
         let c = Catalog::build(&desc("box", vec![lamp, door, bell]));

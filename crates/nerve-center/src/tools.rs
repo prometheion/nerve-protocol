@@ -58,7 +58,7 @@ pub(crate) mod tests {
                 })
                 .collect(),
             events: Default::default(),
-            state: Value::Null,
+            state: Default::default(),
             streams: Default::default(),
         }
     }

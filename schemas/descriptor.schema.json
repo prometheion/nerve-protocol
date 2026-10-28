@@ -81,25 +81,46 @@
         },
         "events": {
           "type": "object",
+          "propertyNames": {"pattern": "^[A-Za-z0-9_-]{1,64}$"},
           "additionalProperties": {
             "type": "object",
+            "required": ["effect"],
             "properties": {
+              "effect": {"$ref": "#/$defs/effect"},
               "summary": {"type": "string"},
               "implicit": {"type": "boolean"},
-              "data": {"type": "object"}
+              "data": {"type": "object"},
+              "exposure": {"enum": ["on", "off"]}
             }
           }
         },
-        "state": {"type": ["object", "null"]},
-        "streams": {
+        "state": {
           "type": "object",
+          "propertyNames": {"pattern": "^[A-Za-z0-9_-]{1,64}$"},
           "additionalProperties": {
             "type": "object",
-            "required": ["kind", "direction"],
+            "required": ["effect"],
+            "properties": {
+              "effect": {"$ref": "#/$defs/effect"},
+              "summary": {"type": "string"},
+              "schema": {"type": "object"},
+              "exposure": {"enum": ["on", "off"]}
+            }
+          }
+        },
+        "streams": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[A-Za-z0-9_-]{1,64}$"},
+          "additionalProperties": {
+            "type": "object",
+            "required": ["kind", "direction", "effect"],
             "properties": {
               "kind": {"enum": ["reliable", "media"]},
               "direction": {"enum": ["up", "down", "both"]},
-              "summary": {"type": "string"}
+              "effect": {"$ref": "#/$defs/effect"},
+              "summary": {"type": "string"},
+              "params": {"type": "object"},
+              "exposure": {"enum": ["on", "off"]}
             }
           }
         }

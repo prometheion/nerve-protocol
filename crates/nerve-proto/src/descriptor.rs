@@ -91,8 +91,26 @@ pub struct Action {
     pub as_account: bool,
 }
 
+/// One state key of a capability, read with `get` (spec §6). Its effect
+/// decides who may read it: `read`, or `sense` for what the machine
+/// perceives.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StateDecl {
+    pub effect: Effect,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub summary: String,
+    /// JSON Schema of its value.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub schema: Value,
+    /// `off` when the owner switched it off (as [`Action::exposure`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exposure: Option<Exposure>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventDecl {
+    /// Who may subscribe to it and get it, as for a state key.
+    pub effect: Effect,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub summary: String,
     /// Delivered without `sub` (D7).
@@ -100,6 +118,9 @@ pub struct EventDecl {
     pub implicit: bool,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub data: Value,
+    /// `off` when the owner switched it off (as [`Action::exposure`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exposure: Option<Exposure>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,8 +143,17 @@ pub enum Direction {
 pub struct StreamDecl {
     pub kind: StreamKind,
     pub direction: Direction,
+    /// Who may open it, as for a state key.
+    pub effect: Effect,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub summary: String,
+    /// JSON Schema of the `params` of its `stream.open`; none takes any
+    /// object.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub params: Value,
+    /// `off` when the owner switched it off (as [`Action::exposure`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exposure: Option<Exposure>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -141,9 +171,12 @@ pub struct Capability {
     pub actions: BTreeMap<String, Action>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub events: BTreeMap<String, EventDecl>,
-    /// JSON Schema of the state document, when the capability has state.
-    #[serde(default, skip_serializing_if = "Value::is_null")]
-    pub state: Value,
+    /// Its state keys. In a program's capability, actions, state keys,
+    /// events and streams share one set of names: each is a unit
+    /// `<cap>.<name>` to the harness (docs/dev/spec/harness.md §4.1). The
+    /// node's own state and events are the center's business, not units.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub state: BTreeMap<String, StateDecl>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub streams: BTreeMap<String, StreamDecl>,
 }
@@ -332,7 +365,7 @@ impl Descriptor {
                     c.actions.clear();
                     c.events.clear();
                     c.streams.clear();
-                    c.state = Value::Null;
+                    c.state.clear();
                 }
                 Some(d)
             }
@@ -347,7 +380,12 @@ impl Descriptor {
                 for e in c.events.values_mut() {
                     e.data = Value::Null;
                 }
-                c.state = Value::Null;
+                for k in c.state.values_mut() {
+                    k.schema = Value::Null;
+                }
+                for s in c.streams.values_mut() {
+                    s.params = Value::Null;
+                }
                 Some(d)
             }
         }
@@ -356,6 +394,55 @@ impl Descriptor {
     /// The effect of `cap.action`, if the descriptor has it.
     pub fn effect(&self, cap: &str, action: &str) -> Option<Effect> {
         self.capability(cap)?.actions.get(action).map(|a| a.effect)
+    }
+}
+
+/// What a unit of a capability is: an action called with `invoke`, a state
+/// key read with `get`, an event subscribed to with `sub`, or a stream
+/// opened with `stream.open`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnitKind {
+    Action,
+    State,
+    Event,
+    Stream,
+}
+
+impl UnitKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UnitKind::Action => "action",
+            UnitKind::State => "state",
+            UnitKind::Event => "event",
+            UnitKind::Stream => "stream",
+        }
+    }
+}
+
+impl Capability {
+    /// Every unit name of the capability with its kind, actions first: one
+    /// name may appear more than once only in a descriptor that breaks the
+    /// rule of one set of names.
+    pub fn unit_names(&self) -> Vec<(&str, UnitKind)> {
+        let mut out: Vec<(&str, UnitKind)> = Vec::new();
+        out.extend(self.actions.keys().map(|n| (n.as_str(), UnitKind::Action)));
+        out.extend(self.state.keys().map(|n| (n.as_str(), UnitKind::State)));
+        out.extend(self.events.keys().map(|n| (n.as_str(), UnitKind::Event)));
+        out.extend(self.streams.keys().map(|n| (n.as_str(), UnitKind::Stream)));
+        out
+    }
+
+    /// The names that are given to more than one kind of unit.
+    pub fn names_twice(&self) -> std::collections::BTreeSet<&str> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut twice = std::collections::BTreeSet::new();
+        for (n, _) in self.unit_names() {
+            if !seen.insert(n) {
+                twice.insert(n);
+            }
+        }
+        twice
     }
 }
 

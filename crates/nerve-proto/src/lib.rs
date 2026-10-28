@@ -20,7 +20,7 @@ pub mod resume;
 pub mod rpc;
 pub mod schema;
 
-pub use descriptor::{Capability, Descriptor, Detail, Effect, Exposure};
+pub use descriptor::{Capability, Descriptor, Detail, Effect, Exposure, UnitKind};
 pub use error::{ErrorCode, RpcError};
 pub use rpc::{Id, Message};
 pub use schema::{ArgError, Role, SchemaError};
