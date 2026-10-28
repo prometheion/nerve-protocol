@@ -64,8 +64,9 @@ still make the allowed one attach for it. Allow only programs you trust.
 
 ## See what is there
 
-`nerve-node cap ls` lists every capability, one action a line: what it does
-(its effect), where it comes from (`built-in`, `config` for
+`nerve-node cap ls` lists every capability, one action a line (and a
+program's state keys, events and streams, each with its kind after the
+effect): what it does (its effect), where it comes from (`built-in`, `config` for
 [your own](config-capabilities.md), or `program desk`), and for
 each center whether it may use it now (`on` or `off`, as its mode, rules and
 switches decide), with the switch in brackets where you set one with `cap
@@ -252,7 +253,8 @@ and name: `nerve-node cap set sensors.temperature on`, an allow rule
 state, subscribing to an event or opening a stream is in the [audit
 log](audit.md). An event goes only to a center that may have it when it
 happens, so a center you take `on` from gets no more of it, even while it is
-still subscribed. `nerve-node cap ls` lists them with their kind after the
+still subscribed. An open stream is asked about again when you change the
+config: one the center may no longer have ends, and the program is told. `nerve-node cap ls` lists them with their kind after the
 effect (`sense state`, `read event`).
 
 A capability of [`node.toml`](config-capabilities.md) has actions only: a

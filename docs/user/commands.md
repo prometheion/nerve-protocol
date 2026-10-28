@@ -52,7 +52,7 @@ center is paired.
 | `rule ls [allow\|deny\|sudo]` | List rules | [rules](rules.md#list-change-and-remove-rules) |
 | `rule guard` | Put the guard's deny rules back that a pairing lacks, in place of its older texts | [rules](rules.md#the-guard-against-changing-the-node) |
 | `cap set <cap> on\|off\|hidden` | Switch a capability or action | [rules](rules.md#switch-a-capability-off) |
-| `cap ls [--center C]` | List every capability: the node's own, yours in `node.toml` and those of the programs you allow, each action with its effect, where it comes from and, per center, whether it may use it now and the switch you set (a stopped node: the switch only, `default` where the mode decides; `settings`: the grant, `center grant settings`) | [providers](providers.md#see-what-is-there) |
+| `cap ls [--center C]` | List every capability: the node's own, yours in `node.toml` and those of the programs you allow, each action (and a program's state key, event and stream, with its kind) with its effect, where it comes from and, per center, whether it may use it now and the switch you set (a stopped node: the switch only, `default` where the mode decides; `settings`: the grant, `center grant settings`) | [providers](providers.md#see-what-is-there) |
 | `cap add <cap.action> --effect E [--summary S] [--params JSON\|--params-stdin] [--result text\|JSON\|--result-stdin] [--timeout SECS] [--platform any\|linux\|windows] -- <program> <args>` | Declare a capability of your own that runs a fixed command as `nerve-run` (the installed node), `{field}` words taking the call's arguments | [config capabilities](config-capabilities.md) |
 | `cap edit <cap.action> [the options of add] [-- <program> <args>]`, `cap rm <cap.action>` | Change one of them (what you give replaces), remove it | [config capabilities](config-capabilities.md#add-one) |
 | `cap provider allow <name> <exe>`, `cap provider rm <name>`, `cap provider ls` | Allow a program to add capabilities, take it off, list them | [providers](providers.md#allow-a-program) |
@@ -101,7 +101,8 @@ A program that drives `nerve-node`, such as a script, adds `--json` and reads
 one JSON value from stdout:
 
 - The read commands print their data: `status`, `center ls`, `folder ls`,
-  `rule ls`, `cap ls` (`capabilities`, `programs`, `config`, each capability
+  `rule ls`, `cap ls` (`capabilities`, one row per action, state key,
+  event or stream with `"kind"` on all but actions, `programs`, `config`, each capability
   of `node.toml` as declared, its schemas as JSON, `running`, and for one
   center, with `--center` or where only one is paired, `center`, `caps` and
   `known`, what `cap set` switches), `cap provider ls`, `config get`,

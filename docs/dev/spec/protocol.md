@@ -511,6 +511,8 @@ Errors carry a string code in `error.data.code` (§5.3).
   (§5.4). The side that sends a stream ends it with `stream.close {sid,
   reason}` once everything went (`reason` `ended` for a command that ended);
   the other side may close it at any time, and nothing more of it is sent.
+  A node also closes a program's stream that its policy no longer lets the
+  center have (node-local.md §7), with another reason.
   A `sid` names no open stream: `unknown_member`. A node keeps at most
   `limits.streams` open per link; one more is `busy`.
 - `deadline_ms` is a duration in milliseconds from receipt; past it the node

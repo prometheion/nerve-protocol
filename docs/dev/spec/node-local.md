@@ -1857,7 +1857,10 @@ folder mode it needs `on` as such an action does.
   8, "ok": {"level": 3}}`; the center gets the keys asked for and no other,
   and a key the program left out fails the `get` (`internal`). A program
   that does not answer within 30 s fails it with `timeout`. A key the
-  capability does not declare is `unknown_member`.
+  capability does not declare is `unknown_member`. A `get` of a program's
+  state is one of the link's calls: it counts against `limits.calls`
+  (`busy`), and a `cancel` of it or `session.end` of its session fails it
+  `cancelled` and tells the program (`cancel`).
 - **Events.** The program sends `{"cap": "lamp", "event": "switched",
   "data": {…}}` (no `id`). An event it did not declare, or of a capability
   that is not its own, is dropped. The node passes the event to each center
@@ -1880,7 +1883,8 @@ folder mode it needs `on` as such an action does.
 - **Streams.** A center's `stream.open` (`{cap, stream, params, ctx}`) is
   checked against the stream's `params` schema (`invalid_args`), decided and
   audited like a call with those arguments, and counts against the link's
-  `limits.streams` (`busy`). Then the program gets `{"id": 9, "method":
+  `limits.streams` (`busy`) from when it comes, so opens that wait for the
+  program together keep the limit. Then the program gets `{"id": 9, "method":
   "stream.open", "params": {"cap": "lamp", "stream": "power", "params":
   {}}}` and answers `{"id": 9, "ok": {}}` (or an error, as for a call, or
   `timeout` after 30 s). It sends the stream's text as `{"stream": 9,
@@ -1890,9 +1894,13 @@ folder mode it needs `on` as such an action does.
   not taken (the oldest goes first, as a gap), and closes the stream with
   reason `ended` once the program ended it. When the center closes it, or
   its link goes, the program gets `{"method": "stream.close", "params":
-  {"stream": 9}}`, and later lines of that stream are dropped. When the
-  program's connection ends, each of its streams ends too, after what it
-  sent.
+  {"stream": 9}}`, and later lines of that stream are dropped; an open
+  that still waits for the program when the link goes ends with it the same
+  way. When the policy changes (or a mode's time limit passes), each open
+  program's stream is decided again as an event is: one the center may no
+  longer have is closed with reason `not allowed any more`, and the program
+  gets `stream.close`. When the program's connection ends, each of its
+  streams ends too, after what it sent.
 
 A capability of `node.toml` (§2) offers actions only: an entry that names
 `state`, `events` or `streams` is refused with a message that says so. A
