@@ -3100,8 +3100,9 @@ fn unit_call(cap: &str, name: &str, args: Map<String, Value>, ctx: msg::Ctx) -> 
 }
 
 /// Whether `entry` may have the unit `cap.name` of a program now (an
-/// event, or a state key's change): its policy allows it as a call that
-/// names no path. Nothing is audited: the subscription was.
+/// event, a state key's change, or more of an open stream): its policy
+/// allows it as a call that names no path. Nothing is audited: the
+/// subscription or the open was.
 pub(crate) fn may_take(
     shared: &Shared,
     cfg: &NodeConfig,
@@ -3110,6 +3111,15 @@ pub(crate) fn may_take(
     name: &str,
     effect: Effect,
 ) -> bool {
+    // The capability's own switch counts over the unit's, as for a call
+    // (`decide` reads the unit's first): an `off` or `hidden` capability
+    // gives nothing, though its unit is `on`.
+    if matches!(
+        entry.policy.cap_setting(cap, None),
+        Some(nerve_policy::config::CapSetting::Off | nerve_policy::config::CapSetting::Hidden)
+    ) {
+        return false;
+    }
     let home = shared.rules_home(cfg);
     let judged = Judged {
         protected: Protected::new(&shared.platform, &home, &[], &entry.policy.protected),

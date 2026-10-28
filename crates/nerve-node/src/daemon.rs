@@ -1123,11 +1123,18 @@ impl Shared {
         l.event(cap, name, data);
     }
 
-    /// An event of a program's capability, for every center ([`Shared::emit`]
-    /// cuts it per center).
-    pub fn emit_all(&self, cap: &str, name: &str, data: Value) {
+    /// An event of a program's capability with `effect`, for every center
+    /// that may have it now (cut as [`Shared::emit`] cuts). The effect is the
+    /// one the program declared, given by its line: looked up again here, an
+    /// event of a program that left meanwhile would have none and go uncut.
+    pub fn emit_all(&self, cap: &str, name: &str, effect: Effect, data: Value) {
         for center in self.config().centers.iter().map(|c| c.name.clone()) {
-            self.emit(&center, cap, name, data.clone());
+            let Some(l) = lock(&self.centers).get(&center).and_then(|c| c.link()) else {
+                continue;
+            };
+            if self.may_take(&center, cap, name, effect) {
+                l.event(cap, name, data.clone());
+            }
         }
     }
 

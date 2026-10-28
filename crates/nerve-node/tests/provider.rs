@@ -2108,6 +2108,57 @@ async fn a_programs_events_and_state_reach_only_the_centers_that_may_have_them()
     daemon.stop().await;
 }
 
+/// The capability's own `off` or `hidden` counts over its units' `on`, as
+/// for a call: a center subscribed while it could have them gets no more
+/// events or state changes once the owner turns the whole capability off
+/// or hides it, though `sensors.alarm` itself is still `on`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_capability_turned_off_or_hidden_gives_none_though_its_units_are_on() {
+    use nerve_policy::config::CapSetting;
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, mut work, mut p) = two_centers_with_sensors(dir.path()).await;
+    let paths = daemon.paths().clone();
+    owner_edit(&paths, |c| {
+        let caps = &mut c.center_mut("lab").unwrap().policy.caps;
+        caps.insert("sensors.alarm".into(), CapSetting::On);
+        caps.insert("sensors.temperature".into(), CapSetting::On);
+    })
+    .await;
+    for conn in [&mut lab, &mut work] {
+        let sub = json!({"topics": ["sensors/alarm", "sensors/state"],
+                         "ctx": {"session": "s-1"}});
+        conn.call("sub", sub, WAIT).await.unwrap().expect("sub");
+    }
+    for (level, setting) in [(1, CapSetting::Off), (2, CapSetting::Hidden)] {
+        owner_edit(&paths, |c| {
+            let caps = &mut c.center_mut("lab").unwrap().policy.caps;
+            caps.insert("sensors".into(), setting);
+        })
+        .await;
+        p.send(json!({"cap": "sensors", "event": "alarm", "data": {"level": level}}))
+            .await;
+        p.send(json!({"cap": "sensors", "state": {"temperature": 20.5}}))
+            .await;
+        // `work` gets both: the node took them before `lab`'s describe.
+        let mut got = 0;
+        while got < 2 {
+            match work.recv(WAIT).await {
+                Recv::Msg(Message::Notification { params, .. }) if params["cap"] == "sensors" => {
+                    got += 1
+                }
+                Recv::Msg(_) => {}
+                other => panic!("no event: {other:?}"),
+            }
+        }
+        assert_eq!(
+            notes_of(&mut lab, "sensors").await,
+            Vec::<Value>::new(),
+            "{setting:?}"
+        );
+    }
+    daemon.stop().await;
+}
+
 /// A program's stream: `stream.open` is decided like a call of
 /// `cap.stream` with its params (which must fit their schema), then
 /// forwarded to the program; what it sends of the stream comes to the

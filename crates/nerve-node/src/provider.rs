@@ -523,15 +523,15 @@ impl Attached {
             return;
         };
         if let Some(name) = v.get("event").and_then(Value::as_str) {
-            if !c.events.contains_key(name) {
+            let Some(decl) = c.events.get(name) else {
                 tracing::debug!(
                     "provider {}: an event {cap}/{name} it did not declare was dropped",
                     self.name
                 );
                 return;
-            }
+            };
             let data = v.get("data").cloned().unwrap_or(Value::Null);
-            shared.emit_all(cap, name, data);
+            shared.emit_all(cap, name, decl.effect, data);
         } else if let Some(Value::Object(changed)) = v.get("state") {
             // Only the keys it declared, each to whoever may read it.
             let changed: Map<String, Value> = changed
