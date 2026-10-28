@@ -1744,16 +1744,13 @@ mod tests {
             json!({"ts": NOW, "center": "home", "cap": "svc", "action": "restart", "target": "svc.restart",
                 "decision": "allowed", "command": "systemctl restart -- nginx"}),
             json!({"ts": NOW, "center": "home", "cap": "proj", "action": "deploy", "target": "proj.deploy",
-                "decision": "forbidden", "reason": "a center may write there", "command": "sh deploy.sh"}),
+                "decision": "forbidden", "reason": "outside the folders", "command": "sh deploy.sh"}),
         ];
         let rows = audit_view(&entries, &centers, &AuditFilter::default(), 200, NOW).rows;
         assert_eq!(rows[0].target, "svc.restart");
         assert_eq!(rows[0].detail, "Command: systemctl restart -- nginx");
         assert!(rows[0].rules);
-        assert_eq!(
-            rows[1].detail,
-            "A center may write there. Command: sh deploy.sh"
-        );
+        assert_eq!(rows[1].detail, "Outside the folders. Command: sh deploy.sh");
         let found = audit_view(
             &entries,
             &centers,

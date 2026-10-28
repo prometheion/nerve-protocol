@@ -1,8 +1,8 @@
 //! Capabilities the owner declares in `node.toml` (`[[capability]]`,
 //! docs/user/config-capabilities.md): each one is one action, `cap.action`,
 //! that runs one fixed program with fixed arguments and the call's arguments
-//! filled in as whole arguments. The node runs it itself (as `nerve-run` by
-//! default, or as the owner), never through a shell, and returns its output.
+//! filled in as whole arguments. The installed node runs it itself as
+//! `nerve-run`, never through a shell, and returns its output.
 //!
 //! The schemas are JSON text in the file, as the owner writes them anywhere
 //! else, and are held to the subset a center checks (nerve_proto::schema).
@@ -62,44 +62,8 @@ pub struct ConfigCapability {
     /// unset. At most `limits.max_timeout_secs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
-    #[serde(default, skip_serializing_if = "RunsAs::is_default")]
-    pub account: RunsAs,
     #[serde(default, skip_serializing_if = "Platform::is_any")]
     pub platform: Platform,
-}
-
-/// The account a config capability runs as. There is no other: never the
-/// node's own `nerve`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RunsAs {
-    /// The installed Linux node's command account, held to the folders.
-    #[default]
-    #[serde(rename = "nerve-run")]
-    NerveRun,
-    /// The owner, with the owner's rights (root where root is the owner).
-    #[serde(rename = "owner")]
-    Owner,
-}
-
-impl RunsAs {
-    pub fn is_default(&self) -> bool {
-        *self == RunsAs::NerveRun
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            RunsAs::NerveRun => "nerve-run",
-            RunsAs::Owner => "owner",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<RunsAs> {
-        match s {
-            "nerve-run" => Some(RunsAs::NerveRun),
-            "owner" => Some(RunsAs::Owner),
-            _ => None,
-        }
-    }
 }
 
 /// Where a config capability runs: a node offers only those of its own
@@ -274,13 +238,6 @@ fn program_named(program: &str, platform: Platform) -> bool {
 }
 
 impl ConfigCapability {
-    /// The argument an element of a command stands for, where it is a
-    /// placeholder (`{field}`, filled in by [`ConfigCapability::argv`]);
-    /// any other element, braces and all, is fixed text of the owner's.
-    pub fn placeholder(element: &str) -> Option<&str> {
-        placeholder(element)
-    }
-
     /// The capability and the action of `name`.
     pub fn split(&self) -> (&str, &str) {
         self.name.split_once('.').unwrap_or((&self.name, ""))
@@ -500,6 +457,30 @@ impl ConfigCapability {
     }
 }
 
+/// Refuses an entry of the file `doc` that names an `account`: every
+/// capability of node.toml runs as `nerve-run` (an `account = "owner"` of
+/// earlier versions is gone, docs/user/config-capabilities.md), and the
+/// owner is told so in words, not as a field serde does not know.
+pub fn refuse_account(doc: &toml::Table) -> Result<(), String> {
+    let entries = doc.get("capability").and_then(toml::Value::as_array);
+    for e in entries
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_table)
+    {
+        if e.contains_key("account") {
+            let name = match e.get("name").and_then(toml::Value::as_str) {
+                Some(n) => format!("capability {n}"),
+                None => "[[capability]]".into(),
+            };
+            return Err(format!(
+                "{name}: account is no setting any more: a capability of node.toml always runs as nerve-run, held to the folders; remove the line. An action with your own rights comes from a program you allow as a provider (docs/user/providers.md)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Checks the config's capabilities: each one alone, and their names once
 /// each.
 pub fn validate_all(caps: &[ConfigCapability], max_timeout_secs: u64) -> Result<(), String> {
@@ -538,7 +519,7 @@ mod tests {
                 "logs.tail",
                 r#"["tail", "-n", "{lines}", "--", "{path}"]"#,
                 &format!(
-                    "summary = \"The end of a log.\"\n{PATH_PARAMS}\ntimeout_secs = 5\naccount = \"owner\"\nplatform = \"linux\""
+                    "summary = \"The end of a log.\"\n{PATH_PARAMS}\ntimeout_secs = 5\nplatform = \"linux\""
                 ),
             ),
             entry(
@@ -561,12 +542,10 @@ mod tests {
         );
         assert_eq!(tail.result, Output::Text);
         assert_eq!(tail.timeout_secs, Some(5));
-        assert_eq!(tail.account, RunsAs::Owner);
         assert_eq!(tail.platform, Platform::Linux);
         assert_eq!(sensors.effect, Effect::Sense);
         assert_eq!(sensors.result, Output::Json(json!({"type": "object"})));
-        // The defaults: nerve-run, any platform, the node's timeout.
-        assert_eq!(sensors.account, RunsAs::NerveRun);
+        // The defaults: any platform, the node's timeout.
         assert_eq!(sensors.platform, Platform::Any);
         assert_eq!(sensors.timeout_secs, None);
         assert!(sensors.params.is_null());
@@ -578,7 +557,7 @@ mod tests {
         let again = c.to_toml();
         assert_eq!(NodeConfig::parse(&again).unwrap(), c, "{again}");
         let sensors_part = &again[again.rfind("[[capability]]").unwrap()..];
-        for absent in ["account", "platform", "timeout_secs", "params", "summary"] {
+        for absent in ["platform", "timeout_secs", "params", "summary"] {
             assert!(!sensors_part.contains(absent), "{absent}: {sensors_part}");
         }
         assert!(!NodeConfig::default().to_toml().contains("capability"));
@@ -653,13 +632,6 @@ mod tests {
                 "timeout_secs = 3601",
                 "max_timeout_secs (3600)",
             ),
-            (
-                "a.b",
-                r#"["cat"]"#,
-                "account = \"nerve\"",
-                "unknown variant",
-            ),
-            ("a.b", r#"["cat"]"#, "account = \"root\"", "unknown variant"),
             ("a.b", r#"["cat"]"#, "platform = \"mac\"", "unknown variant"),
             ("a.b", r#"["cat"]"#, "summary = \"two\\nlines\"", "one line"),
             ("a.b", r#"["cat"]"#, "shell = true", "unknown field"),
@@ -721,6 +693,46 @@ mod tests {
         assert!(NodeConfig::parse(&many).unwrap_err().contains("at most"));
     }
 
+    /// Every capability of node.toml runs as `nerve-run`: an entry that
+    /// names an account, whichever, is refused in words that say so, also
+    /// among others and without a name.
+    #[test]
+    fn an_account_is_refused_in_words() {
+        for (text, name) in [
+            (
+                entry("a.b", r#"["cat"]"#, "account = \"owner\""),
+                "capability a.b",
+            ),
+            (
+                entry("a.b", r#"["cat"]"#, "account = \"nerve-run\""),
+                "capability a.b",
+            ),
+            (
+                format!(
+                    "{}{}",
+                    entry("a.c", r#"["cat"]"#, ""),
+                    entry("a.b", r#"["cat"]"#, "account = 1")
+                ),
+                "capability a.b",
+            ),
+            (
+                "[[capability]]\naccount = \"owner\"\n".to_string(),
+                "[[capability]]",
+            ),
+        ] {
+            let e = NodeConfig::parse(&text).unwrap_err();
+            assert!(
+                e.starts_with(&format!("{name}: account is no setting any more")),
+                "{text}: {e}"
+            );
+            assert!(e.contains("always runs as nerve-run"), "{e}");
+            assert!(e.contains("program you allow as a provider"), "{e}");
+        }
+        // A key of that name elsewhere is no capability's.
+        let e = NodeConfig::parse("[node]\naccount = \"owner\"\n").unwrap_err();
+        assert!(e.contains("unknown field"), "{e}");
+    }
+
     fn cap(command: &[&str], params: Value) -> ConfigCapability {
         ConfigCapability {
             name: "files.show".into(),
@@ -730,7 +742,6 @@ mod tests {
             params,
             result: Output::Text,
             timeout_secs: None,
-            account: RunsAs::NerveRun,
             platform: Platform::Any,
         }
     }
@@ -847,9 +858,5 @@ mod tests {
         for p in [Platform::Any, Platform::Linux, Platform::Windows] {
             assert_eq!(Platform::parse(p.as_str()), Some(p));
         }
-        for a in [RunsAs::NerveRun, RunsAs::Owner] {
-            assert_eq!(RunsAs::parse(a.as_str()), Some(a));
-        }
-        assert_eq!(RunsAs::parse("nerve"), None);
     }
 }

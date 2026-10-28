@@ -17,7 +17,7 @@ use crate::paths::within;
 
 mod capability;
 pub use capability::{
-    BUILT_IN, ConfigCapability, MAX_CAPABILITIES, Output, Platform, RunsAs, validate_all,
+    BUILT_IN, ConfigCapability, MAX_CAPABILITIES, Output, Platform, validate_all,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1044,7 +1044,11 @@ pub struct CenterDocument {
 impl NodeConfig {
     /// Parses and checks `node.toml`; unknown keys are errors.
     pub fn parse(text: &str) -> Result<NodeConfig, String> {
-        refuse_proxy_secrets(text)?;
+        // Not TOML at all: the typed parse says why.
+        if let Ok(doc) = toml::from_str::<toml::Table>(text) {
+            refuse_proxy_secrets(&doc)?;
+            capability::refuse_account(&doc)?;
+        }
         let mut c: NodeConfig = toml::from_str(text).map_err(|e| e.to_string())?;
         c.validate()?;
         Ok(c)
@@ -1242,11 +1246,7 @@ impl NodeConfig {
 /// errors quote the offending line and so would quote the secret. Anything
 /// but a list of strings in `connection.headers` is refused the same way
 /// without quoting it.
-fn refuse_proxy_secrets(text: &str) -> Result<(), String> {
-    let Ok(doc) = toml::from_str::<toml::Table>(text) else {
-        // Not TOML at all: the typed parse says why.
-        return Ok(());
-    };
+fn refuse_proxy_secrets(doc: &toml::Table) -> Result<(), String> {
     let Some(conn) = doc.get("connection").and_then(toml::Value::as_table) else {
         return Ok(());
     };

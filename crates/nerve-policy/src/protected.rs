@@ -431,9 +431,8 @@ enum Piece {
 
 /// `name` against a pattern of `*`, `?`, `[...]` (with `!` or `^` for
 /// "not", and ranges) and literal characters, in time linear in both for
-/// each `*`, so a long line from the center cannot make it slow. The node
-/// matches the names of an owner's command with it too.
-pub fn glob(pattern: &str, name: &str) -> bool {
+/// each `*`, so a long line from the center cannot make it slow.
+fn glob(pattern: &str, name: &str) -> bool {
     glob_closed(pattern, name, pattern.rfind(']'))
 }
 

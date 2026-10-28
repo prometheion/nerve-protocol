@@ -1227,11 +1227,9 @@ async fn config_call(conn: &mut Conn<TcpStream>, name: &str, args: Value) -> Res
 /// ends it; and in a pairing whose commands run as the owner it still runs
 /// as `nerve-run`, held to its own folders (a granted folder open to every
 /// account included), and the center is no longer told it is a command of
-/// the pairing's account. One that runs as the owner is refused while its
-/// script lies where a center may write, judged as the owner, and runs as
-/// the owner once it does not, but not once the center wrote it as
-/// nerve-run. For a test machine only, as
-/// root: it installs the node and removes it again.
+/// the pairing's account. None runs as the owner: `cap add` takes no
+/// account. For a test machine only, as root: it installs the node and
+/// removes it again.
 ///
 /// `NERVE_NODE_REAL=<the nerve-node to install> NERVE_REAL_OWNER=<an account
 /// with a home, the owner> cargo test -p nerve-node --test real_account --
@@ -1387,11 +1385,27 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
             == ["files.show", "read", "config", "conformance-center:", "on"]),
         "{ls}"
     );
-    assert!(ls.contains("capability who.am: id; as nerve-run"), "{ls}");
+    assert!(ls.contains("capability who.am: id\n"), "{ls}");
     assert!(
-        ls.contains(r#"capability say.back: printf "[%s]\n" {a} {b}; as nerve-run"#),
+        ls.contains(r#"capability say.back: printf "[%s]\n" {a} {b}"#),
         "{ls}"
     );
+    // There is no other account to run one as.
+    let (ok, said) = as_owner(
+        &owner,
+        &[
+            "cap",
+            "add",
+            "own.run",
+            "--effect",
+            "read",
+            "--account",
+            "owner",
+            "--",
+            "id",
+        ],
+    );
+    assert!(!ok && said.contains("--account"), "{said}");
     let paired = center.paired().expect("paired");
     let mut inc = center.next_link(WAIT).await.expect("the node dials");
     fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
@@ -1503,62 +1517,6 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     assert!(started.elapsed() < Duration::from_secs(10));
     let left = sh(Command::new("pgrep").args(["-f", "sleep 41.75"]));
     assert!(!left.0, "{}", left.1);
-
-    // One that runs as the owner may not run a script a center may write,
-    // here through a link in the owner's home, which only the owner may
-    // look into: the node looks as the owner, and `cap add` warns of it as
-    // the node judges it. Once the folder is read-only it runs, as the
-    // owner.
-    std::fs::write(proj.join("run.sh"), "id -un\n").unwrap();
-    std::os::unix::fs::symlink("proj", base.join("link")).unwrap();
-    chown(&base);
-    let (ok, said) = as_owner(
-        &owner,
-        &[
-            "cap",
-            "add",
-            "own.run",
-            "--effect",
-            "read",
-            "--account",
-            "owner",
-            "--",
-            "sh",
-            "nerve-b5/link/run.sh",
-        ],
-    );
-    assert!(ok, "{said}");
-    assert!(said.contains("where a center may write"), "{said}");
-    assert!(as_owner(&owner, &["cap", "set", "own", "on"]).0);
-    let e = config_call(&mut conn, "own.run", json!({}))
-        .await
-        .unwrap_err();
-    assert!(e.contains("where a center may write"), "{e}");
-    let (ok, said) = as_owner(&owner, &["folder", "set", proj.to_str().unwrap(), "-w"]);
-    assert!(ok, "{said}");
-    let r = config_call(&mut conn, "own.run", json!({})).await.unwrap();
-    assert_eq!(r, json!(format!("{owner}\n")));
-    let (ok, said) = as_owner(&owner, &["folder", "set", proj.to_str().unwrap(), "+w"]);
-    assert!(ok, "{said}");
-    // What the center wrote as nerve-run while it had `w` stays that
-    // account's once the `w` is gone: the command is still refused.
-    fs_call(
-        &mut conn,
-        "write",
-        json!({"path": proj.join("run.sh").display().to_string(), "content": "id -un\n"}),
-    )
-    .await
-    .unwrap();
-    let (ok, said) = as_owner(&owner, &["folder", "set", proj.to_str().unwrap(), "-w"]);
-    assert!(ok, "{said}");
-    let e = config_call(&mut conn, "own.run", json!({}))
-        .await
-        .unwrap_err();
-    assert!(e.contains("where a center may write"), "{e}");
-    let audit = as_owner(&owner, &["audit"]).1;
-    assert!(audit.contains("nerve-run may change it"), "{audit}");
-    let (ok, said) = as_owner(&owner, &["folder", "set", proj.to_str().unwrap(), "+w"]);
-    assert!(ok, "{said}");
 
     // A pairing whose commands run as the owner: its commands run as the
     // owner once the node took the change, the capability still as

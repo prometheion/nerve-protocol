@@ -2082,8 +2082,8 @@ impl Link {
             shell: self.shell_for(command),
             by_account: self.reads_by_account(entry, account),
             // The node's own `fs` and the commands of a config capability
-            // as `nerve-run` read with that account's rights; a program, and
-            // a config capability that runs as the owner, with the owner's.
+            // (as `nerve-run`) read with that account's rights; a program
+            // with the owner's.
             provider: program.is_some(),
         };
         // The policy looks at the paths as the account (crate::account::FsAs);
@@ -2571,20 +2571,17 @@ impl Link {
     /// A call of the config capability `decl` (crate::config_cap): its
     /// arguments checked against its schema, its marked paths resolved and
     /// the call decided and audited like a program's; then its command runs
-    /// with no shell, as `nerve-run` or as the owner, from that account's
-    /// home, under the node's limits on commands (the running count, the
-    /// cgroup, the timeout).
+    /// with no shell as `nerve-run`, from that account's home, under the
+    /// node's limits on commands (the running count, the cgroup, the
+    /// timeout).
     ///
-    /// As `nerve-run` it is a command of that account, held like one: its
-    /// paths are looked at as that account, which reads them with its own
-    /// rights, and it runs under Landlock where the kernel has it, with the
-    /// pairing's folders and the account's own (its home, `/tmp`,
-    /// `/var/tmp`) where the pairing's commands run as `nerve-run`; where
-    /// they run as the owner (user mode, a pairing set to run as the owner),
-    /// the folders are not `nerve-run`'s, and it gets its own alone. As the
-    /// owner it has the owner's rights, like a program (crate::provider): only
-    /// the folders the owner granted count for its paths, and no sandbox
-    /// holds it.
+    /// It is a command of that account, held like one: its paths are looked
+    /// at as that account, which reads them with its own rights, and it runs
+    /// under Landlock where the kernel has it, with the pairing's folders and
+    /// the account's own (its home, `/tmp`, `/var/tmp`) where the pairing's
+    /// commands run as `nerve-run`; where they run as the owner (user mode, a
+    /// pairing set to run as the owner), the folders are not `nerve-run`'s,
+    /// and it gets its own alone.
     async fn config_call(
         self: &Arc<Self>,
         id: &Id,
@@ -2594,86 +2591,23 @@ impl Link {
         inv: &Invoke,
         decl: nerve_policy::config::ConfigCapability,
     ) -> Result<Value, RpcError> {
-        use nerve_policy::config::RunsAs;
         let params = decl.params_schema();
         nerve_proto::schema::validate(&params, &Value::Object(inv.args.clone()))?;
         let marked = nerve_proto::schema::path_args(&params);
-        let as_owner = decl.account == RunsAs::Owner;
-        let (entry, runs_as, looks_as) = if as_owner {
-            // A program's view: the pairing's command account looks at the
-            // paths, which only the folders the owner granted hold.
-            let looks = if marked.is_empty() {
-                Ok(None)
-            } else {
-                self.shared.command_account(cfg, &granted.policy)
-            };
-            (granted, self.shared.owner_account(cfg), looks)
-        } else {
-            let run = self.shared.run_account(cfg);
-            (self.shared.with_built_in(cfg, granted), run.clone(), run)
-        };
-        let known = looks_as.as_ref().ok().cloned().flatten();
+        let runs_as = self.shared.run_account(cfg);
+        let entry = self.shared.with_built_in(cfg, granted);
+        let known = runs_as.as_ref().ok().cloned().flatten();
         // `nerve-run` sees the folders once their ACLs are on; a grant that
         // should have come off and has not stops it whatever the pairing.
-        if !as_owner || !marked.is_empty() && self.shared.separate(&entry.policy) {
-            self.acls_ready(cfg).await?;
-        }
+        self.acls_ready(cfg).await?;
         let (args, targets, named, target) =
             self.marked_paths(inv, &params, &marked, known.as_ref())?;
-        let mut argv = decl.argv(&args).map_err(RpcError::invalid_args)?;
-        // It starts in the home of the account it runs as (the node's own
-        // by hand).
-        let start_in = match &runs_as {
-            Ok(Some(a)) => a.home.clone(),
-            _ => self.shared.home.clone(),
-        };
-        // With the owner's rights it may not run what a center may write,
-        // nor start there, and runs the program file judged, not another
-        // one a second look in PATH might find.
-        let judged = as_owner.then(|| {
-            let owner = runs_as.as_ref().ok().cloned().flatten();
-            self.shared.owner_command(cfg, &decl, owner.as_ref())
-        });
-        let found = matches!(judged, Some(Ok(Some(_))));
-        if let Some(Ok(Some(f))) = &judged {
-            argv[0] = f.display().to_string();
-        }
+        let argv = decl.argv(&args).map_err(RpcError::invalid_args)?;
         // The audit's target is what the center named: the paths, else the
         // action, which the event to the center and the rules take. The
-        // command as it runs, the program file judged and the call's
-        // values in it, holds the owner's own words and stays in the node's
-        // own log.
+        // command as it runs, the call's values in it, holds the owner's own
+        // words and stays in the node's own log.
         let ran = nerve_policy::config::ConfigCapability::line(&argv);
-        if let Some(Err(why)) = judged {
-            // Where is the owner's to know: the place names words of the
-            // owner's command and a folder some center may write, perhaps
-            // another one's.
-            self.audit_ran(
-                inv,
-                &target,
-                Some(&ran),
-                "forbidden",
-                Some("forbidden"),
-                Some(&why),
-            );
-            return Err(RpcError::new(
-                ErrorCode::Forbidden,
-                format!(
-                    "{} runs as the owner and its command names or starts in a place where a center may write; the node's audit log says which",
-                    decl.name
-                ),
-            ));
-        }
-        // A program of the owner's account: the link walk refuses a folder
-        // it may not look into, where the owner may.
-        let program = as_owner.then(|| {
-            runs_as
-                .as_ref()
-                .ok()
-                .cloned()
-                .flatten()
-                .map_or_else(crate::account::own_uid, |a| a.uid)
-        });
         let unconfined = (effect == Effect::Execute)
             .then(|| self.shared.unconfined_as(cfg, || known.clone()))
             .flatten();
@@ -2688,27 +2622,17 @@ impl Link {
             Some(&ran),
             known.as_ref(),
             unconfined,
-            program,
+            None,
         )
         .await
         .map_err(|e| as_given(e, &named))?;
         // A missing account stops the call once it is decided and audited.
-        looks_as.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
         let account = runs_as.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
-        // A program the owner may not run, or none, is not left for a
-        // second look in PATH when it starts. The center learns of it with
-        // no word of the command; the owner reads which program in the
-        // node's log, and `cap add` warned of it.
-        if as_owner && !found {
-            tracing::warn!("{}", crate::config_cap::no_program(&decl));
-            return Err(RpcError::new(
-                ErrorCode::Unavailable,
-                crate::config_cap::no_program_for_center(&decl),
-            ));
-        }
         // Only the installed Linux node has `nerve-run`, and only it offers
-        // what runs as that account (crate::config_cap::offered).
-        if !as_owner && account.is_none() {
+        // what runs as that account (crate::config_cap::offered); a test's
+        // node by hand stands for it with its own user
+        // (crate::daemon::NodeOptions::config_caps_by_hand).
+        if account.is_none() && !self.shared.config_caps {
             return Err(RpcError::new(
                 ErrorCode::Unavailable,
                 format!(
@@ -2718,10 +2642,13 @@ impl Link {
                 ),
             ));
         }
+        // It starts in the account's home (the node's own by hand).
+        let start_in = account
+            .as_ref()
+            .map_or_else(|| self.shared.home.clone(), |a| a.home.clone());
         let home = self.shared.rules_home(cfg);
         let own = self.shared.own(cfg);
-        let landlock = (!as_owner
-            && self.shared.exe.is_some()
+        let landlock = (self.shared.exe.is_some()
             && self.shared.confinement.landlock_abi.is_some())
         .then(|| {
             let policy = crate::config_cap::confined(
@@ -2756,7 +2683,7 @@ impl Link {
             timeouts,
             sudo: None,
             account,
-            separate: !as_owner,
+            separate: true,
             own,
             root: None,
             limits: self

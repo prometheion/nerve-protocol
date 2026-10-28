@@ -325,7 +325,7 @@ pub enum CapCmd {
         #[arg(long)]
         center: Option<String>,
     },
-    /// Declare a capability of your own, NAME (`cap.action`, like sensors.read), that runs a fixed command: the words after `--`, the program first. A word written `{field}` is the call's argument `field`, as one whole argument; no shell reads it. It runs as nerve-run on the installed Linux node, or as you with --account owner.
+    /// Declare a capability of your own, NAME (`cap.action`, like sensors.read), that runs a fixed command: the words after `--`, the program first. A word written `{field}` is the call's argument `field`, as one whole argument; no shell reads it. It runs as nerve-run on the installed Linux node, held to the folders; a node run by hand offers none.
     Add {
         /// `cap.action`, like sensors.read.
         name: String,
@@ -381,9 +381,6 @@ pub struct CapSpec {
     /// How long it may run, in seconds, up to limits.max_timeout_secs; `default` for the node's default.
     #[arg(long, value_name = "SECS")]
     pub timeout: Option<String>,
-    /// Who runs it: nerve-run (the default), held to the folders, or owner, you, with your rights.
-    #[arg(long)]
-    pub account: Option<String>,
     /// Where it runs: any (the default), linux or windows. A node offers only those of its platform.
     #[arg(long)]
     pub platform: Option<String>,
@@ -2127,7 +2124,6 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                 params: Value::Null,
                 result: Default::default(),
                 timeout_secs: None,
-                account: Default::default(),
                 platform: Default::default(),
             };
             let input = cap_stdin(&spec)?;
@@ -2158,14 +2154,10 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             })
             .await?;
             w(out, format!("capability {name} added: {}", cap_line(&c)));
-            let (cfg, _) = read_config(&paths).await?;
-            let installed = crate::service::is_service_node(&paths);
             let notes = CapNotes {
-                installed,
-                root: runs_as_root(&paths),
+                installed: crate::service::is_service_node(&paths),
                 held: held.into_inner().unwrap(),
                 programs,
-                written: cap_refusal(&paths, &cfg, &c, installed).await,
             };
             for note in notes.of(&c) {
                 w(out, note);
@@ -2204,13 +2196,10 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                 .find(|d| d.name == name)
                 .ok_or_else(|| format!("no capability {name} is declared"))?;
             w(out, format!("capability {name} changed: {}", cap_line(c)));
-            let installed = crate::service::is_service_node(&paths);
             let notes = CapNotes {
-                installed,
-                root: runs_as_root(&paths),
+                installed: crate::service::is_service_node(&paths),
                 held: held.into_inner().unwrap(),
                 programs: Vec::new(),
-                written: cap_refusal(&paths, &cfg, c, installed).await,
             };
             for note in notes.of(c) {
                 w(out, note);
@@ -3466,13 +3455,7 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
     let text = |r: &Value, k: &str| r[k].as_str().unwrap_or("-").to_string();
     let names: Vec<String> = rows.iter().map(|r| text(r, "name")).collect();
     let width = |k: &str| rows.iter().map(|r| text(r, k).len()).max().unwrap_or(0);
-    // A capability of the config that runs as the owner says so.
-    let source = |r: &Value| match (r["source"].as_str(), r["account"].as_str()) {
-        (Some(s), Some("owner")) => format!("{s} (owner)"),
-        _ => text(r, "source"),
-    };
-    let (wn, we) = (width("name"), width("effect"));
-    let ws = rows.iter().map(|r| source(r).len()).max().unwrap_or(0);
+    let (wn, we, ws) = (width("name"), width("effect"), width("source"));
     let mut lines = Vec::new();
     for r in &rows {
         let what = match r["broken"].as_str().or(r["left_out"].as_str()) {
@@ -3502,7 +3485,7 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
             "{:wn$}  {:we$}  {:ws$}  {what}",
             text(r, "name"),
             text(r, "effect"),
-            source(r),
+            text(r, "source"),
         );
         lines.push(line.trim_end().to_string());
     }
@@ -3556,7 +3539,7 @@ fn cap_spec(
     stdin: Option<&str>,
     c: &mut nerve_policy::config::ConfigCapability,
 ) -> Result<(), String> {
-    use nerve_policy::config::{Output, Platform, RunsAs};
+    use nerve_policy::config::{Output, Platform};
     let stdin = || {
         stdin
             .map(str::to_string)
@@ -3592,9 +3575,6 @@ fn cap_spec(
             ),
         };
     }
-    if let Some(a) = &spec.account {
-        c.account = RunsAs::parse(a).ok_or_else(|| format!("--account {a}: nerve-run or owner"))?;
-    }
     if let Some(p) = &spec.platform {
         c.platform =
             Platform::parse(p).ok_or_else(|| format!("--platform {p}: any, linux or windows"))?;
@@ -3602,10 +3582,10 @@ fn cap_spec(
     Ok(())
 }
 
-/// One config capability in words: its command, who runs it, and what
-/// else the owner set.
+/// One config capability in words: its command, and what else the owner
+/// set.
 fn cap_line(c: &nerve_policy::config::ConfigCapability) -> String {
-    let mut line = format!("{}; as {}", c.command_line(), c.account.as_str());
+    let mut line = c.command_line();
     if !c.platform.is_any() {
         line.push_str(&format!("; {} only", c.platform.as_str()));
     }
@@ -3613,26 +3593,6 @@ fn cap_line(c: &nerve_policy::config::ConfigCapability) -> String {
         line.push_str(&format!("; timeout {t} s"));
     }
     line
-}
-
-/// The string arguments of `c` that are not marked as paths
-/// (`x-nerve-path`): the node judges no path in them.
-fn unmarked_strings(c: &nerve_policy::config::ConfigCapability) -> Vec<String> {
-    let params = c.params_schema();
-    let Some(props) = params.get("properties").and_then(Value::as_object) else {
-        return Vec::new();
-    };
-    let takes_string = |t: &Value| match t {
-        Value::String(t) => t == "string",
-        Value::Array(ts) => ts.iter().any(|t| t == "string"),
-        _ => false,
-    };
-    props
-        .iter()
-        .filter(|(_, p)| p.get("x-nerve-path").is_none())
-        .filter(|(_, p)| p.get("type").is_some_and(takes_string))
-        .map(|(name, _)| name.clone())
-        .collect()
 }
 
 /// What the owner is told of an action `name` that came to sense or
@@ -3662,141 +3622,27 @@ fn programs_offering(listing: &Value, cap: &str) -> Vec<String> {
     found
 }
 
-/// Whether a capability with `account = "owner"` runs as root here: the
-/// installed node's owner is root, or a node run by hand runs as root.
-fn runs_as_root(paths: &NodePaths) -> bool {
-    if crate::service::is_service_node(paths) {
-        crate::owner::is_root(crate::service::owner_of(paths).as_deref())
-    } else {
-        cfg!(unix) && nerve_transport::net::euid() == 0
-    }
-}
-
-/// Why the node refuses calls of `c` now: it runs as the owner and names a
-/// place a center may write, or starts there, or finds no program to run.
-/// The running node judges it as it does before a call (`cap.refusal`): as
-/// the owner, from the owner's home, which the node's own user that runs
-/// this CLI on the installed node may not look into. A node that does not
-/// answer leaves it to [`written_by_centers`]. One this node does not
-/// offer (`cap add` says why) has no calls here to refuse.
-async fn cap_refusal(
-    paths: &NodePaths,
-    cfg: &NodeConfig,
-    c: &nerve_policy::config::ConfigCapability,
-    installed: bool,
-) -> Option<String> {
-    if c.account != nerve_policy::config::RunsAs::Owner
-        || crate::config_cap::left_out(c, std::env::consts::OS, installed).is_some()
-    {
-        return None;
-    }
-    #[cfg(unix)]
-    {
-        let asked =
-            nerve_transport::ctl::call(&paths.ctl_socket(), "cap.refusal", json!({"name": c.name}))
-                .await;
-        if let Ok(v) = asked {
-            return v["refusal"].as_str().map(str::to_string);
-        }
-    }
-    written_by_centers(paths, cfg, c, installed)
-}
-
-/// [`cap_refusal`] while no node runs, as `crate::config_cap::
-/// written_by_centers` judges it: a place a center may write is a `w`
-/// folder of `cfg`, `/tmp`, `/var/tmp`, on the installed node `nerve-run`'s
-/// home, and what an allow rule lets a center write as the owner, and
-/// what `nerve-run` owns or may change; the command starts in the owner's
-/// home (this user's by hand). Looked at as this process can.
-fn written_by_centers(
-    paths: &NodePaths,
-    cfg: &NodeConfig,
-    c: &nerve_policy::config::ConfigCapability,
-    installed: bool,
-) -> Option<String> {
-    let home = crate::service::owner_of(paths)
-        .and_then(|o| crate::account::lookup(&o).ok().flatten())
-        .map_or_else(crate::paths::home_dir, |a| a.home);
-    let mut writable = crate::exec::write_folders(cfg, &home);
-    writable.extend([PathBuf::from("/tmp"), PathBuf::from("/var/tmp")]);
-    if installed {
-        writable.push(crate::account::RUN_HOME.into());
-    }
-    let mut caps = crate::descriptor::built_in(cfg);
-    caps.extend(crate::config_cap::offered(cfg, installed));
-    let now = crate::now_ms();
-    writable.extend(crate::config_cap::written_by_rules(
-        cfg,
-        &caps,
-        &home,
-        now,
-        |p| !installed || p.runs_as_owner(now),
-    ));
-    let run = installed
-        .then(|| {
-            crate::account::lookup(crate::account::RUN_USER)
-                .ok()
-                .flatten()
-        })
-        .flatten();
-    let path = std::env::var_os("PATH");
-    if let Some(why) =
-        crate::config_cap::written_by_centers(c, &writable, run.as_ref(), path.as_deref(), &home)
-    {
-        return Some(why);
-    }
-    c.command
-        .first()
-        .and_then(|p| crate::config_cap::program_file(p, path.as_deref()))
-        .is_none()
-        .then(|| crate::config_cap::no_program(c))
-}
-
 /// What the owner should know of a capability once `cap add` or `cap edit`
 /// declared it.
 struct CapNotes {
     /// Whether this is the installed node.
     installed: bool,
-    /// Whether `account = "owner"` runs as root here ([`runs_as_root`]).
-    root: bool,
     /// The centers and actions `crate::config_cap::hold_new` switched off.
     held: Vec<(String, String)>,
     /// The programs that offered its capability and are let go.
     programs: Vec<String>,
-    /// Why the node refuses its calls ([`cap_refusal`]).
-    written: Option<String>,
 }
 
 impl CapNotes {
-    /// The notes on `c`: where this node does not offer it; that it runs as
-    /// root; that the agent sees no description; that a center gets one
+    /// The notes on `c`: where this node does not offer it; that the agent
+    /// sees no description; that a center gets one
     /// that senses or actuates only once the owner allows it, and for which
     /// centers it was switched off; and which programs lost their
     /// capability to it.
     fn of(&self, c: &nerve_policy::config::ConfigCapability) -> Vec<String> {
-        use nerve_policy::config::RunsAs;
         let mut notes = Vec::new();
         if let Some(why) = crate::config_cap::left_out(c, std::env::consts::OS, self.installed) {
             notes.push(format!("this node does not offer it: {why}"));
-        }
-        if self.root && c.account == RunsAs::Owner {
-            notes.push(format!(
-                "Warning: root is the owner here, so {} runs as root: anything on this machine, Nerve and its keys included",
-                c.name
-            ));
-        }
-        if let Some(why) = &self.written {
-            notes.push(format!(
-                "Warning: {why}; the node refuses its calls while that holds"
-            ));
-        }
-        if c.account == RunsAs::Owner {
-            for field in unmarked_strings(c) {
-                notes.push(format!(
-                    "Warning: {} runs as you and passes {{{field}}} as given: if it names a path, no folder, protected path or rule on paths holds it; mark it \"x-nerve-path\": \"read\" or \"write\" in --params",
-                    c.name
-                ));
-            }
         }
         if c.summary.is_empty() {
             notes.push(format!(
@@ -3825,7 +3671,7 @@ impl CapNotes {
 }
 
 /// The lines of `cap ls` for the capabilities of node.toml: each one's
-/// command and who runs it.
+/// command and what else the owner set.
 fn config_lines(v: &Value) -> Vec<String> {
     v["config"]
         .as_array()
@@ -3841,7 +3687,6 @@ fn config_lines(v: &Value) -> Vec<String> {
                 params: Value::Null,
                 result: Default::default(),
                 timeout_secs: e.timeout_secs,
-                account: nerve_policy::config::RunsAs::parse(&e.account).unwrap_or_default(),
                 platform: nerve_policy::config::Platform::parse(&e.platform).unwrap_or_default(),
             };
             format!("capability {}: {}", c.name, cap_line(&c))
@@ -3856,7 +3701,6 @@ struct ConfigEntry {
     effect: nerve_proto::descriptor::Effect,
     command: Vec<String>,
     timeout_secs: Option<u64>,
-    account: String,
     platform: String,
 }
 
@@ -9906,54 +9750,6 @@ mod tests {
         );
     }
 
-    /// `cap add` and `cap edit` warn of a command that runs as the owner and
-    /// names a place a center may write: the node refuses its calls.
-    #[cfg(unix)]
-    #[test]
-    fn an_owners_command_where_a_center_writes_is_warned_of() {
-        let (d, paths) = setup(&["lab"]);
-        let work = std::fs::canonicalize(d.path()).unwrap().join("work");
-        std::fs::create_dir_all(&work).unwrap();
-        let mut cfg = load(&paths);
-        cfg.centers[0].policy.folders = vec![Folder {
-            path: work.display().to_string(),
-            access: Access::parse("rw").unwrap(),
-        }];
-        cfg.save(&paths.config_file()).unwrap();
-        let script = work.join("deploy.sh").display().to_string();
-        let warning = "Warning: proj.deploy runs as the owner and its command names";
-        let said = run(
-            &paths,
-            &[
-                "cap",
-                "add",
-                "proj.deploy",
-                "--effect",
-                "execute",
-                "--account",
-                "owner",
-                "--",
-                "sh",
-                &script,
-            ],
-        )
-        .unwrap();
-        assert!(said.contains(warning), "{said}");
-        // As nerve-run, held like that account's commands, it is not.
-        let said = run(
-            &paths,
-            &["cap", "edit", "proj.deploy", "--account", "nerve-run"],
-        )
-        .unwrap();
-        assert!(!said.contains(warning), "{said}");
-        let said = run(
-            &paths,
-            &["cap", "edit", "proj.deploy", "--account", "owner"],
-        )
-        .unwrap();
-        assert!(said.contains(warning), "{said}");
-    }
-
     /// `audit` shows what a capability of node.toml ran, after the
     /// decision and its reason.
     #[test]
@@ -9972,10 +9768,9 @@ mod tests {
         );
     }
 
-    /// What `cap add` and `cap edit` tell the owner besides: that an
-    /// owner's capability runs as root where root is the owner, that one
-    /// with no summary shows the agent no description, and which programs
-    /// lost their capability to it.
+    /// What `cap add` and `cap edit` tell the owner besides: that one with
+    /// no summary shows the agent no description, and which programs lost
+    /// their capability to it.
     #[test]
     fn cap_notes_say_what_the_owner_should_know() {
         let mut c = nerve_policy::config::ConfigCapability {
@@ -9986,55 +9781,25 @@ mod tests {
             params: Value::Null,
             result: Default::default(),
             timeout_secs: None,
-            account: nerve_policy::config::RunsAs::Owner,
             platform: Default::default(),
         };
-        let notes = |root: bool, c: &nerve_policy::config::ConfigCapability| {
+        let notes = |c: &nerve_policy::config::ConfigCapability| {
             CapNotes {
                 installed: true,
-                root,
                 held: Vec::new(),
                 programs: vec!["desk".into()],
-                written: None,
             }
             .of(c)
             .join("\n")
         };
-        let said = notes(true, &c);
-        assert!(
-            said.contains("Warning: root is the owner here, so x.run runs as root"),
-            "{said}"
-        );
+        let said = notes(&c);
         assert!(said.contains("it has no summary"), "{said}");
         assert!(
             said.contains("the program desk offered x and is let go"),
             "{said}"
         );
-        assert!(!notes(false, &c).contains("root"));
-        // A string argument with no path mark is passed as given.
-        c.command = vec![
-            "make".into(),
-            "-C".into(),
-            "{dir}".into(),
-            "{n}".into(),
-            "{log}".into(),
-        ];
-        c.params = json!({"type": "object", "required": ["dir", "n", "log"], "properties": {
-            "dir": {"type": "string"}, "n": {"type": "integer"},
-            "log": {"type": "string", "x-nerve-path": "write"}}});
-        let said = notes(false, &c);
-        assert!(
-            said.contains("Warning: x.run runs as you and passes {dir} as given"),
-            "{said}"
-        );
-        assert!(!said.contains("{n}") && !said.contains("{log}"), "{said}");
-        c.account = nerve_policy::config::RunsAs::NerveRun;
         c.summary = "Builds.".into();
-        let said = notes(true, &c);
-        assert!(
-            !said.contains("root") && !said.contains("summary") && !said.contains("as given"),
-            "{said}"
-        );
+        assert!(!notes(&c).contains("summary"));
     }
 
     #[test]
@@ -10065,9 +9830,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            said.contains(
-                "capability logs.tail added: tail -n 20 -- {path}; as nerve-run; timeout 5 s"
-            ),
+            said.contains("capability logs.tail added: tail -n 20 -- {path}; timeout 5 s"),
             "{said}"
         );
         let c = load(&paths).capabilities[0].clone();
@@ -10117,11 +9880,11 @@ mod tests {
                     "--effect",
                     "read",
                     "--account",
-                    "root",
+                    "owner",
                     "--",
                     "cat",
                 ],
-                "nerve-run or owner",
+                "unexpected argument '--account'",
             ),
             (
                 &[
@@ -10155,8 +9918,6 @@ mod tests {
                 "cap",
                 "edit",
                 "logs.tail",
-                "--account",
-                "owner",
                 "--timeout",
                 "default",
                 "--effect",
@@ -10165,7 +9926,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            said.contains("capability logs.tail changed: tail -n 20 -- {path}; as owner"),
+            said.contains("capability logs.tail changed: tail -n 20 -- {path}\n"),
             "{said}"
         );
         assert!(
@@ -10173,7 +9934,7 @@ mod tests {
             "{said}"
         );
         let c = load(&paths).capabilities[0].clone();
-        assert_eq!((c.timeout_secs, c.account.as_str()), (None, "owner"));
+        assert_eq!(c.timeout_secs, None);
         assert_eq!(c.command, ["tail", "-n", "20", "--", "{path}"]);
         run(
             &paths,
@@ -10202,8 +9963,6 @@ mod tests {
                 "read",
                 "--platform",
                 "windows",
-                "--account",
-                "owner",
                 "--result",
                 r#"{"type": "string"}"#,
                 "--",
@@ -10221,21 +9980,19 @@ mod tests {
                 .join(" ")
         };
         if cfg!(target_os = "linux") {
+            // A node run by hand offers none and says why.
             assert_eq!(
                 line("logs.tail"),
-                "logs.tail sense config (owner) lab: default"
+                "logs.tail sense config left out: runs as nerve-run, which only the installed node has (sudo nerve-node install)"
             );
             assert!(
                 line("win.who").ends_with("left out: for windows only"),
                 "{ls}"
             );
         }
+        assert!(ls.contains("capability logs.tail: uptime\n"), "{ls}");
         assert!(
-            ls.contains("capability logs.tail: uptime; as owner"),
-            "{ls}"
-        );
-        assert!(
-            ls.contains("capability win.who: whoami; as owner; windows only"),
+            ls.contains("capability win.who: whoami; windows only"),
             "{ls}"
         );
         let v = json_of(&paths, &["cap", "ls"]);
@@ -10243,7 +10000,7 @@ mod tests {
             v["config"][1],
             json!({"name": "win.who", "summary": "", "effect": "read", "command": ["whoami"],
                    "params": null, "result": {"type": "string"}, "timeout_secs": null,
-                   "account": "owner", "platform": "windows"})
+                   "platform": "windows"})
         );
         assert_eq!(v["config"][0]["result"], "text");
         let row = v["capabilities"]

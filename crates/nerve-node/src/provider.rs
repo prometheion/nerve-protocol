@@ -886,9 +886,9 @@ async fn check(
 /// decide besides the switch.
 ///
 /// The capabilities of the config (crate::config_cap) are listed with
-/// source `config` and the account they run as, or, where this node does
-/// not offer one (`installed` tells a node run by hand), with why it is
-/// left out; `config` holds each entry as the owner declared it.
+/// source `config`, or, where this node does not offer one (`installed`
+/// tells a node run by hand, which offers none), with why it is left out;
+/// `config` holds each entry as the owner declared it.
 pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>, installed: bool) -> Value {
     use nerve_policy::config::CapSetting;
     let attached = live.map(|s| &s.providers);
@@ -964,20 +964,13 @@ pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>, installed: bool) 
         .collect();
     let offered = crate::config_cap::offered(cfg, installed);
     for c in offered {
-        for mut r in row(&c, crate::config_cap::PROVIDER) {
-            let name = r["name"].as_str().unwrap_or_default().to_string();
-            if let Some(decl) = cfg.capabilities.iter().find(|d| d.name == name) {
-                r["account"] = json!(decl.account.as_str());
-            }
-            rows.push(r);
-        }
+        rows.extend(row(&c, crate::config_cap::PROVIDER));
     }
     for decl in &cfg.capabilities {
         if let Some(why) = crate::config_cap::left_out(decl, std::env::consts::OS, installed) {
             let (cap, action) = decl.split();
             rows.push(json!({"name": decl.name, "effect": decl.effect,
-                             "source": crate::config_cap::PROVIDER,
-                             "account": decl.account.as_str(), "left_out": why,
+                             "source": crate::config_cap::PROVIDER, "left_out": why,
                              "centers": centers(cap, action)}));
         }
     }

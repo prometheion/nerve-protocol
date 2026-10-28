@@ -2,10 +2,11 @@
 //! on a real node daemon, in process: the node offers them by its platform
 //! and by the effect table, decides and audits each call like any other, and
 //! runs the owner's command itself with the call's arguments as whole
-//! arguments, never through a shell. A node run by hand has no `nerve-run`,
-//! so it offers only those that run as the owner; the installed node's runs
-//! as `nerve-run` are in real_account.rs. Linux only: Windows reads them
-//! and offers none yet.
+//! arguments, never through a shell. They run as `nerve-run`, which a node
+//! run by hand does not have, so it offers none; here the node by hand
+//! stands for it with its own user (NodeOptions::config_caps_by_hand), and
+//! the installed node's runs as `nerve-run` are in real_account.rs. Linux
+//! only: Windows reads them and offers none yet.
 #![cfg(target_os = "linux")]
 
 use std::os::unix::ffi::OsStrExt;
@@ -23,11 +24,8 @@ use tokio::net::{TcpStream, UnixStream};
 
 const WAIT: Duration = Duration::from_secs(15);
 
-/// A folder for one test, outside `/tmp` and `/var/tmp`: the node's home is
-/// in it, and a command that runs as the owner may not start where a center
-/// may write, which those are.
 fn scratch() -> tempfile::TempDir {
-    tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap()
+    tempfile::tempdir().unwrap()
 }
 
 fn options(root: &Path) -> NodeOptions {
@@ -37,6 +35,14 @@ fn options(root: &Path) -> NodeOptions {
     // Not the rights of whoever runs the tests: an elevated run must pass.
     o.full_rights = Some(false);
     o.exe = Some(env!("CARGO_BIN_EXE_nerve-node").into());
+    // The node by hand runs the config's capabilities as its own user, for
+    // `nerve-run`, on a kernel without Landlock (as on a machine that lacks
+    // it): the folders of a pairing by hand are not that account's.
+    o.config_caps_by_hand = true;
+    o.confinement = Some(nerve_sandbox::Confinement {
+        landlock_abi: None,
+        appcontainer: false,
+    });
     o
 }
 
@@ -167,22 +173,6 @@ fn audited(paths: &NodePaths, cap: &str) -> Vec<Value> {
         .collect()
 }
 
-/// The file a node run by hand runs for the bare `program` of an owner's
-/// command: the first one of that name in a full path of `PATH` that may
-/// be run.
-fn found(program: &str) -> String {
-    use std::os::unix::fs::PermissionsExt;
-    std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .filter(|d| d.is_absolute())
-        .map(|d| d.join(program))
-        .find(|f| {
-            std::fs::metadata(f).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })
-        .unwrap()
-        .display()
-        .to_string()
-}
-
 fn user_mode(p: &mut nerve_policy::CenterPolicy) {
     p.mode = nerve_policy::Mode::User;
 }
@@ -196,8 +186,7 @@ async fn arguments_are_data_never_shell() {
     let echo = cap(r#"name = "say.back"
 effect = "read"
 command = ["printf", "--", "[%s]\n", "{a}", "{b}", "{c}"]
-params = '{"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}, "c": {"type": "integer"}}, "required": ["a", "b"]}'
-account = "owner""#);
+params = '{"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}, "c": {"type": "integer"}}, "required": ["a", "b"]}'"#);
     let daemon = node(dir.path(), &center, vec![echo], user_mode).await;
     let home = dir.path().join("home");
     // What `; rm -rf x` would remove if a shell read it: in the folder the
@@ -244,7 +233,7 @@ account = "owner""#);
     assert!(!heard[0].to_string().contains("printf"), "{heard:?}");
     let entries = audited(daemon.paths(), "say");
     let ran = ConfigCapability::line(&[
-        found("printf"),
+        "printf".into(),
         "--".into(),
         "[%s]\n".into(),
         a.clone(),
@@ -270,13 +259,11 @@ async fn an_option_like_value_after_double_dash_stays_an_argument() {
     let after = cap(r#"name = "files.make"
 effect = "write"
 command = ["touch", "--", "{name}"]
-params = '{"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}'
-account = "owner""#);
+params = '{"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}'"#);
     let before = cap(r#"name = "files.touch"
 effect = "write"
 command = ["touch", "{name}"]
-params = '{"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}'
-account = "owner""#);
+params = '{"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}'"#);
     let daemon = node(dir.path(), &center, vec![after, before], user_mode).await;
     let home = dir.path().join("home");
     let mut conn = linked(&mut center).await;
@@ -314,13 +301,11 @@ async fn a_path_arg_outside_the_folders_is_refused() {
     let show = cap(r#"name = "files.show"
 effect = "read"
 command = ["cat", "--", "{path}"]
-params = '{"type": "object", "properties": {"path": {"type": "string", "x-nerve-path": "read"}}, "required": ["path"]}'
-account = "owner""#);
+params = '{"type": "object", "properties": {"path": {"type": "string", "x-nerve-path": "read"}}, "required": ["path"]}'"#);
     let make = cap(r#"name = "files.make"
 effect = "write"
 command = ["touch", "--", "{path}"]
-params = '{"type": "object", "properties": {"path": {"type": "string", "x-nerve-path": "write"}}, "required": ["path"]}'
-account = "owner""#);
+params = '{"type": "object", "properties": {"path": {"type": "string", "x-nerve-path": "write"}}, "required": ["path"]}'"#);
     let folder = nerve_policy::config::Folder {
         path: work.display().to_string(),
         access: nerve_policy::config::Access::parse("rw").unwrap(),
@@ -379,8 +364,7 @@ account = "owner""#);
     daemon.stop().await;
 }
 
-/// Whether a process runs `sleep` with the argument `arg` (the node runs
-/// the file it found in `PATH`, so its first word is a full path).
+/// Whether a process runs `sleep` with the argument `arg`.
 fn sleeping(arg: &str) -> bool {
     std::fs::read_dir("/proc").unwrap().flatten().any(|e| {
         std::fs::read(e.path().join("cmdline")).is_ok_and(|c| {
@@ -392,115 +376,6 @@ fn sleeping(arg: &str) -> bool {
     })
 }
 
-/// A command that runs as the owner may not run what a center may write:
-/// a script in a `w` folder would be that center's code with the owner's
-/// rights, also named from the home it starts in. It is refused and in the
-/// audit, and nothing of it runs.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_owners_command_in_a_folder_a_center_writes_is_refused() {
-    let dir = scratch();
-    let root = dir.path().canonicalize().unwrap();
-    // A folder of the node's home (where an owner's command starts) the
-    // center may write.
-    let work = root.join("home/work");
-    std::fs::create_dir_all(&work).unwrap();
-    let ran = root.join("ran");
-    std::fs::write(work.join("deploy.sh"), format!("touch {}\n", ran.display())).unwrap();
-    let mut center = FakeCenter::start(false).await.unwrap();
-    let deploy = ConfigCapability {
-        command: vec!["sh".into(), work.join("deploy.sh").display().to_string()],
-        ..cap(r#"name = "proj.deploy"
-effect = "execute"
-command = ["sh"]
-account = "owner""#)
-    };
-    let relative = cap(r#"name = "proj.rel"
-effect = "execute"
-command = ["sh", "work/deploy.sh"]
-account = "owner""#);
-    let folder = nerve_policy::config::Folder {
-        path: work.display().to_string(),
-        access: nerve_policy::config::Access::parse("rw").unwrap(),
-    };
-    let daemon = node(&root, &center, vec![deploy, relative], |p| {
-        p.mode = nerve_policy::Mode::Folder;
-        p.folders = vec![folder.clone()];
-        p.caps.insert("proj".into(), CapSetting::On);
-    })
-    .await;
-    let mut conn = linked(&mut center).await;
-    conn.call("sub", json!({"topics": ["audit/decision"]}), WAIT)
-        .await
-        .unwrap()
-        .expect("sub");
-    for name in ["proj.deploy", "proj.rel"] {
-        let (r, heard) = invoke_heard(&mut conn, name, json!({})).await;
-        let e = r.unwrap_err();
-        assert_eq!(code_of(&e), "forbidden", "{name}: {}", e.message);
-        assert!(
-            e.message.contains("where a center may write"),
-            "{name}: {}",
-            e.message
-        );
-        assert!(!ran.exists(), "{name}: the script did not run");
-        // The center is not told the place, which names a folder some
-        // center may write; the owner finds it in the audit log.
-        let place = work.display().to_string();
-        assert!(!e.message.contains(&place), "{name}: {}", e.message);
-        // Nor in the event it hears of the call, which names the action
-        // and no word of the owner's command.
-        assert_eq!(heard.len(), 1, "{name}: {heard:?}");
-        assert_eq!(heard[0]["target"], name, "{heard:?}");
-        assert!(!heard[0].to_string().contains("deploy.sh"), "{heard:?}");
-        let entries = audited(daemon.paths(), "proj");
-        let line = ConfigCapability::line(
-            &daemon
-                .config()
-                .capabilities
-                .iter()
-                .find(|c| c.name == name)
-                .unwrap()
-                .command,
-        );
-        assert!(
-            entries.iter().any(|e| e["decision"] == "forbidden"
-                && e["target"] == name
-                && e["command"] == line.as_str()
-                && e["reason"].as_str().is_some_and(|r| r.contains(&place))),
-            "{entries:?}"
-        );
-    }
-    daemon.stop().await;
-}
-
-/// An owner's command runs the very file the node found in `PATH` when it
-/// judged the command: the program sees its full path as its first word.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_owners_command_runs_the_program_the_node_judged() {
-    let dir = scratch();
-    let mut center = FakeCenter::start(false).await.unwrap();
-    let first = cap(r#"name = "sh.first"
-effect = "read"
-command = ["sh", "-c", "printf %s \"$0\""]
-account = "owner""#);
-    let daemon = node(dir.path(), &center, vec![first], user_mode).await;
-    let mut conn = linked(&mut center).await;
-    let r = invoke(&mut conn, "sh.first", json!({})).await.unwrap();
-    let said = r.as_str().unwrap();
-    assert!(said.starts_with('/') && said.ends_with("/sh"), "{said}");
-    // The audit names that file too: which of two programs of one name
-    // ran is the owner's to know.
-    let entries = audited(daemon.paths(), "sh");
-    assert!(
-        entries.iter().any(|e| e["decision"] == "allowed"
-            && e["command"]
-                .as_str()
-                .is_some_and(|c| c.starts_with(&format!("{said} -c ")))),
-        "{entries:?}"
-    );
-    daemon.stop().await;
-}
-
 /// A call of a config capability counts toward `limits.max_running` as a
 /// command does: while one runs, a second one is `busy`.
 #[tokio::test(flavor = "multi_thread")]
@@ -509,8 +384,7 @@ async fn a_call_counts_toward_max_running() {
     let mut center = FakeCenter::start(false).await.unwrap();
     let slow = cap(r#"name = "slow.wait"
 effect = "read"
-command = ["sleep", "41.625"]
-account = "owner""#);
+command = ["sleep", "41.625"]"#);
     let o = options(dir.path());
     let daemon = node(dir.path(), &center, vec![slow], user_mode).await;
     owner_edit(&o.paths, |c| c.limits.max_running = 1).await;
@@ -549,8 +423,7 @@ async fn the_timeout_ends_it() {
     let slow = cap(r#"name = "slow.wait"
 effect = "read"
 command = ["sleep", "41.25"]
-timeout_secs = 1
-account = "owner""#);
+timeout_secs = 1"#);
     let daemon = node(dir.path(), &center, vec![slow], user_mode).await;
     let mut conn = linked(&mut center).await;
     let started = Instant::now();
@@ -574,8 +447,7 @@ async fn a_cancelled_call_ends_the_command() {
     let mut center = FakeCenter::start(false).await.unwrap();
     let slow = cap(r#"name = "slow.wait"
 effect = "read"
-command = ["sleep", "41.5"]
-account = "owner""#);
+command = ["sleep", "41.5"]"#);
     let daemon = node(dir.path(), &center, vec![slow], user_mode).await;
     let mut conn = linked(&mut center).await;
     let id = conn
@@ -645,8 +517,7 @@ async fn a_command_killed_for_its_memory_fails_and_is_in_the_audit() {
         command: vec!["sh".into(), "-c".into(), script],
         ..cap(r#"name = "big.run"
 effect = "read"
-command = ["sh"]
-account = "owner""#)
+command = ["sh"]"#)
     };
     owner_edit(&o.paths, |c| {
         c.capabilities = vec![big.clone()];
@@ -672,11 +543,9 @@ account = "owner""#)
     assert_eq!(killed.len(), 1, "{entries:?}");
     assert_eq!(killed[0]["code"], "memory", "{entries:?}");
     assert_eq!(killed[0]["target"], "big.run", "{entries:?}");
-    let mut ran = big.command.clone();
-    ran[0] = found("sh");
     assert_eq!(
         killed[0]["command"],
-        ConfigCapability::line(&ran),
+        ConfigCapability::line(&big.command),
         "{entries:?}"
     );
 }
@@ -690,8 +559,7 @@ async fn stderr_past_the_cap_leaves_the_result_whole() {
     let noisy = cap(r#"name = "probe.noisy"
 effect = "read"
 command = ["sh", "-c", "printf '{\"t\": 1}'; head -c 4096 /dev/zero | tr '\\0' x >&2"]
-result = '{"type": "object"}'
-account = "owner""#);
+result = '{"type": "object"}'"#);
     let o = options(dir.path());
     nerve_node::pair::pair(&o.paths, &center.link(), Some("lab"))
         .await
@@ -721,14 +589,12 @@ async fn a_failing_command_is_an_error_and_json_is_parsed() {
     let mut center = FakeCenter::start(false).await.unwrap();
     let fail = cap(r#"name = "probe.fail"
 effect = "read"
-command = ["ls", "--", "/nonexistent-b5"]
-account = "owner""#);
+command = ["ls", "--", "/nonexistent-b5"]"#);
     let json_cap = cap(r#"name = "probe.json"
 effect = "read"
 command = ["printf", "{v}"]
 params = '{"type": "object", "properties": {"v": {"type": "string"}}, "required": ["v"]}'
-result = '{"type": "object", "properties": {"t": {"type": "integer"}}, "required": ["t"]}'
-account = "owner""#);
+result = '{"type": "object", "properties": {"t": {"type": "integer"}}, "required": ["t"]}'"#);
     let daemon = node(dir.path(), &center, vec![fail, json_cap], user_mode).await;
     let mut conn = linked(&mut center).await;
     let e = invoke(&mut conn, "probe.fail", json!({}))
@@ -765,8 +631,7 @@ async fn a_name_clash_with_a_provider_is_refused() {
     let mut center = FakeCenter::start(false).await.unwrap();
     let dim = cap(r#"name = "lamp.dim"
 effect = "write"
-command = ["true"]
-account = "owner""#);
+command = ["true"]"#);
     let o = options(dir.path());
     nerve_node::pair::pair(&o.paths, &center.link(), Some("lab"))
         .await
@@ -804,17 +669,7 @@ account = "owner""#);
     let paths = daemon.paths().clone();
     let said = cli(
         &paths,
-        &[
-            "cap",
-            "add",
-            "desk.off",
-            "--effect",
-            "write",
-            "--account",
-            "owner",
-            "--",
-            "true",
-        ],
+        &["cap", "add", "desk.off", "--effect", "write", "--", "true"],
     )
     .await;
     assert!(
@@ -826,9 +681,8 @@ account = "owner""#);
     daemon.stop().await;
 }
 
-/// A capability for Windows only is not offered on Linux, nor one that runs
-/// as `nerve-run` on a node run by hand, which has no such account; a call
-/// of either names an unknown capability.
+/// A capability for Windows only is not offered on Linux; a call of it
+/// names an unknown capability.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_windows_only_capability_is_not_offered_on_linux() {
     let dir = scratch();
@@ -837,14 +691,12 @@ async fn a_windows_only_capability_is_not_offered_on_linux() {
         cap(r#"name = "win.who"
 effect = "read"
 command = ["whoami"]
-platform = "windows"
-account = "owner""#),
+platform = "windows""#),
         cap(r#"name = "lin.who"
 effect = "read"
 command = ["id", "-un"]
-platform = "linux"
-account = "owner""#),
-        cap(r#"name = "run.who"
+platform = "linux""#),
+        cap(r#"name = "any.who"
 effect = "read"
 command = ["id", "-un"]"#),
     ];
@@ -856,15 +708,57 @@ command = ["id", "-un"]"#),
         .filter(|(_, p)| p == "config")
         .map(|(n, _)| n)
         .collect();
-    assert_eq!(now, ["lin.who"]);
-    for name in ["win.who", "run.who"] {
-        let e = invoke(&mut conn, name, json!({})).await.unwrap_err();
-        assert_eq!(code_of(&e), "unknown_capability", "{name}: {}", e.message);
+    assert_eq!(now, ["any.who", "lin.who"]);
+    let e = invoke(&mut conn, "win.who", json!({})).await.unwrap_err();
+    assert_eq!(code_of(&e), "unknown_capability", "{}", e.message);
+    for name in ["lin.who", "any.who"] {
+        invoke(&mut conn, name, json!({}))
+            .await
+            .expect("its own platform's runs");
     }
-    invoke(&mut conn, "lin.who", json!({}))
-        .await
-        .expect("its own platform's runs");
     daemon.stop().await;
+}
+
+/// A node run by hand has no `nerve-run`, which every capability of
+/// node.toml runs as, so it offers none: a call of one names an unknown
+/// capability, and `cap ls` says why each one is left out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_run_by_hand_offers_none_and_says_why() {
+    let dir = scratch();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let mut o = options(dir.path());
+    o.config_caps_by_hand = false;
+    nerve_node::pair::pair(&o.paths, &center.link(), Some("lab"))
+        .await
+        .expect("pair");
+    let who = cap(r#"name = "who.am"
+effect = "read"
+command = ["id"]"#);
+    owner_edit(&o.paths, |c| {
+        c.capabilities = vec![who.clone()];
+        user_mode(&mut c.centers[0].policy);
+    })
+    .await;
+    let daemon = Daemon::start(o).await.expect("start");
+    let mut conn = linked(&mut center).await;
+    let now = offered(&mut conn).await;
+    assert!(!now.iter().any(|(_, p)| p == "config"), "{now:?}");
+    let e = invoke(&mut conn, "who.am", json!({})).await.unwrap_err();
+    assert_eq!(code_of(&e), "unknown_capability", "{}", e.message);
+    let why =
+        "left out: runs as nerve-run, which only the installed node has (sudo nerve-node install)";
+    let paths = daemon.paths().clone();
+    let ls = cli(&paths, &["cap", "ls"]).await;
+    let row = ls
+        .lines()
+        .find(|l| l.starts_with("who.am"))
+        .unwrap_or_else(|| panic!("{ls}"));
+    assert!(row.ends_with(why), "{ls}");
+    assert!(ls.contains("capability who.am: id\n"), "{ls}");
+    // So does the CLI while no node runs.
+    daemon.stop().await;
+    let ls = cli(&paths, &["cap", "ls"]).await;
+    assert!(ls.contains(why), "{ls}");
 }
 
 /// A capability of the config that senses is offered and runs only once
@@ -876,12 +770,10 @@ async fn sense_needs_the_owners_on() {
     let mut center = FakeCenter::start(false).await.unwrap();
     let temp = cap(r#"name = "probe.temp"
 effect = "sense"
-command = ["echo", "21"]
-account = "owner""#);
+command = ["echo", "21"]"#);
     let list = cap(r#"name = "notes.list"
 effect = "read"
-command = ["echo", "temp"]
-account = "owner""#);
+command = ["echo", "temp"]"#);
     let daemon = node(dir.path(), &center, vec![temp, list], |p| {
         p.mode = nerve_policy::Mode::Folder;
     })
@@ -1023,20 +915,19 @@ async fn set_caps(conn: &mut Conn<TcpStream>, caps: Value) -> Result<Value, nerv
 }
 
 /// A center may not turn on a capability whose action senses although this
-/// node does not offer that action now (it runs as `nerve-run`, which a node
-/// run by hand lacks): once the owner makes it offered, the center's `on`
-/// would cover it.
+/// node does not offer that action now (it is for another platform): once
+/// the owner makes it offered, the center's `on` would cover it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_capability_that_senses_where_it_is_not_offered_stays_the_owners() {
     let dir = scratch();
     let mut center = FakeCenter::start(false).await.unwrap();
     let list = cap(r#"name = "probe.list"
 effect = "read"
-command = ["echo", "temp"]
-account = "owner""#);
+command = ["echo", "temp"]"#);
     let cam = cap(r#"name = "probe.cam"
 effect = "sense"
-command = ["echo", "frame"]"#);
+command = ["echo", "frame"]
+platform = "windows""#);
     let daemon = node(dir.path(), &center, vec![list, cam], |p| {
         p.mode = nerve_policy::Mode::Folder;
     })
@@ -1075,8 +966,7 @@ async fn config_accept_holds_an_action_that_comes_to_sense() {
     let mut center = FakeCenter::start(false).await.unwrap();
     let list = cap(r#"name = "probe.list"
 effect = "read"
-command = ["echo", "temp"]
-account = "owner""#);
+command = ["echo", "temp"]"#);
     let daemon = node(dir.path(), &center, vec![list], |p| {
         p.mode = nerve_policy::Mode::Folder;
         p.caps.insert("probe".into(), CapSetting::On);
@@ -1087,7 +977,7 @@ account = "owner""#);
     let file = paths.config_file();
     let mut text = std::fs::read_to_string(&file).unwrap();
     text.push_str(
-        "\n[[capability]]\nname = \"probe.cam\"\neffect = \"sense\"\ncommand = [\"echo\", \"frame\"]\naccount = \"owner\"\n",
+        "\n[[capability]]\nname = \"probe.cam\"\neffect = \"sense\"\ncommand = [\"echo\", \"frame\"]\n",
     );
     std::fs::write(&file, text).unwrap();
     let version = |paths: &NodePaths| {
@@ -1122,8 +1012,7 @@ account = "owner""#);
     owner_edit(&paths, |c| {
         c.capabilities.push(cap(r#"name = "probe.mic"
 effect = "sense"
-command = ["echo", "sound"]
-account = "owner""#));
+command = ["echo", "sound"]"#));
     })
     .await;
     let caps = &nerve_node::cli::read_config(&paths)
@@ -1268,8 +1157,6 @@ async fn cap_add_takes_the_schema_on_stdin_and_the_running_node_offers_it() {
             "say.word",
             "--effect",
             "read",
-            "--account",
-            "owner",
             "--params-stdin",
             "--",
             "printf",
@@ -1295,7 +1182,7 @@ async fn cap_add_takes_the_schema_on_stdin_and_the_running_node_offers_it() {
         String::from_utf8_lossy(&o.stderr)
     );
     assert!(
-        said.contains("capability say.word added: printf %s {word}; as owner"),
+        said.contains("capability say.word added: printf %s {word}\n"),
         "{said}"
     );
     // The node took the change: it offers it, and the call runs.
@@ -1325,203 +1212,13 @@ async fn cap_add_takes_the_schema_on_stdin_and_the_running_node_offers_it() {
         .unwrap_or_else(|| panic!("{ls}"));
     assert_eq!(
         row.split_whitespace().collect::<Vec<_>>(),
-        ["say.word", "read", "config", "(owner)", "lab:", "on"],
+        ["say.word", "read", "config", "lab:", "on"],
         "{ls}"
     );
     assert!(
-        ls.contains("capability say.word: printf %s {word}; as owner"),
+        ls.contains("capability say.word: printf %s {word}\n"),
         "{ls}"
     );
-    daemon.stop().await;
-}
-
-/// `cap add` and `cap edit` warn of what the running node will refuse, as
-/// the node judges it before a call: from where the command starts (the
-/// node's home here, not the CLI user's), so a relative script in a folder
-/// a center writes is named.
-#[tokio::test(flavor = "multi_thread")]
-async fn cap_add_warns_as_the_node_judges_from_where_it_starts() {
-    let dir = scratch();
-    let root = dir.path().canonicalize().unwrap();
-    let work = root.join("home/work-b5");
-    std::fs::create_dir_all(&work).unwrap();
-    std::fs::write(work.join("go.sh"), "echo go\n").unwrap();
-    let mut center = FakeCenter::start(false).await.unwrap();
-    let folder = nerve_policy::config::Folder {
-        path: work.display().to_string(),
-        access: nerve_policy::config::Access::parse("rw").unwrap(),
-    };
-    let daemon = node(&root, &center, Vec::new(), |p| {
-        p.mode = nerve_policy::Mode::Folder;
-        p.folders = vec![folder.clone()];
-    })
-    .await;
-    let _conn = linked(&mut center).await;
-    let paths = daemon.paths().clone();
-    let said = cli(
-        &paths,
-        &[
-            "cap",
-            "add",
-            "work.go",
-            "--effect",
-            "execute",
-            "--account",
-            "owner",
-            "--",
-            "sh",
-            "work-b5/go.sh",
-        ],
-    )
-    .await;
-    let warning = format!(
-        "Warning: work.go runs as the owner and its command names {}",
-        work.join("go.sh").display()
-    );
-    assert!(said.contains(&warning), "{said}");
-    // A program the owner may not run, or none, is told as well.
-    let said = cli(
-        &paths,
-        &["cap", "edit", "work.go", "--", "no-such-program-b5"],
-    )
-    .await;
-    assert!(
-        said.contains("finds no program no-such-program-b5"),
-        "{said}"
-    );
-    // One this node does not offer has no calls here to refuse: neither
-    // the CLI nor the node says it would.
-    let said = cli(
-        &paths,
-        &[
-            "cap",
-            "add",
-            "win.ip",
-            "--effect",
-            "read",
-            "--account",
-            "owner",
-            "--platform",
-            "windows",
-            "--",
-            "no-such-program-b5.exe",
-            "/all",
-        ],
-    )
-    .await;
-    assert!(said.contains("for windows only"), "{said}");
-    assert!(!said.contains("Warning: win.ip"), "{said}");
-    let asked = nerve_transport::ctl::call(
-        &paths.ctl_socket(),
-        "cap.refusal",
-        json!({"name": "win.ip"}),
-    )
-    .await
-    .unwrap();
-    assert_eq!(asked["refusal"], Value::Null, "{asked}");
-    daemon.stop().await;
-    // Nor does the CLI while no node runs.
-    let said = cli(
-        &paths,
-        &[
-            "cap",
-            "edit",
-            "win.ip",
-            "--",
-            "no-such-program-b5.exe",
-            "/renew",
-        ],
-    )
-    .await;
-    assert!(said.contains("for windows only"), "{said}");
-    assert!(!said.contains("Warning: win.ip"), "{said}");
-}
-
-/// A command that runs as the owner and whose program is in no folder of
-/// `PATH` does not start: the node does not leave it to a second look in
-/// `PATH` when it starts, which could find a file put there meanwhile.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_owners_command_without_its_program_does_not_start() {
-    let dir = scratch();
-    let mut center = FakeCenter::start(false).await.unwrap();
-    let none = cap(r#"name = "gen.run"
-effect = "read"
-command = ["no-such-program-b5"]
-account = "owner""#);
-    let daemon = node(dir.path(), &center, vec![none], user_mode).await;
-    let mut conn = linked(&mut center).await;
-    let e = invoke(&mut conn, "gen.run", json!({})).await.unwrap_err();
-    assert_eq!(code_of(&e), "unavailable", "{}", e.message);
-    // The center is told that, with no word of the owner's command.
-    assert!(
-        e.message
-            .contains("gen.run runs as the owner and finds no program in the node's PATH"),
-        "{}",
-        e.message
-    );
-    assert!(!e.message.contains("no-such-program"), "{}", e.message);
-    daemon.stop().await;
-}
-
-/// In `allowlist` mode a center whose writes run as the owner (every
-/// pairing of a node run by hand) writes where its allow rules say: a
-/// script there is that center's code as much as one in a `w` folder, so
-/// an owner's command that runs it is refused; a rule that only reads
-/// there does not count.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_allow_rule_that_writes_as_the_owner_holds_an_owners_command() {
-    let dir = scratch();
-    let root = dir.path().canonicalize().unwrap();
-    let site = root.join("home/site");
-    std::fs::create_dir_all(&site).unwrap();
-    let ran = root.join("ran");
-    std::fs::write(site.join("deploy.sh"), format!("touch {}\n", ran.display())).unwrap();
-    let mut center = FakeCenter::start(false).await.unwrap();
-    let deploy = cap(r#"name = "site.deploy"
-effect = "execute"
-command = ["sh", "site/deploy.sh"]
-account = "owner""#);
-    let daemon = node(&root, &center, vec![deploy], |p| {
-        p.mode = nerve_policy::Mode::Allowlist;
-        p.allow = vec![
-            "fs.read:~/site/**".into(),
-            "fs.write:~/site/**".into(),
-            "site.deploy".into(),
-        ];
-    })
-    .await;
-    let paths = daemon.paths().clone();
-    let mut conn = linked(&mut center).await;
-    let e = invoke(&mut conn, "site.deploy", json!({}))
-        .await
-        .unwrap_err();
-    assert_eq!(code_of(&e), "forbidden", "{}", e.message);
-    assert!(
-        e.message.contains("where a center may write"),
-        "{}",
-        e.message
-    );
-    assert!(!ran.exists(), "the script did not run");
-    // Reading there is no writing.
-    owner_edit(&paths, |c| {
-        c.centers[0]
-            .policy
-            .allow
-            .retain(|r| !r.starts_with("fs.write"));
-    })
-    .await;
-    let mut done = None;
-    for _ in 0..50 {
-        match invoke(&mut conn, "site.deploy", json!({})).await {
-            Ok(v) => {
-                done = Some(v);
-                break;
-            }
-            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
-        }
-    }
-    assert!(done.is_some(), "it runs once no rule writes there");
-    assert!(ran.exists());
     daemon.stop().await;
 }
 
@@ -1534,8 +1231,7 @@ async fn rules_switches_and_cap_rm_hold_a_config_capability() {
     let mut center = FakeCenter::start(false).await.unwrap();
     let list = cap(r#"name = "probe.list"
 effect = "read"
-command = ["echo", "temp"]
-account = "owner""#);
+command = ["echo", "temp"]"#);
     let daemon = node(dir.path(), &center, vec![list], |p| {
         p.mode = nerve_policy::Mode::Allowlist;
     })

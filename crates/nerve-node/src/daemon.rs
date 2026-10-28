@@ -52,6 +52,11 @@ pub struct NodeOptions {
     /// folders are (crate::service::is_service_node). A test sets it, to
     /// stand for the installed node.
     pub service: Option<bool>,
+    /// Whether a node run by hand offers the capabilities of node.toml and
+    /// runs them as its own user, standing for `nerve-run`, which only the
+    /// installed node has. A test sets it, to run them in process: the node
+    /// never does, and by hand offers none (crate::config_cap::left_out).
+    pub config_caps_by_hand: bool,
     /// Where commands are held to their limits, or why they are not,
     /// instead of looking for the process's cgroup (crate::cgroup), which
     /// moves the process. A test sets it.
@@ -96,6 +101,7 @@ impl NodeOptions {
             full_rights: None,
             confinement: None,
             service: None,
+            config_caps_by_hand: false,
             cgroups: None,
             resume_grace: resume::GRACE,
             aside: None,
@@ -522,6 +528,10 @@ pub(crate) struct Shared {
     pub paths: NodePaths,
     /// Whether this is the installed service (crate::service::is_service_node).
     pub service: bool,
+    /// Whether the capabilities of node.toml are offered: on the installed
+    /// node, which has `nerve-run` to run them as, or where a test's node by
+    /// hand stands for it ([`NodeOptions::config_caps_by_hand`]).
+    pub config_caps: bool,
     pub exe: Option<PathBuf>,
     pub home: PathBuf,
     /// Which protected list applies, and where its system folders are.
@@ -608,8 +618,8 @@ impl Shared {
     }
 
     /// The account `nerve-run` (crate::account), which the config's
-    /// capabilities run as unless they say the owner, whatever a pairing's
-    /// commands run as; `None` on a node run by hand, which has none.
+    /// capabilities run as, whatever a pairing's commands run as; `None` on
+    /// a node run by hand, which has none.
     pub fn run_account(&self, cfg: &NodeConfig) -> Result<Option<crate::service::Account>, String> {
         self.account_as(cfg, false)
     }
@@ -618,7 +628,7 @@ impl Shared {
     /// programs' (crate::provider) and the config's (crate::config_cap).
     pub fn added_caps(&self, cfg: &NodeConfig) -> Vec<nerve_proto::descriptor::Capability> {
         let mut caps = self.providers.caps();
-        caps.extend(crate::config_cap::offered(cfg, self.service));
+        caps.extend(crate::config_cap::offered(cfg, self.config_caps));
         caps
     }
 
@@ -636,70 +646,6 @@ impl Shared {
         let mut caps = self.added_caps(cfg);
         crate::config_cap::as_account_for(&mut caps, self.separate(policy));
         caps
-    }
-
-    /// The places a center may write, where a command of the config that
-    /// runs with the owner's rights may neither start nor name a place
-    /// (crate::config_cap::written_by_centers): the `w` folders of every
-    /// center, `nerve-run`'s own folders (`/tmp` and `/var/tmp` on a node
-    /// run by hand, which has no such account), and what the allow rules of
-    /// a center whose writes run as the owner let it write
-    /// (crate::config_cap::written_by_rules).
-    pub fn center_writes(&self, cfg: &NodeConfig) -> Vec<PathBuf> {
-        let home = self.rules_home(cfg);
-        let mut writable = crate::exec::write_folders(cfg, &home);
-        writable.extend(match self.run_account(cfg) {
-            Ok(Some(a)) => crate::account::built_in(&a.home)
-                .into_iter()
-                .map(|f| f.path.into())
-                .collect(),
-            _ => vec!["/tmp".into(), "/var/tmp".into()],
-        });
-        let mut caps = crate::descriptor::built_in(cfg);
-        caps.extend(self.added_caps(cfg));
-        writable.extend(crate::config_cap::written_by_rules(
-            cfg,
-            &caps,
-            &home,
-            crate::now_ms(),
-            |p| !self.separate(p),
-        ));
-        writable
-    }
-
-    /// How the node judges the command of `decl`, which runs with the
-    /// owner's rights as `owner` (the node's own user where `None`), from
-    /// where it starts, that account's home (the node's own by hand): why
-    /// it may not run (crate::config_cap::written_by_centers, with what
-    /// `nerve-run` owns or may change), else the
-    /// program file it runs, `None` where none is found
-    /// (crate::config_cap::program_file). Looked at as the owner, who may
-    /// look into the owner's home and the folders where the node's own user
-    /// may not.
-    pub fn owner_command(
-        &self,
-        cfg: &NodeConfig,
-        decl: &nerve_policy::config::ConfigCapability,
-        owner: Option<&crate::service::Account>,
-    ) -> Result<Option<PathBuf>, String> {
-        let writable = self.center_writes(cfg);
-        let run = self.run_account(cfg).ok().flatten();
-        let start_in = owner.map_or_else(|| self.home.clone(), |a| a.home.clone());
-        let _as = crate::link::act_as(owner).ok().flatten();
-        let path = std::env::var_os("PATH");
-        if let Some(why) = crate::config_cap::written_by_centers(
-            decl,
-            &writable,
-            run.as_ref(),
-            path.as_deref(),
-            &start_in,
-        ) {
-            return Err(why);
-        }
-        Ok(decl
-            .command
-            .first()
-            .and_then(|p| crate::config_cap::program_file(p, path.as_deref())))
     }
 
     /// The owner's account, which sudo runs as and whose files the folders
@@ -1548,6 +1494,7 @@ impl Daemon {
         let shared = Arc::new(Shared {
             paths: paths.clone(),
             service,
+            config_caps: service || opts.config_caps_by_hand,
             exe: opts.exe,
             home: opts.home,
             platform: crate::paths::platform(),
@@ -1996,7 +1943,7 @@ pub(crate) async fn pipe_control(
         "caps.list" => Reply::Ok(crate::provider::listing(
             &shared.config(),
             Some(shared),
-            shared.service,
+            shared.config_caps,
         )),
         "center.rotate-key" => rotate_key(shared, &params).await,
         "folder.add" | "folder.set" | "folder.rm" => {
@@ -2200,7 +2147,7 @@ pub(crate) fn control(
         "caps.list" => Reply::Ok(crate::provider::listing(
             &shared.config(),
             Some(shared),
-            shared.service,
+            shared.config_caps,
         )),
         "owner.check" => Reply::Ok(json!({})),
         "sudo.status" => Reply::Ok(json!({"sudo": if shared.sudo_on() { "on" } else { "off" }})),
@@ -2287,31 +2234,6 @@ pub(crate) fn control(
                 }
                 Err(e) => Reply::Err(e.to_string()),
             }
-        }
-        "cap.refusal" => {
-            // Why the node refuses calls of the owner's command now, as it
-            // judges it before a call: as the owner, from the owner's home
-            // (`cap add` and `cap edit` warn of it).
-            let Some(name) = str_of("name") else {
-                return Reply::Err("name is missing".into());
-            };
-            let cfg = shared.config();
-            let Some(decl) = cfg.capabilities.iter().find(|c| c.name == name) else {
-                return Reply::Err(format!("no capability {name} is declared"));
-            };
-            // One this node does not offer has no calls here to refuse.
-            if decl.account != nerve_policy::config::RunsAs::Owner
-                || crate::config_cap::left_out(decl, std::env::consts::OS, shared.service).is_some()
-            {
-                return Reply::Ok(json!({"refusal": null}));
-            }
-            let owner = shared.owner_account(&cfg).ok().flatten();
-            let refusal = match shared.owner_command(&cfg, decl, owner.as_ref()) {
-                Err(why) => Some(why),
-                Ok(None) => Some(crate::config_cap::no_program(decl)),
-                Ok(Some(_)) => None,
-            };
-            Reply::Ok(json!({"refusal": refusal}))
         }
         "reload" => match shared.reload() {
             Ok(changed) => Reply::Ok(json!({"changed": changed})),
