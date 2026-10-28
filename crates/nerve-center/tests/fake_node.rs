@@ -181,6 +181,8 @@ enum Seen {
     StreamOpen(Value),
     /// A `stream.close` from the center: the sid.
     StreamClose(u64),
+    /// A `get`, `sub` or `unsub`: its method and params.
+    State(String, Value),
 }
 
 /// Answers the center like a node: describe, sub, invoke (echoing the
@@ -253,6 +255,26 @@ fn talk_ends(talk: &str) -> bool {
     )
 }
 
+/// How many events of 64 KiB a subscription to `board/flood` gets: more
+/// than a stream keeps.
+const FLOOD: usize = 24;
+
+/// The program `desk`'s capability `board` added to the description `d`: a
+/// state key `temp`, events `alarm` and `flood`, and a stream `feed`.
+fn board(d: &mut Value) {
+    d["capabilities"].as_array_mut().unwrap().push(json!(
+        {"id": "board", "provider": "desk", "exposure": "on", "summary": "A sensor board.",
+         "state": {"temp": {"effect": "read", "summary": "The temperature.",
+                            "schema": {"type": "number"}}},
+         "events": {"alarm": {"effect": "read", "summary": "An alarm went off."},
+                    "flood": {"effect": "read"}},
+         "streams": {"feed": {"kind": "reliable", "direction": "up", "effect": "read",
+                              "summary": "Readings as they come.",
+                              "params": {"type": "object", "properties": {
+                                  "every_ms": {"type": "integer", "minimum": 1}},
+                                  "additionalProperties": false}}}}));
+}
+
 /// How long the fake node takes to answer a `slow` call.
 const SLOW: Duration = Duration::from_millis(600);
 /// How long a `talkslow` command's first `stream.open` waits for its answer.
@@ -319,6 +341,64 @@ fn serve_changing(
                     method: m,
                     params,
                 } => {
+                    // The program's capability `board` ([`board`]): `get`
+                    // answers its `temp`, a subscription to `board/alarm`
+                    // gets three events, one to `board/flood` [`FLOOD`]
+                    // events of 64 KiB, and its stream `feed` two lines,
+                    // then the node's close.
+                    let topic = params
+                        .get("topics")
+                        .and_then(|t| t[0].as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let on_board = params.get("cap").is_some_and(|c| c == "board");
+                    if matches!(m.as_str(), method::GET | method::SUB | method::UNSUB)
+                        && (on_board || topic.starts_with("board/"))
+                    {
+                        let _ = tx.send(Seen::State(m.clone(), Value::Object(params.clone())));
+                        let result = match m.as_str() {
+                            method::GET => json!({"temp": 21.5}),
+                            _ => json!({}),
+                        };
+                        send(&mut ws, Message::result(id, result)).await;
+                        let (name, n, size) = match (m.as_str(), topic.as_str()) {
+                            (method::SUB, "board/alarm") => ("alarm", 3, 1),
+                            (method::SUB, "board/flood") => ("flood", FLOOD, 64 * 1024),
+                            _ => continue,
+                        };
+                        for i in 1..=n {
+                            seq += 1;
+                            let ev = json!({"cap": "board", "name": name, "seq": seq, "ts": 1,
+                                            "data": {"level": i, "pad": "x".repeat(size)}});
+                            let _ = later.send(Message::notification(method::EVENT, ev));
+                        }
+                        continue;
+                    }
+                    if m == method::STREAM_OPEN && on_board {
+                        let _ = tx.send(Seen::StreamOpen(Value::Object(params.clone())));
+                        let sid = next_sid;
+                        next_sid += 1;
+                        send(&mut ws, Message::result(id, json!({"sid": sid}))).await;
+                        let raw = raw.clone();
+                        tokio::spawn(async move {
+                            for (i, line) in ["tick 1\n", "tick 2\n"].iter().enumerate() {
+                                let f = nerve_proto::frame::stream_frame(
+                                    sid as u32,
+                                    i as u32,
+                                    line.as_bytes().into(),
+                                );
+                                let _ = raw.send(WsMessage::binary(f.encode().unwrap()));
+                            }
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                            let close = Message::request(
+                                sid,
+                                method::STREAM_CLOSE,
+                                json!({"sid": sid, "reason": "ended"}),
+                            );
+                            let _ = raw.send(WsMessage::text(close.encode()));
+                        });
+                        continue;
+                    }
                     if m == method::INVOKE && params["args"]["command"] == "hang" {
                         let _ = tx.send(Seen::Hang(serde_json::to_value(&id).unwrap()));
                         continue;
@@ -1327,6 +1407,7 @@ async fn a_disabled_node_offers_nothing_and_gets_no_calls() {
         cap: "fs".into(),
         action: "read".into(),
         effect: nerve_proto::Effect::Read,
+        kind: nerve_proto::UnitKind::Action,
     };
     let sess = c.new_session("test");
     let err = c
@@ -3217,6 +3298,7 @@ async fn a_failed_or_dropped_job_is_an_error_of_that_job() {
         cap: "exec".into(),
         action: "run".into(),
         effect: nerve_proto::Effect::Execute,
+        kind: nerve_proto::UnitKind::Action,
     };
     let big = "x".repeat(nerve_center::jobs::RESULT_TEXT);
     // A result is kept as its JSON text: a string with its quotes.
@@ -4302,6 +4384,7 @@ fn fill_kept(sess: &nerve_center::center::Session, node: &str) {
         cap: "exec".into(),
         action: "run".into(),
         effect: nerve_proto::Effect::Execute,
+        kind: nerve_proto::UnitKind::Action,
     };
     let mut jobs = sess.jobs.lock().unwrap();
     let big = nerve_center::jobs::RESULT_TEXT;
@@ -4946,5 +5029,272 @@ async fn a_nodes_words_about_a_stream_never_read_as_the_centers() {
     let ended = ended.expect("the stream ended");
     assert!(ended.contains("it ended (the node closed it)"), "{ended}");
     assert!(!ended.contains("box-2"), "{ended}");
+    r.stop().await;
+}
+
+// ---- A program's state, events and streams (docs/dev/spec/harness.md §4.5) ----
+
+/// box-1 with the program's capability `board` ([`board`]), on a center
+/// whose call wait is [`WAIT`].
+async fn board_box(
+    r: &Running,
+) -> (
+    Arc<Engine>,
+    String,
+    mpsc::UnboundedReceiver<Seen>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (e, node, seen, task, _) = job_box_with(r, json!({}), |d| {
+        with_signal(d);
+        board(d);
+    })
+    .await;
+    (e, node, seen, task)
+}
+
+/// The next `get`, `sub` or `unsub` the fake node saw: its method and
+/// params. Other things it saw are passed over.
+async fn next_state(seen: &mut mpsc::UnboundedReceiver<Seen>) -> (String, Value) {
+    loop {
+        if let Seen::State(m, p) = next_seen(seen).await {
+            return (m, p);
+        }
+    }
+}
+
+/// The stream id an `execute` of a program's event or stream answered,
+/// checking the answer says how to read it.
+fn opened_stream(reply: &Value, unit: &str, kind: &str) -> String {
+    let (text, err) = said(reply);
+    assert!(!err, "{reply}");
+    let sc = &reply["result"]["structuredContent"];
+    assert_eq!(
+        (sc["capability"].as_str(), sc["kind"].as_str()),
+        (Some(unit), Some(kind)),
+        "{reply}"
+    );
+    let id = sc["stream"].as_str().expect("a stream").to_string();
+    assert!(id.starts_with("s-"), "{id}");
+    assert!(
+        text.contains(&format!(
+            "\"stream.read\" with args {{\"stream\": \"{id}\"}}"
+        )),
+        "{text}"
+    );
+    id
+}
+
+/// What `stream.read` of `stream` gives until `enough` holds of it or the
+/// stream ended: the text, and the reply of the last read.
+async fn read_until(e: &Engine, stream: &str, enough: impl Fn(&str) -> bool) -> (String, Value) {
+    let mut text = String::new();
+    for _ in 0..50 {
+        let got = read_stream(e, stream, 1000).await;
+        let data = &got["result"]["structuredContent"]["result"];
+        text.push_str(data["text"].as_str().unwrap_or_else(|| panic!("{got}")));
+        if data["eof"] == true || enough(&text) {
+            return (text, got);
+        }
+    }
+    panic!("{stream}: {text}")
+}
+
+/// `list` names a program's state key, events and stream with their
+/// kinds, and their details say what `execute` does with each. `execute`
+/// of the state key reads it with `get` for the session, and gives the
+/// value of that key.
+#[tokio::test]
+async fn a_programs_state_is_read_through_execute_and_its_units_are_listed_by_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, _node, mut seen, _task) = board_box(&r).await;
+    let list = list_text(&e, json!({"node": "box-1"})).await;
+    for line in [
+        "- board.alarm (event): An alarm went off.",
+        "- board.feed (stream): Readings as they come.",
+        "- board.flood (event): A sensor board.",
+        "- board.temp (state): The temperature.",
+    ] {
+        assert!(list.contains(line), "{line}: {list}");
+    }
+    let details = list_text(
+        &e,
+        json!({"node": "box-1", "capability": ["board.temp", "board.alarm", "board.feed"]}),
+    )
+    .await;
+    for want in [
+        "capability: board.temp\nkind: state\nuse: execute with args {} reads its value now\n",
+        "capability: board.alarm\nkind: event\nuse: execute with args {} subscribes this session",
+        "capability: board.feed\nkind: stream\nuse: execute with args that fit its params opens it",
+    ] {
+        assert!(details.contains(want), "{want}: {details}");
+    }
+    let reply = execute_as(&e, json!(1), "board.temp", json!({})).await;
+    let (text, err) = said(&reply);
+    assert!(!err && text.contains("21.5"), "{reply}");
+    assert_eq!(reply["result"]["structuredContent"]["result"], json!(21.5));
+    let (m, p) = next_state(&mut seen).await;
+    assert_eq!(m, "get");
+    assert_eq!(
+        p,
+        json!({"cap": "board", "keys": ["temp"], "ctx": {"session": e.session().id}})
+    );
+    // A state key takes no arguments: refused before the node.
+    let reply = execute_as(&e, json!(2), "board.temp", json!({"unit": "C"})).await;
+    let (text, err) = said(&reply);
+    assert!(err && text.starts_with("error invalid_args"), "{text}");
+    nothing_more(&mut seen).await;
+    r.stop().await;
+}
+
+/// `execute` of a program's event subscribes the session on the node and
+/// answers a stream id; `stream.read` gives each event as one JSON line.
+/// Another session cannot read that stream. The node's subscription stays
+/// while a session's stream takes the events, and ends (`unsub`) once the
+/// last one is closed or its session ended.
+#[tokio::test]
+async fn a_subscription_reads_events_and_ends_with_its_last_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = board_box(&r).await;
+    let link = r.center.link(&node).unwrap();
+    list_text(&e, json!({"node": "box-1", "capability": ["board.alarm"]})).await;
+    let reply = execute_as(&e, json!(1), "board.alarm", json!({})).await;
+    let stream = opened_stream(&reply, "board.alarm", "event");
+    let (m, p) = next_state(&mut seen).await;
+    assert_eq!(m, "sub");
+    assert_eq!(
+        p,
+        json!({"topics": ["board/alarm"], "ctx": {"session": e.session().id}})
+    );
+    let (text, got) = read_until(&e, &stream, |t| t.lines().count() >= 3).await;
+    let levels: Vec<Value> = text
+        .lines()
+        .map(|l| {
+            let ev: Value = serde_json::from_str(l).unwrap();
+            assert_eq!(ev["name"], "alarm", "{l}");
+            ev["data"]["level"].clone()
+        })
+        .collect();
+    assert_eq!(levels, [json!(1), json!(2), json!(3)]);
+    assert!(
+        said(&got).0.contains(&format!(
+            "Stream {stream} (the events of board.alarm on node box-1)"
+        )),
+        "{got}"
+    );
+
+    // Another session: not its stream. It subscribes too, on the same
+    // subscription of the link.
+    let other = Arc::new(Engine::new(&r.center, "test"));
+    list_text(
+        &other,
+        json!({"node": "box-1", "capability": ["board.alarm", "stream.read"]}),
+    )
+    .await;
+    assert!(unknown_stream(&read_stream(&other, &stream, 0).await));
+    opened_stream(
+        &execute_as(&other, json!(1), "board.alarm", json!({})).await,
+        "board.alarm",
+        "event",
+    );
+    assert_eq!(next_state(&mut seen).await.0, "sub");
+    assert_eq!(link.subscribers("board/alarm"), 2);
+    // The first session closes its stream: the other still takes the
+    // events, so the node is not told.
+    let closed = execute_as(&e, json!(3), "stream.close", json!({"stream": stream})).await;
+    assert!(!said(&closed).1, "{closed}");
+    assert_eq!(link.subscribers("board/alarm"), 1);
+    nothing_more(&mut seen).await;
+    // The other session ends: its stream goes, and so does the node's
+    // subscription.
+    other.close().await;
+    let (m, p) = next_state(&mut seen).await;
+    assert_eq!(
+        (m.as_str(), &p["topics"]),
+        ("unsub", &json!(["board/alarm"]))
+    );
+    assert_eq!(link.subscribers("board/alarm"), 0);
+    r.stop().await;
+}
+
+/// A subscription's stream keeps at most [`streams::RING_BYTES`] that were
+/// not read: the oldest events go by whole lines, and the next read says
+/// how much went.
+#[tokio::test]
+async fn a_subscription_keeps_its_newest_events_by_whole_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = board_box(&r).await;
+    list_text(&e, json!({"node": "box-1", "capability": ["board.flood"]})).await;
+    let reply = execute_as(&e, json!(1), "board.flood", json!({})).await;
+    let stream = opened_stream(&reply, "board.flood", "event");
+    assert_eq!(next_state(&mut seen).await.0, "sub");
+    // Every event came once the ring holds the last one.
+    let link = r.center.link(&node).unwrap();
+    let sess = e.session();
+    wait_for(|| {
+        let (found, _) =
+            sess.streams
+                .lock()
+                .unwrap()
+                .get(&stream, &node, std::time::Instant::now());
+        let held = found?.ring.held();
+        (held > nerve_center::streams::RING_BYTES - 70 * 1024).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let got = execute_as(
+        &e,
+        json!(2),
+        "stream.read",
+        json!({"stream": stream, "max_bytes": nerve_center::streams::READ_MAX}),
+    )
+    .await;
+    let (text, err) = said(&got);
+    assert!(!err, "{got}");
+    assert!(
+        text.contains("bytes were dropped before this text"),
+        "{text}"
+    );
+    let data = &got["result"]["structuredContent"]["result"];
+    let dropped = data["dropped"].as_u64().unwrap();
+    assert!(dropped > 0, "{data}");
+    let first: Value = serde_json::from_str(data["text"].as_str().unwrap().lines().next().unwrap())
+        .expect("a whole line first");
+    let level = first["data"]["level"].as_u64().unwrap();
+    assert!(level > 1, "the oldest went: {level}");
+    assert!(link.subscribers("board/flood") == 1);
+    r.stop().await;
+}
+
+/// `execute` of a program's stream checks its args, opens it on the node
+/// for the session (`stream.open` with the params and the session), and
+/// `stream.read` gives what the program sends, then its end.
+#[tokio::test]
+async fn a_programs_stream_opens_through_execute() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, _node, mut seen, _task) = board_box(&r).await;
+    list_text(&e, json!({"node": "box-1", "capability": ["board.feed"]})).await;
+    let bad = execute_as(&e, json!(1), "board.feed", json!({"every_ms": "often"})).await;
+    let (text, err) = said(&bad);
+    assert!(err && text.starts_with("error invalid_args"), "{text}");
+    let reply = execute_as(&e, json!(2), "board.feed", json!({"every_ms": 5})).await;
+    let stream = opened_stream(&reply, "board.feed", "stream");
+    let Seen::StreamOpen(open) = next_seen(&mut seen).await else {
+        panic!("no stream.open")
+    };
+    assert_eq!(
+        open,
+        json!({"cap": "board", "stream": "feed", "params": {"every_ms": 5},
+               "ctx": {"session": e.session().id}})
+    );
+    let (text, last) = read_until(&e, &stream, |_| false).await;
+    assert_eq!(text, "tick 1\ntick 2\n");
+    assert!(
+        said(&last).0.contains("it ended (the program ended it)"),
+        "{last}"
+    );
     r.stop().await;
 }

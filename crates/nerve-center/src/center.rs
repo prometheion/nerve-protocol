@@ -14,7 +14,7 @@ use tokio::sync::broadcast;
 use nerve_proto::link::{CenterUrl, PairLink, PairRequest, PairResponse};
 use nerve_proto::msg::{self, ByeReason, Event, Hello};
 use nerve_proto::schema::PathMark;
-use nerve_proto::{Descriptor, ErrorCode, Exposure, RpcError};
+use nerve_proto::{Descriptor, ErrorCode, Exposure, RpcError, UnitKind};
 use nerve_transport::log::{Level, Log, Query, call_line};
 use nerve_transport::tls::ServerIdentity;
 
@@ -2061,7 +2061,10 @@ impl Center {
                 self.audit.lock().unwrap().push(e);
                 self.changed(Change::Audit);
             }
-            _ => {}
+            // A program's event, for the sessions subscribed to it.
+            _ => {
+                link.event(&ev);
+            }
         }
     }
 
@@ -2214,6 +2217,7 @@ impl Center {
                 cap: u.cap.clone(),
                 action: u.action.clone(),
                 effect: u.effect,
+                kind: u.kind,
             };
             Ok(Some((route, u)))
         })
@@ -2698,6 +2702,97 @@ impl Center {
         job: &str,
         on: Option<&Arc<Link>>,
     ) -> Result<Value, CallError> {
+        let link = self.admit(sess, route, &args).await?;
+        // A job's `invoke` id is its link's: on another link of the node it
+        // would name some other call.
+        if on.is_some_and(|on| !Arc::ptr_eq(on, &link)) {
+            return Err(RpcError::invalid_args(
+                "the job's call no longer runs on the node's link: the link to the node ended",
+            )
+            .into());
+        }
+        let ctx = json!({"session": sess.id});
+        sess.nodes.lock().unwrap().insert(route.node_id.clone());
+        link.sessions.lock().unwrap().insert(sess.id.clone());
+        // The agents' calls leave a few of the node's call places free, for
+        // the owner's settings changes from the center and for a job's
+        // `exec.signal`: jobs of many sessions could fill them all.
+        let most = link.limits.calls as usize;
+        let most = if on.is_some() {
+            most
+        } else {
+            (most - calls_kept(most)).max(1)
+        };
+        // A program's state key is read with `get`, its event subscribed to
+        // with `sub` (docs/dev/spec/harness.md §4.5); the node decides each
+        // like a call.
+        let (method, params) = match route.kind {
+            UnitKind::State => (
+                msg::method::GET,
+                json!({"cap": route.cap, "keys": [route.action], "ctx": ctx}),
+            ),
+            UnitKind::Event => (
+                msg::method::SUB,
+                json!({"topics": [format!("{}/{}", route.cap, route.action)], "ctx": ctx}),
+            ),
+            UnitKind::Action | UnitKind::Stream => (
+                msg::method::INVOKE,
+                json!({"cap": route.cap, "action": route.action, "args": args, "ctx": ctx}),
+            ),
+        };
+        let (id, rx) = link
+            .start_within(method, params, most)
+            .await
+            .map_err(|e| {
+                if e.kind() != ErrorCode::Busy {
+                    return e;
+                }
+                RpcError::new(
+                    ErrorCode::Busy,
+                    format!(
+                        "node {} runs {} calls already, the most the center sends it for agents: try again when one ended, or stop a job of this session with job.cancel",
+                        route.node_name, most
+                    ),
+                )
+            })?;
+        sess.jobs.lock().unwrap().sent(job, &link, id);
+        let mut waiting = Waiting {
+            link: Some(link),
+            id,
+        };
+        let r = rx.await;
+        waiting.link = None;
+        let v = r
+            .unwrap_or_else(|_| {
+                Err(RpcError::new(
+                    ErrorCode::ConnectionLost,
+                    "the link to the node ended",
+                ))
+            })
+            .map_err(CallError::Rpc)?;
+        // The value of the key asked for, not the node's map of keys.
+        if route.kind == UnitKind::State {
+            return v.get(&route.action).cloned().ok_or_else(|| {
+                RpcError::internal(format!(
+                    "the node answered get without the state {}",
+                    route.action
+                ))
+                .into()
+            });
+        }
+        Ok(v)
+    }
+
+    /// Whether a call of `route` with `args` may go to its node now, and
+    /// the link it goes on: the node is enabled and online, and the action
+    /// checker (issue #17) lets it through; its refusal or allowance is in
+    /// the center's audit.
+    async fn admit(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        args: &Map<String, Value>,
+    ) -> Result<Arc<Link>, CallError> {
         // Checked first: nothing is sent to a disabled node, not even the
         // session mark. `execute` refuses a disabled node before it gets
         // here, but the switch may come in between.
@@ -2731,8 +2826,8 @@ impl Center {
             (os, n.map(|n| CheckerUnit::of(n, route)).unwrap_or_default())
         });
         let tainted = checker.taint_on() && sess.tainted();
-        let paths = seen.paths(&args);
-        let target = checker_target(route, &args, &paths);
+        let paths = seen.paths(args);
+        let target = checker_target(route, args, &paths);
         let endpoint = self.resolved_endpoint(&checker);
         let info = CallInfo {
             cap: &route.cap,
@@ -2741,7 +2836,7 @@ impl Center {
             description: &seen.description,
             target: &target,
             paths: &paths,
-            args: &args,
+            args,
             node_id: &route.node_id,
             os: &os,
             tainted,
@@ -2767,60 +2862,129 @@ impl Center {
         }
         // Looked up again: the node may have gone or come back on another
         // link while the model was asked.
-        let link = self.link(&route.node_id).ok_or_else(offline)?;
-        // A job's `invoke` id is its link's: on another link of the node it
-        // would name some other call.
-        if on.is_some_and(|on| !Arc::ptr_eq(on, &link)) {
-            return Err(RpcError::invalid_args(
-                "the job's call no longer runs on the node's link: the link to the node ended",
-            )
-            .into());
+        Ok(self.link(&route.node_id).ok_or_else(offline)?)
+    }
+
+    /// Room for one more stream in `sess`, or why there is none.
+    fn stream_room(&self, sess: &Session) -> Result<(), String> {
+        let (room, gone) = sess.streams.lock().unwrap().room(Instant::now());
+        for c in gone {
+            c.close("too many streams");
         }
-        let ctx = json!({"session": sess.id});
+        if !room {
+            return Err(format!(
+                "this session holds {} streams already, the most it may: close one with stream.close",
+                streams::STREAMS_MAX
+            ));
+        }
+        Ok(())
+    }
+
+    /// `execute` of a program's event `route`: subscribes `sess` to it on
+    /// its node (decided by the checker and the node like a call) and gives
+    /// the id of the stream its events come in, one JSON line each, read
+    /// with `stream.read` (docs/dev/spec/harness.md §4.5). The subscription
+    /// ends with the stream: `stream.close`, the session's end, the link's.
+    pub async fn subscribe_events(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+    ) -> Result<String, CallError> {
+        self.stream_room(sess)
+            .map_err(|why| self.refused(sess, route, RpcError::new(ErrorCode::Busy, why)))?;
+        let topic = format!("{}/{}", route.cap, route.action);
+        let id = streams::new_id();
+        let ring = Arc::new(Ring::of(streams::Source::Events));
+        let what = format!("the events of {}.{}", route.cap, route.action);
+        // The ring takes the topic's events before the node is asked: the
+        // first may follow its answer at once. Refused, it goes again.
+        if let Some(link) = self.link(&route.node_id)
+            && sess
+                .streams
+                .lock()
+                .unwrap()
+                .add_unit(&id, &route.node_id, what, ring.clone())
+        {
+            link.subscribe(&topic, ring);
+            sess.streams.lock().unwrap().subscribed(&id, &link, &topic);
+        }
+        match self.call(sess, route, Map::new()).await {
+            Ok(_) => Ok(id),
+            Err(e) => {
+                if let Some(c) = sess.streams.lock().unwrap().close(&id, &route.node_id) {
+                    c.close("the subscription was refused");
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// `execute` of a program's stream `route` with `args`: opens it on its
+    /// node (decided by the checker and the node like a call) and gives the
+    /// id it is read by with `stream.read`. It ends when the program ends
+    /// it, on `stream.close`, and with the session or the link.
+    pub async fn open_unit_stream(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        args: Map<String, Value>,
+    ) -> Result<String, CallError> {
+        let started = Instant::now();
+        sess.calls.fetch_add(1, Ordering::SeqCst);
+        let r = self.open_unit_stream_inner(sess, route, args).await;
+        self.count_call(
+            sess,
+            route,
+            r.as_ref().err().map(|CallError::Rpc(e)| e),
+            started,
+        );
+        r
+    }
+
+    async fn open_unit_stream_inner(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        args: Map<String, Value>,
+    ) -> Result<String, CallError> {
+        self.stream_room(sess)
+            .map_err(|why| RpcError::new(ErrorCode::Busy, why))?;
+        let link = self.admit(sess, route, &args).await?;
         sess.nodes.lock().unwrap().insert(route.node_id.clone());
         link.sessions.lock().unwrap().insert(sess.id.clone());
-        // The agents' calls leave a few of the node's call places free, for
-        // the owner's settings changes from the center and for a job's
-        // `exec.signal`: jobs of many sessions could fill them all.
-        let most = link.limits.calls as usize;
-        let most = if on.is_some() {
-            most
-        } else {
-            (most - calls_kept(most)).max(1)
-        };
-        let (id, rx) = link
-            .start_within(
-                msg::method::INVOKE,
-                json!({"cap": route.cap, "action": route.action, "args": args, "ctx": ctx}),
-                most,
-            )
-            .await
-            .map_err(|e| {
-                if e.kind() != ErrorCode::Busy {
-                    return e;
+        let id = streams::new_id();
+        let ring = Arc::new(Ring::of(streams::Source::Program));
+        let what = format!("stream {}.{}", route.cap, route.action);
+        if !sess
+            .streams
+            .lock()
+            .unwrap()
+            .add_unit(&id, &route.node_id, what, ring.clone())
+        {
+            return Err(Stop::SessionEnded.error().into());
+        }
+        let params = json!({"cap": route.cap, "stream": route.action, "params": args,
+                            "ctx": {"session": sess.id}});
+        let wait = self.stream_waits.lock().unwrap().0;
+        match link.open_stream(params, ring, wait).await {
+            Ok(sid) => {
+                if !sess.streams.lock().unwrap().opened(&id, &link, sid) {
+                    // Closed meanwhile (the session ended): so is the stream.
+                    if link.forget_stream(sid) {
+                        let l = link.clone();
+                        tokio::spawn(async move { l.close_stream(sid, "it was closed").await });
+                    }
+                    return Err(Stop::SessionEnded.error().into());
                 }
-                RpcError::new(
-                    ErrorCode::Busy,
-                    format!(
-                        "node {} runs {} calls already, the most the center sends it for agents: try again when one ended, or stop a job of this session with job.cancel",
-                        route.node_name, most
-                    ),
-                )
-            })?;
-        sess.jobs.lock().unwrap().sent(job, &link, id);
-        let mut waiting = Waiting {
-            link: Some(link),
-            id,
-        };
-        let r = rx.await;
-        waiting.link = None;
-        r.unwrap_or_else(|_| {
-            Err(RpcError::new(
-                ErrorCode::ConnectionLost,
-                "the link to the node ended",
-            ))
-        })
-        .map_err(CallError::Rpc)
+                Ok(id)
+            }
+            Err(e) => {
+                if let Some(c) = sess.streams.lock().unwrap().close(&id, &route.node_id) {
+                    c.close("it did not open");
+                }
+                Err(e.into())
+            }
+        }
     }
 
     /// Logs a call that was refused or that failed, with the reason.
@@ -3693,6 +3857,7 @@ mod tests {
             cap: "exec".into(),
             action: "run".into(),
             effect: nerve_proto::Effect::Execute,
+            kind: nerve_proto::UnitKind::Action,
         }
     }
 
@@ -4067,6 +4232,7 @@ mod tests {
             cap: "notes".into(),
             action: "save".into(),
             effect: nerve_proto::Effect::Write,
+            kind: nerve_proto::UnitKind::Action,
         };
         let save = |path: &str| {
             let mut m = Map::new();
@@ -4184,6 +4350,7 @@ mod tests {
             cap: "notes".into(),
             action: "save".into(),
             effect: nerve_proto::Effect::Write,
+            kind: nerve_proto::UnitKind::Action,
         };
         let mut args = Map::new();
         args.insert("path".into(), json!("/home/me/notes/today.md"));
@@ -4282,6 +4449,7 @@ mod tests {
             cap: "lamp".into(),
             action: "set".into(),
             effect: nerve_proto::Effect::Actuate,
+            kind: nerve_proto::UnitKind::Action,
         };
         let seen = c.read(|s| CheckerUnit::of(&s.nodes["n1"], &route));
         assert_eq!(seen.description, "The office lamp.  Turns it on  or off.");
@@ -4316,6 +4484,7 @@ mod tests {
             cap: "door".into(),
             action: "unlock".into(),
             effect: nerve_proto::Effect::Actuate,
+            kind: nerve_proto::UnitKind::Action,
         };
         let seen = c.read(|s| CheckerUnit::of(&s.nodes["n1"], &route));
         assert!(seen.description.len() > checker::STATE_DESCRIPTION_MAX);
@@ -5555,6 +5724,7 @@ mod tests {
             cap: "fs".into(),
             action: "read".into(),
             effect: nerve_proto::Effect::Read,
+            kind: nerve_proto::UnitKind::Action,
         };
         let took = Duration::from_millis(1500);
         let refusal = RpcError::forbidden("no allow rule matches /etc/hostname");

@@ -112,6 +112,11 @@ pub struct Link {
     /// answer puts the ring in `streams` before the next frame is read.
     /// None once the opener gave up: the answer then opens nothing.
     opening: Mutex<HashMap<u64, Option<Arc<Ring>>>>,
+    /// The sessions' subscriptions to a program's events on this link, by
+    /// topic `cap/name`: the rings each event goes to (crate::streams).
+    /// The node holds one subscription per topic for the link; it ends
+    /// once no ring takes the topic any more.
+    subs: Mutex<HashMap<String, Vec<Arc<Ring>>>>,
 }
 
 /// The connection a link is on, and what it counts for a resume.
@@ -162,6 +167,7 @@ impl Link {
             sessions: Mutex::new(Default::default()),
             streams: Mutex::default(),
             opening: Mutex::default(),
+            subs: Mutex::default(),
         }
     }
 
@@ -566,6 +572,18 @@ impl Link {
         w.parked = false;
         w.replay = None;
         self.end_streams("the link to the node ended");
+        // The node's subscriptions end with the link; a resumed link keeps
+        // them, as it keeps the events it sent meanwhile.
+        let subs: Vec<Arc<Ring>> = self
+            .subs
+            .lock()
+            .unwrap()
+            .drain()
+            .flat_map(|(_, r)| r)
+            .collect();
+        for r in subs {
+            r.end("the link to the node ended");
+        }
     }
 
     fn fail_pending(&self) {
@@ -697,11 +715,7 @@ impl Link {
         let ring = self.streams.lock().unwrap().remove(&sid);
         match ring {
             Some(ring) => {
-                ring.end(if reason == "ended" {
-                    "the command ended"
-                } else {
-                    "the node closed it"
-                });
+                ring.end(ring.closed_words(reason == "ended"));
                 true
             }
             None => false,
@@ -742,6 +756,67 @@ impl Link {
     /// How many streams the link holds.
     pub fn stream_count(&self) -> usize {
         self.streams.lock().unwrap().len()
+    }
+
+    /// The events of `topic` go to `ring` too, until [`Link::unsubscribe`].
+    /// A link that ended takes none: the ring ends at once.
+    pub fn subscribe(&self, topic: &str, ring: Arc<Ring>) {
+        let mut subs = self.subs.lock().unwrap();
+        if self.is_closed() {
+            drop(subs);
+            ring.end("the link to the node ended");
+            return;
+        }
+        subs.entry(topic.to_string()).or_default().push(ring);
+    }
+
+    /// `ring` takes the events of `topic` no more; the node's subscription
+    /// ends once no ring takes them (its `unsub` is not waited for).
+    pub fn unsubscribe(self: &Arc<Self>, topic: &str, ring: &Arc<Ring>) {
+        let last = {
+            let mut subs = self.subs.lock().unwrap();
+            let Some(rings) = subs.get_mut(topic) else {
+                return;
+            };
+            rings.retain(|r| !Arc::ptr_eq(r, ring));
+            let last = rings.is_empty();
+            if last {
+                subs.remove(topic);
+            }
+            last
+        };
+        if last && !self.is_closed() {
+            let link = self.clone();
+            let topic = topic.to_string();
+            tokio::spawn(async move {
+                let _ = link
+                    .call(method::UNSUB, json!({"topics": [topic]}), Some(SHORT_CALL))
+                    .await;
+            });
+        }
+    }
+
+    /// How many sessions' streams take the events of `topic`.
+    pub fn subscribers(&self, topic: &str) -> usize {
+        self.subs.lock().unwrap().get(topic).map_or(0, Vec::len)
+    }
+
+    /// An event from the node for the subscriptions of its topic: one JSON
+    /// line `{name, seq, ts, data}` in each of their rings. Whether one
+    /// took it.
+    pub fn event(&self, ev: &msg::Event) -> bool {
+        let topic = format!("{}/{}", ev.cap, ev.name);
+        let rings = self.subs.lock().unwrap().get(&topic).cloned();
+        let Some(rings) = rings else {
+            return false;
+        };
+        let mut line =
+            json!({"name": ev.name, "seq": ev.seq, "ts": ev.ts, "data": ev.data}).to_string();
+        line.push('\n');
+        for r in &rings {
+            r.push(line.as_bytes());
+        }
+        true
     }
 }
 
@@ -1597,5 +1672,48 @@ mod tests {
                 "parked: {parked}"
             );
         }
+    }
+
+    /// An event goes as one JSON line to every ring subscribed to its
+    /// topic and to no other; a parked link keeps its subscriptions (the
+    /// node keeps them for a resume), an ended one ends them.
+    #[tokio::test]
+    async fn events_go_to_their_topics_rings_until_the_link_ends() {
+        let (out, _rx) = mpsc::channel(8);
+        let link = Arc::new(Link::new(
+            "n1",
+            String::new(),
+            false,
+            Limits::default(),
+            out,
+            Some("l-1".into()),
+        ));
+        let conn = link.wire.lock().unwrap().conn;
+        assert!(link.take_frame(conn, true));
+        let ring = |_| Arc::new(Ring::of(crate::streams::Source::Events));
+        let (a, b, c) = (ring(0), ring(1), ring(2));
+        link.subscribe("board/alarm", a.clone());
+        link.subscribe("board/alarm", b.clone());
+        link.subscribe("board/other", c.clone());
+        let ev = |seq| msg::Event {
+            cap: "board".into(),
+            name: "alarm".into(),
+            seq,
+            ts: 5,
+            data: json!({"level": 1}),
+        };
+        assert!(link.event(&ev(1)));
+        let line = "{\"data\":{\"level\":1},\"name\":\"alarm\",\"seq\":1,\"ts\":5}\n";
+        assert_eq!(a.read(1024).text, line);
+        assert_eq!(b.read(1024).text, line);
+        assert_eq!(c.held(), 0);
+        assert!(link.park(conn));
+        assert!(link.event(&ev(2)));
+        assert!(!a.ended() && a.held() > 0, "a parked link keeps them");
+        link.end(ByeReason::Shutdown);
+        for r in [&a, &b, &c] {
+            assert!(r.ended());
+        }
+        assert_eq!(link.subscribers("board/alarm"), 0);
     }
 }

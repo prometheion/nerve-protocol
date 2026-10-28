@@ -63,6 +63,20 @@ pub struct Ring {
     state: Mutex<RingState>,
     /// Moves on every push and at the end, for a read that waits.
     moved: watch::Sender<u64>,
+    /// What it carries, for the words of its end.
+    source: Source,
+}
+
+/// What a ring carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// A command's output (`exec`'s `output`).
+    Output,
+    /// A program's stream.
+    Program,
+    /// The events of a subscription, one JSON line each: what goes past
+    /// [`RING_BYTES`] goes by whole lines.
+    Events,
 }
 
 #[derive(Default)]
@@ -94,14 +108,35 @@ pub struct Read {
 
 impl Default for Ring {
     fn default() -> Ring {
-        Ring {
-            state: Mutex::default(),
-            moved: watch::channel(0).0,
-        }
+        Ring::of(Source::Output)
     }
 }
 
 impl Ring {
+    /// An empty ring for what `source` sends.
+    pub fn of(source: Source) -> Ring {
+        Ring {
+            state: Mutex::default(),
+            moved: watch::channel(0).0,
+            source,
+        }
+    }
+
+    /// What the ring carries.
+    pub fn source(&self) -> Source {
+        self.source
+    }
+
+    /// The words for the node's `stream.close` of it (`ended` when what
+    /// sent it ended it).
+    pub fn closed_words(&self, ended: bool) -> &'static str {
+        match (self.source, ended) {
+            (Source::Output, true) => "the command ended",
+            (Source::Program, true) => "the program ended it",
+            _ => "the node closed it",
+        }
+    }
+
     fn moved(&self) {
         self.moved.send_modify(|n| *n += 1);
     }
@@ -114,7 +149,14 @@ impl Ring {
                 return;
             }
             s.buf.extend(data);
-            let over = s.buf.len().saturating_sub(RING_BYTES);
+            let mut over = s.buf.len().saturating_sub(RING_BYTES);
+            // Events go by whole lines: a read never starts inside one.
+            if over > 0 && self.source == Source::Events {
+                over = match s.buf.range(over..).position(|b| *b == b'\n') {
+                    Some(i) => over + i + 1,
+                    None => s.buf.len(),
+                };
+            }
             if over > 0 {
                 s.buf.drain(..over);
                 s.at += over as u64;
@@ -302,15 +344,21 @@ impl RingState {
 /// A stream of a session as `stream.read` finds it.
 pub struct Found {
     pub ring: Arc<Ring>,
-    /// The job whose output it is.
-    pub job: String,
+    /// What it is, in words: `the output of job j-…`, `the events of
+    /// sensors.alarm`, `stream sensors.feed`.
+    pub what: String,
+    /// The job whose output it is, if it is one's.
+    pub job: Option<String>,
 }
 
 /// What closing a stream leaves to do: tell the node, if the stream still
-/// runs there.
+/// runs there, or end the subscription there once no stream of the link
+/// takes its events any more.
 pub struct Closer {
     /// The link and `sid` of the stream, once the node opened it.
     node: Option<(Weak<Link>, u32)>,
+    /// The link and topic of a subscription.
+    sub: Option<(Weak<Link>, String)>,
     ring: Arc<Ring>,
 }
 
@@ -320,6 +368,11 @@ impl Closer {
     /// it says nothing the center needs.
     pub fn close(self, why: &str) {
         self.ring.end(why);
+        if let Some((link, topic)) = self.sub
+            && let Some(link) = link.upgrade()
+        {
+            link.unsubscribe(&topic, &self.ring);
+        }
         let Some((link, sid)) = self.node else {
             return;
         };
@@ -335,8 +388,10 @@ impl Closer {
 
 struct Entry {
     node_id: String,
-    job: String,
+    what: String,
+    job: Option<String>,
     node: Option<(Weak<Link>, u32)>,
+    sub: Option<(Weak<Link>, String)>,
     ring: Arc<Ring>,
     opened: Instant,
 }
@@ -345,8 +400,13 @@ impl Entry {
     fn closer(self) -> Closer {
         Closer {
             node: self.node,
+            sub: self.sub,
             ring: self.ring,
         }
+    }
+
+    fn is_job(&self, job: &str) -> bool {
+        self.job.as_deref() == Some(job)
     }
 }
 
@@ -394,18 +454,56 @@ impl Streams {
     /// Adds the stream of the output of `job` on `node_id`, as `id`, before
     /// the node opened it. Refused once the session ended.
     pub fn add(&mut self, id: &str, node_id: &str, job: &str, ring: Arc<Ring>) -> bool {
+        self.insert(
+            id,
+            node_id,
+            format!("the output of job {job}"),
+            Some(job),
+            ring,
+        )
+    }
+
+    /// Adds a stream of a program's unit on `node_id`, as `id`, before the
+    /// node opened it or the subscription was made; `what` names it.
+    /// Refused once the session ended.
+    pub fn add_unit(&mut self, id: &str, node_id: &str, what: String, ring: Arc<Ring>) -> bool {
+        self.insert(id, node_id, what, None, ring)
+    }
+
+    fn insert(
+        &mut self,
+        id: &str,
+        node_id: &str,
+        what: String,
+        job: Option<&str>,
+        ring: Arc<Ring>,
+    ) -> bool {
         if self.ended {
             return false;
         }
         let e = Entry {
             node_id: node_id.to_string(),
-            job: job.to_string(),
+            what,
+            job: job.map(str::to_string),
             node: None,
+            sub: None,
             ring,
             opened: Instant::now(),
         };
         self.entries.insert(id.to_string(), e);
         true
+    }
+
+    /// The events of `topic` on `link` go to the stream `id` now; `false`
+    /// when the session no longer holds it.
+    pub fn subscribed(&mut self, id: &str, link: &Arc<Link>, topic: &str) -> bool {
+        match self.entries.get_mut(id) {
+            Some(e) => {
+                e.sub = Some((Arc::downgrade(link), topic.to_string()));
+                true
+            }
+            None => false,
+        }
     }
 
     /// The node opened the stream `id` as `sid` on `link`; `false` when the
@@ -443,6 +541,7 @@ impl Streams {
             .filter(|e| e.node_id == node_id)
             .map(|e| Found {
                 ring: e.ring.clone(),
+                what: e.what.clone(),
                 job: e.job.clone(),
             });
         (found, gone)
@@ -461,7 +560,7 @@ impl Streams {
     /// link, a result not kept) and the stream holds output or, open on the
     /// node, may still get some. Then it stays, and its id is given.
     pub fn result_read(&mut self, job: &str, whole: bool) -> (Option<String>, Option<Closer>) {
-        let Some((id, e)) = self.entries.iter().find(|(_, e)| e.job == job) else {
+        let Some((id, e)) = self.entries.iter().find(|(_, e)| e.is_job(job)) else {
             return (None, None);
         };
         let more = e.ring.held() > 0 || (e.node.is_some() && !e.ring.ended());
@@ -477,7 +576,7 @@ impl Streams {
         let id = self
             .entries
             .iter()
-            .find(|(_, e)| e.job == job)
+            .find(|(_, e)| e.is_job(job))
             .map(|(id, _)| id.clone())?;
         self.entries.remove(&id).map(Entry::closer)
     }
@@ -578,6 +677,7 @@ pub async fn open_on_node(
                         if !kept {
                             Closer {
                                 node: Some((Arc::downgrade(&link), sid)),
+                                sub: None,
                                 ring,
                             }
                             .close("it was closed");

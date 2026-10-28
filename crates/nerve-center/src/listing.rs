@@ -27,6 +27,8 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use nerve_proto::UnitKind;
+
 use crate::catalog::{self, Reach, Unit};
 use crate::store::NodeRecord;
 use crate::util;
@@ -480,15 +482,23 @@ fn lines(o: &Offer, taken: usize) -> Lines {
         let mut capabilities = Vec::new();
         let mut data_len = 0;
         for u in &o.units {
-            let (line, entry) = if summaries {
+            // A program's state key, event or stream says what it is.
+            let kind = match u.kind {
+                UnitKind::Action => String::new(),
+                k => format!(" ({})", k.as_str()),
+            };
+            let (line, mut entry) = if summaries {
                 let s = summary(u);
                 (
-                    format!("- {}: {s}\n", u.name),
+                    format!("- {}{kind}: {s}\n", u.name),
                     json!({"name": u.name, "summary": s}),
                 )
             } else {
-                (format!("- {}\n", u.name), json!({"name": u.name}))
+                (format!("- {}{kind}\n", u.name), json!({"name": u.name}))
             };
+            if u.kind != UnitKind::Action {
+                entry["kind"] = json!(u.kind.as_str());
+            }
             let entry_len = entry.to_string().len() + 1;
             if body.len() + line.len() > budget || data_len + entry_len > budget {
                 break;
@@ -783,8 +793,17 @@ pub fn details(o: &Offer, asked: &[String]) -> Answer {
         } else {
             ""
         };
+        // What execute does with a program's state key, event or stream.
+        let how = match how_used(u.kind) {
+            Some(how) => {
+                entry["kind"] = json!(u.kind.as_str());
+                entry["use"] = json!(how);
+                format!("kind: {}\nuse: {how}\n", u.kind.as_str())
+            }
+            None => String::new(),
+        };
         let block = format!(
-            "capability: {}\ndescription: {}\neffect: {}\nparams: {}\n{paths}result: {}\n{runs}{folders}\n",
+            "capability: {}\n{how}description: {}\neffect: {}\nparams: {}\n{paths}result: {}\n{runs}{folders}\n",
             u.name,
             u.description,
             u.effect.as_str(),
@@ -871,6 +890,21 @@ pub fn details(o: &Offer, asked: &[String]) -> Answer {
         data,
         is_error: false,
         listed,
+    }
+}
+
+/// What `execute` does with a unit of `kind` that is not an action, in
+/// the words its details give.
+fn how_used(kind: UnitKind) -> Option<&'static str> {
+    match kind {
+        UnitKind::Action => None,
+        UnitKind::State => Some("execute with args {} reads its value now"),
+        UnitKind::Event => Some(
+            "execute with args {} subscribes this session and answers a stream id; stream.read gives its events from then on, one JSON line each",
+        ),
+        UnitKind::Stream => Some(
+            "execute with args that fit its params opens it and answers a stream id; stream.read reads what it sends",
+        ),
     }
 }
 
@@ -1080,8 +1114,10 @@ mod tests {
     const CANCEL: &str = "Stops a running job of this session: the node cancels its call.";
     const STATUS: &str = "A job's state: running, or its result once it ended (given once). A \
                           job is a call that execute answered with a job id.";
-    const CLOSE: &str = "Closes a stream of this session: nothing more of it is kept or read.";
-    const READ: &str = "Reads what a stream (a job's command output) sent since the last read; \
+    const CLOSE: &str = "Closes a stream of this session (a subscription too): nothing more of \
+                         it is kept or read.";
+    const READ: &str = "Reads what a stream (a job's command output, a program's stream, or the \
+                        events of a subscription, one JSON line each) sent since the last read; \
                         eof once it ended and all was read.";
 
     fn record(name: &str, d: Option<nerve_proto::Descriptor>) -> NodeRecord {

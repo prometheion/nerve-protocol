@@ -613,6 +613,7 @@ mod tests {
             cap: cap.into(),
             action: action.into(),
             effect: Effect::Execute,
+            kind: nerve_proto::UnitKind::Action,
         }
     }
 
