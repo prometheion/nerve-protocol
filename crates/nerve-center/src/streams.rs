@@ -96,6 +96,10 @@ struct RingState {
     gaps: VecDeque<(u64, u64)>,
     /// Why it ended, and when.
     end: Option<(String, Instant)>,
+    /// What it takes is kept from its readers until [`Ring::show`]: a
+    /// subscription's ring is on the link before its `sub` was decided, and
+    /// takes the events another session's subscription of the topic brings.
+    hidden: bool,
 }
 
 /// One `stream.read`.
@@ -172,6 +176,18 @@ impl Ring {
         self.moved();
     }
 
+    /// Keeps what the ring takes from its readers until [`Ring::show`], and
+    /// drops it if the ring ends before.
+    pub fn hide(&self) {
+        self.state.lock().unwrap().hidden = true;
+    }
+
+    /// What the ring took can be read: its subscription was taken.
+    pub fn show(&self) {
+        self.state.lock().unwrap().hidden = false;
+        self.moved();
+    }
+
     /// The node dropped `n` bytes of the stream, after what came so far.
     pub fn gap(&self, n: u64) {
         {
@@ -201,13 +217,20 @@ impl Ring {
         self.moved();
     }
 
-    /// The stream ended (`why`); what it holds can still be read. Only the
-    /// first end counts.
+    /// The stream ended (`why`); what it holds can still be read, unless
+    /// it was still hidden: then it was never let through ([`Ring::hide`]),
+    /// and only the words why remain. Only the first end counts.
     pub fn end(&self, why: &str) {
         {
             let mut s = self.state.lock().unwrap();
             if s.end.is_some() {
                 return;
+            }
+            if s.hidden {
+                s.buf.clear();
+                s.gaps.clear();
+                s.dropped = 0;
+                s.hidden = false;
             }
             s.end = Some((why.to_string(), Instant::now()));
         }
@@ -255,7 +278,11 @@ impl Ring {
                     let head: Vec<u8> = s.buf.iter().copied().collect();
                     matches!(std::str::from_utf8(&head), Err(e) if e.valid_up_to() == 0 && e.error_len().is_none())
                 };
-            (!s.buf.is_empty() && !part) || s.dropped > 0 || !s.gaps.is_empty() || s.end.is_some()
+            !s.hidden
+                && ((!s.buf.is_empty() && !part)
+                    || s.dropped > 0
+                    || !s.gaps.is_empty()
+                    || s.end.is_some())
         };
         if ready(&self.state.lock().unwrap()) {
             return;
@@ -275,6 +302,14 @@ impl Ring {
     /// stays for the next read, unless nothing more can come.
     pub fn read(&self, max: usize) -> Read {
         let mut s = self.state.lock().unwrap();
+        if s.hidden {
+            return Read {
+                text: String::new(),
+                eof: false,
+                dropped: 0,
+                why: None,
+            };
+        }
         s.gaps_before_text();
         let upto = s
             .gaps
@@ -428,6 +463,65 @@ impl Entry {
     }
 }
 
+/// One of the node's stream places that the `stream.open` of a session's
+/// program stream takes on the node until the node answers it. Its opener
+/// may give up before (its `execute` was cancelled, or its wait passed),
+/// and the protocol cannot withdraw the open: the node keeps the place
+/// until it answers, and so the session keeps counting it
+/// ([`Streams::places_on`]), or cancelled opens would let it take more than
+/// its share of the node's places.
+pub struct Place {
+    sess: Weak<Session>,
+    node_id: String,
+    /// Its opener gave up: the session counts it until it is dropped.
+    left: bool,
+}
+
+impl Place {
+    /// The place of a stream of `sess` on `node_id` that is being opened.
+    pub fn new(sess: &Arc<Session>, node_id: &str) -> Place {
+        Place {
+            sess: Arc::downgrade(sess),
+            node_id: node_id.to_string(),
+            left: false,
+        }
+    }
+
+    /// The opener gave up while the node has not answered: the session
+    /// counts the place until the answer comes or the link ends.
+    pub fn leave(&mut self) {
+        if self.left {
+            return;
+        }
+        self.left = true;
+        if let Some(s) = self.sess.upgrade() {
+            *s.streams
+                .lock()
+                .unwrap()
+                .left
+                .entry(self.node_id.clone())
+                .or_default() += 1;
+        }
+    }
+}
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        if !self.left {
+            return;
+        }
+        if let Some(s) = self.sess.upgrade() {
+            let mut streams = s.streams.lock().unwrap();
+            if let Some(n) = streams.left.get_mut(&self.node_id) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    streams.left.remove(&self.node_id);
+                }
+            }
+        }
+    }
+}
+
 /// Why [`Streams::add_unit`] added no stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotAdded {
@@ -447,6 +541,9 @@ pub struct Streams {
     entries: HashMap<String, Entry>,
     /// The session ended: no stream is added any more.
     ended: bool,
+    /// By node id, the opens of its programs' streams whose openers gave up
+    /// and which the node has not answered yet ([`Place`]).
+    left: HashMap<String, usize>,
 }
 
 impl Streams {
@@ -529,16 +626,19 @@ impl Streams {
     /// How many of the node's stream places the session's streams on
     /// `node_id` hold: those open there that still run, and those on their
     /// way there, its programs' streams and the jobs' output streams it
-    /// asked for (a subscription holds none).
+    /// asked for (a subscription holds none), and the opens it gave up on
+    /// that the node has not answered ([`Place`]).
     fn places_on(&self, node_id: &str) -> usize {
-        self.entries
+        let held = self
+            .entries
             .values()
             .filter(|e| {
                 e.node_id == node_id
                     && !e.ring.ended()
                     && (e.node.is_some() || e.asking || e.ring.source() == Source::Program)
             })
-            .count()
+            .count();
+        held + self.left.get(node_id).copied().unwrap_or(0)
     }
 
     /// The output stream `id` is about to ask its node to open it: when
@@ -899,6 +999,41 @@ mod tests {
 
     /// An events ring drops by whole lines, and no more than it must: a
     /// cut that falls right after a line's end keeps the next line.
+    /// A hidden ring gives nothing until it is shown, and then what it
+    /// took; one that ends while hidden drops it, and gives only its end.
+    #[tokio::test]
+    async fn a_hidden_ring_gives_what_it_took_only_once_shown() {
+        let r = Ring::of(Source::Events);
+        r.hide();
+        r.push(b"{\"seq\":1}\n");
+        let got = r.read(READ_MAX);
+        assert_eq!((got.text.as_str(), got.eof), ("", false));
+        let started = Instant::now();
+        r.wait(Duration::from_millis(100)).await;
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "a wait goes on"
+        );
+        r.show();
+        assert_eq!(r.read(READ_MAX).text, "{\"seq\":1}\n");
+
+        let r = Ring::of(Source::Events);
+        r.hide();
+        r.push(b"{\"seq\":1}\n");
+        r.gap(5);
+        r.end("it did not open");
+        let got = r.read(READ_MAX);
+        assert_eq!(
+            got,
+            Read {
+                text: String::new(),
+                eof: true,
+                dropped: 0,
+                why: Some("it did not open".into()),
+            }
+        );
+    }
+
     #[test]
     fn an_events_ring_drops_whole_lines_and_no_more() {
         let r = Ring::of(Source::Events);

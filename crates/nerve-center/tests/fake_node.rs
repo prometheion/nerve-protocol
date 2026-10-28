@@ -5944,3 +5944,184 @@ async fn a_programs_stream_closed_while_it_opened_says_why() {
     assert_eq!(e.session().streams.lock().unwrap().len(), 0);
     r.stop().await;
 }
+
+/// A subscription whose id was given while the action checker still
+/// decided it gives none of the events that another session's subscription
+/// of the topic brings meanwhile: not before the checker decided, and not
+/// after it refused, when only the words why remain.
+#[tokio::test]
+async fn a_subscription_gives_no_events_before_it_was_taken() {
+    use nerve_center::checker::config::ModelScope;
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = board_box(&r).await;
+    let link = r.center.link(&node).unwrap();
+    // Another session holds the node's subscription of the topic.
+    let other = Arc::new(Engine::new(&r.center, "test"));
+    list_text(
+        &other,
+        json!({"node": "box-1", "capability": ["board.alarm"]}),
+    )
+    .await;
+    let theirs = opened_stream(
+        &execute_as(&other, json!(1), "board.alarm", json!({})).await,
+        "board.alarm",
+        "event",
+    );
+    assert_eq!(next_state(&mut seen).await.0, "sub");
+    list_text(&e, json!({"node": "box-1", "capability": ["board.alarm"]})).await;
+    let (url, asked, go) = held_model();
+    r.center.update(|s| {
+        s.checker.model_on = true;
+        s.checker.model.source = ModelSource::Endpoint;
+        s.checker.model.endpoint_url = url;
+        s.checker.model.scope = ModelScope::WithReads;
+    });
+    r.center.rebuild_checker();
+    r.center.set_call_wait(WAIT);
+    let reply = execute_as(&e, json!(1), "board.alarm", json!({})).await;
+    let stream = opened_stream(&reply, "board.alarm", "event");
+    assert!(
+        said(&reply).0.starts_with("Subscribing to board.alarm"),
+        "{reply}"
+    );
+    tokio::task::spawn_blocking(move || asked.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the model was asked");
+    let ev = msg::Event {
+        cap: "board".into(),
+        name: "alarm".into(),
+        seq: 99,
+        ts: 1,
+        data: json!({"level": 4242}),
+    };
+    assert!(link.event(&ev));
+    let got = read_stream(&e, &stream, 300).await;
+    let (text, data) = read_of(&got);
+    assert!(!text.contains("4242"), "{text}");
+    assert_eq!(data["eof"], false, "{text}");
+    // The model goes without an answer: the checker fails closed.
+    drop(go);
+    let (text, last) = read_until(&e, &stream, |_| false).await;
+    assert!(!text.contains("4242"), "{text}");
+    let (words, data) = read_of(&last);
+    assert_eq!(data["eof"], true, "{words}");
+    assert!(
+        words.contains("it ended (it did not open: error forbidden"),
+        "{words}"
+    );
+    // The other session's subscription took it.
+    let (text, _) = read_until(&other, &theirs, |t| t.contains("4242")).await;
+    assert!(text.contains("4242"), "{text}");
+    r.stop().await;
+}
+
+/// An `execute` of a program's stream or event that is dropped right after
+/// it started opening it, before the task that opens it first ran, holds
+/// no stream in the session, and its ring leaves the link.
+#[tokio::test]
+async fn an_execute_dropped_before_its_open_ran_holds_no_stream() {
+    use std::future::Future;
+    use std::task::Poll;
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, _seen, _task) = board_box(&r).await;
+    let link = r.center.link(&node).unwrap();
+    list_text(
+        &e,
+        json!({"node": "box-1", "capability": ["board.feed", "board.alarm"]}),
+    )
+    .await;
+    for (unit, args) in [
+        ("board.feed", json!({"every_ms": 999})),
+        ("board.alarm", json!({})),
+    ] {
+        let mut call = std::pin::pin!(execute_as(&e, json!(unit), unit, args));
+        // Polled once and dropped: on the test's one thread, the task it
+        // started has not run yet.
+        std::future::poll_fn(|cx| {
+            assert!(call.as_mut().poll(cx).is_pending(), "{unit}");
+            Poll::Ready(())
+        })
+        .await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(e.session().streams.lock().unwrap().len(), 0);
+    assert_eq!(link.subscribers("board/alarm"), 0);
+    r.stop().await;
+}
+
+/// Opens of a program's stream that the session cancelled keep their
+/// places in its share of the node's streams until the node answers them,
+/// as the node keeps them: the session's next open is refused meanwhile,
+/// and goes through once the answers came.
+#[tokio::test]
+async fn cancelled_opens_keep_the_sessions_share_until_the_node_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = board_box(&r).await;
+    let link = r.center.link(&node).unwrap();
+    let sess = e.session();
+    let share = nerve_center::streams::node_share(nerve_proto::limits::STREAMS);
+    list_text(&e, json!({"node": "box-1", "capability": ["board.feed"]})).await;
+    // Opened with `every_ms` 999, each is answered after [`SLOW`] only.
+    let calls: Vec<_> = (0..share)
+        .map(|i| {
+            let e = e.clone();
+            tokio::spawn(async move {
+                execute_as(
+                    &e,
+                    json!(format!("feed-{i}")),
+                    "board.feed",
+                    json!({"every_ms": 999}),
+                )
+                .await
+            })
+        })
+        .collect();
+    for _ in 0..share {
+        let Seen::StreamOpen(_) = next_seen(&mut seen).await else {
+            panic!("no stream.open")
+        };
+    }
+    for i in 0..share {
+        let note = e
+            .handle(
+                json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                           "params": {"requestId": format!("feed-{i}")}}),
+            )
+            .await;
+        assert!(note.is_none());
+    }
+    for c in calls {
+        let _ = c.await;
+    }
+    assert_eq!(sess.streams.lock().unwrap().len(), 0);
+    let reply = execute_as(&e, json!("more"), "board.feed", json!({"every_ms": 5})).await;
+    let (text, err) = said(&reply);
+    assert!(
+        err && text.starts_with("error busy") && text.contains("its share of the node's streams"),
+        "{reply}"
+    );
+    // Answered, the streams are closed on the node, and their places are
+    // the session's again.
+    let mut closed = 0;
+    while closed < share {
+        if let Seen::StreamClose(_) = next_seen(&mut seen).await {
+            closed += 1;
+        }
+    }
+    wait_for(|| (link.stream_count() == 0).then_some(())).await;
+    let mut opened = None;
+    for i in 0..50 {
+        let reply = execute_as(&e, json!(i), "board.feed", json!({"every_ms": 5})).await;
+        if !said(&reply).1 {
+            opened = Some(reply);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    opened_stream(&opened.expect("opened in the end"), "board.feed", "stream");
+    r.stop().await;
+}

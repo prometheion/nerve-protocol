@@ -22,7 +22,7 @@ use nerve_transport::net::BoxIo;
 use nerve_transport::ws::WsMessage;
 
 use crate::center::Center;
-use crate::streams::Ring;
+use crate::streams::{Place, Ring};
 
 /// Each side has this long for its handshake step (§4.2).
 pub const HANDSHAKE_STEP: Duration = Duration::from_secs(15);
@@ -92,6 +92,9 @@ struct Asked {
     link: Arc<Link>,
     id: u64,
     rx: Option<oneshot::Receiver<Reply>>,
+    /// The session's count of the node's place the open takes, kept until
+    /// the answer comes.
+    place: Option<Place>,
 }
 
 impl Drop for Asked {
@@ -102,11 +105,16 @@ impl Drop for Asked {
         if let Some(o) = self.link.opening.lock().unwrap().get_mut(&self.id) {
             o.ring.take();
         }
+        let mut place = self.place.take();
+        if let Some(p) = &mut place {
+            p.leave();
+        }
         let Ok(rt) = tokio::runtime::Handle::try_current() else {
             return;
         };
         let link = self.link.clone();
         rt.spawn(async move {
+            let _place = place;
             if let Ok(Ok(v)) = rx.await
                 && let Some(sid) = sid_of(&v)
             {
@@ -678,6 +686,19 @@ impl Link {
         ring: Arc<Ring>,
         wait: Duration,
     ) -> Result<u32, RpcError> {
+        self.open_stream_in(params, ring, wait, None).await
+    }
+
+    /// [`Link::open_stream`] for a session that counts the node's place the
+    /// open takes as `place`: given up on before the node answered, the
+    /// session counts it until the answer comes.
+    pub async fn open_stream_in(
+        self: &Arc<Self>,
+        params: Value,
+        ring: Arc<Ring>,
+        wait: Duration,
+        place: Option<Place>,
+    ) -> Result<u32, RpcError> {
         if !self.is_live() {
             return Err(lost());
         }
@@ -723,6 +744,7 @@ impl Link {
             link: self.clone(),
             id,
             rx: Some(rx),
+            place,
         };
         let rx = asked.rx.as_mut().expect("just set");
         let r = match tokio::time::timeout(wait, &mut *rx).await {

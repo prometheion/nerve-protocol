@@ -372,25 +372,27 @@ impl Drop for Waiting {
 /// Dropped before its id was given (the harness cancelled the request, or
 /// the node refused), it closes the stream again: nobody could name it to
 /// close it, and it would hold one of the session's places and its
-/// subscription on the link for as long as the session lives.
-struct Adding<'a> {
-    sess: &'a Session,
-    node_id: &'a str,
+/// subscription on the link for as long as the session lives. It owns
+/// what it needs, so that it can be made before the task that opens the
+/// stream: a task aborted before it first ran drops it too.
+struct Adding {
+    sess: Arc<Session>,
+    node_id: String,
     id: Option<String>,
     why: &'static str,
 }
 
-impl Adding<'_> {
+impl Adding {
     /// The id is given: the stream stays.
     fn keep(mut self) -> String {
         self.id.take().unwrap_or_default()
     }
 }
 
-impl Drop for Adding<'_> {
+impl Drop for Adding {
     fn drop(&mut self) {
         if let Some(id) = self.id.take()
-            && let Some(c) = self.sess.streams.lock().unwrap().close(&id, self.node_id)
+            && let Some(c) = self.sess.streams.lock().unwrap().close(&id, &self.node_id)
         {
             c.close(self.why);
         }
@@ -3072,7 +3074,12 @@ impl Center {
             return Err(self.refused(sess, route, e));
         };
         // The ring takes the topic's events before the node is asked: the
-        // first may follow its answer at once. Refused, it goes again.
+        // first may follow its answer at once. Until the checker and the
+        // node took the subscription it keeps them from the session: they
+        // are those another session's subscription of the topic brings, and
+        // its id may be given before (Center::within_call_wait). Refused, it
+        // ends without them.
+        ring.hide();
         self.add_unit_stream(sess, route, &id, what, ring.clone(), None)
             .map_err(|CallError::Rpc(e)| self.refused(sess, route, e))?;
         link.subscribe(&topic, ring.clone());
@@ -3082,8 +3089,12 @@ impl Center {
             link.unsubscribe(&topic, &ring);
             return Err(closed_while_opening(&ring).into());
         }
-        let (c, s, r) = (self.clone(), sess.clone(), route.clone());
-        let subscribe = async move { c.call(&s, &r, Map::new()).await.map(|_| ()) };
+        let (c, s, r, rg) = (self.clone(), sess.clone(), route.clone(), ring.clone());
+        let subscribe = async move {
+            c.call(&s, &r, Map::new()).await?;
+            rg.show();
+            Ok(())
+        };
         self.within_call_wait(sess, route, id, ring, subscribe)
             .await
     }
@@ -3173,7 +3184,12 @@ impl Center {
             .unwrap()
             .0
             .max(streams::PROGRAM_OPEN_WAIT);
-        let sid = link.open_stream(params, ring.clone(), wait).await?;
+        // A cancelled open still takes its place on the node until the node
+        // answers it: the session counts it till then.
+        let place = streams::Place::new(sess, &route.node_id);
+        let sid = link
+            .open_stream_in(params, ring.clone(), wait, Some(place))
+            .await?;
         if !sess.streams.lock().unwrap().opened(id, &link, sid) {
             // Closed meanwhile (by the agent, the session's end, a
             // disable): so is the stream.
@@ -3207,18 +3223,20 @@ impl Center {
     ) -> Result<Opened, CallError> {
         let phase = Arc::new(Mutex::new(Phase::Waited));
         let (tx, mut rx) = tokio::sync::oneshot::channel();
+        // Nobody can name the stream before its id is given: if it does not
+        // open by then, or its `execute` is cancelled, it goes again, so it
+        // holds none of the session's places. Made here, not in the task:
+        // the `execute` may be dropped before the task first ran.
+        let adding = Adding {
+            sess: sess.clone(),
+            node_id: route.node_id.clone(),
+            id: Some(id.clone()),
+            why: "its execute was cancelled",
+        };
         let task = {
             let (s, r, i, phase) = (sess.clone(), route.clone(), id.clone(), phase.clone());
             async move {
-                // Nobody can name the stream before its id is given: if it
-                // does not open by then, or its `execute` is cancelled, it
-                // goes again, so it holds none of the session's places.
-                let mut adding = Adding {
-                    sess: &s,
-                    node_id: &r.node_id,
-                    id: Some(i.clone()),
-                    why: "its execute was cancelled",
-                };
+                let mut adding = adding;
                 let out = open.await;
                 let given = {
                     let mut p = phase.lock().unwrap();

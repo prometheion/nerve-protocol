@@ -305,8 +305,10 @@ names each with its kind (`- sensors.temperature (state): …`, `- door.opened
 Like any call, `execute` of an event or a stream answers within the call
 wait. When the action checker or the program takes longer, it answers
 `Subscribing to …` or `Opening … as stream s-…` with the stream id at
-once, and the subscription or stream goes on by itself; if the machine then
-refuses it, `stream.read` says why (`it ended (it did not open: …)`).
+once, and the subscription or stream goes on by itself. A subscription
+gives no events before it was taken; if the machine then refuses it,
+`stream.read` says why (`it ended (it did not open: …)`) and gives none of
+the events that came meanwhile.
 
 `stream.close` ends a subscription, as the session's end does. A
 subscription keeps at most 1 MiB of events that were not read and drops the
