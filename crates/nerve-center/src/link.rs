@@ -105,10 +105,7 @@ impl Drop for Asked {
         if let Some(o) = self.link.opening.lock().unwrap().get_mut(&self.id) {
             o.ring.take();
         }
-        let mut place = self.place.take();
-        if let Some(p) = &mut place {
-            p.leave();
-        }
+        let place = self.place.take();
         let Ok(rt) = tokio::runtime::Handle::try_current() else {
             return;
         };
@@ -690,8 +687,8 @@ impl Link {
     }
 
     /// [`Link::open_stream`] for a session that counts the node's place the
-    /// open takes as `place`: given up on before the node answered, the
-    /// session counts it until the answer comes.
+    /// open takes as `place`: it is kept until the answer comes, also when
+    /// the open is given up on before.
     pub async fn open_stream_in(
         self: &Arc<Self>,
         params: Value,

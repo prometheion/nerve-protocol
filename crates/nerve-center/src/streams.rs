@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use nerve_proto::ErrorCode;
 use serde_json::json;
 use tokio::sync::watch;
+use tokio::task::AbortHandle;
 
 use crate::center::Session;
 use crate::jobs::NoSignal;
@@ -410,14 +411,21 @@ pub struct Closer {
     /// The link and topic of a subscription.
     sub: Option<(Weak<Link>, String)>,
     ring: Arc<Ring>,
+    /// The task that still opens it, once its id was given.
+    opening: Option<AbortHandle>,
 }
 
 impl Closer {
     /// Ends the stream, frees it on its link and tells the node to stop it,
     /// unless it ended there already. The node's answer is not waited for:
-    /// it says nothing the center needs.
+    /// it says nothing the center needs. A stream still being opened stops
+    /// its open, as a cancelled `execute` does: nobody reads what it would
+    /// bring, and a subscription's call would hold its places meanwhile.
     pub fn close(self, why: &str) {
         self.ring.end(why);
+        if let Some(h) = self.opening {
+            h.abort();
+        }
         if let Some((link, topic)) = self.sub
             && let Some(link) = link.upgrade()
         {
@@ -447,6 +455,12 @@ struct Entry {
     /// A job's output stream asked the node for it ([`Streams::ask`]) and
     /// waits for the answer: it holds one of the node's places meanwhile.
     asking: bool,
+    /// A program stream's `stream.open` went to the node: its [`Place`]
+    /// counts the node's place it takes until the answer, not the entry.
+    placed: bool,
+    /// The task that opens it, once its id was given while it still opened
+    /// ([`Streams::given`]).
+    opening: Option<AbortHandle>,
 }
 
 impl Entry {
@@ -455,6 +469,7 @@ impl Entry {
             node: self.node,
             sub: self.sub,
             ring: self.ring,
+            opening: self.opening,
         }
     }
 
@@ -464,62 +479,68 @@ impl Entry {
 }
 
 /// One of the node's stream places that the `stream.open` of a session's
-/// program stream takes on the node until the node answers it. Its opener
-/// may give up before (its `execute` was cancelled, or its wait passed),
-/// and the protocol cannot withdraw the open: the node keeps the place
-/// until it answers, and so the session keeps counting it
-/// ([`Streams::places_on`]), or cancelled opens would let it take more than
-/// its share of the node's places.
+/// program stream takes on the node until the node answers it. The stream
+/// may be closed before, or its opener give up (its `execute` was
+/// cancelled, or its wait passed), and the protocol cannot withdraw the
+/// open: the node keeps the place until it answers, and so the session
+/// keeps counting it ([`Streams::places_on`]), or closed and cancelled
+/// opens would let it take more than its share of the node's places. From
+/// its take until it is dropped it counts in the stream's stead.
 pub struct Place {
     sess: Weak<Session>,
     node_id: String,
-    /// Its opener gave up: the session counts it until it is dropped.
-    left: bool,
+    id: String,
 }
 
 impl Place {
-    /// The place of a stream of `sess` on `node_id` that is being opened.
-    pub fn new(sess: &Arc<Session>, node_id: &str) -> Place {
-        Place {
+    /// Takes the node's place for the open of the program stream `id` of
+    /// `sess`, under the lock its close takes too, so the place counts
+    /// whichever comes first. None when the session no longer holds the
+    /// stream or it ended: it is not to be opened.
+    pub fn take(sess: &Arc<Session>, id: &str) -> Option<Place> {
+        let mut streams = sess.streams.lock().unwrap();
+        let e = streams.entries.get_mut(id).filter(|e| !e.ring.ended())?;
+        e.placed = true;
+        let node_id = e.node_id.clone();
+        *streams.placed.entry(node_id.clone()).or_default() += 1;
+        Some(Place {
             sess: Arc::downgrade(sess),
-            node_id: node_id.to_string(),
-            left: false,
-        }
-    }
-
-    /// The opener gave up while the node has not answered: the session
-    /// counts the place until the answer comes or the link ends.
-    pub fn leave(&mut self) {
-        if self.left {
-            return;
-        }
-        self.left = true;
-        if let Some(s) = self.sess.upgrade() {
-            *s.streams
-                .lock()
-                .unwrap()
-                .left
-                .entry(self.node_id.clone())
-                .or_default() += 1;
-        }
+            node_id,
+            id: id.to_string(),
+        })
     }
 }
 
 impl Drop for Place {
     fn drop(&mut self) {
-        if !self.left {
+        let Some(s) = self.sess.upgrade() else {
             return;
-        }
-        if let Some(s) = self.sess.upgrade() {
-            let mut streams = s.streams.lock().unwrap();
-            if let Some(n) = streams.left.get_mut(&self.node_id) {
-                *n = n.saturating_sub(1);
-                if *n == 0 {
-                    streams.left.remove(&self.node_id);
-                }
+        };
+        let mut streams = s.streams.lock().unwrap();
+        if let Some(n) = streams.placed.get_mut(&self.node_id) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                streams.placed.remove(&self.node_id);
             }
         }
+        // Answered: the stream, if the session still holds it, counts for
+        // itself again, until it ends.
+        if let Some(e) = streams.entries.get_mut(&self.id) {
+            e.placed = false;
+        }
     }
+}
+
+/// Where a session's streams take a topic's events
+/// ([`Streams::subscribed_on`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Subscribed {
+    /// On the link asked about.
+    Here,
+    /// Only on another link of the node, which went meanwhile.
+    Elsewhere,
+    /// Nowhere: the stream was closed.
+    Closed,
 }
 
 /// Why [`Streams::add_unit`] added no stream.
@@ -541,9 +562,9 @@ pub struct Streams {
     entries: HashMap<String, Entry>,
     /// The session ended: no stream is added any more.
     ended: bool,
-    /// By node id, the opens of its programs' streams whose openers gave up
-    /// and which the node has not answered yet ([`Place`]).
-    left: HashMap<String, usize>,
+    /// By node id, the opens of its programs' streams that went to the node
+    /// and which it has not answered yet ([`Place`]).
+    placed: HashMap<String, usize>,
 }
 
 impl Streams {
@@ -626,8 +647,9 @@ impl Streams {
     /// How many of the node's stream places the session's streams on
     /// `node_id` hold: those open there that still run, and those on their
     /// way there, its programs' streams and the jobs' output streams it
-    /// asked for (a subscription holds none), and the opens it gave up on
-    /// that the node has not answered ([`Place`]).
+    /// asked for (a subscription holds none). A program stream's open that
+    /// went to the node counts as its [`Place`] until the node answered,
+    /// also once the stream was closed or its opener gave up.
     fn places_on(&self, node_id: &str) -> usize {
         let held = self
             .entries
@@ -635,10 +657,12 @@ impl Streams {
             .filter(|e| {
                 e.node_id == node_id
                     && !e.ring.ended()
-                    && (e.node.is_some() || e.asking || e.ring.source() == Source::Program)
+                    && (e.node.is_some()
+                        || e.asking
+                        || (e.ring.source() == Source::Program && !e.placed))
             })
             .count();
-        held + self.left.get(node_id).copied().unwrap_or(0)
+        held + self.placed.get(node_id).copied().unwrap_or(0)
     }
 
     /// The output stream `id` is about to ask its node to open it: when
@@ -689,6 +713,8 @@ impl Streams {
             ring,
             opened: Instant::now(),
             asking: false,
+            placed: false,
+            opening: None,
         };
         self.entries.insert(id.to_string(), e);
         true
@@ -706,15 +732,35 @@ impl Streams {
         }
     }
 
-    /// Whether a stream of the session takes the events of `topic` on
-    /// `link`: a subscription made on another link of the node (it went
-    /// meanwhile) has no ring there.
-    pub fn subscribed_on(&self, link: &Arc<Link>, topic: &str) -> bool {
-        self.entries.values().any(|e| {
-            e.sub
-                .as_ref()
-                .is_some_and(|(l, t)| std::ptr::eq(l.as_ptr(), Arc::as_ptr(link)) && t == topic)
-        })
+    /// The stream `id` was given while it still opened, by the task
+    /// `opening`: closed, it stops it. `false` when the session no longer
+    /// holds it.
+    pub fn given(&mut self, id: &str, opening: AbortHandle) -> bool {
+        match self.entries.get_mut(id) {
+            Some(e) => {
+                e.opening = Some(opening);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Where a stream of the session takes the events of `topic`: on
+    /// `link`, on another link of the node (it went meanwhile, and there
+    /// is no ring on `link`), or on none (the stream was closed).
+    pub fn subscribed_on(&self, link: &Arc<Link>, topic: &str) -> Subscribed {
+        let mut found = Subscribed::Closed;
+        for (l, _) in self
+            .entries
+            .values()
+            .filter_map(|e| e.sub.as_ref().filter(|(_, t)| t == topic))
+        {
+            if std::ptr::eq(l.as_ptr(), Arc::as_ptr(link)) {
+                return Subscribed::Here;
+            }
+            found = Subscribed::Elsewhere;
+        }
+        found
     }
 
     /// Takes out the streams of programs' units on `node_id`, its open
@@ -738,10 +784,13 @@ impl Streams {
     /// ends it and takes its subscription off the link.
     pub fn not_opened(&mut self, id: &str) -> Option<Closer> {
         let e = self.entries.get_mut(id)?;
+        // Its own task gives it up: it stops by itself.
+        e.opening = None;
         Some(Closer {
             node: e.node.take(),
             sub: e.sub.take(),
             ring: e.ring.clone(),
+            opening: None,
         })
     }
 
@@ -914,6 +963,7 @@ pub async fn open_on_node(
                                 node: Some((Arc::downgrade(&link), sid)),
                                 sub: None,
                                 ring,
+                                opening: None,
                             }
                             .close("it was closed");
                         }
@@ -1292,10 +1342,18 @@ mod tests {
             assert!(gone.is_empty());
         }
         assert!(s.subscribed("s-2", &link, "board/e2"));
-        assert!(s.subscribed_on(&link, "board/e2"));
-        assert!(!s.subscribed_on(&link, "board/e3"), "never subscribed");
+        assert_eq!(s.subscribed_on(&link, "board/e2"), Subscribed::Here);
+        assert_eq!(
+            s.subscribed_on(&link, "board/e3"),
+            Subscribed::Closed,
+            "never subscribed"
+        );
         let other = Arc::new(Link::for_test("n1"));
-        assert!(!s.subscribed_on(&other, "board/e2"), "another link");
+        assert_eq!(
+            s.subscribed_on(&other, "board/e2"),
+            Subscribed::Elsewhere,
+            "another link"
+        );
         let ring = Arc::new(Ring::of(Source::Program));
         let (added, _) = s.add_unit("s-more", "n1", "stream board.feed".into(), ring, None, now);
         assert_eq!(added, Err(NotAdded::Full));

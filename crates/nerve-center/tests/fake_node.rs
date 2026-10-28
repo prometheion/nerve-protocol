@@ -6125,3 +6125,223 @@ async fn cancelled_opens_keep_the_sessions_share_until_the_node_answers() {
     opened_stream(&opened.expect("opened in the end"), "board.feed", "stream");
     r.stop().await;
 }
+
+/// Program streams whose ids were given while they still opened, and which
+/// the agent then closed, keep their places in the session's share of the
+/// node's streams until the node answers their opens, as the node keeps
+/// them: the session's next open is refused meanwhile, and goes through
+/// once the answers came.
+#[tokio::test]
+async fn closed_opening_streams_keep_the_sessions_share_until_the_node_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = board_box(&r).await;
+    let link = r.center.link(&node).unwrap();
+    let sess = e.session();
+    let share = nerve_center::streams::node_share(nerve_proto::limits::STREAMS);
+    r.center.set_call_wait(WAIT);
+    list_text(&e, json!({"node": "box-1", "capability": ["board.feed"]})).await;
+    let started = std::time::Instant::now();
+    // Opened with `every_ms` 999, each is answered after [`SLOW`] only:
+    // their ids are given while they still open.
+    let calls: Vec<_> = (0..share)
+        .map(|i| {
+            let e = e.clone();
+            tokio::spawn(async move {
+                execute_as(
+                    &e,
+                    json!(format!("feed-{i}")),
+                    "board.feed",
+                    json!({"every_ms": 999}),
+                )
+                .await
+            })
+        })
+        .collect();
+    let mut ids = Vec::new();
+    for c in calls {
+        let reply = c.await.unwrap();
+        assert_eq!(
+            reply["result"]["structuredContent"]["opening"], true,
+            "{reply}"
+        );
+        ids.push(opened_stream(&reply, "board.feed", "stream"));
+    }
+    for (i, id) in ids.iter().enumerate() {
+        let reply = execute_as(
+            &e,
+            json!(format!("close-{i}")),
+            "stream.close",
+            json!({"stream": id}),
+        )
+        .await;
+        assert!(!said(&reply).1, "{reply}");
+    }
+    assert_eq!(sess.streams.lock().unwrap().len(), 0);
+    let reply = execute_as(&e, json!("more"), "board.feed", json!({"every_ms": 5})).await;
+    assert!(started.elapsed() < SLOW, "{:?}", started.elapsed());
+    let (text, err) = said(&reply);
+    assert!(
+        err && text.starts_with("error busy") && text.contains("its share of the node's streams"),
+        "{reply}"
+    );
+    // Answered, the streams are closed on the node, and their places are
+    // the session's again.
+    let mut closed = 0;
+    while closed < share {
+        if let Seen::StreamClose(_) = next_seen(&mut seen).await {
+            closed += 1;
+        }
+    }
+    wait_for(|| (link.stream_count() == 0).then_some(())).await;
+    let mut opened = None;
+    for i in 0..50 {
+        let reply = execute_as(&e, json!(i), "board.feed", json!({"every_ms": 5})).await;
+        if !said(&reply).1 {
+            opened = Some(reply);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    opened_stream(&opened.expect("opened in the end"), "board.feed", "stream");
+    r.stop().await;
+}
+
+/// A subscription whose id was given while the action checker still
+/// decided it, and which the agent then closes, stops its call at once,
+/// before the model answered, as cancelled: the log does not say that the
+/// link to the node ended.
+#[tokio::test]
+async fn a_subscription_closed_while_it_is_decided_stops_as_closed() {
+    use nerve_center::checker::config::ModelScope;
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, _seen, _task) = board_box(&r).await;
+    let link = r.center.link(&node).unwrap();
+    let sess = e.session();
+    r.center.set_call_wait(WAIT);
+    list_text(&e, json!({"node": "box-1", "capability": ["board.alarm"]})).await;
+    let (url, asked, go) = held_model();
+    r.center.update(|s| {
+        s.checker.model_on = true;
+        s.checker.model.source = ModelSource::Endpoint;
+        s.checker.model.endpoint_url = url;
+        s.checker.model.scope = ModelScope::WithReads;
+    });
+    r.center.rebuild_checker();
+    let reply = execute_as(&e, json!(1), "board.alarm", json!({})).await;
+    let stream = opened_stream(&reply, "board.alarm", "event");
+    assert!(
+        said(&reply).0.starts_with("Subscribing to board.alarm"),
+        "{reply}"
+    );
+    tokio::task::spawn_blocking(move || asked.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the model was asked");
+    let reply = execute_as(&e, json!(2), "stream.close", json!({"stream": stream})).await;
+    assert!(!said(&reply).1, "{reply}");
+    wait_for(|| (sess.jobs.lock().unwrap().running() == 0).then_some(())).await;
+    let _ = go.send(());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let lines = log_lines(&r.center, "board.alarm");
+    assert!(!lines.iter().any(|l| l.contains("failed")), "{lines:?}");
+    assert_eq!(link.subscribers("board/alarm"), 0);
+    r.stop().await;
+}
+
+/// A subscription whose `sub` the node does not answer, closed by the agent
+/// once its id was given, stops its call: it holds none of the session's
+/// call places, and the node's subscription goes with it.
+#[tokio::test]
+async fn a_closed_subscription_the_node_holds_frees_its_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = board_box(&r).await;
+    let link = r.center.link(&node).unwrap();
+    let sess = e.session();
+    r.center.set_call_wait(WAIT);
+    list_text(&e, json!({"node": "box-1", "capability": ["board.hold"]})).await;
+    let reply = execute_as(&e, json!(1), "board.hold", json!({})).await;
+    let stream = opened_stream(&reply, "board.hold", "event");
+    assert_eq!(reply["result"]["structuredContent"]["opening"], true);
+    assert_eq!(next_state(&mut seen).await.0, "sub");
+    assert_eq!(sess.jobs.lock().unwrap().running(), 1);
+    let reply = execute_as(&e, json!(2), "stream.close", json!({"stream": stream})).await;
+    assert!(!said(&reply).1, "{reply}");
+    wait_for(|| (sess.jobs.lock().unwrap().running() == 0).then_some(())).await;
+    assert_eq!(link.subscribers("board/hold"), 0);
+    let (m, p) = next_state(&mut seen).await;
+    assert_eq!(
+        (m.as_str(), &p["topics"]),
+        ("unsub", &json!(["board/hold"]))
+    );
+    r.stop().await;
+}
+
+/// A subscription's call for a topic that none of the session's streams
+/// takes any more (its stream was closed while the call waited) is
+/// stopped as closed: the link to the node did not end.
+#[tokio::test]
+async fn a_subscription_without_its_stream_is_not_a_lost_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, _seen, _task) = board_box(&r).await;
+    let sess = e.session();
+    let route = nerve_center::tools::Route {
+        node_id: node.clone(),
+        node_name: "box-1".into(),
+        cap: "board".into(),
+        action: "alarm".into(),
+        effect: nerve_proto::Effect::Read,
+        kind: nerve_proto::UnitKind::Event,
+    };
+    let nerve_center::center::CallError::Rpc(err) = r
+        .center
+        .call(&sess, &route, serde_json::Map::new())
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind(), nerve_proto::ErrorCode::Cancelled, "{err:?}");
+    assert_eq!(err.message, "its stream was closed");
+    r.stop().await;
+}
+
+/// A program stream whose open went to the node counts once in the
+/// session's share of the node's streams while the node has not answered:
+/// with half the share on its way, the other half still opens.
+#[tokio::test]
+async fn a_programs_streams_on_their_way_count_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, _node, mut seen, _task) = board_box(&r).await;
+    let share = nerve_center::streams::node_share(nerve_proto::limits::STREAMS);
+    r.center.set_call_wait(WAIT);
+    list_text(&e, json!({"node": "box-1", "capability": ["board.feed"]})).await;
+    let started = std::time::Instant::now();
+    // Opened with `every_ms` 999, each is answered after [`SLOW`] only.
+    let open = |i: usize| {
+        let e = e.clone();
+        tokio::spawn(async move {
+            execute_as(
+                &e,
+                json!(format!("feed-{i}")),
+                "board.feed",
+                json!({"every_ms": 999}),
+            )
+            .await
+        })
+    };
+    let mut calls: Vec<_> = (0..share / 2).map(open).collect();
+    for _ in 0..share / 2 {
+        let Seen::StreamOpen(_) = next_seen(&mut seen).await else {
+            panic!("no stream.open")
+        };
+    }
+    calls.extend((share / 2..share).map(open));
+    for c in calls {
+        let reply = c.await.unwrap();
+        opened_stream(&reply, "board.feed", "stream");
+    }
+    assert!(started.elapsed() < SLOW, "{:?}", started.elapsed());
+    r.stop().await;
+}

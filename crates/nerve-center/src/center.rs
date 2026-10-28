@@ -316,6 +316,8 @@ pub enum Ran {
 struct Held {
     sess: Arc<Session>,
     id: Option<String>,
+    /// Why the call stops when it is dropped.
+    why: Stop,
 }
 
 impl Drop for Held {
@@ -323,7 +325,7 @@ impl Drop for Held {
         if let Some(id) = self.id.take() {
             let stop = self.sess.jobs.lock().unwrap().abandon(&id);
             if let Some(stop) = stop {
-                let _ = stop.send(Stop::Abandoned);
+                let _ = stop.send(self.why);
             }
         }
     }
@@ -2614,6 +2616,21 @@ impl Center {
         on: Option<Arc<Link>>,
         wait: Option<Duration>,
     ) -> Ran {
+        self.run_dropped(sess, route, args, on, wait, Stop::Abandoned)
+            .await
+    }
+
+    /// [`Center::run`] whose call stops `dropped` when it is dropped before
+    /// it became a job.
+    async fn run_dropped(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        args: Map<String, Value>,
+        on: Option<Arc<Link>>,
+        wait: Option<Duration>,
+        dropped: Stop,
+    ) -> Ran {
         let id = jobs::new_id();
         let started = sess.jobs.lock().unwrap().start(&id, route, on.is_some());
         let (mut result, stop) = match started {
@@ -2624,6 +2641,7 @@ impl Center {
         let mut held = Held {
             sess: sess.clone(),
             id: Some(id.clone()),
+            why: dropped,
         };
         let (c, s, r, i) = (self.clone(), sess.clone(), route.clone(), id.clone());
         tokio::spawn(async move { c.run_call(&s, &r, args, &i, on, stop).await });
@@ -2824,12 +2842,21 @@ impl Center {
         // (subscribe_events). The node may have come back on another link
         // while the checker was asked: there the events would reach no
         // ring, and no `unsub` would ever end the node's subscription.
+        // The agent may have closed the stream meanwhile too, once its id
+        // was given (Center::within_call_wait): then the link did not end.
         if route.kind == UnitKind::Event {
             let topic = format!("{}/{}", route.cap, route.action);
-            if !sess.streams.lock().unwrap().subscribed_on(&link, &topic) {
-                return Err(
-                    RpcError::new(ErrorCode::ConnectionLost, "the link to the node ended").into(),
-                );
+            let on = sess.streams.lock().unwrap().subscribed_on(&link, &topic);
+            match on {
+                streams::Subscribed::Here => {}
+                streams::Subscribed::Closed => return Err(Stop::Closed.error().into()),
+                streams::Subscribed::Elsewhere => {
+                    return Err(RpcError::new(
+                        ErrorCode::ConnectionLost,
+                        "the link to the node ended",
+                    )
+                    .into());
+                }
             }
         }
         let ctx = json!({"session": sess.id});
@@ -3091,7 +3118,15 @@ impl Center {
         }
         let (c, s, r, rg) = (self.clone(), sess.clone(), route.clone(), ring.clone());
         let subscribe = async move {
-            c.call(&s, &r, Map::new()).await?;
+            // Dropped, the open stops: its stream was closed (also when its
+            // `execute` was cancelled, which closes it).
+            match c
+                .run_dropped(&s, &r, Map::new(), None, None, Stop::Closed)
+                .await
+            {
+                Ran::Done(out) => out?,
+                Ran::Job(_) => unreachable!("a call without a wait never becomes a job"),
+            };
             rg.show();
             Ok(())
         };
@@ -3167,10 +3202,13 @@ impl Center {
         if let Some(e) = disabled() {
             return Err(e.into());
         }
-        // Closed while the checker decided: nobody would read it.
-        if ring.ended() {
+        // The open takes one of the node's places until the node answers
+        // it, and the session counts it till then, also once the stream is
+        // closed or the open cancelled. Closed while the checker decided,
+        // it is not opened: nobody would read it.
+        let Some(place) = streams::Place::take(sess, id) else {
             return Err(closed_while_opening(&ring).into());
-        }
+        };
         sess.nodes.lock().unwrap().insert(route.node_id.clone());
         link.sessions.lock().unwrap().insert(sess.id.clone());
         let params = json!({"cap": route.cap, "stream": route.action, "params": args,
@@ -3184,9 +3222,6 @@ impl Center {
             .unwrap()
             .0
             .max(streams::PROGRAM_OPEN_WAIT);
-        // A cancelled open still takes its place on the node until the node
-        // answers it: the session counts it till then.
-        let place = streams::Place::new(sess, &route.node_id);
         let sid = link
             .open_stream_in(params, ring.clone(), wait, Some(place))
             .await?;
@@ -3277,7 +3312,13 @@ impl Center {
                     *p == Phase::Done
                 };
                 if !done {
-                    stop.0 = None;
+                    // From now on the agent can close the stream, which
+                    // stops its open (streams::Closer::close).
+                    if let Some(h) = stop.0.take()
+                        && !sess.streams.lock().unwrap().given(&id, h.clone())
+                    {
+                        h.abort();
+                    }
                     return Ok(Opened { id, opening: true });
                 }
                 // It ended just now: its result follows at once.
