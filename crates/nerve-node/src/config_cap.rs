@@ -340,7 +340,9 @@ fn run_writes(_: &std::path::Path, _: &crate::service::Account) -> bool {
 /// option or a variable (`--manifest-path=...`, `NAME=...`), the rest
 /// of a short option that has its value attached (`-Cproj`, `-I/x`), the
 /// file of `@file`, and each part of a list of paths (`a:b`) or of a URL
-/// (`file:///x`). One that is not a full path counts from `cwd`. Each is
+/// (`file:///x`). One that is not a full path counts from `cwd`; in a line
+/// a shell reads, `~` and `$HOME` are `cwd` (the home the command runs
+/// with) and a word after a `cd` counts from where it went too. Each is
 /// looked at where it leads (a link whose target is not there, where that
 /// target would be), and a place not there yet where the nearest folder
 /// above it leads, so a link out of such a folder counts too. The call's
@@ -442,19 +444,63 @@ pub fn written_by_centers(
     }
     let program = decl.command.first()?;
     let found = program_file(program, path);
+    // A shell reads `~` and `$HOME` (alone or before a `/`) as the home
+    // the command runs with, which is `cwd`: both callers start it in the
+    // home whose `HOME` it gets. Another `~user` or variable is not read.
+    let home_of = |w: &str| {
+        ["~", "$HOME", "${HOME}"].into_iter().find_map(|h| {
+            let rest = w.strip_prefix(h)?;
+            if rest.is_empty() {
+                return Some(cwd.to_path_buf());
+            }
+            rest.strip_prefix('/').map(|r| cwd.join(r))
+        })
+    };
+    // Where the words of a shell line count from: `cwd`, and each folder a
+    // `cd` or `pushd` in it names, a relative one from `cwd` and from the
+    // folder named before it (`cd /srv && site/x.sh` runs `/srv/site/x.sh`).
+    let folders_of = |words: &[String]| {
+        let mut from = vec![cwd.to_path_buf()];
+        for (i, _) in words
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| *w == "cd" || *w == "pushd")
+        {
+            let Some(to) = words[i + 1..].iter().find(|w| !w.starts_with('-')) else {
+                continue;
+            };
+            let named = match home_of(to) {
+                Some(h) => vec![h],
+                None if Path::new(to).is_absolute() => vec![to.into()],
+                None => vec![cwd.join(to), from[from.len() - 1].join(to)],
+            };
+            for f in named {
+                if !from.contains(&f) {
+                    from.push(f);
+                }
+            }
+        }
+        from
+    };
     // An element, and each word a shell would read in it: a line handed
-    // to `sh -c` names its places as the elements of a command do.
-    let elements: Vec<String> = decl.command[1..]
+    // to `sh -c` names its places as the elements of a command do. Only a
+    // placeholder is passed over (the gate judges the call's arguments);
+    // any other element, a shell's `{ ...; }` too, is the owner's text.
+    let elements: Vec<(String, Vec<PathBuf>)> = decl.command[1..]
         .iter()
-        .filter(|e| !(e.starts_with('{') && e.ends_with('}')))
+        .filter(|e| ConfigCapability::placeholder(e).is_none())
         .flat_map(|e| {
-            let words = shell_words(e).into_iter().filter(move |w| w != e);
-            std::iter::once(e.clone()).chain(words)
+            let words = shell_words(e);
+            let from = folders_of(&words);
+            let words = words.into_iter().filter(move |w| w != e);
+            std::iter::once(e.clone())
+                .chain(words)
+                .map(move |w| (w, from.clone()))
         })
         .collect();
     let named = elements
         .iter()
-        .flat_map(|e| {
+        .flat_map(|(e, from)| {
             // The value of `--opt=value` or `NAME=value` names a place as
             // the element would, and so does the rest of `-Cdir` or
             // `-xf/path`: getopt reads a short option's value glued on.
@@ -477,10 +523,14 @@ pub fn written_by_centers(
                     std::iter::once(v).chain(parts.into_iter().flatten())
                 })
                 .filter(|v| !v.is_empty())
+                .map(move |v| (v, from))
         })
-        .filter_map(|e| {
-            let place = cwd.join(e);
-            (e.contains('/') || place.symlink_metadata().is_ok()).then_some(place)
+        .flat_map(|(e, from)| {
+            let named = from
+                .iter()
+                .map(|f| f.join(e))
+                .filter(|place| e.contains('/') || place.symlink_metadata().is_ok());
+            home_of(e).into_iter().chain(named).collect::<Vec<_>>()
         });
     for place in found.into_iter().chain(named) {
         if let Some(why) = judge(format!("its command names {}", place.display()), &place) {
@@ -993,6 +1043,36 @@ account = "owner"
                 format!("true;sh \"{}\"|cat", s(&work.join("my dir/x.sh"))),
             ],
             vec!["sh".into(), "-c".into(), "cat <work/deploy.sh".into()],
+            // The home a shell reads in `~` and `$HOME` is where it starts.
+            vec!["sh".into(), "-c".into(), "cd ~/work && ./deploy.sh".into()],
+            vec![
+                "sh".into(),
+                "-c".into(),
+                "cd \"$HOME/work\" && ./deploy.sh".into(),
+            ],
+            vec!["sh".into(), "-c".into(), "cd \"${HOME}/work\"".into()],
+            vec!["sh".into(), "-c".into(), "exec sh ~/work/x.sh".into()],
+            vec![
+                "sh".into(),
+                "-c".into(),
+                "PYTHONPATH=$HOME/work python3 -m x".into(),
+            ],
+            // A word after a `cd` counts from the folder it went to.
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!(
+                    "cd {} && {}/work/deploy.sh",
+                    s(root.parent().unwrap()),
+                    root.file_name().unwrap().to_string_lossy()
+                ),
+            ],
+            // A brace group is a line of the owner's, not a placeholder.
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!("{{ cd {} && ./deploy.sh; }}", s(&work)),
+            ],
         ] {
             let c = decl(&bad.iter().map(String::as_str).collect::<Vec<_>>());
             let why = written_by_centers(&c, w, None, Some(&path), &root);
@@ -1021,6 +1101,8 @@ account = "owner"
                 "-c".into(),
                 format!("cd {} && ./safe.sh 2>&1 | tee log", s(&other)),
             ],
+            vec!["sh".into(), "-c".into(), "cd ~/other && ./safe.sh".into()],
+            vec!["sh".into(), "-c".into(), "{ cd ~/other; }".into()],
         ] {
             let c = decl(&good.iter().map(String::as_str).collect::<Vec<_>>());
             assert_eq!(

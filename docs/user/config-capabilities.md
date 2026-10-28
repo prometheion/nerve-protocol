@@ -69,7 +69,10 @@ nerve-node cap add logs.tail --effect read \
 - Each `{field}` becomes one whole argument of the program, exactly as the
   call gave it. No shell reads the command, so `;`, `|`, `$(...)` and quotes
   in a value are just characters. A placeholder is always a word of its own:
-  `--file={path}` is refused. That holds for the node only: a program that
+  `--file={path}` is refused. A word in braces with no blank in it is always
+  a placeholder, so a command that needs such a word as it is (`jq '{a:.x}'`)
+  cannot be declared; one with a blank in it (`{ cd /srv && make; }`) is
+  text of yours. That holds for the node only: a program that
   hands its arguments to a shell of its own reads a value as code again, as
   `ssh host cmd {arg}` does on the other machine and `sh -c`, `su -c` or
   `flock -c` do here. Fill no placeholder into such a command.
@@ -147,7 +150,11 @@ while one of these lies in such a place:
   `-Cproj`, `-I/srv/lib`, `PYTHONPATH=proj`), each part of a list of paths
   (`PYTHONPATH=lib:proj`, `-cp app.jar:proj/*`), the path of a URL
   (`file:///srv/pkg`) and the file of `@file`, and each word of a line a
-  shell reads (`sh -c "cd /srv/site && ./deploy.sh"` names `/srv/site`). A
+  shell reads (`sh -c "cd /srv/site && ./deploy.sh"` names `/srv/site`). In
+  such a line `~` and `$HOME` are your home, and a word after a `cd` or
+  `pushd` counts from your home and from the folder it went to as well
+  (`cd /srv && site/deploy.sh` names `/srv/site/deploy.sh`). Other variables,
+  `~name` and `$(...)` are not read: write such a place as a full path. A
   word of a message names a place this way too: write `/tmp` in a commit
   message and the node refuses the command. A place not there yet counts
   by where the folder it would be in leads, and a link whose target is gone
@@ -190,7 +197,7 @@ As any capability, by what it does ([modes](modes.md#what-each-mode-allows),
 | Mode | It runs when |
 |---|---|
 | `allowlist` | an allow rule names it: `nerve-node config add center.<name>.policy.allow 'logs.tail'` |
-| `folder` | a `read`: its paths are anything the account it runs as may read (above); a `write` or `execute`: its paths lie in folders that allow them; one that takes no path needs `nerve-node cap set logs.tail on` |
+| `folder` | a `read`: its paths are, for one that runs as `nerve-run`, anything `nerve-run` may read; for one that runs as you, the folders granted and what every account may read (above); a `write` or `execute`: its paths lie in folders that allow them; one that takes no path needs `nerve-node cap set logs.tail on` |
 | `user` | always |
 
 One that senses or acts on the world (`sense`, `actuate`) needs you: your

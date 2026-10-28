@@ -274,6 +274,13 @@ fn program_named(program: &str, platform: Platform) -> bool {
 }
 
 impl ConfigCapability {
+    /// The argument an element of a command stands for, where it is a
+    /// placeholder (`{field}`, filled in by [`ConfigCapability::argv`]);
+    /// any other element, braces and all, is fixed text of the owner's.
+    pub fn placeholder(element: &str) -> Option<&str> {
+        placeholder(element)
+    }
+
     /// The capability and the action of `name`.
     pub fn split(&self) -> (&str, &str) {
         self.name.split_once('.').unwrap_or((&self.name, ""))
@@ -387,7 +394,11 @@ impl ConfigCapability {
             if let Some(field) = placeholder(e) {
                 let s = props
                     .get(field)
-                    .ok_or_else(|| format!("{e} names no argument of params"))?;
+                    .ok_or_else(|| {
+                        format!(
+                            "{e} names no argument of params (a word in braces with no blank in it is always an argument)"
+                        )
+                    })?;
                 if !scalar(s) {
                     return Err(format!(
                         "{e}: the argument {field} must be a string, number, integer or boolean, which fills one argument"
@@ -595,6 +606,7 @@ mod tests {
             ),
             ("a.b", r#"["./run.sh"]"#, "", "a name looked up in PATH"),
             ("a.b", r#"["cat", "{path}"]"#, "", "names no argument"),
+            ("a.b", r#"["jq", "{a:.x}"]"#, "", "always an argument"),
             (
                 "a.b",
                 r#"["cat", "{other}"]"#,

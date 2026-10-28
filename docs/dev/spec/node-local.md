@@ -610,7 +610,12 @@ fixed element, and each word of it as a shell splits it (at blanks and
 the rest of a single-dash element after its option letter or from its first
 `/` (`-Cdir`, `-I/x`), the rest of an element after a leading `@`, and each
 `:`-separated part of any of these, read from that folder where it is not
-absolute. The center's error is a fixed text; the reason with the place is
+absolute; one that is `~`, `$HOME` or `${HOME}`, alone or before a `/`, is
+also read from that folder (the home the command runs with), and a word of an
+element whose shell words hold `cd` or `pushd` is also read from each folder
+the first word after it not starting with `-` names (from the start folder
+and from the folder named before it, where relative). Only an element that is
+a placeholder is passed over; any other, braces and all, is judged. The center's error is a fixed text; the reason with the place is
 in the audit entry. A call's audit target is its paths, else `cap.action`,
 as for a program; the entry adds `command`, the command as it runs (or would
 have run), the call's values filled in (one line, as `cap ls` quotes it),
