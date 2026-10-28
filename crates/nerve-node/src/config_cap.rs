@@ -345,8 +345,10 @@ fn run_writes(_: &std::path::Path, _: &crate::service::Account) -> bool {
 /// with) and a word after a `cd` counts from where it went too. Each is
 /// looked at where it leads (a link whose target is not there, where that
 /// target would be), and a place not there yet where the nearest folder
-/// above it leads, so a link out of such a folder counts too. The call's
-/// arguments are judged by the gate.
+/// above it leads, so a link out of such a folder counts too. A word with
+/// a wildcard or a brace list counts by every place it matches now and by
+/// every folder a center may write that it may match, or a place below it.
+/// The call's arguments are judged by the gate.
 ///
 /// On the installed node, `run` is `nerve-run`: a place that belongs to it,
 /// that it may write, or in a folder (at any depth) that does or it may
@@ -539,18 +541,186 @@ pub fn written_by_centers(
                 .map(move |v| (v, from))
         })
         .flat_map(|(e, from)| {
+            // A word with a wildcard or a brace list names what it
+            // matches, which need not be there by that name.
             let named = from
                 .iter()
                 .map(|f| f.join(e))
-                .filter(|place| e.contains('/') || place.symlink_metadata().is_ok());
+                .filter(|place| e.contains('/') || wild(e) || place.symlink_metadata().is_ok());
             home_of(e).into_iter().chain(named).collect::<Vec<_>>()
         });
+    let mut budget = LOOKS;
     for place in found.into_iter().chain(named) {
-        if let Some(why) = judge(format!("its command names {}", place.display()), &place) {
+        let what = format!("its command names {}", place.display());
+        if let Some(why) = judge(what.clone(), &place) {
             return Some(why);
+        }
+        if !place.to_str().is_some_and(wild) {
+            continue;
+        }
+        // A shell makes of it every place it matches: each one that is
+        // there counts as written above, and a folder a center may write
+        // counts where the pattern may name it or a place below it, since
+        // that center may put what matches there.
+        let too_many = || {
+            format!(
+                "{} runs as the owner and {what}, which may stand for more places than the node looks at: write them out",
+                decl.name
+            )
+        };
+        let Some(patterns) = place.to_str().and_then(|p| braces(p, BRACES)) else {
+            return Some(too_many());
+        };
+        for pattern in patterns.iter().map(Path::new) {
+            let comps: Vec<_> = pattern.components().collect();
+            let fixed = comps
+                .iter()
+                .position(|c| c.as_os_str().to_str().is_some_and(wild))
+                .unwrap_or(comps.len());
+            let at: PathBuf = comps[..fixed].iter().collect();
+            let reached = [at.clone(), real(&at)].into_iter().find_map(|at| {
+                let mut full: Vec<_> = at.components().collect();
+                full.extend_from_slice(&comps[fixed..]);
+                folders.iter().find(|f| may_reach(&full, f)).cloned()
+            });
+            if let Some(f) = reached {
+                return Some(refused(what, f));
+            }
+            let Some(found) = matches(pattern, &mut budget) else {
+                return Some(too_many());
+            };
+            for m in found {
+                if let Some(why) = judge(what.clone(), &m) {
+                    return Some(why);
+                }
+            }
         }
     }
     None
+}
+
+/// The most names [`written_by_centers`] reads in folders to match the
+/// wildcards of one command, and the most words it makes of one word's
+/// brace lists.
+const LOOKS: usize = 10_000;
+const BRACES: usize = 64;
+
+/// Whether a shell may make more than one place of `word`: it holds a
+/// wildcard (`*`, `?`, `[`) or a brace (`{a,b}`, bash).
+fn wild(word: &str) -> bool {
+    word.contains(['*', '?', '[', '{'])
+}
+
+/// The words bash's brace expansion makes of `word` (`a{b,c}d` is `abd`
+/// and `acd`; a sequence such as `{1..9}` stands for any name, `*`), or
+/// `None` where they would be more than `max`. `${...}` is a variable,
+/// and a brace with no list in it (`{a}`) stays as it is.
+fn braces(word: &str, max: usize) -> Option<Vec<String>> {
+    let mut done = Vec::new();
+    let mut todo = vec![word.to_string()];
+    while let Some(w) = todo.pop() {
+        match brace_list(&w) {
+            Some(parts) => todo.extend(parts),
+            None => done.push(w),
+        }
+        if done.len() + todo.len() > max {
+            return None;
+        }
+    }
+    Some(done)
+}
+
+/// The words the first brace list in `w` makes, if it has one.
+fn brace_list(w: &str) -> Option<Vec<String>> {
+    for (i, _) in w.match_indices('{') {
+        if w[..i].ends_with('$') {
+            continue;
+        }
+        let (mut depth, mut commas, mut end) = (0, Vec::new(), None);
+        for (j, c) in w[i..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i + j);
+                        break;
+                    }
+                }
+                ',' if depth == 1 => commas.push(i + j),
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            continue;
+        };
+        let (head, tail) = (&w[..i], &w[end + 1..]);
+        if commas.is_empty() {
+            if w[i + 1..end].contains("..") {
+                return Some(vec![format!("{head}*{tail}")]);
+            }
+            continue;
+        }
+        let mut from = i + 1;
+        let mut parts = Vec::new();
+        for c in commas.into_iter().chain([end]) {
+            parts.push(format!("{head}{}{tail}", &w[from..c]));
+            from = c + 1;
+        }
+        return Some(parts);
+    }
+    None
+}
+
+/// Whether a path whose components are `pattern` (with wildcards in some)
+/// may name `folder` or a place below it: each component of the folder
+/// matches the pattern's at its place.
+fn may_reach(pattern: &[std::path::Component], folder: &std::path::Path) -> bool {
+    use std::path::Component;
+    let folder: Vec<_> = folder.components().collect();
+    folder.len() <= pattern.len()
+        && folder.iter().zip(pattern).all(|(f, p)| match (f, p) {
+            (Component::Normal(f), Component::Normal(p)) => {
+                f == p
+                    || f.to_str()
+                        .zip(p.to_str())
+                        .is_some_and(|(f, p)| nerve_policy::protected::glob(p, f))
+            }
+            (f, p) => f == p,
+        })
+}
+
+/// Every place `pattern` matches now, as a shell expands it: a component
+/// with a wildcard by the names in the folders before it (through links,
+/// as a shell goes), the others as they are. `None` where that would read
+/// more than `budget` names in all.
+fn matches(pattern: &std::path::Path, budget: &mut usize) -> Option<Vec<std::path::PathBuf>> {
+    let mut at = vec![std::path::PathBuf::new()];
+    for c in pattern.components() {
+        let n = c.as_os_str();
+        let Some(p) = n.to_str().filter(|p| wild(p)) else {
+            at.iter_mut().for_each(|a| a.push(n));
+            continue;
+        };
+        let mut next = Vec::new();
+        for a in &at {
+            let Ok(dir) = std::fs::read_dir(a) else {
+                continue;
+            };
+            for e in dir.flatten() {
+                *budget = budget.checked_sub(1)?;
+                let name = e.file_name();
+                if name
+                    .to_str()
+                    .is_some_and(|name| nerve_policy::protected::glob(p, name))
+                {
+                    next.push(a.join(name));
+                }
+            }
+        }
+        at = next;
+    }
+    Some(at)
 }
 
 /// What the allow rules let a center write with the owner's rights, which
@@ -1104,6 +1274,48 @@ account = "owner"
                 format!("{name}/work/deploy.sh"),
             ],
             vec![
+                "env".into(),
+                "--chdir".into(),
+                s(parent),
+                format!("{name}/work/deploy.sh"),
+            ],
+            // A wildcard or a brace list names every place it may match,
+            // also one a center has not made yet, and in a folder to `cd` to.
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!("for f in {}/*/work/deploy.sh; do \"$f\"; done", s(parent)),
+            ],
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!("{}/*/work/later.sh", s(parent)),
+            ],
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!(
+                    "cd {}/{}? && work/deploy.sh",
+                    s(parent),
+                    &name[..name.len() - 1]
+                ),
+            ],
+            vec![
+                "bash".into(),
+                "-c".into(),
+                format!("{}/{{{name},x}}/work/deploy.sh", s(parent)),
+            ],
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!("cd {} && */work/deploy.sh", s(parent)),
+            ],
+            vec!["sh".into(), "-c".into(), "w[a-z]rk/deploy.sh".into()],
+            vec!["make".into(), "-C".into(), "w?rk".into()],
+            // Through a link the pattern does not name: `other/in*` is
+            // `other/into`, which leads to `work`.
+            vec!["sh".into(), s(&other.join("in*/deploy.sh"))],
+            vec![
                 "make".into(),
                 "-C".into(),
                 s(parent),
@@ -1165,6 +1377,13 @@ account = "owner"
                 "other".into(),
                 "./safe.sh".into(),
             ],
+            vec!["ls".into(), s(&other.join("*.txt"))],
+            vec!["sh".into(), "-c".into(), "echo {a,b} ${HOME}".into()],
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!("ls {}/s?fe.sh", s(&other)),
+            ],
         ] {
             let c = decl(&good.iter().map(String::as_str).collect::<Vec<_>>());
             assert_eq!(
@@ -1209,6 +1428,44 @@ account = "owner"
         );
         let c = decl(&["sh", "-c", "cd ~/up"]);
         assert_eq!(written_by_centers(&c, w, None, Some(&path), &other), None);
+        // A pattern that stands for more places than the node looks at.
+        let c = decl(&["sh", "-c", &"{a,b}".repeat(7)]);
+        let why = written_by_centers(&c, w, None, Some(&path), &root);
+        assert!(
+            why.as_ref().is_some_and(|y| y.contains("more places")),
+            "{why:?}"
+        );
+        let sorted = |w: &str| {
+            let mut v = braces(w, BRACES).unwrap();
+            v.sort();
+            v
+        };
+        assert_eq!(sorted("a{b,c{d,e}}f"), ["abf", "acdf", "acef"]);
+        assert_eq!(sorted("x{1..9}/{a}${HOME}"), ["x*/{a}${HOME}"]);
+        // A folder a center may write that is not there yet is named by a
+        // pattern that may match it, though nothing matches it now.
+        let later = [root.join("later/dir")];
+        for bad in [
+            format!("{}/l*/dir/x.sh", s(&root)),
+            format!("{}/l*/d?r", s(&root)),
+        ] {
+            let why = written_by_centers(&decl(&["sh", &bad]), &later, None, Some(&path), &root);
+            assert!(
+                why.as_ref()
+                    .is_some_and(|y| y.contains("where a center may write")),
+                "{bad:?}: {why:?}"
+            );
+        }
+        let c = decl(&["sh", &format!("{}/o*/x.sh", s(&root))]);
+        assert_eq!(
+            written_by_centers(&c, &later, None, Some(&path), &root),
+            None
+        );
+        assert_eq!(matches(&other.join("*"), &mut 1), None);
+        assert_eq!(
+            matches(&other.join("s*.sh"), &mut 100),
+            Some(vec![other.join("safe.sh")])
+        );
         // One that starts where a center writes: `make`, `python3 -m` and
         // the like read their code from there.
         let why = written_by_centers(&decl(&["id"]), w, None, Some(&path), &work);
@@ -1315,6 +1572,9 @@ account = "owner"
             s(shared.join("later.sh")),
             // Through a link into that folder.
             s(root.join("via/x.sh")),
+            // What a wildcard matches there.
+            s(root.join("sh*/x.sh")),
+            s(root.join("v?a/x.sh")),
         ] {
             let why = judged(&["/bin/sh", &bad], Some(&run));
             assert!(
