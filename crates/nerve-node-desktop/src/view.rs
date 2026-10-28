@@ -9,8 +9,8 @@ use serde_json::Value;
 use slint::{ModelRc, SharedString, VecModel};
 
 use crate::{
-    AuditRow, CapRow, CenterRow, FolderRow, LogRow, NodeStatus, PairPreview, ProgramRow,
-    RelayNodeRow, Tone, TunnelRow,
+    AuditRow, CapRow, CenterRow, DeclaredRow, FolderRow, LogRow, NodeStatus, PairPreview,
+    ProgramRow, RelayNodeRow, Tone, TunnelRow,
 };
 
 fn s(v: &Value) -> &str {
@@ -768,6 +768,290 @@ pub fn cap_word(setting: i32) -> &'static str {
         2 => "hidden",
         _ => "on",
     }
+}
+
+/// The effects a capability of node.toml may have, in the dialog's order.
+pub const EFFECTS: [&str; 5] = ["read", "write", "execute", "sense", "actuate"];
+
+/// Where one may run, in the dialog's order.
+pub const PLATFORMS: [&str; 3] = ["any", "linux", "windows"];
+
+/// What the Capabilities page's dialog holds of a capability of node.toml
+/// (`cap add`, `cap edit`), as the owner typed it. The schemas are JSON
+/// text, empty for none (no arguments, the printed text as the result); the
+/// timeout is seconds, empty for the node's default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CapForm {
+    pub name: String,
+    pub summary: String,
+    pub effect: String,
+    pub command: String,
+    pub params: String,
+    pub result: String,
+    pub timeout: String,
+    pub platform: String,
+}
+
+/// What is wrong with each field of a [`CapForm`], "" where nothing is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CapFormErrors {
+    pub name: String,
+    pub summary: String,
+    pub command: String,
+    pub params: String,
+    pub result: String,
+    pub timeout: String,
+}
+
+impl CapFormErrors {
+    pub fn none(&self) -> bool {
+        *self == CapFormErrors::default()
+    }
+}
+
+/// The words of a command as the dialog takes it on one line: words apart
+/// by blanks; a word with blanks, quotes or a line break in double quotes,
+/// with the escapes of JSON (as `cap ls` writes it, so an edit gives back
+/// what it showed), or in single quotes as it is.
+pub fn command_words(line: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut rest = line.trim_start();
+    while let Some(c) = rest.chars().next() {
+        let (word, after) = match c {
+            '"' => {
+                // The end: the next quote no backslash escapes.
+                let mut end = None;
+                let mut escaped = false;
+                for (i, ch) in rest.char_indices().skip(1) {
+                    match ch {
+                        '\\' if !escaped => escaped = true,
+                        '"' if !escaped => {
+                            end = Some(i);
+                            break;
+                        }
+                        _ => escaped = false,
+                    }
+                }
+                let end = end.ok_or("a double quote is not closed")?;
+                let word: String = serde_json::from_str(&rest[..=end])
+                    .map_err(|e| format!("in double quotes: {e}"))?;
+                (word, &rest[end + 1..])
+            }
+            '\'' => {
+                let end = rest[1..].find('\'').ok_or("a single quote is not closed")? + 1;
+                (rest[1..end].to_string(), &rest[end + 1..])
+            }
+            _ => {
+                let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                let word = &rest[..end];
+                if word.contains(['"', '\'']) {
+                    return Err(format!("{word}: put the whole word in quotes"));
+                }
+                (word.to_string(), &rest[end..])
+            }
+        };
+        if after.chars().next().is_some_and(|c| !c.is_whitespace()) {
+            return Err("a quoted word ends at a blank".into());
+        }
+        words.push(word);
+        rest = after.trim_start();
+    }
+    Ok(words)
+}
+
+/// A schema field of the dialog: nothing for an empty one, else its JSON,
+/// checked as the center checks it (nerve_proto::schema::check).
+fn schema_field(text: &str, role: nerve_proto::schema::Role) -> Result<Value, String> {
+    if text.trim().is_empty() {
+        return Ok(Value::Null);
+    }
+    let v: Value = serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))?;
+    nerve_proto::schema::check(&v, role).map_err(|e| nerve_proto::schema::brief(&e.to_string()))?;
+    Ok(v)
+}
+
+/// Checks `form` with the node's own rules for a capability of node.toml
+/// (nerve_policy's `ConfigCapability::validate`, the schemas with the
+/// center's), so the dialog says what is wrong while the owner types; the
+/// node checks again when it is saved. `max_timeout_secs` is the node's
+/// limit as far as the app knows it. The node's checks stop at the first
+/// problem, so a field shows its own once those before it are right.
+pub fn cap_form_check(form: &CapForm, max_timeout_secs: u64) -> CapFormErrors {
+    use nerve_policy::config::{ConfigCapability, Output, Platform};
+    use nerve_proto::schema::Role;
+    let mut e = CapFormErrors::default();
+    let params = schema_field(&form.params, Role::Params).unwrap_or_else(|why| {
+        e.params = why;
+        Value::Null
+    });
+    let result = match schema_field(&form.result, Role::Result) {
+        Ok(Value::Null) => Output::Text,
+        Ok(v) => Output::Json(v),
+        Err(why) => {
+            e.result = why;
+            Output::Text
+        }
+    };
+    let command = command_words(&form.command).unwrap_or_else(|why| {
+        e.command = why;
+        Vec::new()
+    });
+    let timeout_secs = match form.timeout.trim() {
+        "" => None,
+        t => match t.parse() {
+            Ok(n) => Some(n),
+            Err(_) => {
+                e.timeout = "seconds, as a whole number".into();
+                None
+            }
+        },
+    };
+    let name = form.name.trim();
+    let c = ConfigCapability {
+        name: name.to_string(),
+        summary: form.summary.trim().to_string(),
+        effect: serde_json::from_value(Value::String(form.effect.clone()))
+            .unwrap_or(nerve_proto::descriptor::Effect::Read),
+        command,
+        params,
+        result,
+        timeout_secs,
+        platform: Platform::parse(&form.platform).unwrap_or_default(),
+    };
+    let Err(why) = c.validate(max_timeout_secs) else {
+        return e;
+    };
+    let quoted = format!("capability {name:?}: ");
+    let plain = format!("capability {name}: ");
+    let why = why
+        .strip_prefix(&quoted)
+        .or_else(|| why.strip_prefix(&plain))
+        .unwrap_or(&why)
+        .to_string();
+    // Where the field it names has a problem of its own already, that one
+    // is what to fix first.
+    let into = |field: &mut String, text: &str| {
+        if field.is_empty() {
+            *field = text.to_string();
+        }
+    };
+    if let Some(rest) = why.strip_prefix("command: ") {
+        // Its placeholders name the arguments, which wait for their schema.
+        if e.params.is_empty() {
+            into(&mut e.command, rest);
+        }
+    } else if why.starts_with("timeout_secs") {
+        into(&mut e.timeout, &why);
+    } else if why.starts_with("the summary") {
+        into(&mut e.summary, &why);
+    } else if !(why.starts_with("params: ") || why.starts_with("result: ")) {
+        into(&mut e.name, &why);
+    }
+    e
+}
+
+/// The arguments of `cap add` (`adding`) or `cap edit` for `form`, and what
+/// goes on its stdin: the arguments' schema, which is no secret but may be
+/// long. An edit gives every field, so an emptied one is cleared.
+pub fn cap_form_args(form: &CapForm, adding: bool) -> (Vec<String>, Option<String>) {
+    let verb = if adding { "add" } else { "edit" };
+    let mut args = vec!["cap".to_string(), verb.into(), form.name.trim().to_string()];
+    args.push(format!("--effect={}", form.effect));
+    let summary = form.summary.trim();
+    if !adding || !summary.is_empty() {
+        args.push(format!("--summary={summary}"));
+    }
+    let mut input = None;
+    if !form.params.trim().is_empty() {
+        args.push("--params-stdin".into());
+        input = Some(form.params.trim().to_string());
+    } else if !adding {
+        args.push("--params=none".into());
+    }
+    match serde_json::from_str::<Value>(&form.result) {
+        Ok(v) => args.push(format!("--result={v}")),
+        Err(_) if !adding => args.push("--result=text".into()),
+        Err(_) => {}
+    }
+    match form.timeout.trim() {
+        "" if !adding => args.push("--timeout=default".into()),
+        "" => {}
+        t => args.push(format!("--timeout={t}")),
+    }
+    if !adding || form.platform != "any" {
+        args.push(format!("--platform={}", form.platform));
+    }
+    args.push("--".into());
+    args.extend(command_words(&form.command).unwrap_or_default());
+    (args, input)
+}
+
+/// The dialog's fields for an entry of `cap ls --json`'s `config`: what the
+/// owner declared, the command as `cap ls` writes it.
+pub fn cap_form_of(entry: &Value) -> CapForm {
+    let words: Vec<String> = entry["command"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    let pretty = |v: &Value| serde_json::to_string_pretty(v).unwrap_or_default();
+    CapForm {
+        name: s(&entry["name"]).into(),
+        summary: s(&entry["summary"]).into(),
+        effect: s(&entry["effect"]).into(),
+        command: nerve_policy::config::ConfigCapability::line(&words),
+        params: match &entry["params"] {
+            Value::Null => String::new(),
+            v => pretty(v),
+        },
+        result: match &entry["result"] {
+            Value::String(_) | Value::Null => String::new(),
+            v => pretty(v),
+        },
+        timeout: entry["timeout_secs"]
+            .as_u64()
+            .map(|t| t.to_string())
+            .unwrap_or_default(),
+        platform: match s(&entry["platform"]) {
+            "" => "any".into(),
+            p => p.into(),
+        },
+    }
+}
+
+/// The capabilities of node.toml the owner declared, from `cap ls
+/// --json`'s `config`.
+pub fn declared(v: &Value) -> Vec<DeclaredRow> {
+    v["config"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| {
+            let form = cap_form_of(c);
+            let mut detail = Vec::new();
+            if form.platform != "any" {
+                detail.push(format!("{} only", form.platform));
+            }
+            if !form.timeout.is_empty() {
+                detail.push(format!("at most {} s", form.timeout));
+            }
+            if !form.params.is_empty() {
+                detail.push("takes arguments".into());
+            }
+            if !form.result.is_empty() {
+                detail.push("returns JSON".into());
+            }
+            DeclaredRow {
+                name: form.name.into(),
+                effect: form.effect.into(),
+                summary: form.summary.into(),
+                command: form.command.into(),
+                detail: detail.join(", ").into(),
+            }
+        })
+        .collect()
 }
 
 /// The lines of the log to show, from `newest` first: all of them, or the
@@ -2077,6 +2361,179 @@ mod tests {
             "{config}"
         );
         assert_eq!(caps_notes(false, true), (String::new(), String::new()));
+    }
+
+    /// The dialog's command line splits as `cap ls` writes one, so an edit
+    /// gives back the command it showed.
+    #[test]
+    fn a_command_line_splits_into_its_words() {
+        let words = |l: &str| command_words(l).unwrap();
+        assert_eq!(words("  sensors   -j "), ["sensors", "-j"]);
+        assert_eq!(words(r#"printf "[%s]\n" {a}"#), ["printf", "[%s]\n", "{a}"]);
+        assert_eq!(words("echo 'a b' \"\""), ["echo", "a b", ""]);
+        assert!(words("").is_empty());
+        for bad in [r#"echo "open"#, "echo 'open", "it's", r#"echo "a"b"#] {
+            assert!(command_words(bad).is_err(), "{bad}");
+        }
+        let all = [
+            "cat",
+            "--",
+            "a b",
+            "q\"uote",
+            "back\\slash",
+            "tab\tline\n",
+            "{path}",
+        ]
+        .map(String::from);
+        let line = nerve_policy::config::ConfigCapability::line(&all);
+        assert_eq!(command_words(&line).unwrap(), all, "{line}");
+    }
+
+    /// The dialog checks a capability as the node does, each problem at its
+    /// field: a schema outside the center's subset with its reason, a
+    /// placeholder that names no argument, a name of the node's own.
+    #[test]
+    fn the_dialog_says_what_is_wrong_where() {
+        let form = CapForm {
+            name: "sensors.read".into(),
+            summary: "The temperatures.".into(),
+            effect: "sense".into(),
+            command: "sensors -j {chip}".into(),
+            params: r#"{"type": "object", "properties": {"chip": {"type": "string"}}, "required": ["chip"]}"#.into(),
+            result: String::new(),
+            timeout: "10".into(),
+            platform: "linux".into(),
+        };
+        let check = |f: &CapForm| cap_form_check(f, 3600);
+        assert!(check(&form).none(), "{:?}", check(&form));
+        let with = |change: &dyn Fn(&mut CapForm)| {
+            let mut f = form.clone();
+            change(&mut f);
+            check(&f)
+        };
+        let e = with(&|f| {
+            f.params =
+                r#"{"type": "object", "properties": {"chip": {"oneOf": [{"type": "string"}]}}}"#
+                    .into()
+        });
+        assert!(
+            e.params.contains("/properties/chip") && e.params.contains("oneOf"),
+            "{e:?}"
+        );
+        assert!(
+            e.command.is_empty(),
+            "the command waits for the schema: {e:?}"
+        );
+        assert!(
+            with(&|f| f.params = "{nope".into())
+                .params
+                .starts_with("not JSON")
+        );
+        let e = with(&|f| f.result = r#"{"type": "object", "patternProperties": {}}"#.into());
+        assert!(e.result.contains("patternProperties"), "{e:?}");
+        let e = with(&|f| f.command = "sensors -j {board}".into());
+        assert!(e.command.contains("board"), "{e:?}");
+        assert!(e.name.is_empty() && e.params.is_empty());
+        assert!(
+            with(&|f| f.command = "echo \"open".into())
+                .command
+                .contains("not closed")
+        );
+        assert!(!with(&|f| f.name = "sensors".into()).name.is_empty());
+        assert!(with(&|f| f.name = "fs.peek".into()).name.contains("own"));
+        assert!(
+            with(&|f| f.timeout = "soon".into())
+                .timeout
+                .contains("seconds")
+        );
+        assert!(!with(&|f| f.timeout = "99999".into()).timeout.is_empty());
+        assert!(
+            !with(&|f| f.summary = "two\nlines".into())
+                .summary
+                .is_empty()
+        );
+        // No arguments and text: empty fields.
+        let plain = with(&|f| {
+            f.params = String::new();
+            f.command = "uptime".into();
+        });
+        assert!(plain.none(), "{plain:?}");
+    }
+
+    /// What the dialog saves: `cap add` with what is given, `cap edit` with
+    /// every field, the arguments' schema on stdin; and an entry of `cap
+    /// ls` back in the dialog's fields.
+    #[test]
+    fn the_dialog_saves_with_cap_add_or_edit() {
+        let form = CapForm {
+            name: "sensors.read".into(),
+            summary: String::new(),
+            effect: "sense".into(),
+            command: "sensors -j \"a b\"".into(),
+            params: String::new(),
+            result: r#"{"type": "object"}"#.into(),
+            timeout: String::new(),
+            platform: "any".into(),
+        };
+        let (args, input) = cap_form_args(&form, true);
+        assert_eq!(
+            args,
+            [
+                "cap",
+                "add",
+                "sensors.read",
+                "--effect=sense",
+                r#"--result={"type":"object"}"#,
+                "--",
+                "sensors",
+                "-j",
+                "a b"
+            ]
+        );
+        assert_eq!(input, None);
+        let mut edited = form.clone();
+        edited.params = r#"{"type": "object"}"#.into();
+        edited.result = String::new();
+        let (args, input) = cap_form_args(&edited, false);
+        assert_eq!(
+            args,
+            [
+                "cap",
+                "edit",
+                "sensors.read",
+                "--effect=sense",
+                "--summary=",
+                "--params-stdin",
+                "--result=text",
+                "--timeout=default",
+                "--platform=any",
+                "--",
+                "sensors",
+                "-j",
+                "a b"
+            ]
+        );
+        assert_eq!(input.as_deref(), Some(r#"{"type": "object"}"#));
+        let entry = json!({"name": "who.am", "summary": "Who.", "effect": "read",
+            "command": ["printf", "%s\n", "{a}"], "params": {"type": "object"},
+            "result": "text", "timeout_secs": 5, "platform": "linux"});
+        let f = cap_form_of(&entry);
+        assert_eq!(f.command, r#"printf "%s\n" {a}"#);
+        assert_eq!(
+            command_words(&f.command).unwrap(),
+            ["printf", "%s\n", "{a}"]
+        );
+        assert_eq!(
+            (f.result.as_str(), f.timeout.as_str(), f.platform.as_str()),
+            ("", "5", "linux")
+        );
+        assert!(f.params.contains("\"object\""));
+        let d = declared(&json!({"config": [entry]}));
+        assert_eq!(
+            (d[0].name.as_str(), d[0].effect.as_str()),
+            ("who.am", "read")
+        );
+        assert_eq!(d[0].detail, "linux only, at most 5 s, takes arguments");
     }
 
     #[test]

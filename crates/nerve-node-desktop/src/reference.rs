@@ -255,14 +255,30 @@ const COMMANDS: &[(&str, &str, Place)] = &[
     (
         "cap add",
         "nerve-node cap add sensors.read --effect sense -- sensors -j",
-        NOT_HERE,
+        (
+            Some(Page::Capabilities),
+            -1,
+            "Capabilities › Your capabilities › Add a capability",
+        ),
     ),
     (
         "cap edit",
         "nerve-node cap edit sensors.read --timeout 10",
-        NOT_HERE,
+        (
+            Some(Page::Capabilities),
+            -1,
+            "Capabilities › Your capabilities › Edit",
+        ),
     ),
-    ("cap rm", "nerve-node cap rm sensors.read", NOT_HERE),
+    (
+        "cap rm",
+        "nerve-node cap rm sensors.read",
+        (
+            Some(Page::Capabilities),
+            -1,
+            "Capabilities › Your capabilities › Remove",
+        ),
+    ),
     (
         "cap provider allow",
         "nerve-node cap provider allow desk /usr/lib/nerve-desktop/nerve-desktop",
@@ -716,11 +732,9 @@ mod tests {
     fn the_capability_commands_are_on_their_page() {
         let caps: Vec<_> = COMMANDS
             .iter()
-            .filter(|(c, _, _)| {
-                c.starts_with("cap ") && !["cap add", "cap edit", "cap rm"].contains(c)
-            })
+            .filter(|(c, _, _)| c.starts_with("cap "))
             .collect();
-        assert_eq!(caps.len(), 5);
+        assert_eq!(caps.len(), 8);
         for (name, _, (page, tab, place)) in caps {
             assert_eq!(*page, Some(Page::Capabilities), "`{name}`");
             assert_eq!(*tab, -1, "`{name}`");

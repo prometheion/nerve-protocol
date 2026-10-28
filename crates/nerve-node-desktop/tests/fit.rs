@@ -5,7 +5,9 @@
 //! window's least height.
 
 use nerve_node_desktop::headless::Screen;
-use nerve_node_desktop::{AppWindow, Install, Load, Page, PairPreview, Perm, Pick, Prefs, Store};
+use nerve_node_desktop::{
+    AppWindow, Caps, Install, Load, Page, PairPreview, Perm, Pick, Prefs, Store,
+};
 use slint::{ComponentHandle, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 
 /// What a screen of 1280x800 leaves a window's content: less a panel (the
@@ -265,6 +267,74 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
         settled(&screen).as_slice() != empty.as_slice(),
         "no password field for the account on Windows"
     );
+
+    // The dialog of a capability on a screen of 1280x800, with what is
+    // wrong shown at every field: its card stays in the window, and
+    // scrolls to its buttons, whose main one saves.
+    screen.resize(ROOM.0 as u32, ROOM.1 as u32);
+    store.set_page(Page::Capabilities);
+    store.set_elevate_open(true);
+    let foot = bottom(&screen.draw(), 20);
+    store.set_elevate_open(false);
+    let caps = window.global::<Caps>();
+    let saved = std::rc::Rc::new(std::cell::Cell::new(false));
+    let s = saved.clone();
+    caps.on_edit_save(move || s.set(true));
+    let long = "the schema's /properties/chip/oneOf: alternatives are not supported here; give one type, or an enum of plain values for a choice";
+    caps.set_edit_new(true);
+    caps.set_edit_name("sensors.read".into());
+    caps.set_edit_effect(3);
+    let schema: Vec<String> = (0..8).map(|i| format!("  \"line-{i}\": {{}},")).collect();
+    caps.set_edit_params(schema.join("\n").into());
+    for set in [
+        Caps::set_name_error,
+        Caps::set_summary_error,
+        Caps::set_command_error,
+        Caps::set_params_error,
+        Caps::set_result_error,
+        Caps::set_timeout_error,
+        Caps::set_edit_error,
+    ] {
+        set(&caps, long.into());
+    }
+    caps.set_edit_ready(true);
+    caps.set_edit_open(true);
+    assert!(
+        bottom(&screen.draw(), 20) == foot,
+        "the capability's dialog runs out of the window"
+    );
+    window
+        .window()
+        .dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+            position: slint::LogicalPosition::new(640.0, 360.0),
+            delta_x: 0.0,
+            delta_y: -5000.0,
+        });
+    screen.draw();
+    // Add, the last button: right in the card of 640, above its padding.
+    let at = slint::LogicalPosition::new(
+        (ROOM.0 + 640.0) / 2.0 - 24.0 - 24.0,
+        ROOM.1 - 24.0 - 24.0 - 17.0,
+    );
+    for event in [
+        slint::platform::WindowEvent::PointerMoved { position: at },
+        slint::platform::WindowEvent::PointerPressed {
+            position: at,
+            button: slint::platform::PointerEventButton::Left,
+        },
+        slint::platform::WindowEvent::PointerReleased {
+            position: at,
+            button: slint::platform::PointerEventButton::Left,
+        },
+    ] {
+        window.window().dispatch_event(event);
+    }
+    assert!(
+        saved.get(),
+        "the dialog's Add is not at the end of its scroll"
+    );
+    caps.set_edit_open(false);
+    screen.draw();
 
     // The sidebar at the window's least height: each page's item, About,
     // and the look's switch at its foot are all in the window, in their

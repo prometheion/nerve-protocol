@@ -1,13 +1,15 @@
 //! The Capabilities page: what the node offers, read with `cap ls`, each
-//! unit's switch for one center (`cap set`), and the programs allowed as
-//! providers (`cap provider allow` and `rm`).
+//! unit's switch for one center (`cap set`), the capabilities of node.toml
+//! (`cap add`, `cap edit` and `cap rm`, through a dialog that checks them as
+//! the owner types), and the programs allowed as providers (`cap provider
+//! allow` and `rm`).
 
 use std::rc::Rc;
 
 use serde_json::Value;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
-use super::{Choose, Ctl};
+use super::{Choose, Ctl, Pending};
 use crate::{Caps, Load, Page, Tone, view};
 
 impl Ctl {
@@ -79,8 +81,11 @@ impl Ctl {
             Ok(v) => {
                 let rows = view::cap_rows(&v, center);
                 let programs = view::programs(&v);
+                let declared = view::declared(&v);
+                *self.caps_listing.borrow_mut() = v.clone();
                 self.with_caps(|c| {
                     c.set_rows(ModelRc::new(VecModel::from(rows)));
+                    c.set_declared(ModelRc::new(VecModel::from(declared)));
                     c.set_programs(ModelRc::new(VecModel::from(programs)));
                     c.set_running(v["running"] == true);
                     c.set_load(Load::Ready);
@@ -138,6 +143,140 @@ impl Ctl {
             format!("{name} is {word} for {center}."),
             |c, e| c.toast(e, Tone::Danger),
         );
+    }
+
+    /// Opens the dialog with `form`: a new capability, or the one it names.
+    fn cap_dialog(&self, form: &view::CapForm, new: bool) {
+        let at = |all: &[&str], v: &str| all.iter().position(|e| *e == v).unwrap_or(0) as i32;
+        self.with_caps(|c| {
+            c.set_edit_new(new);
+            c.set_edit_name(form.name.as_str().into());
+            c.set_edit_summary(form.summary.as_str().into());
+            c.set_edit_effect(at(&view::EFFECTS, &form.effect));
+            c.set_edit_command(form.command.as_str().into());
+            c.set_edit_params(form.params.as_str().into());
+            c.set_edit_result(form.result.as_str().into());
+            c.set_edit_timeout(form.timeout.as_str().into());
+            c.set_edit_platform(at(&view::PLATFORMS, &form.platform));
+            c.set_edit_error(SharedString::new());
+            c.set_edit_busy(false);
+            c.set_edit_open(true);
+        });
+        self.cap_check(false);
+    }
+
+    fn cap_add(&self) {
+        let form = view::CapForm {
+            effect: "read".into(),
+            platform: "any".into(),
+            ..Default::default()
+        };
+        self.cap_dialog(&form, true);
+    }
+
+    fn cap_edit(&self, name: &str) {
+        let entry = self.caps_listing.borrow()["config"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|c| c["name"] == name)
+            .cloned();
+        if let Some(entry) = entry {
+            self.cap_dialog(&view::cap_form_of(&entry), false);
+        }
+    }
+
+    /// What the dialog holds now.
+    fn cap_form(&self) -> Option<view::CapForm> {
+        let pick =
+            |all: &[&str], i: i32| all.get(i as usize).copied().unwrap_or(all[0]).to_string();
+        self.with_caps(|c| view::CapForm {
+            name: c.get_edit_name().to_string(),
+            summary: c.get_edit_summary().to_string(),
+            effect: pick(&view::EFFECTS, c.get_edit_effect()),
+            command: c.get_edit_command().to_string(),
+            params: c.get_edit_params().to_string(),
+            result: c.get_edit_result().to_string(),
+            timeout: c.get_edit_timeout().to_string(),
+            platform: pick(&view::PLATFORMS, c.get_edit_platform()),
+        })
+    }
+
+    /// Checks the dialog's fields as the node will, and says what is wrong
+    /// with each: a field left empty only once the owner tried to save
+    /// (`tried`), so a new dialog does not open full of errors. Whether it
+    /// may be saved.
+    fn cap_check(&self, tried: bool) -> bool {
+        let Some(form) = self.cap_form() else {
+            return false;
+        };
+        let max = nerve_policy::config::Limits::default().max_timeout_secs;
+        let e = view::cap_form_check(&form, max);
+        let typed = |text: &str, error: &str| -> SharedString {
+            if tried || !text.trim().is_empty() {
+                error.into()
+            } else {
+                SharedString::new()
+            }
+        };
+        let filled = !form.name.trim().is_empty() && !form.command.trim().is_empty();
+        self.with_caps(|c| {
+            c.set_name_error(typed(&form.name, &e.name));
+            c.set_summary_error(e.summary.as_str().into());
+            c.set_command_error(typed(&form.command, &e.command));
+            c.set_params_error(e.params.as_str().into());
+            c.set_result_error(e.result.as_str().into());
+            c.set_timeout_error(e.timeout.as_str().into());
+            c.set_edit_ready(filled && e.none());
+        });
+        filled && e.none()
+    }
+
+    /// `cap add` or `cap edit` of what the dialog holds, once the app found
+    /// nothing wrong with it; the node checks it again, and what it refuses
+    /// stays in the dialog with its reason.
+    fn cap_save(self: &Rc<Self>) {
+        if !self.cap_check(true) {
+            return;
+        }
+        let (Some(form), Some(new)) = (self.cap_form(), self.with_caps(|c| c.get_edit_new()))
+        else {
+            return;
+        };
+        let (args, input) = view::cap_form_args(&form, new);
+        self.with_caps(|c| {
+            c.set_edit_busy(true);
+            c.set_edit_error(SharedString::new());
+        });
+        self.command(args, input, move |c, answer| {
+            c.with_caps(|k| k.set_edit_busy(false));
+            match answer {
+                Ok(v) => {
+                    c.with_caps(|k| k.set_edit_open(false));
+                    c.done(&v, "");
+                }
+                Err(e) => {
+                    c.with_caps(|k| k.set_edit_error(e.into()));
+                }
+            }
+            c.caps_load();
+        });
+    }
+
+    fn ask_cap_remove(&self, name: &str) {
+        self.confirm(
+            Pending::CapRemove(name.to_string()),
+            format!("Remove {name}?"),
+            format!("It leaves node.toml, and every center at once. Its switches and rules stay, and count again if you add {name} anew."),
+            "Remove",
+        );
+    }
+
+    pub(super) fn cap_remove(self: &Rc<Self>, name: &str) {
+        let args = vec!["cap".into(), "rm".into(), name.into()];
+        self.caps_change(args, None, format!("{name} is removed."), |c, e| {
+            c.toast(e, Tone::Danger)
+        });
     }
 
     fn program_choose(self: &Rc<Self>) {
@@ -241,4 +380,16 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     k.on_program_allow(move || c.program_allow());
     let c = ctl.clone();
     k.on_program_remove(move |name| c.program_remove(&name));
+    let c = ctl.clone();
+    k.on_add(move || c.cap_add());
+    let c = ctl.clone();
+    k.on_edit(move |name| c.cap_edit(&name));
+    let c = ctl.clone();
+    k.on_edit_check(move || {
+        c.cap_check(false);
+    });
+    let c = ctl.clone();
+    k.on_edit_save(move || c.cap_save());
+    let c = ctl.clone();
+    k.on_remove(move |name| c.ask_cap_remove(&name));
 }

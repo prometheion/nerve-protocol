@@ -21,7 +21,7 @@ import { SetupDialog } from "setup.slint";
 import {
     PairDialog, ConfirmDialog, AboutDialog, ModeDialog, FolderDialog, SudoDialog, ProxyDialog,
     OnceDialog, BackupDialog, RestoreDialog, ElevateDialog, UpdateDialog, UninstallDialog,
-    MissingDialog, RelayNodeDialog, OtherCopyDialog, RelayAddDialog, ConnectDialog,
+    MissingDialog, RelayNodeDialog, OtherCopyDialog, RelayAddDialog, ConnectDialog, CapDialog,
 } from "dialogs.slint";
 import { InstallerView } from "installer.slint";
 
@@ -240,7 +240,8 @@ export component AppWindow inherits Window {
         || Perm.mode-open || Perm.folder-open || Perm.sudo-open || Prefs.proxy-open
         || Prefs.once-open || Prefs.relay-edit-open || Prefs.backup-open || Prefs.restore-open
         || Store.setup-open || Store.elevate-open || Install.update-open || Install.uninstall-open
-        || Store.missing-open || Prefs.relay-add-open || Prefs.connect-open || Install.other-open;
+        || Store.missing-open || Prefs.relay-add-open || Prefs.connect-open || Install.other-open
+        || Caps.edit-open;
     changed dialog-open => {
         if (!self.dialog-open) {
             keys.focus();
@@ -397,6 +398,7 @@ export component AppWindow inherits Window {
         if Perm.mode-open: ModeDialog { }
         if Perm.folder-open: FolderDialog { }
         if Perm.sudo-open: SudoDialog { }
+        if Caps.edit-open: CapDialog { }
         if Prefs.proxy-open: ProxyDialog { }
         if Prefs.once-open: OnceDialog { }
         if Prefs.relay-edit-open: RelayNodeDialog { }

@@ -1307,10 +1307,12 @@ export component TextField {
     }
 }
 
-// A label over a control, with a hint below.
+// A label over a control, with a hint below, or in its place what is
+// wrong with the control's value.
 export component Field {
     in property <string> label;
     in property <string> hint;
+    in property <string> error;
     VerticalLayout {
         VerticalLayout {
             spacing: 6px;
@@ -1323,11 +1325,11 @@ export component Field {
             @children
         }
         Reveal {
-            shown: root.hint != "";
+            shown: root.hint != "" || root.error != "";
             gap: 6px;
             Text {
-                text: root.hint;
-                color: Theme.text-muted;
+                text: root.error != "" ? root.error : root.hint;
+                color: root.error != "" ? Theme.tone(Tone.danger) : Theme.text-muted;
                 font-size: Type.caption;
                 wrap: word-wrap;
             }
@@ -1788,6 +1790,8 @@ export component TextArea {
     in property <bool> mono;
     in property <string> label;
     in property <length> lines-high: 76px;
+    in property <bool> invalid;
+    callback edited(string);
     forward-focus: input;
     height: root.lines-high;
     accessible-role: text-input;
@@ -1797,7 +1801,7 @@ export component TextArea {
         background: Theme.surface;
         border-radius: Radius.md;
         border-width: input.has-focus ? 2px : 1px;
-        border-color: input.has-focus ? Theme.accent : Theme.border-strong;
+        border-color: root.invalid ? Theme.danger : input.has-focus ? Theme.accent : Theme.border-strong;
     }
     Rectangle {
         x: 12px;
@@ -1816,6 +1820,9 @@ export component TextArea {
             font-family: root.mono ? Type.mono : "";
             selection-background-color: Theme.accent.transparentize(0.6);
             selection-foreground-color: Theme.text;
+            edited => {
+                root.edited(self.text);
+            }
         }
         Text {
             x: 0;

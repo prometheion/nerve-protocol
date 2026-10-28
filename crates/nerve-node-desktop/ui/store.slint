@@ -279,6 +279,40 @@ export global Caps {
     callback program-choose();
     callback program-allow();
     callback program-remove(string);
+
+    // The dialog of a capability of node.toml: a new one (`edit-new`), or
+    // the one named `edit-name`, which an edit keeps. Its fields as typed;
+    // the effect and the platform by their place in the dialog's choices.
+    in-out property <bool> edit-open;
+    in-out property <bool> edit-new;
+    in-out property <string> edit-name;
+    in-out property <string> edit-summary;
+    in-out property <int> edit-effect;
+    in-out property <string> edit-command;
+    in-out property <string> edit-params;
+    in-out property <string> edit-result;
+    in-out property <string> edit-timeout;
+    in-out property <int> edit-platform;
+    // What is wrong with a field, as the app checks it while the owner
+    // types (src/view.rs, cap_form_check); what the node said when it
+    // refused the save.
+    in-out property <string> name-error;
+    in-out property <string> summary-error;
+    in-out property <string> command-error;
+    in-out property <string> params-error;
+    in-out property <string> result-error;
+    in-out property <string> timeout-error;
+    in-out property <string> edit-error;
+    in-out property <bool> edit-busy;
+    // Whether the fields are fine to save, as far as the app can tell.
+    in-out property <bool> edit-ready;
+    callback add();
+    callback edit(string);
+    // A field changed: the check runs again.
+    callback edit-check();
+    callback edit-save();
+    // Asks before `cap rm`.
+    callback remove(string);
 }
 
 // The Log page.

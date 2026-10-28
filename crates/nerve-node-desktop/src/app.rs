@@ -87,6 +87,8 @@ enum Pending {
     Accept,
     /// `audit clear`, or with `true` `log clear`.
     Clear(bool),
+    /// `cap rm` of a capability of node.toml.
+    CapRemove(String),
 }
 
 /// What a command that keeps answering gave, until the window takes it.
@@ -144,8 +146,10 @@ pub struct Ctl {
     /// Which reading of the Permissions page is the latest: an answer for
     /// an earlier one (another center picked meanwhile) is dropped.
     perm_asked: Cell<u64>,
-    /// The same for the Capabilities page.
+    /// The same for the Capabilities page, and what `cap ls` said last:
+    /// the entries of node.toml its dialog edits.
     caps_asked: Cell<u64>,
+    caps_listing: RefCell<Value>,
     /// Restarts the service a moment after a change it takes only then.
     restart_timer: slint::Timer,
     /// A restart the app said would come and that has not run yet; the
@@ -302,6 +306,7 @@ impl Ctl {
             first_run: Cell::new(false),
             perm_asked: Cell::new(0),
             caps_asked: Cell::new(0),
+            caps_listing: RefCell::new(Value::Null),
             restart_timer: slint::Timer::default(),
             restart_waits: Cell::new(false),
             scheme_timer: slint::Timer::default(),
@@ -1105,6 +1110,7 @@ impl Ctl {
                     }
                 });
             }
+            Pending::CapRemove(name) => self.cap_remove(&name),
             Pending::Accept => {
                 self.command(vec!["config".into(), "accept".into()], None, |c, answer| {
                     match answer {

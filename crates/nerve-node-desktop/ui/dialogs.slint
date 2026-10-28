@@ -3,7 +3,7 @@
 
 import { AboutSlint } from "std-widgets.slint";
 import { Theme, Type, Space, Radius, Tone } from "theme.slint";
-import { Store, Perm, Prefs, Install } from "store.slint";
+import { Store, Perm, Caps, Prefs, Install } from "store.slint";
 import { Working, DidList, UninstallChoice, UpdateChoice } from "installer.slint";
 import {
     Button, ButtonKind, Banner, Dialog, DialogButtons, Field, TextField, InfoRow, Divider, Code,
@@ -427,6 +427,170 @@ export component FolderDialog inherits Dialog {
             enabled: Perm.folder-read || Perm.folder-write || Perm.folder-execute;
             clicked => {
                 Perm.folder-add();
+            }
+        }
+    }
+}
+
+// A capability of node.toml: a fixed command the node runs as nerve-run,
+// held to the folders. The app checks each field as the node and the
+// center do while the owner types; the node checks again on save.
+export component CapDialog inherits Dialog {
+    title: Caps.edit-new ? "Add a capability" : "Change " + Caps.edit-name;
+    subtitle: "A command the node runs as nerve-run, held to the center's folders. A word written {name} is the call's argument name, as one whole word; no shell reads it.";
+    card-width: 640px;
+    close => {
+        Caps.edit-open = false;
+    }
+    enter => {
+        if (Caps.edit-ready && !Caps.edit-busy) {
+            Caps.edit-save();
+        }
+    }
+    HorizontalLayout {
+        spacing: Space.md;
+        // Each at the top: a longer hint or error below one leaves the
+        // other's field where it is.
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: start;
+            Field {
+                label: "Name";
+                hint: "capability.action, like sensors.read.";
+                error: Caps.name-error;
+                TextField {
+                    text <=> Caps.edit-name;
+                    enabled: Caps.edit-new;
+                    mono: true;
+                    invalid: Caps.name-error != "";
+                    placeholder: "sensors.read";
+                    label: "Name";
+                    edited => {
+                        Caps.edit-check();
+                    }
+                }
+            }
+        }
+        VerticalLayout {
+            width: 160px;
+            alignment: start;
+            Field {
+                label: "Time limit";
+                hint: "Seconds, or empty.";
+                error: Caps.timeout-error;
+                TextField {
+                    text <=> Caps.edit-timeout;
+                    invalid: Caps.timeout-error != "";
+                    placeholder: "default";
+                    label: "Time limit";
+                    edited => {
+                        Caps.edit-check();
+                    }
+                }
+            }
+        }
+    }
+    Field {
+        label: "What it does";
+        hint: Caps.edit-effect >= 3 ? "A center may use it only once you turn it on for that center." : "";
+        Segmented {
+            options: ["Read", "Write", "Execute", "Sense", "Actuate"];
+            current: Caps.edit-effect;
+            chosen(i) => {
+                Caps.edit-effect = i;
+                Caps.edit-check();
+            }
+        }
+    }
+    Field {
+        label: "Summary";
+        hint: "One line for the agent.";
+        error: Caps.summary-error;
+        TextField {
+            text <=> Caps.edit-summary;
+            invalid: Caps.summary-error != "";
+            placeholder: "The machine's temperatures, as JSON.";
+            label: "Summary";
+            edited => {
+                Caps.edit-check();
+            }
+        }
+    }
+    Field {
+        label: "Command";
+        hint: "The program first. A word with blanks goes in quotes.";
+        error: Caps.command-error;
+        TextField {
+            text <=> Caps.edit-command;
+            mono: true;
+            invalid: Caps.command-error != "";
+            placeholder: "sensors -j";
+            label: "Command";
+            edited => {
+                Caps.edit-check();
+            }
+        }
+    }
+    Field {
+        label: "Arguments";
+        hint: "A JSON Schema of an object; empty for none. A property with \"x-nerve-path\": \"read\" or \"write\" is a path the node holds to the folders.";
+        error: Caps.params-error;
+        TextArea {
+            text <=> Caps.edit-params;
+            mono: true;
+            invalid: Caps.params-error != "";
+            lines-high: 110px;
+            placeholder: "{\"type\": \"object\", \"properties\": {\"chip\": {\"type\": \"string\"}}}";
+            label: "Arguments";
+            edited => {
+                Caps.edit-check();
+            }
+        }
+    }
+    Field {
+        label: "Result";
+        hint: "Empty: what the command prints, as text. Or a JSON Schema the JSON it prints must fit.";
+        error: Caps.result-error;
+        TextArea {
+            text <=> Caps.edit-result;
+            mono: true;
+            invalid: Caps.result-error != "";
+            lines-high: 76px;
+            placeholder: "{\"type\": \"object\"}";
+            label: "Result";
+            edited => {
+                Caps.edit-check();
+            }
+        }
+    }
+    Field {
+        label: "Where it runs";
+        Segmented {
+            options: ["Any system", "Linux", "Windows"];
+            current: Caps.edit-platform;
+            chosen(i) => {
+                Caps.edit-platform = i;
+                Caps.edit-check();
+            }
+        }
+    }
+    DialogButtons {
+        error: Caps.edit-error;
+        error-title: "The node did not take it";
+        Button {
+            text: "Cancel";
+            kind: ButtonKind.ghost;
+            clicked => {
+                Caps.edit-open = false;
+            }
+        }
+        Button {
+            text: Caps.edit-new ? "Add" : "Save";
+            kind: ButtonKind.primary;
+            enabled: Caps.edit-ready;
+            busy: Caps.edit-busy;
+            clicked => {
+                Caps.edit-save();
             }
         }
     }

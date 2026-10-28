@@ -4,7 +4,7 @@
 // programs allowed as providers. Each change runs one `nerve-node` command.
 
 import { Theme, Type, Space, Radius, Size, Tone } from "theme.slint";
-import { Load, CapRow, ProgramRow } from "data.slint";
+import { Load, CapRow, DeclaredRow, ProgramRow } from "data.slint";
 import { Store, Caps } from "store.slint";
 import {
     Button, ButtonKind, Card, Pill, Banner, Loading, PageHeader, PageFrame, EmptyState, Divider,
@@ -101,6 +101,99 @@ component OfferedSection inherits Section {
                 current: c.setting;
                 chosen(s) => {
                     Caps.cap-set(c.name, s);
+                }
+            }
+        }
+    }
+}
+
+// The capabilities of node.toml the owner declared, to change or remove,
+// and the button for one more. Where the node offers none, it says why.
+component DeclaredSection inherits Section {
+    icon: @image-url("icons/terminal.svg");
+    tone: Caps.config-note != "" ? Tone.neutral : Tone.accent;
+    title: "Your capabilities";
+    text: Caps.config-note != "" ? Caps.config-note
+        : "Capabilities of node.toml: each runs a fixed command as nerve-run, held to the folders of the center that calls it.";
+    ScrollBox {
+        rows: Caps.declared.length;
+        for d[i] in Caps.declared: ListRow {
+            first: i == 0;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                spacing: 2px;
+                HorizontalLayout {
+                    spacing: Space.sm;
+                    Text {
+                        text: d.name;
+                        color: Theme.text;
+                        font-size: Type.small;
+                        font-weight: Type.semibold;
+                        font-family: Type.mono;
+                        vertical-alignment: center;
+                    }
+                    Pill {
+                        text: d.effect;
+                        tone: d.effect == "sense" || d.effect == "actuate" ? Tone.warn
+                            : d.effect == "execute" ? Tone.accent : Tone.neutral;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: d.detail;
+                        color: Theme.text-faint;
+                        font-size: Type.caption;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+                PathText {
+                    text: d.command;
+                    color: Theme.text-muted;
+                }
+            }
+            Button {
+                text: "Edit";
+                icon: @image-url("icons/edit.svg");
+                kind: ButtonKind.ghost;
+                small: true;
+                accessible-label: "Edit " + d.name;
+                clicked => {
+                    Caps.edit(d.name);
+                }
+            }
+            Button {
+                icon: @image-url("icons/trash.svg");
+                kind: ButtonKind.ghost;
+                small: true;
+                accessible-label: "Remove " + d.name;
+                clicked => {
+                    Caps.remove(d.name);
+                }
+            }
+        }
+    }
+    if !Caps.windows: VerticalLayout {
+        if Caps.declared.length > 0: Divider { }
+        HorizontalLayout {
+            padding: Space.lg;
+            padding-left: Space.xl;
+            spacing: Space.md;
+            if Caps.declared.length == 0: Text {
+                text: "None yet.";
+                color: Theme.text-muted;
+                font-size: Type.small;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+            Button {
+                text: "Add a capability…";
+                icon: @image-url("icons/plus.svg");
+                small: true;
+                clicked => {
+                    Caps.add();
                 }
             }
         }
@@ -270,6 +363,7 @@ export component CapabilitiesPage inherits PageFrame {
         VerticalLayout {
             spacing: Space.xxl;
             OfferedSection { }
+            DeclaredSection { }
             ProgramSection { }
         }
     }
