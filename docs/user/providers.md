@@ -254,8 +254,9 @@ state, subscribing to an event or opening a stream is in the [audit
 log](audit.md). An event goes only to a center that may have it when it
 happens, so a center you take `on` from gets no more of it, even while it is
 still subscribed. An open stream is asked about again when you change the
-config: one the center may no longer have ends, and the program is told. `nerve-node cap ls` lists them with their kind after the
-effect (`sense state`, `read event`).
+config and when a mode's time limit passes: one the center may no longer
+have ends, and the program is told. `nerve-node cap ls` lists them with
+their kind after the effect (`sense state`, `read event`).
 
 A capability of [`node.toml`](config-capabilities.md) has actions only: a
 value it reads is an action with effect `read` or `sense`.

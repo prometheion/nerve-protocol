@@ -1857,7 +1857,8 @@ folder mode it needs `on` as such an action does.
   8, "ok": {"level": 3}}`; the center gets the keys asked for and no other,
   and a key the program left out fails the `get` (`internal`). A program
   that does not answer within 30 s fails it with `timeout`. A key the
-  capability does not declare is `unknown_member`. A `get` of a program's
+  capability does not declare is `unknown_member`; one named twice is
+  decided and asked for once. A `get` of a program's
   state is one of the link's calls: it counts against `limits.calls`
   (`busy`), and a `cancel` of it or `session.end` of its session fails it
   `cancelled` and tells the program (`cancel`).
@@ -1870,7 +1871,13 @@ folder mode it needs `on` as such an action does.
   decided and audited like a call (with the session of its `ctx`), so a
   refusal tells the center at once; `lamp/state` is decided so for each
   state key and `lamp/*` for each event and state key, and one refused
-  refuses the `sub`, as for `get`. An event the program does not declare is
+  refuses the `sub`, as for `get`. A unit is decided once, however often
+  the `sub` names it. `lamp/state` and `lamp/*` take only the units they
+  were decided for: an event or key the program declares when it attaches
+  again later does not come under them until a new `sub` decides it. The
+  capability is looked up with all the units the program declares, as for
+  `get` and `stream.open`, so a `sub` of one this center is offered none of
+  is refused in the audit too. An event the program does not declare is
   `unknown_member`. The cut as each event comes holds after a change of the
   policy, so a center the owner took `on` from, or whose capability the
   owner turned `off` or `hidden` (though the event itself is `on`), gets
@@ -1878,8 +1885,8 @@ folder mode it needs `on` as such an action does.
   taken for any topic, also one of a capability whose program left.
 - **State changes.** The program may send `{"cap": "lamp", "state":
   {"level": 4}}`. Each center that subscribed to `lamp/state` (or
-  `lamp/*`) gets a `state` notification with the declared keys its policy
-  allows now; the others are dropped.
+  `lamp/*`) gets a `state` notification with the keys its subscription was
+  decided for that its policy allows now; the others are dropped.
 - **Streams.** A center's `stream.open` (`{cap, stream, params, ctx}`) is
   checked against the stream's `params` schema (`invalid_args`), decided and
   audited like a call with those arguments, and counts against the link's
@@ -1899,7 +1906,8 @@ folder mode it needs `on` as such an action does.
   way. When the policy changes (or a mode's time limit passes), each open
   program's stream is decided again as an event is: one the center may no
   longer have is closed with reason `not allowed any more`, and the program
-  gets `stream.close`. When the program's connection ends, each of its
+  gets `stream.close`. An open the program answers only after such a change
+  is decided again then, and refused (`forbidden`) the same way. When the program's connection ends, each of its
   streams ends too, after what it sent.
 
 A capability of `node.toml` (§2) offers actions only: an entry that names

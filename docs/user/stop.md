@@ -5,7 +5,7 @@ From the quickest to the most thorough.
 | You want | Do | Effect |
 |---|---|---|
 | Stop one agent session | Web UI, Overview, Sessions, **End** | The session's running commands stop, its jobs too |
-| Hide a machine from the agent | Web UI, Overview, **Disable** on the machine | The machine stays paired and connected. The agent's `list` shows it as disabled with no capabilities, and calls to it are refused. The agent's calls that run there stop, its jobs too. **Enable** undoes it |
+| Hide a machine from the agent | Web UI, Overview, **Disable** on the machine | The machine stays paired and connected. The agent's `list` shows it as disabled with no capabilities, and calls to it are refused. The agent's calls that run there stop, its jobs too, and so do the streams and event subscriptions of a program there. **Enable** undoes it |
 | Stop one center on a machine | `nerve-node center pause --center lab` | The node drops the link and does not dial it again |
 | Stop every center on a machine | `nerve-node panic` | Every link ends. Nothing runs until `unlock` |
 | End a pairing | `nerve-node center rm --center lab`, or **Remove** in the web UI | The pairing and its key are gone |

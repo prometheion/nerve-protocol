@@ -552,6 +552,76 @@ mod tests {
         assert_eq!(cap["actions"]["propertyNames"]["pattern"], rule.as_str());
     }
 
+    /// The published `state`, `events` and `streams` are maps of names as
+    /// the code takes them, each member with the fields the code writes, of
+    /// which those it cannot do without (`effect` among them) are required.
+    #[test]
+    fn the_published_schema_states_state_events_and_streams_as_the_code_does() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/descriptor.schema.json"
+        );
+        let s: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let cap = &s["$defs"]["capability"]["properties"];
+        let rule = format!("^[A-Za-z0-9_-]{{1,{NAME_MAX}}}$");
+        let members = |v: &Value| -> Vec<String> {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        let state = |summary: &str, schema: Value, exposure| StateDecl {
+            effect: Effect::Sense,
+            summary: summary.into(),
+            schema,
+            exposure,
+        };
+        let event = |summary: &str, implicit, data: Value, exposure| EventDecl {
+            effect: Effect::Sense,
+            summary: summary.into(),
+            implicit,
+            data,
+            exposure,
+        };
+        let stream = |summary: &str, params: Value, exposure| StreamDecl {
+            kind: StreamKind::Reliable,
+            direction: Direction::Up,
+            effect: Effect::Read,
+            summary: summary.into(),
+            params,
+            exposure,
+        };
+        // Each with every field set, then with only what it cannot leave out.
+        let decls = [
+            (
+                "state",
+                serde_json::to_value(state("s", json!({}), Some(Exposure::On))).unwrap(),
+                serde_json::to_value(state("", Value::Null, None)).unwrap(),
+            ),
+            (
+                "events",
+                serde_json::to_value(event("s", true, json!({}), Some(Exposure::On))).unwrap(),
+                serde_json::to_value(event("", false, Value::Null, None)).unwrap(),
+            ),
+            (
+                "streams",
+                serde_json::to_value(stream("s", json!({}), Some(Exposure::On))).unwrap(),
+                serde_json::to_value(stream("", Value::Null, None)).unwrap(),
+            ),
+        ];
+        for (name, full, least) in decls {
+            let map = &cap[name];
+            assert_eq!(map["type"], "object", "{name}");
+            assert_eq!(map["propertyNames"]["pattern"], rule.as_str(), "{name}");
+            let member = &map["additionalProperties"];
+            assert_eq!(members(&member["properties"]), members(&full), "{name}");
+            let mut required: Vec<String> =
+                serde_json::from_value(member["required"].clone()).unwrap();
+            required.sort();
+            assert_eq!(required, members(&least), "{name}");
+            assert!(required.contains(&"effect".to_string()), "{name}");
+        }
+    }
+
     /// The published `access` block and an action's `exposure` say what
     /// the code reads: the same modes, the same folder flags, the same
     /// members.

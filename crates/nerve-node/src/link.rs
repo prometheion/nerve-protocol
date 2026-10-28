@@ -1558,36 +1558,49 @@ impl Link {
     /// decided and audited unit by unit, like a call of `cap.name` that
     /// names no path: `cap/<event>` its event, which it must declare,
     /// `cap/state` each of its state keys, `cap/*` both; one refused refuses
-    /// it, as for `get`. The events and changes themselves are cut again as
+    /// it, as for `get`. `cap/state` and `cap/*` take only the units they
+    /// were decided for: one the program declares later comes under none.
+    /// Each topic and unit is decided once, however often it is named. A
+    /// program's capability is looked up with all its units, as `get` and
+    /// `stream.open` do, so one this center is offered none of is refused
+    /// in the audit too. The events and changes themselves are cut again as
     /// they come (Shared::emit_all), so a change of the policy afterwards
     /// holds too. An `unsub` only takes away, so it takes any topic, also one
     /// of a capability that went meanwhile.
     async fn sub(&self, p: &Map<String, Value>, on: bool) -> Result<Value, RpcError> {
         let t: Topics = params(p)?;
         t.check()?;
-        let mut topics = Vec::new();
+        let mut topics = std::collections::BTreeSet::new();
         for s in &t.topics {
             let topic = Topic::parse(s)
                 .ok_or_else(|| RpcError::invalid_args(format!("bad topic {s:?}")))?;
-            topics.push(topic);
+            topics.insert(topic);
         }
         if !on {
-            self.handle.sub(topics, false);
+            self.handle.sub(topics.into_iter().collect(), false);
             return Ok(json!({}));
         }
+        let added = self.shared.providers.caps();
         let view = self.view()?;
-        let mut programs = Vec::new();
-        for topic in &topics {
+        let (mut own, mut programs) = (Vec::new(), Vec::new());
+        for topic in topics {
+            if added.iter().any(|c| c.id == topic.cap()) {
+                programs.push(topic);
+                continue;
+            }
             let Some(c) = view.capability(topic.cap()) else {
                 return Err(RpcError::new(
                     ErrorCode::UnknownCapability,
                     format!("no capability {}", topic.cap()),
                 ));
             };
-            if c.provider != "node" {
+            if c.provider == "node" {
+                own.push(topic);
+            } else {
                 programs.push(topic);
             }
         }
+        let mut taken = Vec::new();
         if !programs.is_empty() {
             // Its units as the program declared them, also those this
             // center is not offered: a refusal is in the audit.
@@ -1596,13 +1609,14 @@ impl Link {
                 .ok_or_else(|| RpcError::new(ErrorCode::Unavailable, "this center was removed"))?;
             let all =
                 descriptor::for_call(&cfg, &entry, crate::now_ms(), &self.shared.added_caps(&cfg));
+            let mut decided = std::collections::BTreeSet::new();
             for topic in programs {
-                let cap = topic.cap();
-                let c = all.capability(cap).ok_or_else(|| {
+                let cap = topic.cap().to_string();
+                let c = all.capability(&cap).ok_or_else(|| {
                     RpcError::new(ErrorCode::UnknownCapability, format!("no capability {cap}"))
                 })?;
                 let mut units: Vec<(&String, Effect)> = Vec::new();
-                match topic {
+                match &topic {
                     Topic::Event(_, name) => {
                         let decl = c.events.get_key_value(name).ok_or_else(|| {
                             RpcError::new(
@@ -1620,13 +1634,25 @@ impl Link {
                 }
                 let (program, _) = self.program(&c.provider)?;
                 let off = c.exposure == Exposure::Off;
-                for (name, effect) in units {
-                    let inv = unit_call(cap, name, Map::new(), t.ctx.clone());
-                    self.decide_unit(&entry, &inv, effect, off, program).await?;
+                for (name, effect) in &units {
+                    if !decided.insert((cap.clone(), (*name).clone())) {
+                        continue;
+                    }
+                    let inv = unit_call(&cap, name, Map::new(), t.ctx.clone());
+                    self.decide_unit(&entry, &inv, *effect, off, program)
+                        .await?;
                 }
+                let names = units.into_iter().map(|(n, _)| n.clone()).collect();
+                taken.push((topic, names));
             }
         }
-        self.handle.sub(topics, true);
+        self.handle.sub(own, true);
+        for (topic, names) in taken {
+            match topic {
+                Topic::Event(..) => self.handle.sub(vec![topic], true),
+                _ => self.handle.sub_units(topic, names),
+            }
+        }
         Ok(json!({}))
     }
 
@@ -1751,10 +1777,12 @@ impl Link {
             )
         })?;
         let (program, serial) = self.program(&cap.provider)?;
+        // Each key is decided and asked for once, however often it is named.
         let keys: Vec<String> = if g.keys.is_empty() {
             cap.state.keys().cloned().collect()
         } else {
-            g.keys
+            let keys: std::collections::BTreeSet<String> = g.keys.into_iter().collect();
+            keys.into_iter().collect()
         };
         if keys.is_empty() {
             return Err(RpcError::new(
@@ -1778,9 +1806,10 @@ impl Link {
             .shared
             .providers
             .get(&cap.provider, serial, &g.cap, &keys);
-        tokio::time::timeout(PROGRAM_WAIT, asked)
+        let wait = self.shared.program_wait;
+        tokio::time::timeout(wait, asked)
             .await
-            .unwrap_or_else(|_| Err(program_late(&cap.provider)))
+            .unwrap_or_else(|_| Err(program_late(&cap.provider, wait)))
     }
 
     /// `stream.open` of a program's stream: decided and audited like a
@@ -1833,31 +1862,65 @@ impl Link {
             }
         };
         let (go, start) = oneshot::channel::<()>();
-        {
+        let refused = {
             let mut streams = lock(&self.streams);
             // Gone: the connection it came on ended meanwhile, and the
             // program's stream ends here (dropping `held` tells it).
             if streams.opening.remove(&id).is_none() {
                 return;
             }
-            let link = self.clone();
-            let task = tokio::spawn(async move {
-                // Held while the stream runs: dropped, it tells the program.
-                let _held = held;
-                if start.await.is_ok() {
-                    link.pump(sid, reader).await;
-                }
+            // Decided before the program answered: a change of the policy
+            // since was looked at by recheck_streams while this stream was
+            // not open yet, so it is looked at here, under the same lock.
+            let (cap, name, effect) = &unit;
+            let allowed = self.entry().is_some_and(|(cfg, entry)| {
+                may_take(&self.shared, &cfg, &entry, cap, name, *effect)
             });
-            streams.open.insert(
-                sid,
-                OpenStream {
-                    task: task.abort_handle(),
-                    unit: Some(unit),
-                },
-            );
+            if allowed {
+                self.open_unit(&mut streams, sid, reader, held, unit, start);
+                None
+            } else {
+                // Dropped, it tells the program.
+                drop(held);
+                Some(RpcError::forbidden(format!(
+                    "{cap}.{name} is not allowed any more"
+                )))
+            }
+        };
+        if let Some(e) = refused {
+            return self.reply(id, Err(e)).await;
         }
         self.reply(id, Ok(json!({ "sid": sid }))).await;
         let _ = go.send(());
+    }
+
+    /// Puts the program's stream `sid` among the open ones: its task pumps
+    /// what the program sends once `start` fires, and holds `held` while
+    /// it runs.
+    fn open_unit(
+        self: &Arc<Self>,
+        streams: &mut Streams,
+        sid: u32,
+        reader: Arc<crate::tap::Reader>,
+        held: crate::provider::ProgramStream,
+        unit: (String, String, Effect),
+        start: oneshot::Receiver<()>,
+    ) {
+        let link = self.clone();
+        let task = tokio::spawn(async move {
+            // Held while the stream runs: dropped, it tells the program.
+            let _held = held;
+            if start.await.is_ok() {
+                link.pump(sid, reader).await;
+            }
+        });
+        streams.open.insert(
+            sid,
+            OpenStream {
+                task: task.abort_handle(),
+                unit: Some(unit),
+            },
+        );
     }
 
     async fn open_program(&self, p: Map<String, Value>) -> Result<ProgramOpen, RpcError> {
@@ -1898,9 +1961,10 @@ impl Link {
             self.shared
                 .providers
                 .open_stream(&cap.provider, serial, &o.cap, &o.stream, args, tap);
-        let held = tokio::time::timeout(PROGRAM_WAIT, asked)
+        let wait = self.shared.program_wait;
+        let held = tokio::time::timeout(wait, asked)
             .await
-            .unwrap_or_else(|_| Err(program_late(&cap.provider)))?;
+            .unwrap_or_else(|_| Err(program_late(&cap.provider, wait)))?;
         let sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
         Ok((sid, reader, held, (o.cap, o.stream, decl.effect)))
     }
@@ -3259,15 +3323,16 @@ impl<F: FnOnce()> Drop for Ended<F> {
 /// How long the node waits for a program's answer to a `get` or a
 /// `stream.open`: they read or open, and a program that takes longer does
 /// not answer.
-const PROGRAM_WAIT: Duration = Duration::from_secs(30);
+pub const PROGRAM_WAIT: Duration = Duration::from_secs(30);
 
-/// Why a program's `get` or `stream.open` failed: it did not answer.
-fn program_late(provider: &str) -> RpcError {
+/// Why a program's `get` or `stream.open` failed: it did not answer within
+/// `wait`.
+fn program_late(provider: &str, wait: Duration) -> RpcError {
     RpcError::new(
         ErrorCode::Timeout,
         format!(
-            "the provider {provider} did not answer within {} s",
-            PROGRAM_WAIT.as_secs()
+            "the provider {provider} did not answer within {}",
+            span(wait)
         ),
     )
 }

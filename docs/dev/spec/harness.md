@@ -134,7 +134,10 @@ never appears in a capability id or action name (protocol §6), while `_` and
   `error forbidden`.
 - A node the owner disabled in the center offers nothing: it stays paired and
   connected, `list` marks it `disabled`, and `execute` on it is
-  `error unavailable`. The calls that run there stop, jobs too (§4.4).
+  `error unavailable`. The calls that run there stop, jobs too (§4.4), and
+  so do a program's streams and event subscriptions the sessions hold
+  there (§4.5): the node gets `stream.close` and `unsub`, and their ids are
+  unknown once it is enabled again.
 - The node cuts the descriptor to what the policy can allow (node-local §3),
   so `list` offers only an action a call may get through: in default deny,
   `fs` and `exec` actions without a covering allow rule are absent from the
@@ -568,7 +571,8 @@ one:
   subscribed: it ends (`unsub`) once the last stream that takes it is
   closed, by `stream.close` or by its session's end. A link that ends ends the subscriptions; one that resumes
   keeps them, as the node keeps them and sends again what it sent
-  meanwhile.
+  meanwhile. A subscription whose node came back on another link while the
+  action checker decided it fails with `connection_lost`.
 - **Stream** (`kind: stream`): `execute` with args that fit its `params`
   sends `stream.open {cap, stream: name, params: args, ctx: {session}}` and
   answers `Opened sensors.feed on node box-1 as stream s-…` with the same
