@@ -5055,7 +5055,8 @@ async fn a_nodes_words_about_a_stream_never_read_as_the_centers() {
 // ---- A program's state, events and streams (docs/dev/spec/harness.md §4.5) ----
 
 /// box-1 with the program's capability `board` ([`board`]), on a center
-/// whose call wait is [`WAIT`].
+/// whose call wait is [`UNIT_WAIT`]: an `execute` of its stream or event
+/// answers once the node did, unless a test sets it lower.
 async fn board_box(
     r: &Running,
 ) -> (
@@ -5069,8 +5070,12 @@ async fn board_box(
         board(d);
     })
     .await;
+    r.center.set_call_wait(UNIT_WAIT);
     (e, node, seen, task)
 }
+
+/// The call wait of [`board_box`]'s center.
+const UNIT_WAIT: Duration = Duration::from_secs(20);
 
 /// The next `get`, `sub` or `unsub` the fake node saw: its method and
 /// params. Other things it saw are passed over.
@@ -5624,6 +5629,7 @@ async fn a_subscription_whose_link_changed_during_the_checker_is_refused() {
     use nerve_center::checker::config::ModelScope;
     let dir = tempfile::tempdir().unwrap();
     let r = job_center(dir.path()).await;
+    r.center.set_call_wait(UNIT_WAIT);
     let key = NodeKey::generate().unwrap();
     assert_eq!(pair(&r, &key, "box-1").await.0, 200);
     let mut d = descriptor(&key, "box-1");
@@ -5781,6 +5787,8 @@ async fn a_jobs_stream_waits_for_the_programs_streams_on_their_way() {
             panic!("no stream.open")
         };
     }
+    // The command becomes a job, whose output streams.
+    r.center.set_call_wait(WAIT);
     let reply = execute_as(&e, json!("job"), "exec.run", json!({"command": "talkhang"})).await;
     stream_of(&reply);
     let Seen::Hang(_) = next_seen(&mut seen).await else {
@@ -5821,5 +5829,118 @@ async fn a_programs_stream_may_take_longer_to_open_than_an_output_stream() {
     // Answered after [`SLOW`] only.
     let reply = execute_as(&e, json!(1), "board.feed", json!({"every_ms": 999})).await;
     opened_stream(&reply, "board.feed", "stream");
+    r.stop().await;
+}
+
+/// An `execute` of a program's stream answers within the call wait, as
+/// any call does, though the program takes longer to answer `stream.open`:
+/// it gives the stream's id while the stream still opens, and the stream
+/// opens on its own after that.
+#[tokio::test]
+async fn a_programs_stream_slower_than_the_call_wait_opens_on_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = board_box(&r).await;
+    r.center.set_call_wait(WAIT);
+    list_text(&e, json!({"node": "box-1", "capability": ["board.feed"]})).await;
+    let started = std::time::Instant::now();
+    // Answered after [`SLOW`] only.
+    let reply = execute_as(&e, json!(1), "board.feed", json!({"every_ms": 999})).await;
+    assert!(started.elapsed() < SLOW, "{:?}", started.elapsed());
+    let stream = opened_stream(&reply, "board.feed", "stream");
+    let (text, _) = said(&reply);
+    assert!(
+        text.starts_with("Opening board.feed on node box-1"),
+        "{text}"
+    );
+    assert_eq!(reply["result"]["structuredContent"]["opening"], true);
+    let Seen::StreamOpen(_) = next_seen(&mut seen).await else {
+        panic!("no stream.open")
+    };
+    let link = r.center.link(&node).unwrap();
+    wait_for(|| (link.stream_count() == 1).then_some(())).await;
+    let got = read_stream(&e, &stream, 0).await;
+    let (said, data) = read_of(&got);
+    assert_eq!(data["eof"], false, "{said}");
+    nothing_more(&mut seen).await;
+    r.stop().await;
+}
+
+/// A subscription whose id was given before it was decided, and which the
+/// node then refuses, ends with the words why: its `stream.read` says so,
+/// and its ring leaves the link.
+#[tokio::test]
+async fn a_subscription_refused_after_the_call_wait_says_why_in_its_stream() {
+    use nerve_center::checker::config::ModelScope;
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = board_box(&r).await;
+    r.center.set_call_wait(WAIT);
+    list_text(&e, json!({"node": "box-1", "capability": ["board.locked"]})).await;
+    let (url, asked, go) = held_model();
+    r.center.update(|s| {
+        s.checker.model_on = true;
+        s.checker.model.source = ModelSource::Endpoint;
+        s.checker.model.endpoint_url = url;
+        s.checker.model.scope = ModelScope::WithReads;
+    });
+    r.center.rebuild_checker();
+    let reply = execute_as(&e, json!(1), "board.locked", json!({})).await;
+    let stream = opened_stream(&reply, "board.locked", "event");
+    assert!(
+        said(&reply).0.starts_with("Subscribing to board.locked"),
+        "{reply}"
+    );
+    tokio::task::spawn_blocking(move || asked.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the model was asked");
+    go.send(()).unwrap();
+    assert_eq!(next_state(&mut seen).await.0, "sub");
+    let (_, last) = read_until(&e, &stream, |_| false).await;
+    let (text, data) = read_of(&last);
+    assert_eq!(data["eof"], true, "{text}");
+    assert!(
+        text.contains(
+            "it ended (it did not open: error forbidden: node box-1 answered: board.locked is not allowed)"
+        ),
+        "{text}"
+    );
+    let link = r.center.link(&node).unwrap();
+    assert_eq!(link.subscribers("board/locked"), 0);
+    r.stop().await;
+}
+
+/// A program's stream whose node was disabled and enabled again while
+/// the program answered is refused with what happened to it, not with an
+/// end of the session, and the node's stream is closed.
+#[tokio::test]
+async fn a_programs_stream_closed_while_it_opened_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = board_box(&r).await;
+    list_text(&e, json!({"node": "box-1", "capability": ["board.feed"]})).await;
+    let call = tokio::spawn({
+        let e = e.clone();
+        // Answered after [`SLOW`] only.
+        async move { execute_as(&e, json!(1), "board.feed", json!({"every_ms": 999})).await }
+    });
+    let Seen::StreamOpen(_) = next_seen(&mut seen).await else {
+        panic!("no stream.open")
+    };
+    r.center.set_disabled(&node, true).unwrap();
+    r.center.set_disabled(&node, false).unwrap();
+    let reply = call.await.unwrap();
+    let (text, err) = said(&reply);
+    assert!(
+        err && text.starts_with(
+            "error cancelled: the stream was closed while it opened (the node was disabled in the center)"
+        ),
+        "{reply}"
+    );
+    let Seen::StreamClose(_) = next_seen(&mut seen).await else {
+        panic!("no stream.close")
+    };
+    assert_eq!(e.session().streams.lock().unwrap().len(), 0);
     r.stop().await;
 }

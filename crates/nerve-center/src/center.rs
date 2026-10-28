@@ -397,6 +397,75 @@ impl Drop for Adding<'_> {
     }
 }
 
+/// What `execute` of a program's event or stream gives: the id of the
+/// session's stream it comes in, and whether it was still being opened
+/// when the call wait passed.
+#[derive(Debug)]
+pub struct Opened {
+    pub id: String,
+    pub opening: bool,
+}
+
+/// Where the opening of a program's stream or subscription is
+/// ([`Center::within_call_wait`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Its `execute` waits for it.
+    Waited,
+    /// The call wait passed: the stream's id was given, and the open goes
+    /// on by itself.
+    Given,
+    /// It ended before the call wait passed: its `execute` has its result.
+    Done,
+}
+
+/// Stops a task when dropped, unless it was let go (`None`).
+struct AbortOnDrop(Option<tokio::task::AbortHandle>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(h) = self.0.take() {
+            h.abort();
+        }
+    }
+}
+
+/// The node `name` has no link now.
+fn offline(name: &str) -> RpcError {
+    RpcError::new(
+        ErrorCode::Unavailable,
+        format!("the node {name} is offline"),
+    )
+}
+
+/// A stream taken out of its session while it opened: the agent closed
+/// it, the session ended or the node was disabled. Its ring says which.
+fn closed_while_opening(ring: &Ring) -> RpcError {
+    RpcError::new(
+        ErrorCode::Cancelled,
+        format!(
+            "the stream was closed while it opened ({})",
+            ring.why().as_deref().unwrap_or("it was closed")
+        ),
+    )
+}
+
+/// Why a stream whose id was given did not open, for its `stream.read`:
+/// the error on one line, a node's own words said to be its own, as
+/// `execute` gives them.
+fn not_opened_words(route: &Route, e: &RpcError) -> String {
+    let whose = if crate::link::by_node(e) {
+        format!("node {} answered: ", route.node_name)
+    } else {
+        String::new()
+    };
+    listing::one_line(&format!(
+        "it did not open: error {}: {whose}{}",
+        e.kind().as_str(),
+        e.message
+    ))
+}
+
 /// Settles a rotation of the center's key that a stop cut short, at the
 /// start: a new key the state file does not know is dropped (the start was
 /// cut short; the old key stays), a rotation whose new key is gone is
@@ -2845,29 +2914,7 @@ impl Center {
         route: &Route,
         args: &Map<String, Value>,
     ) -> Result<Arc<Link>, CallError> {
-        // Checked first: nothing is sent to a disabled node, not even the
-        // session mark. `execute` refuses a disabled node before it gets
-        // here, but the switch may come in between.
-        if self.read(|s| s.nodes.get(&route.node_id).is_some_and(|n| n.disabled)) {
-            return Err(RpcError::new(
-                ErrorCode::Unavailable,
-                format!("the node {} is disabled in the center", route.node_name),
-            )
-            .into());
-        }
-        // Then whether the node is there at all, before the checker: a call
-        // that cannot be sent is `unavailable`, not a checker refusal (with
-        // the model on and down, fail closed would say `forbidden`), and
-        // costs no model call.
-        let offline = || {
-            RpcError::new(
-                ErrorCode::Unavailable,
-                format!("the node {} is offline", route.node_name),
-            )
-        };
-        if self.link(&route.node_id).is_none() {
-            return Err(offline().into());
-        }
+        self.reachable(route)?;
         // The action checker (issue #17): the center's own gate, before the
         // node. It can only refuse; the node's policy still decides what it
         // lets through (design rule 1).
@@ -2914,7 +2961,27 @@ impl Center {
         }
         // Looked up again: the node may have gone or come back on another
         // link while the model was asked.
-        Ok(self.link(&route.node_id).ok_or_else(offline)?)
+        Ok(self
+            .link(&route.node_id)
+            .ok_or_else(|| offline(&route.node_name))?)
+    }
+
+    /// The link a call of `route` would go on now, before the checker: none
+    /// for a disabled node, which is sent nothing, not even the session
+    /// mark (`execute` refuses a disabled node before it gets here, but the
+    /// switch may come in between), and none for a node that is offline. A
+    /// call that cannot be sent is `unavailable`, not a checker refusal
+    /// (with the model on and down, fail closed would say `forbidden`), and
+    /// costs no model call.
+    fn reachable(&self, route: &Route) -> Result<Arc<Link>, RpcError> {
+        if self.read(|s| s.nodes.get(&route.node_id).is_some_and(|n| n.disabled)) {
+            return Err(RpcError::new(
+                ErrorCode::Unavailable,
+                format!("the node {} is disabled in the center", route.node_name),
+            ));
+        }
+        self.link(&route.node_id)
+            .ok_or_else(|| offline(&route.node_name))
     }
 
     /// Room for one more stream in `sess`, or why there is none.
@@ -2990,19 +3057,13 @@ impl Center {
         &self,
         sess: &Arc<Session>,
         route: &Route,
-    ) -> Result<String, CallError> {
+    ) -> Result<Opened, CallError> {
         self.stream_room(sess)
             .map_err(|why| self.refused(sess, route, RpcError::new(ErrorCode::Busy, why)))?;
         let topic = format!("{}/{}", route.cap, route.action);
         let id = streams::new_id();
         let ring = Arc::new(Ring::of(streams::Source::Events));
         let what = format!("the events of {}.{}", route.cap, route.action);
-        let mut adding = Adding {
-            sess,
-            node_id: &route.node_id,
-            id: None,
-            why: "its execute was cancelled",
-        };
         let Some(link) = self.link(&route.node_id) else {
             let e = RpcError::new(
                 ErrorCode::Unavailable,
@@ -3014,21 +3075,17 @@ impl Center {
         // first may follow its answer at once. Refused, it goes again.
         self.add_unit_stream(sess, route, &id, what, ring.clone(), None)
             .map_err(|CallError::Rpc(e)| self.refused(sess, route, e))?;
-        adding.id = Some(id.clone());
         link.subscribe(&topic, ring.clone());
         if !sess.streams.lock().unwrap().subscribed(&id, &link, &topic) {
-            // The session ended meanwhile: its streams went without this
-            // subscription.
+            // Taken out meanwhile (the session ended, or the node was
+            // disabled): its streams went without this subscription.
             link.unsubscribe(&topic, &ring);
-            return Err(Stop::SessionEnded.error().into());
+            return Err(closed_while_opening(&ring).into());
         }
-        match self.call(sess, route, Map::new()).await {
-            Ok(_) => Ok(adding.keep()),
-            Err(e) => {
-                adding.why = "the subscription was refused";
-                Err(e)
-            }
-        }
+        let (c, s, r) = (self.clone(), sess.clone(), route.clone());
+        let subscribe = async move { c.call(&s, &r, Map::new()).await.map(|_| ()) };
+        self.within_call_wait(sess, route, id, ring, subscribe)
+            .await
     }
 
     /// `execute` of a program's stream `route` with `args`: opens it on its
@@ -3040,17 +3097,38 @@ impl Center {
         sess: &Arc<Session>,
         route: &Route,
         args: Map<String, Value>,
-    ) -> Result<String, CallError> {
+    ) -> Result<Opened, CallError> {
         let started = Instant::now();
-        sess.calls.fetch_add(1, Ordering::SeqCst);
-        let r = self.open_unit_stream_inner(sess, route, args).await;
-        self.count_call(
-            sess,
-            route,
-            r.as_ref().err().map(|CallError::Rpc(e)| e),
-            started,
-        );
-        r
+        // Looked at before the checker, which then costs no model call.
+        self.stream_room(sess)
+            .map_err(|why| self.refused(sess, route, RpcError::new(ErrorCode::Busy, why)))?;
+        let link = self
+            .reachable(route)
+            .map_err(|e| self.refused(sess, route, e))?;
+        let id = streams::new_id();
+        let ring = Arc::new(Ring::of(streams::Source::Program));
+        let what = format!("stream {}.{}", route.cap, route.action);
+        // In the session before the checker decides, so its id can be
+        // given once the call wait passed. The stream takes one of the
+        // node's places, as a job's output stream does, so the session
+        // keeps to its share of them and the other sessions find room.
+        let share = streams::node_share(link.limits.streams);
+        self.add_unit_stream(sess, route, &id, what, ring.clone(), Some(share))
+            .map_err(|CallError::Rpc(e)| self.refused(sess, route, e))?;
+        let (c, s, r) = (self.clone(), sess.clone(), route.clone());
+        let (i, rg) = (id.clone(), ring.clone());
+        let open = async move {
+            s.calls.fetch_add(1, Ordering::SeqCst);
+            let out = c.open_unit_stream_inner(&s, &r, args, &i, rg).await;
+            c.count_call(
+                &s,
+                &r,
+                out.as_ref().err().map(|CallError::Rpc(e)| e),
+                started,
+            );
+            out
+        };
+        self.within_call_wait(sess, route, id, ring, open).await
     }
 
     async fn open_unit_stream_inner(
@@ -3058,34 +3136,14 @@ impl Center {
         sess: &Arc<Session>,
         route: &Route,
         args: Map<String, Value>,
-    ) -> Result<String, CallError> {
-        // Looked at before the checker too, which then costs no model call.
-        self.stream_room(sess)
-            .map_err(|why| RpcError::new(ErrorCode::Busy, why))?;
+        id: &str,
+        ring: Arc<Ring>,
+    ) -> Result<(), CallError> {
         let link = self.admit(sess, route, &args).await?;
-        sess.nodes.lock().unwrap().insert(route.node_id.clone());
-        link.sessions.lock().unwrap().insert(sess.id.clone());
-        let id = streams::new_id();
-        let ring = Arc::new(Ring::of(streams::Source::Program));
-        let what = format!("stream {}.{}", route.cap, route.action);
-        // Looked at again: the checker may have taken seconds, while other
-        // calls of the session added theirs. The stream takes one of the
-        // node's places, as a job's output stream does, so the session
-        // keeps to its share of them and the other sessions find room.
-        let share = streams::node_share(link.limits.streams);
-        self.add_unit_stream(sess, route, &id, what, ring.clone(), Some(share))?;
-        // A cancelled `execute` takes it out again; the node's stream, if
-        // its answer still comes, is closed by the link (Link::open_stream).
-        let mut adding = Adding {
-            sess,
-            node_id: &route.node_id,
-            id: Some(id),
-            why: "its execute was cancelled",
-        };
-        // Looked at again, now that the stream is in the session: the owner
-        // may have disabled the node while the checker decided. A disable
-        // after this look finds the stream there and closes it
-        // (`set_disabled`, which sets the switch before it looks).
+        // Looked at again, now that the checker decided: the owner may have
+        // disabled the node meanwhile. A disable after this look finds the
+        // stream in the session and closes it (`set_disabled`, which sets
+        // the switch before it looks).
         let disabled = || {
             self.read(|s| s.nodes.get(&route.node_id).is_some_and(|n| n.disabled))
                 .then(|| {
@@ -3096,39 +3154,124 @@ impl Center {
                 })
         };
         if let Some(e) = disabled() {
-            adding.why = "the node was disabled in the center";
             return Err(e.into());
         }
+        // Closed while the checker decided: nobody would read it.
+        if ring.ended() {
+            return Err(closed_while_opening(&ring).into());
+        }
+        sess.nodes.lock().unwrap().insert(route.node_id.clone());
+        link.sessions.lock().unwrap().insert(sess.id.clone());
         let params = json!({"cap": route.cap, "stream": route.action, "params": args,
                             "ctx": {"session": sess.id}});
         // A program may take its time to answer (the node waits for it up
-        // to its own limit), unlike a node opening a command's output.
+        // to its own limit), unlike a node opening a command's output. The
+        // `execute` does not wait that long (Center::within_call_wait).
         let wait = self
             .stream_waits
             .lock()
             .unwrap()
             .0
             .max(streams::PROGRAM_OPEN_WAIT);
-        match link.open_stream(params, ring, wait).await {
-            Ok(sid) => {
-                let id = adding.keep();
-                if !sess.streams.lock().unwrap().opened(&id, &link, sid) {
-                    // Closed meanwhile (the session ended, or the node was
-                    // disabled): so is the stream.
-                    if link.forget_stream(sid) {
-                        let l = link.clone();
-                        tokio::spawn(async move { l.close_stream(sid, "it was closed").await });
+        let sid = link.open_stream(params, ring.clone(), wait).await?;
+        if !sess.streams.lock().unwrap().opened(id, &link, sid) {
+            // Closed meanwhile (by the agent, the session's end, a
+            // disable): so is the stream.
+            if link.forget_stream(sid) {
+                let l = link.clone();
+                tokio::spawn(async move { l.close_stream(sid, "it was closed").await });
+            }
+            return Err(disabled()
+                .unwrap_or_else(|| closed_while_opening(&ring))
+                .into());
+        }
+        Ok(())
+    }
+
+    /// Runs `open`, which opens the stream `id` of `sess` on its node (a
+    /// program's stream, or a subscription to a program's events; the
+    /// stream is in the session already), in a task of its own, and waits
+    /// for it at most the call wait: a harness gives up on a tool call
+    /// after a while (docs/dev/spec/harness.md §4.4), and the checker and
+    /// a program may each take longer. Once the wait passed, the stream's
+    /// id is given while it still opens; if it then does not open, it ends
+    /// with the words why, which `stream.read` gives. Dropped before (the
+    /// harness cancelled its request), the open stops and the stream goes.
+    async fn within_call_wait(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        id: String,
+        ring: Arc<Ring>,
+        open: impl Future<Output = Result<(), CallError>> + Send + 'static,
+    ) -> Result<Opened, CallError> {
+        let phase = Arc::new(Mutex::new(Phase::Waited));
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let task = {
+            let (s, r, i, phase) = (sess.clone(), route.clone(), id.clone(), phase.clone());
+            async move {
+                // Nobody can name the stream before its id is given: if it
+                // does not open by then, or its `execute` is cancelled, it
+                // goes again, so it holds none of the session's places.
+                let mut adding = Adding {
+                    sess: &s,
+                    node_id: &r.node_id,
+                    id: Some(i.clone()),
+                    why: "its execute was cancelled",
+                };
+                let out = open.await;
+                let given = {
+                    let mut p = phase.lock().unwrap();
+                    if *p == Phase::Waited {
+                        *p = Phase::Done;
                     }
-                    return Err(disabled()
-                        .unwrap_or_else(|| Stop::SessionEnded.error())
-                        .into());
+                    *p == Phase::Given
+                };
+                match (&out, given) {
+                    (Ok(()), _) => {
+                        adding.keep();
+                    }
+                    (Err(CallError::Rpc(e)), true) => {
+                        adding.keep();
+                        let c = s.streams.lock().unwrap().not_opened(&i);
+                        if let Some(c) = c {
+                            c.close(&not_opened_words(&r, e));
+                        }
+                    }
+                    (Err(_), false) => {
+                        adding.why = "it did not open";
+                        drop(adding);
+                    }
                 }
-                Ok(id)
+                let _ = tx.send(out);
             }
-            Err(e) => {
-                adding.why = "it did not open";
-                Err(e.into())
+        };
+        let handle = tokio::spawn(task);
+        let mut stop = AbortOnDrop(Some(handle.abort_handle()));
+        let out = match tokio::time::timeout(self.call_wait(), &mut rx).await {
+            Ok(out) => out,
+            Err(_) => {
+                let done = {
+                    let mut p = phase.lock().unwrap();
+                    if *p == Phase::Waited {
+                        *p = Phase::Given;
+                    }
+                    *p == Phase::Done
+                };
+                if !done {
+                    stop.0 = None;
+                    return Ok(Opened { id, opening: true });
+                }
+                // It ended just now: its result follows at once.
+                rx.await
             }
+        };
+        stop.0 = None;
+        match out {
+            Ok(Ok(())) => Ok(Opened { id, opening: false }),
+            Ok(Err(e)) => Err(e),
+            // The task went without a result: the runtime shuts down.
+            Err(_) => Err(closed_while_opening(&ring).into()),
         }
     }
 

@@ -214,6 +214,16 @@ impl Ring {
         self.moved();
     }
 
+    /// Why the stream ended, once it did.
+    pub fn why(&self) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .end
+            .as_ref()
+            .map(|(why, _)| why.clone())
+    }
+
     /// Whether the stream ended.
     pub fn ended(&self) -> bool {
         self.state.lock().unwrap().end.is_some()
@@ -621,6 +631,18 @@ impl Streams {
             .filter_map(|id| self.entries.remove(id))
             .map(Entry::closer)
             .collect()
+    }
+
+    /// The stream `id` did not open after its id was given: it stays, so
+    /// that its `stream.read` says why, and the closer it is given back
+    /// ends it and takes its subscription off the link.
+    pub fn not_opened(&mut self, id: &str) -> Option<Closer> {
+        let e = self.entries.get_mut(id)?;
+        Some(Closer {
+            node: e.node.take(),
+            sub: e.sub.take(),
+            ring: e.ring.clone(),
+        })
     }
 
     /// The node opened the stream `id` as `sid` on `link`; `false` when the

@@ -17,7 +17,7 @@ use nerve_transport::http::{self, Request, Response};
 use nerve_transport::net::BoxIo;
 
 use crate::catalog;
-use crate::center::{CallError, Center, Change, Ran, Session};
+use crate::center::{CallError, Center, Change, Opened, Ran, Session};
 use crate::jobs::{self, NoSignal, Outcome, Stop};
 use crate::link;
 use crate::listing::{self, Answer, Miss};
@@ -381,7 +381,7 @@ impl Engine {
                 Ok(()) => self.center.open_unit_stream(&sess, &route, call_args).await,
             };
             return match opened {
-                Ok(id) => self.stream_opened(&sess, &route, unit.kind, &id),
+                Ok(opened) => self.stream_opened(&sess, &route, unit.kind, &opened),
                 Err(CallError::Rpc(e)) => call_error(&route, &e),
             };
         }
@@ -425,28 +425,45 @@ impl Engine {
     }
 
     /// The answer to `execute` of a program's event or stream: the id of
-    /// the session's stream it comes in. It counts as the details of
-    /// `stream.read` and `stream.close`, as a job's answer does.
-    fn stream_opened(&self, sess: &Arc<Session>, route: &Route, kind: UnitKind, id: &str) -> Value {
+    /// the session's stream it comes in, and whether it is still being
+    /// opened, as it was not within the call wait. It counts as the details
+    /// of `stream.read` and `stream.close`, as a job's answer does.
+    fn stream_opened(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        kind: UnitKind,
+        opened: &Opened,
+    ) -> Value {
         for u in catalog::center_units().iter().filter(|u| u.cap == "stream") {
             sess.listed(&route.node_id, &u.name, u.hash());
         }
         let unit = format!("{}.{}", route.cap, route.action);
+        let id = &opened.id;
         let read = format!(
             "capability \"stream.read\" with args {{\"stream\": {id:?}}} (\"wait_ms\" waits for more); \"stream.close\" with the same args ends it"
         );
-        let text = match kind {
-            UnitKind::Event => format!(
-                "Subscribed to {unit} on node {} for this session: its events come in stream {id}, one JSON line each ({{\"name\", \"seq\", \"ts\", \"data\"}}), from now on. Read them with {read} and the subscription.",
-                route.node_name
+        let node = &route.node_name;
+        let wait = util::span(self.center.call_wait());
+        let text = match (kind, opened.opening) {
+            (UnitKind::Event, false) => format!(
+                "Subscribed to {unit} on node {node} for this session: its events come in stream {id}, one JSON line each ({{\"name\", \"seq\", \"ts\", \"data\"}}), from now on. Read them with {read} and the subscription."
             ),
-            _ => format!(
-                "Opened {unit} on node {} as stream {id}. Read it with {read}.",
-                route.node_name
+            (UnitKind::Event, true) => format!(
+                "Subscribing to {unit} on node {node} for this session: not done after {wait}, it goes on. Its events come in stream {id}, one JSON line each ({{\"name\", \"seq\", \"ts\", \"data\"}}), once the node took it; if it does not, the stream ends and says why. Read them with {read} and the subscription."
+            ),
+            (_, false) => {
+                format!("Opened {unit} on node {node} as stream {id}. Read it with {read}.")
+            }
+            (_, true) => format!(
+                "Opening {unit} on node {node} as stream {id}: not open after {wait}, it goes on. If it does not open, the stream ends and says why. Read it with {read}."
             ),
         };
         let mut v = text_result(&text, false);
         v["structuredContent"] = json!({"stream": id, "capability": unit, "kind": kind.as_str()});
+        if opened.opening {
+            v["structuredContent"]["opening"] = json!(true);
+        }
         v
     }
 
