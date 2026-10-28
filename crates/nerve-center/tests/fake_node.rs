@@ -5755,6 +5755,58 @@ async fn a_session_takes_half_of_a_nodes_streams_for_programs_too() {
     r.stop().await;
 }
 
+/// A job's output stream keeps to the session's share of a node's stream
+/// places with the session's programs' streams that are still on their
+/// way: it waits until one of them ends, though none was open yet when it
+/// asked.
+#[tokio::test]
+async fn a_jobs_stream_waits_for_the_programs_streams_on_their_way() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = board_box(&r).await;
+    let share = nerve_center::streams::node_share(nerve_proto::limits::STREAMS);
+    list_text(&e, json!({"node": "box-1", "capability": ["board.feed"]})).await;
+    // Opened with `every_ms` 999, each is answered after [`SLOW`] only and
+    // stays open.
+    let calls: Vec<_> = (0..share)
+        .map(|i| {
+            let e = e.clone();
+            tokio::spawn(async move {
+                execute_as(&e, json!(i), "board.feed", json!({"every_ms": 999})).await
+            })
+        })
+        .collect();
+    for _ in 0..share {
+        let Seen::StreamOpen(_) = next_seen(&mut seen).await else {
+            panic!("no stream.open")
+        };
+    }
+    let reply = execute_as(&e, json!("job"), "exec.run", json!({"command": "talkhang"})).await;
+    stream_of(&reply);
+    let Seen::Hang(_) = next_seen(&mut seen).await else {
+        panic!("no invoke")
+    };
+    let mut feeds = Vec::new();
+    for c in calls {
+        feeds.push(opened_stream(&c.await.unwrap(), "board.feed", "stream"));
+    }
+    nothing_more(&mut seen).await;
+    let link = r.center.link(&node).unwrap();
+    assert_eq!(link.stream_count(), share, "no ninth stream opened");
+    execute_as(&e, json!("c"), "stream.close", json!({"stream": feeds[0]})).await;
+    let mut got = Vec::new();
+    for _ in 0..2 {
+        match next_seen(&mut seen).await {
+            Seen::StreamClose(_) => got.push("close"),
+            Seen::StreamOpen(_) => got.push("open"),
+            _ => panic!("something else"),
+        }
+    }
+    got.sort();
+    assert_eq!(got, ["close", "open"], "the job's stream opens then");
+    r.stop().await;
+}
+
 /// The center waits for a program's `stream.open` as long as the node
 /// waits for the program, not only as long as for a command's output
 /// stream: a program that takes longer to answer than that still opens.

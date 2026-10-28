@@ -399,6 +399,9 @@ struct Entry {
     sub: Option<(Weak<Link>, String)>,
     ring: Arc<Ring>,
     opened: Instant,
+    /// A job's output stream asked the node for it ([`Streams::ask`]) and
+    /// waits for the answer: it holds one of the node's places meanwhile.
+    asking: bool,
 }
 
 impl Entry {
@@ -514,17 +517,46 @@ impl Streams {
     }
 
     /// How many of the node's stream places the session's streams on
-    /// `node_id` hold: those open there that still run, and its programs'
-    /// streams on their way there (a subscription holds none).
+    /// `node_id` hold: those open there that still run, and those on their
+    /// way there, its programs' streams and the jobs' output streams it
+    /// asked for (a subscription holds none).
     fn places_on(&self, node_id: &str) -> usize {
         self.entries
             .values()
             .filter(|e| {
                 e.node_id == node_id
                     && !e.ring.ended()
-                    && (e.node.is_some() || e.ring.source() == Source::Program)
+                    && (e.node.is_some() || e.asking || e.ring.source() == Source::Program)
             })
             .count()
+    }
+
+    /// The output stream `id` is about to ask its node to open it: when
+    /// the session holds less than `share` of the node's stream places
+    /// ([`Streams::places_on`]), it takes one until the answer
+    /// ([`Streams::opened`], [`Streams::not_asked`]), and `true`. Counted
+    /// in the one lock with the take, as [`Streams::add_unit`] does: the
+    /// session's programs' streams on their way count too, so the two
+    /// kinds together keep to the share.
+    pub fn ask(&mut self, id: &str, share: usize) -> bool {
+        let Some(node_id) = self.entries.get(id).map(|e| e.node_id.clone()) else {
+            return false;
+        };
+        if self.places_on(&node_id) >= share {
+            return false;
+        }
+        if let Some(e) = self.entries.get_mut(id) {
+            e.asking = true;
+        }
+        true
+    }
+
+    /// The node did not open the stream `id` it was asked for: its place
+    /// is free again.
+    pub fn not_asked(&mut self, id: &str) {
+        if let Some(e) = self.entries.get_mut(id) {
+            e.asking = false;
+        }
     }
 
     fn insert(
@@ -546,6 +578,7 @@ impl Streams {
             sub: None,
             ring,
             opened: Instant::now(),
+            asking: false,
         };
         self.entries.insert(id.to_string(), e);
         true
@@ -596,23 +629,11 @@ impl Streams {
         match self.entries.get_mut(id) {
             Some(e) => {
                 e.node = Some((Arc::downgrade(link), sid));
+                e.asking = false;
                 true
             }
             None => false,
         }
-    }
-
-    /// How many of the session's streams are open on `link` and still run.
-    pub fn open_on(&self, link: &Arc<Link>) -> usize {
-        self.entries
-            .values()
-            .filter(|e| {
-                e.node
-                    .as_ref()
-                    .is_some_and(|(l, _)| std::ptr::eq(l.as_ptr(), Arc::as_ptr(link)))
-                    && !e.ring.ended()
-            })
-            .count()
     }
 
     /// The stream `id` of `node_id`; none when this session has no such
@@ -726,11 +747,13 @@ pub async fn open_on_node(
                 return;
             }
             Ok((link, call)) => {
-                let mine = sess
+                // The place is taken here, until the node answers.
+                let share = node_share(link.limits.streams);
+                let asked = sess
                     .upgrade()
-                    .map_or(0, |s| s.streams.lock().unwrap().open_on(&link));
+                    .is_some_and(|s| s.streams.lock().unwrap().ask(&id, share));
                 // Waiting for room is not waiting for the command to start.
-                if mine >= node_share(link.limits.streams) {
+                if !asked {
                     sent_at = None;
                     tokio::time::sleep(pause).await;
                     pause = (pause * 2).min(Duration::from_secs(1));
@@ -738,6 +761,7 @@ pub async fn open_on_node(
                 }
                 let since = *sent_at.get_or_insert_with(Instant::now);
                 if since.elapsed() >= start_wait {
+                    // An ended stream holds no place.
                     ring.end(if unanswered {
                         "the node did not answer requests for a stream in time; job.status gives its output with the result"
                     } else {
@@ -753,6 +777,11 @@ pub async fn open_on_node(
                                     "ctx": {"session": session}});
                 let tried = link.open_stream(params, ring.clone(), open_wait).await;
                 unanswered = matches!(&tried, Err(e) if e.kind() == ErrorCode::Timeout);
+                if tried.is_err()
+                    && let Some(s) = sess.upgrade()
+                {
+                    s.streams.lock().unwrap().not_asked(&id);
+                }
                 match tried {
                     Ok(sid) => {
                         let kept = sess
@@ -1153,5 +1182,37 @@ mod tests {
         let ev = Arc::new(Ring::of(Source::Events));
         let (added, _) = s.add_unit("s-ev2", "n1", "the events".into(), ev, None, now);
         assert_eq!(added, Ok(()), "a subscription takes no share");
+    }
+
+    /// A job's output stream asks for one of the node's places only within
+    /// the session's share: its programs' streams on their way take theirs,
+    /// and one it asked for holds its place against them until the node
+    /// answered.
+    #[test]
+    fn a_jobs_stream_keeps_to_the_share_with_programs_streams_on_their_way() {
+        let link = Arc::new(Link::for_test("n1"));
+        let mut s = Streams::default();
+        let now = Instant::now();
+        let feed = || Arc::new(Ring::of(Source::Program));
+        let add = |s: &mut Streams, id: &str, ring: Arc<Ring>| {
+            s.add_unit(id, "n1", "stream board.feed".into(), ring, Some(2), now)
+                .0
+        };
+        let first = feed();
+        assert_eq!(add(&mut s, "s-1", first.clone()), Ok(()));
+        assert_eq!(add(&mut s, "s-2", feed()), Ok(()));
+        assert!(s.add("s-job", "n1", "j-1", Arc::new(Ring::default())));
+        assert!(!s.ask("s-job", 2), "two programs' streams on their way");
+        first.end("it did not open");
+        assert!(s.ask("s-job", 2));
+        assert_eq!(add(&mut s, "s-3", feed()), Err(NotAdded::Share));
+        s.not_asked("s-job");
+        assert_eq!(add(&mut s, "s-3", feed()), Ok(()));
+        assert!(!s.ask("s-job", 2));
+        assert!(!s.ask("s-gone", 2));
+        assert!(s.add("s-job2", "n1", "j-2", Arc::new(Ring::default())));
+        assert!(s.ask("s-job2", 3));
+        assert!(s.opened("s-job2", &link, 5));
+        assert!(!s.ask("s-job", 3), "an open one holds its place");
     }
 }
