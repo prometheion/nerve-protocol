@@ -689,6 +689,22 @@ fn the_app_drives_the_cli_end_to_end() {
     store.invoke_show(Page::Capabilities);
     assert_eq!(caps.get_center(), "home");
     assert_eq!(caps.get_load(), Load::Ready, "{}", caps.get_error());
+    // Why this machine offers no programs, or no capabilities of node.toml:
+    // Windows offers neither yet, a Linux node run by hand none of
+    // node.toml.
+    if cfg!(windows) {
+        assert!(caps.get_windows());
+        assert!(caps.get_programs_note().contains("Windows"));
+        assert!(caps.get_config_note().contains("Windows"));
+    } else {
+        assert!(!caps.get_windows());
+        assert_eq!(caps.get_programs_note(), "");
+        assert!(
+            caps.get_config_note().contains("runs by hand"),
+            "{}",
+            caps.get_config_note()
+        );
+    }
     let row = |name: &str| caps.get_rows().iter().find(|c| c.name == name);
     let run = row("exec.run").expect("exec.run is listed");
     assert!(run.switchable && run.action);
