@@ -1217,6 +1217,19 @@ switches off. `uninstall` removes the file.
 
 ## 5. Control socket
 
+The node's sockets on Unix (Windows has the control pipe and the owner pipe,
+below):
+
+| Socket | Who is served | Mode | Places | For |
+|---|---|---|---|---|
+| `<state>/run/ctl.sock` | the node's own user and root, each request with the token | 0600, in a 0700 folder | 64 | the CLI; a provider of a node run by hand (§7) |
+| `/run/nerve-node/owner.sock` (installed node, Linux) | every account; `cli` an owner's only | 0666, in the unit's runtime folder | 64 | the owner's commands (below) |
+| `/run/nerve-node/provider.sock` (installed node, Linux) | an owner (root always is one), told as it connects | 0666, in the unit's runtime folder | 16 | capability providers (§7) |
+
+Each socket has its places of its own: a connection held on one never takes
+one of another's, so providers, which hold theirs while they are attached,
+and the owner's commands never starve each other.
+
 `<state>/run/ctl.sock` (Unix; Windows has the control pipe below). One
 JSON object per line: the client sends
 `{"method", "params", "token"}` (the token is explained below), the server answers `{"ok": value}` or
@@ -1281,7 +1294,8 @@ center's folders hold its commands, in folder mode or as `nerve-run`). An error,
 | `sudo.off` | | turns the switch off and drops the password |
 | `center.rotate-key` | `center`, `end_grace` | rotates the node's key for `center` over the live link, or with `end_grace` ends the grace of the old one (protocol §4.10); `{center, public_key}`, the new key once. Waits for the center's answer, at most 15 s; an error when the node has no link to it or the center does not speak `rotate`. Also served on the control pipe (Windows) |
 | `owner.check` | | changes nothing; the CLI asks it before `install`, `setup`, `update`, `uninstall`, `backup` and `restore` |
-| `hello` | `role` (`provider`), `name`, `capabilities` | a capability provider attaches; the connection stays (§7) |
+| `caps.list` | | what `cap ls` shows: `{capabilities, programs, running}`; each capability row `{name: "cap.action", effect, source: "built-in" \| "program <name>", summary, centers: {<center>: "on"\|"off"\|"hidden"\|"default"}, now: {<center>: "on"\|"off"}}`, `centers` the switch (`cap set`; `default` where none is set; for `settings`, which has none, `"granted"`\|`"not granted"` by the center's `settings` grant) and `now` whether the center's descriptor offers the action now and it is not off (§3: mode, rules, switches, the machine); an action a program offered that the node left out with `broken` (its reason), no effect and no `now`; `programs` the entries of `providers.allowed`, each `{name, exe, attached}`. A stopped node's CLI makes the same from `node.toml`, with the node's own capabilities only, no `now` and `attached` null. Also served on the control pipe (Windows), where no program attaches |
+| `hello` | `role` (`provider`), `name`, `capabilities` | a capability provider attaches; the connection stays (§7); on a node run by hand only, the installed node takes it on its provider socket |
 
 Every method is refused from a process that runs below a command the node
 started for a center, the reading ones (`status`, `config.read`,
@@ -1314,6 +1328,7 @@ answered, which takes long on a large folder. Methods:
 | `folder.set` | `center`?, `path`, `given`, `changes` (1 to 64 of `=rwx`, `+x`, `-w`) | changes the rights of a folder the center has |
 | `folder.rm` | `center`?, `path`, `given` | takes a folder away |
 | `center.rotate-key` | `center`, `end_grace` | as on the socket |
+| `caps.list` | | as on the socket |
 
 `path` is the folder as the CLI judged it: for `add` the real place it
 settled the path at (`exec::settle`, as this process sees it: the pipe takes
@@ -1495,22 +1510,48 @@ new one.
 ## 7. Capability providers
 
 A local program, such as a desktop app, can add capabilities to the node
-without talking to a center: it attaches to the node's control socket as a
-**provider**. Linux only for now: the node tells which program asks from
-`/proc/<pid>/exe`, and Windows' control pipe takes no provider.
+without talking to a center: it attaches as a **provider**, on the installed
+node to its provider socket `/run/nerve-node/provider.sock`, on a node run by
+hand to its control socket. Linux only for now: the node tells which program
+asks from `/proc/<pid>/exe`, and Windows' pipes take no provider.
 
 ### Who may attach
 
 Only a program the owner names in `providers.allowed` (§2), by a name and the
-absolute path of its executable (`nerve-node config add providers.allowed
-'{ name = "desk", exe = "/usr/lib/nerve-desktop/nerve-desktop" }'`). None
-is allowed by default; only the owner changes the list, as no center document
+absolute path of its executable (`nerve-node cap provider allow desk
+/usr/lib/nerve-desktop/nerve-desktop`; `cap provider rm desk` takes it off).
+None is allowed by default; only the owner changes the list, as no center document
 holds it. A name is 1 to 32 of `a-z`, `0-9` and `-`, starting and ending with a letter
 or digit, and not `node`.
 
-The provider connects like the CLI: the socket's user check (its own user or
-root) and the token hold for it too, and so does the refusal of a process
-below a command of a center. Then it sends one request, `hello`:
+On a node run by hand the provider connects like the CLI: the socket's user
+check (its own user or root) and the token hold for it too, and so does the
+refusal of a process below a command of a center. On the installed node it
+connects to the provider socket (§5), which takes no token: the node tells
+the caller by the account the kernel names for it (`SO_PEERCRED`). An
+account that is not the owner (root always is one) is told `refused: only
+the owner of the installed node and root attach a provider to it` as it
+connects, by its uid alone, so it holds a place only for that comparison
+(the node looks the owner's account up as the socket starts, and again at
+most once a minute, off the connections); a process below a command of a center
+is refused as on the owner socket, and one with `no_new_privs` (every
+confined command keeps it) too, told so: `refused: this program runs with
+no_new_privs, …`. The node reads the process's status and parents for that
+with the same rights it looks at its program with (below), so a `/proc`
+mounted `hidepid` hides no command that runs as the caller's account; a
+status it cannot read refuses (`refused: the node cannot tell how the
+program that asks runs`). A command that runs as root (the sudo list, or
+root as its account) keeps no `no_new_privs`, so a program it starts as the
+owner through two or more of root's processes may pass where `/proc` hides
+root's processes from the owner: the check is a guard against mistakes, as
+the owner socket's is. The
+provider socket takes `hello` only, and the installed node's control socket
+takes no `hello` (`refused: the installed node takes a provider's hello on
+/run/nerve-node/provider.sock only`): root, who may connect there too, would
+meet a check that reads as the node and holds no pidfd.
+
+The provider sends one request, `hello`, with the control socket's token on
+a node run by hand (the provider socket takes none, and ignores one):
 
 ```json
 {"method": "hello", "token": "…",
@@ -1526,7 +1567,26 @@ The node refuses it, with nothing attached, when:
 - `providers.allowed` names no provider `name`;
 - the process's executable, as the kernel resolved it, is not the one the
   entry names once that is resolved (a link to the program is the program; a
-  program replaced since it started is not);
+  program replaced since it started is not). The node looks with the caller's
+  own rights, as the kernel shows a process's program only to its own
+  account: the node of root, and a caller of the node's own account, look
+  themselves; for an owner the installed node takes the owner's file system
+  ids (`account::FsAs`) to read `/proc/<pid>/exe` and resolve the entry; for
+  root, whose processes hold more rights than the node, it starts its own
+  program as root (`nerve-node __provider-check <pid> <exe>`, its environment
+  cleared, as a command of root starts; it prints the program, whether it is
+  the entry's, `no_new_privs` and the parents) to look, and refuses when it cannot
+  (`refused: the node cannot tell which program of root asks`). It neither
+  holds CAP_SYS_PTRACE nor skips the check. The provider socket takes the
+  caller's pidfd as it accepts the connection (`SO_PEERPIDFD`, Linux 6.5); a
+  caller whose process ended before the node looked, or while it looked, is
+  refused (`refused: the program that asked has ended`), also where its pid
+  reads well, so on such a kernel a reused pid is not taken for it. A kernel
+  that will not give the pidfd of a process already gone refuses the same; a
+  kernel without `SO_PEERPIDFD` leaves the node the pid alone, and the check
+  then catches mistakes only, as on the owner socket. Between the check and
+  the attachment the node reads `providers.allowed` again and refuses an
+  entry removed or changed meanwhile;
 - a provider of that name is attached already;
 - the fragment is not 1 to 16 capabilities of 1 to 64 actions each, with
   names of 1 to 64 letters, digits, `-` and `_` (a center would leave out a
@@ -1550,9 +1610,7 @@ alternatives are not supported: …`), and a capability with no action left;
 the provider's other actions attach.
 
 The check tells programs apart, not users: a process of the same user can
-still make the allowed program attach for it (`LD_PRELOAD`, `ptrace` where the
-system allows it). On the installed node the socket is `nerve`'s, so a
-program of a desktop user cannot attach there yet.
+still make the allowed program attach for it. Allow only programs you trust.
 
 ### While it is attached
 
@@ -1579,7 +1637,11 @@ the policy and without an audit entry. Then it is decided and audited by the
 node like any other, deny rules and `caps` included. Its rule targets are the
 arguments its schema marks with `x-nerve-path` (top-level strings, `read` or
 `write`), each resolved as the command account sees it (`WirePath::parse`
-under `account::FsAs`), as an `fs` call's path is: the folders, the rules,
+under `account::FsAs`), as an `fs` call's path is. Only the folders the owner
+granted count for them: the command account's own folders (its home, `/tmp`,
+`/var/tmp`, marked `own` in the access block) are that account's, while the
+program works with the owner's rights, so a path there is in no folder, and
+its read goes only where every account may read (Modes). The folders, the rules,
 the protected paths and the node's own folders judge them, and the audit
 entry names them (joined by `, `); a path that does not resolve is refused
 with `bad_path` and audited with the text given, once the node acts as
@@ -1597,7 +1659,19 @@ and folders below need `x` as well, as the path itself does. The refusal names t
 folder or the deny rule below it, which the center is not shown. A program
 follows links, which the node's own walks never do: once the call is
 allowed, the node walks each such path as the command account (and each
-folder a link there leads to, once, after that link passed), and judges the
+folder a link there leads to, once, after that link passed). Where the
+program runs as another account than the walk (on the installed node: the
+owner or root, while the walk is `nerve-run`'s), or as root while the node is
+not root (a walk with root's file ids, `account::FsAs`, keeps the node's
+rights, not root's), a folder the walk may not list refuses the call (`<path> holds a folder the node may not look into, so
+it cannot tell where the links there lead`; where it is the handed folder
+itself, as one granted `w` without `r` is, `<path> is a folder the node may
+not list (one granted without `r`, or one only its owner may enter), so it
+cannot tell where the links in it lead`), as the program could follow a
+link there, and so does an entry whose type the walk cannot tell (on a
+filesystem that names no types, in a folder the walk may list but not
+enter); where both are one account, such a folder or entry is left out, as
+the program cannot look there either. The node judges the
 place each link leads to in the stead of the path it lies below, with the
 same access and the call's other paths; one the call may not reach refuses
 it, and the refusal names the path handed over and the link, not where it
@@ -1643,8 +1717,16 @@ answer. The provider learns nothing of the center: not its name, its session
 or its policy.
 
 The path is checked when the call comes; the provider uses it afterwards
-with the owner's rights, so a link put in or swapped in between is not caught. A
-provider is a program the owner allowed and trusts.
+with its own account's rights (the owner's, or root's for a program of root
+on the installed node), so a link put in or swapped in between is not
+caught. A provider is a program the owner allowed and trusts. For root's
+program such a link reaches root's rights, also from a command of
+`nerve-run` with `w` in a granted folder; the owner keeps its actions that
+take paths away from the folders a center may write in. Inside a granted
+folder its flags decide a program's path, not the owner's own access to the
+file, so root's program on a node another account owns reads and writes
+there what only root or another account may; the node does not check a
+path with the owner's rights for it.
 
 A center with the settings grant may add allow rules and `on` entries for a
 provider's capability like for any other, and take away `off` and `hidden`
@@ -1671,5 +1753,6 @@ The descriptor's `rev` changes again, a call that waited for an answer fails
 `unavailable`, and a call that names the capability afterwards is
 `unknown_capability`. A provider that comes back sends `hello` again.
 
-A provider holds one of the socket's 64 places for as long as it is attached.
+A provider holds one of the socket's places for as long as it is attached:
+16 on the provider socket, 64 on the control socket of a node run by hand.
 

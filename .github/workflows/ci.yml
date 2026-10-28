@@ -140,7 +140,8 @@ jobs:
   # The node keeps its keys in the system keyring on every Linux kernel, and
   # folder mode runs as the account `nerve-run` (issue #135). That used to be
   # refused below Linux 7.1, so this job installs the node on the two Ubuntu
-  # runners and takes the whole path an owner takes: the real-account test,
+  # runners and takes the whole path an owner takes: the real-account tests
+  # (folder grants, and an owner's program as a provider held to the folders),
   # then `setup` in a terminal answering yes to the keyring, the keys moving
   # out of their files, a restart of the keyring's session and of the node,
   # `status`, a folder mode command as `nerve-run`, and `uninstall --purge`.

@@ -564,6 +564,11 @@ pub(crate) struct Shared {
     pub grace: Duration,
     /// The capability providers attached now (crate::provider).
     pub providers: crate::provider::Providers,
+    /// Linux: the installed node's provider socket, the only place it
+    /// takes a provider's hello (crate::provider::serve); `None` for a node
+    /// run by hand, which takes it on the control socket.
+    #[cfg(target_os = "linux")]
+    pub provider_socket: Option<PathBuf>,
     /// Where work goes that runs while the node is stopped
     /// ([`NodeOptions::aside`]).
     pub aside: Option<tokio::sync::mpsc::UnboundedSender<Aside>>,
@@ -1127,6 +1132,14 @@ impl Shared {
         }
     }
 
+    /// Whether one of `chain` (a process and its parents, as far as they
+    /// were read: crate::provider::Seen) is a command the node started for a
+    /// center: the process descends from it.
+    #[cfg(unix)]
+    pub fn runs_any(&self, chain: &[u32]) -> bool {
+        lock(&self.commands).keys().any(|c| chain.contains(c))
+    }
+
     /// What the last sync of the folders' ACLs left, on the installed Linux
     /// node (crate::acl): `status`'s `folder_grants`.
     pub fn folder_grants(&self) -> Value {
@@ -1295,6 +1308,8 @@ pub struct Daemon {
     ctl: Option<JoinHandle<()>>,
     /// The owner endpoint's task and its socket (crate::owner).
     owner: Option<(JoinHandle<()>, PathBuf)>,
+    /// The provider socket's task and its path (crate::provider::serve).
+    providers: Option<(JoinHandle<()>, PathBuf)>,
     /// Held while the node runs: a CLI moves the keys only while no node
     /// reads them.
     _keys: crate::secrets::KeysLock,
@@ -1433,6 +1448,7 @@ impl Daemon {
         let cgroups = opts
             .cgroups
             .unwrap_or_else(|| crate::cgroup::Cgroups::find().map(Arc::new));
+        let endpoint = opts.owners.filter(|_| opts.ctl);
         let shared = Arc::new(Shared {
             paths: paths.clone(),
             service,
@@ -1459,6 +1475,8 @@ impl Daemon {
             told_keyring: Default::default(),
             grace: opts.resume_grace,
             providers: Default::default(),
+            #[cfg(target_os = "linux")]
+            provider_socket: endpoint.as_ref().map(|e| e.provider_socket()),
             relay: Default::default(),
             aside: opts.aside,
             owner: opts.owner,
@@ -1477,9 +1495,27 @@ impl Daemon {
         } else {
             None
         };
+        // A node whose provider socket cannot be made runs on without it:
+        // no program of its owner attaches then.
+        #[cfg(target_os = "linux")]
+        let providers = match &endpoint {
+            Some(e) => {
+                let at = e.provider_socket();
+                match crate::provider::serve(shared.clone(), at.clone(), e.owners.clone()).await {
+                    Ok(task) => Some((task, at)),
+                    Err(e) => {
+                        tracing::error!("{e}; no program of the owner attaches as a provider");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        #[cfg(not(target_os = "linux"))]
+        let providers = None;
         // A node whose owner endpoint cannot be made runs on without it:
         // its owners then need root, as before there was one.
-        let owner = match opts.owners.filter(|_| opts.ctl) {
+        let owner = match endpoint {
             Some(e) => {
                 let at = e.at.clone();
                 match crate::owner::serve(shared.clone(), e).await {
@@ -1521,6 +1557,7 @@ impl Daemon {
             relay,
             ctl,
             owner,
+            providers,
             _keys: keys,
         })
     }
@@ -1590,6 +1627,11 @@ impl Daemon {
             let _ = std::fs::remove_file(socket);
         }
         if let Some((task, _at)) = self.owner {
+            task.abort();
+            #[cfg(unix)]
+            let _ = std::fs::remove_file(_at);
+        }
+        if let Some((task, _at)) = self.providers {
             task.abort();
             #[cfg(unix)]
             let _ = std::fs::remove_file(_at);
@@ -1835,8 +1877,9 @@ fn file_ahead(on_disk: u64, in_force: u64) -> String {
 const FROM_A_COMMAND: &str =
     "refused: this request comes from a command the node runs for a center";
 
-/// One request on Windows' control pipe (crate::pipe): the status, and the
-/// changes to a center's folders, checked and made as the CLI makes them on
+/// One request on Windows' control pipe (crate::pipe): the status, the
+/// capabilities for `cap ls` (crate::provider::listing), and the changes to
+/// a center's folders, checked and made as the CLI makes them on
 /// the file (crate::folder_change). The node then brings the folder grants
 /// in line before it answers, as the CLI does after it wrote the file.
 /// Nothing is taken from a process of a command the node runs, not even the
@@ -1854,6 +1897,7 @@ pub(crate) async fn pipe_control(
     }
     match method {
         "status" => Reply::Ok(shared.status()),
+        "caps.list" => Reply::Ok(crate::provider::listing(&shared.config(), Some(shared))),
         "center.rotate-key" => rotate_key(shared, &params).await,
         "folder.add" | "folder.set" | "folder.rm" => {
             let (center, change) =
@@ -1981,10 +2025,27 @@ async fn answer(
         // A capability provider attaches; its connection stays
         // (crate::provider).
         "hello" => {
+            // Here the command check reads as the node and no pidfd holds
+            // the caller, which the installed node's provider socket does
+            // with the caller's rights; root, who may connect here too,
+            // goes there as well.
+            #[cfg(target_os = "linux")]
+            if let Some(at) = &shared.provider_socket {
+                return nerve_transport::ctl::Reply::Err(format!(
+                    "refused: the installed node takes a provider's hello on {} only",
+                    at.display()
+                ));
+            }
             if shared.below_command(peer.pid) {
                 return nerve_transport::ctl::Reply::Err(FROM_A_COMMAND.into());
             }
-            crate::provider::attach(shared, req.params, peer.pid)
+            let caller = crate::provider::Caller {
+                uid: peer.uid,
+                pid: peer.pid,
+                pidfd: None,
+                refuse_commands: false,
+            };
+            crate::provider::attach(shared, req.params, caller).await
         }
         m => control(shared, m, req.params, peer.pid),
     }
@@ -2034,6 +2095,9 @@ pub(crate) fn control(
     let str_of = |k: &str| params.get(k).and_then(Value::as_str).map(str::to_string);
     match method {
         "status" => Reply::Ok(shared.status()),
+        // Every capability with its effect and settings, the programs'
+        // too (crate::provider::listing), for `cap ls`.
+        "caps.list" => Reply::Ok(crate::provider::listing(&shared.config(), Some(shared))),
         "owner.check" => Reply::Ok(json!({})),
         "sudo.status" => Reply::Ok(json!({"sudo": if shared.sudo_on() { "on" } else { "off" }})),
         "sudo.off" => match shared.sudo_switch_off(nerve_policy::Writer::Local) {
@@ -3178,7 +3242,11 @@ mod tests {
         let ticks = *s.changed.borrow();
         // From the command's job: refused, the status too, and nothing
         // changed.
-        for (method, params) in [(add.method(), add.params(None)), ("status", json!({}))] {
+        for (method, params) in [
+            (add.method(), add.params(None)),
+            ("status", json!({})),
+            ("caps.list", json!({})),
+        ] {
             let e = call(4242, method, params).await.unwrap_err();
             assert_eq!(e, FROM_A_COMMAND);
         }
@@ -3342,6 +3410,66 @@ mod tests {
         daemon.stop().await;
     }
 
+    /// A hello the node checks while it stops (for an owner's restore, too)
+    /// is not held: the stop detached every provider already, and one held
+    /// after would stay with the stopped node, its program never told.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_hello_checked_while_the_node_stops_is_not_held() {
+        use nerve_transport::ctl::Reply;
+        let (_d, daemon) = daemon().await;
+        let s = daemon.shared.clone();
+        let me = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        lock(&s.store)
+            .update(|c| {
+                c.providers
+                    .allowed
+                    .push(nerve_policy::config::AllowedProvider {
+                        name: "desk".into(),
+                        exe: me.to_string_lossy().into(),
+                    });
+                Ok(())
+            })
+            .unwrap();
+        let hello = || {
+            json!({"role": "provider", "name": "desk", "capabilities": [
+                {"id": "echo", "actions": {"say": {"effect": "read"}}}]})
+        };
+        let caller = || crate::provider::Caller {
+            uid: crate::account::own_uid(),
+            pid: Some(std::process::id()),
+            pidfd: None,
+            refuse_commands: false,
+        };
+        s.stop.send_replace(true);
+        let Reply::Err(e) = crate::provider::attach(&s, hello(), caller()).await else {
+            panic!("held while the node stops");
+        };
+        assert!(e.contains("the node stops"), "{e}");
+        assert_eq!(s.providers.held("desk"), None);
+        // The same hello is held while the node runs.
+        s.stop.send_replace(false);
+        let r = crate::provider::attach(&s, hello(), caller()).await;
+        assert!(matches!(r, Reply::Session { .. }), "not held");
+        assert!(s.providers.held("desk").is_some());
+        daemon.stop().await;
+    }
+
+    /// Windows' pipe answers `cap ls` as the socket does: the running node's
+    /// listing.
+    #[tokio::test]
+    async fn the_pipe_lists_the_capabilities_of_the_running_node() {
+        use nerve_transport::ctl::Reply;
+        let (_d, daemon) = daemon().await;
+        let r = pipe_control(&daemon.shared, "caps.list", json!({}), false).await;
+        let Reply::Ok(v) = r else {
+            panic!("not listed");
+        };
+        assert_eq!(v["running"], true, "{v}");
+        assert!(v["capabilities"].as_array().is_some_and(|c| !c.is_empty()));
+        daemon.stop().await;
+    }
+
     /// `folder.add` judges, stores and records a folder in one step, for a CLI
     /// that may not look where the node does (the installed node's CLI runs
     /// as the node's own user, not as the account): a path through a link of
@@ -3474,8 +3602,9 @@ mod tests {
         let r = control(&s, "config.write", write.clone(), Some(me));
         assert!(matches!(r, nerve_transport::ctl::Reply::Err(e) if e.starts_with("refused")));
         // What reads the config is refused as well: `status` and
-        // `config.read` hand it over whole.
-        for method in ["status", "config.read", "sudo.status"] {
+        // `config.read` hand it over whole, `caps.list` the programs and
+        // every center's switches.
+        for method in ["status", "config.read", "sudo.status", "caps.list"] {
             let r = control(&s, method, json!({}), Some(me));
             assert!(
                 matches!(&r, nerve_transport::ctl::Reply::Err(e) if e.starts_with("refused")),

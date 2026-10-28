@@ -444,3 +444,184 @@ async fn root_is_the_owner_only_when_it_says_so() {
     let _ = std::fs::remove_file(secret);
     let _ = sh(Command::new("userdel").args(["-r", alice]));
 }
+
+/// A provider program: it attaches as `rootprov` on the socket its first
+/// argument names, prints the node's answer, and serves `files.open` (read;
+/// a file's first line), saying the account it ran as.
+const PROVIDER_PY: &str = r#"import json, os, socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+caps = [{"id": "files", "actions": {"open": {"effect": "read", "params": {
+    "type": "object", "required": ["path"],
+    "properties": {"path": {"type": "string", "x-nerve-path": "read"}}}}}}]
+hello = {"method": "hello", "params": {"role": "provider", "name": "rootprov", "capabilities": caps}}
+try:
+    s.sendall((json.dumps(hello) + "\n").encode())
+except OSError:
+    pass
+f = s.makefile()
+first = f.readline().strip()
+print(first, flush=True)
+if '"ok"' not in first:
+    sys.exit(0)
+for line in f:
+    m = json.loads(line)
+    if m.get("method") == "invoke":
+        with open(m["params"]["args"]["path"]) as r:
+            ok = {"first": r.readline().strip(), "uid": os.getuid()}
+        s.sendall((json.dumps({"id": m["id"], "ok": ok}) + "\n").encode())
+"#;
+
+/// A program the test started, ended when it is dropped, also when the test
+/// fails.
+struct Started(std::process::Child);
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// `args` started (as `user`, through `runuser`, when one is named), and the
+/// first line it printed.
+fn started(user: Option<&str>, args: &[&str]) -> (Started, String) {
+    let mut c = match user {
+        Some(u) => {
+            let mut c = Command::new("runuser");
+            c.args(["-u", u, "--"]).args(args);
+            c
+        }
+        None => {
+            let mut c = Command::new(args[0]);
+            c.args(&args[1..]);
+            c
+        }
+    };
+    let mut child = c
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("starts");
+    let out = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut line = String::new();
+        let _ = std::io::BufReader::new(out).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    (Started(child), rx.recv_timeout(WAIT).expect("a first line"))
+}
+
+/// With root as the confirmed owner, root's own program attaches to the
+/// installed node on its provider socket (issue #152, B4): the node, which
+/// may not look at a process of root's itself, starts its helper as root to
+/// tell the program. Another account's program is refused, as it is no
+/// owner. A folder of another account the node may not look into refuses
+/// a call that hands root's program the folder above it. For a test machine
+/// only, as root: it installs the node and removes it again.
+///
+/// `NERVE_NODE_REAL=<the nerve-node to install> cargo test -p nerve-node
+/// --test real_root_owner -- --ignored --exact a_program_of_root_attaches_as_a_provider`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "installs the node on this machine as root; NERVE_NODE_REAL names it"]
+async fn a_program_of_root_attaches_as_a_provider() {
+    let Some(exe) = std::env::var_os("NERVE_NODE_REAL").map(PathBuf::from) else {
+        eprintln!("NERVE_NODE_REAL is not set");
+        return;
+    };
+    assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
+    assert!(!Path::new(UNIT).exists(), "the node is installed already");
+    let python = sh(Command::new("python3").args([
+        "-c",
+        "import os, sys; print(os.path.realpath(sys.executable))",
+    ]))
+    .1
+    .trim()
+    .to_string();
+    let (ok, said) =
+        sh(Command::new(&exe).args(["install", "--owner=root", "--accept-root-owner"]));
+    assert!(ok, "{said}");
+    assert_eq!(owner_in_unit().as_deref(), Some("root"));
+
+    let work = Path::new("/srv/nrv152b4");
+    let _ = std::fs::remove_dir_all(work);
+    std::fs::create_dir_all(work).unwrap();
+    let script = work.join("provider.py");
+    std::fs::write(&script, PROVIDER_PY).unwrap();
+    assert!(sh(Command::new("chmod").args(["755"]).arg(work)).0);
+    assert!(sh(Command::new("chmod").args(["644"]).arg(&script)).0);
+    // Root's own file, which only root may read.
+    let secret = work.join("root-only.txt");
+    std::fs::write(&secret, "root-line\n").unwrap();
+    assert!(sh(Command::new("chmod").args(["600"]).arg(&secret)).0);
+
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let link = center.link().render();
+    let (ok, said) = sh(Command::new(BIN).args(["center", "add", &link, "--yes"]));
+    assert!(ok, "{said}");
+    assert!(sh(Command::new(BIN).args(["mode", "set", "user"])).0);
+    let (ok, said) = sh(Command::new(BIN).args(["cap", "provider", "allow", "rootprov", &python]));
+    assert!(ok, "{said}");
+    let mut conn = linked(&mut center).await;
+
+    let at = "/run/nerve-node/provider.sock";
+    let script = script.to_str().unwrap();
+    let (c, first) = started(Some("nobody"), &[&python, script, at]);
+    assert!(
+        first.contains("only the owner of the installed node and root"),
+        "{first}"
+    );
+    drop(c);
+    let (provider, first) = started(None, &[&python, script, at]);
+    assert!(first.contains("\"ok\""), "{first}");
+    let (_, st) = sh(Command::new(BIN).arg("status"));
+    assert!(st.contains("provider rootprov attached: files"), "{st}");
+    let r = conn
+        .call(
+            "invoke",
+            json!({"cap": "files", "action": "open", "ctx": {},
+                   "args": {"path": secret.display().to_string()}}),
+            WAIT,
+        )
+        .await
+        .expect("an answer")
+        .expect("served");
+    assert_eq!(r, json!({"first": "root-line", "uid": 0}));
+    // A folder of another account that only it may look into, holding a
+    // link to a protected file of root's. The walk runs with root's file
+    // ids but the node's rights, so it cannot list the folder; root's
+    // program could, and follow the link: handing it the folder above is
+    // refused.
+    let shut = work.join("shut");
+    std::fs::create_dir(&shut).unwrap();
+    std::os::unix::fs::symlink("/root/.ssh/id_b4", shut.join("key")).unwrap();
+    assert!(
+        sh(Command::new("chown")
+            .args(["-h", "nobody"])
+            .arg(shut.join("key")))
+        .0
+    );
+    assert!(sh(Command::new("chown").arg("nobody").arg(&shut)).0);
+    assert!(sh(Command::new("chmod").args(["700"]).arg(&shut)).0);
+    let e = conn
+        .call(
+            "invoke",
+            json!({"cap": "files", "action": "open", "ctx": {},
+                   "args": {"path": work.display().to_string()}}),
+            WAIT,
+        )
+        .await
+        .expect("an answer")
+        .expect_err("refused");
+    assert!(e.message.contains("may not look into"), "{}", e.message);
+    drop(conn);
+
+    drop(provider);
+    let (ok, said) = sh(Command::new(BIN).args(["uninstall", "--purge"]));
+    assert!(ok, "{said}");
+    std::fs::remove_dir_all(work).unwrap();
+}

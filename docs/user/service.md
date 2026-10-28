@@ -143,7 +143,7 @@ Running `install` again repairs what is missing and restarts the service.
 | Home of `nerve-run` | `/var/lib/nerve-run` |
 | The program | `/usr/local/bin/nerve-node` |
 | The unit | `/etc/systemd/system/nerve-node.service` |
-| The owner socket, made at each start, gone at the stop | `/run/nerve-node` |
+| The owner socket and the provider socket, made at each start, gone at the stop | `/run/nerve-node` |
 | ACL entries for `nerve-run` | on the folders you grant, and the folders of yours above them |
 
 Nothing else is written. `journalctl -u nerve-node` shows the node's output.
@@ -171,6 +171,13 @@ owner and hand it to the node ([backup](backup.md#on-a-node-installed-as-a-servi
 While the node is stopped, only root changes it. A command that root runs on
 these folders runs as `nerve`, so every file it writes stays the node's.
 Another user gets a message that says to use `sudo`.
+
+Programs of the owner's and root's that add capabilities
+([providers](providers.md)) attach on the provider socket beside it,
+`/run/nerve-node/provider.sock`, once the owner allows them with `nerve-node
+cap provider allow`. Any other account is refused as it connects. The two
+sockets have places of their own, so attached programs never keep the owner's
+commands out, nor the reverse.
 
 ## The accounts commands run as
 

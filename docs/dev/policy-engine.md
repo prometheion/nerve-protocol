@@ -203,7 +203,15 @@ to), is covered by the checks below that path or folder; any other decides the c
 leads to in the stead of that path (the call's other paths unchanged, the
 rules compiled once for all links). A refusal there refuses the call and
 names the link, not where it leads, and a folder a refused link leads to is
-not walked. The
+not walked. A folder the walk may not list, or an entry in one whose type
+it cannot tell, is left out where the program runs as the walking account
+(it could not look there either), and refuses the call where it runs as
+another (`fs::Closed`, picked by `nerve_node::link::closed_for`): on the
+installed node the walk runs as `nerve-run` and the program as the owner or
+root, which could follow a link there. For a program's paths the link
+decides by the folders the owner granted alone: `nerve-run`'s own folders
+(its home, `/tmp`, `/var/tmp`) count as none, since the program works with
+its own account's rights, not the command account's. The
 tool-config check (writes to `.git`, `.envrc`, `.vscode`, `.idea`) looks at
 the path itself only, since a program may make those anywhere below a folder
 it writes in.

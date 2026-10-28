@@ -868,14 +868,15 @@ fn provider_part_passes_against_nerve_node() {
                 return Err(format!("grant failed: {out}{err}"));
             }
             let exe = std::env::current_exe().unwrap();
-            let entry = format!("{{ name = \"conformance\", exe = \"{}\" }}", exe.display());
-            let (ok, out, err) = node.cli(&["config", "add", "providers.allowed", &entry]);
+            let exe = exe.display().to_string();
+            let (ok, out, err) = node.cli(&["cap", "provider", "allow", "conformance", &exe]);
             if !ok {
                 return Err(format!("allowing the provider failed: {out}{err}"));
             }
             node.start();
             Ok(provider_part::Setup {
                 socket: node.state.join("run").join("ctl.sock"),
+                attach: provider_part::Attach::Token,
                 provider: "conformance".into(),
             })
         })

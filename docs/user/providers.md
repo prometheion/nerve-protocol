@@ -7,9 +7,10 @@ next to `fs` and `exec`. The program never talks to a center. The node decides
 every call to it by that center's mode and rules, as it does for files and
 commands, and writes it to the [audit log](audit.md).
 
-Providers work on Linux, with a node you run yourself. The installed node's
-control socket belongs to the user `nerve`, so a program of yours cannot
-attach there yet. Windows takes no provider yet.
+Providers work on Linux: a program of yours (or of root) attaches to the
+[installed node](service.md) on its provider socket (its control socket
+takes none), and to a node you run yourself on its control socket. Windows
+takes no provider yet.
 
 ## Allow a program
 
@@ -17,18 +18,20 @@ No program may attach until you name it, with a name of your choice and the
 full path of its executable:
 
 ```sh
-nerve-node config add providers.allowed '{ name = "desk", exe = "/usr/lib/nerve-desktop/nerve-desktop" }'
+nerve-node cap provider allow desk /usr/lib/nerve-desktop/nerve-desktop
 ```
 
 The node checks that the program that attaches under that name runs that very
-file. A center cannot change the list. To let a program go, remove its entry:
+file. Allowing a name again replaces its program. A center cannot change the
+list. To let a program go:
 
 ```sh
-nerve-node config remove providers.allowed '{ name = "desk", exe = "/usr/lib/nerve-desktop/nerve-desktop" }'
+nerve-node cap provider rm desk
 ```
 
-Its capabilities leave at once. `nerve-node status` lists the providers that
-are attached:
+Its capabilities leave at once. `nerve-node cap provider ls` lists the
+programs you allow and whether each is attached; `nerve-node status` lists the
+providers that are attached:
 
 ```
 provider desk attached: lamp
@@ -39,8 +42,44 @@ The second line is an action the node left out (below); `nerve-node status
 --json` has them as `broken`. A reason is one line, cut after 300
 characters, since it holds names from the program's schemas.
 
+On the installed node only your own programs and root's attach: the node
+tells who asks by the account the system names for it, refuses any other
+account at once, and refuses a program that a center's command started, also
+when it runs the allowed program. A program that runs with `no_new_privs`
+(a unit with `NoNewPrivileges=yes`, a flatpak or another sandbox that sets it)
+is refused too, as every command the node runs keeps that, and it is told
+so: start it without. The node looks at which program asks with that
+account's rights (for root's programs it starts a short helper as root to
+look), and a program that ended while it looked is refused.
+
 The check tells programs apart, not users: another program of your user can
 still make the allowed one attach for it. Allow only programs you trust.
+
+## See what is there
+
+`nerve-node cap ls` lists every capability, one action a line: what it does
+(its effect), where it comes from (`built-in`, or `program desk`), and for
+each center whether it may use it now (`on` or `off`, as its mode, rules and
+switches decide), with the switch in brackets where you set one with `cap
+set` (`hidden` ones say just that), for one center with `--center`. The
+`settings` actions, with which a center changes its own entry, have no switch:
+they say `granted` or `not granted`, as `center grant settings` set it. An
+action the node left out says why. A switch for something no program offers now is
+listed too, as it counts once one does. On a stopped node it lists the node's
+own capabilities and the programs you allow, and for each center only the
+switch (`on`, `off`, `hidden`, or `default`, where the mode decides):
+
+```
+fs.read       read     built-in      lab: on
+fs.write      write    built-in      lab: off
+settings.set  write    built-in      lab: off (not granted)
+lamp.on       actuate  program desk  lab: on (set on)
+lamp.dim      -        program desk  left out: params: /properties/level/oneOf: …
+program desk: /usr/lib/nerve-desktop/nerve-desktop, attached
+```
+
+`on` says the center is offered the action; each call is still decided by
+its paths and rules.
 
 ## Allow its capabilities
 
@@ -84,7 +123,10 @@ program's `execute` action with paths, as it runs no command); [rules](rules.md#
 and the [audit log](audit.md) names the path, also one that does not resolve.
 On the installed Linux node a read outside every folder goes where every
 account may read ([reading in folder mode](modes.md#reading-in-folder-mode)),
-and only for a file. A path given that is a link is followed to where it
+and only for a file. There only the folders you granted count for a program:
+the folders of `nerve-run` itself (its home, `/tmp`, `/var/tmp`, marked `own`
+in what the agent is told) are that account's, while the program works with
+your rights, so a path there is in no folder. A path given that is a link is followed to where it
 leads and judged there. A path to write that is itself a link is refused
 (`bad_path`): the program would remove, rename or write the place it leads
 to, which you did not name, so name that place instead. The program gets the
@@ -132,6 +174,17 @@ inside the folder a link that passed leads to where it lies, is judged as
 the other names there, so in `allowlist` mode a rule that covers that
 folder covers it too. The node looks into a folder a link leads to only
 when that link passed, and the refusal names the link, not where it leads.
+On the installed node the program runs as you (or root) and the search as
+`nerve-run`: a folder below that `nerve-run` may not look into, which your
+program could, refuses the call, since the node cannot tell where the links
+there lead. Give `nerve-run` that folder too, or hand the program a folder
+that does not hold it. A folder granted `w` or `x` without `r` counts as one
+`nerve-run` may not look into: it may make entries there but not list them.
+So a program handed such a folder, or a folder that holds one, is refused;
+grant it `r` too, or hand the program a file in it. A program of root is held so whenever the node itself
+does not run as root, also where root is the owner and the search runs as
+root: the node still lacks root's rights to look into another account's
+folder.
 A link that leads nowhere counts only for a write, at the place it names. A
 call whose folders hold more than 200 000 entries in all, counting those of
 the folders their links lead to, is refused, since the node cannot check
@@ -150,9 +203,18 @@ syncs into a folder of yours can write them. Let such an action run only
 where every folder with `w` can take that, or switch it `off`.
 
 The node checks the path when the call comes; the program reads or writes it
-afterwards with your rights, so a link put in or swapped in between is not
-caught: a command with `w` in a folder can make one.
-Allow only programs you trust.
+afterwards with its own account's rights (yours, or root's for a program
+root runs), so a link put in or swapped in between is not caught: a command
+with `w` in a folder can make one. Allow only programs you trust. A program
+root runs reaches with such a link everything root may read or write, so
+let it take no paths in a folder a center may write in: switch its actions
+that take paths `off` for such a center, or run the program as yourself.
+Inside a folder you granted, the folder's flags decide a program's path,
+not whether you yourself may read or write that file, so a program root
+runs on a node you own reads and writes there with root's rights also what
+only root (or another account) may: a file a root tool left there, say. Run
+a program that takes paths as yourself, or grant it only folders that hold
+nothing of root's or another account's.
 
 When the program exits, its capabilities leave what `list` shows the centers,
 and a call that was waiting for it fails with `unavailable`.

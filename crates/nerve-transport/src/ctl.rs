@@ -50,6 +50,12 @@ const IDLE: std::time::Duration = std::time::Duration::from_secs(30);
 /// nothing, and the way to stop the node anyway is to stop its process.
 pub const MAX_CONNECTIONS: usize = 64;
 
+/// How many capability providers a provider socket keeps at once
+/// ([`serve_providers`]): each one's connection stays while it is attached.
+/// Far past what one machine runs, and places of its own, so the providers
+/// and the owner's commands never take each other's.
+pub const MAX_PROVIDERS: usize = 16;
+
 /// What a handler sends back: one answer, or items of a following call.
 pub enum Reply {
     Ok(Value),
@@ -110,6 +116,11 @@ pub const NOT_RUNNING: &str = "not running";
 /// Error when a node listens but takes no connection now: its places are
 /// taken, or its queue is full (EAGAIN).
 pub const BUSY: &str = "the node does not take connections now; try again";
+
+/// Why a provider socket ([`serve_providers`]), or its handler, refuses a
+/// caller whose process ended before the node could hold on to it: its pid
+/// may be another process's by then.
+pub const PEER_ENDED: &str = "refused: the program that asked has ended";
 
 /// Serves one connection whose caller is `peer` (what the transport could
 /// tell of it): one request, answered, and the connection ends. One that
@@ -316,9 +327,27 @@ mod unix {
     use tokio::net::{UnixListener, UnixStream};
 
     use super::{
-        BUSY, CtlRequest, IDLE, MAX_CONNECTIONS, NOT_RUNNING, Peer, Reply, answer, call_stream,
-        serve_stream_within, token_file, write_line,
+        BUSY, CtlRequest, IDLE, MAX_CONNECTIONS, NOT_RUNNING, PEER_ENDED, Peer, Reply, answer,
+        call_stream, serve_stream_within, token_file, write_line,
     };
+
+    /// Who a socket serves, and what it takes from the caller beside the
+    /// request ([`serve_limited`]).
+    #[derive(Clone)]
+    enum Callers {
+        /// The socket's own user and root ([`bind`]).
+        Own,
+        /// Every account; the handler decides, and gets the files sent with
+        /// the request ([`serve_anyone`]).
+        Anyone,
+        /// The accounts `admit` lets in, told at once, before they may hold
+        /// a place for a request; the handler gets the caller's pidfd
+        /// ([`serve_providers`]).
+        Admitted(Arc<Admit>),
+    }
+
+    /// Whether a caller is let in, or why not.
+    type Admit = dyn Fn(&Peer) -> Result<(), String> + Send + Sync;
 
     /// How long [`call`] waits for an answer. The slowest handler, the check
     /// of a sudo password, ends after 30 s itself. A node that does not
@@ -359,10 +388,10 @@ mod unix {
     {
         serve_limited(
             listener,
-            move |req, peer, _files| handler(req, peer),
+            move |req, peer, _files, _pidfd| handler(req, peer),
             IDLE,
             MAX_CONNECTIONS,
-            false,
+            Callers::Own,
         )
         .await
     }
@@ -377,8 +406,102 @@ mod unix {
         F: Fn(CtlRequest, Peer, Vec<OwnedFd>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Reply> + Send + 'static,
     {
-        serve_limited(listener, handler, IDLE, MAX_CONNECTIONS, true).await
+        serve_limited(
+            listener,
+            move |req, peer, files, _pidfd| handler(req, peer, files),
+            IDLE,
+            MAX_CONNECTIONS,
+            Callers::Anyone,
+        )
+        .await
     }
+
+    /// [`serve_anyone`] for a socket of capability providers, whose
+    /// connections stay: at most `max` at once, places of its own apart from
+    /// any other socket's, so neither starves the other. A caller that
+    /// `admit` refuses is told why and closed before it may hold a place for
+    /// its request. `admit` runs on the runtime for every connection, while
+    /// the caller holds a place, so it must answer at once: no lookup, no
+    /// program started. The handler gets the caller's pidfd where the kernel
+    /// gives one (SO_PEERPIDFD, Linux 6.5 on), which stays with that process
+    /// however its pid is reused; no files are taken.
+    pub async fn serve_providers<A, F, Fut>(
+        listener: UnixListener,
+        max: usize,
+        admit: A,
+        handler: F,
+    ) -> std::io::Result<()>
+    where
+        A: Fn(&Peer) -> Result<(), String> + Send + Sync + 'static,
+        F: Fn(CtlRequest, Peer, Option<OwnedFd>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Reply> + Send + 'static,
+    {
+        serve_limited(
+            listener,
+            move |req, peer, _files, pidfd| handler(req, peer, pidfd),
+            IDLE,
+            max,
+            Callers::Admitted(Arc::new(admit)),
+        )
+        .await
+    }
+
+    /// The pidfd of the process on the other end of `stream`, as it was when
+    /// it connected ([`pidfd_or_refuse`]).
+    fn peer_pidfd(stream: &UnixStream) -> Result<Option<OwnedFd>, String> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let mut fd: libc::c_int = -1;
+            let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            // SAFETY: getsockopt into an int of the size it is told; the fd
+            // it gives is new and this process's.
+            let r = unsafe {
+                libc::getsockopt(
+                    stream.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    SO_PEERPIDFD,
+                    (&mut fd as *mut libc::c_int).cast(),
+                    &mut len,
+                )
+            };
+            let got = match r == 0 && fd >= 0 {
+                true => Ok(unsafe { OwnedFd::from_raw_fd(fd) }),
+                false => Err(std::io::Error::last_os_error()),
+            };
+            pidfd_or_refuse(got)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = stream;
+            Ok(None)
+        }
+    }
+
+    /// What SO_PEERPIDFD's answer `got` means for a caller: its pidfd;
+    /// `None` where the kernel has none to give (before Linux 6.5, or a
+    /// peer with no pid in this namespace); else a refusal. Before the
+    /// kernels that hand out the pidfd of a process already reaped, that
+    /// fails exactly when the caller is gone, and only then may its pid be
+    /// another's: the caller is refused rather than told by its pid.
+    #[cfg(target_os = "linux")]
+    fn pidfd_or_refuse(got: std::io::Result<OwnedFd>) -> Result<Option<OwnedFd>, String> {
+        match got {
+            Ok(fd) => Ok(Some(fd)),
+            Err(e) => match e.raw_os_error() {
+                Some(libc::ENOPROTOOPT | libc::ENODATA) => Ok(None),
+                Some(libc::EINVAL | libc::ESRCH) => Err(PEER_ENDED.into()),
+                _ => Err(format!(
+                    "refused: the node cannot hold on to the program that asked: {e}"
+                )),
+            },
+        }
+    }
+
+    /// SO_PEERPIDFD (Linux 6.5): the same number on every architecture the
+    /// node is built for.
+    #[cfg(target_os = "linux")]
+    const SO_PEERPIDFD: libc::c_int = 77;
 
     /// The most files a request may come with; more are closed.
     const MAX_FILES: usize = 4;
@@ -556,17 +679,17 @@ mod unix {
     }
 
     /// [`serve_on`], with `idle` as the time a connection may wait for its
-    /// request and `max` connections served at once; with `anyone`, a caller
-    /// of any account is served.
+    /// request, `max` connections served at once and `callers` the ones it
+    /// serves.
     async fn serve_limited<F, Fut>(
         listener: UnixListener,
         handler: F,
         idle: std::time::Duration,
         max: usize,
-        anyone: bool,
+        callers: Callers,
     ) -> std::io::Result<()>
     where
-        F: Fn(CtlRequest, Peer, Vec<OwnedFd>) -> Fut + Send + Sync + 'static,
+        F: Fn(CtlRequest, Peer, Vec<OwnedFd>, Option<OwnedFd>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Reply> + Send + 'static,
     {
         let handler = Arc::new(handler);
@@ -599,6 +722,7 @@ mod unix {
                 continue;
             };
             let handler = handler.clone();
+            let callers = callers.clone();
             tokio::spawn(async move {
                 let _place = place;
                 let peer = match stream.peer_cred() {
@@ -608,15 +732,43 @@ mod unix {
                     },
                     Err(_) => return,
                 };
-                if !anyone && peer.uid != me && peer.uid != 0 {
-                    return;
-                }
-                let handler = Arc::new(move |req, (peer, files): (Peer, Vec<OwnedFd>)| {
-                    handler(req, peer, files)
-                });
-                if !anyone {
-                    let _ = serve_stream_within(stream, (peer, Vec::new()), handler, idle).await;
-                    return;
+                let handler = Arc::new(
+                    move |req, (peer, files, pidfd): (Peer, Vec<OwnedFd>, Option<OwnedFd>)| {
+                        handler(req, peer, files, pidfd)
+                    },
+                );
+                match callers {
+                    Callers::Own => {
+                        if peer.uid != me && peer.uid != 0 {
+                            return;
+                        }
+                        let _ =
+                            serve_stream_within(stream, (peer, Vec::new(), None), handler, idle)
+                                .await;
+                        return;
+                    }
+                    Callers::Admitted(admit) => {
+                        // Taken first: the process that connected may end,
+                        // and its pid go to another, before its request
+                        // comes.
+                        let pidfd = peer_pidfd(&stream);
+                        let pidfd = match admit(&peer).and(pidfd) {
+                            Ok(pidfd) => pidfd,
+                            Err(why) => {
+                                if stream.writable().await.is_ok() {
+                                    let _ = stream.try_write(
+                                        format!("{}\n", json!({"error": why})).as_bytes(),
+                                    );
+                                }
+                                return;
+                            }
+                        };
+                        let _ =
+                            serve_stream_within(stream, (peer, Vec::new(), pidfd), handler, idle)
+                                .await;
+                        return;
+                    }
+                    Callers::Anyone => {}
                 }
                 // Only the open socket takes files: its callers are other
                 // accounts, who hand over what they opened themselves.
@@ -628,7 +780,7 @@ mod unix {
                     first: std::io::Cursor::new(first),
                     stream,
                 };
-                let _ = serve_stream_within(stream, (peer, files), handler, idle).await;
+                let _ = serve_stream_within(stream, (peer, files, None), handler, idle).await;
             });
         }
     }
@@ -872,6 +1024,90 @@ mod unix {
             }
         }
 
+        /// A caller whose pidfd the kernel will not give because it is gone
+        /// is refused; a kernel without SO_PEERPIDFD leaves the node its pid
+        /// alone.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_caller_gone_before_its_pidfd_is_refused() {
+            let err = |n| Err(std::io::Error::from_raw_os_error(n));
+            assert_eq!(
+                pidfd_or_refuse(err(libc::ENOPROTOOPT)).unwrap().map(|_| ()),
+                None
+            );
+            assert_eq!(
+                pidfd_or_refuse(err(libc::ENODATA)).unwrap().map(|_| ()),
+                None
+            );
+            assert_eq!(pidfd_or_refuse(err(libc::EINVAL)).unwrap_err(), PEER_ENDED);
+            assert_eq!(pidfd_or_refuse(err(libc::ESRCH)).unwrap_err(), PEER_ENDED);
+            let e = pidfd_or_refuse(err(libc::EMFILE)).unwrap_err();
+            assert!(e.starts_with("refused: the node cannot hold on"), "{e}");
+            let f = std::fs::File::open("/dev/null").unwrap();
+            assert!(pidfd_or_refuse(Ok(f.into())).unwrap().is_some());
+        }
+
+        /// The provider socket tells a caller it does not admit so at once,
+        /// before any request, and hands the handler the pidfd of the one
+        /// it admits: the process that connected.
+        #[tokio::test]
+        async fn the_provider_socket_admits_by_the_peer_and_hands_over_its_pidfd() {
+            let d = tempfile::tempdir().unwrap();
+            let at = d.path().join("provider.sock");
+            let listener = bind_open(&at).await.unwrap();
+            let me = crate::net::euid();
+            tokio::spawn(serve_providers(
+                listener,
+                2,
+                move |p: &Peer| {
+                    if p.uid == me {
+                        Ok(())
+                    } else {
+                        Err("not you".into())
+                    }
+                },
+                |_req: CtlRequest, peer: Peer, pidfd: Option<OwnedFd>| async move {
+                    use std::os::fd::AsRawFd;
+                    let pid = pidfd.map(|f| {
+                        let info =
+                            std::fs::read_to_string(format!("/proc/self/fdinfo/{}", f.as_raw_fd()))
+                                .unwrap();
+                        info.lines()
+                            .find_map(|l| l.strip_prefix("Pid:"))
+                            .map(|p| p.trim().to_string())
+                            .unwrap()
+                    });
+                    Reply::Ok(json!({"pid": peer.pid, "pidfd": pid}))
+                },
+            ));
+            let s = UnixStream::connect(&at).await.unwrap();
+            let v = super::super::call_on(s, "hello", json!({})).await.unwrap();
+            let pid = std::process::id();
+            assert_eq!(v["pid"], pid);
+            #[cfg(target_os = "linux")]
+            assert_eq!(v["pidfd"], pid.to_string());
+
+            let listener = bind_open(&d.path().join("closed.sock")).await.unwrap();
+            tokio::spawn(serve_providers(
+                listener,
+                2,
+                |_: &Peer| Err("not you".into()),
+                |_: CtlRequest, _: Peer, _: Option<OwnedFd>| async { Reply::Ok(json!("in")) },
+            ));
+            let mut s = UnixStream::connect(d.path().join("closed.sock"))
+                .await
+                .unwrap();
+            let mut told = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                s.read_to_string(&mut told),
+            )
+            .await
+            .expect("told before any request")
+            .unwrap();
+            assert_eq!(told, "{\"error\":\"not you\"}\n");
+        }
+
         /// A session on a real socket does not wedge when the node writes a
         /// line larger than the socket's buffer while the client writes one
         /// too: a client that answers each line before it reads the next
@@ -1071,10 +1307,10 @@ mod unix {
             let listener = bind(&p).await.unwrap();
             tokio::spawn(serve_limited(
                 listener,
-                |_, _, _| async { Reply::Ok(json!("up")) },
+                |_, _, _, _| async { Reply::Ok(json!("up")) },
                 std::time::Duration::from_millis(200),
                 MAX_CONNECTIONS,
-                false,
+                Callers::Own,
             ));
             let mut idle = UnixStream::connect(&p).await.unwrap();
             let mut byte = [0u8; 1];
@@ -1095,10 +1331,10 @@ mod unix {
             let listener = bind(&p).await.unwrap();
             tokio::spawn(serve_limited(
                 listener,
-                |_, _, _| async { Reply::Ok(json!("up")) },
+                |_, _, _, _| async { Reply::Ok(json!("up")) },
                 std::time::Duration::from_secs(30),
                 2,
-                false,
+                Callers::Own,
             ));
             // Two places held without a word; a call over them is told the
             // node is busy, with the request written or not.
@@ -1360,7 +1596,7 @@ mod unix {
 #[cfg(unix)]
 pub use unix::{
     CANNOT_CONNECT, NO_ANSWER, bind, bind_open, call, follow, node_is_there, request_line,
-    send_files, serve, serve_anyone, serve_on, token_ok, write_token,
+    send_files, serve, serve_anyone, serve_on, serve_providers, token_ok, write_token,
 };
 
 #[cfg(test)]

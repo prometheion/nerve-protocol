@@ -1004,6 +1004,13 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
+    /// The provider socket beside the owner socket (Linux;
+    /// crate::provider::serve).
+    #[cfg(target_os = "linux")]
+    pub fn provider_socket(&self) -> PathBuf {
+        self.at.with_file_name(crate::provider::SOCKET_NAME)
+    }
+
     /// The installed node's, when the node at `paths` is it: on Linux in the
     /// runtime folder systemd made for it (`RUNTIME_DIRECTORY`), for the
     /// owner the unit names ([`of_service`]), on Windows
@@ -1067,7 +1074,7 @@ fn keeps_no_new_privs(pid: u32) -> bool {
 
 /// Why the node refuses an owner request from a process of a center's
 /// command.
-const FROM_A_COMMAND: &str = "refused: this request comes from a command the node runs for a center, or a program it started";
+pub(crate) const FROM_A_COMMAND: &str = "refused: this request comes from a command the node runs for a center, or a program it started";
 
 /// The backup file that came with an owner's request: opened by the
 /// owner's own program and handed over, so the node never opens a path in
@@ -1249,7 +1256,9 @@ async fn run_for(
 
 /// Whether `cmd` only reads: it changes nothing of the node.
 fn only_reads(cmd: &Cmd) -> bool {
-    use crate::cli::{CapCmd, CenterCmd, ConfigCmd, ProxyCmd, RelayCmd, RuleCmd, ServiceCmd};
+    use crate::cli::{
+        CapCmd, CenterCmd, ConfigCmd, ProviderCmd, ProxyCmd, RelayCmd, RuleCmd, ServiceCmd,
+    };
     matches!(
         cmd,
         Cmd::Status
@@ -1258,7 +1267,7 @@ fn only_reads(cmd: &Cmd) -> bool {
             | Cmd::Center(CenterCmd::Ls)
             | Cmd::Folder(FolderCmd::Ls { .. })
             | Cmd::Rule(RuleCmd::Ls { .. })
-            | Cmd::Cap(CapCmd::Ls { .. })
+            | Cmd::Cap(CapCmd::Ls { .. } | CapCmd::Provider(ProviderCmd::Ls))
             | Cmd::Config(ConfigCmd::Get { .. })
             | Cmd::Proxy(ProxyCmd::Ls)
             | Cmd::Relay(RelayCmd::Ls)
@@ -1656,7 +1665,7 @@ fn owner_name(owners: &Owners, uid: u32) -> Option<String> {
 /// against mistakes: `pid` is the process that connected, which may have
 /// ended before the request came on its connection.
 #[cfg(unix)]
-fn from_a_command(shared: &crate::daemon::Shared, pid: Option<u32>) -> bool {
+pub(crate) fn from_a_command(shared: &crate::daemon::Shared, pid: Option<u32>) -> bool {
     let Some(pid) = pid else {
         return true;
     };
@@ -1666,6 +1675,36 @@ fn from_a_command(shared: &crate::daemon::Shared, pid: Option<u32>) -> bool {
     }
     shared.below_command(Some(pid))
 }
+
+/// [`from_a_command`] with its reason, for a program that asks to attach as
+/// a provider, from what the node saw of it as its account
+/// (crate::provider::Seen: its process and parents in `chain`, and whether
+/// it runs with `no_new_privs`): one that runs with `no_new_privs` but below
+/// no command of the node is told so, since the owner may start a program
+/// of theirs that way (a unit's `NoNewPrivileges=`, a sandbox) and must
+/// know why it is refused.
+#[cfg(unix)]
+pub(crate) fn command_refusal(
+    shared: &crate::daemon::Shared,
+    chain: &[u32],
+    nnp: bool,
+) -> Option<&'static str> {
+    if shared.runs_any(chain) {
+        return Some(FROM_A_COMMAND);
+    }
+    #[cfg(target_os = "linux")]
+    if nnp {
+        return Some(NO_NEW_PRIVS);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = nnp;
+    None
+}
+
+/// Why the node refuses a program that runs with `no_new_privs` and below
+/// none of its commands.
+#[cfg(target_os = "linux")]
+pub(crate) const NO_NEW_PRIVS: &str = "refused: this program runs with no_new_privs, as every command the node runs for a center does, so the node cannot tell it from one; start it without no_new_privs (no NoNewPrivileges= in its unit, no sandbox that sets it)";
 
 #[cfg(windows)]
 pub(crate) use win::serve;
@@ -1937,6 +1976,8 @@ mod tests {
             &["config", "get", "log.level"],
             &["relay", "ls"],
             &["service", "status"],
+            &["cap", "ls"],
+            &["cap", "provider", "ls"],
         ] {
             assert!(only_reads(&cli(args).cmd), "{args:?}");
         }
@@ -1947,6 +1988,7 @@ mod tests {
             &["panic"],
             &["log", "clear"],
             &["audit", "clear"],
+            &["cap", "provider", "rm", "desk"],
         ] {
             assert!(!only_reads(&cli(args).cmd), "{args:?}");
         }

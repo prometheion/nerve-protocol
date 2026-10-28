@@ -157,7 +157,10 @@ SIDs in the service's registry value `Parameters\Owners`. `uninstall`
 removes the polkit files and the service helper, and on Windows the service
 with its key.
 
-The running node serves the owner a second endpoint (`crate::owner`): on
+The running node serves the owner a second endpoint (`crate::owner`), and
+on Linux a third, the provider socket `/run/nerve-node/provider.sock` beside
+it, where the owner's and root's programs attach as capability providers
+(node-local.md §7). The second endpoint: on
 Linux `/run/nerve-node/owner.sock`, mode 0666 in the unit's
 `RuntimeDirectory=` (0755), the account decided by the peer's credentials
 (the unit's owner, looked up by name at each request, and root); on Windows

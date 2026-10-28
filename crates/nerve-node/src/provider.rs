@@ -1,6 +1,8 @@
 //! Capability providers (docs/dev/spec/node-local.md §7): local programs
 //! the owner allowed in `providers.allowed` that add capabilities to the
-//! node over its control socket.
+//! node: over the provider socket of the installed node ([`serve`]), which
+//! the owner's programs and root's reach, or over the control socket of a
+//! node run by hand.
 //!
 //! A provider sends `hello` with role `provider` and a descriptor fragment.
 //! The node checks that the program on the other end is the one the owner
@@ -31,7 +33,8 @@ use nerve_proto::descriptor::{Action, Capability, Effect, Exposure, bad_member_n
 use nerve_proto::schema::{self, Role};
 use nerve_proto::{ErrorCode, RpcError};
 
-use crate::daemon::{Shared, lock};
+use crate::daemon::Shared;
+use crate::daemon::lock;
 
 /// The capabilities and profiles that are the node's own, and the ones the
 /// center serves itself on every node (`job`, `stream`): a provider may not
@@ -97,6 +100,8 @@ struct Attached {
     name: String,
     /// The program the node checked it against, as the config named it.
     exe: String,
+    /// The account its program runs as, as the kernel named it.
+    uid: u32,
     /// Tells this attachment from a later one of the same name.
     serial: u64,
     caps: Vec<Capability>,
@@ -106,6 +111,10 @@ struct Attached {
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>,
     next: AtomicU64,
 }
+
+/// Why a provider is refused while the node stops (for an owner's restore,
+/// too): it connects again to the node that runs next.
+const STOPPING: &str = "refused: the node stops; connect again once it runs";
 
 /// The attached providers, by name.
 #[derive(Default)]
@@ -165,6 +174,12 @@ impl Providers {
         }
     }
 
+    /// The account the program of the provider `name` runs as, and which
+    /// attachment of that name it is, while it is attached.
+    pub fn held(&self, name: &str) -> Option<(u32, u64)> {
+        lock(&self.attached).get(name).map(|a| (a.uid, a.serial))
+    }
+
     /// What `status` shows of them: each one's capabilities, and the
     /// actions left out with their reasons.
     pub fn status(&self) -> Value {
@@ -216,12 +231,66 @@ impl Providers {
         }
     }
 
-    /// Forwards a call the node allowed to `provider` and waits for its
-    /// answer. Dropping the future (a cancel, a deadline, the link's end)
-    /// tells the provider to cancel it.
+    /// Holds the provider `name` as attached, for its program `exe` of the
+    /// account `uid`, with the capabilities of `fragment`, unless one of
+    /// that name is attached already, or the config `now` gives no longer
+    /// names it with `exe`. The node looked at the program after it read
+    /// the config, and the owner may have removed or changed the entry
+    /// meanwhile: [`Providers::follow_config`] then found nothing to
+    /// detach. `now` is read while the attachments are held, so a change
+    /// after it finds this one. It gives none once the node stops: its
+    /// stop detaches every provider once ([`Providers::detach_all`]), and
+    /// one held after that would stay with the stopped node, never told.
+    fn hold(
+        &self,
+        name: &str,
+        exe: &str,
+        uid: u32,
+        fragment: Vec<Fragment>,
+        tx: mpsc::Sender<Value>,
+        now: impl FnOnce() -> Option<NodeConfig>,
+    ) -> Result<Arc<Attached>, String> {
+        let mut held = lock(&self.attached);
+        let Some(now) = now() else {
+            return Err(STOPPING.into());
+        };
+        if now.providers.get(name).is_none_or(|p| p.exe != exe) {
+            return Err(format!(
+                "refused: providers.allowed changed while the node looked at the provider {name}; try again"
+            ));
+        }
+        if held.contains_key(name) {
+            return Err(format!("a provider {name} is attached already"));
+        }
+        let taken = held
+            .values()
+            .flat_map(|a| a.caps.iter().map(|c| c.id.clone()))
+            .collect();
+        let (caps, broken) = capabilities(name, fragment, &taken)?;
+        let a = Arc::new(Attached {
+            name: name.to_string(),
+            exe: exe.to_string(),
+            uid,
+            serial: self.serial.fetch_add(1, Ordering::Relaxed),
+            caps,
+            broken,
+            tx,
+            pending: Mutex::default(),
+            next: AtomicU64::new(1),
+        });
+        held.insert(name.to_string(), a.clone());
+        Ok(a)
+    }
+
+    /// Forwards a call the node allowed to the attachment `serial` of
+    /// `provider` ([`Providers::held`]) and waits for its answer: the node
+    /// decided the call for that program, so a later one of the same name
+    /// never gets it. Dropping the future (a cancel, a deadline, the link's
+    /// end) tells the provider to cancel it.
     pub async fn invoke(
         &self,
         provider: &str,
+        serial: u64,
         cap: &str,
         action: &str,
         args: Map<String, Value>,
@@ -235,6 +304,7 @@ impl Providers {
         let (tx, rx, guard) = {
             let a = lock(&self.attached)
                 .get(provider)
+                .filter(|a| a.serial == serial)
                 .cloned()
                 .ok_or_else(gone)?;
             let id = a.next.fetch_add(1, Ordering::Relaxed);
@@ -350,6 +420,250 @@ fn same_program(running: &Path, allowed: &Path) -> Result<bool, String> {
     let allowed =
         std::fs::canonicalize(allowed).map_err(|e| format!("{}: {e}", allowed.display()))?;
     Ok(running == allowed)
+}
+
+/// What the node saw of the process that asks to attach, with the rights
+/// of the account it looked as.
+#[derive(Debug)]
+pub(crate) struct Seen {
+    /// The program it runs, as the kernel resolved it.
+    pub running: PathBuf,
+    /// Whether that is the program the owner allowed.
+    pub same: bool,
+    /// Whether it runs with `no_new_privs`, as every command of the node
+    /// does (crate::owner::command_refusal).
+    pub nnp: bool,
+    /// Its pid, then its parent's and so on up, as far as could be read.
+    pub chain: Vec<u32>,
+}
+
+/// What `pid` is ([`Seen`]), against the program `allowed` names, all as
+/// this thread sees the files: a check of whether it comes from a command
+/// that read less than the program's read would pass a command where
+/// `/proc` hides other accounts' processes (`hidepid`), so it is read with
+/// the same rights. A status that cannot be read refuses.
+fn look(pid: u32, allowed: &Path) -> Result<Seen, String> {
+    let running = program_of(pid)?;
+    let same = same_program(&running, allowed)?;
+    #[cfg(target_os = "linux")]
+    let (nnp, chain) = (no_new_privs(pid)?, ancestry(pid));
+    #[cfg(not(target_os = "linux"))]
+    let (nnp, chain) = (false, vec![pid]);
+    Ok(Seen {
+        running,
+        same,
+        nnp,
+        chain,
+    })
+}
+
+/// Whether the process `pid` runs with `no_new_privs`, from its status. One
+/// the node cannot read is refused rather than taken for one without.
+#[cfg(target_os = "linux")]
+fn no_new_privs(pid: u32) -> Result<bool, String> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).map_err(|e| {
+        format!("refused: the node cannot tell how the program that asks runs: {e}")
+    })?;
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("NoNewPrivs:"))
+        .map(|v| v.trim() == "1")
+        .ok_or_else(|| "refused: the node cannot tell how the program that asks runs".into())
+}
+
+/// `pid` and its parents, up to the first one that cannot be read. One
+/// that cannot be read, as the account that asks, belongs to another
+/// account. A command that runs as the caller's account keeps
+/// `no_new_privs`, so no process of it becomes another account's (a setuid
+/// program cannot change it), and the caller is refused for that flag if
+/// not for its chain. A command that runs as root (the sudo list, or root
+/// as its account) sets no `no_new_privs`: a process it starts as the
+/// caller's account through several of root's in between can lose the
+/// command from its chain where `/proc` is mounted `hidepid`. The check is
+/// a guard against mistakes, as the owner socket's is.
+#[cfg(target_os = "linux")]
+fn ancestry(pid: u32) -> Vec<u32> {
+    let mut chain = vec![pid];
+    let mut p = pid;
+    while chain.len() < 256 {
+        match nerve_transport::ctl::parent_of(p) {
+            Some(pp) if pp != p && pp != 0 => {
+                chain.push(pp);
+                p = pp;
+            }
+            _ => break,
+        }
+    }
+    chain
+}
+
+/// Who asks to attach: the account and the process the kernel names for
+/// the caller, and that process's pidfd where the socket gave one.
+#[cfg(unix)]
+pub(crate) struct Caller {
+    pub uid: u32,
+    pub pid: Option<u32>,
+    pub pidfd: Option<std::os::fd::OwnedFd>,
+    /// Whether a process of a command the node runs, or one with
+    /// `no_new_privs`, is refused from what the node saw of it
+    /// (crate::owner::command_refusal): on the provider socket. The control
+    /// socket, which takes a hello on a node run by hand only, checks its
+    /// callers itself.
+    pub refuse_commands: bool,
+}
+
+/// Why a program of root is refused where the node cannot tell which one
+/// it is.
+#[cfg(target_os = "linux")]
+const ROOT_UNTOLD: &str = "refused: the node cannot tell which program of root asks";
+
+/// What the process `pid` of the account `uid` is ([`Seen`]), looked at
+/// with that account's rights: the kernel shows a process's program only to
+/// its own account (or to a process that holds at least every right it
+/// holds), where `/proc` is mounted `hidepid` its status and parents too,
+/// and `allowed` may lie where only that account may look. The node's own processes and a node of root look
+/// themselves. For another account the installed node takes its file ids
+/// (crate::account::FsAs). For root it starts `exe` as root to look
+/// ([`check_main`]), as it starts root's commands: the node itself holds
+/// too few rights to see a process of root's. Blocks.
+#[cfg(unix)]
+fn identify(uid: u32, pid: u32, allowed: &Path, exe: Option<&Path>) -> Result<Seen, String> {
+    let me = crate::account::own_uid();
+    if me == 0 || uid == me {
+        return look(pid, allowed);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if !crate::account::can_switch() {
+            return Err(format!(
+                "refused: the node may not look at the programs of another account (uid {uid})"
+            ));
+        }
+        if uid == 0 {
+            let exe = exe.ok_or(ROOT_UNTOLD)?;
+            return as_root(exe, pid, allowed);
+        }
+        let account = crate::account::of_uid(uid)
+            .and_then(|a| crate::account::lookup(&a.name).ok().flatten())
+            .ok_or_else(|| format!("refused: the node cannot look up the account uid {uid}"))?;
+        let _as = crate::account::FsAs::new(&account)
+            .map_err(|e| format!("refused: the node cannot look as {}: {e}", account.name))?;
+        look(pid, allowed)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (exe, allowed);
+        Err("refused: providers attach on Linux only for now".into())
+    }
+}
+
+/// [`identify`] for `caller`, which must name its process. A process that
+/// ended while the node looked may have left its pid to another, so where
+/// the socket gave its pidfd, an ended one refuses whatever was read: also
+/// a failed read, since a pid that is gone is no answer either. Blocks.
+#[cfg(unix)]
+fn read_caller(caller: &Caller, allowed: &Path, exe: Option<&Path>) -> Result<Seen, String> {
+    let pid = caller
+        .pid
+        .ok_or("refused: the node cannot tell which process asks")?;
+    let looked = identify(caller.uid, pid, allowed, exe);
+    #[cfg(target_os = "linux")]
+    if caller.pidfd.as_ref().is_some_and(ended) {
+        return Err(nerve_transport::ctl::PEER_ENDED.into());
+    }
+    looked
+}
+
+/// The argument that starts the node's program as the helper that tells
+/// root's program ([`check_main`]). Not a command the owner types.
+pub const CHECK_ARG: &str = "__provider-check";
+
+/// Runs `exe` as root with [`CHECK_ARG`] for `pid` and `allowed`, and
+/// reads its answer ([`Seen`]). The child takes root's ids before its program starts,
+/// as a command of root does (crate::account::Switch), and so runs with
+/// root's rights; it gets nothing from the node's environment.
+#[cfg(target_os = "linux")]
+fn as_root(exe: &Path, pid: u32, allowed: &Path) -> Result<Seen, String> {
+    use std::os::unix::process::CommandExt;
+    let switch = crate::account::Switch::new(&crate::account::root(), None, &[])
+        .map_err(|e| format!("{ROOT_UNTOLD}: {e}"))?;
+    let mut c = std::process::Command::new(exe);
+    c.arg(CHECK_ARG)
+        .arg(pid.to_string())
+        .arg(allowed)
+        .env_clear()
+        .current_dir("/")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: plain system calls on memory moved into the closure.
+    unsafe {
+        c.pre_exec(move || switch.apply());
+    }
+    let out = c.output().map_err(|e| format!("{ROOT_UNTOLD}: {e}"))?;
+    let v: Value = serde_json::from_slice(&out.stdout)
+        .map_err(|_| format!("{ROOT_UNTOLD}: its helper did not answer"))?;
+    if let Some(e) = v["error"].as_str() {
+        return Err(e.to_string());
+    }
+    let untold = || format!("{ROOT_UNTOLD}: its helper did not answer");
+    let chain: Option<Vec<u32>> = v["chain"].as_array().and_then(|c| {
+        c.iter()
+            .map(|p| p.as_u64().and_then(|p| u32::try_from(p).ok()))
+            .collect()
+    });
+    match (
+        v["running"].as_str(),
+        v["same"].as_bool(),
+        v["nnp"].as_bool(),
+        chain,
+    ) {
+        (Some(r), Some(same), Some(nnp), Some(chain)) if !chain.is_empty() => Ok(Seen {
+            running: PathBuf::from(r),
+            same,
+            nnp,
+            chain,
+        }),
+        _ => Err(untold()),
+    }
+}
+
+/// The helper [`as_root`] starts: `<CHECK_ARG> <pid> <allowed>` prints
+/// `{"running": path, "same": bool, "nnp": bool, "chain": [pid, …]}`
+/// ([`Seen`]), or `{"error": text}`. The exit code is 0 either way.
+pub fn check_main() -> i32 {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(2).collect();
+    let answer = match (
+        args.first()
+            .and_then(|p| p.to_str())
+            .and_then(|p| p.parse::<u32>().ok()),
+        args.get(1),
+    ) {
+        (Some(pid), Some(allowed)) if args.len() == 2 => match look(pid, Path::new(allowed)) {
+            Ok(seen) => json!({"running": seen.running.to_string_lossy(), "same": seen.same,
+                               "nnp": seen.nnp, "chain": seen.chain}),
+            Err(e) => json!({"error": e}),
+        },
+        _ => json!({"error": format!("usage: {CHECK_ARG} <pid> <program>")}),
+    };
+    println!("{answer}");
+    0
+}
+
+/// Whether the process `pidfd` stands for has ended. One that has not
+/// still holds its pid, so what was read under that pid was its own.
+#[cfg(target_os = "linux")]
+fn ended(pidfd: &std::os::fd::OwnedFd) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut p = libc::pollfd {
+        fd: pidfd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one pollfd, no wait. A pidfd is readable once its process
+    // ended.
+    let n = unsafe { libc::poll(&mut p, 1, 0) };
+    n != 0
 }
 
 /// Why an action's schemas are outside the subset a center checks, if they
@@ -469,17 +783,18 @@ fn capabilities(
     Ok((caps, broken))
 }
 
-/// `hello` on the control socket from the process `pid`: attaches it as the
-/// provider it names when `providers.allowed` names that provider with the
-/// program it runs. The answer keeps the connection
+/// `hello` from `caller`, on the provider socket or the control socket:
+/// attaches it as the provider it names when `providers.allowed` names that
+/// provider with the program it runs. The answer keeps the connection
 /// ([`nerve_transport::ctl::Reply::Session`]); its end detaches it.
-pub(crate) fn attach(
+#[cfg(unix)]
+pub(crate) async fn attach(
     shared: &Arc<Shared>,
     params: Value,
-    pid: Option<u32>,
+    caller: Caller,
 ) -> nerve_transport::ctl::Reply {
     use nerve_transport::ctl::Reply;
-    match check(shared, params, pid) {
+    match check(shared, params, caller).await {
         Ok(reply) => reply,
         Err(e) => {
             tracing::warn!("a provider was not attached: {e}");
@@ -488,10 +803,11 @@ pub(crate) fn attach(
     }
 }
 
-fn check(
+#[cfg(unix)]
+async fn check(
     shared: &Arc<Shared>,
     params: Value,
-    pid: Option<u32>,
+    caller: Caller,
 ) -> Result<nerve_transport::ctl::Reply, String> {
     let hello: Hello = serde_json::from_value(params).map_err(|e| format!("bad hello: {e}"))?;
     if hello.role != "provider" {
@@ -505,38 +821,40 @@ fn check(
     let allowed = cfg
         .providers
         .get(&name)
-        .ok_or_else(|| format!("refused: providers.allowed names no provider {name}"))?;
-    let pid = pid.ok_or("refused: the node cannot tell which process asks")?;
-    let running = program_of(pid)?;
-    let want = Path::new(&allowed.exe);
-    if !same_program(&running, want).map_err(|e| format!("refused: the provider {name}: {e}"))? {
-        return Err(other_program(&name, &running, want));
+        .ok_or_else(|| format!("refused: providers.allowed names no provider {name}"))?
+        .clone();
+    let want = PathBuf::from(&allowed.exe);
+    let (uid, refuse_commands) = (caller.uid, caller.refuse_commands);
+    let looked = {
+        let (want, exe) = (want.clone(), shared.exe.clone());
+        tokio::task::spawn_blocking(move || read_caller(&caller, &want, exe.as_deref()))
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    let Seen {
+        running,
+        same,
+        nnp,
+        chain,
+    } = looked.map_err(|e| match e.starts_with("refused:") {
+        true => e,
+        false => format!("refused: the provider {name}: {e}"),
+    })?;
+    if refuse_commands && let Some(why) = crate::owner::command_refusal(shared, &chain, nnp) {
+        return Err(why.into());
+    }
+    if !same {
+        return Err(other_program(&name, &running, &want));
     }
     let (out_tx, out_rx) = mpsc::channel(QUEUE);
     let (in_tx, mut in_rx) = mpsc::channel::<Value>(QUEUE);
-    let attached = {
-        let mut held = lock(&shared.providers.attached);
-        if held.contains_key(&name) {
-            return Err(format!("a provider {name} is attached already"));
-        }
-        let taken = held
-            .values()
-            .flat_map(|a| a.caps.iter().map(|c| c.id.clone()))
-            .collect();
-        let (caps, broken) = capabilities(&name, hello.capabilities, &taken)?;
-        let a = Arc::new(Attached {
-            name: name.clone(),
-            exe: allowed.exe.clone(),
-            serial: shared.providers.serial.fetch_add(1, Ordering::Relaxed),
-            caps,
-            broken,
-            tx: out_tx,
-            pending: Mutex::default(),
-            next: AtomicU64::new(1),
-        });
-        held.insert(name.clone(), a.clone());
-        a
-    };
+    let attached =
+        shared
+            .providers
+            .hold(&name, &allowed.exe, uid, hello.capabilities, out_tx, || {
+                // Set before the stop detaches them all (daemon.rs `stop`).
+                (!*shared.stop.borrow()).then(|| shared.config())
+            })?;
     let ids: Vec<String> = attached.caps.iter().map(|c| c.id.clone()).collect();
     let broken = attached.broken.clone();
     tracing::info!(
@@ -570,6 +888,259 @@ fn check(
         out: out_rx,
         inbound: in_tx,
     })
+}
+
+/// What `cap ls` shows (docs/user/commands.md): every action of the node's
+/// own capabilities and of the attached programs', each with its effect,
+/// where it comes from and how each center has it set (`cap set`: `on`,
+/// `off`, `hidden`, or `default` where the mode alone decides; for
+/// `settings`, which no switch governs, `granted` or `not granted` by
+/// `center grant settings`); an action a
+/// program offered that the node left out, with the reason; and the
+/// programs the owner allowed, attached or not. `live` is the running node:
+/// without it no program's capabilities are known, and no row says whether
+/// each center may use the action now (`now`: `on` where its descriptor
+/// offers it and it is not off, else `off`), which its mode and machine
+/// decide besides the switch.
+pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>) -> Value {
+    use nerve_policy::config::CapSetting;
+    let attached = live.map(|s| &s.providers);
+    // Each center's descriptor as it would see it now, built as the link
+    // builds it.
+    let seen: Option<BTreeMap<&str, Vec<Capability>>> = live.map(|s| {
+        let provided = s.providers.caps();
+        cfg.centers
+            .iter()
+            .map(|c| {
+                let reach = s.reach(cfg, c);
+                let d = crate::descriptor::for_center(cfg, c, &reach, &provided);
+                (c.name.as_str(), d.capabilities)
+            })
+            .collect()
+    });
+    let centers = |cap: &str, action: &str| -> Map<String, Value> {
+        cfg.centers
+            .iter()
+            .map(|c| {
+                // No switch: the center's grant offers it or not.
+                if cap == "settings" {
+                    let set = match c.settings {
+                        nerve_policy::config::SettingsGrant::Write => "granted",
+                        nerve_policy::config::SettingsGrant::Off => "not granted",
+                    };
+                    return (c.name.clone(), json!(set));
+                }
+                let set = match c.policy.cap_setting(cap, Some(action)) {
+                    Some(CapSetting::On) => "on",
+                    Some(CapSetting::Off) => "off",
+                    Some(CapSetting::Hidden) => "hidden",
+                    None => "default",
+                };
+                (c.name.clone(), json!(set))
+            })
+            .collect()
+    };
+    let now = |cap: &str, action: &str| -> Option<Map<String, Value>> {
+        let seen = seen.as_ref()?;
+        let on = |caps: &Vec<Capability>| {
+            caps.iter().any(|c| {
+                c.id == cap
+                    && c.exposure == Exposure::On
+                    && c.actions
+                        .get(action)
+                        .is_some_and(|a| a.exposure != Some(Exposure::Off))
+            })
+        };
+        Some(
+            seen.iter()
+                .map(|(c, caps)| (c.to_string(), json!(if on(caps) { "on" } else { "off" })))
+                .collect(),
+        )
+    };
+    let row = |c: &Capability, source: &str| -> Vec<Value> {
+        c.actions
+            .iter()
+            .map(|(a, decl)| {
+                let mut r = json!({"name": format!("{}.{a}", c.id), "effect": decl.effect,
+                                   "source": source, "summary": decl.summary,
+                                   "centers": centers(&c.id, a)});
+                if let Some(now) = now(&c.id, a) {
+                    r["now"] = Value::Object(now);
+                }
+                r
+            })
+            .collect()
+    };
+    let mut rows: Vec<Value> = crate::descriptor::built_in(cfg)
+        .iter()
+        .flat_map(|c| row(c, "built-in"))
+        .collect();
+    let held = attached.map(|p| lock(&p.attached).clone());
+    for a in held.iter().flat_map(|h| h.values()) {
+        let source = format!("program {}", a.name);
+        for c in &a.caps {
+            rows.extend(row(c, &source));
+        }
+        for b in &a.broken {
+            let (cap, action) = b.name.split_once('.').unwrap_or((&b.name, ""));
+            rows.push(json!({"name": b.name, "source": source, "broken": b.reason,
+                             "centers": centers(cap, action)}));
+        }
+    }
+    let programs: Vec<Value> = cfg
+        .providers
+        .allowed
+        .iter()
+        .map(|p| {
+            let on = held.as_ref().map(|h| h.contains_key(&p.name));
+            json!({"name": p.name, "exe": p.exe, "attached": on})
+        })
+        .collect();
+    json!({"capabilities": rows, "programs": programs, "running": live.is_some()})
+}
+
+/// The provider socket's file name, beside the owner socket in the
+/// installed unit's runtime folder (crate::owner::RUNTIME_DIR).
+pub const SOCKET_NAME: &str = "provider.sock";
+
+/// Why the provider socket refuses an account that is neither an owner of
+/// the node nor root.
+pub const NOT_AN_OWNER: &str =
+    "refused: only the owner of the installed node and root attach a provider to it";
+
+/// How long the provider socket keeps the owner's uid before it looks the
+/// account up again ([`Admits`]).
+#[cfg(target_os = "linux")]
+const OWNER_AGAIN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How [`Admits`] looks an account up: its uid by its name.
+#[cfg(target_os = "linux")]
+type Lookup = Box<dyn Fn(&str) -> Option<u32> + Send + Sync>;
+
+/// Who the provider socket lets in, told by the caller's uid alone: the
+/// check runs on the runtime for every connection, from any account, while
+/// the caller holds one of the socket's places, so it looks nothing up. The
+/// owner's account (`Owners::Named`) is looked up as the socket starts, and
+/// again, off the runtime, by a connection that comes once the last lookup
+/// is [`OWNER_AGAIN`] old: an account made or changed while the node runs
+/// counts after that, and a flood of connections costs at most one lookup
+/// in that time. Root is always let in.
+#[cfg(target_os = "linux")]
+struct Admits {
+    owners: crate::owner::Owners,
+    /// The owner's uid as last looked up, and when.
+    known: Mutex<(Option<u32>, std::time::Instant)>,
+    looking: std::sync::atomic::AtomicBool,
+    again: std::time::Duration,
+    lookup: Lookup,
+}
+
+#[cfg(target_os = "linux")]
+impl Admits {
+    /// Looks the owner up once now. Blocks.
+    fn new(owners: crate::owner::Owners, again: std::time::Duration, lookup: Lookup) -> Arc<Self> {
+        let uid = match &owners {
+            crate::owner::Owners::Named(n) => lookup(n),
+            _ => None,
+        };
+        Arc::new(Admits {
+            owners,
+            known: Mutex::new((uid, std::time::Instant::now())),
+            looking: Default::default(),
+            again,
+            lookup,
+        })
+    }
+
+    /// Whether `uid` may attach a provider. Never blocks.
+    fn admits(self: &Arc<Self>, uid: u32) -> bool {
+        use crate::owner::Owners;
+        if uid == 0 {
+            return true;
+        }
+        let name = match &self.owners {
+            Owners::Named(n) => n,
+            Owners::Uids(u) => return u.contains(&uid),
+            Owners::Sids(_) => return false,
+        };
+        let (known, at) = *lock(&self.known);
+        if at.elapsed() >= self.again && !self.looking.swap(true, Ordering::SeqCst) {
+            let (me, name) = (self.clone(), name.clone());
+            tokio::task::spawn_blocking(move || {
+                let uid = (me.lookup)(&name);
+                *lock(&me.known) = (uid, std::time::Instant::now());
+                me.looking.store(false, Ordering::SeqCst);
+            });
+        }
+        known == Some(uid)
+    }
+}
+
+/// Serves the provider socket `at` of the installed node until the task is
+/// aborted: open to every account, 0666, in a folder everyone may enter.
+/// An account that is not one of `owners` (root always is) is refused as
+/// it connects, told by its uid alone ([`Admits`]), so it holds a place
+/// only for that comparison. The socket's places are its own
+/// ([`nerve_transport::ctl::MAX_PROVIDERS`]): a provider's connection
+/// stays, and neither this socket nor the owner socket can take the
+/// other's. A process below a command of the node is refused, as on the
+/// owner socket. The token-gated control socket stays the way in for a
+/// node run by hand.
+#[cfg(target_os = "linux")]
+pub(crate) async fn serve(
+    shared: Arc<Shared>,
+    at: PathBuf,
+    owners: crate::owner::Owners,
+) -> Result<tokio::task::JoinHandle<()>, String> {
+    use nerve_transport::ctl::Reply;
+    let listener = nerve_transport::ctl::bind_open(&at)
+        .await
+        .map_err(|e| format!("{}: {e}", at.display()))?;
+    let admits = tokio::task::spawn_blocking(move || {
+        Admits::new(
+            owners,
+            OWNER_AGAIN,
+            Box::new(|n| crate::account::lookup(n).ok().flatten().map(|a| a.uid)),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let task = tokio::spawn(async move {
+        let admit = move |peer: &nerve_transport::ctl::Peer| match admits.admits(peer.uid) {
+            true => Ok(()),
+            false => Err(NOT_AN_OWNER.to_string()),
+        };
+        let r = nerve_transport::ctl::serve_providers(
+            listener,
+            nerve_transport::ctl::MAX_PROVIDERS,
+            admit,
+            move |req, peer, pidfd| {
+                let s = shared.clone();
+                async move {
+                    if req.method != "hello" {
+                        return Reply::Err(format!(
+                            "the provider socket takes a provider's hello only, not {:?}",
+                            req.method
+                        ));
+                    }
+                    // Below a command, or with no_new_privs: told from
+                    // what the node sees of the process as its account.
+                    let caller = Caller {
+                        uid: peer.uid,
+                        pid: peer.pid,
+                        pidfd,
+                        refuse_commands: true,
+                    };
+                    attach(&s, req.params, caller).await
+                }
+            },
+        )
+        .await;
+        if let Err(e) = r {
+            tracing::error!("the provider socket stopped: {e}");
+        }
+    });
+    Ok(task)
 }
 
 #[cfg(test)]
@@ -793,6 +1364,241 @@ mod tests {
         assert!(same_program(&running, &d.path().join("none")).is_err());
         let deleted = PathBuf::from(format!("{} (deleted)", running.display()));
         assert_eq!(same_program(&deleted, &real), Ok(false));
+    }
+
+    /// The pidfd of a process says when it ended, so a pid read before is
+    /// known to be its own while it has not.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_pidfd_tells_whether_its_process_ended() {
+        use std::os::fd::FromRawFd;
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        // SAFETY: pidfd_open of a child this test holds; the fd is new.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) };
+        assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+        let pidfd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) };
+        assert!(!ended(&pidfd));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(ended(&pidfd));
+    }
+
+    /// A pidfd of `sleep` that has ended.
+    #[cfg(target_os = "linux")]
+    fn ended_pidfd() -> std::os::fd::OwnedFd {
+        use std::os::fd::FromRawFd;
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        // SAFETY: pidfd_open of a child this test holds; the fd is new.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) };
+        assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) }
+    }
+
+    /// A caller whose process that connected has ended is refused, however
+    /// well its pid reads now: the pid may be another process's. While it
+    /// runs, what its pid reads is its own.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_caller_whose_process_ended_is_refused_whatever_its_pid_reads() {
+        use std::os::fd::FromRawFd;
+        let me = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let caller = Caller {
+            uid: crate::account::own_uid(),
+            pid: Some(std::process::id()),
+            pidfd: Some(ended_pidfd()),
+            refuse_commands: true,
+        };
+        assert_eq!(
+            read_caller(&caller, &me, None).unwrap_err(),
+            nerve_transport::ctl::PEER_ENDED
+        );
+        // SAFETY: pidfd_open of this process; the fd is new.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, std::process::id(), 0) };
+        assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+        let caller = Caller {
+            pidfd: Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) }),
+            ..caller
+        };
+        assert!(read_caller(&caller, &me, None).unwrap().same);
+    }
+
+    /// The provider socket tells the owner by a uid it looked up before:
+    /// however many connections come, from whichever account, the account
+    /// is looked up again at most once a while, off the connections, and
+    /// what that lookup finds counts from then on.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_provider_socket_looks_the_owner_up_once_a_while_only() {
+        use std::sync::atomic::{AtomicU32, AtomicUsize};
+        let looked = Arc::new(AtomicUsize::new(0));
+        let owner = Arc::new(AtomicU32::new(1000));
+        let lookup = |looked: Arc<AtomicUsize>, owner: Arc<AtomicU32>| {
+            Box::new(move |n: &str| {
+                assert_eq!(n, "own");
+                looked.fetch_add(1, Ordering::SeqCst);
+                Some(owner.load(Ordering::SeqCst))
+            }) as Lookup
+        };
+        let named = || crate::owner::Owners::Named("own".into());
+        let a = Admits::new(
+            named(),
+            std::time::Duration::from_secs(3600),
+            lookup(looked.clone(), owner.clone()),
+        );
+        assert_eq!(looked.load(Ordering::SeqCst), 1);
+        for _ in 0..100 {
+            assert!(!a.admits(1001));
+        }
+        assert!(a.admits(1000));
+        assert!(a.admits(0));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(looked.load(Ordering::SeqCst), 1, "looked up per connection");
+
+        // Once the last lookup is old, a connection starts the next one and
+        // is told by the old uid; the ones after it by the new.
+        let looked = Arc::new(AtomicUsize::new(0));
+        let a = Admits::new(
+            named(),
+            std::time::Duration::ZERO,
+            lookup(looked.clone(), owner.clone()),
+        );
+        owner.store(1001, Ordering::SeqCst);
+        assert!(!a.admits(1001));
+        let t = std::time::Instant::now();
+        while lock(&a.known).0 != Some(1001) {
+            assert!(t.elapsed().as_secs() < 10, "not looked up again");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(a.admits(1001));
+        assert!(!a.admits(1000));
+        assert!(looked.load(Ordering::SeqCst) >= 2);
+
+        let uids = Admits::new(
+            crate::owner::Owners::Uids(vec![1002]),
+            std::time::Duration::ZERO,
+            lookup(Arc::new(AtomicUsize::new(0)), owner.clone()),
+        );
+        assert!(uids.admits(1002) && uids.admits(0) && !uids.admits(1001));
+    }
+
+    fn allowing(name: &str, exe: &str) -> NodeConfig {
+        let mut cfg = NodeConfig::default();
+        cfg.providers.allowed = vec![nerve_policy::config::AllowedProvider {
+            name: name.into(),
+            exe: exe.into(),
+        }];
+        cfg
+    }
+
+    /// A provider whose entry the owner removed or changed while the node
+    /// looked at its program is not held: the config is read again as it is
+    /// held. Nor is one while the node stops.
+    #[test]
+    fn a_provider_the_owner_dropped_while_it_was_checked_is_not_held() {
+        let p = Providers::default();
+        let (tx, _rx) = mpsc::channel(1);
+        for now in [NodeConfig::default(), allowing("desk", "/opt/other")] {
+            let e = p
+                .hold(
+                    "desk",
+                    "/opt/desk",
+                    1000,
+                    fragment(echo()),
+                    tx.clone(),
+                    || Some(now),
+                )
+                .err()
+                .expect("not held");
+            assert!(e.contains("providers.allowed changed"), "{e}");
+        }
+        assert_eq!(p.held("desk"), None);
+        let a = p
+            .hold(
+                "desk",
+                "/opt/desk",
+                1000,
+                fragment(echo()),
+                tx.clone(),
+                || None,
+            )
+            .err()
+            .expect("not held while the node stops");
+        assert_eq!(a, STOPPING);
+        assert_eq!(p.held("desk"), None);
+        let a = p
+            .hold("desk", "/opt/desk", 1000, fragment(echo()), tx, || {
+                Some(allowing("desk", "/opt/desk"))
+            })
+            .unwrap();
+        assert_eq!(p.held("desk"), Some((1000, a.serial)));
+    }
+
+    /// A call goes to the attachment it was decided for: once that one went,
+    /// a later one of the same name does not get it.
+    #[tokio::test]
+    async fn a_call_goes_to_the_attachment_it_was_decided_for_only() {
+        let p = Providers::default();
+        let (tx, _rx) = mpsc::channel(4);
+        let hold = |tx| {
+            p.hold("desk", "/opt/desk", 1000, fragment(echo()), tx, || {
+                Some(allowing("desk", "/opt/desk"))
+            })
+            .unwrap()
+            .serial
+        };
+        let first = hold(tx.clone());
+        assert!(p.remove("desk", first));
+        let (later_tx, mut later) = mpsc::channel(4);
+        let _later = hold(later_tx);
+        let call = p.invoke("desk", first, "echo", "say", Map::new());
+        let e = tokio::time::timeout(std::time::Duration::from_secs(5), call)
+            .await
+            .expect("answered at once")
+            .unwrap_err();
+        assert_eq!(e.kind(), ErrorCode::Unavailable);
+        assert!(later.try_recv().is_err(), "the later one got the call");
+    }
+
+    /// The node's own program, and a program of its own account, is looked
+    /// at as the node itself; the helper says the same for root.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_program_of_the_nodes_own_account_is_told_directly() {
+        let me = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let seen = identify(crate::account::own_uid(), std::process::id(), &me, None).unwrap();
+        assert_eq!((seen.running.as_path(), seen.same), (me.as_path(), true));
+        assert!(!seen.nnp);
+        assert_eq!(
+            seen.chain[..2],
+            [std::process::id(), std::os::unix::process::parent_id()]
+        );
+        let seen = identify(
+            crate::account::own_uid(),
+            std::process::id(),
+            Path::new("/bin/sh"),
+            None,
+        )
+        .unwrap();
+        assert!(!seen.same);
+    }
+
+    /// A process whose status the node cannot read is refused, not taken
+    /// for one without `no_new_privs`: where `/proc` hides it, a command's
+    /// process would pass.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_status_the_node_cannot_read_refuses() {
+        assert_eq!(no_new_privs(std::process::id()), Ok(false));
+        let e = no_new_privs(u32::MAX).unwrap_err();
+        assert!(e.starts_with("refused: the node cannot tell how"), "{e}");
     }
 
     #[cfg(target_os = "linux")]
