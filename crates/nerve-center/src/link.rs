@@ -41,6 +41,24 @@ pub const CALLS_KEPT: usize = 8;
 /// one link; past it the link gets no more.
 pub const UNANSWERED_MAX: usize = 4;
 
+/// A `stream.open` sent on the link and not answered yet.
+struct Opening {
+    /// Where the stream's frames go; none once the opener gave up: the
+    /// answer then opens nothing.
+    ring: Option<Arc<Ring>>,
+    /// When its wait passes. A node that has not answered by then left it
+    /// unanswered; an opener that gave up before (its `execute` was
+    /// cancelled) says nothing about the node, which may take its time
+    /// still, as for a program's stream.
+    until: Instant,
+}
+
+impl Opening {
+    fn unanswered(&self, now: Instant) -> bool {
+        self.ring.is_none() && now >= self.until
+    }
+}
+
 /// How many of a node's `calls` places the agents' calls leave free: a
 /// quarter, at most [`CALLS_KEPT`], so a node with few places still runs
 /// most of the agents' calls (64 keeps 8, 8 keeps 2, 4 keeps 1).
@@ -81,8 +99,8 @@ impl Drop for Asked {
         let Some(rx) = self.rx.take() else {
             return;
         };
-        if let Some(ring) = self.link.opening.lock().unwrap().get_mut(&self.id) {
-            ring.take();
+        if let Some(o) = self.link.opening.lock().unwrap().get_mut(&self.id) {
+            o.ring.take();
         }
         let Ok(rt) = tokio::runtime::Handle::try_current() else {
             return;
@@ -144,8 +162,7 @@ pub struct Link {
     streams: Mutex<HashMap<u32, Arc<Ring>>>,
     /// `stream.open` requests waiting for their `sid`, by request id: the
     /// answer puts the ring in `streams` before the next frame is read.
-    /// None once the opener gave up: the answer then opens nothing.
-    opening: Mutex<HashMap<u64, Option<Arc<Ring>>>>,
+    opening: Mutex<HashMap<u64, Opening>>,
     /// The sessions' subscriptions to a program's events on this link, by
     /// topic `cap/name`: the rings each event goes to (crate::streams).
     /// The node holds one subscription per topic for the link; it ends
@@ -639,7 +656,7 @@ impl Link {
         // An opened stream is known before its first frame is read, which
         // may follow the answer at once. One lock at a time: `open_stream`
         // takes them the other way round.
-        let opened = self.opening.lock().unwrap().remove(n).flatten();
+        let opened = self.opening.lock().unwrap().remove(n).and_then(|o| o.ring);
         let waited = self.pending.lock().unwrap().contains_key(n);
         if let Some(ring) = opened.filter(|_| waited)
             && let Ok(v) = &r
@@ -671,13 +688,21 @@ impl Link {
             let mut opening = self.opening.lock().unwrap();
             // Each one left unanswered holds a request and a task here
             // until the link ends: a node that does not answer gets no more.
-            if opening.values().filter(|r| r.is_none()).count() >= UNANSWERED_MAX {
+            let now = Instant::now();
+            if opening.values().filter(|o| o.unanswered(now)).count() >= UNANSWERED_MAX {
                 return Err(RpcError::new(
                     ErrorCode::Timeout,
                     "the node left earlier stream.open requests unanswered",
                 ));
             }
-            opening.insert(id, Some(ring));
+            let until = now + wait;
+            opening.insert(
+                id,
+                Opening {
+                    ring: Some(ring),
+                    until,
+                },
+            );
         }
         self.pending.lock().unwrap().insert(id, tx);
         let mut unsent = Unsent {
@@ -704,7 +729,7 @@ impl Link {
             Ok(r) => r.unwrap_or_else(|_| Err(lost())),
             Err(_) => {
                 let abandoned = match self.opening.lock().unwrap().get(&id) {
-                    Some(ring) => ring.is_some(),
+                    Some(o) => o.ring.is_some(),
                     None => false,
                 };
                 if !abandoned {
@@ -725,11 +750,12 @@ impl Link {
 
     /// How many `stream.open`s the node left unanswered past their wait.
     pub fn unanswered_opens(&self) -> usize {
+        let now = Instant::now();
         self.opening
             .lock()
             .unwrap()
             .values()
-            .filter(|r| r.is_none())
+            .filter(|o| o.unanswered(now))
             .count()
     }
 
@@ -1682,6 +1708,46 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(rx.try_recv().is_err(), "nothing more was sent");
         assert_eq!(link.unanswered_opens(), UNANSWERED_MAX);
+    }
+
+    /// An open whose opener gave up before its wait passed (its `execute`
+    /// was cancelled) is not one the node left unanswered: a program may
+    /// take its time, and opens of other callers still go to the node.
+    #[tokio::test]
+    async fn a_cancelled_stream_open_is_not_left_unanswered_by_the_node() {
+        let (out, mut rx) = mpsc::channel(8);
+        let link = Arc::new(Link::new(
+            "n1",
+            String::new(),
+            false,
+            Limits::default(),
+            out,
+            None,
+        ));
+        for _ in 0..UNANSWERED_MAX {
+            let ring = Arc::new(Ring::default());
+            let open = link.open_stream(json!({}), ring, Duration::from_secs(30));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), open)
+                    .await
+                    .is_err(),
+                "cancelled before the answer"
+            );
+            assert_eq!(sent(&mut rx).await.1, method::STREAM_OPEN);
+        }
+        assert_eq!(link.unanswered_opens(), 0);
+        let ring = Arc::new(Ring::default());
+        let open = tokio::spawn({
+            let link = link.clone();
+            async move {
+                link.open_stream(json!({}), ring, Duration::from_secs(5))
+                    .await
+            }
+        });
+        let (id, method, _) = sent(&mut rx).await;
+        assert_eq!(method, method::STREAM_OPEN, "it still goes to the node");
+        link.reply(&Id::Num(id), Ok(json!({"sid": 3})));
+        assert_eq!(open.await.unwrap().unwrap(), 3);
     }
 
     /// An open stream ends when its connection drops: when the link is
