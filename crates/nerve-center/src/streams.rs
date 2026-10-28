@@ -6,8 +6,8 @@
 //! ([`open_on_node`]). The node sends what the command printed so far and
 //! then what it prints, as frames; the center keeps them in a [`Ring`] per
 //! stream, and the model reads them with `stream.read`, polling: there are
-//! no MCP notifications (an event subscription, B6, is a stream read the
-//! same way).
+//! no MCP notifications. A program's stream and the events of a
+//! subscription to a program's event are streams read the same way.
 //!
 //! A ring holds at most [`RING_BYTES`]; past it the oldest bytes go, and the
 //! next read says how many. Rings are kept in memory only, per session, and
@@ -150,8 +150,9 @@ impl Ring {
             }
             s.buf.extend(data);
             let mut over = s.buf.len().saturating_sub(RING_BYTES);
-            // Events go by whole lines: a read never starts inside one.
-            if over > 0 && self.source == Source::Events {
+            // Events go by whole lines: a read never starts inside one. A
+            // cut right after a line's end leaves the next line whole.
+            if over > 0 && self.source == Source::Events && s.buf[over - 1] != b'\n' {
                 over = match s.buf.range(over..).position(|b| *b == b'\n') {
                     Some(i) => over + i + 1,
                     None => s.buf.len(),
@@ -760,6 +761,33 @@ mod tests {
             (last.text.as_str(), last.eof, last.why.as_deref()),
             ("line\n", true, Some("the command ended"))
         );
+    }
+
+    /// An events ring drops by whole lines, and no more than it must: a
+    /// cut that falls right after a line's end keeps the next line.
+    #[test]
+    fn an_events_ring_drops_whole_lines_and_no_more() {
+        let r = Ring::of(Source::Events);
+        let line = |c: u8| {
+            let mut l = vec![c; 64 * 1024 - 1];
+            l.push(b'\n');
+            l
+        };
+        for i in 0..17u8 {
+            r.push(&line(b'a' + i));
+        }
+        assert_eq!(r.held(), RING_BYTES, "16 lines stay");
+        let first = r.read(READ_MAX);
+        assert_eq!(first.dropped, 64 * 1024, "one line went");
+        assert!(first.text.starts_with('b'), "{}", &first.text[..8]);
+        // A cut inside a line takes the rest of it too.
+        let r = Ring::of(Source::Events);
+        r.push(&line(b'a'));
+        r.push(&vec![b'b'; RING_BYTES - 2]);
+        r.push(b"\nc\n");
+        let first = r.read(READ_MAX);
+        assert_eq!(first.dropped as usize, 64 * 1024 + RING_BYTES - 1);
+        assert_eq!(first.text, "c\n");
     }
 
     /// A gap the node reports lies after the data that came before it: a

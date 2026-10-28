@@ -368,6 +368,35 @@ impl Drop for Waiting {
     }
 }
 
+/// A stream of a session that `execute` adds before its node answered.
+/// Dropped before its id was given (the harness cancelled the request, or
+/// the node refused), it closes the stream again: nobody could name it to
+/// close it, and it would hold one of the session's places and its
+/// subscription on the link for as long as the session lives.
+struct Adding<'a> {
+    sess: &'a Session,
+    node_id: &'a str,
+    id: Option<String>,
+    why: &'static str,
+}
+
+impl Adding<'_> {
+    /// The id is given: the stream stays.
+    fn keep(mut self) -> String {
+        self.id.take().unwrap_or_default()
+    }
+}
+
+impl Drop for Adding<'_> {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take()
+            && let Some(c) = self.sess.streams.lock().unwrap().close(&id, self.node_id)
+        {
+            c.close(self.why);
+        }
+    }
+}
+
 /// Settles a rotation of the center's key that a stop cut short, at the
 /// start: a new key the state file does not know is dropped (the start was
 /// cut short; the old key stays), a rotation whose new key is gone is
@@ -2740,10 +2769,12 @@ impl Center {
                 json!({"cap": route.cap, "action": route.action, "args": args, "ctx": ctx}),
             ),
         };
-        let (id, rx) = link
-            .start_within(method, params, most)
-            .await
-            .map_err(|e| {
+        let started = if method == msg::method::SUB {
+            link.start_sub(params, most).await
+        } else {
+            link.start_within(method, params, most).await
+        };
+        let (id, rx) = started.map_err(|e| {
                 if e.kind() != ErrorCode::Busy {
                     return e;
                 }
@@ -2896,24 +2927,41 @@ impl Center {
         let id = streams::new_id();
         let ring = Arc::new(Ring::of(streams::Source::Events));
         let what = format!("the events of {}.{}", route.cap, route.action);
+        let mut adding = Adding {
+            sess,
+            node_id: &route.node_id,
+            id: None,
+            why: "its execute was cancelled",
+        };
+        let Some(link) = self.link(&route.node_id) else {
+            let e = RpcError::new(
+                ErrorCode::Unavailable,
+                format!("the node {} is offline", route.node_name),
+            );
+            return Err(self.refused(sess, route, e));
+        };
         // The ring takes the topic's events before the node is asked: the
         // first may follow its answer at once. Refused, it goes again.
-        if let Some(link) = self.link(&route.node_id)
-            && sess
-                .streams
-                .lock()
-                .unwrap()
-                .add_unit(&id, &route.node_id, what, ring.clone())
+        if !sess
+            .streams
+            .lock()
+            .unwrap()
+            .add_unit(&id, &route.node_id, what, ring.clone())
         {
-            link.subscribe(&topic, ring);
-            sess.streams.lock().unwrap().subscribed(&id, &link, &topic);
+            return Err(Stop::SessionEnded.error().into());
+        }
+        adding.id = Some(id.clone());
+        link.subscribe(&topic, ring.clone());
+        if !sess.streams.lock().unwrap().subscribed(&id, &link, &topic) {
+            // The session ended meanwhile: its streams went without this
+            // subscription.
+            link.unsubscribe(&topic, &ring);
+            return Err(Stop::SessionEnded.error().into());
         }
         match self.call(sess, route, Map::new()).await {
-            Ok(_) => Ok(id),
+            Ok(_) => Ok(adding.keep()),
             Err(e) => {
-                if let Some(c) = sess.streams.lock().unwrap().close(&id, &route.node_id) {
-                    c.close("the subscription was refused");
-                }
+                adding.why = "the subscription was refused";
                 Err(e)
             }
         }
@@ -2963,11 +3011,20 @@ impl Center {
         {
             return Err(Stop::SessionEnded.error().into());
         }
+        // A cancelled `execute` takes it out again; the node's stream, if
+        // its answer still comes, is closed by the link (Link::open_stream).
+        let mut adding = Adding {
+            sess,
+            node_id: &route.node_id,
+            id: Some(id),
+            why: "its execute was cancelled",
+        };
         let params = json!({"cap": route.cap, "stream": route.action, "params": args,
                             "ctx": {"session": sess.id}});
         let wait = self.stream_waits.lock().unwrap().0;
         match link.open_stream(params, ring, wait).await {
             Ok(sid) => {
+                let id = adding.keep();
                 if !sess.streams.lock().unwrap().opened(&id, &link, sid) {
                     // Closed meanwhile (the session ended): so is the stream.
                     if link.forget_stream(sid) {
@@ -2979,9 +3036,7 @@ impl Center {
                 Ok(id)
             }
             Err(e) => {
-                if let Some(c) = sess.streams.lock().unwrap().close(&id, &route.node_id) {
-                    c.close("it did not open");
-                }
+                adding.why = "it did not open";
                 Err(e.into())
             }
         }

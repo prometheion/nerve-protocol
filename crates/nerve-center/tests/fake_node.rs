@@ -260,14 +260,16 @@ fn talk_ends(talk: &str) -> bool {
 const FLOOD: usize = 24;
 
 /// The program `desk`'s capability `board` added to the description `d`: a
-/// state key `temp`, events `alarm` and `flood`, and a stream `feed`.
+/// state key `temp`, events `alarm`, `flood`, `locked` and `hold`, and a
+/// stream `feed`.
 fn board(d: &mut Value) {
     d["capabilities"].as_array_mut().unwrap().push(json!(
         {"id": "board", "provider": "desk", "exposure": "on", "summary": "A sensor board.",
          "state": {"temp": {"effect": "read", "summary": "The temperature.",
                             "schema": {"type": "number"}}},
          "events": {"alarm": {"effect": "read", "summary": "An alarm went off."},
-                    "flood": {"effect": "read"}},
+                    "flood": {"effect": "read"}, "locked": {"effect": "read"},
+                    "hold": {"effect": "read"}},
          "streams": {"feed": {"kind": "reliable", "direction": "up", "effect": "read",
                               "summary": "Readings as they come.",
                               "params": {"type": "object", "properties": {
@@ -344,8 +346,10 @@ fn serve_changing(
                     // The program's capability `board` ([`board`]): `get`
                     // answers its `temp`, a subscription to `board/alarm`
                     // gets three events, one to `board/flood` [`FLOOD`]
-                    // events of 64 KiB, and its stream `feed` two lines,
-                    // then the node's close.
+                    // events of 64 KiB, one to `board/locked` is refused and
+                    // one to `board/hold` never answered; its stream `feed`
+                    // two lines, then the node's close, and opened with
+                    // `every_ms` 999 it is answered after [`SLOW`] only.
                     let topic = params
                         .get("topics")
                         .and_then(|t| t[0].as_str())
@@ -356,6 +360,14 @@ fn serve_changing(
                         && (on_board || topic.starts_with("board/"))
                     {
                         let _ = tx.send(Seen::State(m.clone(), Value::Object(params.clone())));
+                        if m == method::SUB && topic == "board/hold" {
+                            continue;
+                        }
+                        if m == method::SUB && topic == "board/locked" {
+                            let e = RpcError::forbidden("board.locked is not allowed");
+                            send(&mut ws, Message::error(Some(id), e)).await;
+                            continue;
+                        }
                         let result = match m.as_str() {
                             method::GET => json!({"temp": 21.5}),
                             _ => json!({}),
@@ -378,6 +390,14 @@ fn serve_changing(
                         let _ = tx.send(Seen::StreamOpen(Value::Object(params.clone())));
                         let sid = next_sid;
                         next_sid += 1;
+                        if params["params"]["every_ms"] == 999 {
+                            let later = later.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(SLOW).await;
+                                let _ = later.send(Message::result(id, json!({"sid": sid})));
+                            });
+                            continue;
+                        }
                         send(&mut ws, Message::result(id, json!({"sid": sid}))).await;
                         let raw = raw.clone();
                         tokio::spawn(async move {
@@ -5218,6 +5238,99 @@ async fn a_subscription_reads_events_and_ends_with_its_last_stream() {
     r.stop().await;
 }
 
+/// A subscription the node refuses gives no stream: the session holds
+/// none, and the link's ring is gone. One whose `execute` is cancelled
+/// before the node answered is taken out the same way, and the node's
+/// subscription goes with it.
+#[tokio::test]
+async fn a_refused_or_cancelled_subscription_holds_no_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = board_box(&r).await;
+    let link = r.center.link(&node).unwrap();
+    let sess = e.session();
+    list_text(
+        &e,
+        json!({"node": "box-1", "capability": ["board.locked", "board.hold"]}),
+    )
+    .await;
+    let reply = execute_as(&e, json!(1), "board.locked", json!({})).await;
+    let (text, err) = said(&reply);
+    assert!(err && text.starts_with("error forbidden"), "{reply}");
+    assert!(reply["result"]["structuredContent"]["stream"].is_null());
+    assert_eq!(next_state(&mut seen).await.0, "sub");
+    assert_eq!(sess.streams.lock().unwrap().len(), 0);
+    assert_eq!(link.subscribers("board/locked"), 0);
+
+    let call = tokio::spawn({
+        let e = e.clone();
+        async move { execute_as(&e, json!("hold-1"), "board.hold", json!({})).await }
+    });
+    // The refused one's `unsub` may come first: the node takes any.
+    loop {
+        let (m, p) = next_state(&mut seen).await;
+        if p["topics"] == json!(["board/hold"]) {
+            assert_eq!(m, "sub");
+            break;
+        }
+        assert_eq!(
+            (m.as_str(), &p["topics"]),
+            ("unsub", &json!(["board/locked"]))
+        );
+    }
+    assert_eq!(link.subscribers("board/hold"), 1);
+    let note = e
+        .handle(
+            json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                       "params": {"requestId": "hold-1"}}),
+        )
+        .await;
+    assert!(note.is_none());
+    let _ = call.await;
+    assert_eq!(sess.streams.lock().unwrap().len(), 0, "no place held");
+    assert_eq!(link.subscribers("board/hold"), 0);
+    loop {
+        let (m, p) = next_state(&mut seen).await;
+        if p["topics"] == json!(["board/hold"]) {
+            assert_eq!(m, "unsub");
+            break;
+        }
+    }
+    r.stop().await;
+}
+
+/// A session holds at most [`streams::STREAMS_MAX`] streams of events as
+/// of any kind: one more is refused until it closes one. Subscribing reads
+/// outside content, so it taints the session as a call does.
+#[tokio::test]
+async fn a_session_holds_at_most_its_streams_of_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, _node, _seen, _task) = board_box(&r).await;
+    let sess = e.session();
+    list_text(&e, json!({"node": "box-1", "capability": ["board.alarm"]})).await;
+    assert!(!sess.tainted());
+    let mut streams = Vec::new();
+    for i in 0..nerve_center::streams::STREAMS_MAX {
+        let reply = execute_as(&e, json!(i), "board.alarm", json!({})).await;
+        streams.push(opened_stream(&reply, "board.alarm", "event"));
+        assert!(sess.tainted(), "a subscription taints");
+    }
+    let reply = execute_as(&e, json!("more"), "board.alarm", json!({})).await;
+    let (text, err) = said(&reply);
+    assert!(err && text.contains("holds 16 streams already"), "{reply}");
+    execute_as(
+        &e,
+        json!("close"),
+        "stream.close",
+        json!({"stream": streams[0]}),
+    )
+    .await;
+    let reply = execute_as(&e, json!("again"), "board.alarm", json!({})).await;
+    opened_stream(&reply, "board.alarm", "event");
+    r.stop().await;
+}
+
 /// A subscription's stream keeps at most [`streams::RING_BYTES`] that were
 /// not read: the oldest events go by whole lines, and the next read says
 /// how much went.
@@ -5265,6 +5378,43 @@ async fn a_subscription_keeps_its_newest_events_by_whole_lines() {
     let level = first["data"]["level"].as_u64().unwrap();
     assert!(level > 1, "the oldest went: {level}");
     assert!(link.subscribers("board/flood") == 1);
+    r.stop().await;
+}
+
+/// An `execute` of a program's stream cancelled while the node opens it
+/// holds no stream in the session, and the stream the node opens after all
+/// is closed there.
+#[tokio::test]
+async fn a_cancelled_open_of_a_programs_stream_is_closed_on_the_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = board_box(&r).await;
+    let link = r.center.link(&node).unwrap();
+    let sess = e.session();
+    list_text(&e, json!({"node": "box-1", "capability": ["board.feed"]})).await;
+    let call = tokio::spawn({
+        let e = e.clone();
+        async move { execute_as(&e, json!("feed-1"), "board.feed", json!({"every_ms": 999})).await }
+    });
+    let Seen::StreamOpen(_) = next_seen(&mut seen).await else {
+        panic!("no stream.open")
+    };
+    let note = e
+        .handle(
+            json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                       "params": {"requestId": "feed-1"}}),
+        )
+        .await;
+    assert!(note.is_none());
+    let _ = call.await;
+    assert_eq!(sess.streams.lock().unwrap().len(), 0, "no place held");
+    loop {
+        if let Seen::StreamClose(sid) = next_seen(&mut seen).await {
+            assert_eq!(sid, 7, "the stream the node opened late");
+            break;
+        }
+    }
+    assert_eq!(link.stream_count(), 0);
     r.stop().await;
 }
 
