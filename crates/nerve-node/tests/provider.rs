@@ -2108,6 +2108,94 @@ async fn a_programs_events_and_state_reach_only_the_centers_that_may_have_them()
     daemon.stop().await;
 }
 
+/// A subscription to a program's capability is decided and audited unit by
+/// unit: `cap/state` each state key, `cap/*` each event and key, and an
+/// event the program does not declare is refused. An `unsub` only takes
+/// away: it is taken also once the program left, so the node holds no
+/// subscription the center gave up, and the program's next attach sends
+/// that center nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subscription_is_decided_unit_by_unit_and_an_unsub_is_always_taken() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, mut work, p) = two_centers_with_sensors(dir.path()).await;
+    let paths = daemon.paths().clone();
+    let sub = |topic: &str, session: &str| json!({"topics": [topic], "ctx": {"session": session}});
+    let e = lab
+        .call("sub", sub("sensors/later", "s-0"), WAIT)
+        .await
+        .unwrap()
+        .expect_err("no such event");
+    assert_eq!(code_of(&e), "unknown_member", "{}", e.message);
+    // `work` keeps the alarm only: its state key is refused.
+    owner_edit(&paths, |c| {
+        let caps = &mut c.center_mut("work").unwrap().policy.caps;
+        caps.clear();
+        caps.insert("sensors.alarm".into(), nerve_policy::config::CapSetting::On);
+    })
+    .await;
+    descriptor_changed(&mut work).await;
+    for topic in ["sensors/state", "sensors/*"] {
+        let e = work
+            .call("sub", sub(topic, "s-w"), WAIT)
+            .await
+            .unwrap()
+            .expect_err("work may not have the state");
+        assert_eq!(code_of(&e), "forbidden", "{topic}: {}", e.message);
+    }
+    work.call("sub", sub("sensors/alarm", "s-w"), WAIT)
+        .await
+        .unwrap()
+        .expect("work may have the alarm");
+    lab.call("sub", sub("sensors/*", "s-all"), WAIT)
+        .await
+        .unwrap()
+        .expect("lab may");
+    let audit: Value = serde_json::from_str(&cli(&paths, &["--json", "audit"]).await).unwrap();
+    let entries = audit["entries"].as_array().unwrap();
+    for action in ["alarm", "temperature"] {
+        assert!(
+            entries.iter().any(|e| e["center"] == "lab"
+                && e["action"] == action
+                && e["decision"] == "allowed"
+                && e["session"] == "s-all"),
+            "{action}: {audit}"
+        );
+    }
+
+    // The program leaves; the center gives up its subscription, and the
+    // node takes that though the capability is gone.
+    drop(p);
+    descriptor_changed(&mut lab).await;
+    lab.call("unsub", json!({"topics": ["sensors/*"]}), WAIT)
+        .await
+        .unwrap()
+        .expect("an unsub of a capability that went");
+    let (mut p, _) = hello_with(&daemon.paths().ctl_socket(), sensors()).await;
+    descriptor_changed(&mut lab).await;
+    p.send(json!({"cap": "sensors", "event": "alarm", "data": {"level": 1}}))
+        .await;
+    // A subscription of `lab`'s made after it: the earlier event came first.
+    lab.call("sub", sub("sensors/state", "s-1"), WAIT)
+        .await
+        .unwrap()
+        .expect("sub");
+    p.send(json!({"cap": "sensors", "state": {"temperature": 20.5}}))
+        .await;
+    loop {
+        match lab.recv(WAIT).await {
+            Recv::Msg(Message::Notification { method: m, params })
+                if params["cap"] == "sensors" =>
+            {
+                assert_eq!(m, "state", "the alarm after the unsub came: {params:?}");
+                break;
+            }
+            Recv::Msg(_) => {}
+            other => panic!("no state change: {other:?}"),
+        }
+    }
+    daemon.stop().await;
+}
+
 /// The capability's own `off` or `hidden` counts over its units' `on`, as
 /// for a call: a center subscribed while it could have them gets no more
 /// events or state changes once the owner turns the whole capability off

@@ -1865,9 +1865,14 @@ folder mode it needs `on` as such an action does.
   without an audit entry, and that subscribed to it (`sub` with
   `lamp/switched` or `lamp/*`). A center's `sub` of a program's event is
   decided and audited like a call (with the session of its `ctx`), so a
-  refusal tells the center at once; the cut as each event comes holds after
-  a change of the policy, so a center the owner took `on` from gets none,
-  though it stays subscribed.
+  refusal tells the center at once; `lamp/state` is decided so for each
+  state key and `lamp/*` for each event and state key, and one refused
+  refuses the `sub`, as for `get`. An event the program does not declare is
+  `unknown_member`. The cut as each event comes holds after a change of the
+  policy, so a center the owner took `on` from, or whose capability the
+  owner turned `off` or `hidden` (though the event itself is `on`), gets
+  none, though it stays subscribed. An `unsub` only takes away, so it is
+  taken for any topic, also one of a capability whose program left.
 - **State changes.** The program may send `{"cap": "lamp", "state":
   {"level": 4}}`. Each center that subscribed to `lamp/state` (or
   `lamp/*`) gets a `state` notification with the declared keys its policy

@@ -1477,58 +1477,79 @@ impl Link {
         serde_json::to_value(out).map_err(|e| RpcError::internal(e.to_string()))
     }
 
-    /// `sub` and `unsub`. A subscription to an event of a program's
-    /// capability is decided and audited like a call of `cap.event` that
-    /// names no path; the events themselves are cut again as they come
-    /// (Shared::emit), so a change of the policy afterwards holds too. Its
-    /// `state` and `*` are cut as they come only.
+    /// `sub` and `unsub`. A subscription to a program's capability is
+    /// decided and audited unit by unit, like a call of `cap.name` that
+    /// names no path: `cap/<event>` its event, which it must declare,
+    /// `cap/state` each of its state keys, `cap/*` both; one refused refuses
+    /// it, as for `get`. The events and changes themselves are cut again as
+    /// they come (Shared::emit_all), so a change of the policy afterwards
+    /// holds too. An `unsub` only takes away, so it takes any topic, also one
+    /// of a capability that went meanwhile.
     async fn sub(&self, p: &Map<String, Value>, on: bool) -> Result<Value, RpcError> {
         let t: Topics = params(p)?;
         t.check()?;
-        let view = self.view()?;
         let mut topics = Vec::new();
-        let mut decide = Vec::new();
         for s in &t.topics {
             let topic = Topic::parse(s)
                 .ok_or_else(|| RpcError::invalid_args(format!("bad topic {s:?}")))?;
-            if view.capability(topic.cap()).is_none() {
+            topics.push(topic);
+        }
+        if !on {
+            self.handle.sub(topics, false);
+            return Ok(json!({}));
+        }
+        let view = self.view()?;
+        let mut programs = Vec::new();
+        for topic in &topics {
+            let Some(c) = view.capability(topic.cap()) else {
                 return Err(RpcError::new(
                     ErrorCode::UnknownCapability,
                     format!("no capability {}", topic.cap()),
                 ));
+            };
+            if c.provider != "node" {
+                programs.push(topic);
             }
-            if on
-                && let Topic::Event(cap, name) = &topic
-                && self.shared.providers.event_effect(cap, name).is_some()
-            {
-                decide.push((cap.clone(), name.clone()));
-            }
-            topics.push(topic);
         }
-        if !decide.is_empty() {
+        if !programs.is_empty() {
+            // Its units as the program declared them, also those this
+            // center is not offered: a refusal is in the audit.
             let (cfg, entry) = self
                 .entry()
                 .ok_or_else(|| RpcError::new(ErrorCode::Unavailable, "this center was removed"))?;
             let all =
                 descriptor::for_call(&cfg, &entry, crate::now_ms(), &self.shared.added_caps(&cfg));
-            for (cap, name) in decide {
-                let c = all.capability(&cap).ok_or_else(|| {
+            for topic in programs {
+                let cap = topic.cap();
+                let c = all.capability(cap).ok_or_else(|| {
                     RpcError::new(ErrorCode::UnknownCapability, format!("no capability {cap}"))
                 })?;
-                let decl = c.events.get(&name).ok_or_else(|| {
-                    RpcError::new(
-                        ErrorCode::UnknownMember,
-                        format!("{cap} has no event {name}"),
-                    )
-                })?;
+                let mut units: Vec<(&String, Effect)> = Vec::new();
+                match topic {
+                    Topic::Event(_, name) => {
+                        let decl = c.events.get_key_value(name).ok_or_else(|| {
+                            RpcError::new(
+                                ErrorCode::UnknownMember,
+                                format!("{cap} has no event {name}"),
+                            )
+                        })?;
+                        units.push((decl.0, decl.1.effect));
+                    }
+                    Topic::State(_) => units.extend(c.state.iter().map(|(k, d)| (k, d.effect))),
+                    Topic::All(_) => {
+                        units.extend(c.events.iter().map(|(n, d)| (n, d.effect)));
+                        units.extend(c.state.iter().map(|(k, d)| (k, d.effect)));
+                    }
+                }
                 let (program, _) = self.program(&c.provider)?;
-                let inv = unit_call(&cap, &name, Map::new(), t.ctx.clone());
                 let off = c.exposure == Exposure::Off;
-                self.decide_unit(&entry, &inv, decl.effect, off, program)
-                    .await?;
+                for (name, effect) in units {
+                    let inv = unit_call(cap, name, Map::new(), t.ctx.clone());
+                    self.decide_unit(&entry, &inv, effect, off, program).await?;
+                }
             }
         }
-        self.handle.sub(topics, on);
+        self.handle.sub(topics, true);
         Ok(json!({}))
     }
 

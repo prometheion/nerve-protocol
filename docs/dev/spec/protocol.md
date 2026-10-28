@@ -523,7 +523,9 @@ Errors carry a string code in `error.data.code` (§5.3).
   and `settings` capabilities are implicit: they are sent without
   `sub`. Everything else needs one. A program's event goes only to a center
   whose policy allows `<cap>.<event>` when it comes, and a program's state
-  change only with the keys that center may read (node-local.md §7).
+  change only with the keys that center may read (node-local.md §7). An
+  `unsub` only takes away: a node takes any well-formed topic, also one of a
+  capability that went meanwhile.
 - `seq` counts per capability from 1 within a link, across its resumes
   (§4.9); `ts` is milliseconds since the Unix epoch.
 
