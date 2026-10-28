@@ -862,6 +862,40 @@ struct InFlight {
     session: Option<String>,
 }
 
+/// A link's streams. Both maps count against `limits.streams`, so opens
+/// that wait for a program together cannot pass it, and both end with
+/// the connection they came on.
+#[derive(Default)]
+struct Streams {
+    /// Open streams by `sid`.
+    open: HashMap<u32, OpenStream>,
+    /// `stream.open`s of a program's stream waiting for the program, by
+    /// request id → their task.
+    opening: HashMap<Id, AbortHandle>,
+}
+
+impl Streams {
+    fn full(&self) -> bool {
+        self.open.len() + self.opening.len() >= limits::STREAMS as usize
+    }
+}
+
+/// An open stream: the task that sends it, and for a program's stream the
+/// unit it is, which the policy is asked about again when it changes.
+struct OpenStream {
+    task: AbortHandle,
+    unit: Option<(String, String, Effect)>,
+}
+
+/// A program's stream the program opened: its sid, what it sends, what
+/// tells the program when dropped, and the unit (`cap`, `stream`, effect).
+type ProgramOpen = (
+    u32,
+    Arc<crate::tap::Reader>,
+    crate::provider::ProgramStream,
+    (String, String, Effect),
+);
+
 /// A link's state shared with its calls. A link the center resumes keeps it
 /// over several connections.
 struct Link {
@@ -880,8 +914,9 @@ struct Link {
     /// Running `exec.run` calls → their output, for `exec`'s `output`
     /// stream; `None` for a sudo command, whose output is not streamed.
     taps: Mutex<HashMap<Id, Option<Arc<crate::tap::Tap>>>>,
-    /// Open streams by `sid` → the task that sends them.
-    streams: Mutex<HashMap<u32, AbortHandle>>,
+    /// Open streams, and the opens of a program's stream that wait for
+    /// the program.
+    streams: Mutex<Streams>,
     next_sid: AtomicU32,
     /// The `node` status the center last heard (online, busy or paused).
     last_status: Mutex<&'static str>,
@@ -1043,6 +1078,8 @@ impl Link {
                     // Every 5 s at most (resume::ACK_EVERY).
                     self.handle.send_ack();
                     self.check_rev(&mut rev);
+                    // A mode whose time limit passed takes what it gave.
+                    self.recheck_streams().await;
                     self.check_status();
                     crate::rotate::drop_old_pin(&self.shared, &self.name);
                     if self.under_a_pin_that_stopped() {
@@ -1077,6 +1114,7 @@ impl Link {
                         return Outcome::Lost;
                     }
                     self.check_rev(&mut rev);
+                    self.recheck_streams().await;
                     if cfg.version != version {
                         version = cfg.version;
                         if entry.settings == SettingsGrant::Write {
@@ -1287,21 +1325,14 @@ impl Link {
                 self.start_invoke(id, p).await;
                 return;
             }
-            // A program's state is read from the program: as its own task,
-            // so a slow program does not hold up the link.
             method::GET if self.programs(&p) => {
-                let link = self.clone();
-                tokio::spawn(async move {
-                    let r = link.program_get(&p).await;
-                    link.reply(id, r).await;
-                });
+                self.start_program_get(id, p).await;
                 return;
             }
             method::GET => self.get(&p),
             method::SUB | method::UNSUB => self.sub(&p, m == method::SUB).await,
             method::STREAM_OPEN if self.programs(&p) => {
-                let link = self.clone();
-                tokio::spawn(async move { link.program_stream_open(id, p).await });
+                self.start_program_stream(id, p).await;
                 return;
             }
             method::STREAM_OPEN => {
@@ -1336,7 +1367,13 @@ impl Link {
                 link.pump(sid, reader).await;
             }
         });
-        lock(&self.streams).insert(sid, task.abort_handle());
+        lock(&self.streams).open.insert(
+            sid,
+            OpenStream {
+                task: task.abort_handle(),
+                unit: None,
+            },
+        );
         self.reply(id, Ok(json!({ "sid": sid }))).await;
         let _ = go.send(());
     }
@@ -1384,7 +1421,7 @@ impl Link {
             )
         })?;
         let streams = lock(&self.streams);
-        if streams.len() >= limits::STREAMS as usize {
+        if streams.full() {
             return Err(RpcError::new(
                 ErrorCode::Busy,
                 format!("{} streams are open already", limits::STREAMS),
@@ -1406,7 +1443,7 @@ impl Link {
                 crate::tap::Chunk::End => break,
             };
             if !self.handle.frame(&f).await {
-                lock(&self.streams).remove(&sid);
+                lock(&self.streams).open.remove(&sid);
                 return;
             }
             seq = seq.wrapping_add(1);
@@ -1414,7 +1451,7 @@ impl Link {
         // The close goes on the link's own queue, which the writer serves
         // first: it waits until the stream's last frame went.
         let flushed = self.handle.flushed().await;
-        if lock(&self.streams).remove(&sid).is_none() || !flushed {
+        if lock(&self.streams).open.remove(&sid).is_none() || !flushed {
             return;
         }
         let close = Message::request(
@@ -1428,17 +1465,57 @@ impl Link {
     /// `stream.close` from the center: the stream stops at once.
     fn stream_close(&self, p: &Map<String, Value>) -> Result<Value, RpcError> {
         let c: StreamClose = params(p)?;
-        let task = lock(&self.streams).remove(&c.sid).ok_or_else(|| {
+        let s = lock(&self.streams).open.remove(&c.sid).ok_or_else(|| {
             RpcError::new(ErrorCode::UnknownMember, format!("no stream {}", c.sid))
         })?;
-        task.abort();
+        s.task.abort();
         Ok(json!({}))
     }
 
-    /// Ends every stream: the connection they went on is gone.
+    /// Ends every stream, and every open that waits for a program: the
+    /// connection they went on is gone, and a resumed link carries none.
     fn end_streams(&self) {
-        for (_, task) in lock(&self.streams).drain() {
+        let mut streams = lock(&self.streams);
+        for (_, s) in streams.open.drain() {
+            s.task.abort();
+        }
+        for (_, task) in streams.opening.drain() {
             task.abort();
+        }
+    }
+
+    /// Closes each program's stream the policy no longer lets this center
+    /// have, as it cuts the program's events (Shared::emit_all): the open
+    /// was decided once, and a stream may run for as long as the program
+    /// sends. The program is told, and the center gets `stream.close`.
+    async fn recheck_streams(&self) {
+        let Some((cfg, entry)) = self.entry() else {
+            return;
+        };
+        let gone: Vec<(u32, AbortHandle)> = {
+            let mut streams = lock(&self.streams);
+            let sids: Vec<u32> = streams
+                .open
+                .iter()
+                .filter(|(_, s)| {
+                    s.unit.as_ref().is_some_and(|(cap, name, effect)| {
+                        !may_take(&self.shared, &cfg, &entry, cap, name, *effect)
+                    })
+                })
+                .map(|(sid, _)| *sid)
+                .collect();
+            sids.into_iter()
+                .filter_map(|sid| streams.open.remove(&sid).map(|s| (sid, s.task)))
+                .collect()
+        };
+        for (sid, task) in gone {
+            task.abort();
+            let close = Message::request(
+                u64::from(sid),
+                method::STREAM_CLOSE,
+                json!({"sid": sid, "reason": "not allowed any more"}),
+            );
+            self.handle.send(close.encode()).await;
         }
     }
 
@@ -1610,6 +1687,52 @@ impl Link {
         .await
     }
 
+    /// A program's state is read from the program: as its own task, so a
+    /// slow program does not hold up the link. It is one of the link's
+    /// calls, so it counts against `limits.calls`, and a `cancel` or the
+    /// end of its session stops it.
+    async fn start_program_get(self: &Arc<Self>, id: Id, p: Map<String, Value>) {
+        let refusal = {
+            let calls = lock(&self.calls);
+            if calls.len() >= limits::CALLS as usize {
+                Some(RpcError::new(ErrorCode::Busy, "too many calls in flight"))
+            } else if calls.contains_key(&id) {
+                Some(RpcError::new(
+                    ErrorCode::InvalidRequest,
+                    "this id is already in flight",
+                ))
+            } else {
+                None
+            }
+        };
+        if let Some(e) = refusal {
+            return self.reply(id, Err(e)).await;
+        }
+        let session = p
+            .get("ctx")
+            .and_then(|c| c.get("session"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let link = self.clone();
+        let call_id = id.clone();
+        // Held until the handle is in the map, as for an invoke.
+        let mut calls = lock(&self.calls);
+        let task = tokio::spawn(async move {
+            let r = link.program_get(&p).await;
+            let mine = lock(&link.calls).remove(&call_id).is_some();
+            if mine {
+                link.reply(call_id, r).await;
+            }
+        });
+        calls.insert(
+            id,
+            InFlight {
+                abort: task.abort_handle(),
+                session,
+            },
+        );
+    }
+
     /// `get` of a program's state keys (all of them when `keys` is empty):
     /// each decided and audited like a call of `cap.key` that names no path;
     /// only when all are allowed does the program get the request.
@@ -1666,30 +1789,78 @@ impl Link {
     /// goes out as the stream's frames, as a command's output does; the
     /// stream ends when the program ends it or its connection ends, and a
     /// close from the center tells the program.
+    ///
+    /// It runs as its own task, so a slow program does not hold up the
+    /// link. Its place among the link's streams is taken before the program
+    /// is asked, so opens that wait together cannot pass the limit, and the
+    /// end of the connection ends a waiting open too.
+    async fn start_program_stream(self: &Arc<Self>, id: Id, p: Map<String, Value>) {
+        let refusal = {
+            let streams = lock(&self.streams);
+            if streams.full() {
+                Some(RpcError::new(
+                    ErrorCode::Busy,
+                    format!("{} streams are open already", limits::STREAMS),
+                ))
+            } else if streams.opening.contains_key(&id) {
+                Some(RpcError::new(
+                    ErrorCode::InvalidRequest,
+                    "this id is already in flight",
+                ))
+            } else {
+                None
+            }
+        };
+        if let Some(e) = refusal {
+            return self.reply(id, Err(e)).await;
+        }
+        let link = self.clone();
+        let open_id = id.clone();
+        let mut streams = lock(&self.streams);
+        let task = tokio::spawn(async move { link.program_stream_open(open_id, p).await });
+        streams.opening.insert(id, task.abort_handle());
+    }
+
     async fn program_stream_open(self: &Arc<Self>, id: Id, p: Map<String, Value>) {
         let opened = self.open_program(p).await;
-        let (sid, reader, held) = match opened {
+        let (sid, reader, held, unit) = match opened {
             Ok(o) => o,
-            Err(e) => return self.reply(id, Err(e)).await,
+            Err(e) => {
+                if lock(&self.streams).opening.remove(&id).is_some() {
+                    self.reply(id, Err(e)).await;
+                }
+                return;
+            }
         };
         let (go, start) = oneshot::channel::<()>();
-        let link = self.clone();
-        let task = tokio::spawn(async move {
-            // Held while the stream runs: dropped, it tells the program.
-            let _held = held;
-            if start.await.is_ok() {
-                link.pump(sid, reader).await;
+        {
+            let mut streams = lock(&self.streams);
+            // Gone: the connection it came on ended meanwhile, and the
+            // program's stream ends here (dropping `held` tells it).
+            if streams.opening.remove(&id).is_none() {
+                return;
             }
-        });
-        lock(&self.streams).insert(sid, task.abort_handle());
+            let link = self.clone();
+            let task = tokio::spawn(async move {
+                // Held while the stream runs: dropped, it tells the program.
+                let _held = held;
+                if start.await.is_ok() {
+                    link.pump(sid, reader).await;
+                }
+            });
+            streams.open.insert(
+                sid,
+                OpenStream {
+                    task: task.abort_handle(),
+                    unit: Some(unit),
+                },
+            );
+        }
         self.reply(id, Ok(json!({ "sid": sid }))).await;
         let _ = go.send(());
     }
 
-    async fn open_program(
-        &self,
-        p: Map<String, Value>,
-    ) -> Result<(u32, Arc<crate::tap::Reader>, crate::provider::ProgramStream), RpcError> {
+    async fn open_program(&self, p: Map<String, Value>) -> Result<ProgramOpen, RpcError> {
         let o: StreamOpen = params(&p)?;
         o.check()?;
         let (cfg, entry) = self
@@ -1716,12 +1887,6 @@ impl Link {
         let off = cap.exposure == Exposure::Off;
         self.decide_unit(&entry, &inv, decl.effect, off, program)
             .await?;
-        if lock(&self.streams).len() >= limits::STREAMS as usize {
-            return Err(RpcError::new(
-                ErrorCode::Busy,
-                format!("{} streams are open already", limits::STREAMS),
-            ));
-        }
         // Its text is scrubbed of the sudo password as a command's output
         // is: a program may print what it read.
         let shared = Arc::downgrade(&self.shared);
@@ -1737,7 +1902,7 @@ impl Link {
             .await
             .unwrap_or_else(|_| Err(program_late(&cap.provider)))?;
         let sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
-        Ok((sid, reader, held))
+        Ok((sid, reader, held, (o.cap, o.stream, decl.effect)))
     }
 
     fn get(&self, p: &Map<String, Value>) -> Result<Value, RpcError> {

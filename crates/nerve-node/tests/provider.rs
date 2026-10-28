@@ -2351,6 +2351,128 @@ async fn a_programs_stream_is_forwarded_and_ends_with_its_connection() {
     daemon.stop().await;
 }
 
+/// An open program's stream was decided once; the policy is asked again
+/// when it changes, and a stream the center may no longer have ends: the
+/// center gets `stream.close` and the program is told, as an event of the
+/// capability would no longer come.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_programs_stream_ends_when_the_policy_no_longer_allows_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, _work, mut p) = two_centers_with_sensors(dir.path()).await;
+    let open = json!({"cap": "sensors", "stream": "feed", "params": {},
+                      "ctx": {"session": "s-1"}});
+    let id = lab.request("stream.open", open).await.unwrap();
+    let asked = p.next().await.expect("the stream.open");
+    p.send(json!({"id": asked["id"], "ok": {}})).await;
+    let sid = lab
+        .answer(id, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .unwrap()["sid"]
+        .as_u64()
+        .unwrap() as u32;
+    p.send(json!({"stream": asked["id"], "data": "one\n"}))
+        .await;
+    // The owner takes `on` from `lab`: sensing needs it.
+    owner_edit(daemon.paths(), |c| {
+        c.center_mut("lab").unwrap().policy.caps.clear();
+    })
+    .await;
+    let (text, reason) = stream_of(&mut lab, sid).await;
+    assert_eq!(text, "one\n");
+    assert_eq!(reason, "not allowed any more");
+    assert_eq!(
+        p.next().await.expect("the close"),
+        json!({"method": "stream.close", "params": {"stream": asked["id"]}})
+    );
+    daemon.stop().await;
+}
+
+/// Opens of a program's stream that wait for the program together keep
+/// the link's limit of streams: the place is taken before the program is
+/// asked, so one past it is `busy` at once. An open that still waits when
+/// the connection ends ends with it, and the program is told.
+#[tokio::test(flavor = "multi_thread")]
+async fn waiting_opens_of_a_programs_stream_keep_the_limit_and_end_with_the_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, _work, mut p) = two_centers_with_sensors(dir.path()).await;
+    let open = json!({"cap": "sensors", "stream": "feed", "params": {},
+                      "ctx": {"session": "s-1"}});
+    let most = nerve_proto::limits::STREAMS as usize;
+    let mut ids = Vec::new();
+    for _ in 0..most {
+        ids.push(lab.request("stream.open", open.clone()).await.unwrap());
+    }
+    let mut asked = Vec::new();
+    for _ in 0..most {
+        let a = p.next().await.expect("a stream.open");
+        assert_eq!(a["method"], "stream.open", "{a}");
+        asked.push(a["id"].clone());
+    }
+    // None answered yet: one more finds no place.
+    let e = lab
+        .call("stream.open", open.clone(), WAIT)
+        .await
+        .unwrap()
+        .expect_err("past the limit");
+    assert_eq!(code_of(&e), "busy", "{}", e.message);
+
+    // The connection ends while they wait: the program hears of each.
+    drop(lab);
+    let mut told = std::collections::BTreeSet::new();
+    while told.len() < most {
+        let line = p.next().await.expect("the program is told");
+        let n = &line["params"]["id"];
+        let n = if n.is_null() {
+            &line["params"]["stream"]
+        } else {
+            n
+        };
+        assert!(asked.contains(n), "{line}");
+        told.insert(n.to_string());
+    }
+    daemon.stop().await;
+}
+
+/// A `get` of a program's state is one of the link's calls: a `cancel`
+/// stops it (the program is told) and answers `cancelled` at once, and
+/// past `limits.calls` in flight one more is `busy`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_programs_get_is_a_call_of_the_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, _work, mut p) = two_centers_with_sensors(dir.path()).await;
+    let get = json!({"cap": "sensors", "keys": ["temperature"], "ctx": {"session": "s-1"}});
+    let id = lab.request("get", get.clone()).await.unwrap();
+    let asked = p.next().await.expect("the get");
+    assert_eq!(asked["method"], "get", "{asked}");
+    lab.notify("cancel", json!({"id": id})).await.unwrap();
+    let e = lab
+        .answer(id, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .expect_err("cancelled");
+    assert_eq!(code_of(&e), "cancelled", "{}", e.message);
+    assert_eq!(
+        p.next().await.expect("the cancel"),
+        json!({"method": "cancel", "params": {"id": asked["id"]}})
+    );
+
+    let most = nerve_proto::limits::CALLS as usize;
+    for _ in 0..most {
+        lab.request("get", get.clone()).await.unwrap();
+    }
+    for _ in 0..most {
+        assert_eq!(p.next().await.expect("a get")["method"], "get");
+    }
+    let e = lab
+        .call("get", get, WAIT)
+        .await
+        .unwrap()
+        .expect_err("past the limit");
+    assert_eq!(code_of(&e), "busy", "{}", e.message);
+    daemon.stop().await;
+}
+
 /// The text of stream `sid` as it comes to `conn`, in order from seq 0,
 /// and the reason of the node's `stream.close` that ends it.
 async fn stream_of(conn: &mut Conn<TcpStream>, sid: u32) -> (String, String) {
