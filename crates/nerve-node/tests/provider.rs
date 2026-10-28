@@ -1877,7 +1877,17 @@ fn the_root_helper_says_what_a_process_runs() {
         .spawn()
         .unwrap();
     let pid = child.id().to_string();
-    let sleep = std::fs::read_link(format!("/proc/{pid}/exe")).unwrap();
+    // Until the child has run exec its program is still this test's: wait
+    // for the change, or the helper may read another program than this did.
+    let own = std::env::current_exe().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let sleep = loop {
+        let at = std::fs::read_link(format!("/proc/{pid}/exe")).unwrap();
+        if at != own || std::time::Instant::now() > deadline {
+            break at;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
     let v = ask(&[&pid, sleep.to_str().unwrap()]);
     assert_eq!(v["running"], sleep.to_str().unwrap(), "{v}");
     assert_eq!(v["same"], true, "{v}");
