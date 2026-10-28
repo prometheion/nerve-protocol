@@ -1647,8 +1647,9 @@ impl Center {
 
     /// Switches a node off or on for the agent. The link stays as it is;
     /// `list` and the call path look at the flag, and the calls that run on
-    /// the node (jobs too) are stopped: the owner who disables a machine
-    /// wants the agent's work there to end, not to run on unseen.
+    /// the node (jobs too, and a program's streams and subscriptions) are
+    /// stopped: the owner who disables a machine wants the agent's work
+    /// there to end, not to run on unseen.
     pub fn set_disabled(&self, node_id: &str, disabled: bool) -> Result<(), String> {
         self.update(|s| {
             s.nodes.get_mut(node_id).ok_or("no such node")?.disabled = disabled;
@@ -1661,6 +1662,14 @@ impl Center {
                 let stops = sess.jobs.lock().unwrap().stop_on(node_id);
                 for stop in stops {
                     let _ = stop.send(Stop::Disabled);
+                }
+                // A program's open streams and the subscriptions to its
+                // events are no jobs, but run there all the same: the node
+                // gets `stream.close` and `unsub`, and the agent reads none
+                // of what came meanwhile once the node is enabled again.
+                let units = sess.streams.lock().unwrap().units_on(node_id);
+                for c in units {
+                    c.close("the node was disabled in the center");
                 }
             }
         }
@@ -2740,6 +2749,18 @@ impl Center {
             )
             .into());
         }
+        // A subscription's ring is on the link it was made on
+        // (subscribe_events). The node may have come back on another link
+        // while the checker was asked: there the events would reach no
+        // ring, and no `unsub` would ever end the node's subscription.
+        if route.kind == UnitKind::Event {
+            let topic = format!("{}/{}", route.cap, route.action);
+            if !sess.streams.lock().unwrap().subscribed_on(&link, &topic) {
+                return Err(
+                    RpcError::new(ErrorCode::ConnectionLost, "the link to the node ended").into(),
+                );
+            }
+        }
         let ctx = json!({"session": sess.id});
         sess.nodes.lock().unwrap().insert(route.node_id.clone());
         link.sessions.lock().unwrap().insert(sess.id.clone());
@@ -2911,6 +2932,40 @@ impl Center {
         Ok(())
     }
 
+    /// Adds the stream `id` of a program's unit `route` to `sess`, when
+    /// there is room for it: taken in the one lock with the add
+    /// ([`Streams::add_unit`](streams::Streams::add_unit)), so parallel
+    /// `execute`s that all waited for the checker cannot pass the limit.
+    fn add_unit_stream(
+        &self,
+        sess: &Session,
+        route: &Route,
+        id: &str,
+        what: String,
+        ring: Arc<Ring>,
+    ) -> Result<(), CallError> {
+        let (added, gone) =
+            sess.streams
+                .lock()
+                .unwrap()
+                .add_unit(id, &route.node_id, what, ring, Instant::now());
+        for c in gone {
+            c.close("too many streams");
+        }
+        match added {
+            Ok(()) => Ok(()),
+            Err(streams::NotAdded::Ended) => Err(Stop::SessionEnded.error().into()),
+            Err(streams::NotAdded::Full) => Err(RpcError::new(
+                ErrorCode::Busy,
+                format!(
+                    "this session holds {} streams already, the most it may: close one with stream.close",
+                    streams::STREAMS_MAX
+                ),
+            )
+            .into()),
+        }
+    }
+
     /// `execute` of a program's event `route`: subscribes `sess` to it on
     /// its node (decided by the checker and the node like a call) and gives
     /// the id of the stream its events come in, one JSON line each, read
@@ -2942,14 +2997,8 @@ impl Center {
         };
         // The ring takes the topic's events before the node is asked: the
         // first may follow its answer at once. Refused, it goes again.
-        if !sess
-            .streams
-            .lock()
-            .unwrap()
-            .add_unit(&id, &route.node_id, what, ring.clone())
-        {
-            return Err(Stop::SessionEnded.error().into());
-        }
+        self.add_unit_stream(sess, route, &id, what, ring.clone())
+            .map_err(|CallError::Rpc(e)| self.refused(sess, route, e))?;
         adding.id = Some(id.clone());
         link.subscribe(&topic, ring.clone());
         if !sess.streams.lock().unwrap().subscribed(&id, &link, &topic) {
@@ -2995,6 +3044,7 @@ impl Center {
         route: &Route,
         args: Map<String, Value>,
     ) -> Result<String, CallError> {
+        // Looked at before the checker too, which then costs no model call.
         self.stream_room(sess)
             .map_err(|why| RpcError::new(ErrorCode::Busy, why))?;
         let link = self.admit(sess, route, &args).await?;
@@ -3003,14 +3053,9 @@ impl Center {
         let id = streams::new_id();
         let ring = Arc::new(Ring::of(streams::Source::Program));
         let what = format!("stream {}.{}", route.cap, route.action);
-        if !sess
-            .streams
-            .lock()
-            .unwrap()
-            .add_unit(&id, &route.node_id, what, ring.clone())
-        {
-            return Err(Stop::SessionEnded.error().into());
-        }
+        // Looked at again: the checker may have taken seconds, while other
+        // calls of the session added theirs.
+        self.add_unit_stream(sess, route, &id, what, ring.clone())?;
         // A cancelled `execute` takes it out again; the node's stream, if
         // its answer still comes, is closed by the link (Link::open_stream).
         let mut adding = Adding {

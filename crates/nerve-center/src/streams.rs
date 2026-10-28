@@ -411,6 +411,15 @@ impl Entry {
     }
 }
 
+/// Why [`Streams::add_unit`] added no stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotAdded {
+    /// The session holds [`STREAMS_MAX`] streams that still run.
+    Full,
+    /// The session ended.
+    Ended,
+}
+
 /// A session's streams, under their own lock: nothing else is locked while
 /// it is held.
 #[derive(Default)]
@@ -465,10 +474,28 @@ impl Streams {
     }
 
     /// Adds a stream of a program's unit on `node_id`, as `id`, before the
-    /// node opened it or the subscription was made; `what` names it.
-    /// Refused once the session ended.
-    pub fn add_unit(&mut self, id: &str, node_id: &str, what: String, ring: Arc<Ring>) -> bool {
-        self.insert(id, node_id, what, None, ring)
+    /// node opened it or the subscription was made; `what` names it. The
+    /// room for it is made and taken here, under the one lock: a session's
+    /// calls run side by side, and each may have waited for the action
+    /// checker since it last looked, so a look before is not enough. The
+    /// closers of what went to make room are given back.
+    pub fn add_unit(
+        &mut self,
+        id: &str,
+        node_id: &str,
+        what: String,
+        ring: Arc<Ring>,
+        now: Instant,
+    ) -> (Result<(), NotAdded>, Vec<Closer>) {
+        let (room, gone) = self.room(now);
+        if self.ended {
+            return (Err(NotAdded::Ended), gone);
+        }
+        if !room {
+            return (Err(NotAdded::Full), gone);
+        }
+        self.insert(id, node_id, what, None, ring);
+        (Ok(()), gone)
     }
 
     fn insert(
@@ -505,6 +532,33 @@ impl Streams {
             }
             None => false,
         }
+    }
+
+    /// Whether a stream of the session takes the events of `topic` on
+    /// `link`: a subscription made on another link of the node (it went
+    /// meanwhile) has no ring there.
+    pub fn subscribed_on(&self, link: &Arc<Link>, topic: &str) -> bool {
+        self.entries.values().any(|e| {
+            e.sub
+                .as_ref()
+                .is_some_and(|(l, t)| std::ptr::eq(l.as_ptr(), Arc::as_ptr(link)) && t == topic)
+        })
+    }
+
+    /// Takes out the streams of programs' units on `node_id`, its open
+    /// streams and subscriptions, to close them: they are not jobs, so
+    /// stopping the jobs there would leave them running.
+    pub fn units_on(&mut self, node_id: &str) -> Vec<Closer> {
+        let ids: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| e.node_id == node_id && e.job.is_none())
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.iter()
+            .filter_map(|id| self.entries.remove(id))
+            .map(Entry::closer)
+            .collect()
     }
 
     /// The node opened the stream `id` as `sid` on `link`; `false` when the
@@ -1002,5 +1056,41 @@ mod tests {
         let ring = Arc::new(Ring::default());
         assert!(!s.add("s-x", "n1", "j-x", ring));
         assert!(!s.room(now).0);
+    }
+
+    /// A program's unit's stream is added only with room for it, looked at
+    /// in the add itself: the session's other calls may have added theirs
+    /// while this one waited for the checker. Disabling the node takes out
+    /// its units' streams and leaves its jobs' and other nodes' alone.
+    #[test]
+    fn a_units_stream_takes_its_room_as_it_is_added() {
+        let link = Arc::new(Link::for_test("n1"));
+        let mut s = Streams::default();
+        let now = Instant::now();
+        assert!(s.add("s-job", "n1", "j-1", Arc::new(Ring::default())));
+        assert!(s.add("s-other", "n2", "j-2", Arc::new(Ring::default())));
+        for i in 2..STREAMS_MAX {
+            let what = format!("the events of board.e{i}");
+            let ring = Arc::new(Ring::of(Source::Events));
+            let (added, gone) = s.add_unit(&format!("s-{i}"), "n1", what, ring, now);
+            assert_eq!(added, Ok(()));
+            assert!(gone.is_empty());
+        }
+        assert!(s.subscribed("s-2", &link, "board/e2"));
+        assert!(s.subscribed_on(&link, "board/e2"));
+        assert!(!s.subscribed_on(&link, "board/e3"), "never subscribed");
+        let other = Arc::new(Link::for_test("n1"));
+        assert!(!s.subscribed_on(&other, "board/e2"), "another link");
+        let ring = Arc::new(Ring::of(Source::Program));
+        let (added, _) = s.add_unit("s-more", "n1", "stream board.feed".into(), ring, now);
+        assert_eq!(added, Err(NotAdded::Full));
+        assert_eq!(s.len(), STREAMS_MAX);
+
+        assert_eq!(s.units_on("n1").len(), STREAMS_MAX - 2);
+        assert_eq!(s.len(), 2, "the jobs' streams stay");
+        s.end();
+        let ring = Arc::new(Ring::of(Source::Program));
+        let (added, _) = s.add_unit("s-late", "n1", "stream board.feed".into(), ring, now);
+        assert_eq!(added, Err(NotAdded::Ended));
     }
 }

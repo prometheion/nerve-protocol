@@ -5448,3 +5448,221 @@ async fn a_programs_stream_opens_through_execute() {
     );
     r.stop().await;
 }
+
+/// Disabling a node ends the session's streams of its programs' units, as
+/// it stops its jobs: they run there too. The node gets `unsub` and
+/// `stream.close`, and once it is enabled again neither stream is known,
+/// so nothing that came while it was disabled is read.
+#[tokio::test]
+async fn disabling_a_node_ends_its_subscriptions_and_program_streams() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = board_box(&r).await;
+    list_text(
+        &e,
+        json!({"node": "box-1", "capability": ["board.alarm", "board.feed"]}),
+    )
+    .await;
+    let reply = execute_as(&e, json!(1), "board.alarm", json!({})).await;
+    let alarm = opened_stream(&reply, "board.alarm", "event");
+    assert_eq!(next_state(&mut seen).await.0, "sub");
+    // Opened with `every_ms` 999, the node's stream stays open.
+    let reply = execute_as(&e, json!(2), "board.feed", json!({"every_ms": 999})).await;
+    let feed = opened_stream(&reply, "board.feed", "stream");
+    let Seen::StreamOpen(_) = next_seen(&mut seen).await else {
+        panic!("no stream.open")
+    };
+    r.center.set_disabled(&node, true).unwrap();
+    let (mut unsub, mut closed) = (false, false);
+    while !(unsub && closed) {
+        match next_seen(&mut seen).await {
+            Seen::State(m, p) => {
+                assert_eq!(
+                    (m.as_str(), &p["topics"]),
+                    ("unsub", &json!(["board/alarm"]))
+                );
+                unsub = true;
+            }
+            Seen::StreamClose(_) => closed = true,
+            _ => {}
+        }
+    }
+    assert_eq!(e.session().streams.lock().unwrap().len(), 0);
+    r.center.set_disabled(&node, false).unwrap();
+    for stream in [alarm, feed] {
+        assert!(
+            unknown_stream(&read_stream(&e, &stream, 0).await),
+            "{stream}"
+        );
+    }
+    r.stop().await;
+}
+
+/// A subscription outlives a dropped link the node resumes: the node keeps
+/// it and the center its ring, so no new `sub` is sent, and an event the
+/// node sends after the resume reaches the same stream.
+#[tokio::test]
+async fn a_resumed_link_keeps_its_subscriptions() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(dir.path()).await;
+    let key = NodeKey::generate().unwrap();
+    assert_eq!(pair(&r, &key, "box-1").await.0, 200);
+    let mut d = descriptor(&key, "box-1");
+    board(&mut d);
+    let (mut ws, welcome) = handshake_with(
+        &r,
+        &key,
+        json!({"resume": {"link": link_id('a'), "got": 0}}),
+    )
+    .await;
+    assert_eq!(resume_of(&welcome), json!({"resumed": false, "got": 0}));
+    let (id, m, _) = request(&mut ws).await;
+    assert_eq!(m, method::DESCRIBE);
+    send(&mut ws, Message::result(id, d.clone())).await;
+    described(&r.center).await;
+    let e = Arc::new(Engine::new(&r.center, "test"));
+    list_text(&e, json!({"node": "box-1", "capability": ["board.alarm"]})).await;
+    let call = tokio::spawn({
+        let e = e.clone();
+        async move { execute_as(&e, json!(1), "board.alarm", json!({})).await }
+    });
+    let (sub, m, p) = request(&mut ws).await;
+    assert_eq!(m, method::SUB);
+    assert_eq!(p["topics"], json!(["board/alarm"]));
+    send(&mut ws, Message::result(sub, json!({}))).await;
+    let stream = opened_stream(&call.await.unwrap(), "board.alarm", "event");
+
+    drop(ws);
+    let node = key.node_id();
+    wait_for(|| r.center.link(&node).is_none().then_some(())).await;
+    let (mut ws, welcome) = handshake_with(
+        &r,
+        &key,
+        json!({"resume": {"link": link_id('a'), "got": 2}}),
+    )
+    .await;
+    assert_eq!(resume_of(&welcome)["resumed"], true, "{welcome:?}");
+    // The center's new describe, not a `sub` again.
+    let (id, m, _) = request(&mut ws).await;
+    assert_eq!(m, method::DESCRIBE);
+    send(&mut ws, Message::result(id, d)).await;
+    let ev = json!({"cap": "board", "name": "alarm", "seq": 1, "ts": 1, "data": {"level": 7}});
+    send(&mut ws, Message::notification(method::EVENT, ev)).await;
+    let (text, got) = read_until(&e, &stream, |t| !t.is_empty()).await;
+    assert_eq!(read_of(&got).1["eof"], false, "{got}");
+    let ev: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(ev["data"]["level"], 7, "{text}");
+    r.stop().await;
+}
+
+/// A decision model at a local address that holds its answer: `asked`
+/// hears of each request that reaches it, which is answered (with a low
+/// score, so the call goes on) only once `go` fires. Its URL.
+fn held_model() -> (
+    String,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+) {
+    use std::io::{Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let (asked, asked_rx) = std::sync::mpsc::channel();
+    let (go, go_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let mut held = true;
+        for conn in l.incoming() {
+            let Ok(mut conn) = conn else { return };
+            let _ = conn.set_read_timeout(Some(Duration::from_secs(10)));
+            let mut got = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let Ok(n) = conn.read(&mut buf) else { return };
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&got).into_owned();
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let want = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")?
+                                .parse()
+                                .ok()
+                        })
+                        .unwrap_or(0usize);
+                    if body.len() >= want {
+                        break;
+                    }
+                }
+            }
+            let _ = asked.send(());
+            if held {
+                held = false;
+                if go_rx.recv_timeout(Duration::from_secs(20)).is_err() {
+                    return;
+                }
+            }
+            let answer = r#"{"answers":{"danger":{"type":"noul","noul":0.01}}}"#;
+            let _ = write!(
+                conn,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                answer.len()
+            );
+        }
+    });
+    (format!("http://127.0.0.1:{port}"), asked_rx, go)
+}
+
+/// A subscription whose node came back on another link while the action
+/// checker was asked is refused: its ring is on the old link, which ended,
+/// so the new one is never sent the `sub`, and the session holds no
+/// stream for it.
+#[tokio::test]
+async fn a_subscription_whose_link_changed_during_the_checker_is_refused() {
+    use nerve_center::checker::config::ModelScope;
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let key = NodeKey::generate().unwrap();
+    assert_eq!(pair(&r, &key, "box-1").await.0, 200);
+    let mut d = descriptor(&key, "box-1");
+    board(&mut d);
+    let (ws, _) = handshake(&r, &key).await;
+    let (_, first) = serve_task(ws, d.clone());
+    described(&r.center).await;
+    let e = Arc::new(Engine::new(&r.center, "test"));
+    list_text(&e, json!({"node": "box-1", "capability": ["board.alarm"]})).await;
+    let (url, asked, go) = held_model();
+    r.center.update(|s| {
+        s.checker.model_on = true;
+        s.checker.model.source = ModelSource::Endpoint;
+        s.checker.model.endpoint_url = url;
+        s.checker.model.scope = ModelScope::WithReads;
+    });
+    r.center.rebuild_checker();
+    let call = tokio::spawn({
+        let e = e.clone();
+        async move { execute_as(&e, json!(1), "board.alarm", json!({})).await }
+    });
+    tokio::task::spawn_blocking(move || asked.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the model was asked");
+    // The node's link ends while the model thinks, and it dials again.
+    first.abort();
+    let node = key.node_id();
+    wait_for(|| r.center.link(&node).is_none().then_some(())).await;
+    let (ws, _) = handshake(&r, &key).await;
+    let mut seen = serve(ws, d);
+    wait_for(|| r.center.link(&node).map(|_| ())).await;
+    go.send(()).unwrap();
+    let reply = call.await.unwrap();
+    let (text, err) = said(&reply);
+    assert!(err && text.starts_with("error connection_lost"), "{reply}");
+    assert_eq!(e.session().streams.lock().unwrap().len(), 0);
+    let link = r.center.link(&node).unwrap();
+    assert_eq!(link.subscribers("board/alarm"), 0);
+    nothing_more(&mut seen).await;
+    r.stop().await;
+}
