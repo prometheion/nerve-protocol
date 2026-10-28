@@ -13,7 +13,7 @@ use nerve_node_desktop::app::{Choose, Ctl, Exec};
 use nerve_node_desktop::broker::Launch;
 use nerve_node_desktop::headless::Screen;
 use nerve_node_desktop::runner::Runner;
-use nerve_node_desktop::{AppWindow, Install, Load, Logs, Page, Perm, Prefs, Store};
+use nerve_node_desktop::{AppWindow, Caps, Install, Load, Logs, Page, Perm, Prefs, Store};
 use nerve_policy::NodeConfig;
 use serde_json::Value;
 use slint::{ComponentHandle, Model};
@@ -455,7 +455,7 @@ fn the_app_drives_the_cli_end_to_end() {
     );
 
     // Permissions: the mode with a time, a folder from the system's
-    // dialog (answered here), a rule, a capability switch.
+    // dialog (answered here), a rule.
     let work = root.join("work");
     std::fs::create_dir(&work).unwrap();
     let picked = work.clone();
@@ -471,7 +471,6 @@ fn the_app_drives_the_cli_end_to_end() {
     assert_eq!(perm.get_load(), Load::Ready, "{}", perm.get_error());
     // A new pairing starts in folder mode.
     assert_eq!(perm.get_mode(), "folder");
-    assert!(perm.get_caps().iter().any(|c| c.name == "exec.run"));
     perm.invoke_mode_pick("user".into());
     assert!(perm.get_mode_open());
     perm.set_mode_timed(true);
@@ -602,13 +601,11 @@ fn the_app_drives_the_cli_end_to_end() {
         {"path": "/elsewhere", "rights": "r--", "read": true, "write": false, "execute": false}
     ]});
     let rules = serde_json::json!({"center": "other", "allow": ["exec.run:elsewhere"], "deny": [], "sudo": []});
-    let caps = serde_json::json!({"center": "other", "caps": {}, "known": {}});
     ctl.perm_loaded(
         stale,
         (
             Ok(elsewhere),
             Ok(rules),
-            Ok(caps),
             Ok(serde_json::json!({"sudo": "on"})),
         ),
     );
@@ -686,17 +683,57 @@ fn the_app_drives_the_cli_end_to_end() {
     );
     perm.invoke_rule_remove(0, "exec.run:type C:\\tools\\x.exe".into());
     assert!(!allowed("exec.run:type C:\\tools\\x.exe"));
-    perm.invoke_cap_set("exec.run".into(), 1);
+    // The capability switches are on the Capabilities page, for the
+    // center it shows; none of them is on Permissions any more.
+    let caps = window.global::<Caps>();
+    store.invoke_show(Page::Capabilities);
+    assert_eq!(caps.get_center(), "home");
+    assert_eq!(caps.get_load(), Load::Ready, "{}", caps.get_error());
+    let row = |name: &str| caps.get_rows().iter().find(|c| c.name == name);
+    let run = row("exec.run").expect("exec.run is listed");
+    assert!(run.switchable && run.action);
+    assert_eq!((run.setting, run.effect.as_str()), (-1, "execute"));
+    caps.invoke_cap_set("exec.run".into(), 1);
     assert_eq!(
         config(&paths).centers[0].policy.caps.get("exec.run"),
         Some(&nerve_policy::config::CapSetting::Off)
     );
+    assert_eq!(row("exec.run").unwrap().setting, 1, "{}", store.get_toast());
+    caps.invoke_cap_set("exec".into(), 2);
+    assert_eq!(row("exec").unwrap().setting, 2);
+    caps.invoke_cap_set("exec".into(), 0);
+    caps.invoke_cap_set("exec.run".into(), 0);
+    assert_eq!(row("exec.run").unwrap().setting, 0);
+    // The provider allow list is here too: a program by its full path,
+    // listed without its state while the node does not run, and removed.
+    let program = std::env::current_exe().unwrap().display().to_string();
+    caps.set_program_name("desk".into());
+    caps.set_program_exe("not/a/full/path".into());
+    caps.invoke_program_allow();
     assert!(
-        perm.get_caps()
-            .iter()
-            .any(|c| c.name == "exec.run" && c.setting == 1 && c.set)
+        caps.get_program_error().contains("full path"),
+        "{}",
+        caps.get_program_error()
     );
-    perm.invoke_cap_set("exec.run".into(), 0);
+    assert!(config(&paths).providers.allowed.is_empty());
+    caps.set_program_exe(program.as_str().into());
+    caps.invoke_program_allow();
+    assert_eq!(caps.get_program_error(), "");
+    assert_eq!(caps.get_program_name(), "", "the fields are not cleared");
+    let allowed = &config(&paths).providers.allowed;
+    assert_eq!(
+        (allowed[0].name.as_str(), allowed[0].exe.as_str()),
+        ("desk", program.as_str())
+    );
+    let listed = caps.get_programs().row_data(0).unwrap();
+    assert_eq!(
+        (listed.name.as_str(), listed.attached.as_str()),
+        ("desk", "")
+    );
+    caps.invoke_program_remove("desk".into());
+    assert!(config(&paths).providers.allowed.is_empty());
+    assert_eq!(caps.get_programs().row_count(), 0);
+    store.invoke_show(Page::Policy);
 
     // A pairing without the whole guard (the owner took a rule off) is
     // offered it, in one click.

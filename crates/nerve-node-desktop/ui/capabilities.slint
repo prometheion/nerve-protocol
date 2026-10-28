@@ -1,0 +1,276 @@
+// Capabilities: what this node offers, from `nerve-node cap ls`. Its own
+// capabilities, those of node.toml and those of the programs the owner
+// allows, each unit with what it does and its switch for one center; and the
+// programs allowed as providers. Each change runs one `nerve-node` command.
+
+import { Theme, Type, Space, Radius, Size, Tone } from "theme.slint";
+import { Load, CapRow, ProgramRow } from "data.slint";
+import { Store, Caps } from "store.slint";
+import {
+    Button, ButtonKind, Card, Pill, Banner, Loading, PageHeader, PageFrame, EmptyState, Divider,
+    Segmented, Picker, ListRow, TextField, Icon, Reveal, PathText, ScrollBox,
+} from "widgets.slint";
+import { Section } from "permissions.slint";
+
+// Every capability and its units, each with its switch for the page's
+// center; one the node leaves out says why instead.
+component OfferedSection inherits Section {
+    icon: @image-url("icons/plug.svg");
+    title: "What this node offers";
+    text: Caps.center == "" ? "Pair a center to switch them for it."
+        : "Off: " + Caps.center + " may not use it. Hidden: it does not see it. None chosen: its mode decides.";
+    Reveal {
+        shown: !Caps.running;
+        HorizontalLayout {
+            padding-left: Space.xl;
+            padding-right: Space.xl;
+            padding-bottom: Space.md;
+            Banner {
+                tone: Tone.neutral;
+                text: "The node does not run: the programs' capabilities, and whether a center may use each one now, show while it runs.";
+            }
+        }
+    }
+    ScrollBox {
+        rows: Caps.rows.length;
+        max-rows: 14;
+        long-height: 640px;
+        for c[i] in Caps.rows: ListRow {
+            first: i == 0;
+            HorizontalLayout {
+                horizontal-stretch: 1;
+                padding-left: c.action ? Space.xl : 0;
+                spacing: Space.sm;
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    Text {
+                        text: c.name;
+                        color: Theme.text;
+                        font-size: Type.small;
+                        font-weight: c.action ? Type.regular : Type.semibold;
+                        font-family: Type.mono;
+                    }
+                }
+                if !c.action: VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    Pill {
+                        text: c.source;
+                        tone: c.source == "built-in" ? Tone.neutral : Tone.accent;
+                    }
+                }
+                if c.action && c.effect != "": VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    Pill {
+                        text: c.effect;
+                        tone: c.tone;
+                    }
+                }
+                if c.action && c.left-out != "": VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    Pill {
+                        text: "left out";
+                        tone: Tone.danger;
+                    }
+                }
+                // Its line for the agent, or why the node leaves it out.
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: c.left-out != "" ? c.left-out : c.summary;
+                        color: c.left-out != "" ? Theme.tone(Tone.danger) : Theme.text-muted;
+                        font-size: Type.small;
+                        overflow: elide;
+                    }
+                }
+            }
+            if c.now != "": VerticalLayout {
+                alignment: center;
+                Pill {
+                    text: c.now == "on" ? "In use" : "Not now";
+                    tone: c.now == "on" ? Tone.ok : Tone.neutral;
+                    dot: true;
+                }
+            }
+            if c.switchable: Segmented {
+                options: ["On", "Off", "Hidden"];
+                current: c.setting;
+                chosen(s) => {
+                    Caps.cap-set(c.name, s);
+                }
+            }
+        }
+    }
+}
+
+// The programs the owner allows to add capabilities while they run, and a
+// row to allow one more.
+component ProgramSection inherits Section {
+    icon: @image-url("icons/window.svg");
+    title: "Programs";
+    text: Caps.programs-note != "" ? Caps.programs-note
+        : "A program you allow adds capabilities while it runs, as a provider. The node checks that the program that attaches runs this very file.";
+    ScrollBox {
+        rows: Caps.programs.length;
+        for p[i] in Caps.programs: ListRow {
+            first: i == 0;
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: p.name;
+                    color: Theme.text;
+                    font-size: Type.small;
+                    font-weight: Type.semibold;
+                    font-family: Type.mono;
+                }
+            }
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                PathText {
+                    text: p.exe;
+                    color: Theme.text-muted;
+                }
+            }
+            if p.attached != "": VerticalLayout {
+                alignment: center;
+                Pill {
+                    text: p.attached == "attached" ? "Attached" : "Not attached";
+                    tone: p.attached == "attached" ? Tone.ok : Tone.neutral;
+                    dot: true;
+                }
+            }
+            Button {
+                icon: @image-url("icons/trash.svg");
+                kind: ButtonKind.ghost;
+                small: true;
+                accessible-label: "Remove " + p.name;
+                clicked => {
+                    Caps.program-remove(p.name);
+                }
+            }
+        }
+    }
+    if !Caps.windows: VerticalLayout {
+        if Caps.programs.length > 0: Divider { }
+        HorizontalLayout {
+            padding: Space.lg;
+            padding-left: Space.xl;
+            spacing: Space.md;
+            TextField {
+                width: 150px;
+                text <=> Caps.program-name;
+                mono: true;
+                placeholder: "desk";
+                label: "Name";
+            }
+            TextField {
+                horizontal-stretch: 1;
+                text <=> Caps.program-exe;
+                mono: true;
+                placeholder: "/usr/bin/the-program";
+                label: "Program";
+                accepted => {
+                    Caps.program-allow();
+                }
+            }
+            Button {
+                text: "Choose…";
+                small: true;
+                clicked => {
+                    Caps.program-choose();
+                }
+            }
+            Button {
+                text: "Allow";
+                icon: @image-url("icons/plus.svg");
+                small: true;
+                busy: Caps.program-busy;
+                enabled: Caps.program-name != "" && Caps.program-exe != "";
+                clicked => {
+                    Caps.program-allow();
+                }
+            }
+        }
+        Reveal {
+            shown: Caps.program-error != "";
+            HorizontalLayout {
+                padding-left: Space.xl;
+                padding-right: Space.xl;
+                padding-bottom: Space.lg;
+                Banner {
+                    tone: Tone.danger;
+                    text: Caps.program-error;
+                }
+            }
+        }
+    }
+}
+
+export component CapabilitiesPage inherits PageFrame {
+    gap: 0;
+    PageHeader {
+        icon: @image-url("icons/plug.svg");
+        title: "Capabilities";
+        error-title: "What the node offers could not be read";
+        error: Caps.error;
+        error-action: "Try again";
+        error-acted => {
+            Caps.refresh();
+        }
+        Button {
+            text: "Refresh";
+            icon: @image-url("icons/refresh.svg");
+            kind: ButtonKind.ghost;
+            clicked => {
+                Store.reload();
+            }
+        }
+    }
+
+    Reveal {
+        shown: Caps.centers.length > 1;
+        gap: Space.xxl;
+        HorizontalLayout {
+            alignment: start;
+            spacing: Space.md;
+            Text {
+                text: "Center";
+                color: Theme.text-muted;
+                font-size: Type.small;
+                vertical-alignment: center;
+            }
+            if Caps.centers.length <= 4: Segmented {
+                options: Caps.centers;
+                current: Caps.current;
+                chosen(i) => {
+                    Caps.pick(i);
+                }
+            }
+            if Caps.centers.length > 4: Picker {
+                options: Caps.centers;
+                current: Caps.current;
+                label: "Center";
+                chosen(i) => {
+                    Caps.pick(i);
+                }
+            }
+        }
+    }
+
+    if Caps.load == Load.loading && !Caps.read: Loading { }
+
+    Reveal {
+        shown: Caps.read;
+        gap: Space.xxl;
+        VerticalLayout {
+            spacing: Space.xxl;
+            OfferedSection { }
+            ProgramSection { }
+        }
+    }
+}

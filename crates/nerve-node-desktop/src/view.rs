@@ -9,8 +9,8 @@ use serde_json::Value;
 use slint::{ModelRc, SharedString, VecModel};
 
 use crate::{
-    AuditRow, CapRow, CenterRow, FolderRow, LogRow, NodeStatus, PairPreview, RelayNodeRow, Tone,
-    TunnelRow,
+    AuditRow, CapRow, CenterRow, FolderRow, LogRow, NodeStatus, PairPreview, ProgramRow,
+    RelayNodeRow, Tone, TunnelRow,
 };
 
 fn s(v: &Value) -> &str {
@@ -640,41 +640,125 @@ pub fn pattern_rule(text: &str) -> bool {
     })
 }
 
-/// The capability switches of `cap ls --json`: each capability the node
-/// knows, then its actions, with what is set (on when nothing is).
-pub fn caps(v: &Value) -> Vec<CapRow> {
+/// The rows of the Capabilities page, from `cap ls --json`: each
+/// capability once, where its first unit comes, and its units under it, in
+/// the node's order. `center` is the one whose switches show ("" for none):
+/// each switch as `caps` holds it (-1 where none is set and the mode
+/// decides), and whether the running node lets that center use the unit
+/// now. A unit the node leaves out says why, and has no switch; neither has
+/// `settings`, which the center's settings grant governs.
+pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
     let setting = |name: &str| match v["caps"][name].as_str() {
-        Some("off") => (1, true),
-        Some("hidden") => (2, true),
-        Some(_) => (0, true),
-        None => (0, false),
+        Some("on") => 0,
+        Some("off") => 1,
+        Some("hidden") => 2,
+        _ => -1,
     };
-    let mut rows = Vec::new();
-    for (cap, actions) in v["known"].as_object().into_iter().flatten() {
-        let (s, set) = setting(cap);
-        rows.push(CapRow {
-            name: cap.as_str().into(),
-            action: false,
-            setting: s,
-            set,
-        });
-        for a in actions
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
+    // The units by their capability and where they come from: a program's
+    // left-out units come after all its others.
+    let mut groups: Vec<(&str, &str, Vec<&Value>)> = Vec::new();
+    for r in v["capabilities"].as_array().into_iter().flatten() {
+        let name = s(&r["name"]);
+        let cap = name.split_once('.').map_or(name, |(c, _)| c);
+        let source = s(&r["source"]);
+        match groups
+            .iter_mut()
+            .find(|(c, o, _)| *c == cap && *o == source)
         {
-            let name = format!("{cap}.{a}");
-            let (s, set) = setting(&name);
+            Some((_, _, units)) => units.push(r),
+            None => groups.push((cap, source, vec![r])),
+        }
+    }
+    let left_out = |r: &Value| s(&r["broken"]).to_string() + s(&r["left_out"]);
+    let mut rows = Vec::new();
+    for (cap, source, units) in groups {
+        let switches = !center.is_empty() && cap != "settings";
+        rows.push(CapRow {
+            name: cap.into(),
+            action: false,
+            effect: SharedString::new(),
+            tone: Tone::Neutral,
+            source: source.into(),
+            summary: SharedString::new(),
+            left_out: SharedString::new(),
+            switchable: switches && units.iter().any(|r| left_out(r).is_empty()),
+            setting: setting(cap),
+            now: SharedString::new(),
+        });
+        for r in units {
+            let name = s(&r["name"]);
+            let why = left_out(r);
+            let effect = s(&r["effect"]);
+            let tone = match effect {
+                "sense" | "actuate" => Tone::Warn,
+                "execute" => Tone::Accent,
+                _ => Tone::Neutral,
+            };
+            // A program's state key, event or stream says its kind.
+            let effect = match r["kind"].as_str() {
+                Some(kind) if !effect.is_empty() => format!("{effect} {kind}"),
+                _ => effect.to_string(),
+            };
+            let now = if why.is_empty() && !center.is_empty() {
+                s(&r["now"][center])
+            } else {
+                ""
+            };
             rows.push(CapRow {
                 name: name.into(),
                 action: true,
-                setting: s,
-                set,
+                effect: effect.into(),
+                tone,
+                source: source.into(),
+                summary: s(&r["summary"]).into(),
+                switchable: switches && why.is_empty(),
+                left_out: why.into(),
+                setting: setting(name),
+                now: now.into(),
             });
         }
     }
     rows
+}
+
+/// The programs allowed as providers, from `cap ls --json`: whether each is
+/// attached, as the running node said ("" while it does not run).
+pub fn programs(v: &Value) -> Vec<ProgramRow> {
+    v["programs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|p| ProgramRow {
+            name: s(&p["name"]).into(),
+            exe: s(&p["exe"]).into(),
+            attached: match p["attached"].as_bool() {
+                Some(true) => "attached",
+                Some(false) => "not attached",
+                None => "",
+            }
+            .into(),
+        })
+        .collect()
+}
+
+/// Why this machine offers no programs as providers, and why no
+/// capabilities of node.toml, for the Capabilities page ("" where it
+/// does): Windows offers neither yet, and a node run by hand has no
+/// nerve-run, which every capability of node.toml runs as.
+pub fn caps_notes(windows: bool, installed: bool) -> (String, String) {
+    if windows {
+        return (
+            "Windows offers no programs as providers yet; they come with later work on the node for Windows.".into(),
+            "Windows offers no capabilities of node.toml yet; they come with later work on the node for Windows.".into(),
+        );
+    }
+    if !installed {
+        return (
+            String::new(),
+            "This node runs by hand: a capability of node.toml runs as nerve-run, which only the installed node has, so it offers none here.".into(),
+        );
+    }
+    (String::new(), String::new())
 }
 
 /// The word `cap set` takes for a switch.
@@ -1889,6 +1973,112 @@ mod tests {
         );
     }
 
+    /// The Capabilities page: each capability once over its units, in the
+    /// node's order, with the switches of the page's center as set (none
+    /// set: -1), whether it may use each unit now, and a unit the node
+    /// leaves out marked with its reason and no switch.
+    #[test]
+    fn the_capabilities_and_what_the_node_leaves_out() {
+        let v = json!({"running": true, "center": "lab",
+            "caps": {"exec.run": "off", "fs": "hidden", "board.temp": "on"},
+            "capabilities": [
+                {"name": "fs.read", "effect": "read", "source": "built-in", "summary": "Read a file.",
+                 "centers": {"lab": "hidden"}, "now": {"lab": "off"}},
+                {"name": "exec.run", "effect": "execute", "source": "built-in", "summary": "Run a command.",
+                 "centers": {"lab": "off"}, "now": {"lab": "off"}},
+                {"name": "settings.get", "effect": "read", "source": "built-in", "summary": "",
+                 "centers": {"lab": "granted"}, "now": {"lab": "on"}},
+                {"name": "who.am", "effect": "read", "source": "config", "summary": "Who runs it.",
+                 "centers": {"lab": "default"}, "now": {"lab": "on"}},
+                {"name": "board.temp", "effect": "sense", "kind": "state", "source": "program desk",
+                 "summary": "Degrees.", "centers": {"lab": "on"}, "now": {"lab": "on"}},
+                {"name": "lamp.on", "effect": "actuate", "source": "config",
+                 "left_out": "for windows only", "centers": {"lab": "default"}},
+                {"name": "board.dim", "source": "program desk",
+                 "broken": "params: /properties/l/oneOf: alternatives are not supported",
+                 "centers": {"lab": "default"}}
+            ],
+            "programs": [{"name": "desk", "exe": "/usr/bin/desk", "attached": true},
+                         {"name": "pad", "exe": "/opt/pad", "attached": null}]});
+        let rows = cap_rows(&v, "lab");
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "fs",
+                "fs.read",
+                "exec",
+                "exec.run",
+                "settings",
+                "settings.get",
+                "who",
+                "who.am",
+                "board",
+                "board.temp",
+                "board.dim",
+                "lamp",
+                "lamp.on"
+            ]
+        );
+        let row = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
+        assert!(!row("fs").action && row("fs").switchable);
+        assert_eq!((row("fs").setting, row("fs.read").setting), (2, -1));
+        assert_eq!(row("exec.run").setting, 1);
+        assert_eq!(row("exec.run").tone, Tone::Accent);
+        assert_eq!(
+            (row("who.am").setting, row("who.am").now.as_str()),
+            (-1, "on")
+        );
+        assert_eq!(row("who").source, "config");
+        // A program's state key says its kind; it senses, in the warning's
+        // colour.
+        let temp = row("board.temp");
+        assert_eq!(
+            (temp.effect.as_str(), temp.tone, temp.setting),
+            ("sense state", Tone::Warn, 0)
+        );
+        assert_eq!(temp.source, "program desk");
+        // No switch for settings, which its grant governs.
+        assert!(!row("settings").switchable && !row("settings.get").switchable);
+        assert_eq!(row("settings.get").now, "on");
+        // Left out: the reason, no switch, no state now; a capability
+        // with every unit left out has no switch either.
+        let dim = row("board.dim");
+        assert!(dim.left_out.contains("alternatives are not supported"));
+        assert!(!dim.switchable && dim.now.is_empty() && dim.effect.is_empty());
+        assert!(row("board").switchable, "board.temp is offered");
+        assert_eq!(row("lamp.on").left_out, "for windows only");
+        assert!(!row("lamp").switchable && !row("lamp.on").switchable);
+        assert_eq!(row("lamp.on").summary, "");
+        // No center paired: no switch, nothing now.
+        assert!(
+            cap_rows(&v, "")
+                .iter()
+                .all(|r| !r.switchable && r.now.is_empty())
+        );
+        assert_eq!(cap_word(2), "hidden");
+        let p = programs(&v);
+        assert_eq!(
+            (
+                p[0].name.as_str(),
+                p[0].exe.as_str(),
+                p[0].attached.as_str()
+            ),
+            ("desk", "/usr/bin/desk", "attached")
+        );
+        assert_eq!(p[1].attached, "");
+        // Windows offers neither programs nor capabilities of node.toml
+        // yet; a node run by hand none of node.toml.
+        let (programs, config) = caps_notes(true, true);
+        assert!(programs.contains("Windows") && config.contains("Windows"));
+        let (programs, config) = caps_notes(false, false);
+        assert!(
+            programs.is_empty() && config.contains("runs by hand"),
+            "{config}"
+        );
+        assert_eq!(caps_notes(false, true), (String::new(), String::new()));
+    }
+
     #[test]
     fn the_permissions_of_a_center() {
         let f = folders(
@@ -1900,17 +2090,6 @@ mod tests {
         );
         assert_eq!(rights(true, false, true), "=rx");
         assert_eq!(rights(false, false, false), "=");
-        let rows = caps(&json!({"caps": {"exec.run": "off", "fs": "hidden"},
-            "known": {"exec": ["run", "signal"], "fs": ["read"]}}));
-        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, ["exec", "exec.run", "exec.signal", "fs", "fs.read"]);
-        assert_eq!((rows[0].setting, rows[0].set), (0, false));
-        assert_eq!(
-            (rows[1].setting, rows[1].set, rows[1].action),
-            (1, true, true)
-        );
-        assert_eq!(rows[3].setting, 2);
-        assert_eq!(cap_word(2), "hidden");
         let c = json!({"mode": "user", "until": NOW + 90 * 60_000});
         assert_eq!(mode_until(&c, NOW), "Back to allowlist mode in 1 h.");
         assert_eq!(mode_until(&json!({"mode": "user"}), NOW), "");

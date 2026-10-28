@@ -16,6 +16,7 @@ use crate::broker::Launch;
 use crate::runner::{Follow, Runner};
 use crate::{AppWindow, Install, Load, Manual, Motion, Page, Perm, Prefs, Store, Tone, Type, view};
 
+mod caps;
 mod install;
 mod live;
 mod node;
@@ -52,6 +53,8 @@ pub enum Choose {
     OpenBackup,
     /// The program an update takes.
     Program,
+    /// A program to allow as a provider.
+    Provider,
 }
 
 /// Shows the system's dialog for a [`Choose`]; tests answer for it.
@@ -141,6 +144,8 @@ pub struct Ctl {
     /// Which reading of the Permissions page is the latest: an answer for
     /// an earlier one (another center picked meanwhile) is dropped.
     perm_asked: Cell<u64>,
+    /// The same for the Capabilities page.
+    caps_asked: Cell<u64>,
     /// Restarts the service a moment after a change it takes only then.
     restart_timer: slint::Timer,
     /// A restart the app said would come and that has not run yet; the
@@ -296,6 +301,7 @@ impl Ctl {
             link: RefCell::new(None),
             first_run: Cell::new(false),
             perm_asked: Cell::new(0),
+            caps_asked: Cell::new(0),
             restart_timer: slint::Timer::default(),
             restart_waits: Cell::new(false),
             scheme_timer: slint::Timer::default(),
@@ -393,6 +399,7 @@ impl Ctl {
         store.on_set_appearance(move |i| c.set_appearance(i));
         node::wire(&ctl, window);
         perm::wire(&ctl, window);
+        caps::wire(&ctl, window);
         prefs::wire(&ctl, window);
         live::wire(&ctl, window);
         install::wire(&ctl, window);
@@ -737,6 +744,10 @@ impl Ctl {
                 self.refresh_status();
                 self.perm_load();
             }
+            Page::Capabilities => {
+                self.refresh_status();
+                self.caps_load();
+            }
             // The relay's state is read with the settings it shares.
             Page::Settings | Page::Relay => {
                 self.refresh_status();
@@ -800,6 +811,7 @@ impl Ctl {
                     s.set_status_error(SharedString::new());
                 });
                 self.perm_centers(&names);
+                self.caps_centers(&names);
                 if first {
                     self.after_first_status(names.is_empty());
                 }

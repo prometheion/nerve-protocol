@@ -1,4 +1,4 @@
-//! The keyboard drives the app: Ctrl+1 to Ctrl+8 open the pages, Ctrl+R and
+//! The keyboard drives the app: Ctrl+1 to Ctrl+9 open the pages, Ctrl+R and
 //! F5 read the open page again, Escape closes a dialog and Enter takes its
 //! main button. A click on the tab of the page that is open reads nothing
 //! again (it flickered on Audit and Log); only Refresh does.
@@ -102,11 +102,15 @@ fn the_keyboard_drives_the_app_and_the_open_tab_stays() {
     press(Key::F5.into());
     assert!(started(&log).len() > ctrl_r, "F5 read nothing");
 
-    // Ctrl+1 to Ctrl+8: the pages in the sidebar's order.
+    // Ctrl+1 to Ctrl+8: the pages in the sidebar's order, as it was before
+    // Capabilities came; Ctrl+9 opens that.
     for (key, page) in [
         ("2", Page::Centers),
         ("3", Page::Relay),
         ("4", Page::Policy),
+        ("9", Page::Capabilities),
+        ("5", Page::Audit),
+        ("6", Page::Log),
         ("7", Page::Settings),
         ("8", Page::Help),
         ("1", Page::Overview),

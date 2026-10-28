@@ -241,12 +241,16 @@ const COMMANDS: &[(&str, &str, Place)] = &[
     (
         "cap set",
         "nerve-node cap set exec.signal off --center lab",
-        (Some(Page::Policy), -1, "Permissions › Capabilities"),
+        (
+            Some(Page::Capabilities),
+            -1,
+            "Capabilities › On / Off / Hidden",
+        ),
     ),
     (
         "cap ls",
         "nerve-node cap ls --center lab",
-        (Some(Page::Policy), -1, "Permissions › Capabilities"),
+        (Some(Page::Capabilities), -1, "Capabilities"),
     ),
     (
         "cap add",
@@ -262,17 +266,25 @@ const COMMANDS: &[(&str, &str, Place)] = &[
     (
         "cap provider allow",
         "nerve-node cap provider allow desk /usr/lib/nerve-desktop/nerve-desktop",
-        (Some(Page::Settings), 6, "Settings › Advanced › Add"),
+        (
+            Some(Page::Capabilities),
+            -1,
+            "Capabilities › Programs › Allow",
+        ),
     ),
     (
         "cap provider rm",
         "nerve-node cap provider rm desk",
-        (Some(Page::Settings), 6, "Settings › Advanced › Remove"),
+        (
+            Some(Page::Capabilities),
+            -1,
+            "Capabilities › Programs › Remove",
+        ),
     ),
     (
         "cap provider ls",
         "nerve-node cap provider ls",
-        (Some(Page::Settings), 6, "Settings › Advanced"),
+        (Some(Page::Capabilities), -1, "Capabilities › Programs"),
     ),
     (
         "sudo on",
@@ -625,6 +637,7 @@ mod tests {
         let files = [
             include_str!("../ui/app.slint"),
             include_str!("../ui/audit.slint"),
+            include_str!("../ui/capabilities.slint"),
             include_str!("../ui/centers.slint"),
             include_str!("../ui/log.slint"),
             include_str!("../ui/overview.slint"),
@@ -669,6 +682,7 @@ mod tests {
             (Page::Centers, "Centers"),
             (Page::Relay, "Relay"),
             (Page::Policy, "Permissions"),
+            (Page::Capabilities, "Capabilities"),
             (Page::Audit, "Audit"),
             (Page::Log, "Log"),
             (Page::Settings, "Settings"),
@@ -692,6 +706,25 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The capability commands are done on the Capabilities page, the
+    /// switches and the provider allow list included, which were on
+    /// Permissions and Settings › Advanced before it came.
+    #[test]
+    fn the_capability_commands_are_on_their_page() {
+        let caps: Vec<_> = COMMANDS
+            .iter()
+            .filter(|(c, _, _)| {
+                c.starts_with("cap ") && !["cap add", "cap edit", "cap rm"].contains(c)
+            })
+            .collect();
+        assert_eq!(caps.len(), 5);
+        for (name, _, (page, tab, place)) in caps {
+            assert_eq!(*page, Some(Page::Capabilities), "`{name}`");
+            assert_eq!(*tab, -1, "`{name}`");
+            assert!(place.starts_with("Capabilities"), "`{name}`: {place}");
         }
     }
 

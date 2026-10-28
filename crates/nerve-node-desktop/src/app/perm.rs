@@ -1,5 +1,6 @@
 //! The Permissions page: what one center may do, read with `folder ls`,
-//! `rule ls`, `cap ls` and `sudo status`, changed with their siblings.
+//! `rule ls` and `sudo status`, changed with their siblings. Its capability
+//! switches are on the Capabilities page (src/app/caps.rs).
 
 use std::rc::Rc;
 
@@ -11,10 +12,9 @@ use crate::{Load, Perm, Tone, view};
 
 const LISTS: [&str; 3] = ["allow", "deny", "sudo"];
 
-/// What `folder ls`, `rule ls`, `cap ls` and `sudo status` answered for the
-/// page's center.
+/// What `folder ls`, `rule ls` and `sudo status` answered for the page's
+/// center.
 pub type PermAnswers = (
-    Result<Value, String>,
     Result<Value, String>,
     Result<Value, String>,
     Result<Value, String>,
@@ -164,7 +164,6 @@ impl Ctl {
                 (
                     ask(&["folder", "ls"]),
                     ask(&["rule", "ls"]),
-                    ask(&["cap", "ls"]),
                     r.run(&["sudo", "status"]),
                 )
             },
@@ -185,10 +184,10 @@ impl Ctl {
         if asked != self.perm_asked.get() {
             return;
         }
-        let (folders, rules, caps, sudo) = answers;
-        let all = folders.and_then(|f| Ok((f, rules?, caps?, sudo?)));
+        let (folders, rules, sudo) = answers;
+        let all = folders.and_then(|f| Ok((f, rules?, sudo?)));
         match all {
-            Ok((f, r, k, s)) => {
+            Ok((f, r, s)) => {
                 self.with_perm(|p| {
                     // A row being edited may be another one now.
                     if !p.get_edit_busy() {
@@ -202,8 +201,8 @@ impl Ctl {
                     p.set_guard_missing(view::guard_missing(&r));
                     p.set_guard_older(view::guard_older(&r));
                     p.set_sudo_list(ModelRc::new(VecModel::from(view::rule_list_of(&r, "sudo"))));
-                    p.set_caps(ModelRc::new(VecModel::from(view::caps(&k))));
                     p.set_sudo_on(s["sudo"] == "on");
+                    p.set_read(true);
                     p.set_load(Load::Ready);
                     p.set_error(SharedString::new());
                 });
@@ -512,18 +511,6 @@ impl Ctl {
         );
     }
 
-    fn cap_set(self: &Rc<Self>, name: &str, setting: i32) {
-        let word = view::cap_word(setting);
-        let args = vec!["cap".into(), "set".into(), name.into(), word.into()];
-        self.perm_change(
-            args,
-            None,
-            format!("{name} is {word}."),
-            |_| {},
-            |c, e| c.toast(e, Tone::Danger),
-        );
-    }
-
     fn sudo_confirm(self: &Rc<Self>) {
         let Some(password) = self.with_perm(|p| p.get_sudo_password().to_string()) else {
             return;
@@ -623,8 +610,6 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     p.on_rule_edit_save(move || c.rule_edit_save());
     let c = ctl.clone();
     p.on_rule_remove(move |list, rule| c.rule_remove(list, &rule));
-    let c = ctl.clone();
-    p.on_cap_set(move |name, s| c.cap_set(&name, s));
     let c = ctl.clone();
     p.on_sudo_ask(move || {
         c.with_perm(|p| {

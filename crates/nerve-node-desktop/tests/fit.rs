@@ -1,7 +1,8 @@
 //! The app fits a screen of 1280x800: its windows open no larger than such a
 //! screen leaves them, what an install, update or uninstall did fits the
 //! installer and the dialogs without scrolling, and a longer step or dialog
-//! scrolls inside the window.
+//! scrolls inside the window. The sidebar holds all its items at the
+//! window's least height.
 
 use nerve_node_desktop::headless::Screen;
 use nerve_node_desktop::{AppWindow, Install, Load, Page, PairPreview, Perm, Pick, Prefs, Store};
@@ -10,8 +11,9 @@ use slint::{ComponentHandle, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedStrin
 /// What a screen of 1280x800 leaves a window's content: less a panel (the
 /// taskbar of Windows is 48 pixels high) and the window's title bar.
 const ROOM: (f32, f32) = (1280.0, 720.0);
-/// The app's window, as it opens.
+/// The app's window, as it opens, and as small as it gets (ui/app.slint).
 const APP: (u32, u32) = (1180, 700);
+const LEAST: (u32, u32) = (900, 580);
 
 fn lines(n: usize, text: &str) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(
@@ -262,5 +264,68 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
     assert!(
         settled(&screen).as_slice() != empty.as_slice(),
         "no password field for the account on Windows"
+    );
+
+    // The sidebar at the window's least height: each page's item, About,
+    // and the look's switch at its foot are all in the window, in their
+    // order. A click every few pixels down the sidebar opens them one
+    // after the other; an item pushed below the window's foot opens none.
+    screen.resize(LEAST.0, LEAST.1);
+    install.set_windows(false);
+    store.set_page(Page::Overview);
+    let w = window.as_weak();
+    store.on_show(move |page| w.unwrap().global::<Store>().set_page(page));
+    let w = window.as_weak();
+    store.on_set_appearance(move |i| w.unwrap().global::<Store>().set_appearance(i));
+    let click = |x: f32, y: f32| {
+        let position = slint::LogicalPosition::new(x, y);
+        let w = window.window();
+        w.dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+        w.dispatch_event(slint::platform::WindowEvent::PointerPressed {
+            position,
+            button: slint::platform::PointerEventButton::Left,
+        });
+        w.dispatch_event(slint::platform::WindowEvent::PointerReleased {
+            position,
+            button: slint::platform::PointerEventButton::Left,
+        });
+        screen.draw();
+    };
+    let mut opened = vec![Page::Overview];
+    let mut about = false;
+    for y in (40..LEAST.1 as i32).step_by(6) {
+        click(118.0, y as f32);
+        if store.get_about_open() {
+            about = opened.len() == 9;
+            store.set_about_open(false);
+            screen.draw();
+        }
+        let page = store.get_page();
+        if opened.last() != Some(&page) {
+            opened.push(page);
+        }
+    }
+    assert_eq!(
+        opened,
+        [
+            Page::Overview,
+            Page::Centers,
+            Page::Relay,
+            Page::Policy,
+            Page::Capabilities,
+            Page::Audit,
+            Page::Log,
+            Page::Settings,
+            Page::Help,
+        ],
+        "the sidebar's items at the least height"
+    );
+    assert!(about, "About is not below Help in the window");
+    // Dark, the last third of the switch, 27 pixels above the foot.
+    click(12.0 + 211.0 * 5.0 / 6.0, LEAST.1 as f32 - 27.0);
+    assert_eq!(
+        store.get_appearance(),
+        2,
+        "the look's switch is not at the foot"
     );
 }

@@ -4,8 +4,8 @@
 
 import { Tone } from "theme.slint";
 import {
-    Page, Load, NodeStatus, CenterRow, AuditRow, PairPreview, FolderRow, CapRow, LogRow,
-    RefGroup, RelayNodeRow, TunnelRow, Pick, Limit,
+    Page, Load, NodeStatus, CenterRow, AuditRow, PairPreview, FolderRow, CapRow, DeclaredRow,
+    ProgramRow, LogRow, RefGroup, RelayNodeRow, TunnelRow, Pick, Limit,
 } from "data.slint";
 
 export global Store {
@@ -199,7 +199,8 @@ export global Perm {
     in-out property <int> edit-index;
     in-out property <string> edit-text;
     in-out property <bool> edit-busy;
-    in-out property <[CapRow]> caps;
+    // The page read its center once: until then it shows that it loads.
+    in-out property <bool> read;
     in-out property <bool> sudo-on;
 
     in-out property <bool> mode-open;
@@ -238,11 +239,46 @@ export global Perm {
     callback rule-add(int);
     callback rule-remove(int, string);
     callback rule-edit-save();
-    callback cap-set(string, int);
     callback sudo-ask();
     callback sudo-confirm();
     callback sudo-off();
     callback guard-add();
+}
+
+// The Capabilities page (src/app/caps.rs): what the node offers, from
+// `cap ls`, each with its switch for one center; the capabilities of
+// node.toml the owner declared; and the programs allowed as providers.
+export global Caps {
+    in-out property <[string]> centers;
+    in-out property <int> current;
+    in-out property <string> center;
+    in-out property <Load> load: Load.loading;
+    in-out property <string> error;
+    // The page read the node once: until then it shows that it loads.
+    in-out property <bool> read;
+    in-out property <[CapRow]> rows;
+    in-out property <[DeclaredRow]> declared;
+    in-out property <[ProgramRow]> programs;
+    // Whether the node runs: only then does it know the programs'
+    // capabilities and whether a center may use each one now.
+    in-out property <bool> running;
+    // Why this machine offers no programs, or no capabilities of node.toml
+    // (src/view.rs, caps_notes); "" where it does.
+    in-out property <string> programs-note;
+    in-out property <string> config-note;
+    // Windows offers neither yet: the page has nothing to add there.
+    in-out property <bool> windows;
+    // A program to allow: its name and its file.
+    in-out property <string> program-name;
+    in-out property <string> program-exe;
+    in-out property <string> program-error;
+    in-out property <bool> program-busy;
+    callback pick(int);
+    callback refresh();
+    callback cap-set(string, int);
+    callback program-choose();
+    callback program-allow();
+    callback program-remove(string);
 }
 
 // The Log page.
