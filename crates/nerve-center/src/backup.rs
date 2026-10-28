@@ -804,7 +804,11 @@ mod tests {
         );
         assert!(!d.path().join("c.bak").exists());
         let e = plain.unwrap_err();
-        assert!(e.starts_with("cannot open") && !e.contains("owner"), "{e}");
+        // The plain error carries the path, which may itself contain "owner".
+        assert!(
+            e.starts_with("cannot open") && !e.contains("read as the owner"),
+            "{e}"
+        );
     }
 
     /// A state folder of a center that has run: its identity, a paired node
