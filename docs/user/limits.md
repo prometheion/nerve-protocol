@@ -61,8 +61,9 @@ oldest part dropping first, and a session holds at most 16 streams, at most
 8 of them open or being opened on one machine at once
 ([output while it runs](harness.md#a-commands-output-while-it-runs)); a
 [program's stream](providers.md#state-events-and-streams) past those 8 is
-refused with `busy` until one of them ends or is closed (an open that was
-cancelled counts until the machine answered it). These
+refused with `busy` until one of them ends or is closed (an open that went
+to the machine counts until the machine answered it, also when it was
+cancelled or its stream closed). These
 are fixed in the center.
 
 A job that runs a command holds one of the machine's command places until the

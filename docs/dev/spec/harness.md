@@ -586,7 +586,9 @@ one:
   session's subscription brings meanwhile are held back); if the checker or
   the node then refuses it, the stream ends with the words why only (`it
   ended (it did not open: error forbidden: node box-1 answered: …)`), and
-  what was held back is dropped.
+  what was held back is dropped. `stream.close` of such a stream stops the
+  subscribing: the call is cancelled (`its stream was closed`), not taken
+  for a lost link.
 - **Stream** (`kind: stream`): `execute` with args that fit its `params`
   sends `stream.open {cap, stream: name, params: args, ctx: {session}}` and
   answers `Opened sensors.feed on node box-1 as stream s-…` with the same
@@ -596,9 +598,10 @@ one:
   one of the node's stream places from when it is asked for: with the
   session's half of them (8) held by its streams there, open or being
   opened, it is refused with `busy` (`… its share of the node's streams:
-  close one with stream.close`) and not asked for. An open whose `execute`
-  was cancelled, or whose wait passed, keeps its place in that count until
-  the node answers it, as the node keeps it. The `execute` waits for
+  close one with stream.close`) and not asked for. An open that went to the
+  node keeps its place in that count until the node answers it, as the
+  node keeps it: also when its `execute` was cancelled, its wait passed, or
+  the agent closed its stream while it opened. The `execute` waits for
   the checker and the node's answer at most the call wait (§4.4), as for
   any call. A stream not open by then is answered `Opening sensors.feed on
   node box-1 as stream s-…: not open after 20 s, it goes on. …` with

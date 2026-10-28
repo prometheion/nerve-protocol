@@ -308,7 +308,8 @@ wait. When the action checker or the program takes longer, it answers
 once, and the subscription or stream goes on by itself. A subscription
 gives no events before it was taken; if the machine then refuses it,
 `stream.read` says why (`it ended (it did not open: …)`) and gives none of
-the events that came meanwhile.
+the events that came meanwhile. `stream.close` of a stream that is still
+being opened stops its opening.
 
 `stream.close` ends a subscription, as the session's end does. A
 subscription keeps at most 1 MiB of events that were not read and drops the
