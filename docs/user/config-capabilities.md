@@ -7,7 +7,10 @@ a fixed command the node runs itself, such as `sensors.read` running
 for any other capability, and writes it to the [audit log](audit.md) (with
 the command as it ran, the call's values in it, which the node sends no
 center; while it runs, though, anyone on the machine can read it, see
-[below](#keep-secrets-out-of-the-command)). For a capability that keeps a connection or state of its own, write a
+[below](#keep-secrets-out-of-the-command)). Such a capability offers actions only: a value it
+reads is an action with effect `read` or `sense` (an entry with `state`,
+`events` or `streams` is refused). For a capability that keeps a connection
+or state of its own, or sends events or a stream, write a
 [provider](providers.md) instead.
 
 They run on Linux, as the command account `nerve-run` of the [installed

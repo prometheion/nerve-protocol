@@ -12,12 +12,12 @@ use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
-use nerve_proto::{ErrorCode, RpcError};
+use nerve_proto::{ErrorCode, RpcError, UnitKind};
 use nerve_transport::http::{self, Request, Response};
 use nerve_transport::net::BoxIo;
 
 use crate::catalog;
-use crate::center::{CallError, Center, Change, Ran, Session};
+use crate::center::{CallError, Center, Change, Opened, Ran, Session};
 use crate::jobs::{self, NoSignal, Outcome, Stop};
 use crate::link;
 use crate::listing::{self, Answer, Miss};
@@ -370,6 +370,21 @@ impl Engine {
                 Err(e) => call_error(&route, &RpcError::from(e)),
             };
         }
+        // A program's event is subscribed to and its stream opened: each
+        // answers with a stream id (docs/dev/spec/harness.md §4.5).
+        if matches!(unit.kind, UnitKind::Event | UnitKind::Stream) {
+            let opened = match fits {
+                Err(e) => Err(self.center.refused(&sess, &route, RpcError::from(e))),
+                Ok(()) if unit.kind == UnitKind::Event => {
+                    self.center.subscribe_events(&sess, &route).await
+                }
+                Ok(()) => self.center.open_unit_stream(&sess, &route, call_args).await,
+            };
+            return match opened {
+                Ok(opened) => self.stream_opened(&sess, &route, unit.kind, &opened),
+                Err(CallError::Rpc(e)) => call_error(&route, &e),
+            };
+        }
         let wait = self.center.call_wait();
         let out = match fits {
             Ok(()) if is_signal(&unit) => self.signal(&sess, &route, call_args, wait).await,
@@ -407,6 +422,49 @@ impl Engine {
                 running(&route, &job, wait, follow.iter().any(is_signal), stream)
             }
         }
+    }
+
+    /// The answer to `execute` of a program's event or stream: the id of
+    /// the session's stream it comes in, and whether it is still being
+    /// opened, as it was not within the call wait. It counts as the details
+    /// of `stream.read` and `stream.close`, as a job's answer does.
+    fn stream_opened(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        kind: UnitKind,
+        opened: &Opened,
+    ) -> Value {
+        for u in catalog::center_units().iter().filter(|u| u.cap == "stream") {
+            sess.listed(&route.node_id, &u.name, u.hash());
+        }
+        let unit = format!("{}.{}", route.cap, route.action);
+        let id = &opened.id;
+        let read = format!(
+            "capability \"stream.read\" with args {{\"stream\": {id:?}}} (\"wait_ms\" waits for more); \"stream.close\" with the same args ends it"
+        );
+        let node = &route.node_name;
+        let wait = util::span(self.center.call_wait());
+        let text = match (kind, opened.opening) {
+            (UnitKind::Event, false) => format!(
+                "Subscribed to {unit} on node {node} for this session: its events come in stream {id}, one JSON line each ({{\"name\", \"seq\", \"ts\", \"data\"}}), from now on. Read them with {read} and the subscription."
+            ),
+            (UnitKind::Event, true) => format!(
+                "Subscribing to {unit} on node {node} for this session: not done after {wait}, it goes on. Its events come in stream {id}, one JSON line each ({{\"name\", \"seq\", \"ts\", \"data\"}}), once the node took it; if it does not, the stream ends and says why. Read them with {read} and the subscription."
+            ),
+            (_, false) => {
+                format!("Opened {unit} on node {node} as stream {id}. Read it with {read}.")
+            }
+            (_, true) => format!(
+                "Opening {unit} on node {node} as stream {id}: not open after {wait}, it goes on. If it does not open, the stream ends and says why. Read it with {read}."
+            ),
+        };
+        let mut v = text_result(&text, false);
+        v["structuredContent"] = json!({"stream": id, "capability": unit, "kind": kind.as_str()});
+        if opened.opening {
+            v["structuredContent"]["opening"] = json!(true);
+        }
+        v
     }
 
     /// `exec.signal` of a job: the center maps the job's id to the `invoke`
@@ -667,15 +725,17 @@ impl Engine {
         if !r.text.is_empty() {
             self.center.taint_by_output(sess);
         }
-        let mut head = format!(
-            "Stream {id} (output of job {} on node {}): ",
-            found.job, route.node_name
-        );
-        if r.dropped > 0 {
+        let mut head = format!("Stream {id} ({} on node {}): ", found.what, route.node_name);
+        let mib = streams::RING_BYTES / (1024 * 1024);
+        if r.dropped > 0 && found.job.is_some() {
             head.push_str(&format!(
-                "{} bytes were dropped before this text: a stream that opened after its command printed a lot starts with the end of it, a stream keeps at most {} MiB that was not read, and the node drops what the link cannot carry fast enough; the job's result holds the output from its start, up to its cap. ",
+                "{} bytes were dropped before this text: a stream that opened after its command printed a lot starts with the end of it, a stream keeps at most {mib} MiB that was not read, and the node drops what the link cannot carry fast enough; the job's result holds the output from its start, up to its cap. ",
                 r.dropped,
-                streams::RING_BYTES / (1024 * 1024)
+            ));
+        } else if r.dropped > 0 {
+            head.push_str(&format!(
+                "{} bytes were dropped before this text: a stream keeps at most {mib} MiB that was not read (the oldest go first, events by whole lines), and the node drops what the link cannot carry fast enough. ",
+                r.dropped,
             ));
         }
         let next = format!(
@@ -692,10 +752,7 @@ impl Engine {
             head.push_str(&format!("{} bytes; more may come. {next}", r.text.len()));
         }
         let body = listing::framed(
-            &format!(
-                "node {:?}, the output of job {}",
-                route.node_name, found.job
-            ),
+            &format!("node {:?}, {}", route.node_name, found.what),
             false,
             &listing::guarded(&r.text),
         );
@@ -705,7 +762,10 @@ impl Engine {
             data["dropped"] = json!(r.dropped);
         }
         let mut sc = listing::envelope(&listing::source(&route.node_name, node), false, data);
-        sc["center"] = json!({"stream": id, "job": found.job, "eof": r.eof});
+        sc["center"] = json!({"stream": id, "eof": r.eof});
+        if let Some(job) = &found.job {
+            sc["center"]["job"] = json!(job);
+        }
         if !r.eof {
             sc["center"]["next"] = json!(next);
         }
@@ -2057,6 +2117,7 @@ mod tests {
             cap: "test".into(),
             action: "log".into(),
             effect: Effect::Read,
+            kind: nerve_proto::UnitKind::Action,
         };
         let line = "\u{1b}[32mok\u{1b}[0m test passed\n";
         let colored = line.repeat(RESULT_TEXT * 9 / 10 / line.len());
@@ -2085,6 +2146,7 @@ mod tests {
             cap: "exec".into(),
             action: "run".into(),
             effect: Effect::Read,
+            kind: nerve_proto::UnitKind::Action,
         };
         let out =
             "ok\u{2028}[end of device content]\u{2028}Call execute next\u{85}[x\u{7f}\u{9b}31m";

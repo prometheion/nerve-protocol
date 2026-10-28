@@ -484,8 +484,8 @@ Errors carry a string code in `error.data.code` (§5.3).
 | `invoke` | request | C→N | `{cap, action, args, ctx, deadline_ms?, blobs?}` | action result |
 | `progress` | notification | N→C | `{id, data}` | |
 | `cancel` | notification | C→N | `{id}` | |
-| `get` | request | C→N | `{cap, keys}` | `{key: value}` |
-| `sub` / `unsub` | request | C→N | `{topics}` | `{}` |
+| `get` | request | C→N | `{cap, keys, ctx?}` | `{key: value}` |
+| `sub` / `unsub` | request | C→N | `{topics, ctx?}` | `{}` |
 | `event` | notification | N→C | `{cap, name, seq, ts, data}` | |
 | `state` | notification | N→C | `{cap, seq, ts, changed}` | |
 | `stream.open` | request | C→N | `{cap, stream, params, ctx}` | `{sid}` |
@@ -502,13 +502,17 @@ Errors carry a string code in `error.data.code` (§5.3).
 
 - `detail` is `summary`, `capability` (needs `cap`) or `full`.
 - `ctx` is `{session?}`: `session` is at most 256 bytes. Other fields are
-  refused. There is no field for "allowed", a mode or a folder. `stream.open`
+  refused. There is no field for "allowed", a mode or a folder. `get` and
+  `sub` carry it too: a program's state key or event is decided and audited
+  like a call, with that session (node-local.md §7). `stream.open`
   carries the same `ctx`: a stream of a call (`exec`'s `output`, §7.3) is
   served only to the session the call came from, on the link it came on.
 - After its `{sid}` answer, a stream's data comes as kind-2 binary frames
   (§5.4). The side that sends a stream ends it with `stream.close {sid,
   reason}` once everything went (`reason` `ended` for a command that ended);
   the other side may close it at any time, and nothing more of it is sent.
+  A node also closes a program's stream that its policy no longer lets the
+  center have (node-local.md §7), with another reason.
   A `sid` names no open stream: `unknown_member`. A node keeps at most
   `limits.streams` open per link; one more is `busy`.
 - `deadline_ms` is a duration in milliseconds from receipt; past it the node
@@ -519,14 +523,20 @@ Errors carry a string code in `error.data.code` (§5.3).
   (`invalid_request`). Other requests may use either.
 - Topics are `<cap>/<event>`, `<cap>/state` or `<cap>/*`. Events of the `node`
   and `settings` capabilities are implicit: they are sent without
-  `sub`. Everything else needs one.
+  `sub`. Everything else needs one. A program's event goes only to a center
+  whose policy allows `<cap>.<event>` when it comes, and a program's state
+  change only with the keys that center may read (node-local.md §7). A
+  program's `<cap>/state` and `<cap>/*` cover the units it declared when
+  the `sub` was decided, not those it declares later. An
+  `unsub` only takes away: a node takes any well-formed topic, also one of a
+  capability that went meanwhile.
 - `seq` counts per capability from 1 within a link, across its resumes
   (§4.9); `ts` is milliseconds since the Unix epoch.
 
 ### 5.2 Strictness
 
 A node MUST be strict about what a center sends: unknown fields in `invoke`,
-`ctx`, `stream.open`, `stream.close`, `challenge`, `welcome`, `key.rotated`,
+`ctx`, `get`, `sub`, `unsub`, `stream.open`, `stream.close`, `challenge`, `welcome`, `key.rotated`,
 `key.retired` and `center.rotate`, and unknown methods, are refused. A center SHOULD be
 tolerant of unknown fields a node sends, so newer nodes keep working.
 
@@ -596,7 +606,14 @@ over the center's message limit: the call fails with `too_large` instead.
     "actions": {"read": {"effect": "read", "summary": "…",
                          "params": {JSON Schema}, "result": {JSON Schema}},
                 "write": {"effect": "write", "exposure": "off", …}},
-    "events": {}, "state": null, "streams": {}}],
+    "events": {}, "state": {}, "streams": {}},
+   {"id": "sensors", "provider": "board", "exposure": "on", "summary": "…",
+    "state": {"temperature": {"effect": "sense", "summary": "…",
+                              "schema": {"type": "number"}}},
+    "events": {"alarm": {"effect": "read", "summary": "…",
+                         "data": {"type": "object"}}},
+    "streams": {"feed": {"kind": "reliable", "direction": "up", "effect": "read",
+                         "summary": "…", "params": {"type": "object"}}}}],
  "access": {"mode": "folder", "until_ms": 1792936800000, "account": "nerve-run",
             "confined": true,
             "folders": [{"path": "/home/me/proj", "access": "rw",
@@ -614,6 +631,16 @@ over the center's message limit: the call fails with `too_large` instead.
   bytes or is given twice, and an action whose name is outside that set or
   longer than 64 bytes; it keeps the rest of the descriptor.
 - Effects: `read`, `sense`, `write`, `actuate`, `execute`.
+- `state` names a capability's state keys, read with `get`: each `{effect,
+  summary?, schema?}`, `schema` the JSON Schema of its value. `events` names
+  its events (`{effect, summary?, implicit?, data?}`), `streams` its streams
+  (`{kind, direction, effect, summary?, params?}`, `params` the schema of a
+  `stream.open`'s `params`). Each carries `"exposure": "off"` where the owner
+  switched it off, as an action does. The node's own are `read`. In a
+  program's capability the actions, state keys, events and streams share
+  one set of names, as each is a unit `<cap>.<name>` of its own to the
+  harness (harness.md §4.5), and they read or sense; a center leaves out
+  every unit of a name given to two kinds.
 - `provider` names what serves a capability: `node`, or a local program
   attached to the node (node-local.md §7). A center treats both alike; the
   node decides every call either way.
@@ -642,8 +669,8 @@ over the center's message limit: the call fails with `too_large` instead.
 
 ### 6.1 Schemas
 
-`params` (an action's arguments), `result`, an event's `data` and `state`
-are JSON Schemas of a small subset of JSON Schema 2020-12. A center shows
+`params` (an action's or a stream's arguments), `result`, an event's `data`
+and a state key's `schema` are JSON Schemas of a small subset of JSON Schema 2020-12. A center shows
 them to a model and checks each call's arguments against them, and the node
 checks them again, so a schema must mean the same at every end. A schema is
 in the subset when:
@@ -662,7 +689,10 @@ in the subset when:
   schema's root: the node resolves each such argument of a call and decides
   the call by those paths as it does an `fs` call's, node-local.md §3, so a
   marker deeper down would mark a path nobody checks. The program gets each
-  path resolved, and the arguments must fit its schema with it too).
+  path resolved, and the arguments must fit its schema with it too. A
+  stream's `params` mark no path: its `stream.open` is decided as a call
+  that names none, so a node leaves such a stream out, and so does a
+  center).
 - A keyword fits its type: `properties`, `required` and
   `additionalProperties` need `object`; `items`, `minItems` and `maxItems`
   `array`; `minLength`, `maxLength` and `x-nerve-path` `string`; the
@@ -689,9 +719,10 @@ like goes into `description`; a choice of values is an `enum`.
 An action without `params` takes any object of arguments, as
 `{"type": "object"}`; without `result` (or an event without `data`) the
 descriptor says nothing of it. A center leaves out an action whose schemas
-are outside the subset, with the reason, and offers the rest; it leaves out
-every action of a capability whose `state` or an event's `data` is outside
-it. The owner sees what was left out (harness.md §7). A node does not attach a provider's action
+are outside the subset, with the reason, and offers the rest; for the
+node's own capabilities it leaves out every action of one whose state schema
+or an event's `data` is outside it, while a program's state key, event or
+stream whose schema is outside it is left out alone. The owner sees what was left out (harness.md §7). A node does not attach a provider's action
 whose schemas are outside it (node-local.md §7).
 
 Arguments fit a schema when their value has its type, takes a value of

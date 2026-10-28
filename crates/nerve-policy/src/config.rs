@@ -1048,6 +1048,7 @@ impl NodeConfig {
         if let Ok(doc) = toml::from_str::<toml::Table>(text) {
             refuse_proxy_secrets(&doc)?;
             capability::refuse_account(&doc)?;
+            capability::refuse_units(&doc)?;
         }
         let mut c: NodeConfig = toml::from_str(text).map_err(|e| e.to_string())?;
         c.validate()?;

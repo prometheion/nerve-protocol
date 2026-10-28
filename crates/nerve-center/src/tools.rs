@@ -8,7 +8,7 @@
 //! call `settings.set` would let a model change its own permissions. The
 //! units of `job` are the center's own, served by the center itself.
 
-use nerve_proto::Effect;
+use nerve_proto::{Effect, UnitKind};
 
 /// Capabilities that are never offered to the agent.
 pub const RESERVED_CAPS: [&str; 3] = ["node", "settings", "audit"];
@@ -26,6 +26,8 @@ pub struct Route {
     pub cap: String,
     pub action: String,
     pub effect: Effect,
+    /// What the unit is: an action, a program's state key, event or stream.
+    pub kind: UnitKind,
 }
 
 #[cfg(test)]
@@ -58,7 +60,7 @@ pub(crate) mod tests {
                 })
                 .collect(),
             events: Default::default(),
-            state: Value::Null,
+            state: Default::default(),
             streams: Default::default(),
         }
     }

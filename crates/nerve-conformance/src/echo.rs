@@ -27,7 +27,8 @@ pub fn descriptor(node_id: &str, name: &str) -> Descriptor {
         "summary": "Conformance echo node: answers echo.say with what it was sent and fails echo.fail.",
         "capabilities": [
             {"id": "node", "profile": "node", "exposure": "on", "summary": "The node itself.",
-             "events": {"descriptor_changed": {"implicit": true}, "going_away": {"implicit": true}}},
+             "events": {"descriptor_changed": {"effect": "read", "implicit": true},
+                        "going_away": {"effect": "read", "implicit": true}}},
             {"id": "echo", "exposure": "on", "summary": "Says back what it is sent.",
              "actions": {"say": {"effect": "read", "summary": "Return the text.",
                 "params": {"type": "object", "properties": {"text": {"type": "string"}},
@@ -42,6 +43,13 @@ pub fn descriptor(node_id: &str, name: &str) -> Descriptor {
     }))
     .expect("the echo descriptor is well formed")
 }
+
+/// The program's capability the harness nodes offer.
+pub const GAUGE: &str = "gauge";
+/// The value of its state key `level`.
+pub const GAUGE_LEVEL: i64 = 7;
+/// How many events a subscription to `gauge/tick` gets at once.
+pub const GAUGE_TICKS: u64 = 2;
 
 /// The longest `echo.wait` of the harness nodes, in milliseconds.
 pub const WAIT_MAX_MS: u64 = 600_000;
@@ -91,6 +99,21 @@ pub fn harness_descriptor(node_id: &str, name: &str) -> Descriptor {
     caps.push(
         json!({"id": "audit", "exposure": "on", "summary": "Not a tool.",
         "actions": {"list": {"effect": "read", "summary": "Never offered to a harness."}}}),
+    );
+    // A program's capability (node-local.md §7): a state key, an event and
+    // a stream, each a unit of its own to the harness (harness.md §4.5).
+    caps.push(
+        json!({"id": GAUGE, "provider": "conformance-program", "exposure": "on",
+        "summary": "A program's gauge.",
+        "state": {"level": {"effect": "read", "summary": "Its level now.",
+                            "schema": {"type": "integer"}}},
+        "events": {"tick": {"effect": "read", "summary": "It ticked.",
+                            "data": {"type": "object", "properties": {"n": {"type": "integer"}}}}},
+        "streams": {"feed": {"kind": "reliable", "direction": "up", "effect": "read",
+                             "summary": "Its readings as they come.",
+                             "params": {"type": "object", "properties": {
+                                 "lines": {"type": "integer", "minimum": 1, "maximum": 9}},
+                                 "required": ["lines"], "additionalProperties": false}}}}),
     );
     // What the center may do there (§6.2), which `list(node)` tells.
     d["access"] = json!({"mode": "folder", "account": ACCESS_ACCOUNT,

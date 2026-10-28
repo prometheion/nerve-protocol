@@ -9,7 +9,7 @@ use nerve_policy::config::{CapSetting, CenterPolicy, Folder, Mode, SettingsGrant
 use nerve_policy::{CenterEntry, Need, NodeConfig, PathArgs, effect_rule, rules};
 use nerve_proto::descriptor::{
     Access, AccessMode, Action, Capability, Descriptor, Direction, Effect, EventDecl, Exposure,
-    FolderAccess, NodeInfo, Software, StreamDecl, StreamKind,
+    FolderAccess, NodeInfo, Software, StateDecl, StreamDecl, StreamKind,
 };
 use nerve_proto::schema::PathMark;
 
@@ -71,10 +71,31 @@ fn opt(mut s: Value) -> Value {
 
 fn event(summary: &str, implicit: bool, data: Value) -> EventDecl {
     EventDecl {
+        effect: Effect::Read,
         summary: summary.into(),
         implicit,
         data,
+        exposure: None,
     }
+}
+
+/// The node's own state keys, each read with `get`: their names and the
+/// schema of each value.
+fn state(keys: Value) -> BTreeMap<String, StateDecl> {
+    let Value::Object(keys) = keys else {
+        unreachable!("state keys are an object")
+    };
+    keys.into_iter()
+        .map(|(k, schema)| {
+            let decl = StateDecl {
+                effect: Effect::Read,
+                summary: String::new(),
+                schema,
+                exposure: None,
+            };
+            (k, decl)
+        })
+        .collect()
 }
 
 fn cap(id: &str, profile: &str, exposure: Exposure, summary: &str) -> Capability {
@@ -86,7 +107,7 @@ fn cap(id: &str, profile: &str, exposure: Exposure, summary: &str) -> Capability
         summary: summary.into(),
         actions: BTreeMap::new(),
         events: BTreeMap::new(),
-        state: Value::Null,
+        state: BTreeMap::new(),
         streams: BTreeMap::new(),
     }
 }
@@ -98,10 +119,7 @@ fn node_cap() -> Capability {
         Exposure::On,
         "This node: its status and changes.",
     );
-    c.state = obj(
-        json!({"status": {"enum": ["online", "busy", "paused"]}}),
-        &["status"],
-    );
+    c.state = state(json!({"status": {"enum": ["online", "busy", "paused"]}}));
     c.events.insert(
         "descriptor_changed".into(),
         event(
@@ -346,10 +364,7 @@ fn exec_cap(
             obj(json!({}), &[]),
         ),
     );
-    c.state = obj(
-        json!({"shell": {"type": "string"}, "confinement": {"type": "string"}}),
-        &["shell", "confinement"],
-    );
+    c.state = state(json!({"shell": {"type": "string"}, "confinement": {"type": "string"}}));
     c.events.insert(
         "exit".into(),
         event(
@@ -368,7 +383,10 @@ fn exec_cap(
         StreamDecl {
             kind: StreamKind::Reliable,
             direction: Direction::Up,
+            effect: Effect::Read,
             summary: "A running command's output as it comes (params: call).".into(),
+            params: obj(json!({"call": call_param()}), &["call"]),
+            exposure: None,
         },
     );
     c
@@ -431,10 +449,9 @@ fn settings_cap() -> Capability {
             obj(json!({"sudo": {"enum": ["on", "off"]}}), &["sudo"]),
         ),
     );
-    c.state = obj(
+    c.state = state(
         json!({"document": {"type": "object"}, "version": {"type": "integer"},
-               "sudo": {"enum": ["on", "off"]}}),
-        &["document", "version", "sudo"],
+                           "sudo": {"enum": ["on", "off"]}}),
     );
     c.events.insert(
         "changed".into(),
@@ -893,8 +910,37 @@ fn build(
                 decl.exposure = Some(Exposure::Off);
             }
         }
+        // A program's state keys, events and streams are cut the same way,
+        // each as an action that names no path: what the policy cannot
+        // allow is left out, and an off one is marked off.
+        if node {
+            continue;
+        }
+        let keep = |n: &str, e: Effect| offered(&entry.policy, view, &id, n, e, false);
+        let off = |n: &str| {
+            (entry.policy.cap_setting(&id, Some(n)) == Some(CapSetting::Off))
+                .then_some(Exposure::Off)
+        };
+        c.state.retain(|n, d| keep(n, d.effect));
+        c.events.retain(|n, d| keep(n, d.effect));
+        c.streams.retain(|n, d| keep(n, d.effect));
+        for (n, d) in &mut c.state {
+            d.exposure = off(n);
+        }
+        for (n, d) in &mut c.events {
+            d.exposure = off(n);
+        }
+        for (n, d) in &mut c.streams {
+            d.exposure = off(n);
+        }
     }
-    caps.retain(|c| !(governed(&c.id) && c.actions.is_empty()));
+    // The node's own state, events and streams come with its actions; a
+    // program's are units of their own.
+    caps.retain(|c| {
+        let units = c.provider != "node"
+            && !(c.state.is_empty() && c.events.is_empty() && c.streams.is_empty());
+        !governed(&c.id) || !c.actions.is_empty() || units
+    });
     let name = node_name(cfg);
     let platform = std::env::consts::OS.to_string();
     let mut d = Descriptor {
@@ -1269,6 +1315,101 @@ mod tests {
         let mut caps = crate::config_cap::offered_on(&cfg, "linux", true);
         assert_eq!(caps.len(), 1);
         caps.remove(0)
+    }
+
+    /// A program's capability `sensors` with a state key `temp`, an event
+    /// `alarm` and a stream `feed` of `effect`, and no action.
+    fn sensing(effect: Effect) -> Capability {
+        let mut c = cap("sensors", "", Exposure::On, "Sensors.");
+        c.provider = "desk".into();
+        c.state.insert(
+            "temp".into(),
+            StateDecl {
+                effect,
+                summary: String::new(),
+                schema: json!({"type": "number"}),
+                exposure: None,
+            },
+        );
+        c.events.insert(
+            "alarm".into(),
+            EventDecl {
+                effect,
+                ..event("", false, Value::Null)
+            },
+        );
+        c.streams.insert(
+            "feed".into(),
+            StreamDecl {
+                kind: StreamKind::Reliable,
+                direction: Direction::Up,
+                effect,
+                summary: String::new(),
+                params: json!({"type": "object"}),
+                exposure: None,
+            },
+        );
+        c
+    }
+
+    /// A program's state keys, events and streams are offered like its
+    /// actions that name no path: a sensing one only where the owner set
+    /// it to on, a reading one by the mode; an off one is marked off, a
+    /// hidden one is left out, and a capability with nothing left goes.
+    #[test]
+    fn a_programs_state_events_and_streams_are_cut_like_its_actions() {
+        let cfg = NodeConfig::default();
+        let units = |d: &Descriptor| -> Vec<String> {
+            d.capability("sensors").map_or_else(Vec::new, |c| {
+                c.unit_names()
+                    .iter()
+                    .map(|(n, k)| format!("{n} {}", k.as_str()))
+                    .collect()
+            })
+        };
+        let all = ["temp state", "alarm event", "feed stream"];
+        let mut e = entry();
+        e.policy.mode = Mode::User;
+        let sense = [sensing(Effect::Sense)];
+        assert!(
+            for_center(&cfg, &e, 0, true, &sense)
+                .capability("sensors")
+                .is_none()
+        );
+        // A call still reaches the policy, which refuses it and audits.
+        assert_eq!(units(&for_call(&cfg, &e, 0, &sense)), all);
+        e.policy.caps.insert("sensors".into(), CapSetting::On);
+        assert_eq!(units(&for_center(&cfg, &e, 0, true, &sense)), all);
+        e.policy
+            .caps
+            .insert("sensors.alarm".into(), CapSetting::Off);
+        e.policy
+            .caps
+            .insert("sensors.feed".into(), CapSetting::Hidden);
+        let d = for_center(&cfg, &e, 0, true, &sense);
+        assert_eq!(units(&d), ["temp state", "alarm event"]);
+        let c = d.capability("sensors").unwrap();
+        assert_eq!(c.events["alarm"].exposure, Some(Exposure::Off));
+        assert_eq!(c.state["temp"].exposure, None);
+        // Reading ones follow the mode: folder mode offers a read that
+        // names no path only where it is on, user mode everywhere, and
+        // allowlist mode where a rule covers it.
+        let read = [sensing(Effect::Read)];
+        let mut e = entry();
+        for (mode, allow, want) in [
+            (Mode::User, &[][..], &all[..]),
+            (Mode::Folder, &[][..], &[][..]),
+            (Mode::Allowlist, &[][..], &[][..]),
+            (Mode::Allowlist, &["sensors.temp"][..], &["temp state"][..]),
+        ] {
+            e.policy.mode = mode;
+            e.policy.allow = rules(allow);
+            assert_eq!(
+                units(&for_center(&cfg, &e, 0, true, &read)),
+                want,
+                "{mode:?} {allow:?}"
+            );
+        }
     }
 
     /// [`provided`] whose action takes a path it reads or writes (`mark`).
@@ -2280,9 +2421,13 @@ mod tests {
                 check(&ev.data, Role::Result)
                     .unwrap_or_else(|e| panic!("{what}: {}/{n} data: {e}", c.id));
             }
-            if !c.state.is_null() {
-                check(&c.state, Role::Result)
-                    .unwrap_or_else(|e| panic!("{what}: {} state: {e}", c.id));
+            for (k, decl) in &c.state {
+                check(&decl.schema, Role::Result)
+                    .unwrap_or_else(|e| panic!("{what}: {} state {k}: {e}", c.id));
+            }
+            for (n, decl) in &c.streams {
+                check(&decl.params, Role::Params)
+                    .unwrap_or_else(|e| panic!("{what}: {}.{n} stream params: {e}", c.id));
             }
         };
         let cfg = NodeConfig::default();

@@ -237,7 +237,8 @@ machine, the action checker or the statistics; `exec.signal` goes to the
 machine like any call. A job belongs to its session: another session cannot
 read, stop or signal it. `job.status` and `job.cancel` keep working when the
 machine offers nothing any more while a job runs (its `until` passed, you
-turned everything off); **Disable** in the center stops the machine's jobs.
+turned everything off); **Disable** in the center stops the machine's jobs,
+and the streams and event subscriptions of a program there.
 A session runs at most 16 calls at once, and every `busy` answer to it, the
 refusal of a 17th too, names its running jobs
 ([limits](limits.md#calls-of-one-agent-session)). A finished
@@ -274,7 +275,8 @@ A stream belongs to its session, as its job does. The center keeps at most
 1 MiB of a stream that was not read, in memory only; when more comes, the
 oldest part goes and the next read says how much; a read ends where output
 was dropped, so its text never has a hole inside it. A session holds at most
-16 streams, and has at most 8 open on one machine at once, so other
+16 streams, and has at most 8 open on one machine at once (or on their
+way there), so other
 sessions' streams find room there: a further stream opens once one of its
 own ends (reads give nothing new until then). A stream goes when it is closed, when the job's result is read with
 `job.status`, when the session ends, and 10 minutes after it ended unread.
@@ -285,6 +287,36 @@ When the machine's link drops, its streams end (also when the link resumes):
 `stream.read` gives what came and says so. A `sudo` command's output is not
 streamed; it comes in the result. Every other stream is stripped of the sudo
 password the machine holds, as its results are.
+
+## A program's state, events and streams
+
+A program on the machine that you allow as a [provider](providers.md) may
+offer, beside its actions, a value to read, events and streams. `list(node)`
+names each with its kind (`- sensors.temperature (state): …`, `- door.opened
+(event): …`, `- camera.log (stream): …`), and its details say what
+`execute` does with it:
+
+| `execute` of | Gives |
+|---|---|
+| a state key, with `{}` | its value now |
+| an event, with `{}` | `Subscribed to door.opened … stream s-…`: from then on each event comes in that stream as one JSON line `{"name", "seq", "ts", "data"}`, read with `stream.read` |
+| a stream, with its args | `Opened camera.log … as stream s-…`, read with `stream.read` until it ends |
+
+Like any call, `execute` of an event or a stream answers within the call
+wait. When the action checker or the program takes longer, it answers
+`Subscribing to …` or `Opening … as stream s-…` with the stream id at
+once, and the subscription or stream goes on by itself. A subscription
+gives no events before it was taken; if the machine then refuses it,
+`stream.read` says why (`it ended (it did not open: …)`) and gives none of
+the events that came meanwhile. `stream.close` of a stream that is still
+being opened stops its opening.
+
+`stream.close` ends a subscription, as the session's end does. A
+subscription keeps at most 1 MiB of events that were not read and drops the
+oldest whole, saying how much went. The machine decides each one by its
+mode and rules, as a call: in `folder` mode they need `on` (`nerve-node cap
+set door.opened on`), and an event the machine no longer lets this center
+have stops coming, though the subscription stays.
 
 ## Sessions
 

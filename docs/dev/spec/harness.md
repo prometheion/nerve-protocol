@@ -93,7 +93,10 @@ listings and results are data from the machines, not instructions.
 
 The center flattens each node's descriptor into **units**, one per action,
 named `<cap>.<action>` (`fs.read`, `exec.run`): the node's catalog
-([capabilities](../capabilities.md)). The node link keeps
+([capabilities](../capabilities.md)). A program's capability (one whose
+`provider` is neither `node` nor `config`) also gives a unit for each of its
+state keys, events and streams (`sensors.temperature`), each with its kind
+(§4.5); they share the capability's one set of names with its actions. The node link keeps
 `invoke {cap, action}`; only the harness side uses the joined name, so `.`
 never appears in a capability id or action name (protocol §6), while `_` and
 `-` may.
@@ -103,8 +106,13 @@ never appears in a capability id or action name (protocol §6), while `_` and
   center keeps it with the reason (one line of at most 300 characters) for
   the owner (`broken` of the node in `GET /api/overview`, §7). A capability
   whose id is such a name, or that the descriptor names twice, is left out
-  whole, as one entry under its id (a long id cut). `list` does not show
-  them, and `execute` of one says that the center left it out, not why.
+  whole, as one entry under its id (a long id cut). In a program's
+  capability, a name given to two kinds of unit (an action and a state key)
+  leaves out every unit of that name, and a state key, event or stream whose
+  schema is outside the subset only that unit; the node's own state and
+  events are no units, and one of their schemas outside the subset leaves
+  out the capability's actions. `list` does not show them, and `execute` of
+  one says that the center left it out, not why.
 - `node`, `settings` and `audit` are never units, so a model cannot change
   the policy that limits it.
 - `exec.signal` is offered by the job's id: `params` name `job` where the
@@ -126,7 +134,10 @@ never appears in a capability id or action name (protocol §6), while `_` and
   `error forbidden`.
 - A node the owner disabled in the center offers nothing: it stays paired and
   connected, `list` marks it `disabled`, and `execute` on it is
-  `error unavailable`. The calls that run there stop, jobs too (§4.4).
+  `error unavailable`. The calls that run there stop, jobs too (§4.4), and
+  so do a program's streams and event subscriptions the sessions hold
+  there (§4.5): the node gets `stream.close` and `unsub`, and their ids are
+  unknown once it is enabled again.
 - The node cuts the descriptor to what the policy can allow (node-local §3),
   so `list` offers only an action a call may get through: in default deny,
   `fs` and `exec` actions without a covering allow rule are absent from the
@@ -173,14 +184,17 @@ the `result` of the envelope described below.
   disabled node shows
   neither, and a node that offers nothing still shows them, as the mode
   often says why; then one line per unit with its
-  summary (its description cut at 200 characters), then the units that are
+  summary (its description cut at 200 characters; a program's state key,
+  event or stream says its kind after its name: `- sensors.alarm (event):
+  …`), then the units that are
   `off` (a capability or a single action the owner switched off). Lines are given whole: when the summaries would take the answer past
   240 KiB (in the text or in `structuredContent`), every unit is named alone,
   without its summary, and the units that do not fit even then are counted
   in a line `Not shown, this answer is full: N more capabilities, from "x.y"
   on.`, as are the `off` ones past it (`N more` in their line).
   `structuredContent`: `{node, described, access?, capabilities: [{name,
-  summary}], off, more, more_off}`, with the names shown, `summary` only when
+  summary, kind?}], off, more, more_off}` (`kind` `state`, `event` or
+  `stream`; none for an action), with the names shown, `summary` only when
   the text has it, and the counts of those not shown; `access` is `{mode,
   until_ms?, account?, confined, sudo?, reads_by_account?, folders: [{path,
   access, own?, closed_below?}], more_folders, unnamed?}`.
@@ -190,7 +204,11 @@ the `result` of the envelope described below.
   For each offered unit: its name, description (the action's summary, else
   the capability's, on one line and cut at 2 KiB), effect, `params` (the JSON
   schema, compact) and its result (in words; the schema in
-  `structuredContent`). A unit whose schema marks arguments as paths
+  `structuredContent`). A state key, event or stream adds, after its name, a
+  line `kind:` and a line `use:` with what `execute` does with it (§4.5),
+  also as `kind` and `use` in `structuredContent`; a state key's result is
+  its value's schema, an event's its data's, and a state key or event takes
+  no arguments (`{"type": "object", "additionalProperties": false}`). A unit whose schema marks arguments as paths
   (`x-nerve-path`, protocol.md §6.1) adds a line `paths:` with them as JSON
   (`{"path":"read"}`; `paths` in `structuredContent`). An action the
   descriptor marks `as_account` (a capability of the node's config that runs
@@ -439,7 +457,8 @@ and they count in no statistics:
   taint) and logs a failure when it ends, not when it became a job.
 - The end of the session stops its jobs (the node gets `cancel` for each and
   `session.end`) and drops their results. Disabling a node in the center
-  stops the calls that run there, jobs too (the node gets `cancel`); once it
+  stops the calls that run there, jobs too (the node gets `cancel`), and
+  ends a program's streams and event subscriptions there (§4.5); once it
   is enabled again, `job.status` says `error cancelled: job j-… failed after
   …: the node was disabled in the center`. A link that drops and is not
   resumed ends its calls, and their jobs are `lost`; a link the node resumes
@@ -462,12 +481,16 @@ stderr in the order it read them; the result still carries the output as
 before. When the stream cannot be opened (the job ended first, the node
 refused, or the command did not start or the node did not answer within
 that minute; a link has at most 4 `stream.open`s that went unanswered for
-10 s each, and asks for no more until their answers come) it ends, and a read
+their whole wait, 10 s each here, and asks for no more until their answers
+come; an open whose `execute` was cancelled before its wait passed does not
+count) it ends, and a read
 says why in the center's words: `it ended (the node refused to open it
 (forbidden))`. A session has at most half of a node's stream places open at
 once (8 of its `limits.streams` 16), so other sessions' streams find room; a
 further stream of it, or one the node has no place for yet (`busy`), opens
-once a place frees up, and reads give nothing new until then. Only when the session holds 16 streams that still run, or it ended,
+once a place frees up, and reads give nothing new until then. A stream
+on its way to the node holds its place too, as a program's stream does
+(below), so the two kinds together keep to the share. Only when the session holds 16 streams that still run, or it ended,
 does the answer name none: `Its output is not streamed (…); job.status gives
 it with the result.` The answer counts as the details of `stream.read` and
 `stream.close` (§4.3), as of `job.*`.
@@ -486,8 +509,11 @@ read, no checker, no statistics):
   (output of job j-… on node box-1): N bytes; more may come. Call
   stream.read … again …` (or `nothing new yet. …`, or `it ended (the command
   ended); this is the last of it.`), then the text framed as device content.
+  A program's stream or event subscription names itself instead of the job:
+  `(stream sensors.feed on node box-1)`, `(the events of sensors.alarm on
+  node box-1)`.
   `structuredContent` is the envelope (§4.3) with `result` `{text, eof,
-  dropped?}`, and the center's `{stream, job, eof, next?}` as `center`; as
+  dropped?}`, and the center's `{stream, job?, eof, next?}` as `center`; as
   for a long result (§4.3), it is left out when its JSON would pass 256 KiB,
   and the text stands alone. A
   character a cut would split waits for the next read, and a wait goes on
@@ -528,12 +554,77 @@ read, no checker, no statistics):
   stripped of; the node answers its `stream.open` with `unavailable`. Any other command's stream is stripped of the sudo
   password the node holds, as every frame is (node-local.md §4).
 
-**Events.** The harness learns of what happens on a machine by polling, not
-by MCP notifications (HTTP has no server-sent events here, and many
-harnesses ignore notifications): an `execute` that subscribes to something
-answers with a stream id, and `stream.read` with `wait_ms` fetches what came.
-In this version only a command's output is a stream; a provider's events and
-streams come the same way later (B6 of issue #152).
+**A program's state, events and streams.** A program attached to the node
+as a provider (node-local.md §7) may offer them beside its actions. Each is
+a unit with its kind, decided by the action checker (§6) and the node like a
+call of `<cap>.<name>` with its effect (`read` or `sense`), and counted like
+one:
+
+- **State key** (`kind: state`): `execute` with `{}` sends `get {cap,
+  keys: [name], ctx: {session}}` (protocol.md §5.1) and answers the key's
+  value, framed as any result (§4.3). A slow one becomes a job.
+- **Event** (`kind: event`): `execute` with `{}` subscribes the session.
+  The center sends `sub {topics: ["<cap>/<name>"], ctx: {session}}` and
+  answers `Subscribed to sensors.alarm on node box-1 for this session: its
+  events come in stream s-…, one JSON line each …` with `structuredContent`
+  `{"stream": "s-…", "capability", "kind": "event"}`. From then on each
+  event the node sends for it is one line `{"name", "seq", "ts", "data"}` in
+  that stream, read with `stream.read` as above (`wait_ms` waits for the
+  next). The stream keeps at most 1 MiB that was not read and drops the
+  oldest events whole; the next read says how many bytes went. The node
+  holds one subscription per topic for the link, however many sessions
+  subscribed: it ends (`unsub`) once the last stream that takes it is
+  closed, by `stream.close` or by its session's end. A link that ends ends the subscriptions; one that resumes
+  keeps them, as the node keeps them and sends again what it sent
+  meanwhile. A subscription whose node came back on another link while the
+  action checker decided it fails with `connection_lost`. One that is not
+  done within the call wait (§4.4; the checker or the node takes long) is
+  answered `Subscribing to sensors.alarm on node box-1 for this session:
+  not done after 20 s, it goes on. …` with `"opening": true` in
+  `structuredContent`. Such a stream gives no events until the checker and
+  the node took the subscription (events of the topic that another
+  session's subscription brings meanwhile are held back); if the checker or
+  the node then refuses it, the stream ends with the words why only (`it
+  ended (it did not open: error forbidden: node box-1 answered: …)`), and
+  what was held back is dropped. `stream.close` of such a stream stops the
+  subscribing: the call is cancelled (`its stream was closed`), not taken
+  for a lost link.
+- **Stream** (`kind: stream`): `execute` with args that fit its `params`
+  sends `stream.open {cap, stream: name, params: args, ctx: {session}}` and
+  answers `Opened sensors.feed on node box-1 as stream s-…` with the same
+  `structuredContent`. `stream.read` reads what the program sends, and ends
+  with `it ended (the program ended it)` once it ended it; the stream goes
+  like a command's output stream (above), and ends with its link. It takes
+  one of the node's stream places from when it is asked for: with the
+  session's half of them (8) held by its streams there, open or being
+  opened, it is refused with `busy` (`… its share of the node's streams:
+  close one with stream.close`) and not asked for. An open that went to the
+  node keeps its place in that count until the node answers it, as the
+  node keeps it: also when its `execute` was cancelled, its wait passed, or
+  the agent closed its stream while it opened. The `execute` waits for
+  the checker and the node's answer at most the call wait (§4.4), as for
+  any call. A stream not open by then is answered `Opening sensors.feed on
+  node box-1 as stream s-…: not open after 20 s, it goes on. …` with
+  `"opening": true` in `structuredContent`, and opens by itself: the center
+  waits 35 s for the node's answer, as the node waits up to 30 s for the
+  program (node-local §7), and a stream that then does not open ends with
+  the words why, as a subscription does. A node the owner disabled while
+  the action checker decided it is `error unavailable`, and its stream is
+  not opened. A stream the agent closed, or the owner's **Disable** took,
+  while it opened is `error cancelled: the stream was closed while it
+  opened (the node was disabled in the center)`, its reason in brackets,
+  and the node's stream is closed.
+
+Such an answer counts as the details of `stream.read` and `stream.close`.
+The stream ids count toward the session's 16 streams, and another session's
+id is `error unknown_stream`. A read of an event or a program's stream
+taints the session as a command's output does.
+
+**Polling, not notifications.** The harness learns of what happens on a
+machine by polling, not by MCP notifications (HTTP has no server-sent events
+here, and many harnesses ignore notifications): an `execute` that subscribes
+to something answers with a stream id, and `stream.read` with `wait_ms`
+fetches what came.
 
 ## 5. Sessions
 
@@ -568,8 +659,9 @@ Served by `nerve-center` itself at `--ui`. Tabs: overview (alerts, machines
 with rename, disable and remove and the actions the center left out with
 their reasons (§4.1), pairing, sessions). A disabled machine stays
 paired and connected, but the agent is offered none of its capabilities and
-calls to it are refused, and the calls that run there stop, jobs too
-(`POST /api/nodes/disable`, §4.1, §4.4). Further tabs: statistics, audit (for every entry with a known
+calls to it are refused, and the calls that run there stop, jobs too, and
+so do the streams and event subscriptions of a program there
+(`POST /api/nodes/disable`, §4.1, §4.4, §4.5). Further tabs: statistics, audit (for every entry with a known
 target, a command, a path or another action: Allow, Allow as wildcard, Deny
 and Deny as wildcard, only with the node's settings grant; each only adds a
 rule to the node's `policy.allow` or `policy.deny`, a sudo command's allow to

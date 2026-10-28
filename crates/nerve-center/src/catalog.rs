@@ -2,7 +2,8 @@
 //! (docs/dev/spec/protocol.md §6).
 //!
 //! The descriptor is the node's own word. The catalog is the center's reading
-//! of it: one unit per action, named `cap.action`, whose names and schemas
+//! of it: one unit per action (and per state key, event and stream of a
+//! program's capability), named `cap.action`, whose names and schemas
 //! the center can check, and the units it leaves out (broken), each with the
 //! reason. One bad unit leaves out that unit only; the rest of the node stays
 //! usable.
@@ -20,7 +21,7 @@ use nerve_proto::descriptor::{
     Access, AccessMode, Exposure, FolderAccess, bad_member_name, plain_line,
 };
 use nerve_proto::schema::{self, Role};
-use nerve_proto::{Descriptor, Effect};
+use nerve_proto::{Descriptor, Effect, UnitKind};
 
 use crate::jobs::WAIT_MS_MAX;
 use crate::listing::one_line;
@@ -411,6 +412,9 @@ pub struct Unit {
     /// (a capability of its config, `Action::as_account`): the details say
     /// so, as the advice on the folders tells such an action apart.
     pub as_account: bool,
+    /// What `execute` does with it: calls an action, reads a state key
+    /// (`get`), subscribes to an event, or opens a stream.
+    pub kind: UnitKind,
 }
 
 impl Unit {
@@ -442,6 +446,9 @@ impl Unit {
         // their numbers.
         if self.as_account {
             ctx.update(b"as_account");
+        }
+        if self.kind != UnitKind::Action {
+            ctx.update(self.kind.as_str().as_bytes());
         }
         let d = ctx.finish();
         let mut first = [0u8; 8];
@@ -528,10 +535,12 @@ impl Catalog {
             // A capability's event data and state are checked as well, so
             // every schema the node publishes keeps to the subset; one that
             // does not leaves out the whole capability.
-            let whole = cap_outside_subset(cap);
             let cap_description = described(&cap.summary);
             let provider: Arc<str> = cap.provider.as_str().into();
             let node = cap.provider == "node";
+            // A program's state keys and events are units of their own, each
+            // checked alone below.
+            let whole = if node { cap_outside_subset(cap) } else { None };
             if cap.actions.is_empty()
                 && let Some(reason) = whole.clone()
             {
@@ -540,7 +549,21 @@ impl Catalog {
                     reason,
                 });
             }
+            // In a program's capability a name given to two kinds of unit
+            // would name two things: neither is offered.
+            let twice = if node {
+                Default::default()
+            } else {
+                cap.names_twice()
+            };
             for (action, def) in &cap.actions {
+                if twice.contains(action.as_str()) {
+                    c.broken.push(Broken {
+                        name: format!("{}.{}", cap.id, shown_name(action)),
+                        reason: TWICE.into(),
+                    });
+                    continue;
+                }
                 if let Some(reason) = bad_name("action", action) {
                     c.broken.push(Broken {
                         name: format!("{}.{}", cap.id, shown_name(action)),
@@ -606,7 +629,11 @@ impl Catalog {
                     }
                     .filter(|_| bound),
                     as_account: def.as_account,
+                    kind: UnitKind::Action,
                 });
+            }
+            if !node {
+                program_units(&mut c, cap, &cap_description, &provider);
             }
         }
         // Beside a node's own units only: a node that offers nothing runs
@@ -641,6 +668,122 @@ impl Catalog {
     /// Whether `cap.action` is a unit, so it may be offered to the agent.
     pub fn offers(&self, cap: &str, action: &str) -> bool {
         self.unit(&format!("{cap}.{action}")).is_some()
+    }
+}
+
+/// Why a unit of a program's capability is left out whose name the
+/// capability gives to two kinds of unit.
+const TWICE: &str = "its name is given to more than one of the capability's actions, state keys, events and streams";
+
+/// The params of a state key or an event: `execute` takes no arguments.
+fn no_args() -> Value {
+    json!({"type": "object", "additionalProperties": false})
+}
+
+/// The state keys, events and streams of the program's capability `cap` as
+/// units, beside its actions: a state key is read with `get`, an event is
+/// subscribed to, a stream is opened (docs/dev/spec/harness.md §4.5). Each
+/// is checked alone; one whose name is given twice, or whose schema is
+/// outside the subset, is left out with the reason.
+fn program_units(
+    c: &mut Catalog,
+    cap: &nerve_proto::Capability,
+    cap_description: &Arc<str>,
+    provider: &Arc<str>,
+) {
+    let twice = cap.names_twice();
+    let cap_off = cap.exposure == Exposure::Off;
+    let mut add = |name: &str,
+                   kind: UnitKind,
+                   effect: Effect,
+                   summary: &str,
+                   params: Value,
+                   result: Value,
+                   off: bool,
+                   bad: Option<String>| {
+        let full = format!("{}.{}", cap.id, shown_name(name));
+        let reason = bad_name(kind.as_str(), name)
+            .or_else(|| twice.contains(name).then(|| TWICE.to_string()))
+            .or(bad);
+        if let Some(reason) = reason {
+            c.broken.push(Broken { name: full, reason });
+            return;
+        }
+        c.units.push(Unit {
+            name: full,
+            cap: cap.id.clone(),
+            action: name.to_string(),
+            effect,
+            description: match described(summary) {
+                own if own.is_empty() => cap_description.clone(),
+                own => own,
+            },
+            params,
+            result,
+            provider: provider.clone(),
+            off: cap_off || off,
+            note: None,
+            advice: None,
+            as_account: false,
+            kind,
+        });
+    };
+    let schema_of = |what: &str, s: &Value| {
+        (!s.is_null())
+            .then(|| schema::check(s, Role::Result).err())
+            .flatten()
+            .map(|e| schema::brief(&format!("{what}: {e}")))
+    };
+    for (n, d) in &cap.state {
+        let bad = schema_of("value", &d.schema);
+        let off = d.exposure == Some(Exposure::Off);
+        add(
+            n,
+            UnitKind::State,
+            d.effect,
+            &d.summary,
+            no_args(),
+            d.schema.clone(),
+            off,
+            bad,
+        );
+    }
+    for (n, d) in &cap.events {
+        let bad = schema_of("data", &d.data);
+        let off = d.exposure == Some(Exposure::Off);
+        add(
+            n,
+            UnitKind::Event,
+            d.effect,
+            &d.summary,
+            no_args(),
+            d.data.clone(),
+            off,
+            bad,
+        );
+    }
+    for (n, d) in &cap.streams {
+        let params = if d.params.is_null() {
+            json!({"type": "object"})
+        } else {
+            d.params.clone()
+        };
+        // A stream marks no path: the node opens it as a call that names
+        // none, so the agent is never told one is judged.
+        let bad = schema::check_stream_params(&params)
+            .err()
+            .map(|e| schema::brief(&format!("params: {e}")));
+        let off = d.exposure == Some(Exposure::Off);
+        add(
+            n,
+            UnitKind::Stream,
+            d.effect,
+            &d.summary,
+            params,
+            Value::Null,
+            off,
+            bad,
+        );
     }
 }
 
@@ -695,7 +838,7 @@ pub fn center_units() -> Vec<Unit> {
     let job = json!({"type": "string", "minLength": 1,
                      "description": "The job's id, from execute (like j-...)."});
     let stream = json!({"type": "string", "minLength": 1,
-                        "description": "The stream's id, from execute's answer for a job (like s-...)."});
+                        "description": "The stream's id, from execute's answer (like s-...)."});
     let unit = |name: &str, effect: Effect, summary: &str, params: Value| Unit {
         name: name.into(),
         cap: name.split_once('.').map_or(name, |(c, _)| c).into(),
@@ -709,6 +852,7 @@ pub fn center_units() -> Vec<Unit> {
         note: None,
         advice: None,
         as_account: false,
+        kind: UnitKind::Action,
     };
     vec![
         unit(
@@ -731,14 +875,14 @@ pub fn center_units() -> Vec<Unit> {
         unit(
             "stream.close",
             Effect::Read,
-            "Closes a stream of this session: nothing more of it is kept or read.",
+            "Closes a stream of this session (a subscription too): nothing more of it is kept or read.",
             json!({"type": "object", "properties": {"stream": stream}, "required": ["stream"],
                    "additionalProperties": false}),
         ),
         unit(
             "stream.read",
             Effect::Read,
-            "Reads what a stream (a job's command output) sent since the last read; eof once it ended and all was read.",
+            "Reads what a stream (a job's command output, a program's stream, or the events of a subscription, one JSON line each) sent since the last read; eof once it ended and all was read.",
             json!({"type": "object",
                    "properties": {"stream": stream,
                                   "max_bytes": {"type": "integer", "minimum": READ_MIN, "maximum": READ_MAX,
@@ -771,10 +915,12 @@ fn shown_name(name: &str) -> String {
 /// reason is brief, as on the node: it holds the node's own names, and the
 /// Overview and the log repeat it.
 fn cap_outside_subset(cap: &nerve_proto::Capability) -> Option<String> {
-    if !cap.state.is_null()
-        && let Err(e) = schema::check(&cap.state, Role::Result)
-    {
-        return Some(schema::brief(&format!("state: {e}")));
+    for (k, decl) in &cap.state {
+        if !decl.schema.is_null()
+            && let Err(e) = schema::check(&decl.schema, Role::Result)
+        {
+            return Some(schema::brief(&format!("state {k}: {e}")));
+        }
     }
     cap.events.iter().find_map(|(name, ev)| {
         if ev.data.is_null() {
@@ -861,6 +1007,7 @@ mod tests {
                 note: None,
                 advice: None,
                 as_account: false,
+                kind: UnitKind::Action,
             }
         );
         assert!(c.offers("fs", "write"));
@@ -1273,6 +1420,7 @@ mod tests {
             note: None,
             advice: None,
             as_account: false,
+            kind: UnitKind::Action,
         };
         assert_ne!(unit("x1", json!(2)).hash(), unit("x", json!(12)).hash());
     }
@@ -1879,6 +2027,120 @@ mod tests {
         );
     }
 
+    /// A program's state keys, events and streams are units beside its
+    /// actions, each with its kind, checked alone: a name given to two
+    /// kinds leaves out both, and a schema outside the subset only its
+    /// unit. The node's own state and events are no units.
+    #[test]
+    fn a_programs_state_events_and_streams_are_units_with_their_kinds() {
+        let mut board: nerve_proto::Capability = serde_json::from_value(json!(
+            {"id": "board", "provider": "desk", "exposure": "on", "summary": "A board.",
+             "actions": {"reset": {"effect": "actuate"}, "led": {"effect": "write"}},
+             "state": {"temp": {"effect": "sense", "summary": "Degrees.",
+                                "schema": {"type": "number"}},
+                       "led": {"effect": "read"},
+                       "odd": {"effect": "read", "schema": {"anyOf": []}}},
+             "events": {"alarm": {"effect": "read", "exposure": "off"},
+                        "bad": {"effect": "read", "data": {"$ref": "#/x"}}},
+             "streams": {"feed": {"kind": "reliable", "direction": "up", "effect": "sense",
+                                  "params": {"type": "object", "properties": {
+                                      "every_ms": {"type": "integer"}}}},
+                         "tail": {"kind": "reliable", "direction": "up", "effect": "read",
+                                  "params": {"type": "object", "properties": {
+                                      "file": {"type": "string", "x-nerve-path": "read"}}}}}}))
+        .unwrap();
+        board.exposure = Exposure::On;
+        let mut exec = cap(
+            "exec",
+            "exec",
+            &[("run", Effect::Execute, json!({"type": "object"}))],
+        );
+        exec.events = board.events.clone();
+        exec.events.remove("bad");
+        exec.state = board.state.clone();
+        exec.state.remove("odd");
+        let c = Catalog::build(&desc("box", vec![board, exec]));
+        assert_eq!(
+            names(&c),
+            (
+                vec![
+                    "board.alarm",
+                    "board.feed",
+                    "board.reset",
+                    "board.temp",
+                    "exec.run"
+                ],
+                vec![
+                    "board.bad",
+                    "board.led",
+                    "board.led",
+                    "board.odd",
+                    "board.tail"
+                ]
+            )
+        );
+        let unit = |n: &str| c.unit(n).unwrap();
+        assert_eq!(unit("board.temp").kind, UnitKind::State);
+        assert_eq!(unit("board.temp").effect, Effect::Sense);
+        assert_eq!(unit("board.temp").result, json!({"type": "number"}));
+        assert_eq!(&*unit("board.temp").description, "Degrees.");
+        assert_eq!(
+            unit("board.temp").params,
+            json!({"type": "object", "additionalProperties": false})
+        );
+        assert_eq!(unit("board.alarm").kind, UnitKind::Event);
+        assert!(unit("board.alarm").off);
+        assert_eq!(&*unit("board.alarm").description, "A board.");
+        assert_eq!(unit("board.feed").kind, UnitKind::Stream);
+        assert_eq!(
+            unit("board.feed").params["properties"]["every_ms"]["type"],
+            "integer"
+        );
+        assert_eq!(unit("board.reset").kind, UnitKind::Action);
+        let reason = |n: &str| {
+            c.broken
+                .iter()
+                .find(|b| b.name == n)
+                .unwrap()
+                .reason
+                .clone()
+        };
+        assert_eq!(reason("board.led"), TWICE);
+        assert!(
+            reason("board.bad").starts_with("data: "),
+            "{}",
+            reason("board.bad")
+        );
+        assert!(
+            reason("board.odd").starts_with("value: "),
+            "{}",
+            reason("board.odd")
+        );
+        // A stream's open names no path, so the agent is never told one.
+        assert!(
+            reason("board.tail").contains("a stream takes no path"),
+            "{}",
+            reason("board.tail")
+        );
+        // The kind is part of what the model was told.
+        let mut as_action = unit("board.temp").clone();
+        as_action.kind = UnitKind::Action;
+        assert_ne!(as_action.hash(), unit("board.temp").hash());
+    }
+
+    /// One state key `value` with `schema`.
+    fn state_of(
+        schema: Value,
+    ) -> std::collections::BTreeMap<String, nerve_proto::descriptor::StateDecl> {
+        let decl = nerve_proto::descriptor::StateDecl {
+            effect: Effect::Read,
+            summary: String::new(),
+            schema,
+            exposure: None,
+        };
+        [("value".to_string(), decl)].into()
+    }
+
     /// Event data and state are published schemas too: one outside the
     /// subset leaves out every action of its capability, and a capability
     /// without actions is named on its own.
@@ -1892,26 +2154,30 @@ mod tests {
                 ("off", Effect::Actuate, json!({"type": "object"})),
             ],
         );
-        lamp.state = json!({"$ref": "#/x"});
+        lamp.state = state_of(json!({"$ref": "#/x"}));
         let mut door = cap("door", "", &[("open", Effect::Actuate, path())]);
         door.events.insert(
             "opened".into(),
             nerve_proto::descriptor::EventDecl {
+                effect: Effect::Read,
                 summary: "It opened.".into(),
                 implicit: false,
                 data: json!({"oneOf": [{"type": "string"}]}),
+                exposure: None,
             },
         );
         let mut bell = cap("bell", "", &[]);
         bell.events = door.events.clone();
         let mut fine = cap("fine", "", &[("go", Effect::Read, path())]);
-        fine.state = json!({"type": "object", "properties": {"on": {"type": "boolean"}}});
+        fine.state = state_of(json!({"type": "boolean"}));
         fine.events.insert(
             "went".into(),
             nerve_proto::descriptor::EventDecl {
+                effect: Effect::Read,
                 summary: "It went.".into(),
                 implicit: false,
                 data: json!({"type": "integer"}),
+                exposure: None,
             },
         );
         let c = Catalog::build(&desc("box", vec![lamp, door, bell, fine]));
@@ -1931,7 +2197,7 @@ mod tests {
                 .clone()
         };
         assert!(
-            reason("lamp.on").starts_with("state: "),
+            reason("lamp.on").starts_with("state value: "),
             "{}",
             reason("lamp.on")
         );
@@ -1971,14 +2237,16 @@ mod tests {
             },
         );
         let mut door = cap("door", "", &[("open", Effect::Actuate, path())]);
-        door.state = json!({"type": "object", long.clone(): 1});
+        door.state = state_of(json!({"type": "object", long.clone(): 1}));
         let mut bell = cap("bell", "", &[]);
         bell.events.insert(
             "rang".into(),
             nerve_proto::descriptor::EventDecl {
+                effect: Effect::Read,
                 summary: "It rang.".into(),
                 implicit: false,
                 data: json!({"type": "object", long: 1}),
+                exposure: None,
             },
         );
         let c = Catalog::build(&desc("box", vec![lamp, door, bell]));
@@ -2020,6 +2288,7 @@ mod tests {
                 note: None,
                 advice: None,
                 as_account: false,
+                kind: UnitKind::Action,
             })
             .collect();
         let c = Catalog {

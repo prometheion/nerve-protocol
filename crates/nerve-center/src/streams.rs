@@ -6,8 +6,8 @@
 //! ([`open_on_node`]). The node sends what the command printed so far and
 //! then what it prints, as frames; the center keeps them in a [`Ring`] per
 //! stream, and the model reads them with `stream.read`, polling: there are
-//! no MCP notifications (an event subscription, B6, is a stream read the
-//! same way).
+//! no MCP notifications. A program's stream and the events of a
+//! subscription to a program's event are streams read the same way.
 //!
 //! A ring holds at most [`RING_BYTES`]; past it the oldest bytes go, and the
 //! next read says how many. Rings are kept in memory only, per session, and
@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use nerve_proto::ErrorCode;
 use serde_json::json;
 use tokio::sync::watch;
+use tokio::task::AbortHandle;
 
 use crate::center::Session;
 use crate::jobs::NoSignal;
@@ -47,6 +48,10 @@ pub const READ_ROOM: usize = 4 * 1024;
 pub const KEEP_FOR: Duration = crate::jobs::KEEP_FOR;
 /// How long one `stream.open` waits for the node's answer.
 pub const OPEN_WAIT: Duration = Duration::from_secs(10);
+/// How long the `stream.open` of a program's stream waits for the node's
+/// answer: the node gives its program 30 s to answer (node-local.md §7),
+/// and its own `timeout` then should come before the center gives up.
+pub const PROGRAM_OPEN_WAIT: Duration = Duration::from_secs(35);
 /// How long the center keeps asking for the stream of a command its node
 /// does not run yet, once the call was sent: the node may hold a command
 /// before it starts (its folders' access, a sandbox to set up).
@@ -63,6 +68,20 @@ pub struct Ring {
     state: Mutex<RingState>,
     /// Moves on every push and at the end, for a read that waits.
     moved: watch::Sender<u64>,
+    /// What it carries, for the words of its end.
+    source: Source,
+}
+
+/// What a ring carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// A command's output (`exec`'s `output`).
+    Output,
+    /// A program's stream.
+    Program,
+    /// The events of a subscription, one JSON line each: what goes past
+    /// [`RING_BYTES`] goes by whole lines.
+    Events,
 }
 
 #[derive(Default)]
@@ -78,6 +97,10 @@ struct RingState {
     gaps: VecDeque<(u64, u64)>,
     /// Why it ended, and when.
     end: Option<(String, Instant)>,
+    /// What it takes is kept from its readers until [`Ring::show`]: a
+    /// subscription's ring is on the link before its `sub` was decided, and
+    /// takes the events another session's subscription of the topic brings.
+    hidden: bool,
 }
 
 /// One `stream.read`.
@@ -94,14 +117,35 @@ pub struct Read {
 
 impl Default for Ring {
     fn default() -> Ring {
-        Ring {
-            state: Mutex::default(),
-            moved: watch::channel(0).0,
-        }
+        Ring::of(Source::Output)
     }
 }
 
 impl Ring {
+    /// An empty ring for what `source` sends.
+    pub fn of(source: Source) -> Ring {
+        Ring {
+            state: Mutex::default(),
+            moved: watch::channel(0).0,
+            source,
+        }
+    }
+
+    /// What the ring carries.
+    pub fn source(&self) -> Source {
+        self.source
+    }
+
+    /// The words for the node's `stream.close` of it (`ended` when what
+    /// sent it ended it).
+    pub fn closed_words(&self, ended: bool) -> &'static str {
+        match (self.source, ended) {
+            (Source::Output, true) => "the command ended",
+            (Source::Program, true) => "the program ended it",
+            _ => "the node closed it",
+        }
+    }
+
     fn moved(&self) {
         self.moved.send_modify(|n| *n += 1);
     }
@@ -114,7 +158,15 @@ impl Ring {
                 return;
             }
             s.buf.extend(data);
-            let over = s.buf.len().saturating_sub(RING_BYTES);
+            let mut over = s.buf.len().saturating_sub(RING_BYTES);
+            // Events go by whole lines: a read never starts inside one. A
+            // cut right after a line's end leaves the next line whole.
+            if over > 0 && self.source == Source::Events && s.buf[over - 1] != b'\n' {
+                over = match s.buf.range(over..).position(|b| *b == b'\n') {
+                    Some(i) => over + i + 1,
+                    None => s.buf.len(),
+                };
+            }
             if over > 0 {
                 s.buf.drain(..over);
                 s.at += over as u64;
@@ -122,6 +174,18 @@ impl Ring {
                 s.gaps_before_text();
             }
         }
+        self.moved();
+    }
+
+    /// Keeps what the ring takes from its readers until [`Ring::show`], and
+    /// drops it if the ring ends before.
+    pub fn hide(&self) {
+        self.state.lock().unwrap().hidden = true;
+    }
+
+    /// What the ring took can be read: its subscription was taken.
+    pub fn show(&self) {
+        self.state.lock().unwrap().hidden = false;
         self.moved();
     }
 
@@ -154,17 +218,34 @@ impl Ring {
         self.moved();
     }
 
-    /// The stream ended (`why`); what it holds can still be read. Only the
-    /// first end counts.
+    /// The stream ended (`why`); what it holds can still be read, unless
+    /// it was still hidden: then it was never let through ([`Ring::hide`]),
+    /// and only the words why remain. Only the first end counts.
     pub fn end(&self, why: &str) {
         {
             let mut s = self.state.lock().unwrap();
             if s.end.is_some() {
                 return;
             }
+            if s.hidden {
+                s.buf.clear();
+                s.gaps.clear();
+                s.dropped = 0;
+                s.hidden = false;
+            }
             s.end = Some((why.to_string(), Instant::now()));
         }
         self.moved();
+    }
+
+    /// Why the stream ended, once it did.
+    pub fn why(&self) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .end
+            .as_ref()
+            .map(|(why, _)| why.clone())
     }
 
     /// Whether the stream ended.
@@ -198,7 +279,11 @@ impl Ring {
                     let head: Vec<u8> = s.buf.iter().copied().collect();
                     matches!(std::str::from_utf8(&head), Err(e) if e.valid_up_to() == 0 && e.error_len().is_none())
                 };
-            (!s.buf.is_empty() && !part) || s.dropped > 0 || !s.gaps.is_empty() || s.end.is_some()
+            !s.hidden
+                && ((!s.buf.is_empty() && !part)
+                    || s.dropped > 0
+                    || !s.gaps.is_empty()
+                    || s.end.is_some())
         };
         if ready(&self.state.lock().unwrap()) {
             return;
@@ -218,6 +303,14 @@ impl Ring {
     /// stays for the next read, unless nothing more can come.
     pub fn read(&self, max: usize) -> Read {
         let mut s = self.state.lock().unwrap();
+        if s.hidden {
+            return Read {
+                text: String::new(),
+                eof: false,
+                dropped: 0,
+                why: None,
+            };
+        }
         s.gaps_before_text();
         let upto = s
             .gaps
@@ -302,24 +395,42 @@ impl RingState {
 /// A stream of a session as `stream.read` finds it.
 pub struct Found {
     pub ring: Arc<Ring>,
-    /// The job whose output it is.
-    pub job: String,
+    /// What it is, in words: `the output of job j-…`, `the events of
+    /// sensors.alarm`, `stream sensors.feed`.
+    pub what: String,
+    /// The job whose output it is, if it is one's.
+    pub job: Option<String>,
 }
 
 /// What closing a stream leaves to do: tell the node, if the stream still
-/// runs there.
+/// runs there, or end the subscription there once no stream of the link
+/// takes its events any more.
 pub struct Closer {
     /// The link and `sid` of the stream, once the node opened it.
     node: Option<(Weak<Link>, u32)>,
+    /// The link and topic of a subscription.
+    sub: Option<(Weak<Link>, String)>,
     ring: Arc<Ring>,
+    /// The task that still opens it, once its id was given.
+    opening: Option<AbortHandle>,
 }
 
 impl Closer {
     /// Ends the stream, frees it on its link and tells the node to stop it,
     /// unless it ended there already. The node's answer is not waited for:
-    /// it says nothing the center needs.
+    /// it says nothing the center needs. A stream still being opened stops
+    /// its open, as a cancelled `execute` does: nobody reads what it would
+    /// bring, and a subscription's call would hold its places meanwhile.
     pub fn close(self, why: &str) {
         self.ring.end(why);
+        if let Some(h) = self.opening {
+            h.abort();
+        }
+        if let Some((link, topic)) = self.sub
+            && let Some(link) = link.upgrade()
+        {
+            link.unsubscribe(&topic, &self.ring);
+        }
         let Some((link, sid)) = self.node else {
             return;
         };
@@ -335,19 +446,113 @@ impl Closer {
 
 struct Entry {
     node_id: String,
-    job: String,
+    what: String,
+    job: Option<String>,
     node: Option<(Weak<Link>, u32)>,
+    sub: Option<(Weak<Link>, String)>,
     ring: Arc<Ring>,
     opened: Instant,
+    /// A job's output stream asked the node for it ([`Streams::ask`]) and
+    /// waits for the answer: it holds one of the node's places meanwhile.
+    asking: bool,
+    /// A program stream's `stream.open` went to the node: its [`Place`]
+    /// counts the node's place it takes until the answer, not the entry.
+    placed: bool,
+    /// The task that opens it, once its id was given while it still opened
+    /// ([`Streams::given`]).
+    opening: Option<AbortHandle>,
 }
 
 impl Entry {
     fn closer(self) -> Closer {
         Closer {
             node: self.node,
+            sub: self.sub,
             ring: self.ring,
+            opening: self.opening,
         }
     }
+
+    fn is_job(&self, job: &str) -> bool {
+        self.job.as_deref() == Some(job)
+    }
+}
+
+/// One of the node's stream places that the `stream.open` of a session's
+/// program stream takes on the node until the node answers it. The stream
+/// may be closed before, or its opener give up (its `execute` was
+/// cancelled, or its wait passed), and the protocol cannot withdraw the
+/// open: the node keeps the place until it answers, and so the session
+/// keeps counting it ([`Streams::places_on`]), or closed and cancelled
+/// opens would let it take more than its share of the node's places. From
+/// its take until it is dropped it counts in the stream's stead.
+pub struct Place {
+    sess: Weak<Session>,
+    node_id: String,
+    id: String,
+}
+
+impl Place {
+    /// Takes the node's place for the open of the program stream `id` of
+    /// `sess`, under the lock its close takes too, so the place counts
+    /// whichever comes first. None when the session no longer holds the
+    /// stream or it ended: it is not to be opened.
+    pub fn take(sess: &Arc<Session>, id: &str) -> Option<Place> {
+        let mut streams = sess.streams.lock().unwrap();
+        let e = streams.entries.get_mut(id).filter(|e| !e.ring.ended())?;
+        e.placed = true;
+        let node_id = e.node_id.clone();
+        *streams.placed.entry(node_id.clone()).or_default() += 1;
+        Some(Place {
+            sess: Arc::downgrade(sess),
+            node_id,
+            id: id.to_string(),
+        })
+    }
+}
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        let Some(s) = self.sess.upgrade() else {
+            return;
+        };
+        let mut streams = s.streams.lock().unwrap();
+        if let Some(n) = streams.placed.get_mut(&self.node_id) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                streams.placed.remove(&self.node_id);
+            }
+        }
+        // Answered: the stream, if the session still holds it, counts for
+        // itself again, until it ends.
+        if let Some(e) = streams.entries.get_mut(&self.id) {
+            e.placed = false;
+        }
+    }
+}
+
+/// Where a session's streams take a topic's events
+/// ([`Streams::subscribed_on`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Subscribed {
+    /// On the link asked about.
+    Here,
+    /// Only on another link of the node, which went meanwhile.
+    Elsewhere,
+    /// Nowhere: the stream was closed.
+    Closed,
+}
+
+/// Why [`Streams::add_unit`] added no stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotAdded {
+    /// The session holds [`STREAMS_MAX`] streams that still run.
+    Full,
+    /// The session ended.
+    Ended,
+    /// The session holds its share of the node's stream places
+    /// ([`node_share`]) already.
+    Share,
 }
 
 /// A session's streams, under their own lock: nothing else is locked while
@@ -357,6 +562,9 @@ pub struct Streams {
     entries: HashMap<String, Entry>,
     /// The session ended: no stream is added any more.
     ended: bool,
+    /// By node id, the opens of its programs' streams that went to the node
+    /// and which it has not answered yet ([`Place`]).
+    placed: HashMap<String, usize>,
 }
 
 impl Streams {
@@ -394,18 +602,196 @@ impl Streams {
     /// Adds the stream of the output of `job` on `node_id`, as `id`, before
     /// the node opened it. Refused once the session ended.
     pub fn add(&mut self, id: &str, node_id: &str, job: &str, ring: Arc<Ring>) -> bool {
+        self.insert(
+            id,
+            node_id,
+            format!("the output of job {job}"),
+            Some(job),
+            ring,
+        )
+    }
+
+    /// Adds a stream of a program's unit on `node_id`, as `id`, before the
+    /// node opened it or the subscription was made; `what` names it. The
+    /// room for it is made and taken here, under the one lock: a session's
+    /// calls run side by side, and each may have waited for the action
+    /// checker since it last looked, so a look before is not enough. A
+    /// program's stream takes one of the node's stream places too: with
+    /// `share` the session holds at most that many there, its streams that
+    /// are open on the node or still being opened, so one session cannot
+    /// take every place of the link from the others. The closers of what
+    /// went to make room are given back.
+    pub fn add_unit(
+        &mut self,
+        id: &str,
+        node_id: &str,
+        what: String,
+        ring: Arc<Ring>,
+        share: Option<usize>,
+        now: Instant,
+    ) -> (Result<(), NotAdded>, Vec<Closer>) {
+        let (room, gone) = self.room(now);
+        if self.ended {
+            return (Err(NotAdded::Ended), gone);
+        }
+        if !room {
+            return (Err(NotAdded::Full), gone);
+        }
+        if share.is_some_and(|share| self.places_on(node_id) >= share) {
+            return (Err(NotAdded::Share), gone);
+        }
+        self.insert(id, node_id, what, None, ring);
+        (Ok(()), gone)
+    }
+
+    /// How many of the node's stream places the session's streams on
+    /// `node_id` hold: those open there that still run, and those on their
+    /// way there, its programs' streams and the jobs' output streams it
+    /// asked for (a subscription holds none). A program stream's open that
+    /// went to the node counts as its [`Place`] until the node answered,
+    /// also once the stream was closed or its opener gave up.
+    fn places_on(&self, node_id: &str) -> usize {
+        let held = self
+            .entries
+            .values()
+            .filter(|e| {
+                e.node_id == node_id
+                    && !e.ring.ended()
+                    && (e.node.is_some()
+                        || e.asking
+                        || (e.ring.source() == Source::Program && !e.placed))
+            })
+            .count();
+        held + self.placed.get(node_id).copied().unwrap_or(0)
+    }
+
+    /// The output stream `id` is about to ask its node to open it: when
+    /// the session holds less than `share` of the node's stream places
+    /// ([`Streams::places_on`]), it takes one until the answer
+    /// ([`Streams::opened`], [`Streams::not_asked`]), and `true`. Counted
+    /// in the one lock with the take, as [`Streams::add_unit`] does: the
+    /// session's programs' streams on their way count too, so the two
+    /// kinds together keep to the share.
+    pub fn ask(&mut self, id: &str, share: usize) -> bool {
+        let Some(node_id) = self.entries.get(id).map(|e| e.node_id.clone()) else {
+            return false;
+        };
+        if self.places_on(&node_id) >= share {
+            return false;
+        }
+        if let Some(e) = self.entries.get_mut(id) {
+            e.asking = true;
+        }
+        true
+    }
+
+    /// The node did not open the stream `id` it was asked for: its place
+    /// is free again.
+    pub fn not_asked(&mut self, id: &str) {
+        if let Some(e) = self.entries.get_mut(id) {
+            e.asking = false;
+        }
+    }
+
+    fn insert(
+        &mut self,
+        id: &str,
+        node_id: &str,
+        what: String,
+        job: Option<&str>,
+        ring: Arc<Ring>,
+    ) -> bool {
         if self.ended {
             return false;
         }
         let e = Entry {
             node_id: node_id.to_string(),
-            job: job.to_string(),
+            what,
+            job: job.map(str::to_string),
             node: None,
+            sub: None,
             ring,
             opened: Instant::now(),
+            asking: false,
+            placed: false,
+            opening: None,
         };
         self.entries.insert(id.to_string(), e);
         true
+    }
+
+    /// The events of `topic` on `link` go to the stream `id` now; `false`
+    /// when the session no longer holds it.
+    pub fn subscribed(&mut self, id: &str, link: &Arc<Link>, topic: &str) -> bool {
+        match self.entries.get_mut(id) {
+            Some(e) => {
+                e.sub = Some((Arc::downgrade(link), topic.to_string()));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The stream `id` was given while it still opened, by the task
+    /// `opening`: closed, it stops it. `false` when the session no longer
+    /// holds it.
+    pub fn given(&mut self, id: &str, opening: AbortHandle) -> bool {
+        match self.entries.get_mut(id) {
+            Some(e) => {
+                e.opening = Some(opening);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Where a stream of the session takes the events of `topic`: on
+    /// `link`, on another link of the node (it went meanwhile, and there
+    /// is no ring on `link`), or on none (the stream was closed).
+    pub fn subscribed_on(&self, link: &Arc<Link>, topic: &str) -> Subscribed {
+        let mut found = Subscribed::Closed;
+        for (l, _) in self
+            .entries
+            .values()
+            .filter_map(|e| e.sub.as_ref().filter(|(_, t)| t == topic))
+        {
+            if std::ptr::eq(l.as_ptr(), Arc::as_ptr(link)) {
+                return Subscribed::Here;
+            }
+            found = Subscribed::Elsewhere;
+        }
+        found
+    }
+
+    /// Takes out the streams of programs' units on `node_id`, its open
+    /// streams and subscriptions, to close them: they are not jobs, so
+    /// stopping the jobs there would leave them running.
+    pub fn units_on(&mut self, node_id: &str) -> Vec<Closer> {
+        let ids: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| e.node_id == node_id && e.job.is_none())
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.iter()
+            .filter_map(|id| self.entries.remove(id))
+            .map(Entry::closer)
+            .collect()
+    }
+
+    /// The stream `id` did not open after its id was given: it stays, so
+    /// that its `stream.read` says why, and the closer it is given back
+    /// ends it and takes its subscription off the link.
+    pub fn not_opened(&mut self, id: &str) -> Option<Closer> {
+        let e = self.entries.get_mut(id)?;
+        // Its own task gives it up: it stops by itself.
+        e.opening = None;
+        Some(Closer {
+            node: e.node.take(),
+            sub: e.sub.take(),
+            ring: e.ring.clone(),
+            opening: None,
+        })
     }
 
     /// The node opened the stream `id` as `sid` on `link`; `false` when the
@@ -414,23 +800,11 @@ impl Streams {
         match self.entries.get_mut(id) {
             Some(e) => {
                 e.node = Some((Arc::downgrade(link), sid));
+                e.asking = false;
                 true
             }
             None => false,
         }
-    }
-
-    /// How many of the session's streams are open on `link` and still run.
-    pub fn open_on(&self, link: &Arc<Link>) -> usize {
-        self.entries
-            .values()
-            .filter(|e| {
-                e.node
-                    .as_ref()
-                    .is_some_and(|(l, _)| std::ptr::eq(l.as_ptr(), Arc::as_ptr(link)))
-                    && !e.ring.ended()
-            })
-            .count()
     }
 
     /// The stream `id` of `node_id`; none when this session has no such
@@ -443,6 +817,7 @@ impl Streams {
             .filter(|e| e.node_id == node_id)
             .map(|e| Found {
                 ring: e.ring.clone(),
+                what: e.what.clone(),
                 job: e.job.clone(),
             });
         (found, gone)
@@ -461,7 +836,7 @@ impl Streams {
     /// link, a result not kept) and the stream holds output or, open on the
     /// node, may still get some. Then it stays, and its id is given.
     pub fn result_read(&mut self, job: &str, whole: bool) -> (Option<String>, Option<Closer>) {
-        let Some((id, e)) = self.entries.iter().find(|(_, e)| e.job == job) else {
+        let Some((id, e)) = self.entries.iter().find(|(_, e)| e.is_job(job)) else {
             return (None, None);
         };
         let more = e.ring.held() > 0 || (e.node.is_some() && !e.ring.ended());
@@ -477,7 +852,7 @@ impl Streams {
         let id = self
             .entries
             .iter()
-            .find(|(_, e)| e.job == job)
+            .find(|(_, e)| e.is_job(job))
             .map(|(id, _)| id.clone())?;
         self.entries.remove(&id).map(Entry::closer)
     }
@@ -543,11 +918,13 @@ pub async fn open_on_node(
                 return;
             }
             Ok((link, call)) => {
-                let mine = sess
+                // The place is taken here, until the node answers.
+                let share = node_share(link.limits.streams);
+                let asked = sess
                     .upgrade()
-                    .map_or(0, |s| s.streams.lock().unwrap().open_on(&link));
+                    .is_some_and(|s| s.streams.lock().unwrap().ask(&id, share));
                 // Waiting for room is not waiting for the command to start.
-                if mine >= node_share(link.limits.streams) {
+                if !asked {
                     sent_at = None;
                     tokio::time::sleep(pause).await;
                     pause = (pause * 2).min(Duration::from_secs(1));
@@ -555,6 +932,7 @@ pub async fn open_on_node(
                 }
                 let since = *sent_at.get_or_insert_with(Instant::now);
                 if since.elapsed() >= start_wait {
+                    // An ended stream holds no place.
                     ring.end(if unanswered {
                         "the node did not answer requests for a stream in time; job.status gives its output with the result"
                     } else {
@@ -570,6 +948,11 @@ pub async fn open_on_node(
                                     "ctx": {"session": session}});
                 let tried = link.open_stream(params, ring.clone(), open_wait).await;
                 unanswered = matches!(&tried, Err(e) if e.kind() == ErrorCode::Timeout);
+                if tried.is_err()
+                    && let Some(s) = sess.upgrade()
+                {
+                    s.streams.lock().unwrap().not_asked(&id);
+                }
                 match tried {
                     Ok(sid) => {
                         let kept = sess
@@ -578,7 +961,9 @@ pub async fn open_on_node(
                         if !kept {
                             Closer {
                                 node: Some((Arc::downgrade(&link), sid)),
+                                sub: None,
                                 ring,
+                                opening: None,
                             }
                             .close("it was closed");
                         }
@@ -660,6 +1045,68 @@ mod tests {
             (last.text.as_str(), last.eof, last.why.as_deref()),
             ("line\n", true, Some("the command ended"))
         );
+    }
+
+    /// An events ring drops by whole lines, and no more than it must: a
+    /// cut that falls right after a line's end keeps the next line.
+    /// A hidden ring gives nothing until it is shown, and then what it
+    /// took; one that ends while hidden drops it, and gives only its end.
+    #[tokio::test]
+    async fn a_hidden_ring_gives_what_it_took_only_once_shown() {
+        let r = Ring::of(Source::Events);
+        r.hide();
+        r.push(b"{\"seq\":1}\n");
+        let got = r.read(READ_MAX);
+        assert_eq!((got.text.as_str(), got.eof), ("", false));
+        let started = Instant::now();
+        r.wait(Duration::from_millis(100)).await;
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "a wait goes on"
+        );
+        r.show();
+        assert_eq!(r.read(READ_MAX).text, "{\"seq\":1}\n");
+
+        let r = Ring::of(Source::Events);
+        r.hide();
+        r.push(b"{\"seq\":1}\n");
+        r.gap(5);
+        r.end("it did not open");
+        let got = r.read(READ_MAX);
+        assert_eq!(
+            got,
+            Read {
+                text: String::new(),
+                eof: true,
+                dropped: 0,
+                why: Some("it did not open".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn an_events_ring_drops_whole_lines_and_no_more() {
+        let r = Ring::of(Source::Events);
+        let line = |c: u8| {
+            let mut l = vec![c; 64 * 1024 - 1];
+            l.push(b'\n');
+            l
+        };
+        for i in 0..17u8 {
+            r.push(&line(b'a' + i));
+        }
+        assert_eq!(r.held(), RING_BYTES, "16 lines stay");
+        let first = r.read(READ_MAX);
+        assert_eq!(first.dropped, 64 * 1024, "one line went");
+        assert!(first.text.starts_with('b'), "{}", &first.text[..8]);
+        // A cut inside a line takes the rest of it too.
+        let r = Ring::of(Source::Events);
+        r.push(&line(b'a'));
+        r.push(&vec![b'b'; RING_BYTES - 2]);
+        r.push(b"\nc\n");
+        let first = r.read(READ_MAX);
+        assert_eq!(first.dropped as usize, 64 * 1024 + RING_BYTES - 1);
+        assert_eq!(first.text, "c\n");
     }
 
     /// A gap the node reports lies after the data that came before it: a
@@ -874,5 +1321,113 @@ mod tests {
         let ring = Arc::new(Ring::default());
         assert!(!s.add("s-x", "n1", "j-x", ring));
         assert!(!s.room(now).0);
+    }
+
+    /// A program's unit's stream is added only with room for it, looked at
+    /// in the add itself: the session's other calls may have added theirs
+    /// while this one waited for the checker. Disabling the node takes out
+    /// its units' streams and leaves its jobs' and other nodes' alone.
+    #[test]
+    fn a_units_stream_takes_its_room_as_it_is_added() {
+        let link = Arc::new(Link::for_test("n1"));
+        let mut s = Streams::default();
+        let now = Instant::now();
+        assert!(s.add("s-job", "n1", "j-1", Arc::new(Ring::default())));
+        assert!(s.add("s-other", "n2", "j-2", Arc::new(Ring::default())));
+        for i in 2..STREAMS_MAX {
+            let what = format!("the events of board.e{i}");
+            let ring = Arc::new(Ring::of(Source::Events));
+            let (added, gone) = s.add_unit(&format!("s-{i}"), "n1", what, ring, None, now);
+            assert_eq!(added, Ok(()));
+            assert!(gone.is_empty());
+        }
+        assert!(s.subscribed("s-2", &link, "board/e2"));
+        assert_eq!(s.subscribed_on(&link, "board/e2"), Subscribed::Here);
+        assert_eq!(
+            s.subscribed_on(&link, "board/e3"),
+            Subscribed::Closed,
+            "never subscribed"
+        );
+        let other = Arc::new(Link::for_test("n1"));
+        assert_eq!(
+            s.subscribed_on(&other, "board/e2"),
+            Subscribed::Elsewhere,
+            "another link"
+        );
+        let ring = Arc::new(Ring::of(Source::Program));
+        let (added, _) = s.add_unit("s-more", "n1", "stream board.feed".into(), ring, None, now);
+        assert_eq!(added, Err(NotAdded::Full));
+        assert_eq!(s.len(), STREAMS_MAX);
+
+        assert_eq!(s.units_on("n1").len(), STREAMS_MAX - 2);
+        assert_eq!(s.len(), 2, "the jobs' streams stay");
+        s.end();
+        let ring = Arc::new(Ring::of(Source::Program));
+        let (added, _) = s.add_unit("s-late", "n1", "stream board.feed".into(), ring, None, now);
+        assert_eq!(added, Err(NotAdded::Ended));
+    }
+
+    /// A program's stream is added only within the session's share of the
+    /// node's stream places: its program streams there, open or on their
+    /// way, and its jobs' streams open there count; subscriptions, ended
+    /// streams and other nodes' do not.
+    #[test]
+    fn a_programs_streams_keep_to_the_sessions_share_of_a_node() {
+        let link = Arc::new(Link::for_test("n1"));
+        let mut s = Streams::default();
+        let now = Instant::now();
+        let feed = || Arc::new(Ring::of(Source::Program));
+        let add = |s: &mut Streams, id: &str, node: &str, ring: Arc<Ring>| {
+            s.add_unit(id, node, "stream board.feed".into(), ring, Some(3), now)
+                .0
+        };
+        assert_eq!(add(&mut s, "s-1", "n1", feed()), Ok(()));
+        assert!(s.add("s-job", "n1", "j-1", Arc::new(Ring::default())));
+        assert!(s.add("s-later", "n1", "j-2", Arc::new(Ring::default())));
+        assert!(s.opened("s-job", &link, 4));
+        let events = Arc::new(Ring::of(Source::Events));
+        assert_eq!(add(&mut s, "s-ev", "n1", events), Ok(()));
+        let ended = feed();
+        assert_eq!(add(&mut s, "s-2", "n1", ended.clone()), Ok(()));
+        assert_eq!(add(&mut s, "s-3", "n1", feed()), Err(NotAdded::Share));
+        ended.end("the program ended it");
+        assert_eq!(add(&mut s, "s-3", "n1", feed()), Ok(()));
+        assert_eq!(add(&mut s, "s-4", "n1", feed()), Err(NotAdded::Share));
+        assert_eq!(add(&mut s, "s-4", "n2", feed()), Ok(()));
+        let ev = Arc::new(Ring::of(Source::Events));
+        let (added, _) = s.add_unit("s-ev2", "n1", "the events".into(), ev, None, now);
+        assert_eq!(added, Ok(()), "a subscription takes no share");
+    }
+
+    /// A job's output stream asks for one of the node's places only within
+    /// the session's share: its programs' streams on their way take theirs,
+    /// and one it asked for holds its place against them until the node
+    /// answered.
+    #[test]
+    fn a_jobs_stream_keeps_to_the_share_with_programs_streams_on_their_way() {
+        let link = Arc::new(Link::for_test("n1"));
+        let mut s = Streams::default();
+        let now = Instant::now();
+        let feed = || Arc::new(Ring::of(Source::Program));
+        let add = |s: &mut Streams, id: &str, ring: Arc<Ring>| {
+            s.add_unit(id, "n1", "stream board.feed".into(), ring, Some(2), now)
+                .0
+        };
+        let first = feed();
+        assert_eq!(add(&mut s, "s-1", first.clone()), Ok(()));
+        assert_eq!(add(&mut s, "s-2", feed()), Ok(()));
+        assert!(s.add("s-job", "n1", "j-1", Arc::new(Ring::default())));
+        assert!(!s.ask("s-job", 2), "two programs' streams on their way");
+        first.end("it did not open");
+        assert!(s.ask("s-job", 2));
+        assert_eq!(add(&mut s, "s-3", feed()), Err(NotAdded::Share));
+        s.not_asked("s-job");
+        assert_eq!(add(&mut s, "s-3", feed()), Ok(()));
+        assert!(!s.ask("s-job", 2));
+        assert!(!s.ask("s-gone", 2));
+        assert!(s.add("s-job2", "n1", "j-2", Arc::new(Ring::default())));
+        assert!(s.ask("s-job2", 3));
+        assert!(s.opened("s-job2", &link, 5));
+        assert!(!s.ask("s-job", 3), "an open one holds its place");
     }
 }

@@ -284,12 +284,32 @@ pub struct Get {
     pub cap: String,
     #[serde(default)]
     pub keys: Vec<String>,
+    /// The session that reads, for the audit of a program's state.
+    #[serde(default)]
+    pub ctx: Ctx,
+}
+
+impl Get {
+    /// Checks what serde cannot: the session's length.
+    pub fn check(&self) -> Result<(), crate::RpcError> {
+        check_session(&self.ctx)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Topics {
     pub topics: Vec<String>,
+    /// The session that subscribes, for the audit of a program's events.
+    #[serde(default)]
+    pub ctx: Ctx,
+}
+
+impl Topics {
+    /// Checks what serde cannot: the session's length.
+    pub fn check(&self) -> Result<(), crate::RpcError> {
+        check_session(&self.ctx)
+    }
 }
 
 /// A parsed topic: `<cap>/<event>`, `<cap>/state` or `<cap>/*`.
@@ -513,6 +533,40 @@ mod tests {
             serde_json::from_value::<StreamClose>(json!({"sid": 1, "reason": "x", "y": 2}))
                 .is_err()
         );
+    }
+
+    /// `get` and `sub` carry the session that reads or subscribes, as
+    /// strictly as `invoke` does.
+    #[test]
+    fn get_and_sub_take_a_session() {
+        let g: Get = serde_json::from_value(
+            json!({"cap": "sensors", "keys": ["temp"], "ctx": {"session": "s1"}}),
+        )
+        .unwrap();
+        assert_eq!(g.ctx.session.as_deref(), Some("s1"));
+        assert!(g.check().is_ok());
+        let t: Topics =
+            serde_json::from_value(json!({"topics": ["sensors/alarm"], "ctx": {"session": "s1"}}))
+                .unwrap();
+        assert!(t.check().is_ok());
+        assert!(
+            serde_json::from_value::<Get>(json!({"cap": "x", "ctx": {"mode": "full"}})).is_err()
+        );
+        assert!(
+            serde_json::from_value::<Topics>(json!({"topics": [], "ctx": {}, "x": 1})).is_err()
+        );
+        let long = Ctx {
+            session: Some("s".repeat(257)),
+        };
+        assert!(
+            Get {
+                ctx: long.clone(),
+                ..g
+            }
+            .check()
+            .is_err()
+        );
+        assert!(Topics { ctx: long, ..t }.check().is_err());
     }
 
     #[test]

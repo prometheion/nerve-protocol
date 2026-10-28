@@ -14,7 +14,7 @@ use tokio::sync::broadcast;
 use nerve_proto::link::{CenterUrl, PairLink, PairRequest, PairResponse};
 use nerve_proto::msg::{self, ByeReason, Event, Hello};
 use nerve_proto::schema::PathMark;
-use nerve_proto::{Descriptor, ErrorCode, Exposure, RpcError};
+use nerve_proto::{Descriptor, ErrorCode, Exposure, RpcError, UnitKind};
 use nerve_transport::log::{Level, Log, Query, call_line};
 use nerve_transport::tls::ServerIdentity;
 
@@ -316,6 +316,8 @@ pub enum Ran {
 struct Held {
     sess: Arc<Session>,
     id: Option<String>,
+    /// Why the call stops when it is dropped.
+    why: Stop,
 }
 
 impl Drop for Held {
@@ -323,7 +325,7 @@ impl Drop for Held {
         if let Some(id) = self.id.take() {
             let stop = self.sess.jobs.lock().unwrap().abandon(&id);
             if let Some(stop) = stop {
-                let _ = stop.send(Stop::Abandoned);
+                let _ = stop.send(self.why);
             }
         }
     }
@@ -366,6 +368,106 @@ impl Drop for Waiting {
             rt.spawn(async move { link.cancel(id).await });
         }
     }
+}
+
+/// A stream of a session that `execute` adds before its node answered.
+/// Dropped before its id was given (the harness cancelled the request, or
+/// the node refused), it closes the stream again: nobody could name it to
+/// close it, and it would hold one of the session's places and its
+/// subscription on the link for as long as the session lives. It owns
+/// what it needs, so that it can be made before the task that opens the
+/// stream: a task aborted before it first ran drops it too.
+struct Adding {
+    sess: Arc<Session>,
+    node_id: String,
+    id: Option<String>,
+    why: &'static str,
+}
+
+impl Adding {
+    /// The id is given: the stream stays.
+    fn keep(mut self) -> String {
+        self.id.take().unwrap_or_default()
+    }
+}
+
+impl Drop for Adding {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take()
+            && let Some(c) = self.sess.streams.lock().unwrap().close(&id, &self.node_id)
+        {
+            c.close(self.why);
+        }
+    }
+}
+
+/// What `execute` of a program's event or stream gives: the id of the
+/// session's stream it comes in, and whether it was still being opened
+/// when the call wait passed.
+#[derive(Debug)]
+pub struct Opened {
+    pub id: String,
+    pub opening: bool,
+}
+
+/// Where the opening of a program's stream or subscription is
+/// ([`Center::within_call_wait`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Its `execute` waits for it.
+    Waited,
+    /// The call wait passed: the stream's id was given, and the open goes
+    /// on by itself.
+    Given,
+    /// It ended before the call wait passed: its `execute` has its result.
+    Done,
+}
+
+/// Stops a task when dropped, unless it was let go (`None`).
+struct AbortOnDrop(Option<tokio::task::AbortHandle>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(h) = self.0.take() {
+            h.abort();
+        }
+    }
+}
+
+/// The node `name` has no link now.
+fn offline(name: &str) -> RpcError {
+    RpcError::new(
+        ErrorCode::Unavailable,
+        format!("the node {name} is offline"),
+    )
+}
+
+/// A stream taken out of its session while it opened: the agent closed
+/// it, the session ended or the node was disabled. Its ring says which.
+fn closed_while_opening(ring: &Ring) -> RpcError {
+    RpcError::new(
+        ErrorCode::Cancelled,
+        format!(
+            "the stream was closed while it opened ({})",
+            ring.why().as_deref().unwrap_or("it was closed")
+        ),
+    )
+}
+
+/// Why a stream whose id was given did not open, for its `stream.read`:
+/// the error on one line, a node's own words said to be its own, as
+/// `execute` gives them.
+fn not_opened_words(route: &Route, e: &RpcError) -> String {
+    let whose = if crate::link::by_node(e) {
+        format!("node {} answered: ", route.node_name)
+    } else {
+        String::new()
+    };
+    listing::one_line(&format!(
+        "it did not open: error {}: {whose}{}",
+        e.kind().as_str(),
+        e.message
+    ))
 }
 
 /// Settles a rotation of the center's key that a stop cut short, at the
@@ -1618,8 +1720,9 @@ impl Center {
 
     /// Switches a node off or on for the agent. The link stays as it is;
     /// `list` and the call path look at the flag, and the calls that run on
-    /// the node (jobs too) are stopped: the owner who disables a machine
-    /// wants the agent's work there to end, not to run on unseen.
+    /// the node (jobs too, and a program's streams and subscriptions) are
+    /// stopped: the owner who disables a machine wants the agent's work
+    /// there to end, not to run on unseen.
     pub fn set_disabled(&self, node_id: &str, disabled: bool) -> Result<(), String> {
         self.update(|s| {
             s.nodes.get_mut(node_id).ok_or("no such node")?.disabled = disabled;
@@ -1632,6 +1735,14 @@ impl Center {
                 let stops = sess.jobs.lock().unwrap().stop_on(node_id);
                 for stop in stops {
                     let _ = stop.send(Stop::Disabled);
+                }
+                // A program's open streams and the subscriptions to its
+                // events are no jobs, but run there all the same: the node
+                // gets `stream.close` and `unsub`, and the agent reads none
+                // of what came meanwhile once the node is enabled again.
+                let units = sess.streams.lock().unwrap().units_on(node_id);
+                for c in units {
+                    c.close("the node was disabled in the center");
                 }
             }
         }
@@ -2061,7 +2172,10 @@ impl Center {
                 self.audit.lock().unwrap().push(e);
                 self.changed(Change::Audit);
             }
-            _ => {}
+            // A program's event, for the sessions subscribed to it.
+            _ => {
+                link.event(&ev);
+            }
         }
     }
 
@@ -2214,6 +2328,7 @@ impl Center {
                 cap: u.cap.clone(),
                 action: u.action.clone(),
                 effect: u.effect,
+                kind: u.kind,
             };
             Ok(Some((route, u)))
         })
@@ -2501,6 +2616,21 @@ impl Center {
         on: Option<Arc<Link>>,
         wait: Option<Duration>,
     ) -> Ran {
+        self.run_dropped(sess, route, args, on, wait, Stop::Abandoned)
+            .await
+    }
+
+    /// [`Center::run`] whose call stops `dropped` when it is dropped before
+    /// it became a job.
+    async fn run_dropped(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        args: Map<String, Value>,
+        on: Option<Arc<Link>>,
+        wait: Option<Duration>,
+        dropped: Stop,
+    ) -> Ran {
         let id = jobs::new_id();
         let started = sess.jobs.lock().unwrap().start(&id, route, on.is_some());
         let (mut result, stop) = match started {
@@ -2511,6 +2641,7 @@ impl Center {
         let mut held = Held {
             sess: sess.clone(),
             id: Some(id.clone()),
+            why: dropped,
         };
         let (c, s, r, i) = (self.clone(), sess.clone(), route.clone(), id.clone());
         tokio::spawn(async move { c.run_call(&s, &r, args, &i, on, stop).await });
@@ -2698,29 +2829,121 @@ impl Center {
         job: &str,
         on: Option<&Arc<Link>>,
     ) -> Result<Value, CallError> {
-        // Checked first: nothing is sent to a disabled node, not even the
-        // session mark. `execute` refuses a disabled node before it gets
-        // here, but the switch may come in between.
-        if self.read(|s| s.nodes.get(&route.node_id).is_some_and(|n| n.disabled)) {
-            return Err(RpcError::new(
-                ErrorCode::Unavailable,
-                format!("the node {} is disabled in the center", route.node_name),
+        let link = self.admit(sess, route, &args).await?;
+        // A job's `invoke` id is its link's: on another link of the node it
+        // would name some other call.
+        if on.is_some_and(|on| !Arc::ptr_eq(on, &link)) {
+            return Err(RpcError::invalid_args(
+                "the job's call no longer runs on the node's link: the link to the node ended",
             )
             .into());
         }
-        // Then whether the node is there at all, before the checker: a call
-        // that cannot be sent is `unavailable`, not a checker refusal (with
-        // the model on and down, fail closed would say `forbidden`), and
-        // costs no model call.
-        let offline = || {
-            RpcError::new(
-                ErrorCode::Unavailable,
-                format!("the node {} is offline", route.node_name),
-            )
-        };
-        if self.link(&route.node_id).is_none() {
-            return Err(offline().into());
+        // A subscription's ring is on the link it was made on
+        // (subscribe_events). The node may have come back on another link
+        // while the checker was asked: there the events would reach no
+        // ring, and no `unsub` would ever end the node's subscription.
+        // The agent may have closed the stream meanwhile too, once its id
+        // was given (Center::within_call_wait): then the link did not end.
+        if route.kind == UnitKind::Event {
+            let topic = format!("{}/{}", route.cap, route.action);
+            let on = sess.streams.lock().unwrap().subscribed_on(&link, &topic);
+            match on {
+                streams::Subscribed::Here => {}
+                streams::Subscribed::Closed => return Err(Stop::Closed.error().into()),
+                streams::Subscribed::Elsewhere => {
+                    return Err(RpcError::new(
+                        ErrorCode::ConnectionLost,
+                        "the link to the node ended",
+                    )
+                    .into());
+                }
+            }
         }
+        let ctx = json!({"session": sess.id});
+        sess.nodes.lock().unwrap().insert(route.node_id.clone());
+        link.sessions.lock().unwrap().insert(sess.id.clone());
+        // The agents' calls leave a few of the node's call places free, for
+        // the owner's settings changes from the center and for a job's
+        // `exec.signal`: jobs of many sessions could fill them all.
+        let most = link.limits.calls as usize;
+        let most = if on.is_some() {
+            most
+        } else {
+            (most - calls_kept(most)).max(1)
+        };
+        // A program's state key is read with `get`, its event subscribed to
+        // with `sub` (docs/dev/spec/harness.md §4.5); the node decides each
+        // like a call.
+        let (method, params) = match route.kind {
+            UnitKind::State => (
+                msg::method::GET,
+                json!({"cap": route.cap, "keys": [route.action], "ctx": ctx}),
+            ),
+            UnitKind::Event => (
+                msg::method::SUB,
+                json!({"topics": [format!("{}/{}", route.cap, route.action)], "ctx": ctx}),
+            ),
+            UnitKind::Action | UnitKind::Stream => (
+                msg::method::INVOKE,
+                json!({"cap": route.cap, "action": route.action, "args": args, "ctx": ctx}),
+            ),
+        };
+        let started = if method == msg::method::SUB {
+            link.start_sub(params, most).await
+        } else {
+            link.start_within(method, params, most).await
+        };
+        let (id, rx) = started.map_err(|e| {
+                if e.kind() != ErrorCode::Busy {
+                    return e;
+                }
+                RpcError::new(
+                    ErrorCode::Busy,
+                    format!(
+                        "node {} runs {} calls already, the most the center sends it for agents: try again when one ended, or stop a job of this session with job.cancel",
+                        route.node_name, most
+                    ),
+                )
+            })?;
+        sess.jobs.lock().unwrap().sent(job, &link, id);
+        let mut waiting = Waiting {
+            link: Some(link),
+            id,
+        };
+        let r = rx.await;
+        waiting.link = None;
+        let v = r
+            .unwrap_or_else(|_| {
+                Err(RpcError::new(
+                    ErrorCode::ConnectionLost,
+                    "the link to the node ended",
+                ))
+            })
+            .map_err(CallError::Rpc)?;
+        // The value of the key asked for, not the node's map of keys.
+        if route.kind == UnitKind::State {
+            return v.get(&route.action).cloned().ok_or_else(|| {
+                RpcError::internal(format!(
+                    "the node answered get without the state {}",
+                    route.action
+                ))
+                .into()
+            });
+        }
+        Ok(v)
+    }
+
+    /// Whether a call of `route` with `args` may go to its node now, and
+    /// the link it goes on: the node is enabled and online, and the action
+    /// checker (issue #17) lets it through; its refusal or allowance is in
+    /// the center's audit.
+    async fn admit(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        args: &Map<String, Value>,
+    ) -> Result<Arc<Link>, CallError> {
+        self.reachable(route)?;
         // The action checker (issue #17): the center's own gate, before the
         // node. It can only refuse; the node's policy still decides what it
         // lets through (design rule 1).
@@ -2731,8 +2954,8 @@ impl Center {
             (os, n.map(|n| CheckerUnit::of(n, route)).unwrap_or_default())
         });
         let tainted = checker.taint_on() && sess.tainted();
-        let paths = seen.paths(&args);
-        let target = checker_target(route, &args, &paths);
+        let paths = seen.paths(args);
+        let target = checker_target(route, args, &paths);
         let endpoint = self.resolved_endpoint(&checker);
         let info = CallInfo {
             cap: &route.cap,
@@ -2741,7 +2964,7 @@ impl Center {
             description: &seen.description,
             target: &target,
             paths: &paths,
-            args: &args,
+            args,
             node_id: &route.node_id,
             os: &os,
             tainted,
@@ -2767,60 +2990,348 @@ impl Center {
         }
         // Looked up again: the node may have gone or come back on another
         // link while the model was asked.
-        let link = self.link(&route.node_id).ok_or_else(offline)?;
-        // A job's `invoke` id is its link's: on another link of the node it
-        // would name some other call.
-        if on.is_some_and(|on| !Arc::ptr_eq(on, &link)) {
-            return Err(RpcError::invalid_args(
-                "the job's call no longer runs on the node's link: the link to the node ended",
-            )
-            .into());
+        Ok(self
+            .link(&route.node_id)
+            .ok_or_else(|| offline(&route.node_name))?)
+    }
+
+    /// The link a call of `route` would go on now, before the checker: none
+    /// for a disabled node, which is sent nothing, not even the session
+    /// mark (`execute` refuses a disabled node before it gets here, but the
+    /// switch may come in between), and none for a node that is offline. A
+    /// call that cannot be sent is `unavailable`, not a checker refusal
+    /// (with the model on and down, fail closed would say `forbidden`), and
+    /// costs no model call.
+    fn reachable(&self, route: &Route) -> Result<Arc<Link>, RpcError> {
+        if self.read(|s| s.nodes.get(&route.node_id).is_some_and(|n| n.disabled)) {
+            return Err(RpcError::new(
+                ErrorCode::Unavailable,
+                format!("the node {} is disabled in the center", route.node_name),
+            ));
         }
-        let ctx = json!({"session": sess.id});
+        self.link(&route.node_id)
+            .ok_or_else(|| offline(&route.node_name))
+    }
+
+    /// Room for one more stream in `sess`, or why there is none.
+    fn stream_room(&self, sess: &Session) -> Result<(), String> {
+        let (room, gone) = sess.streams.lock().unwrap().room(Instant::now());
+        for c in gone {
+            c.close("too many streams");
+        }
+        if !room {
+            return Err(format!(
+                "this session holds {} streams already, the most it may: close one with stream.close",
+                streams::STREAMS_MAX
+            ));
+        }
+        Ok(())
+    }
+
+    /// Adds the stream `id` of a program's unit `route` to `sess`, when
+    /// there is room for it: taken in the one lock with the add
+    /// ([`Streams::add_unit`](streams::Streams::add_unit)), so parallel
+    /// `execute`s that all waited for the checker cannot pass the limit.
+    /// `share`: the most of the node's stream places the session may hold,
+    /// for a stream the node opens (a subscription takes none).
+    fn add_unit_stream(
+        &self,
+        sess: &Session,
+        route: &Route,
+        id: &str,
+        what: String,
+        ring: Arc<Ring>,
+        share: Option<usize>,
+    ) -> Result<(), CallError> {
+        let (added, gone) = sess.streams.lock().unwrap().add_unit(
+            id,
+            &route.node_id,
+            what,
+            ring,
+            share,
+            Instant::now(),
+        );
+        for c in gone {
+            c.close("too many streams");
+        }
+        match added {
+            Ok(()) => Ok(()),
+            Err(streams::NotAdded::Ended) => Err(Stop::SessionEnded.error().into()),
+            Err(streams::NotAdded::Full) => Err(RpcError::new(
+                ErrorCode::Busy,
+                format!(
+                    "this session holds {} streams already, the most it may: close one with stream.close",
+                    streams::STREAMS_MAX
+                ),
+            )
+            .into()),
+            Err(streams::NotAdded::Share) => Err(RpcError::new(
+                ErrorCode::Busy,
+                format!(
+                    "this session holds {} streams on the node {} already, its share of the node's streams: close one with stream.close",
+                    share.unwrap_or_default(),
+                    route.node_name
+                ),
+            )
+            .into()),
+        }
+    }
+
+    /// `execute` of a program's event `route`: subscribes `sess` to it on
+    /// its node (decided by the checker and the node like a call) and gives
+    /// the id of the stream its events come in, one JSON line each, read
+    /// with `stream.read` (docs/dev/spec/harness.md §4.5). The subscription
+    /// ends with the stream: `stream.close`, the session's end, the link's.
+    pub async fn subscribe_events(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+    ) -> Result<Opened, CallError> {
+        self.stream_room(sess)
+            .map_err(|why| self.refused(sess, route, RpcError::new(ErrorCode::Busy, why)))?;
+        let topic = format!("{}/{}", route.cap, route.action);
+        let id = streams::new_id();
+        let ring = Arc::new(Ring::of(streams::Source::Events));
+        let what = format!("the events of {}.{}", route.cap, route.action);
+        let Some(link) = self.link(&route.node_id) else {
+            let e = RpcError::new(
+                ErrorCode::Unavailable,
+                format!("the node {} is offline", route.node_name),
+            );
+            return Err(self.refused(sess, route, e));
+        };
+        // The ring takes the topic's events before the node is asked: the
+        // first may follow its answer at once. Until the checker and the
+        // node took the subscription it keeps them from the session: they
+        // are those another session's subscription of the topic brings, and
+        // its id may be given before (Center::within_call_wait). Refused, it
+        // ends without them.
+        ring.hide();
+        self.add_unit_stream(sess, route, &id, what, ring.clone(), None)
+            .map_err(|CallError::Rpc(e)| self.refused(sess, route, e))?;
+        link.subscribe(&topic, ring.clone());
+        if !sess.streams.lock().unwrap().subscribed(&id, &link, &topic) {
+            // Taken out meanwhile (the session ended, or the node was
+            // disabled): its streams went without this subscription.
+            link.unsubscribe(&topic, &ring);
+            return Err(closed_while_opening(&ring).into());
+        }
+        let (c, s, r, rg) = (self.clone(), sess.clone(), route.clone(), ring.clone());
+        let subscribe = async move {
+            // Dropped, the open stops: its stream was closed (also when its
+            // `execute` was cancelled, which closes it).
+            match c
+                .run_dropped(&s, &r, Map::new(), None, None, Stop::Closed)
+                .await
+            {
+                Ran::Done(out) => out?,
+                Ran::Job(_) => unreachable!("a call without a wait never becomes a job"),
+            };
+            rg.show();
+            Ok(())
+        };
+        self.within_call_wait(sess, route, id, ring, subscribe)
+            .await
+    }
+
+    /// `execute` of a program's stream `route` with `args`: opens it on its
+    /// node (decided by the checker and the node like a call) and gives the
+    /// id it is read by with `stream.read`. It ends when the program ends
+    /// it, on `stream.close`, and with the session or the link.
+    pub async fn open_unit_stream(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        args: Map<String, Value>,
+    ) -> Result<Opened, CallError> {
+        let started = Instant::now();
+        // Looked at before the checker, which then costs no model call.
+        self.stream_room(sess)
+            .map_err(|why| self.refused(sess, route, RpcError::new(ErrorCode::Busy, why)))?;
+        let link = self
+            .reachable(route)
+            .map_err(|e| self.refused(sess, route, e))?;
+        let id = streams::new_id();
+        let ring = Arc::new(Ring::of(streams::Source::Program));
+        let what = format!("stream {}.{}", route.cap, route.action);
+        // In the session before the checker decides, so its id can be
+        // given once the call wait passed. The stream takes one of the
+        // node's places, as a job's output stream does, so the session
+        // keeps to its share of them and the other sessions find room.
+        let share = streams::node_share(link.limits.streams);
+        self.add_unit_stream(sess, route, &id, what, ring.clone(), Some(share))
+            .map_err(|CallError::Rpc(e)| self.refused(sess, route, e))?;
+        let (c, s, r) = (self.clone(), sess.clone(), route.clone());
+        let (i, rg) = (id.clone(), ring.clone());
+        let open = async move {
+            s.calls.fetch_add(1, Ordering::SeqCst);
+            let out = c.open_unit_stream_inner(&s, &r, args, &i, rg).await;
+            c.count_call(
+                &s,
+                &r,
+                out.as_ref().err().map(|CallError::Rpc(e)| e),
+                started,
+            );
+            out
+        };
+        self.within_call_wait(sess, route, id, ring, open).await
+    }
+
+    async fn open_unit_stream_inner(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        args: Map<String, Value>,
+        id: &str,
+        ring: Arc<Ring>,
+    ) -> Result<(), CallError> {
+        let link = self.admit(sess, route, &args).await?;
+        // Looked at again, now that the checker decided: the owner may have
+        // disabled the node meanwhile. A disable after this look finds the
+        // stream in the session and closes it (`set_disabled`, which sets
+        // the switch before it looks).
+        let disabled = || {
+            self.read(|s| s.nodes.get(&route.node_id).is_some_and(|n| n.disabled))
+                .then(|| {
+                    RpcError::new(
+                        ErrorCode::Unavailable,
+                        format!("the node {} is disabled in the center", route.node_name),
+                    )
+                })
+        };
+        if let Some(e) = disabled() {
+            return Err(e.into());
+        }
+        // The open takes one of the node's places until the node answers
+        // it, and the session counts it till then, also once the stream is
+        // closed or the open cancelled. Closed while the checker decided,
+        // it is not opened: nobody would read it.
+        let Some(place) = streams::Place::take(sess, id) else {
+            return Err(closed_while_opening(&ring).into());
+        };
         sess.nodes.lock().unwrap().insert(route.node_id.clone());
         link.sessions.lock().unwrap().insert(sess.id.clone());
-        // The agents' calls leave a few of the node's call places free, for
-        // the owner's settings changes from the center and for a job's
-        // `exec.signal`: jobs of many sessions could fill them all.
-        let most = link.limits.calls as usize;
-        let most = if on.is_some() {
-            most
-        } else {
-            (most - calls_kept(most)).max(1)
+        let params = json!({"cap": route.cap, "stream": route.action, "params": args,
+                            "ctx": {"session": sess.id}});
+        // A program may take its time to answer (the node waits for it up
+        // to its own limit), unlike a node opening a command's output. The
+        // `execute` does not wait that long (Center::within_call_wait).
+        let wait = self
+            .stream_waits
+            .lock()
+            .unwrap()
+            .0
+            .max(streams::PROGRAM_OPEN_WAIT);
+        let sid = link
+            .open_stream_in(params, ring.clone(), wait, Some(place))
+            .await?;
+        if !sess.streams.lock().unwrap().opened(id, &link, sid) {
+            // Closed meanwhile (by the agent, the session's end, a
+            // disable): so is the stream.
+            if link.forget_stream(sid) {
+                let l = link.clone();
+                tokio::spawn(async move { l.close_stream(sid, "it was closed").await });
+            }
+            return Err(disabled()
+                .unwrap_or_else(|| closed_while_opening(&ring))
+                .into());
+        }
+        Ok(())
+    }
+
+    /// Runs `open`, which opens the stream `id` of `sess` on its node (a
+    /// program's stream, or a subscription to a program's events; the
+    /// stream is in the session already), in a task of its own, and waits
+    /// for it at most the call wait: a harness gives up on a tool call
+    /// after a while (docs/dev/spec/harness.md §4.4), and the checker and
+    /// a program may each take longer. Once the wait passed, the stream's
+    /// id is given while it still opens; if it then does not open, it ends
+    /// with the words why, which `stream.read` gives. Dropped before (the
+    /// harness cancelled its request), the open stops and the stream goes.
+    async fn within_call_wait(
+        &self,
+        sess: &Arc<Session>,
+        route: &Route,
+        id: String,
+        ring: Arc<Ring>,
+        open: impl Future<Output = Result<(), CallError>> + Send + 'static,
+    ) -> Result<Opened, CallError> {
+        let phase = Arc::new(Mutex::new(Phase::Waited));
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        // Nobody can name the stream before its id is given: if it does not
+        // open by then, or its `execute` is cancelled, it goes again, so it
+        // holds none of the session's places. Made here, not in the task:
+        // the `execute` may be dropped before the task first ran.
+        let adding = Adding {
+            sess: sess.clone(),
+            node_id: route.node_id.clone(),
+            id: Some(id.clone()),
+            why: "its execute was cancelled",
         };
-        let (id, rx) = link
-            .start_within(
-                msg::method::INVOKE,
-                json!({"cap": route.cap, "action": route.action, "args": args, "ctx": ctx}),
-                most,
-            )
-            .await
-            .map_err(|e| {
-                if e.kind() != ErrorCode::Busy {
-                    return e;
+        let task = {
+            let (s, r, i, phase) = (sess.clone(), route.clone(), id.clone(), phase.clone());
+            async move {
+                let mut adding = adding;
+                let out = open.await;
+                let given = {
+                    let mut p = phase.lock().unwrap();
+                    if *p == Phase::Waited {
+                        *p = Phase::Done;
+                    }
+                    *p == Phase::Given
+                };
+                match (&out, given) {
+                    (Ok(()), _) => {
+                        adding.keep();
+                    }
+                    (Err(CallError::Rpc(e)), true) => {
+                        adding.keep();
+                        let c = s.streams.lock().unwrap().not_opened(&i);
+                        if let Some(c) = c {
+                            c.close(&not_opened_words(&r, e));
+                        }
+                    }
+                    (Err(_), false) => {
+                        adding.why = "it did not open";
+                        drop(adding);
+                    }
                 }
-                RpcError::new(
-                    ErrorCode::Busy,
-                    format!(
-                        "node {} runs {} calls already, the most the center sends it for agents: try again when one ended, or stop a job of this session with job.cancel",
-                        route.node_name, most
-                    ),
-                )
-            })?;
-        sess.jobs.lock().unwrap().sent(job, &link, id);
-        let mut waiting = Waiting {
-            link: Some(link),
-            id,
+                let _ = tx.send(out);
+            }
         };
-        let r = rx.await;
-        waiting.link = None;
-        r.unwrap_or_else(|_| {
-            Err(RpcError::new(
-                ErrorCode::ConnectionLost,
-                "the link to the node ended",
-            ))
-        })
-        .map_err(CallError::Rpc)
+        let handle = tokio::spawn(task);
+        let mut stop = AbortOnDrop(Some(handle.abort_handle()));
+        let out = match tokio::time::timeout(self.call_wait(), &mut rx).await {
+            Ok(out) => out,
+            Err(_) => {
+                let done = {
+                    let mut p = phase.lock().unwrap();
+                    if *p == Phase::Waited {
+                        *p = Phase::Given;
+                    }
+                    *p == Phase::Done
+                };
+                if !done {
+                    // From now on the agent can close the stream, which
+                    // stops its open (streams::Closer::close).
+                    if let Some(h) = stop.0.take()
+                        && !sess.streams.lock().unwrap().given(&id, h.clone())
+                    {
+                        h.abort();
+                    }
+                    return Ok(Opened { id, opening: true });
+                }
+                // It ended just now: its result follows at once.
+                rx.await
+            }
+        };
+        stop.0 = None;
+        match out {
+            Ok(Ok(())) => Ok(Opened { id, opening: false }),
+            Ok(Err(e)) => Err(e),
+            // The task went without a result: the runtime shuts down.
+            Err(_) => Err(closed_while_opening(&ring).into()),
+        }
     }
 
     /// Logs a call that was refused or that failed, with the reason.
@@ -3693,6 +4204,7 @@ mod tests {
             cap: "exec".into(),
             action: "run".into(),
             effect: nerve_proto::Effect::Execute,
+            kind: nerve_proto::UnitKind::Action,
         }
     }
 
@@ -4067,6 +4579,7 @@ mod tests {
             cap: "notes".into(),
             action: "save".into(),
             effect: nerve_proto::Effect::Write,
+            kind: nerve_proto::UnitKind::Action,
         };
         let save = |path: &str| {
             let mut m = Map::new();
@@ -4184,6 +4697,7 @@ mod tests {
             cap: "notes".into(),
             action: "save".into(),
             effect: nerve_proto::Effect::Write,
+            kind: nerve_proto::UnitKind::Action,
         };
         let mut args = Map::new();
         args.insert("path".into(), json!("/home/me/notes/today.md"));
@@ -4282,6 +4796,7 @@ mod tests {
             cap: "lamp".into(),
             action: "set".into(),
             effect: nerve_proto::Effect::Actuate,
+            kind: nerve_proto::UnitKind::Action,
         };
         let seen = c.read(|s| CheckerUnit::of(&s.nodes["n1"], &route));
         assert_eq!(seen.description, "The office lamp.  Turns it on  or off.");
@@ -4316,6 +4831,7 @@ mod tests {
             cap: "door".into(),
             action: "unlock".into(),
             effect: nerve_proto::Effect::Actuate,
+            kind: nerve_proto::UnitKind::Action,
         };
         let seen = c.read(|s| CheckerUnit::of(&s.nodes["n1"], &route));
         assert!(seen.description.len() > checker::STATE_DESCRIPTION_MAX);
@@ -5555,6 +6071,7 @@ mod tests {
             cap: "fs".into(),
             action: "read".into(),
             effect: nerve_proto::Effect::Read,
+            kind: nerve_proto::UnitKind::Action,
         };
         let took = Duration::from_millis(1500);
         let refusal = RpcError::forbidden("no allow rule matches /etc/hostname");

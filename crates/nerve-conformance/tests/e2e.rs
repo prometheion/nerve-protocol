@@ -60,7 +60,7 @@ fn harness_part_passes_against_nerve_center() {
     let report = block_on(harness_part::run(&target));
     assert!(report.ok(), "{report}");
     // Every check ran; a count that shrinks silently would hide a lost check.
-    assert_eq!(report.outcomes.len(), 48, "{report}");
+    assert_eq!(report.outcomes.len(), 52, "{report}");
 }
 
 fn with(mut args: Value, more: Value) -> Value {
@@ -885,8 +885,8 @@ fn provider_part_passes_against_nerve_node() {
     }));
     assert!(report.ok(), "{report}");
     // Every check ran; a count that shrinks silently would hide a lost check.
-    assert_eq!(report.outcomes.len(), 15, "{report}");
-    assert_eq!(provider_part::CHECKS.len(), 15);
+    assert_eq!(report.outcomes.len(), 21, "{report}");
+    assert_eq!(provider_part::CHECKS.len(), 21);
     drop(node);
 }
 
@@ -960,4 +960,154 @@ fn both_keys_rotate_without_pairing_again() {
     ] {
         assert!(audit.contains(event), "{event}: {audit}");
     }
+}
+
+/// A program's state key, event and stream reach the agent through the
+/// real binaries: this test program attaches to `nerve-node` as the
+/// provider the owner allowed, and the agent of a `nerve-center` lists the
+/// units with their kinds, reads the state, subscribes to the event and
+/// reads it with `stream.read`, and reads the program's stream to its end.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_programs_state_events_and_stream_reach_the_agent() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let root = tempfile::tempdir().unwrap();
+    let mut mcp = Mcp::start(&root.path().join("center"), false, &[]);
+    let mut node = Node::new(&root.path().join("node"));
+    node.ok(&["center", "add", &mcp.pair_link(), "--yes"]);
+    node.ok(&["mode", "set", "user"]);
+    let exe = std::env::current_exe().unwrap().display().to_string();
+    node.ok(&["cap", "provider", "allow", "board", &exe]);
+    node.start();
+    let ov = mcp.wait_overview("the node is online", |v| {
+        v["nodes"][0]["online"] == json!(true)
+    });
+    let name = ov["nodes"][0]["name"].as_str().unwrap().to_string();
+
+    // The program: a state key, an event and a stream, all reading.
+    let socket = node.state.join("run").join("ctl.sock");
+    let token = std::fs::read_to_string(socket.with_file_name("ctl.token")).unwrap();
+    let mut w = UnixStream::connect(&socket).unwrap();
+    let mut lines = BufReader::new(w.try_clone().unwrap()).lines();
+    let fragment = json!([{"id": "board", "summary": "A sensor board.",
+        "state": {"temp": {"effect": "read", "summary": "The temperature.",
+                           "schema": {"type": "number"}}},
+        "events": {"alarm": {"effect": "read", "summary": "An alarm went off."}},
+        "streams": {"feed": {"effect": "read", "summary": "Readings as they come."}}}]);
+    let hello = json!({"method": "hello", "token": token.trim(),
+        "params": {"role": "provider", "name": "board", "capabilities": fragment}});
+    writeln!(w, "{hello}").unwrap();
+    let first: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    assert_eq!(first["ok"]["capabilities"], json!(["board"]), "{first}");
+    // It answers the node's requests in a thread of its own: `get` with
+    // the temperature, `sub`'s events come when asked below, `stream.open`
+    // with three readings and its end.
+    let (tx, asked) = std::sync::mpsc::channel::<Value>();
+    let mut out = w.try_clone().unwrap();
+    std::thread::spawn(move || {
+        for line in lines {
+            let Ok(v) = serde_json::from_str::<Value>(&line.unwrap_or_default()) else {
+                return;
+            };
+            let reply = match v["method"].as_str() {
+                Some("get") => vec![json!({"id": v["id"], "ok": {"temp": 21.5}})],
+                Some("stream.open") => {
+                    let mut r = vec![json!({"id": v["id"], "ok": {}})];
+                    for i in 1..=3 {
+                        r.push(json!({"stream": v["id"], "data": format!("reading {i}\n")}));
+                    }
+                    r.push(json!({"stream": v["id"], "end": true}));
+                    r
+                }
+                _ => vec![],
+            };
+            let _ = tx.send(v);
+            for r in reply {
+                if writeln!(out, "{r}").is_err() {
+                    return;
+                }
+            }
+        }
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !mcp.offered(&name).iter().any(|n| n == "board.temp") {
+        assert!(Instant::now() < deadline, "board.temp is not offered");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let list = mcp.list(json!({"node": name}));
+    let text = text_of(&list);
+    for line in [
+        "- board.alarm (event): An alarm went off.",
+        "- board.feed (stream): Readings as they come.",
+        "- board.temp (state): The temperature.",
+    ] {
+        assert!(text.contains(line), "{line}: {text}");
+    }
+    let mut call = |unit: &str, args: Value| mcp.run(&name, unit, args);
+
+    let temp = call("board.temp", json!({}));
+    assert_eq!(temp["structuredContent"]["result"], json!(21.5), "{temp}");
+    let got = asked.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(got["method"], "get");
+    assert_eq!(got["params"], json!({"cap": "board", "keys": ["temp"]}));
+
+    let sub = call("board.alarm", json!({}));
+    let stream = sub["structuredContent"]["stream"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no stream: {sub}"))
+        .to_string();
+    for level in 1..=2 {
+        writeln!(
+            w,
+            "{}",
+            json!({"cap": "board", "event": "alarm", "data": {"level": level}})
+        )
+        .unwrap();
+    }
+    let mut events = String::new();
+    while events.lines().count() < 2 {
+        let got = call("stream.read", json!({"stream": stream, "wait_ms": 1000}));
+        assert_ne!(got["isError"], true, "{got}");
+        events.push_str(got["structuredContent"]["result"]["text"].as_str().unwrap());
+        assert!(
+            Instant::now() < deadline,
+            "the events did not come: {events:?}"
+        );
+    }
+    let levels: Vec<Value> = events
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap()["data"]["level"].clone())
+        .collect();
+    assert_eq!(levels, [json!(1), json!(2)], "{events}");
+    let closed = call("stream.close", json!({"stream": stream}));
+    assert_ne!(closed["isError"], true, "{closed}");
+
+    let feed = call("board.feed", json!({}));
+    let stream = feed["structuredContent"]["stream"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no stream: {feed}"))
+        .to_string();
+    let mut text = String::new();
+    let last = loop {
+        let got = call("stream.read", json!({"stream": stream, "wait_ms": 1000}));
+        let data = &got["structuredContent"]["result"];
+        text.push_str(data["text"].as_str().unwrap());
+        if data["eof"] == true {
+            break got;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the stream did not end: {text:?}"
+        );
+    };
+    assert_eq!(text, "reading 1\nreading 2\nreading 3\n");
+    assert!(
+        text_of(&last).contains("it ended (the program ended it)"),
+        "{last}"
+    );
+    drop(w);
+    assert!(mcp.finish());
 }

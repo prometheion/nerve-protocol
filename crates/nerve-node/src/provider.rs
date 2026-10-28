@@ -29,12 +29,16 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 use nerve_policy::NodeConfig;
-use nerve_proto::descriptor::{Action, Capability, Effect, Exposure, bad_member_name};
+use nerve_proto::descriptor::{
+    Action, Capability, Direction, Effect, EventDecl, Exposure, StateDecl, StreamDecl, StreamKind,
+    bad_member_name,
+};
 use nerve_proto::schema::{self, Role};
 use nerve_proto::{ErrorCode, RpcError};
 
 use crate::daemon::Shared;
 use crate::daemon::lock;
+use crate::tap::Tap;
 
 /// The capabilities and profiles that are the node's own, and the ones the
 /// center serves itself on every node: a provider may not take their names
@@ -59,9 +63,11 @@ struct Hello {
     capabilities: Vec<Fragment>,
 }
 
-/// One capability of a provider's fragment. It offers actions only: the
-/// node forwards calls, not events, state or streams, so a fragment that
-/// declares those is refused as an unknown field.
+/// One capability of a provider's fragment: its actions, state keys,
+/// events and streams. They share one set of names, each a unit
+/// `<cap>.<name>` to the harness. The node forwards calls, `get` and
+/// `stream.open` to the program, and its events and state changes to the
+/// centers that may have them.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Fragment {
@@ -70,7 +76,47 @@ struct Fragment {
     profile: String,
     #[serde(default)]
     summary: String,
+    #[serde(default)]
     actions: BTreeMap<String, FragmentAction>,
+    #[serde(default)]
+    state: BTreeMap<String, FragmentState>,
+    #[serde(default)]
+    events: BTreeMap<String, FragmentEvent>,
+    #[serde(default)]
+    streams: BTreeMap<String, FragmentStream>,
+}
+
+/// A state key: its value is read with `get`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FragmentState {
+    effect: Effect,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    schema: Value,
+}
+
+/// An event: the program sends it, the node passes it on.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FragmentEvent {
+    effect: Effect,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    data: Value,
+}
+
+/// A stream the program sends once a center opened it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FragmentStream {
+    effect: Effect,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    params: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +155,19 @@ struct Attached {
     tx: mpsc::Sender<Value>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>,
     next: AtomicU64,
+    /// The streams it sends, by the id of the `stream.open` that opened
+    /// each: its lines go to the link's stream there (crate::tap).
+    streams: Mutex<HashMap<u64, Arc<Tap>>>,
+}
+
+impl Drop for Attached {
+    /// Its streams end with its connection: what it sent goes out, then
+    /// each stream's close.
+    fn drop(&mut self) {
+        for (_, tap) in lock(&self.streams).drain() {
+            tap.end();
+        }
+    }
 }
 
 /// Why a provider is refused while the node stops (for an owner's restore,
@@ -250,6 +309,7 @@ impl Providers {
             tx,
             pending: Mutex::default(),
             next: AtomicU64::new(1),
+            streams: Mutex::default(),
         });
         held.insert(name.to_string(), a.clone());
         Ok(a)
@@ -268,13 +328,86 @@ impl Providers {
         action: &str,
         args: Map<String, Value>,
     ) -> Result<Value, RpcError> {
+        let params = json!({"cap": cap, "action": action, "args": args});
+        self.request(provider, serial, "invoke", params, None)
+            .await
+            .map(|(v, _)| v)
+    }
+
+    /// Reads the state keys `keys` of `cap` from the attachment `serial` of
+    /// `provider`, for a `get` the node allowed: `{key: value}` with the
+    /// keys asked for, each one there. A key the program left out is its
+    /// failure; one it added is dropped, so the center gets only what the
+    /// node decided.
+    pub async fn get(
+        &self,
+        provider: &str,
+        serial: u64,
+        cap: &str,
+        keys: &[String],
+    ) -> Result<Value, RpcError> {
+        let params = json!({"cap": cap, "keys": keys});
+        let (v, _) = self.request(provider, serial, "get", params, None).await?;
+        let mut v = match v {
+            Value::Object(m) => m,
+            _ => {
+                return Err(RpcError::internal(format!(
+                    "the provider {provider} answered get with no object"
+                )));
+            }
+        };
+        let mut out = Map::new();
+        for k in keys {
+            let value = v.remove(k).ok_or_else(|| {
+                RpcError::internal(format!("the provider {provider} gave no state {k}"))
+            })?;
+            out.insert(k.clone(), value);
+        }
+        Ok(Value::Object(out))
+    }
+
+    /// Opens the stream `stream` of `cap` on the attachment `serial` of
+    /// `provider` with `params`, for a `stream.open` the node allowed: what
+    /// the program sends of it goes to `tap`. The stream runs while the
+    /// returned [`ProgramStream`] lives, and until the program ends it or
+    /// its connection ends.
+    pub async fn open_stream(
+        &self,
+        provider: &str,
+        serial: u64,
+        cap: &str,
+        stream: &str,
+        params: Map<String, Value>,
+        tap: Arc<Tap>,
+    ) -> Result<ProgramStream, RpcError> {
+        let p = json!({"cap": cap, "stream": stream, "params": params});
+        let (_, opened) = self
+            .request(provider, serial, "stream.open", p, Some(tap))
+            .await?;
+        Ok(opened.expect("a stream request gives its stream"))
+    }
+
+    /// Sends the request `method` to the attachment `serial` of `provider`
+    /// and waits for its answer. With `tap`, the request opens a stream:
+    /// what the program sends of it goes there from before the request
+    /// goes, and the stream is given with the answer. Dropping the future
+    /// (a cancel, a deadline, the link's end) tells the provider to cancel
+    /// the request, and closes a stream it opened.
+    async fn request(
+        &self,
+        provider: &str,
+        serial: u64,
+        method: &str,
+        params: Value,
+        tap: Option<Arc<Tap>>,
+    ) -> Result<(Value, Option<ProgramStream>), RpcError> {
         let gone = || {
             RpcError::new(
                 ErrorCode::Unavailable,
                 format!("the provider {provider} is not attached now"),
             )
         };
-        let (tx, rx, guard) = {
+        let (tx, rx, guard, opened) = {
             let a = lock(&self.attached)
                 .get(provider)
                 .filter(|a| a.serial == serial)
@@ -283,21 +416,70 @@ impl Providers {
             let id = a.next.fetch_add(1, Ordering::Relaxed);
             let (answer, rx) = oneshot::channel();
             lock(&a.pending).insert(id, answer);
+            let opened = tap.map(|tap| {
+                lock(&a.streams).insert(id, tap);
+                ProgramStream {
+                    attached: Arc::downgrade(&a),
+                    id,
+                }
+            });
             let guard = Waiting {
                 attached: Arc::downgrade(&a),
                 id,
             };
-            (a.tx.clone(), rx, guard)
+            (a.tx.clone(), rx, guard, opened)
         };
-        let line = json!({"id": guard.id, "method": "invoke",
-                          "params": {"cap": cap, "action": action, "args": args}});
+        let line = json!({"id": guard.id, "method": method, "params": params});
         if tx.send(line).await.is_err() {
             return Err(gone());
         }
         drop(tx);
         let answer = rx.await;
         drop(guard);
-        answer.unwrap_or_else(|_| Err(gone()))
+        let v = answer.unwrap_or_else(|_| Err(gone()))?;
+        Ok((v, opened))
+    }
+
+    /// The effect of the event `name` of the program's capability `cap`;
+    /// none when no attached program declares it.
+    pub fn event_effect(&self, cap: &str, name: &str) -> Option<Effect> {
+        lock(&self.attached)
+            .values()
+            .flat_map(|a| a.caps.iter())
+            .find(|c| c.id == cap)
+            .and_then(|c| c.events.get(name))
+            .map(|e| e.effect)
+    }
+
+    /// The effect of each state key of the program's capability `cap`;
+    /// none when no attached program adds it.
+    pub fn state_effects(&self, cap: &str) -> Option<BTreeMap<String, Effect>> {
+        lock(&self.attached)
+            .values()
+            .flat_map(|a| a.caps.iter())
+            .find(|c| c.id == cap)
+            .map(|c| c.state.iter().map(|(k, d)| (k.clone(), d.effect)).collect())
+    }
+}
+
+/// A stream a program sends (`stream.open` forwarded to it). Dropped while
+/// the stream still runs (the center closed it, or its link went), it
+/// tells the program to stop it.
+pub(crate) struct ProgramStream {
+    attached: Weak<Attached>,
+    id: u64,
+}
+
+impl Drop for ProgramStream {
+    fn drop(&mut self) {
+        let Some(a) = self.attached.upgrade() else {
+            return;
+        };
+        if let Some(tap) = lock(&a.streams).remove(&self.id) {
+            tap.end();
+            let close = json!({"method": "stream.close", "params": {"stream": self.id}});
+            let _ = a.tx.try_send(close);
+        }
     }
 }
 
@@ -322,11 +504,68 @@ impl Drop for Waiting {
 }
 
 impl Attached {
-    /// One line from the provider: the answer to a call. Anything else is
-    /// dropped; a call it does not name stays waiting.
+    /// One line from the provider: the answer to a request (with `id`), a
+    /// stream's data or end (with `stream`), an event (`event`) or a change
+    /// of its state (`state`). Anything else is dropped.
+    fn line(&self, v: Value, shared: &Shared) {
+        if v.get("id").is_some() {
+            return self.answer(v);
+        }
+        if let Some(id) = v.get("stream").and_then(Value::as_u64) {
+            return self.stream_line(id, &v);
+        }
+        let cap = v.get("cap").and_then(Value::as_str).unwrap_or("");
+        let Some(c) = self.caps.iter().find(|c| c.id == cap) else {
+            tracing::debug!(
+                "provider {}: a line for no capability of its own was dropped",
+                self.name
+            );
+            return;
+        };
+        if let Some(name) = v.get("event").and_then(Value::as_str) {
+            let Some(decl) = c.events.get(name) else {
+                tracing::debug!(
+                    "provider {}: an event {cap}/{name} it did not declare was dropped",
+                    self.name
+                );
+                return;
+            };
+            let data = v.get("data").cloned().unwrap_or(Value::Null);
+            shared.emit_all(cap, name, decl.effect, data);
+        } else if let Some(Value::Object(changed)) = v.get("state") {
+            // Only the keys it declared, each to whoever may read it.
+            let changed: Map<String, Value> = changed
+                .iter()
+                .filter(|(k, _)| c.state.contains_key(*k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if !changed.is_empty() {
+                shared.state_all(cap, changed);
+            }
+        } else {
+            tracing::debug!("provider {}: a line without an id was dropped", self.name);
+        }
+    }
+
+    /// Data of the stream `id` (`data`, text), or its end (`end`).
+    fn stream_line(&self, id: u64, v: &Value) {
+        let tap = lock(&self.streams).get(&id).cloned();
+        let Some(tap) = tap else {
+            return;
+        };
+        if let Some(d) = v.get("data").and_then(Value::as_str) {
+            tap.push(crate::tap::Pipe::Out, d.as_bytes());
+        }
+        if v.get("end").is_some() {
+            lock(&self.streams).remove(&id);
+            tap.end();
+        }
+    }
+
+    /// The answer to a request. One it does not name stays waiting.
     fn answer(&self, v: Value) {
         let Some(id) = v.get("id").and_then(Value::as_u64) else {
-            tracing::debug!("provider {}: a line without an id was dropped", self.name);
+            tracing::debug!("provider {}: a line with a bad id was dropped", self.name);
             return;
         };
         let Some(waiting) = lock(&self.pending).remove(&id) else {
@@ -655,9 +894,20 @@ fn outside_subset(params: &Value, result: &Value) -> Option<String> {
     None
 }
 
+/// Why a state key's value or an event's data (`what`) is outside the
+/// subset, if it is; none says nothing of it.
+fn outside_result(what: &str, schema: &Value) -> Option<String> {
+    if schema.is_null() {
+        return None;
+    }
+    schema::check(schema, Role::Result)
+        .err()
+        .map(|e| schema::brief(&format!("{what}: {e}")))
+}
+
 /// Checks a fragment and makes its capabilities, each with `provider:
-/// name`, and the actions left out because their schemas are outside the
-/// subset; a capability left with no action goes too. `taken` holds the
+/// name`, and the units left out because their schemas are outside the
+/// subset; a capability left with no unit goes too. `taken` holds the
 /// capability ids of the other attached providers, and `config` tells the
 /// ones the config declares (`[[capability]]`), which no program may add.
 fn capabilities(
@@ -705,14 +955,61 @@ fn capabilities(
         if !seen.insert(f.id.clone()) {
             return Err(format!("capability {} is named twice", f.id));
         }
-        if f.actions.is_empty() || f.actions.len() > MAX_ACTIONS {
-            return Err(format!("capability {}: 1 to {MAX_ACTIONS} actions", f.id));
+        let units = f.actions.len() + f.state.len() + f.events.len() + f.streams.len();
+        if units == 0 || units > MAX_ACTIONS {
+            return Err(format!(
+                "capability {}: 1 to {MAX_ACTIONS} actions, state keys, events and streams",
+                f.id
+            ));
+        }
+        // One set of names: a unit `cap.name` names one thing to a center.
+        let mut names: BTreeMap<&str, &str> = BTreeMap::new();
+        let kinds = [
+            ("action", "an action", f.actions.keys().collect::<Vec<_>>()),
+            ("state key", "a state key", f.state.keys().collect()),
+            ("event", "an event", f.events.keys().collect()),
+            ("stream", "a stream", f.streams.keys().collect()),
+        ];
+        for (kind, one, list) in &kinds {
+            for n in list {
+                if let Some(why) = bad_member_name(n) {
+                    return Err(format!("capability {}: {kind} {why}", f.id));
+                }
+                if let Some(other) = names.insert(n.as_str(), one) {
+                    return Err(format!(
+                        "capability {}: {n} is both {other} and {one}; actions, state keys, events and streams share one set of names",
+                        f.id
+                    ));
+                }
+            }
+        }
+        // `cap/state` is the topic of the state's changes (spec §5.1).
+        if f.events.contains_key("state") {
+            return Err(format!(
+                "capability {}: an event may not be named state",
+                f.id
+            ));
+        }
+        // What is not an action only tells: the program reads, or senses,
+        // what it gives. A switch or a write is an action.
+        let observes = |e: Effect| matches!(e, Effect::Read | Effect::Sense);
+        for (kind, n, e) in f
+            .state
+            .iter()
+            .map(|(n, d)| ("state key", n, d.effect))
+            .chain(f.events.iter().map(|(n, d)| ("event", n, d.effect)))
+            .chain(f.streams.iter().map(|(n, d)| ("stream", n, d.effect)))
+        {
+            if !observes(e) {
+                return Err(format!(
+                    "capability {}: the {kind} {n} has effect {}; a state key, event or stream reads or senses",
+                    f.id,
+                    e.as_str()
+                ));
+            }
         }
         let mut actions = BTreeMap::new();
         for (a, decl) in f.actions {
-            if let Some(why) = bad_member_name(&a) {
-                return Err(format!("capability {}: action {why}", f.id));
-            }
             // Arguments are always an object; no schema takes any.
             let params = match decl.params {
                 Value::Null => json!({"type": "object"}),
@@ -737,7 +1034,75 @@ fn capabilities(
                 },
             );
         }
-        if actions.is_empty() {
+        let mut left_out = |n: &str, reason: Option<String>| match reason {
+            Some(reason) => {
+                broken.push(Broken {
+                    name: format!("{}.{n}", f.id),
+                    reason,
+                });
+                false
+            }
+            None => true,
+        };
+        let state: BTreeMap<String, StateDecl> = f
+            .state
+            .into_iter()
+            .filter(|(n, d)| left_out(n, outside_result("value", &d.schema)))
+            .map(|(n, d)| {
+                let decl = StateDecl {
+                    effect: d.effect,
+                    summary: d.summary,
+                    schema: d.schema,
+                    exposure: None,
+                };
+                (n, decl)
+            })
+            .collect();
+        let events: BTreeMap<String, EventDecl> = f
+            .events
+            .into_iter()
+            .filter(|(n, d)| left_out(n, outside_result("data", &d.data)))
+            .map(|(n, d)| {
+                let decl = EventDecl {
+                    effect: d.effect,
+                    summary: d.summary,
+                    implicit: false,
+                    data: d.data,
+                    exposure: None,
+                };
+                (n, decl)
+            })
+            .collect();
+        let streams: BTreeMap<String, StreamDecl> = f
+            .streams
+            .into_iter()
+            .map(|(n, d)| {
+                let params = match d.params {
+                    Value::Null => json!({"type": "object"}),
+                    p => p,
+                };
+                (n, d.effect, d.summary, params)
+            })
+            // A stream marks no path: its open names none (schema::check_stream_params).
+            .filter(|(n, _, _, params)| {
+                let bad = schema::check_stream_params(params)
+                    .err()
+                    .map(|e| schema::brief(&format!("params: {e}")));
+                left_out(n, bad)
+            })
+            .map(|(n, effect, summary, params)| {
+                let decl = StreamDecl {
+                    kind: StreamKind::Reliable,
+                    direction: Direction::Up,
+                    effect,
+                    summary,
+                    params,
+                    exposure: None,
+                };
+                (n, decl)
+            })
+            .collect();
+        if actions.is_empty() && state.is_empty() && events.is_empty() && streams.is_empty() {
             continue;
         }
         caps.push(Capability {
@@ -747,9 +1112,9 @@ fn capabilities(
             exposure: Exposure::On,
             summary: f.summary,
             actions,
-            events: BTreeMap::new(),
-            state: Value::Null,
-            streams: BTreeMap::new(),
+            events,
+            state,
+            streams,
         });
     }
     if caps.is_empty() {
@@ -758,7 +1123,7 @@ fn capabilities(
             .map(|b| format!("{}: {}", b.name, b.reason))
             .collect();
         return Err(format!(
-            "no action has schemas a center can check: {}",
+            "no unit has schemas a center can check: {}",
             why.join("; ")
         ));
     }
@@ -854,7 +1219,7 @@ async fn check(
     tokio::spawn(async move {
         while let Some(v) = in_rx.recv().await {
             match weak.upgrade() {
-                Some(a) => a.answer(v),
+                Some(a) => a.line(v, &s),
                 None => break,
             }
         }
@@ -931,11 +1296,13 @@ pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>, installed: bool) 
         let seen = seen.as_ref()?;
         let on = |caps: &Vec<Capability>| {
             caps.iter().any(|c| {
+                let unit_on = |e: Option<Exposure>| e != Some(Exposure::Off);
                 c.id == cap
                     && c.exposure == Exposure::On
-                    && c.actions
-                        .get(action)
-                        .is_some_and(|a| a.exposure != Some(Exposure::Off))
+                    && (c.actions.get(action).is_some_and(|a| unit_on(a.exposure))
+                        || c.state.get(action).is_some_and(|a| unit_on(a.exposure))
+                        || c.events.get(action).is_some_and(|a| unit_on(a.exposure))
+                        || c.streams.get(action).is_some_and(|a| unit_on(a.exposure)))
             })
         };
         Some(
@@ -944,13 +1311,38 @@ pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>, installed: bool) 
                 .collect(),
         )
     };
+    // A program's state keys, events and streams are rows too, with their
+    // kind; an action's row names none.
     let row = |c: &Capability, source: &str| -> Vec<Value> {
-        c.actions
+        let actions = c
+            .actions
             .iter()
-            .map(|(a, decl)| {
-                let mut r = json!({"name": format!("{}.{a}", c.id), "effect": decl.effect,
-                                   "source": source, "summary": decl.summary,
+            .map(|(a, d)| (a, d.effect, &d.summary, None));
+        let state = c
+            .state
+            .iter()
+            .map(|(a, d)| (a, d.effect, &d.summary, Some("state")));
+        let events = c
+            .events
+            .iter()
+            .map(|(a, d)| (a, d.effect, &d.summary, Some("event")));
+        let streams = c
+            .streams
+            .iter()
+            .map(|(a, d)| (a, d.effect, &d.summary, Some("stream")));
+        let units: Vec<_> = match c.provider.as_str() {
+            "node" => actions.collect(),
+            _ => actions.chain(state).chain(events).chain(streams).collect(),
+        };
+        units
+            .into_iter()
+            .map(|(a, effect, summary, kind)| {
+                let mut r = json!({"name": format!("{}.{a}", c.id), "effect": effect,
+                                   "source": source, "summary": summary,
                                    "centers": centers(&c.id, a)});
+                if let Some(kind) = kind {
+                    r["kind"] = json!(kind);
+                }
                 if let Some(now) = now(&c.id, a) {
                     r["now"] = Value::Object(now);
                 }
@@ -1150,9 +1542,9 @@ pub(crate) async fn serve(
 
 /// What only the owner may turn on or allow, as a test of a `caps` key
 /// or an allow rule's scope (`cap` or `cap.action`): a capability an
-/// attached provider offers with an action that senses or actuates; one
-/// that is neither the node's own nor offered now; and an action that an
-/// offered capability does not have now. The node cannot tell what such
+/// attached provider offers with an action (or a state key, event or
+/// stream) that senses or actuates; one that is neither the node's own nor
+/// offered now; and a unit that an offered capability does not have now. The node cannot tell what such
 /// a capability or action will do once a provider offers it, so a
 /// center's entry for it waits for the owner. An entry for an offered
 /// capability that neither senses nor actuates, or for one of its
@@ -1167,13 +1559,22 @@ pub fn owner_only_of(caps: &[Capability]) -> impl Fn(&str) -> bool + use<> {
     let mut sensing = BTreeSet::new();
     let mut offered: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for c in caps {
+        // Its state keys, events and streams are units like its actions.
+        let units: Vec<(&String, Effect)> = c
+            .actions
+            .iter()
+            .map(|(n, a)| (n, a.effect))
+            .chain(c.state.iter().map(|(n, d)| (n, d.effect)))
+            .chain(c.events.iter().map(|(n, d)| (n, d.effect)))
+            .chain(c.streams.iter().map(|(n, d)| (n, d.effect)))
+            .collect();
         offered
             .entry(c.id.clone())
             .or_default()
-            .extend(c.actions.keys().cloned());
-        if c.actions
-            .values()
-            .any(|a| matches!(a.effect, Effect::Sense | Effect::Actuate))
+            .extend(units.iter().map(|(n, _)| (*n).clone()));
+        if units
+            .iter()
+            .any(|(_, e)| matches!(e, Effect::Sense | Effect::Actuate))
         {
             sensing.insert(c.id.clone());
         }
@@ -1265,9 +1666,102 @@ mod tests {
         let none = json!([{"id": "fan", "actions": {"spin": {"effect": "write", "params": {}}}}]);
         let e = capabilities("desk", fragment(none), &BTreeSet::new(), |_| false).unwrap_err();
         assert!(
-            e.contains("no action") && e.contains("fan.spin: params"),
+            e.contains("no unit") && e.contains("fan.spin: params"),
             "{e}"
         );
+    }
+
+    /// A capability may offer state keys, events and streams beside its
+    /// actions, or instead of them; each is checked like an action, and
+    /// one whose schema is outside the subset is left out on its own.
+    #[test]
+    fn state_events_and_streams_are_units_of_their_own() {
+        let frag = json!([{"id": "sensors", "summary": "The board's sensors.",
+            "state": {"temperature": {"effect": "sense", "summary": "Degrees.",
+                                      "schema": {"type": "number"}},
+                      "bad": {"effect": "read", "schema": {"oneOf": []}}},
+            "events": {"alarm": {"effect": "sense", "data": {"type": "object"}},
+                       "plain": {"effect": "read"}},
+            "streams": {"feed": {"effect": "read",
+                                 "params": {"type": "object", "properties": {
+                                     "every_ms": {"type": "integer"}}}},
+                        "raw": {"effect": "sense"},
+                        "tail": {"effect": "read",
+                                 "params": {"type": "object", "properties": {
+                                     "file": {"type": "string", "x-nerve-path": "read"}}}}}}]);
+        let (caps, broken) =
+            capabilities("board", fragment(frag), &BTreeSet::new(), |_| false).unwrap();
+        let c = &caps[0];
+        assert!(c.actions.is_empty());
+        assert_eq!(c.state.keys().collect::<Vec<_>>(), ["temperature"]);
+        assert_eq!(c.state["temperature"].effect, Effect::Sense);
+        assert_eq!(c.state["temperature"].schema, json!({"type": "number"}));
+        assert_eq!(c.events.keys().collect::<Vec<_>>(), ["alarm", "plain"]);
+        assert_eq!(c.events["alarm"].effect, Effect::Sense);
+        assert!(!c.events["alarm"].implicit);
+        assert_eq!(c.streams.keys().collect::<Vec<_>>(), ["feed", "raw"]);
+        // A stream without params takes any object, as an action does.
+        assert_eq!(c.streams["raw"].params, json!({"type": "object"}));
+        assert_eq!(c.streams["raw"].direction, Direction::Up);
+        let names: Vec<&str> = broken.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["sensors.bad", "sensors.tail"]);
+        assert!(broken[0].reason.starts_with("value: "), "{broken:?}");
+        // A stream's open names no path, so its params may mark none.
+        assert!(
+            broken[1]
+                .reason
+                .starts_with("params: /properties/file/x-nerve-path: a stream takes no path"),
+            "{broken:?}"
+        );
+    }
+
+    /// Actions, state keys, events and streams share one set of names: a
+    /// name given to two kinds is refused, as are an event named `state`
+    /// (the topic of the state's changes) and a state key, event or stream
+    /// that does more than read or sense.
+    #[test]
+    fn a_name_of_two_kinds_and_a_unit_that_acts_are_refused() {
+        for (bad, why) in [
+            (
+                json!([{"id": "x", "actions": {"temp": {"effect": "read"}},
+                        "state": {"temp": {"effect": "read"}}}]),
+                "temp is both an action and a state key",
+            ),
+            (
+                json!([{"id": "x", "state": {"temp": {"effect": "read"}},
+                        "events": {"temp": {"effect": "read"}}}]),
+                "temp is both a state key and an event",
+            ),
+            (
+                json!([{"id": "x", "events": {"feed": {"effect": "read"}},
+                        "streams": {"feed": {"effect": "read"}}}]),
+                "feed is both an event and a stream",
+            ),
+            (
+                json!([{"id": "x", "events": {"state": {"effect": "read"}}}]),
+                "an event may not be named state",
+            ),
+            (
+                json!([{"id": "x", "state": {"on": {"effect": "write"}}}]),
+                "the state key on has effect write",
+            ),
+            (
+                json!([{"id": "x", "events": {"rang": {"effect": "actuate"}}}]),
+                "the event rang has effect actuate",
+            ),
+            (
+                json!([{"id": "x", "streams": {"cam": {"effect": "execute"}}}]),
+                "the stream cam has effect execute",
+            ),
+            (
+                json!([{"id": "x", "streams": {"a.b": {"effect": "read"}}}]),
+                "capability x: stream name",
+            ),
+        ] {
+            let e = capabilities("desk", fragment(bad.clone()), &BTreeSet::new(), |_| false)
+                .unwrap_err();
+            assert!(e.contains(why), "{bad}: {e}");
+        }
     }
 
     /// The reason names the provider's own property names, so `status`
@@ -1341,7 +1835,10 @@ mod tests {
                     {"id": "x", "actions": {"a": {"effect": "read"}}}]),
                 "twice",
             ),
-            (json!([{"id": "x", "actions": {}}]), "1 to 64 actions"),
+            (
+                json!([{"id": "x", "actions": {}}]),
+                "1 to 64 actions, state keys",
+            ),
             (
                 json!([{"id": "x", "actions": {"a.b": {"effect": "read"}}}]),
                 "action name",
@@ -1359,14 +1856,8 @@ mod tests {
             let e = capabilities("desk", fragment(bad.clone()), &taken, |_| false).unwrap_err();
             assert!(e.contains(why), "{bad}: {e}");
         }
-        // A provider offers actions only, and says nothing of who serves them.
-        for extra in [
-            json!({"events": {}}),
-            json!({"state": {}}),
-            json!({"streams": {}}),
-            json!({"provider": "node"}),
-            json!({"exposure": "on"}),
-        ] {
+        // A provider says nothing of who serves its capabilities.
+        for extra in [json!({"provider": "node"}), json!({"exposure": "on"})] {
             let mut cap = echo()[0].clone();
             cap.as_object_mut()
                 .unwrap()
@@ -1380,6 +1871,39 @@ mod tests {
             .map(|i| json!({"id": format!("c{i}"), "actions": {"a": {"effect": "read"}}}))
             .collect();
         assert!(capabilities("desk", fragment(json!(many)), &BTreeSet::new(), |_| false).is_err());
+    }
+
+    /// A program's state keys, events and streams count as its actions do
+    /// for what only the owner may turn on: one that senses makes its
+    /// capability the owner's, and a name the capability does not offer
+    /// now is the owner's too.
+    #[test]
+    fn a_sensing_state_key_event_or_stream_is_the_owners_to_turn_on() {
+        let frag =
+            |kind: &str, effect: &str| json!([{"id": "board", kind: {"x": {"effect": effect}}}]);
+        for kind in ["state", "events", "streams"] {
+            let (caps, _) = capabilities(
+                "desk",
+                fragment(frag(kind, "sense")),
+                &BTreeSet::new(),
+                |_| false,
+            )
+            .unwrap();
+            let owner_only = owner_only_of(&caps);
+            assert!(owner_only("board"), "{kind}");
+            assert!(owner_only("board.x"), "{kind}");
+            let (caps, _) = capabilities(
+                "desk",
+                fragment(frag(kind, "read")),
+                &BTreeSet::new(),
+                |_| false,
+            )
+            .unwrap();
+            let owner_only = owner_only_of(&caps);
+            assert!(!owner_only("board"), "{kind}");
+            assert!(!owner_only("board.x"), "{kind}");
+            assert!(owner_only("board.y"), "{kind}");
+        }
     }
 
     #[test]

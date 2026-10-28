@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -16,9 +16,9 @@ use nerve_policy::SetError;
 use nerve_policy::audit::{AuditLog, Change, Entry, diff};
 use nerve_policy::config::SecretStorage;
 use nerve_policy::{NodeConfig, SettingsStore};
-use nerve_proto::Message;
 use nerve_proto::msg::{Topic, method};
 use nerve_proto::resume::{self, Replay};
+use nerve_proto::{Effect, Message};
 use nerve_sandbox::Confinement;
 use nerve_transport::log::{Level, Log};
 use nerve_transport::ws::WsMessage;
@@ -64,6 +64,9 @@ pub struct NodeOptions {
     /// How long a dropped link is kept for the center to resume it
     /// (nerve_proto::resume::GRACE). A test shortens it.
     pub resume_grace: Duration,
+    /// How long a program's answer to a `get` or `stream.open` is waited
+    /// for (crate::link::PROGRAM_WAIT). A test shortens it.
+    pub program_wait: Duration,
     /// Where the node takes its owners' commands, besides the control
     /// socket (crate::owner): the installed node's, unless a test gives
     /// one. Served only with `ctl`.
@@ -104,6 +107,7 @@ impl NodeOptions {
             config_caps_by_hand: false,
             cgroups: None,
             resume_grace: resume::GRACE,
+            program_wait: crate::link::PROGRAM_WAIT,
             aside: None,
         }
     }
@@ -171,6 +175,10 @@ impl Wire {
 #[derive(Default)]
 struct Subs {
     topics: BTreeSet<Topic>,
+    /// For `cap/state` and `cap/*` of a program's capability: the units the
+    /// subscription was decided for (crate::link `sub`). A unit the program
+    /// declares later was never decided, so it does not come under them.
+    units: HashMap<Topic, BTreeSet<String>>,
     /// `seq` per capability, counting from 1 on this link.
     seq: HashMap<String, u64>,
 }
@@ -427,12 +435,27 @@ impl LinkHandle {
     pub fn sub(&self, topics: Vec<Topic>, on: bool) {
         let mut s = lock(&self.subs);
         for t in topics {
+            s.units.remove(&t);
             if on {
                 s.topics.insert(t);
             } else {
                 s.topics.remove(&t);
             }
         }
+    }
+
+    /// Subscribes to `cap/state` or `cap/*` of a program's capability,
+    /// for the `units` it was decided for, and only those.
+    pub fn sub_units(&self, topic: Topic, units: BTreeSet<String>) {
+        let mut s = lock(&self.subs);
+        s.topics.insert(topic.clone());
+        s.units.insert(topic, units);
+    }
+
+    /// Whether the subscription `topic` takes the unit `name`: one of a
+    /// program's capability only the units it was decided for.
+    fn covers(s: &Subs, topic: &Topic, name: &str) -> bool {
+        s.topics.contains(topic) && s.units.get(topic).is_none_or(|u| u.contains(name))
     }
 
     fn next_seq(s: &mut Subs, cap: &str) -> u64 {
@@ -447,7 +470,7 @@ impl LinkHandle {
         let mut s = lock(&self.subs);
         let wanted = IMPLICIT.contains(&cap)
             || s.topics.contains(&Topic::Event(cap.into(), name.into()))
-            || s.topics.contains(&Topic::All(cap.into()));
+            || Self::covers(&s, &Topic::All(cap.into()), name);
         if !wanted {
             return;
         }
@@ -464,12 +487,21 @@ impl LinkHandle {
     /// Sends a `state` change if subscribed (implicit for the implicit caps).
     pub fn state(&self, cap: &str, changed: Value) {
         let mut s = lock(&self.subs);
-        let wanted = IMPLICIT.contains(&cap)
-            || s.topics.contains(&Topic::State(cap.into()))
-            || s.topics.contains(&Topic::All(cap.into()));
-        if !wanted {
-            return;
-        }
+        let changed = match changed {
+            _ if IMPLICIT.contains(&cap) => changed,
+            Value::Object(keys) => {
+                let (state, all) = (Topic::State(cap.into()), Topic::All(cap.into()));
+                let keys: Map<String, Value> = keys
+                    .into_iter()
+                    .filter(|(k, _)| Self::covers(&s, &state, k) || Self::covers(&s, &all, k))
+                    .collect();
+                if keys.is_empty() {
+                    return;
+                }
+                Value::Object(keys)
+            }
+            _ => return,
+        };
         let seq = Self::next_seq(&mut s, cap);
         let m = Message::notification(
             method::STATE,
@@ -572,6 +604,8 @@ pub(crate) struct Shared {
     pub told_keyring: std::sync::atomic::AtomicBool,
     /// How long a dropped link is kept for its resume.
     pub grace: Duration,
+    /// How long a program's answer to a `get` or `stream.open` is waited for.
+    pub program_wait: Duration,
     /// The capability providers attached now (crate::provider).
     pub providers: crate::provider::Providers,
     /// Linux: the installed node's provider socket, the only place it
@@ -1106,11 +1140,69 @@ impl Shared {
             .clone()
     }
 
-    /// Sends an event to `center`'s link.
+    /// Sends an event to `center`'s link. An event of a program's
+    /// capability goes only to a center that may subscribe to it now: its
+    /// policy allows the event as it would allow a call of `cap.name`
+    /// (crate::link::may_take), so a center the owner did not give it, or
+    /// switched it off for, never gets it.
     pub fn emit(&self, center: &str, cap: &str, name: &str, data: Value) {
-        if let Some(l) = lock(&self.centers).get(center).and_then(|c| c.link()) {
-            l.event(cap, name, data);
+        let Some(l) = lock(&self.centers).get(center).and_then(|c| c.link()) else {
+            return;
+        };
+        if let Some(effect) = self.providers.event_effect(cap, name)
+            && !self.may_take(center, cap, name, effect)
+        {
+            return;
         }
+        l.event(cap, name, data);
+    }
+
+    /// An event of a program's capability with `effect`, for every center
+    /// that may have it now (cut as [`Shared::emit`] cuts). The effect is the
+    /// one the program declared, given by its line: looked up again here, an
+    /// event of a program that left meanwhile would have none and go uncut.
+    pub fn emit_all(&self, cap: &str, name: &str, effect: Effect, data: Value) {
+        for center in self.config().centers.iter().map(|c| c.name.clone()) {
+            let Some(l) = lock(&self.centers).get(&center).and_then(|c| c.link()) else {
+                continue;
+            };
+            if self.may_take(&center, cap, name, effect) {
+                l.event(cap, name, data.clone());
+            }
+        }
+    }
+
+    /// A change of the state of a program's capability, for every center:
+    /// each gets the keys it may read now, as [`Shared::emit`] cuts events.
+    pub fn state_all(&self, cap: &str, changed: Map<String, Value>) {
+        let Some(effects) = self.providers.state_effects(cap) else {
+            return;
+        };
+        for center in self.config().centers.iter().map(|c| c.name.clone()) {
+            let Some(l) = lock(&self.centers).get(&center).and_then(|c| c.link()) else {
+                continue;
+            };
+            let mine: Map<String, Value> = changed
+                .iter()
+                .filter(|(k, _)| {
+                    effects
+                        .get(*k)
+                        .is_some_and(|e| self.may_take(&center, cap, k, *e))
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if !mine.is_empty() {
+                l.state(cap, Value::Object(mine));
+            }
+        }
+    }
+
+    /// Whether `center` may have the unit `cap.name` of a program now: its
+    /// policy allows it as a call that names no path.
+    fn may_take(&self, center: &str, cap: &str, name: &str, effect: Effect) -> bool {
+        let cfg = self.config();
+        cfg.center(center)
+            .is_some_and(|entry| crate::link::may_take(self, &cfg, entry, cap, name, effect))
     }
 
     /// Records a rotation of a key in the audit log (crate::rotate).
@@ -1517,6 +1609,7 @@ impl Daemon {
             account_cache: Mutex::default(),
             told_keyring: Default::default(),
             grace: opts.resume_grace,
+            program_wait: opts.program_wait,
             providers: Default::default(),
             #[cfg(target_os = "linux")]
             provider_socket: endpoint.as_ref().map(|e| e.provider_socket()),

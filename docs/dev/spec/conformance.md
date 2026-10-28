@@ -163,6 +163,10 @@ JSON is a failure of the check, not an empty result.
 | 4.4 | another session's `job.status` and `job.cancel` of the job are `error unknown_job`, and the node is not told to cancel it |
 | 4.4 | `job.cancel` stops a running job (`{job, state: "cancelled"}`), and the node is told to `cancel` its call |
 | 4.5 | `stream.read` and `stream.close` of a stream the session was not given are `error unknown_stream` |
+| 4.5 | `list(node)` names a program's state key, event and stream with their kinds (`- gauge.tick (event): …`), and their details give `kind` |
+| 4.5 | `execute` of a program's state key sends `get {cap, keys: [name]}` with the session's `ctx` and answers its value |
+| 4.5 | `execute` of a program's event sends `sub` with the session's `ctx` and answers a stream id; `stream.read` gives its events, one JSON line each; once that stream is closed the node gets `unsub` |
+| 4.5 | `execute` of a program's stream sends `stream.open` with its args and the session's `ctx`, and `stream.read` gives what the node sends, then its end |
 | 5 | two sessions have two ids; a node sees one `ctx.session` per session, so a node that two sessions use sees two |
 | 5 | `DELETE /mcp` ends the session (204), and the ended session is 404 |
 | 5 | `session.end` goes to every node the session used (checked for a session that used two) |
@@ -195,8 +199,12 @@ before the provider comes, allow rules for `echo.say`, `echo.fail` and
 `echo.peek:/nerve-conformance/inside/*` once it is there) and attaches an
 `echo` provider with the actions `say` (a string `text`), `shout`, `fail`,
 `odd`, whose schema has a `oneOf` and so is outside the subset of
-protocol.md §6.1, and `peek`, whose `path` is marked `x-nerve-path: "read"`.
-Every check names node-local §7.
+protocol.md §6.1, and `peek`, whose `path` is marked `x-nerve-path: "read"`;
+the state keys `level` and `secret`, the event `ping` (sent before it
+answers `say` with the text `ping`, so it reaches the center before that
+answer, node-local §7) and the stream `talk` (two lines, then
+its end), all `read`, with allow rules for `echo.level`, `echo.ping` and
+`echo.talk`. Every check names node-local §7.
 
 | Check |
 |---|
@@ -213,6 +221,12 @@ Every check names node-local §7.
 | a call the policy refuses never reaches the provider |
 | a call whose arguments do not fit the action's schema is `invalid_args` and never reaches the provider |
 | a path argument keeps its `x-nerve-path` marker, and the node decides the call by that path (one below the allowed folder reaches the provider with it, one elsewhere is `forbidden` and never does) |
+| the descriptor lists the provider's state key, event and stream with their effects (and not the state key no rule allows) |
+| a `get` of a state key the policy allows reaches the provider, and only the keys asked for come back |
+| a `get` the policy refuses never reaches the provider |
+| an event the policy allows reaches the center that subscribed to it |
+| an event the policy no longer allows does not reach the center, though it stays subscribed |
+| a stream the policy allows is forwarded from the provider, and ends (`stream.close` with reason `ended`) when the provider ends it |
 | when the provider exits its capability leaves the descriptor |
 | a call to a provider that left is `unknown_capability` |
 

@@ -481,6 +481,34 @@ pub fn refuse_account(doc: &toml::Table) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuses an entry of the file `doc` that declares `state`, `events` or
+/// `streams`: a capability of node.toml offers actions only, so its state
+/// is read by an action (effect `read` or `sense`), and events and streams
+/// come from a program (docs/user/config-capabilities.md). The owner is
+/// told so in words, not as a field serde does not know.
+pub fn refuse_units(doc: &toml::Table) -> Result<(), String> {
+    let entries = doc.get("capability").and_then(toml::Value::as_array);
+    for e in entries
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_table)
+    {
+        if let Some(key) = ["state", "events", "streams"]
+            .into_iter()
+            .find(|k| e.contains_key(*k))
+        {
+            let name = match e.get("name").and_then(toml::Value::as_str) {
+                Some(n) => format!("capability {n}"),
+                None => "[[capability]]".into(),
+            };
+            return Err(format!(
+                "{name}: {key} is no setting: a capability of node.toml offers actions only, so a state it reads is an action with effect read or sense; events and streams come from a program you allow as a provider (docs/user/providers.md)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Checks the config's capabilities: each one alone, and their names once
 /// each.
 pub fn validate_all(caps: &[ConfigCapability], max_timeout_secs: u64) -> Result<(), String> {
@@ -691,6 +719,25 @@ mod tests {
             .map(|i| entry(&format!("a.n{i}"), r#"["cat"]"#, ""))
             .collect();
         assert!(NodeConfig::parse(&many).unwrap_err().contains("at most"));
+    }
+
+    /// A capability of node.toml offers actions only: an entry that
+    /// declares state, events or streams is refused in words that say how
+    /// to offer them.
+    #[test]
+    fn state_events_and_streams_are_refused_in_words() {
+        for key in ["state", "events", "streams"] {
+            let text = format!(
+                "{}{key} = {{}}\n",
+                entry("sensors.read", r#"["sensors", "-j"]"#, "")
+            );
+            let e = NodeConfig::parse(&text).unwrap_err();
+            assert!(
+                e.contains(&format!("capability sensors.read: {key} is no setting"))
+                    && e.contains("an action with effect read or sense"),
+                "{key}: {e}"
+            );
+        }
     }
 
     /// Every capability of node.toml runs as `nerve-run`: an entry that

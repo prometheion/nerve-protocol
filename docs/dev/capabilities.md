@@ -12,9 +12,16 @@ A capability is a named part of a node, with four kinds of members:
 | Member | Direction | Meaning |
 |---|---|---|
 | Action | center to node, with a reply | Do something: read a file, run a command |
-| Event | node to center | Something happened |
-| State | readable, change-notified | A value the node holds |
-| Stream | continuous | Data without a known length |
+| Event | node to center, once subscribed | Something happened |
+| State | read with `get`, change-notified | A value the node holds, by key |
+| Stream | opened with `stream.open`, continuous | Data without a known length |
+
+A program's capability ([node-local §7](spec/node-local.md#7-capability-providers))
+may offer all four. Its state keys, events and streams each have an effect,
+`read` or `sense`: they only take data in. They share one set of names with
+its actions, so each is a unit `cap.name` of its own for the agent, and the
+node decides and audits each like a call. A capability of the owner's config
+offers actions only.
 
 A capability may follow a **profile**, a published contract such as `fs` or
 `exec`. A capability without a profile is usable from its schemas alone.
@@ -42,7 +49,7 @@ and state included) and `validate` before every call it sends.
     "summary": "…",
     "actions": {"read": {"effect": "read", "summary": "…",
                          "params": {"type": "object", …}, "result": {…}}},
-    "events": {}, "state": null, "streams": {}}]}
+    "events": {}, "state": {}, "streams": {}}]}
 ```
 
 - The descriptor a center gets is filtered by that center's policy. A
@@ -63,9 +70,12 @@ and state included) and `validate` before every call it sends.
   the descriptor gives twice, and an action with another character in its
   name or a name over 64 bytes, and keeps the rest.
 - The center builds a catalog per node from its descriptor
-  (`nerve-center` `catalog.rs`): one unit per `cap.action`, and the units it
-  left out (a bad name, a schema outside the subset; every action of a
-  capability whose event data or state is outside it) with their reasons. The
+  (`nerve-center` `catalog.rs`): one unit per `cap.action`, and for a
+  program's capability one per state key, event and stream too, each with
+  its kind. The units it left out are kept with their reasons: a bad name, a
+  schema outside the subset (only that unit, for a program's capability;
+  every action of one of the node's own capabilities whose event data or
+  state is outside it), a name given to two kinds. The
   catalog is rebuilt from the descriptor, never stored; `list` reads it, and
   the overview shows what was left out. Each unit has a hash over its name,
   effect, description, `params` and `result`: `execute` runs a unit only
@@ -75,9 +85,10 @@ and state included) and `validate` before every call it sends.
   own, `config` for one the owner declared in `node.toml` (`[[capability]]`:
   a fixed command the node runs itself, [node-local §2](spec/node-local.md#capabilities-of-the-config)),
   else the name of a local program the owner allowed to attach to the
-  node ([node-local §7](spec/node-local.md#7-capability-providers)). Such a
-  capability has actions only, and the node decides each call to it by the
-  center's policy before the program or the command sees it. The names
+  node ([node-local §7](spec/node-local.md#7-capability-providers)). A
+  config capability has actions only; a program's may add state, events and
+  streams. The node decides each call, `get`, subscription and stream to
+  them by the center's policy before the program or the command sees it. The names
   `node`, `fs`, `exec`, `settings`, `audit`, `job` and `stream`
   (`nerve_policy::config::BUILT_IN`) are taken by neither, and no program may
   add a capability the config declares.

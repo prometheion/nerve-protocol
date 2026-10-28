@@ -22,7 +22,7 @@ use nerve_transport::net::BoxIo;
 use nerve_transport::ws::WsMessage;
 
 use crate::center::Center;
-use crate::streams::Ring;
+use crate::streams::{Place, Ring};
 
 /// Each side has this long for its handshake step (§4.2).
 pub const HANDSHAKE_STEP: Duration = Duration::from_secs(15);
@@ -40,6 +40,24 @@ pub const CALLS_KEPT: usize = 8;
 /// The most `stream.open`s a node may leave unanswered past their wait on
 /// one link; past it the link gets no more.
 pub const UNANSWERED_MAX: usize = 4;
+
+/// A `stream.open` sent on the link and not answered yet.
+struct Opening {
+    /// Where the stream's frames go; none once the opener gave up: the
+    /// answer then opens nothing.
+    ring: Option<Arc<Ring>>,
+    /// When its wait passes. A node that has not answered by then left it
+    /// unanswered; an opener that gave up before (its `execute` was
+    /// cancelled) says nothing about the node, which may take its time
+    /// still, as for a program's stream.
+    until: Instant,
+}
+
+impl Opening {
+    fn unanswered(&self, now: Instant) -> bool {
+        self.ring.is_none() && now >= self.until
+    }
+}
 
 /// How many of a node's `calls` places the agents' calls leave free: a
 /// quarter, at most [`CALLS_KEPT`], so a node with few places still runs
@@ -63,6 +81,45 @@ impl Drop for Unsent<'_> {
             self.link.pending.lock().unwrap().remove(&id);
             self.link.opening.lock().unwrap().remove(&id);
         }
+    }
+}
+
+/// A `stream.open` that was sent and whose answer was not taken. Dropped
+/// so (its opener gave up: its wait passed, or its `execute` was
+/// cancelled), the node may still open the stream, and nobody would read
+/// it: the answer frames nothing here, and the stream is closed there.
+struct Asked {
+    link: Arc<Link>,
+    id: u64,
+    rx: Option<oneshot::Receiver<Reply>>,
+    /// The session's count of the node's place the open takes, kept until
+    /// the answer comes.
+    place: Option<Place>,
+}
+
+impl Drop for Asked {
+    fn drop(&mut self) {
+        let Some(rx) = self.rx.take() else {
+            return;
+        };
+        if let Some(o) = self.link.opening.lock().unwrap().get_mut(&self.id) {
+            o.ring.take();
+        }
+        let place = self.place.take();
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let link = self.link.clone();
+        rt.spawn(async move {
+            let _place = place;
+            if let Ok(Ok(v)) = rx.await
+                && let Some(sid) = sid_of(&v)
+            {
+                // Taken in just now, it is held here too.
+                link.forget_stream(sid);
+                link.close_stream(sid, "nobody waits for it").await;
+            }
+        });
     }
 }
 
@@ -110,8 +167,16 @@ pub struct Link {
     streams: Mutex<HashMap<u32, Arc<Ring>>>,
     /// `stream.open` requests waiting for their `sid`, by request id: the
     /// answer puts the ring in `streams` before the next frame is read.
-    /// None once the opener gave up: the answer then opens nothing.
-    opening: Mutex<HashMap<u64, Option<Arc<Ring>>>>,
+    opening: Mutex<HashMap<u64, Opening>>,
+    /// The sessions' subscriptions to a program's events on this link, by
+    /// topic `cap/name`: the rings each event goes to (crate::streams).
+    /// The node holds one subscription per topic for the link; it ends
+    /// once no ring takes the topic any more.
+    subs: Mutex<HashMap<String, Vec<Arc<Ring>>>>,
+    /// Held while a `sub` or `unsub` is queued, so they go in the order
+    /// the rings came and went: an `unsub` queued after a later `sub` would
+    /// end the node's subscription that ring waits on.
+    sub_order: tokio::sync::Mutex<()>,
 }
 
 /// The connection a link is on, and what it counts for a resume.
@@ -162,6 +227,8 @@ impl Link {
             sessions: Mutex::new(Default::default()),
             streams: Mutex::default(),
             opening: Mutex::default(),
+            subs: Mutex::default(),
+            sub_order: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -566,6 +633,18 @@ impl Link {
         w.parked = false;
         w.replay = None;
         self.end_streams("the link to the node ended");
+        // The node's subscriptions end with the link; a resumed link keeps
+        // them, as it keeps the events it sent meanwhile.
+        let subs: Vec<Arc<Ring>> = self
+            .subs
+            .lock()
+            .unwrap()
+            .drain()
+            .flat_map(|(_, r)| r)
+            .collect();
+        for r in subs {
+            r.end("the link to the node ended");
+        }
     }
 
     fn fail_pending(&self) {
@@ -582,7 +661,7 @@ impl Link {
         // An opened stream is known before its first frame is read, which
         // may follow the answer at once. One lock at a time: `open_stream`
         // takes them the other way round.
-        let opened = self.opening.lock().unwrap().remove(n).flatten();
+        let opened = self.opening.lock().unwrap().remove(n).and_then(|o| o.ring);
         let waited = self.pending.lock().unwrap().contains_key(n);
         if let Some(ring) = opened.filter(|_| waited)
             && let Ok(v) = &r
@@ -604,23 +683,44 @@ impl Link {
         ring: Arc<Ring>,
         wait: Duration,
     ) -> Result<u32, RpcError> {
+        self.open_stream_in(params, ring, wait, None).await
+    }
+
+    /// [`Link::open_stream`] for a session that counts the node's place the
+    /// open takes as `place`: it is kept until the answer comes, also when
+    /// the open is given up on before.
+    pub async fn open_stream_in(
+        self: &Arc<Self>,
+        params: Value,
+        ring: Arc<Ring>,
+        wait: Duration,
+        place: Option<Place>,
+    ) -> Result<u32, RpcError> {
         if !self.is_live() {
             return Err(lost());
         }
-        let (tx, mut rx) = oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         // The ring is in place before the request can be answered.
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         {
             let mut opening = self.opening.lock().unwrap();
             // Each one left unanswered holds a request and a task here
             // until the link ends: a node that does not answer gets no more.
-            if opening.values().filter(|r| r.is_none()).count() >= UNANSWERED_MAX {
+            let now = Instant::now();
+            if opening.values().filter(|o| o.unanswered(now)).count() >= UNANSWERED_MAX {
                 return Err(RpcError::new(
                     ErrorCode::Timeout,
                     "the node left earlier stream.open requests unanswered",
                 ));
             }
-            opening.insert(id, Some(ring));
+            let until = now + wait;
+            opening.insert(
+                id,
+                Opening {
+                    ring: Some(ring),
+                    until,
+                },
+            );
         }
         self.pending.lock().unwrap().insert(id, tx);
         let mut unsent = Unsent {
@@ -632,30 +732,29 @@ impl Link {
             return Err(lost());
         }
         unsent.id = None;
-        let r = match tokio::time::timeout(wait, &mut rx).await {
+        // The node may open it after this stops waiting (its wait passed, or
+        // the caller was dropped), and nobody would read it: it would hold
+        // one of the link's stream places until its command or program ends
+        // it. `asked` then closes it; the request still waits for its
+        // answer, as a stream.open is not cancelled.
+        let mut asked = Asked {
+            link: self.clone(),
+            id,
+            rx: Some(rx),
+            place,
+        };
+        let rx = asked.rx.as_mut().expect("just set");
+        let r = match tokio::time::timeout(wait, &mut *rx).await {
             Ok(r) => r.unwrap_or_else(|_| Err(lost())),
             Err(_) => {
-                // The node may still open it, and nobody would read it: it
-                // would hold one of the link's stream places until its
-                // command ends. Its answer frames nothing here and closes it
-                // there; the request still waits for it, as a stream.open
-                // is not cancelled.
-                let abandoned = match self.opening.lock().unwrap().get_mut(&id) {
-                    Some(ring) => ring.take().is_some(),
+                let abandoned = match self.opening.lock().unwrap().get(&id) {
+                    Some(o) => o.ring.is_some(),
                     None => false,
                 };
                 if !abandoned {
                     // The answer is being taken in right now.
                     rx.await.unwrap_or_else(|_| Err(lost()))
                 } else {
-                    let link = self.clone();
-                    tokio::spawn(async move {
-                        if let Ok(Ok(v)) = rx.await
-                            && let Some(sid) = sid_of(&v)
-                        {
-                            link.close_stream(sid, "nobody waits for it").await;
-                        }
-                    });
                     return Err(RpcError::new(
                         ErrorCode::Timeout,
                         "the node did not answer in time",
@@ -663,17 +762,19 @@ impl Link {
                 }
             }
         };
+        asked.rx = None;
         self.opening.lock().unwrap().remove(&id);
         sid_of(&r?).ok_or_else(|| RpcError::internal("the node answered stream.open without a sid"))
     }
 
     /// How many `stream.open`s the node left unanswered past their wait.
     pub fn unanswered_opens(&self) -> usize {
+        let now = Instant::now();
         self.opening
             .lock()
             .unwrap()
             .values()
-            .filter(|r| r.is_none())
+            .filter(|o| o.unanswered(now))
             .count()
     }
 
@@ -697,11 +798,7 @@ impl Link {
         let ring = self.streams.lock().unwrap().remove(&sid);
         match ring {
             Some(ring) => {
-                ring.end(if reason == "ended" {
-                    "the command ended"
-                } else {
-                    "the node closed it"
-                });
+                ring.end(ring.closed_words(reason == "ended"));
                 true
             }
             None => false,
@@ -742,6 +839,87 @@ impl Link {
     /// How many streams the link holds.
     pub fn stream_count(&self) -> usize {
         self.streams.lock().unwrap().len()
+    }
+
+    /// The events of `topic` go to `ring` too, until [`Link::unsubscribe`].
+    /// A link that ended takes none: the ring ends at once.
+    pub fn subscribe(&self, topic: &str, ring: Arc<Ring>) {
+        let mut subs = self.subs.lock().unwrap();
+        if self.is_closed() {
+            drop(subs);
+            ring.end("the link to the node ended");
+            return;
+        }
+        subs.entry(topic.to_string()).or_default().push(ring);
+    }
+
+    /// `ring` takes the events of `topic` no more; the node's subscription
+    /// ends once no ring takes them (its `unsub` is not waited for).
+    pub fn unsubscribe(self: &Arc<Self>, topic: &str, ring: &Arc<Ring>) {
+        let last = {
+            let mut subs = self.subs.lock().unwrap();
+            let Some(rings) = subs.get_mut(topic) else {
+                return;
+            };
+            rings.retain(|r| !Arc::ptr_eq(r, ring));
+            let last = rings.is_empty();
+            if last {
+                subs.remove(topic);
+            }
+            last
+        };
+        if last && !self.is_closed() {
+            let link = self.clone();
+            let topic = topic.to_string();
+            tokio::spawn(async move {
+                let queued = {
+                    let _order = link.sub_order.lock().await;
+                    // A ring that came since keeps the node's subscription:
+                    // its `sub` went, or goes after this.
+                    if link.subscribers(&topic) > 0 {
+                        return;
+                    }
+                    link.start(method::UNSUB, json!({"topics": [topic]})).await
+                };
+                if let Ok((id, rx)) = queued {
+                    let _ = link.finish(id, rx, Some(SHORT_CALL)).await;
+                }
+            });
+        }
+    }
+
+    /// [`Link::start_within`] for a `sub` with `params`, in order with the
+    /// `unsub`s of [`Link::unsubscribe`]: its ring is in place already.
+    pub async fn start_sub(
+        &self,
+        params: Value,
+        most: usize,
+    ) -> Result<(u64, oneshot::Receiver<Reply>), RpcError> {
+        let _order = self.sub_order.lock().await;
+        self.start_within(method::SUB, params, most).await
+    }
+
+    /// How many sessions' streams take the events of `topic`.
+    pub fn subscribers(&self, topic: &str) -> usize {
+        self.subs.lock().unwrap().get(topic).map_or(0, Vec::len)
+    }
+
+    /// An event from the node for the subscriptions of its topic: one JSON
+    /// line `{name, seq, ts, data}` in each of their rings. Whether one
+    /// took it.
+    pub fn event(&self, ev: &msg::Event) -> bool {
+        let topic = format!("{}/{}", ev.cap, ev.name);
+        let rings = self.subs.lock().unwrap().get(&topic).cloned();
+        let Some(rings) = rings else {
+            return false;
+        };
+        let mut line =
+            json!({"name": ev.name, "seq": ev.seq, "ts": ev.ts, "data": ev.data}).to_string();
+        line.push('\n');
+        for r in &rings {
+            r.push(line.as_bytes());
+        }
+        true
     }
 }
 
@@ -1551,6 +1729,46 @@ mod tests {
         assert_eq!(link.unanswered_opens(), UNANSWERED_MAX);
     }
 
+    /// An open whose opener gave up before its wait passed (its `execute`
+    /// was cancelled) is not one the node left unanswered: a program may
+    /// take its time, and opens of other callers still go to the node.
+    #[tokio::test]
+    async fn a_cancelled_stream_open_is_not_left_unanswered_by_the_node() {
+        let (out, mut rx) = mpsc::channel(8);
+        let link = Arc::new(Link::new(
+            "n1",
+            String::new(),
+            false,
+            Limits::default(),
+            out,
+            None,
+        ));
+        for _ in 0..UNANSWERED_MAX {
+            let ring = Arc::new(Ring::default());
+            let open = link.open_stream(json!({}), ring, Duration::from_secs(30));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), open)
+                    .await
+                    .is_err(),
+                "cancelled before the answer"
+            );
+            assert_eq!(sent(&mut rx).await.1, method::STREAM_OPEN);
+        }
+        assert_eq!(link.unanswered_opens(), 0);
+        let ring = Arc::new(Ring::default());
+        let open = tokio::spawn({
+            let link = link.clone();
+            async move {
+                link.open_stream(json!({}), ring, Duration::from_secs(5))
+                    .await
+            }
+        });
+        let (id, method, _) = sent(&mut rx).await;
+        assert_eq!(method, method::STREAM_OPEN, "it still goes to the node");
+        link.reply(&Id::Num(id), Ok(json!({"sid": 3})));
+        assert_eq!(open.await.unwrap().unwrap(), 3);
+    }
+
     /// An open stream ends when its connection drops: when the link is
     /// parked, and when the node resumes it before the center saw the old
     /// connection go. The node ended it with that connection.
@@ -1597,5 +1815,86 @@ mod tests {
                 "parked: {parked}"
             );
         }
+    }
+
+    /// An `unsub` goes in order with the `sub`s of its topic: a ring that
+    /// came after the last one went keeps the node's subscription, so the
+    /// `unsub` of the earlier ring never follows the later ring's `sub`.
+    #[tokio::test]
+    async fn an_unsub_never_follows_a_later_sub_of_its_topic() {
+        let (out, mut rx) = mpsc::channel(8);
+        let link = Arc::new(Link::new(
+            "n1",
+            String::new(),
+            false,
+            Limits::default(),
+            out,
+            None,
+        ));
+        let ring = |_| Arc::new(Ring::of(crate::streams::Source::Events));
+        let (a, b) = (ring(0), ring(1));
+        let mut sent = async || {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let mut methods = Vec::new();
+            while let Ok(Out::Frame(m)) = rx.try_recv() {
+                if let Ok(Message::Request { method, .. }) = Message::decode(m.to_text().unwrap()) {
+                    methods.push(method);
+                }
+            }
+            methods
+        };
+        link.subscribe("board/alarm", a.clone());
+        link.unsubscribe("board/alarm", &a);
+        link.subscribe("board/alarm", b.clone());
+        let _sub = link
+            .start_sub(json!({"topics": ["board/alarm"]}), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(sent().await, ["sub"]);
+        link.unsubscribe("board/alarm", &b);
+        assert_eq!(sent().await, ["unsub"]);
+    }
+
+    /// An event goes as one JSON line to every ring subscribed to its
+    /// topic and to no other; a parked link keeps its subscriptions (the
+    /// node keeps them for a resume), an ended one ends them.
+    #[tokio::test]
+    async fn events_go_to_their_topics_rings_until_the_link_ends() {
+        let (out, _rx) = mpsc::channel(8);
+        let link = Arc::new(Link::new(
+            "n1",
+            String::new(),
+            false,
+            Limits::default(),
+            out,
+            Some("l-1".into()),
+        ));
+        let conn = link.wire.lock().unwrap().conn;
+        assert!(link.take_frame(conn, true));
+        let ring = |_| Arc::new(Ring::of(crate::streams::Source::Events));
+        let (a, b, c) = (ring(0), ring(1), ring(2));
+        link.subscribe("board/alarm", a.clone());
+        link.subscribe("board/alarm", b.clone());
+        link.subscribe("board/other", c.clone());
+        let ev = |seq| msg::Event {
+            cap: "board".into(),
+            name: "alarm".into(),
+            seq,
+            ts: 5,
+            data: json!({"level": 1}),
+        };
+        assert!(link.event(&ev(1)));
+        let line = "{\"data\":{\"level\":1},\"name\":\"alarm\",\"seq\":1,\"ts\":5}\n";
+        assert_eq!(a.read(1024).text, line);
+        assert_eq!(b.read(1024).text, line);
+        assert_eq!(c.held(), 0);
+        assert!(link.park(conn));
+        assert!(link.event(&ev(2)));
+        assert!(!a.ended() && a.held() > 0, "a parked link keeps them");
+        link.end(ByeReason::Shutdown);
+        for r in [&a, &b, &c] {
+            assert!(r.ended());
+        }
+        assert_eq!(link.subscribers("board/alarm"), 0);
     }
 }

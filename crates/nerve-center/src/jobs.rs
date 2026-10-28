@@ -60,6 +60,9 @@ pub enum Stop {
     SessionEnded,
     /// The node's owner disabled it in the center.
     Disabled,
+    /// The stream whose subscription it makes was closed before it was
+    /// taken.
+    Closed,
 }
 
 impl Stop {
@@ -70,6 +73,7 @@ impl Stop {
             Stop::Cancelled => "the job was cancelled",
             Stop::SessionEnded => "the session ended",
             Stop::Disabled => "the node was disabled in the center",
+            Stop::Closed => "its stream was closed",
         };
         RpcError::new(ErrorCode::Cancelled, why)
     }
@@ -613,6 +617,7 @@ mod tests {
             cap: cap.into(),
             action: action.into(),
             effect: Effect::Execute,
+            kind: nerve_proto::UnitKind::Action,
         }
     }
 

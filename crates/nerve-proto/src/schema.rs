@@ -698,6 +698,22 @@ pub fn path_args(params: &Value) -> Vec<(String, PathMark)> {
         .collect()
 }
 
+/// Whether `params` may be the params schema of a program's stream
+/// (`stream.open`): as an action's arguments, with no argument marked
+/// `x-nerve-path`. A stream's open is decided as a call that names no path,
+/// so a path there would reach the program unjudged; a program that reads
+/// at a path offers that as an action, whose paths the node judges.
+pub fn check_stream_params(params: &Value) -> Result<(), SchemaError> {
+    check(params, Role::Params)?;
+    match path_args(params).into_iter().next() {
+        Some((name, _)) => Err(SchemaError {
+            pointer: below(&below("", "properties"), &name) + "/x-nerve-path",
+            reason: "a stream takes no path; one read at a path is an action's".into(),
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Whether `args` fit `schema`, a schema that passed `check`. The first
 /// argument that does not fit is returned with what was expected there.
 /// Keywords `check` refuses are not looked at, so an unchecked schema is not
@@ -1403,6 +1419,22 @@ mod tests {
                 .starts_with("/properties/a~1b~0c/format: format: "),
             "{e}"
         );
+    }
+
+    /// A stream's params are an action's, but mark no path: the node would
+    /// not judge one.
+    #[test]
+    fn a_streams_params_mark_no_path() {
+        let plain = json!({"type": "object", "properties": {"every_ms": {"type": "integer"}}});
+        assert!(check_stream_params(&plain).is_ok());
+        let path = json!({"type": "object", "properties": {
+            "every_ms": {"type": "integer"},
+            "a/file": {"type": "string", "x-nerve-path": "read"}}});
+        let e = check_stream_params(&path).unwrap_err();
+        assert_eq!(e.pointer, "/properties/a~1file/x-nerve-path", "{e}");
+        assert!(e.reason.contains("a stream takes no path"), "{e}");
+        let e = check_stream_params(&json!({"type": "string"})).unwrap_err();
+        assert!(e.reason.contains("type \"object\""), "{e}");
     }
 
     /// `depth` levels of objects, each with one property below it.

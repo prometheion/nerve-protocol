@@ -61,7 +61,9 @@ motion, nothing moves. On a phone the menu opens from the button at the top.
 
 A disabled machine stays paired and connected. The agent's `list` shows it as
 disabled with no capabilities, and calls to it are refused. The agent's calls
-that run there stop, its [jobs](harness.md#long-calls-become-jobs) too.
+that run there stop, its [jobs](harness.md#long-calls-become-jobs) too, and so
+do the streams and event subscriptions of a program there; after **Enable**
+the agent opens them again with `execute`.
 
 ### Statistics
 

@@ -1662,8 +1662,27 @@ a node run by hand (the provider socket takes none, and ignores one):
             "capabilities": [{"id": "lamp", "summary": "The desk lamp.",
                               "actions": {"on": {"effect": "write", "summary": "…",
                                                  "params": {"type": "object"},
-                                                 "result": {"type": "object"}}}}]}}
+                                                 "result": {"type": "object"}}},
+                              "state": {"level": {"effect": "read", "summary": "…",
+                                                  "schema": {"type": "integer"}}},
+                              "events": {"switched": {"effect": "read", "summary": "…",
+                                                      "data": {"type": "object"}}},
+                              "streams": {"power": {"effect": "sense", "summary": "…",
+                                                    "params": {"type": "object"}}}}]}}
 ```
+
+Besides `actions`, a capability may declare `state` keys (read with `get`),
+`events` (the program sends them, the node passes them on) and `streams`
+(opened with `stream.open`, the program sends their data). All four share
+one set of names: each is one unit `<cap>.<name>` to the harness
+(harness.md §4.5), so a name may stand in one of them only. A state key, an
+event and a stream read or sense (`effect` `read` or `sense`); what changes
+the world is an action. A state key's `schema` and an event's `data` say
+what the value holds, a stream's `params` what its `stream.open` takes
+(none takes any object); all keep to the subset of protocol.md §6.1. A
+stream's `params` mark no path (`x-nerve-path`): its open is decided as a
+call that names none, so a path there would reach the program unjudged; what
+a program reads at a path the center names is an action.
 
 The node refuses it, with nothing attached, when:
 
@@ -1691,27 +1710,33 @@ The node refuses it, with nothing attached, when:
   the attachment the node reads `providers.allowed` again and refuses an
   entry removed or changed meanwhile;
 - a provider of that name is attached already;
-- the fragment is not 1 to 16 capabilities of 1 to 64 actions each, with
-  names of 1 to 64 letters, digits, `-` and `_` (a center would leave out a
-  longer name); a capability is named twice, takes the
+- the fragment is not 1 to 16 capabilities of 1 to 64 actions, state keys,
+  events and streams each (counted together), with names of 1 to 64
+  letters, digits, `-` and `_` (a center would leave out a longer name); a
+  name stands for two kinds of unit (`capability lamp: level is both an
+  action and a state key; …`), an event is named `state` (the topic of the
+  state's changes, protocol.md §5.1), or a state key, event or stream has
+  another effect than `read` or `sense`; a capability is named twice, takes the
   name or the profile of one of the node's own (`node`, `fs`, `exec`,
   `settings`, `audit`) or of the center's (`job`, `stream`: the center
   serves `job.status`, `job.cancel`, `stream.read` and `stream.close` on
   every node itself, harness.md §4.4, §4.5), is added by another attached
   provider, or is the `cap` of one of the config's capabilities (§2, any
   platform, offered or not); or a
-  capability declares anything but `id`, `profile`, `summary` and `actions`
-  (no events, state or streams: the node forwards calls only, and the node,
-  not the provider, says `provider` and `exposure`);
-- no action is left once those whose schemas are outside the subset are
+  capability declares anything but `id`, `profile`, `summary`, `actions`,
+  `state`, `events` and `streams` (the node, not the provider, says
+  `provider` and `exposure`);
+- no unit is left once those whose schemas are outside the subset are
   left out (below).
 
 An action's `params` and `result` must keep to the schema subset of
 protocol.md §6.1; an action without `params` takes any arguments, as
 `{"type": "object"}`. The node leaves out an action whose schemas do not
 keep to it, with the reason (`params: /properties/n/oneOf: oneOf:
-alternatives are not supported: …`), and a capability with no action left;
-the provider's other actions attach.
+alternatives are not supported: …`), and likewise a state key (`value: …`),
+an event (`data: …`) or a stream (`params: …`, also one that marks a
+path); a capability with no unit
+left goes. The provider's other units attach.
 
 The check tells programs apart, not users: a process of the same user can
 still make the allowed program attach for it. Allow only programs you trust.
@@ -1820,6 +1845,78 @@ the node sends `{"method": "cancel", "params": {"id": 7}}` and drops a late
 answer. The provider learns nothing of the center: not its name, its session
 or its policy.
 
+A program's state key, event or stream is decided and audited like a call
+of `<cap>.<name>` with its effect that names no path (§3): its target is
+`<cap>.<name>`, `caps` may switch it (`cap set lamp.level off`), and in
+folder mode it needs `on` as such an action does.
+
+- **`get`** of the capability (`{cap, keys, ctx}`, all its keys when `keys`
+  is empty) is decided key by key, each audited with the session of `ctx`;
+  only when every key is allowed does the program get `{"id": 8, "method":
+  "get", "params": {"cap": "lamp", "keys": ["level"]}}`. It answers `{"id":
+  8, "ok": {"level": 3}}`; the center gets the keys asked for and no other,
+  and a key the program left out fails the `get` (`internal`). A program
+  that does not answer within 30 s fails it with `timeout`. A key the
+  capability does not declare is `unknown_member`; one named twice is
+  decided and asked for once. A `get` of a program's
+  state is one of the link's calls: it counts against `limits.calls`
+  (`busy`), and a `cancel` of it or `session.end` of its session fails it
+  `cancelled` and tells the program (`cancel`).
+- **Events.** The program sends `{"cap": "lamp", "event": "switched",
+  "data": {…}}` (no `id`). An event it did not declare, or of a capability
+  that is not its own, is dropped. The node passes the event to each center
+  whose policy allows `<cap>.<event>` now, decided again for every event
+  without an audit entry, and that subscribed to it (`sub` with
+  `lamp/switched` or `lamp/*`). A center's `sub` of a program's event is
+  decided and audited like a call (with the session of its `ctx`), so a
+  refusal tells the center at once; `lamp/state` is decided so for each
+  state key and `lamp/*` for each event and state key, and one refused
+  refuses the `sub`, as for `get`. A unit is decided once, however often
+  the `sub` names it. `lamp/state` and `lamp/*` take only the units they
+  were decided for: an event or key the program declares when it attaches
+  again later does not come under them until a new `sub` decides it. The
+  capability is looked up with all the units the program declares, as for
+  `get` and `stream.open`, so a `sub` of one this center is offered none of
+  is refused in the audit too. An event the program does not declare is
+  `unknown_member`. The cut as each event comes holds after a change of the
+  policy, so a center the owner took `on` from, or whose capability the
+  owner turned `off` or `hidden` (though the event itself is `on`), gets
+  none, though it stays subscribed. An `unsub` only takes away, so it is
+  taken for any topic, also one of a capability whose program left. An
+  event or state change the program sent before it answered a request
+  reaches each center that takes it before that answer: the node passes the
+  program's lines on in the order it read them.
+- **State changes.** The program may send `{"cap": "lamp", "state":
+  {"level": 4}}`. Each center that subscribed to `lamp/state` (or
+  `lamp/*`) gets a `state` notification with the keys its subscription was
+  decided for that its policy allows now; the others are dropped.
+- **Streams.** A center's `stream.open` (`{cap, stream, params, ctx}`) is
+  checked against the stream's `params` schema (`invalid_args`), decided and
+  audited like a call with those arguments, and counts against the link's
+  `limits.streams` (`busy`) from when it comes, so opens that wait for the
+  program together keep the limit. Then the program gets `{"id": 9, "method":
+  "stream.open", "params": {"cap": "lamp", "stream": "power", "params":
+  {}}}` and answers `{"id": 9, "ok": {}}` (or an error, as for a call, or
+  `timeout` after 30 s). It sends the stream's text as `{"stream": 9,
+  "data": "…"}` and ends it with `{"stream": 9, "end": true}`; the node
+  sends it as the stream's kind-2 frames (protocol.md §5.4), scrubbed of the
+  sudo password as a command's output is, holds at most 1 MiB the link has
+  not taken (the oldest goes first, as a gap), and closes the stream with
+  reason `ended` once the program ended it. When the center closes it, or
+  its link goes, the program gets `{"method": "stream.close", "params":
+  {"stream": 9}}`, and later lines of that stream are dropped; an open
+  that still waits for the program when the link goes ends with it the same
+  way. When the policy changes (or a mode's time limit passes), each open
+  program's stream is decided again as an event is: one the center may no
+  longer have is closed with reason `not allowed any more`, and the program
+  gets `stream.close`. An open the program answers only after such a change
+  is decided again then, and refused (`forbidden`) the same way. When the program's connection ends, each of its
+  streams ends too, after what it sent.
+
+A capability of `node.toml` (§2) offers actions only: an entry that names
+`state`, `events` or `streams` is refused with a message that says so. A
+value it reads is an action with effect `read` or `sense`.
+
 The path is checked when the call comes; the provider uses it afterwards
 with its own account's rights (the owner's, or root's for a program of root
 on the installed node), so a link put in or swapped in between is not
@@ -1842,7 +1939,8 @@ it comes.
 Only the owner adds or takes away those entries (`settings.set` refuses the
 document with `forbidden`), so a center cannot drop its own deny rule for such
 a capability either. What stays open: an `on` entry or an allow rule for a
-capability or for one of its actions, written while it did not sense, still
+capability or for one of its actions (its state keys, events and streams
+count as actions here), written while it did not sense, still
 counts when a provider later offers it with a sense or actuate action under
 the same name (a new version of the program that makes `screen.info` sense). The node
 cannot tell a center's entry from the owner's then; the owner checks the
@@ -1856,8 +1954,8 @@ off `providers.allowed` or names another program for it, the owner declares
 one of its capabilities in `node.toml` (`[[capability]]`, §2), or the node
 stops.
 The descriptor's `rev` changes again, a call that waited for an answer fails
-`unavailable`, and a call that names the capability afterwards is
-`unknown_capability`. A provider that comes back sends `hello` again.
+`unavailable`, its streams end (each with the node's `stream.close`), and a
+call that names the capability afterwards is `unknown_capability`. A provider that comes back sends `hello` again.
 
 A provider holds one of the socket's places for as long as it is attached:
 16 on the provider socket, 64 on the control socket of a node run by hand.

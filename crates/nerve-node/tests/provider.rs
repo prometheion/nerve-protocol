@@ -1904,3 +1904,989 @@ fn the_root_helper_says_what_a_process_runs() {
     child.kill().unwrap();
     child.wait().unwrap();
 }
+
+/// The capability `sensors` of the provider `desk`: a state key, an event
+/// and a stream, each of which senses.
+fn sensors() -> Value {
+    json!([{"id": "sensors", "summary": "The board's sensors.",
+            "state": {"temperature": {"effect": "sense", "schema": {"type": "number"}}},
+            "events": {"alarm": {"effect": "sense",
+                                 "data": {"type": "object", "properties": {
+                                     "level": {"type": "integer"}}}}},
+            "streams": {"feed": {"effect": "sense",
+                                 "params": {"type": "object", "properties": {
+                                     "every_ms": {"type": "integer"}},
+                                     "additionalProperties": false}}}}])
+}
+
+/// Two centers, `lab` and `work`, in folder mode, each with `sensors`
+/// turned on by the owner (what senses needs it), and the provider `desk`
+/// attached with [`sensors`]: the node, both links and the provider.
+async fn two_centers_with_sensors(
+    root: &Path,
+) -> (Daemon, Conn<TcpStream>, Conn<TcpStream>, Provider) {
+    two_centers_with_sensors_as(options(root)).await
+}
+
+/// [`two_centers_with_sensors`] of a node started with `o`.
+async fn two_centers_with_sensors_as(
+    o: NodeOptions,
+) -> (Daemon, Conn<TcpStream>, Conn<TcpStream>, Provider) {
+    let mut a = FakeCenter::start(false).await.unwrap();
+    let mut b = FakeCenter::start(false).await.unwrap();
+    nerve_node::pair::pair(&o.paths, &a.link(), Some("lab"))
+        .await
+        .expect("pair a");
+    nerve_node::pair::pair(&o.paths, &b.link(), Some("work"))
+        .await
+        .expect("pair b");
+    owner_edit(&o.paths, |c| {
+        c.providers.allowed = vec![AllowedProvider {
+            name: "desk".into(),
+            exe: me(),
+        }];
+        for e in c.centers.iter_mut() {
+            e.policy
+                .caps
+                .insert("sensors".into(), nerve_policy::config::CapSetting::On);
+        }
+    })
+    .await;
+    let daemon = Daemon::start(o).await.expect("start");
+    let (mut lab, mut work) = (linked(&mut a).await, linked(&mut b).await);
+    let (p, first) = hello_with(&daemon.paths().ctl_socket(), sensors()).await;
+    assert_eq!(first["ok"]["capabilities"], json!(["sensors"]), "{first}");
+    descriptor_changed(&mut lab).await;
+    descriptor_changed(&mut work).await;
+    (daemon, lab, work, p)
+}
+
+/// The events and state changes of `cap` that came to `conn` while it
+/// waited for the answer to a `describe`: what the node sent it before.
+async fn notes_of(conn: &mut Conn<TcpStream>, cap: &str) -> Vec<Value> {
+    let id = conn
+        .request("describe", json!({"detail": "summary"}))
+        .await
+        .unwrap();
+    let mut others = Vec::new();
+    conn.answer(id, WAIT, &mut others)
+        .await
+        .unwrap()
+        .expect("describe");
+    others
+        .into_iter()
+        .filter_map(|m| match m {
+            Message::Notification { method: m, params }
+                if (m == "event" || m == "state") && params["cap"] == cap =>
+            {
+                Some(json!({"method": m, "params": params}))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A program's state key, events and state changes go to a center whose
+/// policy allows them, and never to one whose policy does not: the node
+/// cuts each event as it comes (not only the subscription), so a center
+/// the owner takes `on` from gets nothing more, while its subscription
+/// stays. Its `get` is decided and audited like a call, and only an
+/// allowed one reaches the program, which gets the keys asked for.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_programs_events_and_state_reach_only_the_centers_that_may_have_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, mut work, mut p) = two_centers_with_sensors(dir.path()).await;
+    let c = lamp_or(&mut lab, "sensors")
+        .await
+        .expect("lab sees sensors");
+    assert_eq!(c["state"]["temperature"]["effect"], "sense", "{c}");
+    assert_eq!(c["events"]["alarm"]["effect"], "sense", "{c}");
+    assert_eq!(c["streams"]["feed"]["effect"], "sense", "{c}");
+
+    for conn in [&mut lab, &mut work] {
+        let sub = json!({"topics": ["sensors/alarm", "sensors/state"],
+                         "ctx": {"session": "s-1"}});
+        conn.call("sub", sub, WAIT).await.unwrap().expect("sub");
+    }
+    p.send(json!({"cap": "sensors", "event": "alarm", "data": {"level": 1}}))
+        .await;
+    p.send(json!({"cap": "sensors", "state": {"temperature": 20.5, "made_up": 1}}))
+        .await;
+    for conn in [&mut lab, &mut work] {
+        let mut notes = notes_of(conn, "sensors").await;
+        // The node may send them after the answer; wait for the rest.
+        while notes.len() < 2 {
+            match conn.recv(WAIT).await {
+                Recv::Msg(Message::Notification { method: m, params })
+                    if params["cap"] == "sensors" =>
+                {
+                    notes.push(json!({"method": m, "params": params}))
+                }
+                Recv::Msg(_) => {}
+                other => panic!("no event: {other:?}"),
+            }
+        }
+        assert_eq!(notes[0]["params"]["name"], "alarm", "{notes:?}");
+        assert_eq!(notes[0]["params"]["data"], json!({"level": 1}));
+        assert_eq!(
+            notes[1]["params"]["changed"],
+            json!({"temperature": 20.5}),
+            "only a declared key: {notes:?}"
+        );
+    }
+
+    // The owner takes `on` from `work`: sensing needs it, so `work` gets
+    // nothing of `sensors` from now on, though it stays subscribed.
+    let paths = daemon.paths().clone();
+    owner_edit(&paths, |c| {
+        c.center_mut("work").unwrap().policy.caps.clear();
+    })
+    .await;
+    descriptor_changed(&mut work).await;
+    p.send(json!({"cap": "sensors", "event": "alarm", "data": {"level": 2}}))
+        .await;
+    p.send(json!({"cap": "sensors", "state": {"temperature": 21.0}}))
+        .await;
+    let mut got = Vec::new();
+    while got.len() < 2 {
+        match lab.recv(WAIT).await {
+            Recv::Msg(Message::Notification { method: m, params })
+                if params["cap"] == "sensors" =>
+            {
+                got.push((m, params))
+            }
+            Recv::Msg(_) => {}
+            other => panic!("no event: {other:?}"),
+        }
+    }
+    assert_eq!(got[0].1["data"], json!({"level": 2}));
+    assert_eq!(got[1].1["changed"], json!({"temperature": 21.0}));
+    assert_eq!(notes_of(&mut work, "sensors").await, Vec::<Value>::new());
+
+    // `get`: `work` is refused before the program hears of it, `lab` gets
+    // the key it asked for and no other.
+    let e = work
+        .call(
+            "get",
+            json!({"cap": "sensors", "keys": ["temperature"], "ctx": {"session": "s-2"}}),
+            WAIT,
+        )
+        .await
+        .unwrap()
+        .expect_err("work may not read it");
+    assert_eq!(code_of(&e), "forbidden", "{}", e.message);
+    let id = lab
+        .request(
+            "get",
+            json!({"cap": "sensors", "keys": ["temperature"], "ctx": {"session": "s-1"}}),
+        )
+        .await
+        .unwrap();
+    let asked = p.next().await.expect("the get");
+    assert_eq!(asked["method"], "get", "work's get never came: {asked}");
+    assert_eq!(
+        asked["params"],
+        json!({"cap": "sensors", "keys": ["temperature"]})
+    );
+    p.send(json!({"id": asked["id"], "ok": {"temperature": 21.0, "other": 3}}))
+        .await;
+    let got = lab
+        .answer(id, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .expect("lab reads it");
+    assert_eq!(got, json!({"temperature": 21.0}));
+    let e = lab
+        .call("get", json!({"cap": "sensors", "keys": ["humidity"]}), WAIT)
+        .await
+        .unwrap()
+        .expect_err("no such key");
+    assert_eq!(code_of(&e), "unknown_member");
+
+    // Both reads and both subscriptions are in the audit, with the session.
+    let audit: Value = serde_json::from_str(&cli(&paths, &["--json", "audit"]).await).unwrap();
+    let entries = audit["entries"].as_array().unwrap();
+    for (center, action, decision, session) in [
+        ("lab", "alarm", "allowed", "s-1"),
+        ("work", "alarm", "allowed", "s-1"),
+        ("work", "temperature", "forbidden", "s-2"),
+        ("lab", "temperature", "allowed", "s-1"),
+    ] {
+        assert!(
+            entries.iter().any(|e| e["center"] == center
+                && e["cap"] == "sensors"
+                && e["action"] == action
+                && e["decision"] == decision
+                && e["session"] == session),
+            "{center} {action}: {audit}"
+        );
+    }
+    daemon.stop().await;
+}
+
+/// A subscription to a program's capability is decided and audited unit by
+/// unit: `cap/state` each state key, `cap/*` each event and key, and an
+/// event the program does not declare is refused. An `unsub` only takes
+/// away: it is taken also once the program left, so the node holds no
+/// subscription the center gave up, and the program's next attach sends
+/// that center nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subscription_is_decided_unit_by_unit_and_an_unsub_is_always_taken() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, mut work, p) = two_centers_with_sensors(dir.path()).await;
+    let paths = daemon.paths().clone();
+    let sub = |topic: &str, session: &str| json!({"topics": [topic], "ctx": {"session": session}});
+    let e = lab
+        .call("sub", sub("sensors/later", "s-0"), WAIT)
+        .await
+        .unwrap()
+        .expect_err("no such event");
+    assert_eq!(code_of(&e), "unknown_member", "{}", e.message);
+    // `work` keeps the alarm only: its state key is refused.
+    owner_edit(&paths, |c| {
+        let caps = &mut c.center_mut("work").unwrap().policy.caps;
+        caps.clear();
+        caps.insert("sensors.alarm".into(), nerve_policy::config::CapSetting::On);
+    })
+    .await;
+    descriptor_changed(&mut work).await;
+    for topic in ["sensors/state", "sensors/*"] {
+        let e = work
+            .call("sub", sub(topic, "s-w"), WAIT)
+            .await
+            .unwrap()
+            .expect_err("work may not have the state");
+        assert_eq!(code_of(&e), "forbidden", "{topic}: {}", e.message);
+    }
+    work.call("sub", sub("sensors/alarm", "s-w"), WAIT)
+        .await
+        .unwrap()
+        .expect("work may have the alarm");
+    lab.call("sub", sub("sensors/*", "s-all"), WAIT)
+        .await
+        .unwrap()
+        .expect("lab may");
+    let audit: Value = serde_json::from_str(&cli(&paths, &["--json", "audit"]).await).unwrap();
+    let entries = audit["entries"].as_array().unwrap();
+    for action in ["alarm", "temperature"] {
+        assert!(
+            entries.iter().any(|e| e["center"] == "lab"
+                && e["action"] == action
+                && e["decision"] == "allowed"
+                && e["session"] == "s-all"),
+            "{action}: {audit}"
+        );
+    }
+
+    // The program leaves; the center gives up its subscription, and the
+    // node takes that though the capability is gone.
+    drop(p);
+    descriptor_changed(&mut lab).await;
+    lab.call("unsub", json!({"topics": ["sensors/*"]}), WAIT)
+        .await
+        .unwrap()
+        .expect("an unsub of a capability that went");
+    let (mut p, _) = hello_with(&daemon.paths().ctl_socket(), sensors()).await;
+    descriptor_changed(&mut lab).await;
+    p.send(json!({"cap": "sensors", "event": "alarm", "data": {"level": 1}}))
+        .await;
+    // A subscription of `lab`'s made after it: the earlier event came first.
+    lab.call("sub", sub("sensors/state", "s-1"), WAIT)
+        .await
+        .unwrap()
+        .expect("sub");
+    p.send(json!({"cap": "sensors", "state": {"temperature": 20.5}}))
+        .await;
+    loop {
+        match lab.recv(WAIT).await {
+            Recv::Msg(Message::Notification { method: m, params })
+                if params["cap"] == "sensors" =>
+            {
+                assert_eq!(m, "state", "the alarm after the unsub came: {params:?}");
+                break;
+            }
+            Recv::Msg(_) => {}
+            other => panic!("no state change: {other:?}"),
+        }
+    }
+    daemon.stop().await;
+}
+
+/// The capability's own `off` or `hidden` counts over its units' `on`, as
+/// for a call: a center subscribed while it could have them gets no more
+/// events or state changes once the owner turns the whole capability off
+/// or hides it, though `sensors.alarm` itself is still `on`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_capability_turned_off_or_hidden_gives_none_though_its_units_are_on() {
+    use nerve_policy::config::CapSetting;
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, mut work, mut p) = two_centers_with_sensors(dir.path()).await;
+    let paths = daemon.paths().clone();
+    owner_edit(&paths, |c| {
+        let caps = &mut c.center_mut("lab").unwrap().policy.caps;
+        caps.insert("sensors.alarm".into(), CapSetting::On);
+        caps.insert("sensors.temperature".into(), CapSetting::On);
+    })
+    .await;
+    for conn in [&mut lab, &mut work] {
+        let sub = json!({"topics": ["sensors/alarm", "sensors/state"],
+                         "ctx": {"session": "s-1"}});
+        conn.call("sub", sub, WAIT).await.unwrap().expect("sub");
+    }
+    for (level, setting) in [(1, CapSetting::Off), (2, CapSetting::Hidden)] {
+        owner_edit(&paths, |c| {
+            let caps = &mut c.center_mut("lab").unwrap().policy.caps;
+            caps.insert("sensors".into(), setting);
+        })
+        .await;
+        p.send(json!({"cap": "sensors", "event": "alarm", "data": {"level": level}}))
+            .await;
+        p.send(json!({"cap": "sensors", "state": {"temperature": 20.5}}))
+            .await;
+        // `work` gets both: the node took them before `lab`'s describe.
+        let mut got = 0;
+        while got < 2 {
+            match work.recv(WAIT).await {
+                Recv::Msg(Message::Notification { params, .. }) if params["cap"] == "sensors" => {
+                    got += 1
+                }
+                Recv::Msg(_) => {}
+                other => panic!("no event: {other:?}"),
+            }
+        }
+        assert_eq!(
+            notes_of(&mut lab, "sensors").await,
+            Vec::<Value>::new(),
+            "{setting:?}"
+        );
+    }
+    daemon.stop().await;
+}
+
+/// A program's stream: `stream.open` is decided like a call of
+/// `cap.stream` with its params (which must fit their schema), then
+/// forwarded to the program; what it sends of the stream comes to the
+/// center as the stream's frames, in order, and the stream ends when the
+/// program ends it, when the center closes it (the program is told), and
+/// when the program's connection ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_programs_stream_is_forwarded_and_ends_with_its_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, mut work, mut p) = two_centers_with_sensors(dir.path()).await;
+    let open = |params: Value| {
+        json!({"cap": "sensors", "stream": "feed", "params": params,
+               "ctx": {"session": "s-1"}})
+    };
+    let e = lab
+        .call("stream.open", open(json!({"every_ms": "often"})), WAIT)
+        .await
+        .unwrap()
+        .expect_err("params that do not fit");
+    assert_eq!(code_of(&e), "invalid_args", "{}", e.message);
+
+    // One the program ends.
+    let id = lab
+        .request("stream.open", open(json!({"every_ms": 100})))
+        .await
+        .unwrap();
+    let asked = p.next().await.expect("the stream.open");
+    assert_eq!(asked["method"], "stream.open");
+    assert_eq!(
+        asked["params"],
+        json!({"cap": "sensors", "stream": "feed", "params": {"every_ms": 100}})
+    );
+    let n = asked["id"].clone();
+    p.send(json!({"id": n, "ok": {}})).await;
+    let sid = lab
+        .answer(id, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .unwrap()["sid"]
+        .as_u64()
+        .unwrap() as u32;
+    p.send(json!({"stream": n, "data": "one\n"})).await;
+    p.send(json!({"stream": n, "data": "two\n"})).await;
+    p.send(json!({"stream": n, "end": true})).await;
+    let (text, reason) = stream_of(&mut lab, sid).await;
+    assert_eq!((text.as_str(), reason.as_str()), ("one\ntwo\n", "ended"));
+
+    // One the center closes: the program is told.
+    let id = lab.request("stream.open", open(json!({}))).await.unwrap();
+    let asked = p.next().await.expect("the stream.open");
+    p.send(json!({"id": asked["id"], "ok": {}})).await;
+    let sid = lab
+        .answer(id, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .unwrap()["sid"]
+        .as_u64()
+        .unwrap();
+    lab.call("stream.close", json!({"sid": sid, "reason": "done"}), WAIT)
+        .await
+        .unwrap()
+        .expect("closed");
+    assert_eq!(
+        p.next().await.expect("the close"),
+        json!({"method": "stream.close", "params": {"stream": asked["id"]}})
+    );
+
+    // One whose program goes: the stream ends with what it sent.
+    let id = lab.request("stream.open", open(json!({}))).await.unwrap();
+    let asked = p.next().await.expect("the stream.open");
+    p.send(json!({"id": asked["id"], "ok": {}})).await;
+    let sid = lab
+        .answer(id, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .unwrap()["sid"]
+        .as_u64()
+        .unwrap() as u32;
+    p.send(json!({"stream": asked["id"], "data": "last\n"}))
+        .await;
+    drop(p);
+    let (text, reason) = stream_of(&mut lab, sid).await;
+    assert_eq!((text.as_str(), reason.as_str()), ("last\n", "ended"));
+
+    // A center whose policy does not allow the stream never opens it.
+    let paths = daemon.paths().clone();
+    owner_edit(&paths, |c| {
+        c.center_mut("work").unwrap().policy.caps.clear();
+    })
+    .await;
+    descriptor_changed(&mut work).await;
+    let e = work
+        .call("stream.open", open(json!({})), WAIT)
+        .await
+        .unwrap()
+        .expect_err("refused");
+    assert!(
+        ["forbidden", "unknown_capability", "unavailable"].contains(&code_of(&e).as_str()),
+        "{}",
+        e.message
+    );
+    daemon.stop().await;
+}
+
+/// An open program's stream was decided once; the policy is asked again
+/// when it changes, and a stream the center may no longer have ends: the
+/// center gets `stream.close` and the program is told, as an event of the
+/// capability would no longer come.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_programs_stream_ends_when_the_policy_no_longer_allows_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, _work, mut p) = two_centers_with_sensors(dir.path()).await;
+    let open = json!({"cap": "sensors", "stream": "feed", "params": {},
+                      "ctx": {"session": "s-1"}});
+    let id = lab.request("stream.open", open).await.unwrap();
+    let asked = p.next().await.expect("the stream.open");
+    p.send(json!({"id": asked["id"], "ok": {}})).await;
+    let sid = lab
+        .answer(id, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .unwrap()["sid"]
+        .as_u64()
+        .unwrap() as u32;
+    p.send(json!({"stream": asked["id"], "data": "one\n"}))
+        .await;
+    // The owner takes `on` from `lab`: sensing needs it.
+    owner_edit(daemon.paths(), |c| {
+        c.center_mut("lab").unwrap().policy.caps.clear();
+    })
+    .await;
+    let (text, reason) = stream_of(&mut lab, sid).await;
+    assert_eq!(text, "one\n");
+    assert_eq!(reason, "not allowed any more");
+    assert_eq!(
+        p.next().await.expect("the close"),
+        json!({"method": "stream.close", "params": {"stream": asked["id"]}})
+    );
+    daemon.stop().await;
+}
+
+/// Opens of a program's stream that wait for the program together keep
+/// the link's limit of streams: the place is taken before the program is
+/// asked, so one past it is `busy` at once. An open that still waits when
+/// the connection ends ends with it, and the program is told.
+#[tokio::test(flavor = "multi_thread")]
+async fn waiting_opens_of_a_programs_stream_keep_the_limit_and_end_with_the_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, _work, mut p) = two_centers_with_sensors(dir.path()).await;
+    let open = json!({"cap": "sensors", "stream": "feed", "params": {},
+                      "ctx": {"session": "s-1"}});
+    let most = nerve_proto::limits::STREAMS as usize;
+    let mut ids = Vec::new();
+    for _ in 0..most {
+        ids.push(lab.request("stream.open", open.clone()).await.unwrap());
+    }
+    let mut asked = Vec::new();
+    for _ in 0..most {
+        let a = p.next().await.expect("a stream.open");
+        assert_eq!(a["method"], "stream.open", "{a}");
+        asked.push(a["id"].clone());
+    }
+    // None answered yet: one more finds no place.
+    let e = lab
+        .call("stream.open", open.clone(), WAIT)
+        .await
+        .unwrap()
+        .expect_err("past the limit");
+    assert_eq!(code_of(&e), "busy", "{}", e.message);
+
+    // The connection ends while they wait: the program hears of each.
+    drop(lab);
+    let mut told = std::collections::BTreeSet::new();
+    while told.len() < most {
+        let line = p.next().await.expect("the program is told");
+        let n = &line["params"]["id"];
+        let n = if n.is_null() {
+            &line["params"]["stream"]
+        } else {
+            n
+        };
+        assert!(asked.contains(n), "{line}");
+        told.insert(n.to_string());
+    }
+    daemon.stop().await;
+}
+
+/// A `get` of a program's state is one of the link's calls: a `cancel`
+/// stops it (the program is told) and answers `cancelled` at once, and
+/// past `limits.calls` in flight one more is `busy`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_programs_get_is_a_call_of_the_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, _work, mut p) = two_centers_with_sensors(dir.path()).await;
+    let get = json!({"cap": "sensors", "keys": ["temperature"], "ctx": {"session": "s-1"}});
+    let id = lab.request("get", get.clone()).await.unwrap();
+    let asked = p.next().await.expect("the get");
+    assert_eq!(asked["method"], "get", "{asked}");
+    lab.notify("cancel", json!({"id": id})).await.unwrap();
+    let e = lab
+        .answer(id, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .expect_err("cancelled");
+    assert_eq!(code_of(&e), "cancelled", "{}", e.message);
+    assert_eq!(
+        p.next().await.expect("the cancel"),
+        json!({"method": "cancel", "params": {"id": asked["id"]}})
+    );
+
+    let most = nerve_proto::limits::CALLS as usize;
+    for _ in 0..most {
+        lab.request("get", get.clone()).await.unwrap();
+    }
+    for _ in 0..most {
+        assert_eq!(p.next().await.expect("a get")["method"], "get");
+    }
+    let e = lab
+        .call("get", get, WAIT)
+        .await
+        .unwrap()
+        .expect_err("past the limit");
+    assert_eq!(code_of(&e), "busy", "{}", e.message);
+    daemon.stop().await;
+}
+
+/// The entries of the node's audit log for `cap` with the session
+/// `session`: center, action and decision of each.
+async fn audited(paths: &NodePaths, cap: &str, session: &str) -> Vec<(String, String, String)> {
+    let audit: Value = serde_json::from_str(&cli(paths, &["--json", "audit"]).await).unwrap();
+    audit["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["cap"] == cap && e["session"] == session)
+        .map(|e| {
+            let s = |k: &str| e[k].as_str().unwrap_or("").to_string();
+            (s("center"), s("action"), s("decision"))
+        })
+        .collect()
+}
+
+/// A subscription to a program's event is decided and audited also when
+/// the center is offered none of the capability: the node looks the
+/// capability up with all its units, as for `get` and `stream.open`, so
+/// the refusal is in the owner's audit log, not an unknown capability.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subscription_to_a_capability_the_center_is_not_offered_is_audited() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, _lab, mut work, _p) = two_centers_with_sensors(dir.path()).await;
+    let paths = daemon.paths().clone();
+    // Without `on`, `work` is offered nothing of `sensors`: each unit senses.
+    owner_edit(&paths, |c| {
+        c.center_mut("work").unwrap().policy.caps.clear();
+    })
+    .await;
+    descriptor_changed(&mut work).await;
+    assert!(lamp_or(&mut work, "sensors").await.is_none());
+    let sub = json!({"topics": ["sensors/alarm"], "ctx": {"session": "s-cut"}});
+    let e = work
+        .call("sub", sub, WAIT)
+        .await
+        .unwrap()
+        .expect_err("refused");
+    assert_eq!(code_of(&e), "forbidden", "{}", e.message);
+    assert_eq!(
+        audited(&paths, "sensors", "s-cut").await,
+        [("work".into(), "alarm".into(), "forbidden".into())]
+    );
+    daemon.stop().await;
+}
+
+/// A topic named more than once in one `sub`, or an event both by name
+/// and under `cap/*`, is decided and audited once; so is a key named more
+/// than once in a `get`, which the program is asked for once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repeated_topic_or_key_is_decided_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, _work, mut p) = two_centers_with_sensors(dir.path()).await;
+    let paths = daemon.paths().clone();
+    let topics = vec!["sensors/alarm"; 50]
+        .into_iter()
+        .chain(["sensors/*", "sensors/state"])
+        .collect::<Vec<_>>();
+    lab.call(
+        "sub",
+        json!({"topics": topics, "ctx": {"session": "s-twice"}}),
+        WAIT,
+    )
+    .await
+    .unwrap()
+    .expect("sub");
+    let mut got = audited(&paths, "sensors", "s-twice").await;
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            ("lab".into(), "alarm".into(), "allowed".into()),
+            ("lab".into(), "temperature".into(), "allowed".into())
+        ]
+    );
+
+    let get = json!({"cap": "sensors", "keys": ["temperature", "temperature"],
+                     "ctx": {"session": "s-keys"}});
+    let id = lab.request("get", get).await.unwrap();
+    let asked = p.next().await.expect("the get");
+    assert_eq!(
+        asked["params"],
+        json!({"cap": "sensors", "keys": ["temperature"]})
+    );
+    p.send(json!({"id": asked["id"], "ok": {"temperature": 20.0}}))
+        .await;
+    let v = lab
+        .answer(id, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .expect("read");
+    assert_eq!(v, json!({"temperature": 20.0}));
+    assert_eq!(audited(&paths, "sensors", "s-keys").await.len(), 1);
+    daemon.stop().await;
+}
+
+/// A `get` or `sub` whose session is longer than 256 bytes is refused with
+/// `invalid_args` before anything is decided: nothing reaches the audit
+/// log or the program. 256 bytes are taken.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_get_or_sub_with_a_session_past_its_limit_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, _work, mut p) = two_centers_with_sensors(dir.path()).await;
+    let paths = daemon.paths().clone();
+    let count = |paths: NodePaths| async move {
+        let audit: Value = serde_json::from_str(&cli(&paths, &["--json", "audit"]).await).unwrap();
+        audit["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["cap"] == "sensors")
+            .count()
+    };
+    let long = "s".repeat(257);
+    let get = json!({"cap": "sensors", "keys": ["temperature"], "ctx": {"session": long}});
+    let e = lab
+        .call("get", get, WAIT)
+        .await
+        .unwrap()
+        .expect_err("too long");
+    assert_eq!(code_of(&e), "invalid_args", "{}", e.message);
+    let sub = json!({"topics": ["sensors/alarm"], "ctx": {"session": long}});
+    let e = lab
+        .call("sub", sub, WAIT)
+        .await
+        .unwrap()
+        .expect_err("too long");
+    assert_eq!(code_of(&e), "invalid_args", "{}", e.message);
+    assert_eq!(count(paths.clone()).await, 0);
+
+    let sub = json!({"topics": ["sensors/alarm"], "ctx": {"session": "s".repeat(256)}});
+    lab.call("sub", sub, WAIT).await.unwrap().expect("sub");
+    let get = json!({"cap": "sensors", "keys": ["temperature"],
+                     "ctx": {"session": "s".repeat(256)}});
+    let id = lab.request("get", get).await.unwrap();
+    let asked = p.next().await.expect("the get");
+    p.send(json!({"id": asked["id"], "ok": {"temperature": 20.0}}))
+        .await;
+    lab.answer(id, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .expect("read");
+    assert_eq!(count(paths).await, 2);
+    daemon.stop().await;
+}
+
+/// `cap/*` and `cap/state` of a program's capability take only the units
+/// they were decided for: an event or state key the program declares when
+/// it attaches again later was never decided for that subscription, so it
+/// does not come under it, while the units decided still do.
+#[tokio::test(flavor = "multi_thread")]
+async fn units_declared_later_do_not_come_under_an_earlier_subscription() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, _work, p) = two_centers_with_sensors(dir.path()).await;
+    let sub = json!({"topics": ["sensors/*"], "ctx": {"session": "s-all"}});
+    lab.call("sub", sub, WAIT).await.unwrap().expect("sub");
+    drop(p);
+    descriptor_changed(&mut lab).await;
+    let mut more = sensors();
+    more[0]["events"]["motion"] = json!({"effect": "sense"});
+    more[0]["state"]["humidity"] = json!({"effect": "sense", "schema": {"type": "number"}});
+    let (mut p, first) = hello_with(&daemon.paths().ctl_socket(), more).await;
+    assert_eq!(first["ok"]["capabilities"], json!(["sensors"]), "{first}");
+    descriptor_changed(&mut lab).await;
+    p.send(json!({"cap": "sensors", "event": "motion", "data": {}}))
+        .await;
+    p.send(json!({"cap": "sensors", "state": {"humidity": 40, "temperature": 20.5}}))
+        .await;
+    p.send(json!({"cap": "sensors", "event": "alarm", "data": {"level": 1}}))
+        .await;
+    let mut got = Vec::new();
+    while got.len() < 2 {
+        match lab.recv(WAIT).await {
+            Recv::Msg(Message::Notification { method: m, params })
+                if params["cap"] == "sensors" =>
+            {
+                got.push(json!({"method": m, "name": params.get("name"),
+                                "changed": params.get("changed")}))
+            }
+            Recv::Msg(_) => {}
+            other => panic!("no event: {other:?}"),
+        }
+    }
+    assert_eq!(
+        got,
+        [
+            json!({"method": "state", "name": null, "changed": {"temperature": 20.5}}),
+            json!({"method": "event", "name": "alarm", "changed": null}),
+        ]
+    );
+    daemon.stop().await;
+}
+
+/// An open program's stream is decided again on the link's tick, so a
+/// mode whose time limit passes takes it as a change of the policy would:
+/// folder mode gave `sensors` with `on`, the allowlist it falls back to
+/// has no rule for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_programs_stream_ends_when_a_modes_time_limit_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, _work, mut p) = two_centers_with_sensors(dir.path()).await;
+    let until = nerve_proto::msg::now_ms() + 1500;
+    owner_edit(daemon.paths(), |c| {
+        c.center_mut("lab").unwrap().policy.until = Some(until);
+    })
+    .await;
+    let open = json!({"cap": "sensors", "stream": "feed", "params": {},
+                      "ctx": {"session": "s-1"}});
+    let id = lab.request("stream.open", open).await.unwrap();
+    let asked = p.next().await.expect("the stream.open");
+    p.send(json!({"id": asked["id"], "ok": {}})).await;
+    let sid = lab
+        .answer(id, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .expect("opened while the mode holds")["sid"]
+        .as_u64()
+        .unwrap() as u32;
+    let (_, reason) = stream_of(&mut lab, sid).await;
+    assert_eq!(reason, "not allowed any more");
+    assert!(nerve_proto::msg::now_ms() >= until);
+    assert_eq!(
+        p.next().await.expect("the close"),
+        json!({"method": "stream.close", "params": {"stream": asked["id"]}})
+    );
+    daemon.stop().await;
+}
+
+/// An open decided before the policy changed, which the program answers
+/// only after, is refused then: it was not open yet when the change was
+/// looked at, and the program is told.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_the_policy_took_while_the_program_answered_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, _work, mut p) = two_centers_with_sensors(dir.path()).await;
+    let open = json!({"cap": "sensors", "stream": "feed", "params": {},
+                      "ctx": {"session": "s-1"}});
+    let id = lab.request("stream.open", open).await.unwrap();
+    let asked = p.next().await.expect("the stream.open");
+    owner_edit(daemon.paths(), |c| {
+        c.center_mut("lab").unwrap().policy.caps.clear();
+    })
+    .await;
+    p.send(json!({"id": asked["id"], "ok": {}})).await;
+    let e = lab
+        .answer(id, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .expect_err("not allowed any more");
+    assert_eq!(code_of(&e), "forbidden", "{}", e.message);
+    assert_eq!(
+        p.next().await.expect("the close"),
+        json!({"method": "stream.close", "params": {"stream": asked["id"]}})
+    );
+    daemon.stop().await;
+}
+
+/// A program that does not answer a `get` or a `stream.open` within the
+/// node's wait fails it with `timeout`, and the call's place is free again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_program_that_does_not_answer_times_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut o = options(dir.path());
+    o.program_wait = Duration::from_millis(300);
+    let (daemon, mut lab, _work, mut p) = two_centers_with_sensors_as(o).await;
+    let get = json!({"cap": "sensors", "keys": ["temperature"], "ctx": {"session": "s-1"}});
+    let open = json!({"cap": "sensors", "stream": "feed", "params": {},
+                      "ctx": {"session": "s-1"}});
+    for (method, params) in [("get", get), ("stream.open", open)] {
+        let e = lab
+            .call(method, params, WAIT)
+            .await
+            .unwrap()
+            .expect_err("no answer");
+        assert_eq!(code_of(&e), "timeout", "{method}: {}", e.message);
+        assert!(
+            e.message
+                .contains("the provider desk did not answer within"),
+            "{}",
+            e.message
+        );
+        // The program was asked; given up, it is told.
+        let asked = p.next().await.expect("asked");
+        assert_eq!(asked["method"], method, "{asked}");
+        let told = p.next().await.expect("told");
+        let n = told["params"]["id"]
+            .as_u64()
+            .or(told["params"]["stream"].as_u64());
+        assert_eq!(n, asked["id"].as_u64(), "{told}");
+    }
+    daemon.stop().await;
+}
+
+/// `cap ls` names each of a program's state keys, events and streams with
+/// its kind after its effect, as `--json` rows do with `kind`; an action
+/// has none. Each center's column says whether it may have the unit now.
+#[tokio::test(flavor = "multi_thread")]
+async fn cap_ls_names_the_kind_of_a_programs_units() {
+    use nerve_policy::config::CapSetting;
+    let dir = tempfile::tempdir().unwrap();
+    let center = FakeCenter::start(false).await.unwrap();
+    let daemon = node(dir.path(), &center, &me(), |p| {
+        p.caps.insert("sensors.temperature".into(), CapSetting::On);
+        p.caps.insert("sensors.alarm".into(), CapSetting::Off);
+    })
+    .await;
+    let paths = daemon.paths().clone();
+    let mut caps = sensors();
+    caps[0]["actions"] = json!({"calibrate": {"effect": "write", "summary": "Calibrates."}});
+    let (_p, first) = hello_with(&paths.ctl_socket(), caps).await;
+    assert_eq!(first["ok"]["capabilities"], json!(["sensors"]), "{first}");
+
+    let ls = cli(&paths, &["cap", "ls"]).await;
+    let words = |name: &str| {
+        ls.lines()
+            .find(|l| l.split_whitespace().next() == Some(name))
+            .unwrap_or_else(|| panic!("no {name}: {ls}"))
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    for (name, want) in [
+        ("sensors.temperature", "sense state program desk lab: "),
+        (
+            "sensors.alarm",
+            "sense event program desk lab: off (set off)",
+        ),
+        ("sensors.feed", "sense stream program desk lab: "),
+        ("sensors.calibrate", "write program desk lab: "),
+    ] {
+        assert!(
+            words(name).starts_with(&format!("{name} {want}")),
+            "{name}: {ls}"
+        );
+    }
+
+    let v: Value = serde_json::from_str(&cli(&paths, &["--json", "cap", "ls"]).await).unwrap();
+    let row = |name: &str| {
+        v["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {name}: {v}"))
+    };
+    for (name, kind) in [
+        ("sensors.temperature", json!("state")),
+        ("sensors.alarm", json!("event")),
+        ("sensors.feed", json!("stream")),
+        ("sensors.calibrate", Value::Null),
+    ] {
+        assert_eq!(row(name)["kind"], kind, "{name}: {v}");
+    }
+    assert_eq!(row("sensors.alarm")["now"], json!({"lab": "off"}), "{v}");
+    assert_eq!(
+        row("sensors.alarm")["centers"],
+        json!({"lab": "off"}),
+        "{v}"
+    );
+    daemon.stop().await;
+}
+
+/// The text of stream `sid` as it comes to `conn`, in order from seq 0,
+/// and the reason of the node's `stream.close` that ends it.
+async fn stream_of(conn: &mut Conn<TcpStream>, sid: u32) -> (String, String) {
+    let mut text = Vec::new();
+    let mut seq = 0;
+    loop {
+        match conn.recv(WAIT).await {
+            Recv::Frame(f) if f.id == sid => {
+                assert_eq!(f.seq, seq, "in order");
+                seq += 1;
+                text.extend_from_slice(&f.payload);
+            }
+            Recv::Msg(Message::Request { id, method, params }) if method == "stream.close" => {
+                assert_eq!(params["sid"], sid);
+                conn.send(&Message::result(id, json!({}))).await.unwrap();
+                let reason = params["reason"].as_str().unwrap_or("").to_string();
+                return (String::from_utf8(text).unwrap(), reason);
+            }
+            Recv::Msg(_) => {}
+            other => panic!("stream {sid}: {other:?}"),
+        }
+    }
+}
+
+/// The capability `id` of the descriptor the center gets now.
+async fn lamp_or(conn: &mut Conn<TcpStream>, id: &str) -> Option<Value> {
+    let d = conn
+        .call("describe", json!({"detail": "full"}), WAIT)
+        .await
+        .unwrap()
+        .expect("describe");
+    d["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == id)
+        .cloned()
+}
