@@ -457,7 +457,8 @@ and they count in no statistics:
   taint) and logs a failure when it ends, not when it became a job.
 - The end of the session stops its jobs (the node gets `cancel` for each and
   `session.end`) and drops their results. Disabling a node in the center
-  stops the calls that run there, jobs too (the node gets `cancel`); once it
+  stops the calls that run there, jobs too (the node gets `cancel`), and
+  ends a program's streams and event subscriptions there (§4.5); once it
   is enabled again, `job.status` says `error cancelled: job j-… failed after
   …: the node was disabled in the center`. A link that drops and is not
   resumed ends its calls, and their jobs are `lost`; a link the node resumes
@@ -578,7 +579,14 @@ one:
   answers `Opened sensors.feed on node box-1 as stream s-…` with the same
   `structuredContent`. `stream.read` reads what the program sends, and ends
   with `it ended (the program ended it)` once it ended it; the stream goes
-  like a command's output stream (above), and ends with its link.
+  like a command's output stream (above), and ends with its link. It takes
+  one of the node's stream places from when it is asked for: with the
+  session's half of them (8) held by its streams there, open or being
+  opened, it is refused with `busy` (`… its share of the node's streams:
+  close one with stream.close`) and not asked for. The center waits 35 s for
+  the node's answer, as the node waits up to 30 s for the program
+  (node-local §7). A node the owner disabled while the action checker
+  decided it is `error unavailable`, and its stream is not opened.
 
 Such an answer counts as the details of `stream.read` and `stream.close`.
 The stream ids count toward the session's 16 streams, and another session's
@@ -624,8 +632,9 @@ Served by `nerve-center` itself at `--ui`. Tabs: overview (alerts, machines
 with rename, disable and remove and the actions the center left out with
 their reasons (§4.1), pairing, sessions). A disabled machine stays
 paired and connected, but the agent is offered none of its capabilities and
-calls to it are refused, and the calls that run there stop, jobs too
-(`POST /api/nodes/disable`, §4.1, §4.4). Further tabs: statistics, audit (for every entry with a known
+calls to it are refused, and the calls that run there stop, jobs too, and
+so do the streams and event subscriptions of a program there
+(`POST /api/nodes/disable`, §4.1, §4.4, §4.5). Further tabs: statistics, audit (for every entry with a known
 target, a command, a path or another action: Allow, Allow as wildcard, Deny
 and Deny as wildcard, only with the node's settings grant; each only adds a
 rule to the node's `policy.allow` or `policy.deny`, a sudo command's allow to

@@ -237,7 +237,8 @@ machine, the action checker or the statistics; `exec.signal` goes to the
 machine like any call. A job belongs to its session: another session cannot
 read, stop or signal it. `job.status` and `job.cancel` keep working when the
 machine offers nothing any more while a job runs (its `until` passed, you
-turned everything off); **Disable** in the center stops the machine's jobs.
+turned everything off); **Disable** in the center stops the machine's jobs,
+and the streams and event subscriptions of a program there.
 A session runs at most 16 calls at once, and every `busy` answer to it, the
 refusal of a 17th too, names its running jobs
 ([limits](limits.md#calls-of-one-agent-session)). A finished

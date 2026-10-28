@@ -2575,6 +2575,56 @@ async fn a_repeated_topic_or_key_is_decided_once() {
     daemon.stop().await;
 }
 
+/// A `get` or `sub` whose session is longer than 256 bytes is refused with
+/// `invalid_args` before anything is decided: nothing reaches the audit
+/// log or the program. 256 bytes are taken.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_get_or_sub_with_a_session_past_its_limit_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, _work, mut p) = two_centers_with_sensors(dir.path()).await;
+    let paths = daemon.paths().clone();
+    let count = |paths: NodePaths| async move {
+        let audit: Value = serde_json::from_str(&cli(&paths, &["--json", "audit"]).await).unwrap();
+        audit["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["cap"] == "sensors")
+            .count()
+    };
+    let long = "s".repeat(257);
+    let get = json!({"cap": "sensors", "keys": ["temperature"], "ctx": {"session": long}});
+    let e = lab
+        .call("get", get, WAIT)
+        .await
+        .unwrap()
+        .expect_err("too long");
+    assert_eq!(code_of(&e), "invalid_args", "{}", e.message);
+    let sub = json!({"topics": ["sensors/alarm"], "ctx": {"session": long}});
+    let e = lab
+        .call("sub", sub, WAIT)
+        .await
+        .unwrap()
+        .expect_err("too long");
+    assert_eq!(code_of(&e), "invalid_args", "{}", e.message);
+    assert_eq!(count(paths.clone()).await, 0);
+
+    let sub = json!({"topics": ["sensors/alarm"], "ctx": {"session": "s".repeat(256)}});
+    lab.call("sub", sub, WAIT).await.unwrap().expect("sub");
+    let get = json!({"cap": "sensors", "keys": ["temperature"],
+                     "ctx": {"session": "s".repeat(256)}});
+    let id = lab.request("get", get).await.unwrap();
+    let asked = p.next().await.expect("the get");
+    p.send(json!({"id": asked["id"], "ok": {"temperature": 20.0}}))
+        .await;
+    lab.answer(id, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .expect("read");
+    assert_eq!(count(paths).await, 2);
+    daemon.stop().await;
+}
+
 /// `cap/*` and `cap/state` of a program's capability take only the units
 /// they were decided for: an event or state key the program declares when
 /// it attaches again later was never decided for that subscription, so it

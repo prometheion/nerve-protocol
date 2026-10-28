@@ -2936,6 +2936,8 @@ impl Center {
     /// there is room for it: taken in the one lock with the add
     /// ([`Streams::add_unit`](streams::Streams::add_unit)), so parallel
     /// `execute`s that all waited for the checker cannot pass the limit.
+    /// `share`: the most of the node's stream places the session may hold,
+    /// for a stream the node opens (a subscription takes none).
     fn add_unit_stream(
         &self,
         sess: &Session,
@@ -2943,12 +2945,16 @@ impl Center {
         id: &str,
         what: String,
         ring: Arc<Ring>,
+        share: Option<usize>,
     ) -> Result<(), CallError> {
-        let (added, gone) =
-            sess.streams
-                .lock()
-                .unwrap()
-                .add_unit(id, &route.node_id, what, ring, Instant::now());
+        let (added, gone) = sess.streams.lock().unwrap().add_unit(
+            id,
+            &route.node_id,
+            what,
+            ring,
+            share,
+            Instant::now(),
+        );
         for c in gone {
             c.close("too many streams");
         }
@@ -2960,6 +2966,15 @@ impl Center {
                 format!(
                     "this session holds {} streams already, the most it may: close one with stream.close",
                     streams::STREAMS_MAX
+                ),
+            )
+            .into()),
+            Err(streams::NotAdded::Share) => Err(RpcError::new(
+                ErrorCode::Busy,
+                format!(
+                    "this session holds {} streams on the node {} already, its share of the node's streams: close one with stream.close",
+                    share.unwrap_or_default(),
+                    route.node_name
                 ),
             )
             .into()),
@@ -2997,7 +3012,7 @@ impl Center {
         };
         // The ring takes the topic's events before the node is asked: the
         // first may follow its answer at once. Refused, it goes again.
-        self.add_unit_stream(sess, route, &id, what, ring.clone())
+        self.add_unit_stream(sess, route, &id, what, ring.clone(), None)
             .map_err(|CallError::Rpc(e)| self.refused(sess, route, e))?;
         adding.id = Some(id.clone());
         link.subscribe(&topic, ring.clone());
@@ -3054,8 +3069,11 @@ impl Center {
         let ring = Arc::new(Ring::of(streams::Source::Program));
         let what = format!("stream {}.{}", route.cap, route.action);
         // Looked at again: the checker may have taken seconds, while other
-        // calls of the session added theirs.
-        self.add_unit_stream(sess, route, &id, what, ring.clone())?;
+        // calls of the session added theirs. The stream takes one of the
+        // node's places, as a job's output stream does, so the session
+        // keeps to its share of them and the other sessions find room.
+        let share = streams::node_share(link.limits.streams);
+        self.add_unit_stream(sess, route, &id, what, ring.clone(), Some(share))?;
         // A cancelled `execute` takes it out again; the node's stream, if
         // its answer still comes, is closed by the link (Link::open_stream).
         let mut adding = Adding {
@@ -3064,19 +3082,46 @@ impl Center {
             id: Some(id),
             why: "its execute was cancelled",
         };
+        // Looked at again, now that the stream is in the session: the owner
+        // may have disabled the node while the checker decided. A disable
+        // after this look finds the stream there and closes it
+        // (`set_disabled`, which sets the switch before it looks).
+        let disabled = || {
+            self.read(|s| s.nodes.get(&route.node_id).is_some_and(|n| n.disabled))
+                .then(|| {
+                    RpcError::new(
+                        ErrorCode::Unavailable,
+                        format!("the node {} is disabled in the center", route.node_name),
+                    )
+                })
+        };
+        if let Some(e) = disabled() {
+            adding.why = "the node was disabled in the center";
+            return Err(e.into());
+        }
         let params = json!({"cap": route.cap, "stream": route.action, "params": args,
                             "ctx": {"session": sess.id}});
-        let wait = self.stream_waits.lock().unwrap().0;
+        // A program may take its time to answer (the node waits for it up
+        // to its own limit), unlike a node opening a command's output.
+        let wait = self
+            .stream_waits
+            .lock()
+            .unwrap()
+            .0
+            .max(streams::PROGRAM_OPEN_WAIT);
         match link.open_stream(params, ring, wait).await {
             Ok(sid) => {
                 let id = adding.keep();
                 if !sess.streams.lock().unwrap().opened(&id, &link, sid) {
-                    // Closed meanwhile (the session ended): so is the stream.
+                    // Closed meanwhile (the session ended, or the node was
+                    // disabled): so is the stream.
                     if link.forget_stream(sid) {
                         let l = link.clone();
                         tokio::spawn(async move { l.close_stream(sid, "it was closed").await });
                     }
-                    return Err(Stop::SessionEnded.error().into());
+                    return Err(disabled()
+                        .unwrap_or_else(|| Stop::SessionEnded.error())
+                        .into());
                 }
                 Ok(id)
             }

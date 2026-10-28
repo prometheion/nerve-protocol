@@ -5666,3 +5666,108 @@ async fn a_subscription_whose_link_changed_during_the_checker_is_refused() {
     nothing_more(&mut seen).await;
     r.stop().await;
 }
+
+/// A program's stream whose `execute` the action checker decides while
+/// the owner disables the node is refused once the checker allows it: the
+/// node is never asked to open it, and the session holds nothing of it.
+#[tokio::test]
+async fn a_programs_stream_the_checker_decides_while_its_node_is_disabled_is_refused() {
+    use nerve_center::checker::config::ModelScope;
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = board_box(&r).await;
+    list_text(&e, json!({"node": "box-1", "capability": ["board.feed"]})).await;
+    let (url, asked, go) = held_model();
+    r.center.update(|s| {
+        s.checker.model_on = true;
+        s.checker.model.source = ModelSource::Endpoint;
+        s.checker.model.endpoint_url = url;
+        s.checker.model.scope = ModelScope::WithReads;
+    });
+    r.center.rebuild_checker();
+    let call = tokio::spawn({
+        let e = e.clone();
+        async move { execute_as(&e, json!(1), "board.feed", json!({"every_ms": 5})).await }
+    });
+    tokio::task::spawn_blocking(move || asked.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the model was asked");
+    r.center.set_disabled(&node, true).unwrap();
+    go.send(()).unwrap();
+    let reply = call.await.unwrap();
+    let (text, err) = said(&reply);
+    assert!(
+        err && text.starts_with("error unavailable") && text.contains("disabled"),
+        "{reply}"
+    );
+    assert_eq!(e.session().streams.lock().unwrap().len(), 0);
+    nothing_more(&mut seen).await;
+    assert_eq!(r.center.link(&node).unwrap().stream_count(), 0);
+    r.stop().await;
+}
+
+/// A program's streams keep to the session's half of a node's stream
+/// places, as its jobs' output streams do: one more is refused while the
+/// session holds them, and another session still opens one.
+#[tokio::test]
+async fn a_session_takes_half_of_a_nodes_streams_for_programs_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, node, mut seen, _task) = board_box(&r).await;
+    let share = nerve_center::streams::node_share(nerve_proto::limits::STREAMS);
+    list_text(&e, json!({"node": "box-1", "capability": ["board.feed"]})).await;
+    // Opened with `every_ms` 999, the node's streams stay open; the opens
+    // go side by side, so each is still on its way while the next is added.
+    let calls: Vec<_> = (0..share)
+        .map(|i| {
+            let e = e.clone();
+            tokio::spawn(async move {
+                execute_as(&e, json!(i), "board.feed", json!({"every_ms": 999})).await
+            })
+        })
+        .collect();
+    for _ in 0..share {
+        let Seen::StreamOpen(_) = next_seen(&mut seen).await else {
+            panic!("no stream.open")
+        };
+    }
+    let reply = execute_as(&e, json!("more"), "board.feed", json!({"every_ms": 999})).await;
+    let (text, err) = said(&reply);
+    assert!(
+        err && text.starts_with("error busy") && text.contains("its share of the node's streams"),
+        "{reply}"
+    );
+    for c in calls {
+        opened_stream(&c.await.unwrap(), "board.feed", "stream");
+    }
+    assert_eq!(r.center.link(&node).unwrap().stream_count(), share);
+    nothing_more(&mut seen).await;
+
+    let other = Engine::new(&r.center, "test");
+    list_text(
+        &other,
+        json!({"node": "box-1", "capability": ["board.feed"]}),
+    )
+    .await;
+    let reply = execute_as(&other, json!(1), "board.feed", json!({"every_ms": 5})).await;
+    opened_stream(&reply, "board.feed", "stream");
+    r.stop().await;
+}
+
+/// The center waits for a program's `stream.open` as long as the node
+/// waits for the program, not only as long as for a command's output
+/// stream: a program that takes longer to answer than that still opens.
+#[tokio::test]
+async fn a_programs_stream_may_take_longer_to_open_than_an_output_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = job_center(dir.path()).await;
+    let (e, _node, _seen, _task) = board_box(&r).await;
+    r.center
+        .set_stream_waits(Duration::from_millis(50), Duration::from_secs(60));
+    list_text(&e, json!({"node": "box-1", "capability": ["board.feed"]})).await;
+    // Answered after [`SLOW`] only.
+    let reply = execute_as(&e, json!(1), "board.feed", json!({"every_ms": 999})).await;
+    opened_stream(&reply, "board.feed", "stream");
+    r.stop().await;
+}

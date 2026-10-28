@@ -201,7 +201,8 @@ before the provider comes, allow rules for `echo.say`, `echo.fail` and
 `odd`, whose schema has a `oneOf` and so is outside the subset of
 protocol.md §6.1, and `peek`, whose `path` is marked `x-nerve-path: "read"`;
 the state keys `level` and `secret`, the event `ping` (sent before it
-answers `say` with the text `ping`) and the stream `talk` (two lines, then
+answers `say` with the text `ping`, so it reaches the center before that
+answer, node-local §7) and the stream `talk` (two lines, then
 its end), all `read`, with allow rules for `echo.level`, `echo.ping` and
 `echo.talk`. Every check names node-local §7.
 

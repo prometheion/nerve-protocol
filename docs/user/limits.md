@@ -59,7 +59,9 @@ is not kept (a job that failed still says that it failed, and why in one
 word). A command's output stream keeps at most 1 MiB that was not read, the
 oldest part dropping first, and a session holds at most 16 streams, at most
 8 of them open on one machine at once
-([output while it runs](harness.md#a-commands-output-while-it-runs)). These
+([output while it runs](harness.md#a-commands-output-while-it-runs)); a
+[program's stream](providers.md#state-events-and-streams) past those 8 is
+refused with `busy` until one of them ends or is closed. These
 are fixed in the center.
 
 A job that runs a command holds one of the machine's command places until the

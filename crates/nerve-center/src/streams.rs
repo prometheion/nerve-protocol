@@ -47,6 +47,10 @@ pub const READ_ROOM: usize = 4 * 1024;
 pub const KEEP_FOR: Duration = crate::jobs::KEEP_FOR;
 /// How long one `stream.open` waits for the node's answer.
 pub const OPEN_WAIT: Duration = Duration::from_secs(10);
+/// How long the `stream.open` of a program's stream waits for the node's
+/// answer: the node gives its program 30 s to answer (node-local.md §7),
+/// and its own `timeout` then should come before the center gives up.
+pub const PROGRAM_OPEN_WAIT: Duration = Duration::from_secs(35);
 /// How long the center keeps asking for the stream of a command its node
 /// does not run yet, once the call was sent: the node may hold a command
 /// before it starts (its folders' access, a sandbox to set up).
@@ -418,6 +422,9 @@ pub enum NotAdded {
     Full,
     /// The session ended.
     Ended,
+    /// The session holds its share of the node's stream places
+    /// ([`node_share`]) already.
+    Share,
 }
 
 /// A session's streams, under their own lock: nothing else is locked while
@@ -477,14 +484,19 @@ impl Streams {
     /// node opened it or the subscription was made; `what` names it. The
     /// room for it is made and taken here, under the one lock: a session's
     /// calls run side by side, and each may have waited for the action
-    /// checker since it last looked, so a look before is not enough. The
-    /// closers of what went to make room are given back.
+    /// checker since it last looked, so a look before is not enough. A
+    /// program's stream takes one of the node's stream places too: with
+    /// `share` the session holds at most that many there, its streams that
+    /// are open on the node or still being opened, so one session cannot
+    /// take every place of the link from the others. The closers of what
+    /// went to make room are given back.
     pub fn add_unit(
         &mut self,
         id: &str,
         node_id: &str,
         what: String,
         ring: Arc<Ring>,
+        share: Option<usize>,
         now: Instant,
     ) -> (Result<(), NotAdded>, Vec<Closer>) {
         let (room, gone) = self.room(now);
@@ -494,8 +506,25 @@ impl Streams {
         if !room {
             return (Err(NotAdded::Full), gone);
         }
+        if share.is_some_and(|share| self.places_on(node_id) >= share) {
+            return (Err(NotAdded::Share), gone);
+        }
         self.insert(id, node_id, what, None, ring);
         (Ok(()), gone)
+    }
+
+    /// How many of the node's stream places the session's streams on
+    /// `node_id` hold: those open there that still run, and its programs'
+    /// streams on their way there (a subscription holds none).
+    fn places_on(&self, node_id: &str) -> usize {
+        self.entries
+            .values()
+            .filter(|e| {
+                e.node_id == node_id
+                    && !e.ring.ended()
+                    && (e.node.is_some() || e.ring.source() == Source::Program)
+            })
+            .count()
     }
 
     fn insert(
@@ -1072,7 +1101,7 @@ mod tests {
         for i in 2..STREAMS_MAX {
             let what = format!("the events of board.e{i}");
             let ring = Arc::new(Ring::of(Source::Events));
-            let (added, gone) = s.add_unit(&format!("s-{i}"), "n1", what, ring, now);
+            let (added, gone) = s.add_unit(&format!("s-{i}"), "n1", what, ring, None, now);
             assert_eq!(added, Ok(()));
             assert!(gone.is_empty());
         }
@@ -1082,7 +1111,7 @@ mod tests {
         let other = Arc::new(Link::for_test("n1"));
         assert!(!s.subscribed_on(&other, "board/e2"), "another link");
         let ring = Arc::new(Ring::of(Source::Program));
-        let (added, _) = s.add_unit("s-more", "n1", "stream board.feed".into(), ring, now);
+        let (added, _) = s.add_unit("s-more", "n1", "stream board.feed".into(), ring, None, now);
         assert_eq!(added, Err(NotAdded::Full));
         assert_eq!(s.len(), STREAMS_MAX);
 
@@ -1090,7 +1119,39 @@ mod tests {
         assert_eq!(s.len(), 2, "the jobs' streams stay");
         s.end();
         let ring = Arc::new(Ring::of(Source::Program));
-        let (added, _) = s.add_unit("s-late", "n1", "stream board.feed".into(), ring, now);
+        let (added, _) = s.add_unit("s-late", "n1", "stream board.feed".into(), ring, None, now);
         assert_eq!(added, Err(NotAdded::Ended));
+    }
+
+    /// A program's stream is added only within the session's share of the
+    /// node's stream places: its program streams there, open or on their
+    /// way, and its jobs' streams open there count; subscriptions, ended
+    /// streams and other nodes' do not.
+    #[test]
+    fn a_programs_streams_keep_to_the_sessions_share_of_a_node() {
+        let link = Arc::new(Link::for_test("n1"));
+        let mut s = Streams::default();
+        let now = Instant::now();
+        let feed = || Arc::new(Ring::of(Source::Program));
+        let add = |s: &mut Streams, id: &str, node: &str, ring: Arc<Ring>| {
+            s.add_unit(id, node, "stream board.feed".into(), ring, Some(3), now)
+                .0
+        };
+        assert_eq!(add(&mut s, "s-1", "n1", feed()), Ok(()));
+        assert!(s.add("s-job", "n1", "j-1", Arc::new(Ring::default())));
+        assert!(s.add("s-later", "n1", "j-2", Arc::new(Ring::default())));
+        assert!(s.opened("s-job", &link, 4));
+        let events = Arc::new(Ring::of(Source::Events));
+        assert_eq!(add(&mut s, "s-ev", "n1", events), Ok(()));
+        let ended = feed();
+        assert_eq!(add(&mut s, "s-2", "n1", ended.clone()), Ok(()));
+        assert_eq!(add(&mut s, "s-3", "n1", feed()), Err(NotAdded::Share));
+        ended.end("the program ended it");
+        assert_eq!(add(&mut s, "s-3", "n1", feed()), Ok(()));
+        assert_eq!(add(&mut s, "s-4", "n1", feed()), Err(NotAdded::Share));
+        assert_eq!(add(&mut s, "s-4", "n2", feed()), Ok(()));
+        let ev = Arc::new(Ring::of(Source::Events));
+        let (added, _) = s.add_unit("s-ev2", "n1", "the events".into(), ev, None, now);
+        assert_eq!(added, Ok(()), "a subscription takes no share");
     }
 }

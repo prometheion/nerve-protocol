@@ -1882,7 +1882,10 @@ folder mode it needs `on` as such an action does.
   policy, so a center the owner took `on` from, or whose capability the
   owner turned `off` or `hidden` (though the event itself is `on`), gets
   none, though it stays subscribed. An `unsub` only takes away, so it is
-  taken for any topic, also one of a capability whose program left.
+  taken for any topic, also one of a capability whose program left. An
+  event or state change the program sent before it answered a request
+  reaches each center that takes it before that answer: the node passes the
+  program's lines on in the order it read them.
 - **State changes.** The program may send `{"cap": "lamp", "state":
   {"level": 4}}`. Each center that subscribed to `lamp/state` (or
   `lamp/*`) gets a `state` notification with the keys its subscription was
