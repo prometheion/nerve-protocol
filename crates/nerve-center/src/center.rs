@@ -4208,14 +4208,15 @@ fn cap_units(units: &[catalog::Unit]) -> Vec<Value> {
 /// What the Capabilities tab shows of a node's answer to `get
 /// settings.capabilities`: its `{entries, refused}`, each entry also as the
 /// form shows it. The answer is the node's word, so one of another shape
-/// is said as such, and an entry that is no object is left out.
+/// is said as such, and an entry the form cannot show ([`shown`]) is left
+/// out.
 fn added_of(answer: &Value) -> Value {
     let Some(added) = answer.get("capabilities").and_then(Value::as_object) else {
         return json!({"error": "the machine's answer has no list of capabilities"});
     };
     let mut added = added.clone();
     if let Some(entries) = added.get_mut("entries").and_then(Value::as_array_mut) {
-        entries.retain(Value::is_object);
+        entries.retain(shown);
         for e in entries.iter_mut() {
             let form = json!(nerve_policy::config::form::of_entry(e));
             if let Some(o) = e.as_object_mut() {
@@ -4224,6 +4225,24 @@ fn added_of(answer: &Value) -> Value {
         }
     }
     Value::Object(added)
+}
+
+/// Whether the form can show `e`, an entry of a node's `get
+/// settings.capabilities`: an object whose `params` and `result`, where it
+/// has them, keep to the schema subset, as the node checks what it keeps.
+/// A schema of another shape may nest far deeper, and the form's pretty
+/// text of it would be many times the size of the answer.
+fn shown(e: &Value) -> bool {
+    use nerve_proto::schema::{Role, check};
+    e.is_object()
+        && match &e["params"] {
+            Value::Null => true,
+            p => check(p, Role::Params).is_ok(),
+        }
+        && match &e["result"] {
+            Value::Null | Value::String(_) => true,
+            r => check(r, Role::Result).is_ok(),
+        }
 }
 
 /// Where a unit comes from, as the Capabilities tab says it: the node's
@@ -4312,7 +4331,8 @@ mod tests {
 
     /// The Capabilities tab leaves out the center's own units by their
     /// capability, so a node's provider named `center` stays, and shows a
-    /// node's answer of another shape as such instead of failing on it.
+    /// node's answer of another shape as such instead of failing on it, and
+    /// an entry whose schema it would not keep not at all.
     #[test]
     fn the_capabilities_tab_takes_the_nodes_word_as_data() {
         use crate::tools::tests::{cap, desc};
@@ -4350,6 +4370,30 @@ mod tests {
         assert_eq!(entries[0]["form"]["name"], "say.back");
         assert_eq!(entries[0]["form"]["command"], "echo");
         assert!(added_of(&json!({"capabilities": {"entries": 3}}))["entries"] == 3);
+        // A schema nested deeper than a node keeps, or of another shape, is
+        // left out before the form prints it; one in the subset is shown.
+        let mut deep = json!(0);
+        for _ in 0..100 {
+            deep = json!([deep, 0]);
+        }
+        let schema = json!({"type": "object", "properties": {"word": {"type": "string"}}});
+        let with = |key: &str, v: &Value| {
+            let mut e = json!({"name": "say.back", "effect": "read", "command": ["echo"]});
+            e[key] = v.clone();
+            e
+        };
+        let v = added_of(&json!({"capabilities": {"entries": [
+            with("params", &deep), with("result", &deep), with("params", &json!("text")),
+            with("params", &schema), with("result", &json!("text")), with("result", &schema),
+        ]}}));
+        let entries = v["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 3, "{v}");
+        assert!(
+            entries[0]["form"]["params"]
+                .as_str()
+                .unwrap()
+                .contains("word")
+        );
     }
 
     fn open(dir: &Path, name: Option<&str>) -> Center {

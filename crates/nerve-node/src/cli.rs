@@ -3486,9 +3486,13 @@ async fn cap_listing(paths: &NodePaths, cfg: &NodeConfig) -> Result<Value, Strin
 /// from and each center's setting (`center` only), the settings that name
 /// no action offered now, and the programs.
 fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
-    let rows = v["capabilities"].as_array().cloned().unwrap_or_default();
+    let mut rows = v["capabilities"].as_array().cloned().unwrap_or_default();
+    // What a center added is offered to it alone: one center's view leaves
+    // out what the others added.
+    if let Some(w) = center {
+        rows.retain(|r| !added_by_other(r, w));
+    }
     let text = |r: &Value, k: &str| r[k].as_str().unwrap_or("-").to_string();
-    let names: Vec<String> = rows.iter().map(|r| text(r, "name")).collect();
     // A program's state key, event or stream says its kind after its effect.
     let effect = |r: &Value| match r["kind"].as_str() {
         Some(kind) => format!("{} {kind}", text(r, "effect")),
@@ -3536,6 +3540,11 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
         if center.is_some_and(|w| w != c.name) {
             continue;
         }
+        let names: Vec<String> = rows
+            .iter()
+            .filter(|r| !added_by_other(r, &c.name))
+            .map(|r| text(r, "name"))
+            .collect();
         for (key, set) in &c.policy.caps {
             let offered = names
                 .iter()
@@ -3555,9 +3564,19 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
                 .into(),
         );
     }
-    lines.extend(config_lines(v));
+    lines.extend(config_lines(v, center));
     lines.extend(program_lines(v));
     lines
+}
+
+/// Whether the row `r` of `cap ls --json` is of a capability a center other
+/// than `center` added (crate::provider::listing gives it the source
+/// `center NAME`).
+fn added_by_other(r: &Value, center: &str) -> bool {
+    r["source"]
+        .as_str()
+        .and_then(|s| s.strip_prefix("center "))
+        .is_some_and(|c| c != center)
 }
 
 /// The schema `spec` takes from stdin, if it takes one: read in the
@@ -3712,9 +3731,14 @@ impl CapNotes {
 }
 
 /// The lines of `cap ls` for the capabilities of node.toml: each one's
-/// command and what else the owner set.
-fn config_lines(v: &Value) -> Vec<String> {
-    let added = v["added"].as_array().into_iter().flatten();
+/// command and what else the owner set. Of those the centers added, only
+/// `center`'s where one is given.
+fn config_lines(v: &Value, center: Option<&str>) -> Vec<String> {
+    let added = v["added"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(move |e| center.is_none_or(|w| e["center"] == w));
     v["config"]
         .as_array()
         .into_iter()

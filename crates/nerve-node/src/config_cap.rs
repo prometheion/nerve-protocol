@@ -211,8 +211,16 @@ pub fn center_offered(
 /// program offers under that name. Once the center removes its own, with
 /// them ([`remove_added`]), the program's is offered to it as to any other.
 pub fn programs_for(entry: &CenterEntry, mut programs: Vec<Capability>) -> Vec<Capability> {
-    programs.retain(|p| !entry.capabilities.iter().any(|c| c.split().0 == p.id));
+    programs.retain(|p| !keeps_own(entry, &p.id));
     programs
+}
+
+/// Whether `entry`'s center keeps a capability of its own under `cap`: it
+/// is offered none of a program's under that name then ([`programs_for`]),
+/// and gets none of its events, state or streams either
+/// (crate::link::may_take).
+pub fn keeps_own(entry: &CenterEntry, cap: &str) -> bool {
+    entry.capabilities.iter().any(|c| c.split().0 == cap)
 }
 
 /// The capabilities `entry`'s center added that sense or actuate, offered
@@ -484,11 +492,13 @@ pub fn hold_new(before: &NodeConfig, after: &mut NodeConfig) -> Vec<(String, Str
         let was = before
             .center(&e.name)
             .map_or(&[][..], |b| &b.capabilities[..]);
+        // Only the owner's own count for the owner's: one the center added
+        // under that name sensed by its own command, and the owner's `on`
+        // for it was given for that, not for the owner's.
         let sensed = |name: &str| {
             before
                 .capabilities
                 .iter()
-                .chain(was)
                 .any(|b| b.name == name && senses(b.effect))
         };
         // A center edits what it added itself, so the owner's `on` for one
@@ -1033,6 +1043,63 @@ command = ["sensors", "-l"]
             full,
             "what entry gives, from_sent takes"
         );
+    }
+
+    /// The owner's capability that senses, declared under the name of one
+    /// a center added that senses too, is new for that center as for any
+    /// other: the owner's `on` for the center's was given for its command.
+    #[test]
+    fn the_owners_sensing_capability_under_a_centers_name_waits_for_its_on() {
+        use nerve_policy::config::CapSetting;
+        let center = |name: &str, id: &str| {
+            format!(
+                "[[center]]\nname = \"{name}\"\ncenter_id = \"{id}\"\nurl = \"https://{name}.example\"\nnode_id = \"n1\"\nsettings = \"write\"\n"
+            )
+        };
+        let mut before = cfg(&format!(
+            "{TWO}\n{}{}",
+            center("lab", "c1"),
+            center("ops", "c2")
+        ));
+        let sent = |word: &str| {
+            from_sent(
+                &json!({"name": "cam.snap", "effect": "sense", "command": [word, "--shot"]}),
+                60,
+            )
+            .unwrap()
+        };
+        center_change(
+            &mut before,
+            "lab",
+            CenterChange::Add(sent("echo")),
+            "linux",
+            true,
+            &[],
+        )
+        .unwrap();
+        for e in &mut before.centers {
+            e.policy.caps.insert("cam.snap".into(), CapSetting::On);
+        }
+        let mut after = before.clone();
+        after.capabilities.push(sent("real-cam"));
+        assert_eq!(
+            hold_new(&before, &mut after),
+            [
+                ("lab".to_string(), "cam.snap".to_string()),
+                ("ops".to_string(), "cam.snap".to_string())
+            ]
+        );
+        for e in &after.centers {
+            assert_eq!(
+                e.policy.caps.get("cam.snap"),
+                Some(&CapSetting::Off),
+                "{}",
+                e.name
+            );
+        }
+        // The center's own, unchanged, is not held again.
+        let mut again = after.clone();
+        assert_eq!(hold_new(&after, &mut again), []);
     }
 
     /// A center removes its own entry also once the owner declares the

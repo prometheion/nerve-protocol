@@ -11,10 +11,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use nerve_conformance::fake_center::{self, FakeCenter};
-use nerve_conformance::wire::{Conn, code_of};
+use nerve_conformance::wire::{Conn, Recv, code_of};
 use nerve_node::{Daemon, NodeOptions, NodePaths};
 use nerve_policy::NodeConfig;
 use nerve_policy::config::{CapSetting, SettingsGrant};
+use nerve_proto::rpc::Message;
 use serde_json::{Value, json};
 use tokio::net::{TcpStream, UnixStream};
 
@@ -180,7 +181,8 @@ fn settings_audit(paths: &NodePaths, by: &str) -> Vec<Value> {
 
 /// A center adds a capability, which it is offered as `center-added` and
 /// runs; it edits it; each change is in the audit as that center's; `cap
-/// ls` says who added it; and the owner removes it.
+/// ls` says who added it; it stays offered once the owner takes the grant
+/// back, which the center then cannot remove; and the owner removes it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_center_adds_runs_and_edits_its_own_and_the_owner_removes_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -252,6 +254,22 @@ async fn a_center_adds_runs_and_edits_its_own_and_the_owner_removes_it() {
     assert!(
         ls.contains("capability say.back (added by center lab, counted as execute): printf"),
         "{ls}"
+    );
+
+    // The owner takes the grant back: what the center added stays offered
+    // and runs, but the center no longer changes it (it is offered no
+    // `settings` then).
+    owner_edit(&paths, |c| c.centers[0].settings = SettingsGrant::Off).await;
+    let e = invoke(&mut conn, "settings", "cap-rm", json!({"name": "say.back"}))
+        .await
+        .unwrap_err();
+    assert_eq!(code_of(&e), "unknown_capability", "{}", e.message);
+    assert!(described(&mut conn, "say").await.is_some());
+    assert_eq!(
+        call(&mut conn, "say.back", json!({"word": "hi"}))
+            .await
+            .unwrap(),
+        json!("hi!")
     );
 
     // The owner removes it, naming the center.
@@ -730,6 +748,93 @@ async fn a_centers_own_switches_never_reach_what_a_program_offers_later() {
     daemon.stop().await;
 }
 
+/// The next event of `cap` the center gets within `wait`, if one comes.
+async fn event_of(conn: &mut Conn<TcpStream>, cap: &str, wait: Duration) -> Option<Value> {
+    let end = tokio::time::Instant::now() + wait;
+    loop {
+        let left = end.saturating_duration_since(tokio::time::Instant::now());
+        match conn.recv(left).await {
+            Recv::Msg(Message::Notification { method, params })
+                if method == "event" && params["cap"] == cap =>
+            {
+                return Some(Value::Object(params));
+            }
+            Recv::Msg(_) => {}
+            Recv::Timeout => return None,
+            other => panic!("the link ended: {other:?}"),
+        }
+    }
+}
+
+/// A center's own switch for its own `cap.action` lets through none of a
+/// program's events of that name, also by a subscription it made while
+/// the owner allowed them: while it keeps its own under that `cap`, it
+/// gets nothing of the program's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_centers_own_switch_lets_through_no_event_of_a_program() {
+    use tokio::io::AsyncWriteExt;
+    let dir = tempfile::tempdir().unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let daemon = node(
+        dir.path(),
+        &[(&center, "lab")],
+        nerve_policy::Mode::Folder,
+        true,
+        |c| {
+            allow_desk(c);
+            let lab = &mut c.center_mut("lab").unwrap().policy;
+            lab.caps.insert("cam.motion".into(), CapSetting::On);
+        },
+    )
+    .await;
+    let paths = daemon.paths().clone();
+    let mut conn = linked(&mut center).await;
+    let cam = json!([{"id": "cam", "events": {"motion": {"effect": "sense"}}}]);
+    let motion = b"{\"cap\":\"cam\",\"event\":\"motion\",\"data\":{\"level\":1}}\n";
+    let mut program = attach(&daemon, cam.clone()).await;
+    // With the owner's `on` the center subscribes, and gets the event.
+    conn.call(
+        "sub",
+        json!({"topics": ["cam/motion"], "ctx": {"session": "s-1"}}),
+        WAIT,
+    )
+    .await
+    .unwrap()
+    .expect("sub");
+    program.write_all(motion).await.unwrap();
+    assert!(event_of(&mut conn, "cam", WAIT).await.is_some());
+
+    // The owner takes the `on` back, the program leaves, and the center
+    // adds its own of that name and turns it on itself.
+    owner_edit(&paths, |c| c.center_mut("lab").unwrap().policy.caps.clear()).await;
+    drop(program);
+    let own = json!({"name": "cam.motion", "effect": "read", "command": ["echo", "x"]});
+    let mut tries = 0;
+    while let Err(e) = invoke(&mut conn, "settings", "cap-add", json!({"capability": own})).await {
+        // Until the node has seen the program leave.
+        tries += 1;
+        assert!(tries < 100, "{}", e.message);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    settings_set(&mut conn, |d| {
+        d["policy"]["caps"] = json!({"cam.motion": "on"})
+    })
+    .await
+    .expect("its own action, by its name");
+
+    // The program attaches again: the center is offered none of it, and
+    // its subscription carries none of the program's events.
+    let mut program = attach(&daemon, cam).await;
+    assert!(described(&mut conn, "cam").await.is_none());
+    program.write_all(motion).await.unwrap();
+    assert_eq!(
+        event_of(&mut conn, "cam", Duration::from_secs(3)).await,
+        None
+    );
+    drop(program);
+    daemon.stop().await;
+}
+
 /// Lets the program `desk` (this test binary, [`attach`]) attach.
 fn allow_desk(c: &mut NodeConfig) {
     c.providers.allowed = vec![nerve_policy::config::AllowedProvider {
@@ -847,9 +952,69 @@ async fn a_centers_sensing_capability_waits_for_the_owner_whatever_else_offers_i
     daemon.stop().await;
 }
 
+/// The owner's `on` for a center's capability that senses was given for
+/// the center's command: once the owner declares one of that name, the
+/// center waits for the owner's `on` for the owner's, and `cap add` says
+/// so; the center's removal of its own does not bring the `on` back.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owners_on_for_a_centers_sensing_one_never_turns_on_the_owners() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let daemon = node(
+        dir.path(),
+        &[(&center, "lab")],
+        nerve_policy::Mode::Folder,
+        true,
+        |_| {},
+    )
+    .await;
+    let paths = daemon.paths().clone();
+    let mut conn = linked(&mut center).await;
+    let snap = json!({"name": "cam.snap", "effect": "sense", "command": ["echo", "theirs"]});
+    invoke(
+        &mut conn,
+        "settings",
+        "cap-add",
+        json!({"capability": snap}),
+    )
+    .await
+    .unwrap();
+    cli(&paths, &["cap", "set", "cam.snap", "on", "--center", "lab"])
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&mut conn, "cam.snap", json!({})).await.unwrap(),
+        json!("theirs\n")
+    );
+    let out = cli(
+        &paths,
+        &[
+            "cap", "add", "cam.snap", "--effect", "sense", "--", "echo", "mine",
+        ],
+    )
+    .await
+    .unwrap();
+    assert!(
+        out.contains("lab: a switch or allow rule set before covered cam.snap"),
+        "{out}"
+    );
+    for when in ["the owner's", "after the center's removal"] {
+        let e = call(&mut conn, "cam.snap", json!({})).await.unwrap_err();
+        assert_eq!(code_of(&e), "disabled", "{when}: {}", e.message);
+        invoke(&mut conn, "settings", "cap-rm", json!({"name": "cam.snap"}))
+            .await
+            .ok();
+    }
+    let cfg = nerve_node::cli::read_config(&paths).await.unwrap().0;
+    assert!(cfg.centers[0].capabilities.is_empty());
+    let off = cfg.centers[0].policy.caps.get("cam.snap");
+    assert_eq!(off, Some(&CapSetting::Off), "{cfg:?}");
+    daemon.stop().await;
+}
+
 /// What one center added is that center's alone: another one is not
-/// offered it, cannot call it, does not see it in its settings and cannot
-/// remove it.
+/// offered it, cannot call it, does not see it in its settings or in `cap
+/// ls` for it, and cannot remove it.
 #[tokio::test(flavor = "multi_thread")]
 async fn another_center_never_sees_what_one_added() {
     let dir = tempfile::tempdir().unwrap();
@@ -863,6 +1028,7 @@ async fn another_center_never_sees_what_one_added() {
         |_| {},
     )
     .await;
+    let paths = daemon.paths().clone();
     let mut lab_conn = linked(&mut lab).await;
     let mut ops_conn = linked(&mut ops).await;
     invoke(
@@ -873,6 +1039,14 @@ async fn another_center_never_sees_what_one_added() {
     )
     .await
     .unwrap();
+    let ls = cli(&paths, &["cap", "ls", "--center", "ops"])
+        .await
+        .unwrap();
+    assert!(!ls.contains("say.back"), "{ls}");
+    let ls = cli(&paths, &["cap", "ls", "--center", "lab"])
+        .await
+        .unwrap();
+    assert!(ls.contains("added by center lab"), "{ls}");
     assert!(described(&mut lab_conn, "say").await.is_some());
     assert!(described(&mut ops_conn, "say").await.is_none());
     let e = call(&mut ops_conn, "say.back", json!({"word": "x"}))
@@ -918,6 +1092,14 @@ async fn another_center_never_sees_what_one_added() {
             .unwrap(),
         json!("x\n")
     );
+    // Each center's view lists its own once, and not the other's.
+    let ls = cli(&paths, &["cap", "ls", "--center", "lab"])
+        .await
+        .unwrap();
+    let rows: Vec<&str> = ls.lines().filter(|l| l.starts_with("say.back")).collect();
+    assert_eq!(rows.len(), 1, "{ls}");
+    assert!(rows[0].contains("center lab"), "{ls}");
+    assert!(!ls.contains("ops:%s"), "{ls}");
     daemon.stop().await;
 }
 

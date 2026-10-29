@@ -3474,6 +3474,13 @@ pub(crate) fn may_take(
     name: &str,
     effect: Effect,
 ) -> bool {
+    // A center that keeps its own under `cap` is offered none of the
+    // program's (crate::config_cap::programs_for): its switches were set
+    // for its own, and a subscription made before must not carry the
+    // program's units to it by them.
+    if crate::config_cap::keeps_own(entry, cap) {
+        return false;
+    }
     // The capability's own switch counts over the unit's, as for a call
     // (`decide` reads the unit's first): an `off` or `hidden` capability
     // gives nothing, though its unit is `on`.

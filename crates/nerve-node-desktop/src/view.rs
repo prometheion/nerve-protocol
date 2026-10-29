@@ -2084,10 +2084,6 @@ mod tests {
         );
     }
 
-    /// The Capabilities page: each capability once over its units, in the
-    /// node's order, with the switches of the page's center as set (none
-    /// set: -1), whether it may use each unit now, and a unit the node
-    /// leaves out marked with its reason and no switch.
     /// A capability a center added (`cap ls` source `center <name>`) is
     /// listed for that center, with its switch, and for no other one.
     #[test]
@@ -2110,6 +2106,10 @@ mod tests {
         assert!(lab[0].switchable && lab[0].source == "center lab");
     }
 
+    /// The Capabilities page: each capability once over its units, in the
+    /// node's order, with the switches of the page's center as set (none
+    /// set: -1), whether it may use each unit now, and a unit the node
+    /// leaves out marked with its reason and no switch.
     #[test]
     fn the_capabilities_and_what_the_node_leaves_out() {
         let v = json!({"running": true, "center": "lab",
