@@ -8,14 +8,23 @@
 //! `nerve-run`, so it offers none; an action with the owner's rights comes
 //! from a program the owner allows (crate::provider). Windows reads them and
 //! offers none yet.
+//!
+//! A center with the settings grant `write` adds capabilities of the same
+//! shape to its own entry (`settings.cap-add`, `cap-edit`, `cap-rm`): they
+//! are offered to that center alone, run as `nerve-run` like the owner's,
+//! and count as `execute` whatever they declare, but one that senses or
+//! actuates stays so and waits for the owner's `on`. What the owner
+//! declares, and the programs the owner allows, come first: a center
+//! changes none of them and adds nothing under their names.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 
-use nerve_policy::NodeConfig;
-use nerve_policy::config::{ConfigCapability, Output};
-use nerve_proto::descriptor::{Action, Capability, Exposure};
+use nerve_policy::config::{CENTER_ADDED, CenterEntry, ConfigCapability, Output, Platform};
+use nerve_policy::{NodeConfig, SetError};
+use nerve_proto::descriptor::{Action, Capability, Effect, Exposure};
 use nerve_proto::{ErrorCode, RpcError};
 
 /// The `provider` of a config capability in the descriptor and `cap ls`.
@@ -70,13 +79,23 @@ pub fn declared(cfg: &NodeConfig) -> Vec<Capability> {
 
 /// `entries` as capabilities, one per `cap` with its actions.
 fn capabilities<'a>(entries: impl Iterator<Item = &'a ConfigCapability>) -> Vec<Capability> {
+    capabilities_of(entries, PROVIDER, |e| e)
+}
+
+/// `entries` as capabilities of `provider`, each action with the effect
+/// `effect` makes of the declared one.
+fn capabilities_of<'a>(
+    entries: impl Iterator<Item = &'a ConfigCapability>,
+    provider: &str,
+    effect: impl Fn(Effect) -> Effect,
+) -> Vec<Capability> {
     let mut caps: BTreeMap<&str, Capability> = BTreeMap::new();
     for c in entries {
         let (cap, action) = c.split();
         let entry = caps.entry(cap).or_insert_with(|| Capability {
             id: cap.to_string(),
             profile: String::new(),
-            provider: PROVIDER.into(),
+            provider: provider.into(),
             exposure: Exposure::On,
             summary: String::new(),
             actions: BTreeMap::new(),
@@ -87,7 +106,7 @@ fn capabilities<'a>(entries: impl Iterator<Item = &'a ConfigCapability>) -> Vec<
         entry.actions.insert(
             action.to_string(),
             Action {
-                effect: c.effect,
+                effect: effect(c.effect),
                 summary: c.summary.clone(),
                 params: c.params_schema(),
                 result: c.result.schema(),
@@ -98,6 +117,231 @@ fn capabilities<'a>(entries: impl Iterator<Item = &'a ConfigCapability>) -> Vec<
         );
     }
     caps.into_values().collect()
+}
+
+/// Why a node on `os` takes no capability from a center, if it does not:
+/// Windows offers none yet (issue #176), and a node run by hand has no
+/// `nerve-run` to run them as.
+pub fn center_refusal(os: &str, installed: bool) -> Option<String> {
+    if os == "windows" {
+        Some("a node on Windows offers no capability a center adds yet (issue #176)".to_string())
+    } else if os != "linux" {
+        Some(format!(
+            "a node on {os} offers no capability a center adds yet (Linux only for now)"
+        ))
+    } else if !installed {
+        Some(format!(
+            "a capability a center adds runs as {}, which only the installed node has; this one runs by hand",
+            crate::account::RUN_USER
+        ))
+    } else {
+        None
+    }
+}
+
+/// The effect a capability a center added counts as: `execute`, whatever
+/// it declares, so a center's command never passes for a read in folder
+/// mode; one that senses or actuates stays so, and only the owner turns it
+/// on.
+pub fn counted(effect: Effect) -> Effect {
+    if senses(effect) {
+        effect
+    } else {
+        Effect::Execute
+    }
+}
+
+/// Why the node leaves out `c`, a capability `entry`'s center added, if it
+/// does: as one of the owner's ([`left_out`]), or because its capability is
+/// the owner's (the config names it) or a program's (`taken`, the ids the
+/// attached programs offer), which come first.
+pub fn center_left_out(
+    c: &ConfigCapability,
+    cfg: &NodeConfig,
+    os: &str,
+    installed: bool,
+    taken: &BTreeSet<String>,
+) -> Option<String> {
+    let cap = c.split().0;
+    if let Some(why) = center_refusal(os, installed) {
+        Some(why)
+    } else if names(cfg, cap) {
+        Some(format!("the owner declares {cap} in node.toml"))
+    } else if taken.contains(cap) {
+        Some(format!("a program the owner allows offers {cap}"))
+    } else {
+        left_out(c, os, installed)
+    }
+}
+
+/// The capabilities `entry`'s center added that a node on `os` offers it,
+/// with provider [`CENTER_ADDED`] and their [`counted`] effects: those
+/// [`center_left_out`] does not leave out, `programs` being the attached
+/// programs' capabilities.
+pub fn center_offered(
+    cfg: &NodeConfig,
+    entry: &CenterEntry,
+    os: &str,
+    installed: bool,
+    programs: &[Capability],
+) -> Vec<Capability> {
+    let taken: BTreeSet<String> = programs.iter().map(|c| c.id.clone()).collect();
+    capabilities_of(
+        entry
+            .capabilities
+            .iter()
+            .filter(|c| center_left_out(c, cfg, os, installed, &taken).is_none()),
+        CENTER_ADDED,
+        counted,
+    )
+}
+
+/// Every capability `entry`'s center added, offered or not, with their
+/// [`counted`] effects: what only the owner may turn on for that center
+/// goes by them as by the owner's ([`declared`]).
+pub fn center_declared(entry: &CenterEntry) -> Vec<Capability> {
+    capabilities_of(entry.capabilities.iter(), CENTER_ADDED, counted)
+}
+
+/// The entry of `cfg` (`provider` [`PROVIDER`]) or of `entry`'s center
+/// ([`CENTER_ADDED`]) for `cap.action`.
+pub fn find_for<'a>(
+    cfg: &'a NodeConfig,
+    entry: &'a CenterEntry,
+    provider: &str,
+    cap: &str,
+    action: &str,
+) -> Option<&'a ConfigCapability> {
+    if provider == CENTER_ADDED {
+        entry
+            .capabilities
+            .iter()
+            .find(|c| c.split() == (cap, action))
+    } else {
+        find(cfg, cap, action)
+    }
+}
+
+/// A capability as a center sends it (`settings.cap-add`, `cap-edit`): the
+/// fields of `[[capability]]`, with the schemas as JSON, as [`entry`] gives
+/// them. There is no account: it runs as `nerve-run`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Sent {
+    name: String,
+    #[serde(default)]
+    summary: String,
+    effect: Effect,
+    command: Vec<String>,
+    #[serde(default)]
+    params: Value,
+    #[serde(default)]
+    result: Value,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    platform: Option<String>,
+}
+
+/// The capability a center sent, `v` in the form [`entry`] gives, checked
+/// as one of `node.toml` is (ConfigCapability::validate) against
+/// `max_timeout_secs`.
+pub fn from_sent(v: &Value, max_timeout_secs: u64) -> Result<ConfigCapability, String> {
+    let s: Sent = serde_json::from_value(v.clone()).map_err(|e| format!("capability: {e}"))?;
+    let params = match s.params {
+        Value::Null => Value::Null,
+        p @ Value::Object(_) => p,
+        _ => return Err("params: a JSON Schema object, or null for none".into()),
+    };
+    let result = match s.result {
+        Value::Null => Output::Text,
+        Value::String(t) if t == Output::Text.to_string() => Output::Text,
+        r @ Value::Object(_) => Output::Json(r),
+        _ => return Err("result: \"text\", or a JSON Schema object".into()),
+    };
+    let platform = match s.platform.as_deref() {
+        None => Platform::Any,
+        Some(p) => Platform::parse(p).ok_or("platform: any, linux or windows")?,
+    };
+    let c = ConfigCapability {
+        name: s.name,
+        summary: s.summary,
+        effect: s.effect,
+        command: s.command,
+        params,
+        result,
+        timeout_secs: s.timeout_secs,
+        platform,
+    };
+    c.validate(max_timeout_secs)?;
+    Ok(c)
+}
+
+/// A center's change to the capabilities it added.
+pub enum CenterChange {
+    Add(ConfigCapability),
+    Edit(ConfigCapability),
+    Rm(String),
+}
+
+/// Makes `change` of `center` in `cfg`, the config a store change starts
+/// from (nerve_policy::SettingsStore::set_center_capabilities), on a node
+/// on `os` (`installed` tells the installed node) with `programs` attached:
+/// a center changes only what it added, adds nothing under a name of the
+/// owner's or a program's, and adds or edits only what this node would
+/// offer it. An action that comes to sense or actuate is switched off for
+/// that center where an earlier switch or rule of its own would cover it
+/// ([`hold_new`]).
+pub fn center_change(
+    cfg: &mut NodeConfig,
+    center: &str,
+    change: CenterChange,
+    os: &str,
+    installed: bool,
+    programs: &[Capability],
+) -> Result<(), SetError> {
+    let before = cfg.clone();
+    let owners = |name: &str| cfg.capabilities.iter().any(|c| c.name == name);
+    let name = match &change {
+        CenterChange::Add(c) | CenterChange::Edit(c) => c.name.clone(),
+        CenterChange::Rm(n) => n.clone(),
+    };
+    if owners(&name) {
+        return Err(SetError::Forbidden(format!(
+            "capability {name} is the owner's (node.toml): a center does not change it"
+        )));
+    }
+    if let CenterChange::Add(c) | CenterChange::Edit(c) = &change {
+        let taken: BTreeSet<String> = programs.iter().map(|c| c.id.clone()).collect();
+        if let Some(why) = center_left_out(c, cfg, os, installed, &taken) {
+            return Err(SetError::Forbidden(format!(
+                "capability {name}: this node would not offer it: {why}"
+            )));
+        }
+    }
+    let e = cfg
+        .center_mut(center)
+        .ok_or_else(|| SetError::Forbidden(format!("no center {center}")))?;
+    let at = e.capabilities.iter().position(|c| c.name == name);
+    match (change, at) {
+        (CenterChange::Add(_), Some(_)) => {
+            return Err(SetError::Invalid(format!(
+                "this center added a capability {name} already; settings.cap-edit changes it"
+            )));
+        }
+        (CenterChange::Add(c), None) => e.capabilities.push(c),
+        (CenterChange::Edit(c), Some(i)) => e.capabilities[i] = c,
+        (CenterChange::Rm(_), Some(i)) => {
+            e.capabilities.remove(i);
+        }
+        (CenterChange::Edit(_) | CenterChange::Rm(_), None) => {
+            return Err(SetError::Invalid(format!(
+                "this center added no capability {name}"
+            )));
+        }
+    }
+    hold_new(&before, cfg);
+    Ok(())
 }
 
 /// `caps` as a pairing is offered them: an action marked as a command of
@@ -167,22 +411,29 @@ pub fn senses(effect: nerve_proto::descriptor::Effect) -> bool {
 /// the node as it takes a file the owner wrote (`config accept`).
 pub fn hold_new(before: &NodeConfig, after: &mut NodeConfig) -> Vec<(String, String)> {
     use nerve_policy::config::CapSetting;
-    let came: Vec<ConfigCapability> = after
-        .capabilities
-        .iter()
-        .filter(|c| senses(c.effect))
-        .filter(|c| {
-            !before
+    let mut held = Vec::new();
+    for e in &mut after.centers {
+        // The owner's capabilities count for every center, the ones a
+        // center added for that center alone.
+        let was = before
+            .center(&e.name)
+            .map_or(&[][..], |b| &b.capabilities[..]);
+        let sensed = |name: &str| {
+            before
                 .capabilities
                 .iter()
-                .any(|b| b.name == c.name && senses(b.effect))
-        })
-        .cloned()
-        .collect();
-    let mut held = Vec::new();
-    for c in came {
-        let (cap, action) = c.split();
-        for e in &mut after.centers {
+                .chain(was)
+                .any(|b| b.name == name && senses(b.effect))
+        };
+        let came: Vec<ConfigCapability> = after
+            .capabilities
+            .iter()
+            .chain(&e.capabilities)
+            .filter(|c| senses(c.effect) && !sensed(&c.name))
+            .cloned()
+            .collect();
+        for c in came {
+            let (cap, action) = c.split();
             // An `on` for this very action that the change itself brings is
             // the owner's: a center may set none for an action not offered.
             let on = |p: &nerve_policy::CenterPolicy| p.caps.get(&c.name) == Some(&CapSetting::On);
@@ -531,6 +782,159 @@ command = ["sensors", "-l"]
         assert_eq!(
             owned.center("lab").unwrap().policy.caps.get("probe.cam"),
             Some(&CapSetting::On)
+        );
+    }
+
+    /// What a center adds: refused where the node takes none (Windows,
+    /// issue #176; by hand), counted as execute unless it senses, left out
+    /// where the owner or a program has its capability, and changed only
+    /// by the center that added it.
+    #[test]
+    fn a_centers_capabilities_count_as_execute_behind_the_owners() {
+        assert!(
+            center_refusal("windows", true)
+                .unwrap()
+                .contains("issue #176")
+        );
+        assert!(center_refusal("linux", false).unwrap().contains("by hand"));
+        assert_eq!(center_refusal("linux", true), None);
+        for (declared, as_) in [
+            (Effect::Read, Effect::Execute),
+            (Effect::Write, Effect::Execute),
+            (Effect::Execute, Effect::Execute),
+            (Effect::Sense, Effect::Sense),
+            (Effect::Actuate, Effect::Actuate),
+        ] {
+            assert_eq!(counted(declared), as_, "{declared:?}");
+        }
+        let mut c = cfg(&format!(
+            "{TWO}\n[[center]]\nname = \"lab\"\ncenter_id = \"c1\"\nurl = \"https://lab.example\"\nnode_id = \"n1\"\nsettings = \"write\"\n[[center]]\nname = \"ops\"\ncenter_id = \"c2\"\nurl = \"https://ops.example\"\nnode_id = \"n1\"\n"
+        ));
+        let sent = |name: &str, effect: &str| {
+            from_sent(
+                &json!({"name": name, "effect": effect, "command": ["echo", "x"]}),
+                60,
+            )
+            .unwrap()
+        };
+        let desk = Capability {
+            id: "desk".into(),
+            ..offered_on(&c, "linux", true).remove(0)
+        };
+        let programs = [desk];
+        let add = |c: &mut NodeConfig, who: &str, x: ConfigCapability| {
+            center_change(c, who, CenterChange::Add(x), "linux", true, &programs)
+        };
+        add(&mut c, "lab", sent("notes.show", "read")).unwrap();
+        // Under the owner's capability or a program's, none.
+        for (name, why) in [
+            ("sensors.extra", "the owner declares sensors in node.toml"),
+            ("desk.extra", "a program the owner allows offers desk"),
+        ] {
+            let e = add(&mut c, "lab", sent(name, "read")).unwrap_err();
+            assert!(
+                matches!(&e, SetError::Forbidden(m) if m.contains(why)),
+                "{e:?}"
+            );
+        }
+        // Windows takes none, also here.
+        let e = center_change(
+            &mut c.clone(),
+            "lab",
+            CenterChange::Add(sent("other.x", "read")),
+            "windows",
+            true,
+            &[],
+        )
+        .unwrap_err();
+        assert!(format!("{e:?}").contains("issue #176"), "{e:?}");
+        let lab = c.center("lab").unwrap();
+        let offered = center_offered(&c, lab, "linux", true, &programs);
+        assert_eq!(ids(&offered), ["notes.show"]);
+        assert_eq!(offered[0].provider, CENTER_ADDED);
+        assert_eq!(offered[0].actions["show"].effect, Effect::Execute);
+        assert!(offered[0].actions["show"].as_account);
+        assert_eq!(
+            find_for(&c, lab, CENTER_ADDED, "notes", "show")
+                .unwrap()
+                .name,
+            "notes.show"
+        );
+        assert!(find_for(&c, lab, PROVIDER, "notes", "show").is_none());
+        // Another center has none of it, and cannot remove it.
+        let ops = c.center("ops").unwrap();
+        assert!(center_offered(&c, ops, "linux", true, &[]).is_empty());
+        let e = center_change(
+            &mut c,
+            "ops",
+            CenterChange::Rm("notes.show".into()),
+            "linux",
+            true,
+            &[],
+        )
+        .unwrap_err();
+        assert!(format!("{e:?}").contains("added no capability"), "{e:?}");
+        // The owner's are no center's to change.
+        let e = center_change(
+            &mut c,
+            "lab",
+            CenterChange::Rm("sensors.list".into()),
+            "linux",
+            true,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, SetError::Forbidden(m) if m.contains("is the owner's")),
+            "{e:?}"
+        );
+        // One that comes to sense is held where the center's `on` covered it.
+        c.center_mut("lab")
+            .unwrap()
+            .policy
+            .caps
+            .insert("notes".into(), nerve_policy::config::CapSetting::On);
+        center_change(
+            &mut c,
+            "lab",
+            CenterChange::Edit(sent("notes.show", "sense")),
+            "linux",
+            true,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            c.center("lab").unwrap().policy.caps.get("notes.show"),
+            Some(&nerve_policy::config::CapSetting::Off)
+        );
+        // An owner's program that comes later takes its capability's place.
+        let lab = c.center("lab").unwrap();
+        let notes = Capability {
+            id: "notes".into(),
+            ..programs[0].clone()
+        };
+        assert!(center_offered(&c, lab, "linux", true, &[notes]).is_empty());
+        // What it sends names no account and keeps to the validator.
+        for bad in [
+            json!({"name": "a.b", "effect": "read", "command": ["id"], "account": "owner"}),
+            json!({"name": "a.b", "effect": "read", "command": ["id"], "params": "{}"}),
+            json!({"name": "a.b", "effect": "read", "command": ["id"], "result": 3}),
+            json!({"name": "a.b", "effect": "read", "command": ["id"], "timeout_secs": 61}),
+            json!({"name": "fs.b", "effect": "read", "command": ["id"]}),
+        ] {
+            assert!(from_sent(&bad, 60).is_err(), "{bad}");
+        }
+        let full = from_sent(
+            &json!({"name": "a.b", "effect": "read", "command": ["id"], "result": "text",
+                    "platform": "linux", "timeout_secs": 60, "summary": "Who."}),
+            60,
+        )
+        .unwrap();
+        assert_eq!(entry(&full)["platform"], "linux");
+        assert_eq!(
+            from_sent(&entry(&full), 60).unwrap(),
+            full,
+            "what entry gives, from_sent takes"
         );
     }
 

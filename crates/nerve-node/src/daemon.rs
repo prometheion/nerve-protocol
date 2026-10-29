@@ -658,11 +658,24 @@ impl Shared {
         self.account_as(cfg, false)
     }
 
-    /// The capabilities offered besides the node's own: the attached
-    /// programs' (crate::provider) and the config's (crate::config_cap).
-    pub fn added_caps(&self, cfg: &NodeConfig) -> Vec<nerve_proto::descriptor::Capability> {
+    /// The capabilities `entry`'s center is offered besides the node's own:
+    /// the attached programs' (crate::provider), the config's and those that
+    /// center added itself (crate::config_cap).
+    pub fn added_caps(
+        &self,
+        cfg: &NodeConfig,
+        entry: &nerve_policy::CenterEntry,
+    ) -> Vec<nerve_proto::descriptor::Capability> {
         let mut caps = self.providers.caps();
+        let added = crate::config_cap::center_offered(
+            cfg,
+            entry,
+            std::env::consts::OS,
+            self.config_caps,
+            &caps,
+        );
         caps.extend(crate::config_cap::offered(cfg, self.config_caps));
+        caps.extend(added);
         caps
     }
 
@@ -675,10 +688,10 @@ impl Shared {
     pub fn offered_caps(
         &self,
         cfg: &NodeConfig,
-        policy: &nerve_policy::config::CenterPolicy,
+        entry: &nerve_policy::CenterEntry,
     ) -> Vec<nerve_proto::descriptor::Capability> {
-        let mut caps = self.added_caps(cfg);
-        crate::config_cap::as_account_for(&mut caps, self.separate(policy));
+        let mut caps = self.added_caps(cfg, entry);
+        crate::config_cap::as_account_for(&mut caps, self.separate(&entry.policy));
         caps
     }
 
@@ -2574,6 +2587,7 @@ mod every_platform {
                 sudo_allow: vec!["sudo apt *".into()],
                 ..Default::default()
             },
+            capabilities: Vec::new(),
         };
         let told = || {
             let r = s.reach(&s.config(), &entry);
@@ -3028,6 +3042,7 @@ mod tests {
                         }],
                         ..Default::default()
                     },
+                    capabilities: Vec::new(),
                 };
                 let r = s.reach(&cfg, &entry);
                 let a = crate::descriptor::for_center(&cfg, &entry, &r, &[])
@@ -3120,6 +3135,7 @@ mod tests {
                     mode: Mode::Folder,
                     ..Default::default()
                 },
+                capabilities: Vec::new(),
             };
             let r = s.reach(&s.config(), &entry);
             assert_eq!(r.held_by_account, held, "landlock {landlock:?}");
@@ -3195,6 +3211,7 @@ mod tests {
                             folders,
                             ..Default::default()
                         },
+                        capabilities: Vec::new(),
                     })
                     .collect();
                 let r = control(
@@ -3361,6 +3378,7 @@ mod tests {
                     pin_rotations: 0,
                     old_pin: None,
                     policy: Default::default(),
+                    capabilities: Vec::new(),
                 });
                 Ok(())
             })
@@ -3511,6 +3529,7 @@ mod tests {
                     pin_rotations: 0,
                     old_pin: None,
                     policy: Default::default(),
+                    capabilities: Vec::new(),
                 });
                 Ok(())
             })
@@ -3668,6 +3687,7 @@ mod tests {
                         }],
                         ..Default::default()
                     },
+                    capabilities: Vec::new(),
                 });
                 Ok(())
             })
@@ -4234,6 +4254,7 @@ mod old_pin_tests {
                         until_ms: 1,
                     }),
                     policy: Default::default(),
+                    capabilities: Vec::new(),
                 });
                 Ok(())
             })

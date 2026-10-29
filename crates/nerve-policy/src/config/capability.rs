@@ -19,6 +19,11 @@ use nerve_proto::schema::{self, Role};
 /// and a center never leaves its capability out for the name.
 pub const BUILT_IN: &[&str] = &["node", "fs", "exec", "settings", "audit", "job", "stream"];
 
+/// The `provider` of a capability a center added (`settings.cap-add`) in
+/// the descriptor that center gets: the node routes its calls by it, and the
+/// center tells by it which capabilities it added itself.
+pub const CENTER_ADDED: &str = "center-added";
+
 /// The most `[[capability]]` entries a node keeps: far past what an owner
 /// declares, and a bound on what every descriptor carries.
 pub const MAX_CAPABILITIES: usize = 64;

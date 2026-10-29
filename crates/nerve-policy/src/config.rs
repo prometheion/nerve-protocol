@@ -17,7 +17,7 @@ use crate::paths::within;
 
 mod capability;
 pub use capability::{
-    BUILT_IN, ConfigCapability, MAX_CAPABILITIES, Output, Platform, validate_all,
+    BUILT_IN, CENTER_ADDED, ConfigCapability, MAX_CAPABILITIES, Output, Platform, validate_all,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -98,10 +98,11 @@ pub struct AllowedProvider {
 
 /// Whether `name` can name a provider: a node name's shape (1 to 32 of
 /// a-z, 0-9 and `-`, starting and ending with a letter or digit), and not
-/// `node`, which stands for the node itself, or `config`, which stands for
-/// the capabilities of `node.toml` (the node routes a call by it).
+/// `node`, which stands for the node itself, `config`, which stands for
+/// the capabilities of `node.toml`, or `center-added`, which stands for
+/// those a center added (the node routes a call by them).
 pub fn valid_provider_name(name: &str) -> bool {
-    nerve_proto::valid_node_name(name) && !["node", "config"].contains(&name)
+    nerve_proto::valid_node_name(name) && !["node", "config", CENTER_ADDED].contains(&name)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -659,6 +660,13 @@ pub struct CenterEntry {
     pub old_pin: Option<OldPin>,
     #[serde(default)]
     pub policy: CenterPolicy,
+    /// The capabilities this center added itself (`settings.cap-add`, with
+    /// the settings grant `write`; docs/user/config-capabilities.md): shaped
+    /// as the owner's `[[capability]]` entries, offered to this center
+    /// alone, always run as `nerve-run` and counted as `execute`. Not part
+    /// of its [`CenterDocument`]: `settings.set` leaves them as they are.
+    #[serde(default, rename = "capability", skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<ConfigCapability>,
 }
 
 /// A center's replaced pin and the end of its grace.
@@ -1172,7 +1180,7 @@ impl NodeConfig {
         for p in &self.providers.allowed {
             if !valid_provider_name(&p.name) {
                 return Err(format!(
-                    "providers.allowed name {:?}: 1 to 32 characters of a-z, 0-9 and -, starting and ending with a letter or digit, not node or config",
+                    "providers.allowed name {:?}: 1 to 32 characters of a-z, 0-9 and -, starting and ending with a letter or digit, not node, config or center-added",
                     p.name
                 ));
             }
@@ -1235,6 +1243,8 @@ impl NodeConfig {
             }
             c.policy
                 .validate()
+                .map_err(|e| format!("center {}: {e}", c.name))?;
+            validate_all(&c.capabilities, self.limits.max_timeout_secs)
                 .map_err(|e| format!("center {}: {e}", c.name))?;
         }
         Ok(())
@@ -1376,7 +1386,7 @@ mod tests {
             assert!(!valid_center_name(bad), "{bad}");
         }
         assert!(valid_provider_name("desk-2"));
-        for bad in ["-desk", "desk-", "node", "config"] {
+        for bad in ["-desk", "desk-", "node", "config", "center-added"] {
             assert!(!valid_provider_name(bad), "{bad}");
         }
         for (key, toml) in [

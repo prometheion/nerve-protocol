@@ -1979,6 +1979,7 @@ mod tests {
                     }],
                     ..Default::default()
                 },
+                capabilities: Vec::new(),
             });
         };
         add("folder", Mode::Folder, false);

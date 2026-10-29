@@ -345,10 +345,13 @@ pub enum CapCmd {
         #[arg(last = true, value_name = "COMMAND")]
         command: Vec<String>,
     },
-    /// Remove a capability you declared; it leaves every center at once.
+    /// Remove a capability you declared; it leaves every center at once. With --center, remove one that center added itself (settings grant write); `cap set NAME off --center` turns it off instead.
     Rm {
         /// The capability, `cap.action`.
         name: String,
+        /// The center that added it, for a capability a center added.
+        #[arg(long)]
+        center: Option<String>,
     },
     /// Allow a program on this machine to add capabilities (a provider), remove it, or list them.
     #[command(subcommand)]
@@ -2206,12 +2209,44 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             }
             Ok(())
         }
-        Cmd::Cap(CapCmd::Rm { name }) => {
+        Cmd::Cap(CapCmd::Rm {
+            name,
+            center: Some(center),
+        }) => {
+            edit(&paths, |c| {
+                let e = c
+                    .center_mut(&center)
+                    .ok_or_else(|| format!("no center named {center}"))?;
+                let before = e.capabilities.len();
+                e.capabilities.retain(|d| d.name != name);
+                if e.capabilities.len() == before {
+                    return Err(format!("center {center} added no capability {name}"));
+                }
+                Ok(())
+            })
+            .await?;
+            w(out, format!("capability {name} of center {center} removed"));
+            Ok(())
+        }
+        Cmd::Cap(CapCmd::Rm { name, center: None }) => {
             edit(&paths, |c| {
                 let before = c.capabilities.len();
                 c.capabilities.retain(|d| d.name != name);
                 if c.capabilities.len() == before {
-                    return Err(format!("no capability {name} is declared"));
+                    // One a center added is removed with that center named.
+                    let by: Vec<&str> = c
+                        .centers
+                        .iter()
+                        .filter(|e| e.capabilities.iter().any(|d| d.name == name))
+                        .map(|e| e.name.as_str())
+                        .collect();
+                    return Err(match by.first() {
+                        Some(first) => format!(
+                            "no capability {name} is declared in node.toml; center {} added one: cap rm {name} --center {first}",
+                            by.join(", center ")
+                        ),
+                        None => format!("no capability {name} is declared"),
+                    });
                 }
                 Ok(())
             })
@@ -2222,7 +2257,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
         Cmd::Cap(CapCmd::Provider(ProviderCmd::Allow { name, exe })) => {
             if !nerve_policy::config::valid_provider_name(&name) {
                 return Err(format!(
-                    "{name:?} cannot name a provider: 1 to 32 of a-z, 0-9 and -, starting and ending with a letter or digit, and not node or config"
+                    "{name:?} cannot name a provider: 1 to 32 of a-z, 0-9 and -, starting and ending with a letter or digit, and not node, config or center-added"
                 ));
             }
             if !Path::new(&exe).is_absolute() {
@@ -3680,12 +3715,19 @@ impl CapNotes {
 /// The lines of `cap ls` for the capabilities of node.toml: each one's
 /// command and what else the owner set.
 fn config_lines(v: &Value) -> Vec<String> {
+    let added = v["added"].as_array().into_iter().flatten();
     v["config"]
         .as_array()
         .into_iter()
         .flatten()
+        .chain(added)
         .filter_map(|e| serde_json::from_value::<ConfigEntry>(e.clone()).ok())
         .map(|e| {
+            // One a center added says which, and how it counts.
+            let by = match &e.center {
+                Some(c) => format!(" (added by center {c}, counted as execute)"),
+                None => String::new(),
+            };
             let c = nerve_policy::config::ConfigCapability {
                 name: e.name,
                 summary: String::new(),
@@ -3696,7 +3738,7 @@ fn config_lines(v: &Value) -> Vec<String> {
                 timeout_secs: e.timeout_secs,
                 platform: nerve_policy::config::Platform::parse(&e.platform).unwrap_or_default(),
             };
-            format!("capability {}: {}", c.name, cap_line(&c))
+            format!("capability {}{by}: {}", c.name, cap_line(&c))
         })
         .collect()
 }
@@ -3709,6 +3751,9 @@ struct ConfigEntry {
     command: Vec<String>,
     timeout_secs: Option<u64>,
     platform: String,
+    /// The center that added it; none for the owner's.
+    #[serde(default)]
+    center: Option<String>,
 }
 
 /// What `cap provider allow` and `ls` add where no program attaches: the
@@ -5433,6 +5478,7 @@ mod tests {
             pin_rotations: 0,
             old_pin: None,
             policy: Default::default(),
+            capabilities: Vec::new(),
         }
     }
 

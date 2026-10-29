@@ -1260,12 +1260,11 @@ pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>, installed: bool) 
     // Each center's descriptor as it would see it now, built as the link
     // builds it.
     let seen: Option<BTreeMap<&str, Vec<Capability>>> = live.map(|s| {
-        let provided = s.added_caps(cfg);
         cfg.centers
             .iter()
             .map(|c| {
                 let reach = s.reach(cfg, c);
-                let d = crate::descriptor::for_center(cfg, c, &reach, &provided);
+                let d = crate::descriptor::for_center(cfg, c, &reach, &s.added_caps(cfg, c));
                 (c.name.as_str(), d.capabilities)
             })
             .collect()
@@ -1372,6 +1371,45 @@ pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>, installed: bool) 
         .map(crate::config_cap::entry)
         .collect();
     let held = attached.map(|p| lock(&p.attached).clone());
+    // What each center added itself, its rows for that center alone: no
+    // other one is offered them. A stopped node knows no program, so none
+    // is left out for one.
+    let programs: Vec<Capability> = held
+        .iter()
+        .flat_map(|h| h.values())
+        .flat_map(|a| a.caps.iter().cloned())
+        .collect();
+    let taken: BTreeSet<String> = programs.iter().map(|c| c.id.clone()).collect();
+    let os = std::env::consts::OS;
+    let mut added = Vec::new();
+    for e in &cfg.centers {
+        let source = format!("center {}", e.name);
+        let only = |mut r: Value| {
+            for key in ["centers", "now"] {
+                if let Some(m) = r.get_mut(key).and_then(Value::as_object_mut) {
+                    m.retain(|c, _| *c == e.name);
+                }
+            }
+            r
+        };
+        for c in crate::config_cap::center_offered(cfg, e, os, installed, &programs) {
+            rows.extend(row(&c, &source).into_iter().map(only));
+        }
+        for decl in &e.capabilities {
+            if let Some(why) = crate::config_cap::center_left_out(decl, cfg, os, installed, &taken)
+            {
+                let (cap, action) = decl.split();
+                rows.push(only(
+                    json!({"name": decl.name, "effect": crate::config_cap::counted(decl.effect),
+                                      "source": source, "left_out": why,
+                                      "centers": centers(cap, action)}),
+                ));
+            }
+            let mut v = crate::config_cap::entry(decl);
+            v["center"] = json!(e.name);
+            added.push(v);
+        }
+    }
     for a in held.iter().flat_map(|h| h.values()) {
         let source = format!("program {}", a.name);
         for c in &a.caps {
@@ -1392,7 +1430,7 @@ pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>, installed: bool) 
             json!({"name": p.name, "exe": p.exe, "attached": on})
         })
         .collect();
-    json!({"capabilities": rows, "programs": programs, "config": config,
+    json!({"capabilities": rows, "programs": programs, "config": config, "added": added,
            "running": live.is_some()})
 }
 

@@ -1200,6 +1200,7 @@ mod tests {
             pin_rotations: 0,
             old_pin: None,
             policy: Default::default(),
+            capabilities: Vec::new(),
         }
     }
 

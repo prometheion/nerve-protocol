@@ -595,7 +595,7 @@ async fn session(
             &cfg,
             entry,
             &shared.reach(&cfg, entry),
-            &shared.offered_caps(&cfg, &entry.policy),
+            &shared.offered_caps(&cfg, entry),
         )
         .rev;
         let hello = Hello {
@@ -1538,7 +1538,7 @@ impl Link {
             cfg,
             entry,
             &self.shared.reach(cfg, entry),
-            &self.shared.offered_caps(cfg, &entry.policy),
+            &self.shared.offered_caps(cfg, entry),
         )
     }
 
@@ -1607,8 +1607,12 @@ impl Link {
             let (cfg, entry) = self
                 .entry()
                 .ok_or_else(|| RpcError::new(ErrorCode::Unavailable, "this center was removed"))?;
-            let all =
-                descriptor::for_call(&cfg, &entry, crate::now_ms(), &self.shared.added_caps(&cfg));
+            let all = descriptor::for_call(
+                &cfg,
+                &entry,
+                crate::now_ms(),
+                &self.shared.added_caps(&cfg, &entry),
+            );
             let mut decided = std::collections::BTreeSet::new();
             for topic in programs {
                 let cap = topic.cap().to_string();
@@ -1768,8 +1772,12 @@ impl Link {
         let (cfg, entry) = self
             .entry()
             .ok_or_else(|| RpcError::new(ErrorCode::Unavailable, "this center was removed"))?;
-        let view =
-            descriptor::for_call(&cfg, &entry, crate::now_ms(), &self.shared.added_caps(&cfg));
+        let view = descriptor::for_call(
+            &cfg,
+            &entry,
+            crate::now_ms(),
+            &self.shared.added_caps(&cfg, &entry),
+        );
         let cap = view.capability(&g.cap).ok_or_else(|| {
             RpcError::new(
                 ErrorCode::UnknownCapability,
@@ -1929,8 +1937,12 @@ impl Link {
         let (cfg, entry) = self
             .entry()
             .ok_or_else(|| RpcError::new(ErrorCode::Unavailable, "this center was removed"))?;
-        let view =
-            descriptor::for_call(&cfg, &entry, crate::now_ms(), &self.shared.added_caps(&cfg));
+        let view = descriptor::for_call(
+            &cfg,
+            &entry,
+            crate::now_ms(),
+            &self.shared.added_caps(&cfg, &entry),
+        );
         let cap = view.capability(&o.cap).ok_or_else(|| {
             RpcError::new(
                 ErrorCode::UnknownCapability,
@@ -1984,7 +1996,7 @@ impl Link {
         let all: &[&str] = match g.cap.as_str() {
             "node" => &["status"],
             "exec" => &["shell", "confinement"],
-            "settings" => &["document", "version", "sudo"],
+            "settings" => &["document", "version", "sudo", "capabilities"],
             _ => &[],
         };
         let keys: Vec<String> = if g.keys.is_empty() {
@@ -2009,6 +2021,7 @@ impl Link {
                     serde_json::to_value(doc).map_err(|e| RpcError::internal(e.to_string()))?
                 }
                 "sudo" => json!(if self.shared.sudo_on() { "on" } else { "off" }),
+                "capabilities" => self.added_by_center(&cfg),
                 _ => json!(lock(&self.shared.store).version()),
             };
             out.insert(k, v);
@@ -2123,8 +2136,12 @@ impl Link {
         // the folders the owner granted alone.
         let granted = entry.clone();
         let entry = self.shared.with_built_in(&cfg, entry);
-        let view =
-            descriptor::for_call(&cfg, &entry, crate::now_ms(), &self.shared.added_caps(&cfg));
+        let view = descriptor::for_call(
+            &cfg,
+            &entry,
+            crate::now_ms(),
+            &self.shared.added_caps(&cfg, &entry),
+        );
         let cap = view.capability(&inv.cap).ok_or_else(|| {
             RpcError::new(
                 ErrorCode::UnknownCapability,
@@ -2152,16 +2169,20 @@ impl Link {
             return Err(RpcError::new(ErrorCode::Disabled, why));
         }
         // A capability of the config (crate::config_cap) runs the owner's
-        // command, decided and audited like any other call.
-        if cap.provider == crate::config_cap::PROVIDER {
-            let decl = crate::config_cap::find(&cfg, &inv.cap, &inv.action)
-                .cloned()
-                .ok_or_else(|| {
-                    RpcError::new(
-                        ErrorCode::UnknownMember,
-                        format!("{}.{} is not served", inv.cap, inv.action),
-                    )
-                })?;
+        // command, and one this center added its own, decided and audited
+        // like any other call.
+        if cap.provider == crate::config_cap::PROVIDER
+            || cap.provider == nerve_policy::config::CENTER_ADDED
+        {
+            let decl =
+                crate::config_cap::find_for(&cfg, &entry, &cap.provider, &inv.cap, &inv.action)
+                    .cloned()
+                    .ok_or_else(|| {
+                        RpcError::new(
+                            ErrorCode::UnknownMember,
+                            format!("{}.{} is not served", inv.cap, inv.action),
+                        )
+                    })?;
             return self
                 .config_call(id, &cfg, granted, effect, &inv, decl)
                 .await;
@@ -2238,6 +2259,9 @@ impl Link {
             ("settings", "pause") => self.settings_pause(),
             ("settings", "sudo-offer") => self.sudo_offer(&entry),
             ("settings", "sudo") => self.settings_sudo(&inv.args).await,
+            ("settings", "cap-add" | "cap-edit" | "cap-rm") => {
+                self.settings_cap(&inv.action, &inv.args)
+            }
             ("exec", "signal") => {
                 // Decided and audited like any other action; its rule target
                 // is the action itself.
@@ -2743,6 +2767,10 @@ impl Link {
         let attached = self.shared.providers.caps();
         let mut store = lock(&self.shared.store);
         let mut known = crate::config_cap::declared(store.config());
+        // So do the ones this center added, as their effects count.
+        if let Some(e) = store.config().center(&self.name) {
+            known.extend(crate::config_cap::center_declared(e));
+        }
         known.extend(attached);
         let owner_only = crate::provider::owner_only_of(&known);
         let r =
@@ -2750,6 +2778,79 @@ impl Link {
                 self.protected_with(opts, account.as_ref(), &own)
             });
         settings_result(r)
+    }
+
+    /// `settings.cap-add`, `cap-edit` and `cap-rm`: a change to the
+    /// capabilities this center added itself (crate::config_cap::center_change),
+    /// saved and audited as this center's. A node that offers none (Windows
+    /// for now, a node run by hand) refuses it with the reason.
+    fn settings_cap(&self, action: &str, args: &Map<String, Value>) -> Result<Value, RpcError> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Sent {
+            capability: Value,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Named {
+            name: String,
+        }
+        let os = std::env::consts::OS;
+        if let Some(why) = crate::config_cap::center_refusal(os, self.shared.config_caps) {
+            return Err(RpcError::new(ErrorCode::Unavailable, why));
+        }
+        // Read before the store, as `settings.set` does.
+        let programs = self.shared.providers.caps();
+        let mut store = lock(&self.shared.store);
+        let max = store.config().limits.max_timeout_secs;
+        let change = match action {
+            "cap-rm" => crate::config_cap::CenterChange::Rm(params::<Named>(args)?.name),
+            _ => {
+                let sent: Sent = params(args)?;
+                let c = crate::config_cap::from_sent(&sent.capability, max)
+                    .map_err(RpcError::invalid_args)?;
+                if action == "cap-add" {
+                    crate::config_cap::CenterChange::Add(c)
+                } else {
+                    crate::config_cap::CenterChange::Edit(c)
+                }
+            }
+        };
+        let installed = self.shared.config_caps;
+        let r = store.set_center_capabilities(&self.name, |cfg| {
+            crate::config_cap::center_change(cfg, &self.name, change, os, installed, &programs)
+        });
+        settings_result(r)
+    }
+
+    /// What `settings.get` gives of the capabilities this center added: each
+    /// as it was sent (crate::config_cap::entry), with why the node leaves it
+    /// out where it does, and why this node takes none, where it takes none.
+    fn added_by_center(&self, cfg: &NodeConfig) -> Value {
+        let os = std::env::consts::OS;
+        let installed = self.shared.config_caps;
+        let taken = self
+            .shared
+            .providers
+            .caps()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        let entries: Vec<Value> = cfg
+            .center(&self.name)
+            .map(|e| &e.capabilities[..])
+            .unwrap_or_default()
+            .iter()
+            .map(|c| {
+                let mut v = crate::config_cap::entry(c);
+                if let Some(why) = crate::config_cap::center_left_out(c, cfg, os, installed, &taken)
+                {
+                    v["left_out"] = json!(why);
+                }
+                v
+            })
+            .collect();
+        json!({"entries": entries, "refused": crate::config_cap::center_refusal(os, installed)})
     }
 
     /// `settings.pause`: a center may pause itself, never unpause.
@@ -3909,6 +4010,7 @@ mod tests {
             pin_rotations: 0,
             old_pin: None,
             policy: Default::default(),
+            capabilities: Vec::new(),
         });
         cfg.connection.proxy = Some(format!(
             "http://127.0.0.1:{}",
