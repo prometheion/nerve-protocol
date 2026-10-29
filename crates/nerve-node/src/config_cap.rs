@@ -154,13 +154,16 @@ pub fn counted(effect: Effect) -> Effect {
 /// Why the node leaves out `c`, a capability `entry`'s center added, if it
 /// does: as one of the owner's ([`left_out`]), or because its capability is
 /// the owner's (the config names it) or a program's (`taken`, the ids the
-/// attached programs offer), which come first.
+/// attached programs offer), which come first. Where `kept`, `c` is one
+/// the center keeps, not one it asks to add, and the reason says that the
+/// program's is not offered to it either while it does ([`programs_for`]).
 pub fn center_left_out(
     c: &ConfigCapability,
     cfg: &NodeConfig,
     os: &str,
     installed: bool,
     taken: &BTreeSet<String>,
+    kept: bool,
 ) -> Option<String> {
     let cap = c.split().0;
     if let Some(why) = center_refusal(os, installed) {
@@ -168,9 +171,12 @@ pub fn center_left_out(
     } else if names(cfg, cap) {
         Some(format!("the owner declares {cap} in node.toml"))
     } else if taken.contains(cap) {
-        Some(format!(
-            "a program the owner allows offers {cap}, which this center is offered only once it removes its own"
-        ))
+        let tail = if kept {
+            ", which this center is offered only once it removes its own"
+        } else {
+            ""
+        };
+        Some(format!("a program the owner allows offers {cap}{tail}"))
     } else {
         left_out(c, os, installed)
     }
@@ -192,7 +198,7 @@ pub fn center_offered(
         entry
             .capabilities
             .iter()
-            .filter(|c| center_left_out(c, cfg, os, installed, &taken).is_none()),
+            .filter(|c| center_left_out(c, cfg, os, installed, &taken, true).is_none()),
         CENTER_ADDED,
         counted,
     )
@@ -207,6 +213,19 @@ pub fn center_offered(
 pub fn programs_for(entry: &CenterEntry, mut programs: Vec<Capability>) -> Vec<Capability> {
     programs.retain(|p| !entry.capabilities.iter().any(|c| c.split().0 == p.id));
     programs
+}
+
+/// The capabilities `entry`'s center added that sense or actuate, offered
+/// now or not: what only the owner may turn on for that center goes by
+/// them as well (crate::provider::owner_only_of). Its `on` or rule for
+/// their capability, or for the action, set while another one offered
+/// that name without sensing, would cover its own once that one goes.
+pub fn center_sensing(entry: &CenterEntry) -> Vec<Capability> {
+    capabilities_of(
+        entry.capabilities.iter().filter(|c| senses(c.effect)),
+        CENTER_ADDED,
+        counted,
+    )
 }
 
 /// Whether a `caps` key or an allow rule's scope names an action
@@ -232,14 +251,20 @@ pub fn own_action(entry: &CenterEntry, known: &[Capability]) -> impl Fn(&str) ->
 /// center's `on` and allow rules for that very action: they were set for
 /// its command (by the center, or by the owner for one that senses), and
 /// kept they would cover what a program the owner allows offers under that
-/// name later. An `off` or `hidden`, and a deny rule, stay. Whether it had
+/// name later. An `off` or `hidden`, and a deny rule, stay. Where the
+/// owner's config declares `name` too (`owners`), the switch and rules stay
+/// as well: the center's own was left out, so they are what turns the
+/// owner's on for that center ([`hold_new`] guards it). Whether it had
 /// one.
-pub fn remove_added(entry: &mut CenterEntry, name: &str) -> bool {
+pub fn remove_added(entry: &mut CenterEntry, name: &str, owners: bool) -> bool {
     use nerve_policy::config::CapSetting;
     let Some(i) = entry.capabilities.iter().position(|c| c.name == name) else {
         return false;
     };
     entry.capabilities.remove(i);
+    if owners {
+        return true;
+    }
     let p = &mut entry.policy;
     if p.caps.get(name) == Some(&CapSetting::On) {
         p.caps.remove(name);
@@ -357,14 +382,15 @@ pub fn center_change(
         .center(center)
         .is_some_and(|e| e.capabilities.iter().any(|c| c.name == name));
     let removes_own = matches!(change, CenterChange::Rm(_)) && own;
-    if owners(&name) && !removes_own {
+    let owner_has = owners(&name);
+    if owner_has && !removes_own {
         return Err(SetError::Forbidden(format!(
             "capability {name} is the owner's (node.toml): a center does not change it"
         )));
     }
     if let CenterChange::Add(c) | CenterChange::Edit(c) = &change {
         let taken: BTreeSet<String> = programs.iter().map(|c| c.id.clone()).collect();
-        if let Some(why) = center_left_out(c, cfg, os, installed, &taken) {
+        if let Some(why) = center_left_out(c, cfg, os, installed, &taken, false) {
             return Err(SetError::Forbidden(format!(
                 "capability {name}: this node would not offer it: {why}"
             )));
@@ -383,7 +409,7 @@ pub fn center_change(
         (CenterChange::Add(c), None) => e.capabilities.push(c),
         (CenterChange::Edit(c), Some(i)) => e.capabilities[i] = c,
         (CenterChange::Rm(_), Some(_)) => {
-            remove_added(e, &name);
+            remove_added(e, &name, owner_has);
         }
         (CenterChange::Edit(_) | CenterChange::Rm(_), None) => {
             return Err(SetError::Invalid(format!(
@@ -901,8 +927,9 @@ command = ["sensors", "-l"]
             ("desk.extra", "a program the owner allows offers desk"),
         ] {
             let e = add(&mut c, "lab", sent(name, "read")).unwrap_err();
+            // It has nothing of its own there to remove.
             assert!(
-                matches!(&e, SetError::Forbidden(m) if m.contains(why)),
+                matches!(&e, SetError::Forbidden(m) if m.contains(why) && !m.contains("its own")),
                 "{e:?}"
             );
         }
@@ -1028,11 +1055,28 @@ command = ["sensors", "-l"]
             |c: &mut NodeConfig, x: CenterChange| center_change(c, "lab", x, "linux", true, &[]);
         change(&mut c, CenterChange::Add(sent("notes.show", "read", "a"))).unwrap();
         // The owner takes the name: the center's is left out, and the
-        // center still removes it.
+        // center still removes it. The `on` and the rule for that name then
+        // turn on the owner's for it, and stay; without the owner's they go.
         let mut owners = c.clone();
         owners.capabilities.push(sent("notes.show", "read", "mine"));
+        for c in [&mut c, &mut owners] {
+            let p = &mut c.center_mut("lab").unwrap().policy;
+            p.caps.insert("notes.show".into(), CapSetting::On);
+            p.allow = vec!["notes.show:/srv/*".into()];
+        }
+        let mut gone = c.clone();
         change(&mut owners, CenterChange::Rm("notes.show".into())).unwrap();
         assert!(owners.center("lab").unwrap().capabilities.is_empty());
+        let p = &owners.center("lab").unwrap().policy;
+        assert_eq!(p.caps.get("notes.show"), Some(&CapSetting::On));
+        assert_eq!(p.allow, ["notes.show:/srv/*"]);
+        change(&mut gone, CenterChange::Rm("notes.show".into())).unwrap();
+        let p = &gone.center("lab").unwrap().policy;
+        assert_eq!(p.caps.get("notes.show"), None);
+        assert!(p.allow.is_empty());
+        let p = &mut c.center_mut("lab").unwrap().policy;
+        p.caps.clear();
+        p.allow.clear();
         assert_eq!(
             owners.capabilities.len(),
             TWO.matches("[[capability]]").count() + 1

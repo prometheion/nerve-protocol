@@ -1396,7 +1396,8 @@ pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>, installed: bool) 
             rows.extend(row(&c, &source).into_iter().map(only));
         }
         for decl in &e.capabilities {
-            if let Some(why) = crate::config_cap::center_left_out(decl, cfg, os, installed, &taken)
+            if let Some(why) =
+                crate::config_cap::center_left_out(decl, cfg, os, installed, &taken, true)
             {
                 let (cap, action) = decl.split();
                 rows.push(only(
@@ -1590,9 +1591,10 @@ pub(crate) async fn serve(
 /// when a provider later offers that capability or action with a sense
 /// or actuate action under the same name.
 ///
-/// `caps` are those the attached programs offer and those the config
-/// declares (crate::config_cap::declared), offered now or not, which count
-/// alike.
+/// `caps` are those the attached programs offer, those the config
+/// declares (crate::config_cap::declared) and those the center added that
+/// sense or actuate (crate::config_cap::center_sensing), the last two
+/// offered now or not, which count alike.
 pub fn owner_only_of(caps: &[Capability]) -> impl Fn(&str) -> bool + use<> {
     let mut sensing = BTreeSet::new();
     let mut offered: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();

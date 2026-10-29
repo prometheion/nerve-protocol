@@ -2768,14 +2768,19 @@ impl Link {
         let mut store = lock(&self.shared.store);
         let mut known = crate::config_cap::declared(store.config());
         known.extend(attached);
-        let others = crate::provider::owner_only_of(&known);
+        let entry = store.config().center(&self.name);
         // The actions this center added that do not sense it turns on
         // itself, each by its name; their capability as a whole stays the
         // owner's, as one nothing offers (crate::config_cap::own_action).
-        let mine = store
-            .config()
-            .center(&self.name)
-            .map(|e| crate::config_cap::own_action(e, &known));
+        let mine = entry.map(|e| crate::config_cap::own_action(e, &known));
+        // Those it added that sense wait for the owner whatever else
+        // offers their name meanwhile (crate::config_cap::center_sensing).
+        known.extend(
+            entry
+                .map(crate::config_cap::center_sensing)
+                .unwrap_or_default(),
+        );
+        let others = crate::provider::owner_only_of(&known);
         let owner_only =
             move |scope: &str| others(scope) && !mine.as_ref().is_some_and(|f| f(scope));
         let r =
@@ -2848,7 +2853,8 @@ impl Link {
             .iter()
             .map(|c| {
                 let mut v = crate::config_cap::entry(c);
-                if let Some(why) = crate::config_cap::center_left_out(c, cfg, os, installed, &taken)
+                if let Some(why) =
+                    crate::config_cap::center_left_out(c, cfg, os, installed, &taken, true)
                 {
                     v["left_out"] = json!(why);
                 }
