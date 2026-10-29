@@ -220,19 +220,25 @@ these limits:
   a center changes one to sense or act, or changes anything but the summary
   of one that does (its command, the arguments it takes, its time limit),
   a switch or rule that covered it is switched off, also your `on`: you turn
-  on what it does now.
+  on what it does now. So it is when you declare one that senses or acts
+  under the name of one a center added: your `on` for the center's was
+  given for its command, so `cap add` switches it off for that center too,
+  and says so.
 - **Yours come first.** A center changes and removes none of your
   capabilities, and adds none under the name of a capability of yours or of
   a program you allow that is attached now. One it added is left out while
   you declare its capability or such a program offers it. The center can
   still remove that one. While it keeps it, that center is not offered the
-  program's capability of that name either: its switches and rules were set
-  for its own command, not for what the program does.
+  program's capability of that name either, and gets none of its events,
+  state or streams, also where it subscribed before: its switches and rules
+  were set for its own command, not for what the program does.
 - **Removed with its switches.** When the center removes one, or you do,
   the node also drops that center's `on` and allow rules for that very
   action, yours too: they were given for that command. An `off`, a `hidden`
   and a deny rule stay. Where you declare that very name yourself, they all
-  stay: the center's was left out, so they turn on yours for that center.
+  stay: the center's was left out, so they turn on yours for that center
+  (an `on` for one of yours that senses or acts only where you set it after
+  declaring it).
 - **Audited.** Each add, change and removal is in the [audit log](audit.md)
   as that center's change of the settings, with the old and the new entry.
 - **You can turn it off or remove it.** `cap set NAME off --center <name>`
@@ -254,7 +260,7 @@ you run yourself has no `nerve-run`: either refuses the center's add and
 says why.
 
 `cap ls` lists them with the source `center <name>`, and each one's
-command after yours:
+command after yours; `cap ls --center <name>` only that center's:
 
 ```
 say.back  execute  center lab  lab: on

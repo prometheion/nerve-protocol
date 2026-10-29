@@ -294,8 +294,12 @@ with no switch of its own takes its capability's, as the node does, and
 shows it marked "like its capability"; with neither chosen its mode decides,
 and `sense` and `actuate` need your **On**. One the
 node leaves out, such as a program's action whose schema is outside what a
-center takes, says why in red and has no switch. A stopped node shows its
-own capabilities and those of `node.toml`; the programs' show while it runs.
+center takes, says why in red and has no switch. A capability the chosen
+center [added itself](config-capabilities.md#capabilities-a-center-adds)
+shows with the source `center <name>` and its switches, and only while that
+center is chosen; remove it with `nerve-node cap rm NAME --center <name>`.
+A stopped node shows its own capabilities and those of `node.toml`; the
+programs' show while it runs.
 
 **Your capabilities** lists those of `node.toml` with **Edit** and remove.
 **Add a capability…** opens a form: the name (`cap.action`), what it does,
