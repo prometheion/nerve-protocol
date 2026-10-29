@@ -16,6 +16,7 @@ use crate::broker::Launch;
 use crate::runner::{Follow, Runner};
 use crate::{AppWindow, Install, Load, Manual, Motion, Page, Perm, Prefs, Store, Tone, Type, view};
 
+mod caps;
 mod install;
 mod live;
 mod node;
@@ -52,6 +53,8 @@ pub enum Choose {
     OpenBackup,
     /// The program an update takes.
     Program,
+    /// A program to allow as a provider.
+    Provider,
 }
 
 /// Shows the system's dialog for a [`Choose`]; tests answer for it.
@@ -84,6 +87,8 @@ enum Pending {
     Accept,
     /// `audit clear`, or with `true` `log clear`.
     Clear(bool),
+    /// `cap rm` of a capability of node.toml.
+    CapRemove(String),
 }
 
 /// What a command that keeps answering gave, until the window takes it.
@@ -141,6 +146,19 @@ pub struct Ctl {
     /// Which reading of the Permissions page is the latest: an answer for
     /// an earlier one (another center picked meanwhile) is dropped.
     perm_asked: Cell<u64>,
+    /// The same for the Capabilities page, and what `cap ls` said last:
+    /// the entries of node.toml its dialog edits.
+    caps_asked: Cell<u64>,
+    /// The node's `limits.max_timeout_secs` as the page last read it: the
+    /// most a capability's time limit may be.
+    caps_max_timeout: Cell<u64>,
+    /// The capability dialog that is open, or was last: a count, so an
+    /// answer of a save that comes later knows whether it is still its own.
+    cap_dialogs: Cell<u64>,
+    /// Whether the open capability dialog was saved once: its empty fields
+    /// then show as errors until it closes.
+    cap_tried: Cell<bool>,
+    caps_listing: RefCell<Value>,
     /// Restarts the service a moment after a change it takes only then.
     restart_timer: slint::Timer,
     /// A restart the app said would come and that has not run yet; the
@@ -296,6 +314,11 @@ impl Ctl {
             link: RefCell::new(None),
             first_run: Cell::new(false),
             perm_asked: Cell::new(0),
+            caps_asked: Cell::new(0),
+            caps_max_timeout: Cell::new(nerve_policy::config::Limits::default().max_timeout_secs),
+            cap_dialogs: Cell::new(0),
+            cap_tried: Cell::new(false),
+            caps_listing: RefCell::new(Value::Null),
             restart_timer: slint::Timer::default(),
             restart_waits: Cell::new(false),
             scheme_timer: slint::Timer::default(),
@@ -393,6 +416,7 @@ impl Ctl {
         store.on_set_appearance(move |i| c.set_appearance(i));
         node::wire(&ctl, window);
         perm::wire(&ctl, window);
+        caps::wire(&ctl, window);
         prefs::wire(&ctl, window);
         live::wire(&ctl, window);
         install::wire(&ctl, window);
@@ -737,6 +761,10 @@ impl Ctl {
                 self.refresh_status();
                 self.perm_load();
             }
+            Page::Capabilities => {
+                self.refresh_status();
+                self.caps_load();
+            }
             // The relay's state is read with the settings it shares.
             Page::Settings | Page::Relay => {
                 self.refresh_status();
@@ -800,6 +828,7 @@ impl Ctl {
                     s.set_status_error(SharedString::new());
                 });
                 self.perm_centers(&names);
+                self.caps_centers(&names);
                 if first {
                     self.after_first_status(names.is_empty());
                 }
@@ -1093,6 +1122,7 @@ impl Ctl {
                     }
                 });
             }
+            Pending::CapRemove(name) => self.cap_remove(&name),
             Pending::Accept => {
                 self.command(vec!["config".into(), "accept".into()], None, |c, answer| {
                     match answer {

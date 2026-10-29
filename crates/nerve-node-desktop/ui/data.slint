@@ -3,7 +3,7 @@
 
 import { Tone } from "theme.slint";
 
-export enum Page { overview, centers, relay, policy, audit, log, settings, help }
+export enum Page { overview, centers, relay, policy, capabilities, audit, log, settings, help }
 
 // What the app knows of something it asks the node for.
 export enum Load { loading, ready, failed }
@@ -81,14 +81,50 @@ export struct FolderRow {
     execute: bool,
 }
 
-// A capability or one of its actions, and its switch: 0 on, 1 off, 2 hidden.
+// A row of the Capabilities page (src/view.rs, cap_rows): a capability, or
+// one of its units (an action, a state key, an event or a stream) under it.
 export struct CapRow {
     name: string,
-    // An action, shown under its capability.
+    // A unit, shown under its capability.
     action: bool,
+    // What it does (read, sense event, ...) in its colour, and where it
+    // comes from: built-in, config, or program <name>; its line for the
+    // agent.
+    effect: string,
+    tone: Tone,
+    source: string,
+    summary: string,
+    // Why the node leaves it out, such as a schema outside the subset; ""
+    // when it offers it.
+    left-out: string,
+    // Its switch for the page's center, when it has one: -1 not set (the
+    // mode decides), 0 on, 1 off, 2 hidden. `inherited`: a unit with none
+    // of its own, which takes its capability's.
+    switchable: bool,
     setting: int,
-    // Set for this center, not the default.
-    set: bool,
+    inherited: bool,
+    // Whether the center may use it now, as the running node said: on,
+    // off, or "" while the node does not run.
+    now: string,
+}
+
+// A capability of node.toml the owner declared (`cap add`), to edit or
+// remove.
+export struct DeclaredRow {
+    name: string,
+    effect: string,
+    summary: string,
+    // Its command as one line, and what else is set (platform, timeout).
+    command: string,
+    detail: string,
+}
+
+// A program the owner allows as a provider: its name, its file, and whether
+// it is attached now ("" while the node does not run).
+export struct ProgramRow {
+    name: string,
+    exe: string,
+    attached: string,
 }
 
 export struct LogRow {

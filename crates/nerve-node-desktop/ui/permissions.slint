@@ -1,9 +1,10 @@
 // Permissions: what one center may do on this machine. Its mode, its
-// folders, its command rules, its capability switches, and the sudo switch
-// of the machine. Each change runs one `nerve-node` command.
+// folders, its command rules, and the sudo switch of the machine; its
+// capability switches are on the Capabilities page. Each change runs one
+// `nerve-node` command.
 
 import { Theme, Type, Space, Radius, Size, Tone } from "theme.slint";
-import { Load, FolderRow, CapRow } from "data.slint";
+import { Load, FolderRow } from "data.slint";
 import { Store, Perm } from "store.slint";
 import {
     Button, ButtonKind, Card, Pill, Banner, Loading, PageHeader, PageFrame, EmptyState, Divider, IconTile,
@@ -12,8 +13,8 @@ import {
 } from "widgets.slint";
 
 // A part of the page: its icon in its colour, its title, a line on it,
-// and its rows.
-component Section inherits Card {
+// and its rows. The Capabilities page has its parts alike.
+export component Section inherits Card {
     in property <image> icon;
     in property <Tone> tone: Tone.accent;
     in property <string> title;
@@ -578,49 +579,6 @@ component RuleSection inherits Section {
     }
 }
 
-component CapSection inherits Section {
-    icon: @image-url("icons/plug.svg");
-    title: "Capabilities";
-    text: "Off: " + Perm.center + " may not use it. Hidden: it does not see it.";
-    ScrollBox {
-        rows: Perm.caps.length;
-        for c[i] in Perm.caps: ListRow {
-            first: i == 0;
-            HorizontalLayout {
-                horizontal-stretch: 1;
-                padding-left: c.action ? Space.xl : 0;
-                spacing: Space.sm;
-                Text {
-                    text: c.name;
-                    color: c.action ? Theme.text-muted : Theme.text;
-                    font-size: Type.small;
-                    font-weight: c.action ? Type.regular : Type.semibold;
-                    font-family: Type.mono;
-                    vertical-alignment: center;
-                }
-                if c.set: VerticalLayout {
-                    alignment: center;
-                    horizontal-stretch: 0;
-                    Pill {
-                        text: "set here";
-                        tone: Tone.neutral;
-                    }
-                }
-                Rectangle {
-                    horizontal-stretch: 1;
-                }
-            }
-            Segmented {
-                options: ["On", "Off", "Hidden"];
-                current: c.setting;
-                chosen(s) => {
-                    Perm.cap-set(c.name, s);
-                }
-            }
-        }
-    }
-}
-
 // Sudo: the machine's switch, and the center's sudo list, which counts
 // while sudo is on.
 component SudoSection inherits Section {
@@ -744,10 +702,10 @@ export component PermissionsPage inherits PageFrame {
         }
     }
 
-    if Perm.centers.length > 0 && Perm.load == Load.loading && Perm.caps.length == 0: Loading { }
+    if Perm.centers.length > 0 && Perm.load == Load.loading && !Perm.read: Loading { }
 
     Reveal {
-        shown: Perm.centers.length > 0 && Perm.caps.length > 0;
+        shown: Perm.centers.length > 0 && Perm.read;
         gap: Space.xxl;
         VerticalLayout {
             // A pairing from before the guard, one with the guard's older
@@ -775,7 +733,6 @@ export component PermissionsPage inherits PageFrame {
             ModeSection { }
             FolderSection { }
             RuleSection { }
-            CapSection { }
             SudoSection { }
           }
         }

@@ -229,11 +229,11 @@ so the node checks a value as it checks the command line's.
 
 The settings without a control of their own are under **Advanced**:
 `machine.allow_root` and `machine.sudo_path` (for a node run by hand, not
-the installed one), `providers.allowed` ([providers](providers.md)), and
-`policy.protected` of a center ([protected paths](protected-paths.md)). The
-[capabilities of your `node.toml`](config-capabilities.md) have no page yet:
-`nerve-node cap add`, `cap edit` and `cap rm` change them.
-A center's other settings are on **Centers** and **Permissions**.
+the installed one), and `policy.protected` of a center ([protected
+paths](protected-paths.md)). The programs allowed as providers and the
+capabilities of your `node.toml` are on [Capabilities](#capabilities).
+A center's other settings are on **Centers**, **Permissions** and
+**Capabilities**.
 
 On **Permissions**, the commands that count in the center's mode come first:
 in allowlist mode its allowed commands, with the deny rules below them as
@@ -243,7 +243,8 @@ mode. The sudo list is in **Sudo**, beside its switch. The pencil beside a
 rule edits it in place, as one change (`rule edit`), the rules of the guard
 too. A list longer than some eight rows (rules, folders, capabilities, a
 relay's nodes, the centers on the Overview) scrolls in a box of its own, with
-its scroll bar beside it, so the page stays short.
+its scroll bar beside it, so the page stays short. A center's capability
+switches are on [Capabilities](#capabilities).
 
 On **Permissions**, the **Mode** names who runs the commands: in folder
 mode `nerve-run`, in user mode you; in allowlist mode **Run them as you**
@@ -278,6 +279,47 @@ What stays with the terminal: restoring the keys straight into the keyring
 (`restore --secret-storage keyring`; restore, then switch **Keys** to the
 keyring), and the keyring `setup` installs for the node's account on a
 Linux without a desktop session for it.
+
+## Capabilities
+
+**Capabilities** (Ctrl+9) shows what the node offers, as `nerve-node cap ls`
+does: its own capabilities, the [capabilities of your
+`node.toml`](config-capabilities.md) and those of the programs you allow
+([providers](providers.md)). Each action, and each state key, event or
+stream of a program, has its effect (`read`, `write`, `execute`, `sense`,
+`actuate`), its line for the agent and, while the node runs, whether the
+chosen center may use it now. **On**, **Off** and **Hidden** switch a
+capability or one of its actions for that center (`cap set`). An action
+with no switch of its own takes its capability's, as the node does, and
+shows it marked "like its capability"; with neither chosen its mode decides,
+and `sense` and `actuate` need your **On**. One the
+node leaves out, such as a program's action whose schema is outside what a
+center takes, says why in red and has no switch. A stopped node shows its
+own capabilities and those of `node.toml`; the programs' show while it runs.
+
+**Your capabilities** lists those of `node.toml` with **Edit** and remove.
+**Add a capability…** opens a form: the name (`cap.action`), what it does,
+a summary, the command (the program first; a word with blanks in quotes, a
+word `{field}` the call's argument `field`), the arguments' JSON Schema
+(empty for none), the result (empty for the printed text, or a JSON Schema),
+a time limit and the system it runs on. The form checks each field as the
+node and the center do while you type, and says what is wrong below it (the
+time against the node's `limits.max_timeout_secs`); a schema outside the
+subset says where and why, and nothing is saved, and **Add** with a name or
+command missing shows which. The node checks again when you save (`cap add`,
+`cap edit`), and what it refuses, such as a limit changed since the page
+read it, stays in the form with its reason. Removing one
+(`cap rm`) asks first.
+
+**Programs** lists the programs allowed as providers, whether each is
+attached, and a row to allow one by its name and its file (`cap provider
+allow`), which **Choose…** picks.
+
+A node run by hand offers no capabilities of `node.toml` (they run as
+`nerve-run`, which only the installed node has), and the page says so. On
+Windows the node offers neither programs nor capabilities of `node.toml`
+yet, so the page shows what is declared and says so, without the forms to
+add more.
 
 ## Relay
 
@@ -391,6 +433,7 @@ in PowerShell. A batch file waits for it as it is.
 | Keys | Do |
 |---|---|
 | Ctrl+1 … Ctrl+8 | Open Overview, Centers, Relay, Permissions, Audit, Log, Settings, Help |
+| Ctrl+9 | Open Capabilities |
 | Ctrl+R, F5 | Read the page again |
 | Esc | Close a dialog |
 | Enter | The dialog's main button |
