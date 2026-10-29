@@ -1559,6 +1559,9 @@ function capForm(d, f) {
     t.value = v[key];
     return t;
   };
+  // The choices have no field of their own, but say what is wrong as well.
+  errs.effect = el("span", { class: "hint error", role: "status" });
+  errs.platform = el("span", { class: "hint error", role: "status" });
   const refusal = el("div", {});
   let timer = null;
   let asked = 0;
@@ -1593,12 +1596,12 @@ function capForm(d, f) {
       field("name", "Name (cap.action, like sensors.read)", text("name", { readonly: !f.adding })),
       field("timeout", "Time limit (seconds, empty for the machine's default)", text("timeout", { inputmode: "numeric" }))),
     el("div", { class: "form-row" }, el("div", { class: "field grow" }, el("span", { class: "label" }, "What it does"), effect,
-      el("span", { class: "hint" }, "It counts as execute whatever it says, except sense and actuate, which only the machine's owner turns on."))),
+      el("span", { class: "hint" }, "It counts as execute whatever it says, except sense and actuate, which only the machine's owner turns on."), errs.effect)),
     el("div", { class: "form-row" }, field("summary", "Summary (one line for the agent)", text("summary"))),
     el("div", { class: "form-row" }, field("command", "Command (the program first; a word {field} is the argument field)", text("command", { class: "input mono" }))),
     el("div", { class: "form-row" }, field("params", "Arguments (a JSON Schema; empty for none)", area("params", "{\"type\": \"object\", \"properties\": {}}"))),
     el("div", { class: "form-row" }, field("result", "Result (a JSON Schema the printed JSON fits; empty for the printed text)", area("result", "empty: the printed text"))),
-    el("div", { class: "form-row" }, el("div", { class: "field grow" }, el("span", { class: "label" }, "Where it runs"), platform)),
+    el("div", { class: "form-row" }, el("div", { class: "field grow" }, el("span", { class: "label" }, "Where it runs"), platform, errs.platform)),
     refusal,
     el("div", { class: "actions" },
       btn("Cancel", "ghost", () => { c.form = null; draw(true); }, null, "capform:cancel"),

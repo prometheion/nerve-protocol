@@ -627,10 +627,15 @@ entries as it checks the owner's. The node:
 - answers `unavailable` with the reason where it takes none: Windows (issue
   #176) and a node run by hand, which has no `nerve-run`;
 - refuses `forbidden` a change that names an entry of the owner's
-  (`cap edit`/`cap rm` of one), and an add or edit whose `cap` the owner's
+  (`cap edit` of one, or `cap rm` of one the center has no entry of: it
+  removes its own also where the owner came to declare that name), and an
+  add or edit whose `cap` the owner's
   `[[capability]]` names or an attached provider offers, or that this node
   would leave out (its platform); `invalid_args` an add of a name the center
-  added already, and an edit or removal of one it did not add;
+  added already, an edit or removal of one it did not add, and one that
+  takes the center's entries together past 256 KiB as JSON (a summary is at
+  most 2048 bytes and a command element at most 4096 bytes, for the owner's
+  entries too);
 - offers them to that center alone, with `provider: "center-added"`, each
   action's effect `execute` unless it declared `sense` or `actuate`, which
   stays; marks them `as_account` as the owner's (above); and leaves one out
@@ -639,10 +644,14 @@ entries as it checks the owner's. The node:
   see them (`unknown_capability`);
 - runs a call of one as it runs the owner's (above), always as `nerve-run`;
 - after an add or edit, switches an action that came to sense or actuate off
-  for that center where its own `on` or allow rule covers it, as above;
+  for that center where its own `on` or allow rule covers it, as above; an
+  edit of one that senses or actuates that changes its effect or command
+  counts as one that came to, so the owner's `on` goes too;
 - keeps, in `settings.set`, an `off` or `hidden` switch (of the capability or
-  one of its actions) of a capability the center added until the owner
-  changes it, whoever set it, as only the owner unpauses: the owner turns one
+  one of its actions) of a capability the center added, while the center
+  keeps an entry of it, until the owner changes it, whoever set it, as only
+  the owner unpauses (a pause: a center that removes its entry and adds it
+  again starts afresh; only taking the grant back stops it): the owner turns one
   off (`cap set NAME off --center <name>`) and removes one (`cap rm NAME
   --center <name>`); a center turns on, by `caps` or its rules, one that
   neither senses nor actuates, as it may for the owner's.

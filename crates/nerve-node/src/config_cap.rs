@@ -306,7 +306,13 @@ pub fn center_change(
         CenterChange::Add(c) | CenterChange::Edit(c) => c.name.clone(),
         CenterChange::Rm(n) => n.clone(),
     };
-    if owners(&name) {
+    // A removal touches only the center's own list, so it takes away its
+    // own entry also where the owner came to declare the same name later.
+    let own = cfg
+        .center(center)
+        .is_some_and(|e| e.capabilities.iter().any(|c| c.name == name));
+    let removes_own = matches!(change, CenterChange::Rm(_)) && own;
+    if owners(&name) && !removes_own {
         return Err(SetError::Forbidden(format!(
             "capability {name} is the owner's (node.toml): a center does not change it"
         )));
@@ -393,8 +399,9 @@ pub fn senses(effect: nerve_proto::descriptor::Effect) -> bool {
 /// earlier switch (`cap set` of its capability, or of the action while it
 /// only read) or allow rule would let that center use it at once: such a
 /// switch was set for what it did then, perhaps by the center itself, and
-/// only the owner turns on what senses or actuates. A center cannot take
-/// that `off` away. Returns those centers, each with the action. Whoever
+/// only the owner turns on what senses or actuates. One a center added
+/// that senses counts as new again where its effect or command changed.
+/// A center cannot take that `off` away. Returns those centers, each with the action. Whoever
 /// changes the config's capabilities does it: `cap add` and `cap edit`, and
 /// the node as it takes a file the owner wrote (`config accept`).
 pub fn hold_new(before: &NodeConfig, after: &mut NodeConfig) -> Vec<(String, String)> {
@@ -413,11 +420,26 @@ pub fn hold_new(before: &NodeConfig, after: &mut NodeConfig) -> Vec<(String, Str
                 .chain(was)
                 .any(|b| b.name == name && senses(b.effect))
         };
+        // A center edits what it added itself, so the owner's `on` for one
+        // that senses was given for what it did then: one of its own counts
+        // as new again where its effect or command changed.
+        let same = |c: &ConfigCapability| {
+            was.iter().any(|b| {
+                b.name == c.name
+                    && senses(b.effect)
+                    && b.effect == c.effect
+                    && b.command == c.command
+            })
+        };
         let came: Vec<ConfigCapability> = after
             .capabilities
             .iter()
-            .chain(&e.capabilities)
             .filter(|c| senses(c.effect) && !sensed(&c.name))
+            .chain(
+                e.capabilities
+                    .iter()
+                    .filter(|c| senses(c.effect) && !same(c)),
+            )
             .cloned()
             .collect();
         for c in came {
@@ -925,6 +947,73 @@ command = ["sensors", "-l"]
             full,
             "what entry gives, from_sent takes"
         );
+    }
+
+    /// A center removes its own entry also once the owner declares the
+    /// same name, and an edit of one that senses waits for the owner's
+    /// `on` again where its effect or command changed.
+    #[test]
+    fn a_center_removes_its_own_and_an_edit_of_a_sensing_one_waits_again() {
+        use nerve_policy::config::CapSetting;
+        let mut c = cfg(&format!(
+            "{TWO}\n[[center]]\nname = \"lab\"\ncenter_id = \"c1\"\nurl = \"https://lab.example\"\nnode_id = \"n1\"\nsettings = \"write\"\n"
+        ));
+        let sent = |name: &str, effect: &str, word: &str| {
+            from_sent(
+                &json!({"name": name, "effect": effect, "command": ["echo", word]}),
+                60,
+            )
+            .unwrap()
+        };
+        let change =
+            |c: &mut NodeConfig, x: CenterChange| center_change(c, "lab", x, "linux", true, &[]);
+        change(&mut c, CenterChange::Add(sent("notes.show", "read", "a"))).unwrap();
+        // The owner takes the name: the center's is left out, and the
+        // center still removes it.
+        let mut owners = c.clone();
+        owners.capabilities.push(sent("notes.show", "read", "mine"));
+        change(&mut owners, CenterChange::Rm("notes.show".into())).unwrap();
+        assert!(owners.center("lab").unwrap().capabilities.is_empty());
+        assert_eq!(
+            owners.capabilities.len(),
+            TWO.matches("[[capability]]").count() + 1
+        );
+        // One that senses, which the owner turned on.
+        change(
+            &mut c,
+            CenterChange::Add(sent("cam.look", "sense", "frame")),
+        )
+        .unwrap();
+        let on = |c: &mut NodeConfig| {
+            c.center_mut("lab")
+                .unwrap()
+                .policy
+                .caps
+                .insert("cam.look".into(), CapSetting::On);
+        };
+        let setting = |c: &NodeConfig| {
+            c.center("lab")
+                .unwrap()
+                .policy
+                .caps
+                .get("cam.look")
+                .cloned()
+        };
+        on(&mut c);
+        // The same again keeps the owner's `on`; so does a new summary.
+        let mut same = sent("cam.look", "sense", "frame");
+        same.summary = "A look.".into();
+        change(&mut c, CenterChange::Edit(same)).unwrap();
+        assert_eq!(setting(&c), Some(CapSetting::On));
+        for (effect, word) in [("sense", "other"), ("actuate", "frame")] {
+            let mut edited = c.clone();
+            change(
+                &mut edited,
+                CenterChange::Edit(sent("cam.look", effect, word)),
+            )
+            .unwrap();
+            assert_eq!(setting(&edited), Some(CapSetting::Off), "{effect} {word}");
+        }
     }
 
     #[test]

@@ -1323,6 +1323,24 @@ mod tests {
             matches!(&e, SetError::Invalid(m) if m.contains("center home: two capabilities are named say.back")),
             "{e:?}"
         );
+        // And so is their size together.
+        let big = |i: usize| {
+            let mut c = cap("echo");
+            c.name = format!("big.n{i}");
+            c.command.push("x".repeat(4096));
+            c
+        };
+        let e = s
+            .set_center_capabilities("home", |cfg| {
+                let e = cfg.center_mut("home").unwrap();
+                e.capabilities.extend((0..63).map(big));
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(
+            matches!(&e, SetError::Invalid(m) if m.contains("center home: its capabilities take")),
+            "{e:?}"
+        );
         let entries = s.audit.read().unwrap();
         let last = entries.last().unwrap();
         assert_eq!(last["kind"], "settings");

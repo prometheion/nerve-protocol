@@ -210,20 +210,27 @@ these limits:
   allow commands is refused. A `read` never passes for a read.
 - **Sensing waits for you.** One that says `sense` or `actuate` stays so, and
   only you turn it on (`cap set NAME on --center <name>`), in every mode. When
-  a center changes one to sense or act, a switch or rule of its own that
-  covered it is switched off, as for yours.
+  a center changes one to sense or act, or changes the effect or the command
+  of one that does, a switch or rule that covered it is switched off, also
+  your `on`: you turn on what it does now.
 - **Yours come first.** A center changes and removes none of your
   capabilities, adds none under the name of a capability of yours or of a
   program you allow, and one it added is left out while you declare its
-  capability or such a program offers it.
+  capability or such a program offers it. The center can still remove that
+  one.
 - **Audited.** Each add, change and removal is in the [audit log](audit.md)
   as that center's change of the settings, with the old and the new entry.
 - **You can turn it off or remove it.** `cap set NAME off --center <name>`
-  turns it off, and the center cannot turn it on again: an `off` or `hidden`
-  of a capability a center added stays until you change it, also one the
-  center set itself. `cap rm NAME --center <name>` removes it. Taking the
-  grant back (`center grant settings off`) leaves what it added; remove it
-  too if you want it gone.
+  turns it off, and the center cannot turn it on again while it keeps that
+  capability: an `off` or `hidden` of a capability a center added stays
+  until you change it, also one the center set itself. `cap rm NAME --center
+  <name>` removes it. The desktop app lists them on that center's
+  Capabilities page with their switches; removing one is `cap rm` there.
+- **Only the grant stops a center.** An `off` is a pause, not a ban: the
+  center may remove its capability and add it again, or add the same command
+  under another name, with nothing of yours to undo. To stop a center from
+  adding commands, take the grant back (`center grant settings off`). That
+  leaves what it added; remove it too if you want it gone.
 
 The installed Linux node takes them. Windows takes none yet (issue
 [#176](https://github.com/prometheion/nerve-protocol/issues/176)), and a node

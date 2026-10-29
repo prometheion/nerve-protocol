@@ -1245,7 +1245,7 @@ impl NodeConfig {
             c.policy
                 .validate()
                 .map_err(|e| format!("center {}: {e}", c.name))?;
-            validate_all(&c.capabilities, self.limits.max_timeout_secs)
+            capability::validate_center(&c.capabilities, self.limits.max_timeout_secs)
                 .map_err(|e| format!("center {}: {e}", c.name))?;
         }
         Ok(())

@@ -183,19 +183,16 @@ fn form(name: &str, command: &str) -> Value {
            "result": "", "timeout": "", "platform": "any"})
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_capability_added_through_the_web_ui_is_listed_and_runs() {
-    let dir = tempfile::tempdir().unwrap();
-    let r = center(&dir.path().join("center")).await;
-
-    // A node by hand, paired, with the settings grant and user mode, and
-    // one capability of the owner's.
-    let root = dir.path().join("node");
+/// A node by hand, paired with `r`, with the settings grant and user mode,
+/// and one capability of the owner's. `takes` stands for the installed node
+/// that takes a center's capabilities (NodeOptions::config_caps_by_hand).
+async fn node(r: &Running, dir: &std::path::Path, takes: bool) -> (Daemon, NodePaths) {
+    let root = dir.join("node");
     let mut o = NodeOptions::new(NodePaths::new(root.join("config"), root.join("state")));
     o.home = root.join("home");
     std::fs::create_dir_all(&o.home).unwrap();
     o.full_rights = Some(false);
-    o.config_caps_by_hand = true;
+    o.config_caps_by_hand = takes;
     let link = PairLink::parse(r.center.new_pairing()["link"].as_str().unwrap()).unwrap();
     nerve_node::pair::pair(&o.paths, &link, Some("lab"))
         .await
@@ -212,15 +209,27 @@ async fn a_capability_added_through_the_web_ui_is_listed_and_runs() {
     })
     .await;
     let paths = o.paths.clone();
-    let daemon = Daemon::start(o).await.expect("start");
+    (Daemon::start(o).await.expect("start"), paths)
+}
 
-    let ui = Ui::open(&r).await;
-    let node = wait_for("the node comes online with the grant", async || {
+/// The node as the Overview shows it, once it is online with the grant.
+async fn online(ui: &Ui) -> Value {
+    wait_for("the node comes online with the grant", async || {
         let (_, ov) = ui.api("GET", "/api/overview", Value::Null).await;
         let n = ov["nodes"][0].clone();
         (n["online"] == true && n["settings_write"] == true).then_some(n)
     })
-    .await;
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_capability_added_through_the_web_ui_is_listed_and_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(&dir.path().join("center")).await;
+
+    let (daemon, paths) = node(&r, dir.path(), true).await;
+    let ui = Ui::open(&r).await;
+    let node = online(&ui).await;
     let id = node["id"].as_str().unwrap().to_string();
     let name = node["name"].as_str().unwrap().to_string();
 
@@ -395,6 +404,37 @@ async fn a_capability_added_through_the_web_ui_is_listed_and_runs() {
         )
         .await;
     assert_eq!(status, 409, "{v}");
+    daemon.stop().await;
+    r.stop().await;
+}
+
+/// A node that takes no capability from a center (one run by hand, which
+/// has no `nerve-run`; Windows says so the same way) gives the tab its
+/// reason, which the page shows in place of the form, and refuses a save.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_that_takes_none_says_why_on_the_tab() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(&dir.path().join("center")).await;
+    let (daemon, _) = node(&r, dir.path(), false).await;
+    let ui = Ui::open(&r).await;
+    let id = online(&ui).await["id"].as_str().unwrap().to_string();
+    let v = ui.caps(&id).await;
+    assert_eq!(v["settings_write"], true, "{v}");
+    assert!(
+        v["added"]["refused"]
+            .as_str()
+            .is_some_and(|why| why.contains("runs by hand")),
+        "{v}"
+    );
+    let (status, v) = ui
+        .api(
+            "POST",
+            "/api/caps/save",
+            json!({"id": id, "form": form("say.back", "echo {word}"), "adding": true}),
+        )
+        .await;
+    assert_eq!((status, &v["code"]), (409, &json!("unavailable")), "{v}");
+    assert!(v["error"].as_str().unwrap().contains("runs by hand"), "{v}");
     daemon.stop().await;
     r.stop().await;
 }

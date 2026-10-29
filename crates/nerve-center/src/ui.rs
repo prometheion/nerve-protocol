@@ -1312,6 +1312,8 @@ mod tests {
             ("timeout", "soon", "seconds, as a whole number"),
             ("timeout", "0", "timeout_secs 0"),
             ("summary", "two\nlines", "one line"),
+            ("effect", "Sense", "read, write, execute, sense or actuate"),
+            ("platform", "Linux", "any, linux or windows"),
         ] {
             let mut form = good.clone();
             form[field] = json!(value);
@@ -1426,6 +1428,13 @@ mod tests {
         // Every field the center checks has its place for what is wrong.
         for f in ["name", "timeout", "summary", "command", "params", "result"] {
             assert!(form.contains(&format!("field(\"{f}\", ")), "{f}");
+        }
+        for f in ["effect", "platform"] {
+            assert!(
+                form.contains(&format!("errs.{f} = el(\"span\""))
+                    && form.contains(&format!(", errs.{f})")),
+                "{f}"
+            );
         }
         assert!(APP_JS.contains("err.body = v;"));
         assert!(!APP_JS.contains("el(\"select\""));

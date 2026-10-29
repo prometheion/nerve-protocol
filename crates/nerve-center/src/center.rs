@@ -2596,17 +2596,7 @@ impl Center {
     pub async fn node_caps(&self, node_id: &str) -> Result<Value, String> {
         let found = self.read(|s| {
             s.nodes.get(node_id).map(|n| {
-                let units: Vec<Value> = n
-                    .catalog
-                    .units
-                    .iter()
-                    .filter(|u| &*u.provider != catalog::CENTER)
-                    .map(|u| {
-                        json!({"name": u.name, "effect": u.effect, "kind": u.kind.as_str(),
-                               "summary": &*u.description, "source": unit_source(&u.provider),
-                               "off": u.off})
-                    })
-                    .collect();
+                let units = cap_units(&n.catalog.units);
                 let write = n.descriptor.as_ref().is_some_and(settings_write);
                 let node = json!({"id": n.id, "name": n.name, "platform": n.platform});
                 (node, units, n.catalog.broken.clone(), write)
@@ -2624,15 +2614,7 @@ impl Center {
                     )
                     .await;
                 match got {
-                    Ok(v) => {
-                        let mut added = v["capabilities"].clone();
-                        if let Some(entries) = added["entries"].as_array_mut() {
-                            for e in entries {
-                                e["form"] = json!(nerve_policy::config::form::of_entry(e));
-                            }
-                        }
-                        added
-                    }
+                    Ok(v) => added_of(&v),
                     Err(e) => json!({"error": e.message}),
                 }
             }
@@ -4203,6 +4185,42 @@ pub(crate) fn plural(n: u32, one: &str) -> String {
 /// Where a unit comes from, as the Capabilities tab says it: the node's
 /// own, the owner's node.toml, this center (it added it), or a program the
 /// owner allows.
+/// The rows of the Capabilities tab for a node's `units`: all but the
+/// center's own, told as the catalog tells them (catalog::is_center), not
+/// by the provider a node names.
+fn cap_units(units: &[catalog::Unit]) -> Vec<Value> {
+    units
+        .iter()
+        .filter(|u| !catalog::is_center(u))
+        .map(|u| {
+            json!({"name": u.name, "effect": u.effect, "kind": u.kind.as_str(),
+                   "summary": &*u.description, "source": unit_source(&u.provider),
+                   "off": u.off})
+        })
+        .collect()
+}
+
+/// What the Capabilities tab shows of a node's answer to `get
+/// settings.capabilities`: its `{entries, refused}`, each entry also as the
+/// form shows it. The answer is the node's word, so one of another shape
+/// is said as such, and an entry that is no object is left out.
+fn added_of(answer: &Value) -> Value {
+    let Some(added) = answer.get("capabilities").and_then(Value::as_object) else {
+        return json!({"error": "the machine's answer has no list of capabilities"});
+    };
+    let mut added = added.clone();
+    if let Some(entries) = added.get_mut("entries").and_then(Value::as_array_mut) {
+        entries.retain(Value::is_object);
+        for e in entries.iter_mut() {
+            let form = json!(nerve_policy::config::form::of_entry(e));
+            if let Some(o) = e.as_object_mut() {
+                o.insert("form".into(), form);
+            }
+        }
+    }
+    Value::Object(added)
+}
+
 fn unit_source(provider: &str) -> String {
     match provider {
         "node" => "built-in".into(),
@@ -4283,6 +4301,48 @@ pub fn audit_rule(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Capabilities tab leaves out the center's own units by their
+    /// capability, so a node's provider named `center` stays, and shows a
+    /// node's answer of another shape as such instead of failing on it.
+    #[test]
+    fn the_capabilities_tab_takes_the_nodes_word_as_data() {
+        use crate::tools::tests::{cap, desc};
+        let mut lamp = cap(
+            "lamp",
+            "",
+            &[(
+                "on",
+                nerve_proto::descriptor::Effect::Execute,
+                json!({"type": "object"}),
+            )],
+        );
+        lamp.provider = catalog::CENTER.into();
+        let c = catalog::Catalog::build(&desc("box", vec![lamp]));
+        assert!(
+            c.units.iter().any(catalog::is_center),
+            "the center's own are in"
+        );
+        let rows = cap_units(&c.units);
+        let names: Vec<&str> = rows.iter().filter_map(|r| r["name"].as_str()).collect();
+        assert_eq!(names, ["lamp.on"]);
+        assert_eq!(rows[0]["source"], "program center");
+        for odd in [
+            json!(1),
+            json!({"capabilities": 1}),
+            json!({"capabilities": "x"}),
+            json!({"capabilities": [1]}),
+        ] {
+            assert!(added_of(&odd)["error"].is_string(), "{odd}");
+        }
+        let entry = json!({"name": "say.back", "effect": "read", "command": ["echo"]});
+        let v = added_of(&json!({"capabilities": {"entries": [1, "x", entry], "refused": null}}));
+        let entries = v["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "{v}");
+        assert_eq!(entries[0]["form"]["name"], "say.back");
+        assert_eq!(entries[0]["form"]["command"], "echo");
+        assert!(added_of(&json!({"capabilities": {"entries": 3}}))["entries"] == 3);
+    }
 
     fn open(dir: &Path, name: Option<&str>) -> Center {
         nerve_transport::init_crypto();

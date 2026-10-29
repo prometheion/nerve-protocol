@@ -37,10 +37,12 @@ pub struct CapForm {
 pub struct CapFormErrors {
     pub name: String,
     pub summary: String,
+    pub effect: String,
     pub command: String,
     pub params: String,
     pub result: String,
     pub timeout: String,
+    pub platform: String,
 }
 
 impl CapFormErrors {
@@ -53,10 +55,12 @@ impl CapFormErrors {
         [
             &self.name,
             &self.summary,
+            &self.effect,
             &self.command,
             &self.params,
             &self.result,
             &self.timeout,
+            &self.platform,
         ]
         .into_iter()
         .find(|e| !e.is_empty())
@@ -162,17 +166,26 @@ pub fn capability(
             }
         },
     };
+    // A choice the form does not offer is said, not taken for another:
+    // what is saved is what the form holds.
+    let effect = serde_json::from_value(Value::String(form.effect.clone())).unwrap_or_else(|_| {
+        e.effect = "read, write, execute, sense or actuate".into();
+        nerve_proto::descriptor::Effect::Read
+    });
+    let platform = Platform::parse(&form.platform).unwrap_or_else(|| {
+        e.platform = "any, linux or windows".into();
+        Platform::Any
+    });
     let name = form.name.trim();
     let c = ConfigCapability {
         name: name.to_string(),
         summary: form.summary.trim().to_string(),
-        effect: serde_json::from_value(Value::String(form.effect.clone()))
-            .unwrap_or(nerve_proto::descriptor::Effect::Read),
+        effect,
         command,
         params,
         result,
         timeout_secs,
-        platform: Platform::parse(&form.platform).unwrap_or_default(),
+        platform,
     };
     let Err(why) = c.validate(max_timeout_secs) else {
         return if e.none() { Ok(c) } else { Err(Box::new(e)) };
@@ -285,6 +298,29 @@ mod tests {
         let e = check(&form, 4);
         assert!(e.timeout.contains("limits.max_timeout_secs (4)"), "{e:?}");
         assert_eq!(e.first(), e.timeout);
+        // A choice it does not offer is said, not taken for read or any.
+        for (effect, platform) in [
+            ("Sense", "linux"),
+            ("", "linux"),
+            ("read", "Linux"),
+            ("read", ""),
+        ] {
+            let odd = CapForm {
+                effect: effect.into(),
+                platform: platform.into(),
+                ..form.clone()
+            };
+            let e = capability(&odd, 60).unwrap_err();
+            let said = if effect == "read" {
+                &e.platform
+            } else {
+                &e.effect
+            };
+            assert!(
+                !said.is_empty() && e.first() == said,
+                "{effect} {platform}: {e:?}"
+            );
+        }
         let empty = CapForm {
             name: String::new(),
             ..form

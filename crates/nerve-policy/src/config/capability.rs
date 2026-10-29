@@ -31,6 +31,17 @@ pub const MAX_CAPABILITIES: usize = 64;
 /// The most elements of one command.
 pub const MAX_COMMAND: usize = 64;
 
+/// The most bytes of one element of a command.
+pub const MAX_ELEMENT: usize = 4096;
+
+/// The most bytes of a summary: what a center keeps of a description.
+pub const MAX_SUMMARY: usize = 2048;
+
+/// The most bytes the capabilities one center added take together, as
+/// JSON ([`ConfigCapability::entry`]): that center's descriptor carries
+/// them on top of the owner's, and node.toml keeps them.
+pub const MAX_CENTER_BYTES: usize = 256 * 1024;
+
 /// What the `result` of an entry is when the file says none.
 pub const TEXT: &str = "text";
 
@@ -282,6 +293,11 @@ impl ConfigCapability {
                 "capability {n}: the summary is one line, without blanks at either end"
             ));
         }
+        if self.summary.len() > MAX_SUMMARY {
+            return Err(format!(
+                "capability {n}: the summary is at most {MAX_SUMMARY} bytes"
+            ));
+        }
         if let Some(t) = self.timeout_secs
             && !(1..=max_timeout_secs).contains(&t)
         {
@@ -315,6 +331,9 @@ impl ConfigCapability {
         }
         if self.command.iter().any(|e| e.contains('\0')) {
             return Err("an element holds a NUL character".into());
+        }
+        if self.command.iter().any(|e| e.len() > MAX_ELEMENT) {
+            return Err(format!("an element is at most {MAX_ELEMENT} bytes"));
         }
         if program.is_empty() || placeholder(program).is_some() {
             return Err("the first element is the program, fixed".into());
@@ -529,6 +548,19 @@ pub fn refuse_units(doc: &toml::Table) -> Result<(), String> {
                 "{name}: {key} is no setting: a capability of node.toml offers actions only, so a state it reads is an action with effect read or sense; events and streams come from a program you allow as a provider (docs/user/providers.md)"
             ));
         }
+    }
+    Ok(())
+}
+
+/// Checks the capabilities a center added ([`validate_all`]), and that they
+/// keep to [`MAX_CENTER_BYTES`] together.
+pub fn validate_center(caps: &[ConfigCapability], max_timeout_secs: u64) -> Result<(), String> {
+    validate_all(caps, max_timeout_secs)?;
+    let bytes: usize = caps.iter().map(|c| c.entry().to_string().len()).sum();
+    if bytes > MAX_CENTER_BYTES {
+        return Err(format!(
+            "its capabilities take {bytes} bytes as JSON, at most {MAX_CENTER_BYTES} together"
+        ));
     }
     Ok(())
 }
@@ -929,5 +961,36 @@ mod tests {
         for p in [Platform::Any, Platform::Linux, Platform::Windows] {
             assert_eq!(Platform::parse(p.as_str()), Some(p));
         }
+    }
+
+    /// A summary and a command element keep to their bounds, and the
+    /// capabilities of one center to theirs together: a center writes them
+    /// from afar, and its descriptor carries them.
+    #[test]
+    fn a_summary_an_element_and_a_centers_capabilities_have_a_bound() {
+        let mut c = cap(&["echo", &"x".repeat(MAX_ELEMENT)], Value::Null);
+        c.summary = "s".repeat(MAX_SUMMARY);
+        assert_eq!(c.validate(60), Ok(()));
+        let mut long = c.clone();
+        long.summary.push('s');
+        let e = long.validate(60).unwrap_err();
+        assert!(e.contains("the summary is at most 2048 bytes"), "{e}");
+        let mut long = c.clone();
+        long.command[1].push('x');
+        let e = long.validate(60).unwrap_err();
+        assert!(
+            e.contains("command: an element is at most 4096 bytes"),
+            "{e}"
+        );
+        let many: Vec<ConfigCapability> = (0..MAX_CAPABILITIES)
+            .map(|i| ConfigCapability {
+                name: format!("files.show{i}"),
+                ..c.clone()
+            })
+            .collect();
+        assert_eq!(validate_all(&many, 60), Ok(()));
+        let e = validate_center(&many, 60).unwrap_err();
+        assert!(e.contains("at most 262144 together"), "{e}");
+        assert_eq!(validate_center(&many[..2], 60), Ok(()));
     }
 }

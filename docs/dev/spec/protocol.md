@@ -854,34 +854,12 @@ concurrently.
   document is the owner's without being refused: `policy.places`, the node's
   record of the folders it recorded at their real place. A `set` keeps it as
   it was (less the entries of folders the document removes), whatever the
-  document says there. `pause {}` → `{}`.
+  document says there. `pause {}` → `{}`. `sudo-offer` and `sudo` switch the
+  node's sudo switch (§7.4.1); `cap-add`, `cap-edit` and `cap-rm` change the
+  capabilities this center added (§7.4.2).
 - `get` key `sudo` → `{sudo: "on" | "off"}`: the node's sudo switch.
 - `get` key `capabilities` → `{entries, refused}` (§7.4.2).
 - event (implicit): `changed {version}`.
-
-### 7.4.2 Capabilities a center adds
-
-A center with the settings grant `write` may add capabilities of its own
-(node-local §2): each one action that runs a fixed command on the node.
-
-- `cap-add {capability}` → `{version}` (effect `write`); `capability` is
-  `{name: "cap.action", summary?, effect, command: [program, args…], params?,
-  result?, timeout_secs?, platform?}`, `params` and `result` as JSON Schemas
-  (`result` `"text"` or null for what the command prints), with no other
-  field. `cap-edit {capability}` replaces the one of that name;
-  `cap-rm {name}` removes it.
-- A node that takes none answers `unavailable` with the reason. A broken
-  entry, a name the center added already, or one it did not add is
-  `invalid_args`; a name or capability of the node's owner (or of a program
-  the owner allows) is `forbidden`.
-- The node offers them to that center alone, in its descriptor with
-  `provider: "center-added"`, each action's effect `execute` unless it
-  declared `sense` or `actuate`. They run as the node's command account;
-  only the node's owner turns on one that senses or actuates, and an `off`
-  of one stays until the owner changes it.
-- `get` key `capabilities` → `{entries, refused}`: each entry this center
-  added, as it sent it, with `left_out` (why) where the node leaves it out;
-  `refused` why the node takes none, or null.
 
 ### 7.4.1 The sudo switch
 
@@ -910,6 +888,34 @@ browser or tool) to the node; the center only relays it.
   password is wrong; node-local §4); the switch then stays as it was.
 - `sudo {on: false}` → `{sudo: "off"}` drops the password.
 - The password never appears in a frame the node sends.
+
+### 7.4.2 Capabilities a center adds
+
+A center with the settings grant `write` may add capabilities of its own
+(node-local §2): each one action that runs a fixed command on the node.
+
+- `cap-add {capability}` → `{version}` (effect `write`); `capability` is
+  `{name: "cap.action", summary?, effect, command: [program, args…], params?,
+  result?, timeout_secs?, platform?}`, `params` and `result` as JSON Schemas
+  (`result` `"text"` or null for what the command prints), with no other
+  field. `cap-edit {capability}` replaces the one of that name;
+  `cap-rm {name}` removes it. A summary is at most 2048 bytes, each command
+  element at most 4096 bytes, and all of a center's capabilities together at
+  most 256 KiB as JSON.
+- A node that takes none answers `unavailable` with the reason. A broken
+  entry, a name the center added already, or one it did not add is
+  `invalid_args`; adding or editing under a name or capability of the node's
+  owner (or of a program the owner allows) is `forbidden`. `cap-rm` removes
+  the center's own entry also where the owner came to declare its name.
+- The node offers them to that center alone, in its descriptor with
+  `provider: "center-added"`, each action's effect `execute` unless it
+  declared `sense` or `actuate`. They run as the node's command account;
+  only the node's owner turns on one that senses or actuates (again after an
+  edit changes the effect or command of one that does), and an `off` of one
+  stays, while the center keeps that capability, until the owner changes it.
+- `get` key `capabilities` → `{entries, refused}`: each entry this center
+  added, as it sent it, with `left_out` (why) where the node leaves it out;
+  `refused` why the node takes none, or null.
 
 ### 7.5 `audit`
 
