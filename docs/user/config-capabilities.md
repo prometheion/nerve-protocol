@@ -235,7 +235,9 @@ command after yours:
 
 ```
 say.back  execute  center lab  lab: on
+cam.look  sense    center lab  lab: off
 capability say.back (added by center lab, counted as execute): echo {word}
+capability cam.look (added by center lab, waits for your cap set on): cam-snap
 ```
 
 ## See what is there

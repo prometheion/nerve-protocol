@@ -491,6 +491,13 @@ async fn a_centers_capability_counts_as_execute_and_sensing_waits_for_the_owner(
         .unwrap();
     let e = call(&mut conn, "cam.look", json!({})).await.unwrap_err();
     assert_eq!(code_of(&e), "forbidden");
+    let ls = cli(&paths, &["cap", "ls"]).await.unwrap();
+    assert!(
+        ls.contains(
+            "capability cam.look (added by center lab, waits for your cap set on): echo frame"
+        ),
+        "{ls}"
+    );
     let e = settings_set(&mut conn, |d| d["policy"]["caps"]["cam"] = json!("on"))
         .await
         .unwrap_err();

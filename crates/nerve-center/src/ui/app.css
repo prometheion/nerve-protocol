@@ -673,6 +673,11 @@ input[type="checkbox"] {
   min-height: 7rem;
 }
 
+/* The hint under a row of choices stands on a line of its own. */
+.cap-form .field > .hint {
+  display: block;
+}
+
 .cap-row .card-top {
   flex-wrap: wrap;
 }

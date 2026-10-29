@@ -3723,8 +3723,12 @@ fn config_lines(v: &Value) -> Vec<String> {
         .chain(added)
         .filter_map(|e| serde_json::from_value::<ConfigEntry>(e.clone()).ok())
         .map(|e| {
-            // One a center added says which, and how it counts.
+            // One a center added says which, and how it counts: as execute,
+            // unless it senses or actuates, which waits for the owner's `on`.
             let by = match &e.center {
+                Some(c) if crate::config_cap::senses(e.effect) => {
+                    format!(" (added by center {c}, waits for your cap set on)")
+                }
                 Some(c) => format!(" (added by center {c}, counted as execute)"),
                 None => String::new(),
             };
