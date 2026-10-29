@@ -137,6 +137,45 @@ licence. Taint, which marks a session once a call of it returned content, has
 its switch here too. Everything is kept in the center's state, except the
 endpoint token and the local model's files.
 
+### Capabilities
+
+What each machine offers the agent, and the capabilities this center added
+there itself. Pick the machine from the **Machine** list under the page
+header (it works like the one on the Statistics page).
+
+- **Offered.** Each unit the agent may be offered on that machine: its name,
+  what it does (its effect), whether it is an action, a state, an event or a
+  stream, and where it comes from: built in, your `node.toml`, this center,
+  or a program you allow ([providers](providers.md)). One the owner switched
+  off is marked off.
+- **Left out.** The units the center does not offer the agent, each with the
+  reason (a name it cannot carry, or a schema it cannot check).
+- **Added by this center.** Only for a machine that gave the center the
+  [settings grant](settings-grant.md) and is online:
+  the [capabilities this center added](config-capabilities.md#capabilities-a-center-adds),
+  each with what it says it does, its command and, where the machine leaves
+  it out, why. **Add a capability** opens a form; **Edit** fills it with one;
+  **Remove** asks first.
+
+The form has the fields of `nerve-node cap add`: the name (`cap.action`), the
+time limit, what it does, a summary, the command (the program first; a word
+`{field}` is the argument `field`, and a word with blanks goes in quotes),
+the JSON Schema of its arguments and of its result (empty for none and for
+the printed text), and where it runs. While you type, the center checks each
+field with the machine's own rules and shows what is wrong under it. On
+**Add** or **Save** the center checks it once more and sends it, and the
+machine checks it again against its own limits (the time limit against its
+`limits.max_timeout_secs`). A refusal of the machine shows in the form with
+its reason, for example a name of the owner's.
+
+A capability the center adds runs as `nerve-run`, counts as `execute`, and
+one that senses or acts stays off until the machine's owner turns it on. A
+machine on Windows takes none yet, and one its owner runs by hand has no
+`nerve-run`: the page says so and offers no form.
+
+A machine without the settings grant is shown read only: its units and the
+left-out ones, and a note that the center may change nothing there.
+
 ### Log
 
 What the center did and saw, newest first: links that dropped and came back,
@@ -192,6 +231,7 @@ Built like the desktop app's Help: two parts that open and close on their own.
   to stop it.
 - **Machines.** For each online machine that gave the center the settings
   grant: its settings as JSON, with **Reload** and **Save**, and the sudo
-  switch. A save sends the whole document with its version. If the version is
+  switch. The capabilities the center adds are on the Capabilities page, not
+  in this document. A save sends the whole document with its version. If the version is
   stale, the machine refuses it. Reload and try again. A machine without the
   grant says it keeps its settings to itself.

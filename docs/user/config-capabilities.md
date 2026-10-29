@@ -170,7 +170,8 @@ One that senses or acts on the world (`sense`, `actuate`) needs you: your
 `cap set NAME on` in `folder` and `user` mode, an allow rule you add in
 `allowlist` mode. A center with the [settings grant](settings-grant.md) may
 turn on or allow the others itself, never one that senses or acts, and cannot
-add, change or remove a capability of `node.toml`.
+change or remove a capability of `node.toml`. It may add capabilities of its
+own ([below](#capabilities-a-center-adds)).
 
 A switch or allow rule set earlier may cover a capability you add later: `cap
 set sensors on`, or an allow rule `sensors`, also covers a new
@@ -191,6 +192,52 @@ No program may [attach](providers.md) with the name of one of your
 capabilities, and one that is attached with such a name is let go when you
 declare it.
 
+## Capabilities a center adds
+
+A center with the [settings grant](settings-grant.md) (`write`) may add
+capabilities of the same kind itself, from its web UI's
+[Capabilities](web-ui.md#capabilities) page. They are kept in that center's
+own entry of the pairing, and only that center is offered them: another
+center never sees them, cannot call them and cannot remove them. Within
+these limits:
+
+- **Always `nerve-run`.** It runs as the command account, held like that
+  account's commands (above), never as you or root. There is no account to
+  choose.
+- **Counted as `execute`.** Whatever it says it does, the node decides it as
+  a command: in `folder` mode one that takes no path needs an `on`, which that
+  center may set itself, and one whose paths lie outside the folders that
+  allow commands is refused. A `read` never passes for a read.
+- **Sensing waits for you.** One that says `sense` or `actuate` stays so, and
+  only you turn it on (`cap set NAME on --center <name>`), in every mode. When
+  a center changes one to sense or act, a switch or rule of its own that
+  covered it is switched off, as for yours.
+- **Yours come first.** A center changes and removes none of your
+  capabilities, adds none under the name of a capability of yours or of a
+  program you allow, and one it added is left out while you declare its
+  capability or such a program offers it.
+- **Audited.** Each add, change and removal is in the [audit log](audit.md)
+  as that center's change of the settings, with the old and the new entry.
+- **You can turn it off or remove it.** `cap set NAME off --center <name>`
+  turns it off, and the center cannot turn it on again: an `off` or `hidden`
+  of a capability a center added stays until you change it, also one the
+  center set itself. `cap rm NAME --center <name>` removes it. Taking the
+  grant back (`center grant settings off`) leaves what it added; remove it
+  too if you want it gone.
+
+The installed Linux node takes them. Windows takes none yet (issue
+[#176](https://github.com/prometheion/nerve-protocol/issues/176)), and a node
+you run yourself has no `nerve-run`: either refuses the center's add and
+says why.
+
+`cap ls` lists them with the source `center <name>`, and each one's
+command after yours:
+
+```
+say.back  execute  center lab  lab: on
+capability say.back (added by center lab, counted as execute): echo {word}
+```
+
 ## See what is there
 
 `nerve-node cap ls` lists them with the source `config`, each with its
@@ -206,7 +253,8 @@ capability win.who: whoami; windows only
 ```
 
 A capability this node does not offer says why. `nerve-node cap ls --json`
-gives each one as declared under `config`.
+gives each one as declared under `config`, and those the centers added under
+`added`, each with its `center`.
 
 ## In `node.toml`
 

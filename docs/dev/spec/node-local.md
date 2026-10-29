@@ -609,6 +609,48 @@ blank). What the command printed stays out of the message: it is the
 command's text, not the node's, and the center hands it on as device content
 (protocol.md §6).
 
+### Capabilities a center adds
+
+A center with the settings grant `write` adds entries of the same shape to
+its own entry, `[[center.capability]]`, through `settings.cap-add {capability}`,
+`settings.cap-edit {capability}` (replaces the one of that name) and
+`settings.cap-rm {name}` (protocol §7.4.2); `settings.set` neither shows nor
+takes them. `capability` is the entry as `caps.list` gives it (`{name, summary,
+effect, command, params, result, timeout_secs, platform}`, the schemas as
+JSON, `result` `"text"` or a schema); a field it does not know, such as
+`account`, is `invalid_args`, and so is an entry the checks above refuse
+(against this node's `limits.max_timeout_secs`). Each change goes through the
+settings store, which checks the grant and audits it as that center's
+(`by: "center <name>"`), and `NodeConfig::validate` checks every center's
+entries as it checks the owner's. The node:
+
+- answers `unavailable` with the reason where it takes none: Windows (issue
+  #176) and a node run by hand, which has no `nerve-run`;
+- refuses `forbidden` a change that names an entry of the owner's
+  (`cap edit`/`cap rm` of one), and an add or edit whose `cap` the owner's
+  `[[capability]]` names or an attached provider offers, or that this node
+  would leave out (its platform); `invalid_args` an add of a name the center
+  added already, and an edit or removal of one it did not add;
+- offers them to that center alone, with `provider: "center-added"`, each
+  action's effect `execute` unless it declared `sense` or `actuate`, which
+  stays; marks them `as_account` as the owner's (above); and leaves one out
+  while the owner's config names its `cap` or an attached provider offers it.
+  Another center's descriptor, `get settings.capabilities` and calls never
+  see them (`unknown_capability`);
+- runs a call of one as it runs the owner's (above), always as `nerve-run`;
+- after an add or edit, switches an action that came to sense or actuate off
+  for that center where its own `on` or allow rule covers it, as above;
+- keeps, in `settings.set`, an `off` or `hidden` switch (of the capability or
+  one of its actions) of a capability the center added until the owner
+  changes it, whoever set it, as only the owner unpauses: the owner turns one
+  off (`cap set NAME off --center <name>`) and removes one (`cap rm NAME
+  --center <name>`); a center turns on, by `caps` or its rules, one that
+  neither senses nor actuates, as it may for the owner's.
+
+`get {cap: "settings", keys: ["capabilities"]}` gives `{entries, refused}`:
+each entry the center added as it sent it, with `left_out` where this node
+leaves it out, and `refused` the reason this node takes none, or null.
+
 ### Commands
 
 `exec.run` runs its command line with `machine.shell`: `/bin/sh -c`, on
@@ -1394,7 +1436,7 @@ center's folders hold its commands, in folder mode or as `nerve-run`). An error,
 | `sudo.off` | | turns the switch off and drops the password |
 | `center.rotate-key` | `center`, `end_grace` | rotates the node's key for `center` over the live link, or with `end_grace` ends the grace of the old one (protocol §4.10); `{center, public_key}`, the new key once. Waits for the center's answer, at most 15 s; an error when the node has no link to it or the center does not speak `rotate`. Also served on the control pipe (Windows) |
 | `owner.check` | | changes nothing; the CLI asks it before `install`, `setup`, `update`, `uninstall`, `backup` and `restore` |
-| `caps.list` | | what `cap ls` shows: `{capabilities, programs, config, running}`; each capability row `{name: "cap.action", effect, source: "built-in" \| "config" \| "program <name>", summary, centers: {<center>: "on"\|"off"\|"hidden"\|"default"}, now: {<center>: "on"\|"off"}}`, `centers` the switch (`cap set`; `default` where none is set; for `settings`, which has none, `"granted"`\|`"not granted"` by the center's `settings` grant) and `now` whether the center's descriptor offers the action now and it is not off (§3: mode, rules, switches, the machine); an action a program offered that the node left out with `broken` (its reason), no effect and no `now`; a config capability's row that this node does not offer (§2; a node run by hand offers none) has `left_out` (why) and no `now`; `config` each `[[capability]]` as declared, `{name, summary, effect, command, params, result, timeout_secs, platform}`, the schemas as JSON (`result` `"text"` or a schema); `programs` the entries of `providers.allowed`, each `{name, exe, attached}`. A stopped node's CLI makes the same from `node.toml`, with the node's own capabilities and the config's (no program's), no `now` and `attached` null. Also served on the control pipe (Windows), where no program attaches |
+| `caps.list` | | what `cap ls` shows: `{capabilities, programs, config, added, running}`; each capability row `{name: "cap.action", effect, source: "built-in" \| "config" \| "program <name>", summary, centers: {<center>: "on"\|"off"\|"hidden"\|"default"}, now: {<center>: "on"\|"off"}}`, `centers` the switch (`cap set`; `default` where none is set; for `settings`, which has none, `"granted"`\|`"not granted"` by the center's `settings` grant) and `now` whether the center's descriptor offers the action now and it is not off (§3: mode, rules, switches, the machine); an action a program offered that the node left out with `broken` (its reason), no effect and no `now`; a config capability's row that this node does not offer (§2; a node run by hand offers none) has `left_out` (why) and no `now`; `config` each `[[capability]]` as declared, `{name, summary, effect, command, params, result, timeout_secs, platform}`, the schemas as JSON (`result` `"text"` or a schema); a capability a center added (§2) has the source `center <name>`, its counted effect, and `centers` and `now` for that center alone, and `added` lists each one as `config` does, with its `center`; `programs` the entries of `providers.allowed`, each `{name, exe, attached}`. A stopped node's CLI makes the same from `node.toml`, with the node's own capabilities and the config's (no program's), no `now` and `attached` null. Also served on the control pipe (Windows), where no program attaches |
 | `hello` | `role` (`provider`), `name`, `capabilities` | a capability provider attaches; the connection stays (§7); on a node run by hand only, the installed node takes it on its provider socket |
 
 Every method is refused from a process that runs below a command the node

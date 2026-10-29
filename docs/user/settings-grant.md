@@ -27,6 +27,10 @@ the agent needs them to know where it may work
 - Edit the machine's settings as JSON in the web UI, Settings.
 - Pause the node's link.
 - Turn the [sudo switch](sudo.md) on and off.
+- Add, change and remove [capabilities of its own](config-capabilities.md#capabilities-a-center-adds),
+  in the web UI's Capabilities page: fixed commands that run as `nerve-run`,
+  count as `execute`, and are offered to it alone. One that senses or acts
+  waits for your `on`.
 
 Each change is checked, then saved. A change is audited on the machine with the
 old and the new value and the name of the center.
@@ -65,7 +69,11 @@ No grant lets a center change:
   offers now, or an action an offered one lacks, as the machine cannot tell
   yet what it does; a capability of `node.toml` with an action that senses or
   acts counts whether this machine offers that action now or not
-- adding, changing or removing a capability of `node.toml`
+- adding, changing or removing a capability of `node.toml`, or one another
+  center added
+- turning on again a capability it added that you, or it, turned off or
+  hid; you turn it off with `cap set NAME off --center <name>` and remove it
+  with `cap rm NAME --center <name>`
 
 A change that touches one of these is refused as a whole, and the refusal names
 the field.
@@ -79,5 +87,6 @@ value there changes nothing; an entry goes only with its folder.
 ## Without the grant
 
 Everything is still possible on the machine, with [`nerve-node`](commands.md).
-The web UI shows such a machine as keeping its settings to itself, and its
-Audit buttons stay off.
+The web UI shows such a machine as keeping its settings to itself, its Audit
+buttons stay off, and its Capabilities page is read only. What a center added
+while it had the grant stays offered to it until you remove it.
