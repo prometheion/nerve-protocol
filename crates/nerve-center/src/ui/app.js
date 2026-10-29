@@ -49,6 +49,7 @@ const PAGES = {
   stats: { title: "Statistics", view: pageStats },
   audit: { title: "Audit", view: pageAudit },
   checker: { title: "Action checker", view: pageChecker },
+  capabilities: { title: "Capabilities", view: pageCaps },
   log: { title: "Log", view: pageLog },
   help: { title: "Help", view: pageHelp },
   settings: { title: "Settings", view: pageSettings },
@@ -59,7 +60,7 @@ let lastSig = null;
 let busy = false;
 let down = false;
 let settingsRun = 0;
-const state = { overview: null, stats: null, statsNode: null, audit: null, log: null, help: null, pairing: null, settings: null, newToken: null, newPin: null, checker: null };
+const state = { overview: null, stats: null, statsNode: null, audit: null, log: null, help: null, pairing: null, settings: null, newToken: null, newPin: null, checker: null, caps: null, capsNode: null };
 
 const $ = (id) => document.getElementById(id);
 
@@ -110,7 +111,10 @@ async function api(method, path, body) {
   }
   if (!r.ok) {
     const why = v.data && v.data.field ? ` (${v.data.field})` : "";
-    throw new Error((v.error || r.statusText) + (v.code ? ` [${v.code}]` : "") + why);
+    const err = new Error((v.error || r.statusText) + (v.code ? ` [${v.code}]` : "") + why);
+    // A form shows what the answer says of each field.
+    err.body = v;
+    throw err;
   }
   return v;
 }
@@ -1424,6 +1428,185 @@ async function pollCheckerLocal() {
   checkerStatusEl.replaceChildren(...localInstallParts(r));
 }
 
+// ---- Capabilities ----
+
+// What a machine offers the agent and where each unit comes from, and the
+// capabilities this center added there itself (docs/user/web-ui.md). A
+// machine that gave this center the settings grant (write) takes changes:
+// add, edit, remove. One without it is shown read only.
+const CAP_EFFECTS = ["read", "write", "execute", "sense", "actuate"];
+const CAP_PLATFORMS = ["any", "linux", "windows"];
+let capsRun = 0;
+
+// The picker is made once and kept, as the statistics page's.
+const capsPicker = picker({
+  label: "Machine", search: "Search machines", none: "No machine matches.", key: "caps:machine",
+  onpick: (id) => { state.capsNode = id; state.caps = null; draw(true); loadCaps(); },
+});
+
+async function loadCaps() {
+  const run = ++capsRun;
+  const o = state.overview || await api("GET", "/api/overview");
+  const nodes = o.nodes || [];
+  if (!nodes.some((n) => n.id === state.capsNode)) state.capsNode = nodes.length ? nodes[0].id : null;
+  if (state.capsNode === null) {
+    state.caps = { nodes, data: null, form: null };
+  } else {
+    const data = await api("GET", `/api/caps?id=${encodeURIComponent(state.capsNode)}`);
+    if (run !== capsRun) return;
+    // An open form stays open over a reload.
+    state.caps = { nodes, data, form: state.caps && state.caps.form };
+  }
+  if (current() === "capabilities") draw(true);
+}
+
+function pageCaps() {
+  const c = state.caps;
+  if (!c) return [loading()];
+  const head_ = head("plug", "Capabilities", "What each machine offers the agent, where it comes from, and the capabilities this center added there itself.");
+  if (!c.nodes.length) return [head_, empty("No machines yet.", "server")];
+  capsPicker.set(c.nodes.map((n) => ({ value: n.id, text: n.name })), state.capsNode);
+  const d = c.data;
+  if (!d) return [head_, el("div", { class: "picker-row" }, capsPicker.root), loading()];
+  return [head_, el("div", { class: "picker-row" }, capsPicker.root),
+    !d.online ? banner("warn", "alert", "This machine is offline: the list is what it offered when it was last linked.") : null,
+    !d.settings_write ? banner("", "info", "This machine does not let this center change its settings (settings grant off), so it is shown read only. Its owner gives the grant with nerve-node center grant settings write.") : null,
+    section("Offered", "Each unit the agent may be offered here, with what it does and where it comes from.", null,
+      d.units.length ? el("div", { class: "list" }, d.units.map(capUnitRow)) : empty("This machine offers no capability to the agent now.", "plug")),
+    d.broken.length ? section("Left out", "Units the center does not offer the agent, with the reason.", null,
+      el("div", { class: "list" }, d.broken.map((b) => el("div", { class: "card cap-row" },
+        el("div", { class: "card-top" }, el("code", { class: "mono name" }, b.name), pill("down", "left out")),
+        el("p", { class: "meta" }, b.reason))))) : null,
+    d.settings_write ? addedSection(d) : null];
+}
+
+// What a unit does, in a tone: one that senses or acts on the world stands
+// out, as the owner turns it on.
+function effectPill(effect) {
+  return pill(effect === "sense" || effect === "actuate" ? "warn" : effect === "read" ? "" : "accent", effect);
+}
+
+function capUnitRow(u) {
+  return el("div", { class: "card cap-row" },
+    el("div", { class: "card-top" },
+      el("code", { class: "mono name" }, u.name),
+      effectPill(u.effect),
+      u.kind !== "action" ? pill("", u.kind) : null,
+      u.off ? pill("down", "off") : null,
+      el("span", { class: "meta push" }, u.source)),
+    u.summary ? el("p", { class: "meta" }, u.summary) : null);
+}
+
+// The capabilities this center added on the machine, and the form to add
+// or change one. The machine says when it takes none (Windows for now, or
+// one run by hand) and why.
+function addedSection(d) {
+  const a = d.added;
+  const c = state.caps;
+  const sub = "Each runs a fixed command as nerve-run, counts as execute whatever it says it does, and only the machine's owner turns on one that senses or actuates. The owner can turn any of them off or remove it.";
+  if (!d.online || !a) return section("Added by this center", sub, null, el("p", { class: "meta" }, "The machine is offline; its capabilities can be changed when it is back."));
+  if (a.error) return section("Added by this center", sub, null, banner("error", "alert", `The machine did not say: ${a.error}`));
+  const add = a.refused ? null : btn("Add a capability", "primary", () => { c.form = { adding: true, form: blankCapForm() }; draw(true); }, "plus", "caps:add");
+  const entries = a.entries || [];
+  return section("Added by this center", sub, add,
+    a.refused ? banner("warn", "alert", `This machine takes no capability from a center: ${a.refused}.`) : null,
+    c.form ? capForm(d, c.form) : null,
+    entries.length ? el("div", { class: "list" }, entries.map((e) => addedRow(d, e))) : (a.refused ? null : el("p", { class: "meta" }, "None yet.")));
+}
+
+function addedRow(d, e) {
+  const c = state.caps;
+  return el("div", { class: "card cap-row" },
+    el("div", { class: "card-top" },
+      el("code", { class: "mono name" }, e.name),
+      effectPill(e.effect),
+      e.effect === "sense" || e.effect === "actuate" ? null : el("span", { class: "meta" }, "counted as execute"),
+      e.left_out ? pill("down", "left out") : null,
+      el("span", { class: "push" }),
+      btn("Edit", "ghost", () => { c.form = { adding: false, form: { ...e.form } }; draw(true); }, "edit", `cap:${e.name}:edit`),
+      btn("Remove", "ghost", act(async () => {
+        const yes = await modal({ title: `Remove ${e.name}?`, message: "The agent is no longer offered it on this machine.", confirm: "Remove", danger: true });
+        if (!yes) return;
+        await api("POST", "/api/caps/remove", { id: d.node.id, name: e.name });
+        notify(`Removed ${e.name}.`);
+        await loadCaps();
+      }), "trash", `cap:${e.name}:remove`)),
+    e.summary ? el("p", { class: "meta" }, e.summary) : null,
+    el("p", { class: "meta" }, el("code", { class: "mono" }, e.form.command)),
+    e.left_out ? el("p", { class: "meta" }, `Left out: ${e.left_out}`) : null);
+}
+
+function blankCapForm() {
+  return { name: "", summary: "", effect: "read", command: "", params: "", result: "", timeout: "", platform: "any" };
+}
+
+// The form of a capability: each field says what is wrong with it while it
+// is typed in, checked by the center with the machine's own rules
+// (/api/caps/check); the machine checks it again on save and may refuse it
+// with its own reason, which the form shows.
+function capForm(d, f) {
+  const c = state.caps;
+  const v = f.form;
+  const errs = {};
+  const field = (key, label, input, hint) => {
+    errs[key] = el("span", { class: "hint error", role: "status" });
+    input.addEventListener("input", () => { v[key] = input.value; checkSoon(); });
+    return el("label", { class: "field grow" }, el("span", { class: "label" }, label), input, hint ? el("span", { class: "hint" }, hint) : null, errs[key]);
+  };
+  const text = (key, attrs) => el("input", { class: "input", type: "text", value: v[key], autocomplete: "off", spellcheck: "false", "data-focus": `capform:${key}`, ...attrs });
+  const area = (key, placeholder) => {
+    const t = el("textarea", { class: "json", spellcheck: "false", placeholder, "data-focus": `capform:${key}` });
+    t.value = v[key];
+    return t;
+  };
+  const refusal = el("div", {});
+  let timer = null;
+  let asked = 0;
+  const show = (e) => { for (const k of Object.keys(errs)) errs[k].textContent = (e && e[k]) || ""; };
+  const check = async () => {
+    const n = ++asked;
+    const r = await api("POST", "/api/caps/check", { form: v });
+    if (n === asked) show(r.errors);
+  };
+  function checkSoon() {
+    clearTimeout(timer);
+    timer = setTimeout(() => check().catch(() => {}), 300);
+  }
+  const effect = segmented("What it does", CAP_EFFECTS.map((e) => e[0].toUpperCase() + e.slice(1)), CAP_EFFECTS.indexOf(v.effect), (i) => { v.effect = CAP_EFFECTS[i]; checkSoon(); });
+  const platform = segmented("Where it runs", ["Any system", "Linux", "Windows"], CAP_PLATFORMS.indexOf(v.platform), (i) => { v.platform = CAP_PLATFORMS[i]; checkSoon(); });
+  const save = act(async () => {
+    refusal.replaceChildren();
+    try {
+      await api("POST", "/api/caps/save", { id: d.node.id, form: v, adding: f.adding });
+    } catch (e) {
+      if (e.auth) throw e;
+      if (e.body && e.body.errors) { show(e.body.errors); return; }
+      refusal.replaceChildren(banner("error", "alert", `The machine refused: ${e.message}`));
+      return;
+    }
+    notify(f.adding ? `Added ${v.name}.` : `Saved ${v.name}.`);
+    c.form = null;
+    await loadCaps();
+  });
+  const card = el("div", { class: "card cap-form" },
+    el("div", { class: "form-row" },
+      field("name", "Name (cap.action, like sensors.read)", text("name", { readonly: !f.adding })),
+      field("timeout", "Time limit (seconds, empty for the machine's default)", text("timeout", { inputmode: "numeric" }))),
+    el("div", { class: "form-row" }, el("div", { class: "field grow" }, el("span", { class: "label" }, "What it does"), effect,
+      el("span", { class: "hint" }, "It counts as execute whatever it says, except sense and actuate, which only the machine's owner turns on."))),
+    el("div", { class: "form-row" }, field("summary", "Summary (one line for the agent)", text("summary"))),
+    el("div", { class: "form-row" }, field("command", "Command (the program first; a word {field} is the argument field)", text("command", { class: "input mono" }))),
+    el("div", { class: "form-row" }, field("params", "Arguments (a JSON Schema; empty for none)", area("params", "{\"type\": \"object\", \"properties\": {}}"))),
+    el("div", { class: "form-row" }, field("result", "Result (a JSON Schema the printed JSON fits; empty for the printed text)", area("result", "empty: the printed text"))),
+    el("div", { class: "form-row" }, el("div", { class: "field grow" }, el("span", { class: "label" }, "Where it runs"), platform)),
+    refusal,
+    el("div", { class: "actions" },
+      btn("Cancel", "ghost", () => { c.form = null; draw(true); }, null, "capform:cancel"),
+      btn(f.adding ? "Add" : "Save", "primary", save, "check", "capform:save")));
+  check().catch(() => {});
+  return card;
+}
+
 // ---- Log ----
 
 // The levels the page filters by, most to least verbose: a level shows itself
@@ -1768,7 +1951,7 @@ function signature(page) {
 
 function draw(force) {
   const page = current();
-  if (page === "settings" || page === "checker") {
+  if (page === "settings" || page === "checker" || page === "capabilities") {
     if (force) {
       replacePage(PAGES[page].view().flat().filter((p) => p != null));
       // A page drawn while a save runs (the user came back to it) has its
@@ -1848,6 +2031,7 @@ function setNav(open) {
 function go() {
   const page = current();
   statsPicker.close();
+  capsPicker.close();
   logLevelPicker.close();
   logNodePicker.close();
   for (const a of document.querySelectorAll("[data-page]")) {
@@ -1876,6 +2060,10 @@ function go() {
     checkerPick = null;
     draw(true);
     loadChecker().catch((e) => { if (!e.auth) notify(e.message, "error"); });
+  } else if (page === "capabilities") {
+    state.caps = null;
+    draw(true);
+    loadCaps().catch((e) => { if (!e.auth) notify(e.message, "error"); });
   } else {
     draw(true);
   }

@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use nerve_policy::config::{CENTER_ADDED, CenterEntry, ConfigCapability, Output, Platform};
 use nerve_policy::{NodeConfig, SetError};
@@ -358,21 +358,9 @@ pub fn as_account_for(caps: &mut [Capability], separate: bool) {
 }
 
 /// `c` as `cap ls --json` gives it: as the owner declared it, the schemas
-/// as JSON.
+/// as JSON (ConfigCapability::entry).
 pub fn entry(c: &ConfigCapability) -> Value {
-    json!({
-        "name": c.name,
-        "summary": c.summary,
-        "effect": c.effect,
-        "command": c.command,
-        "params": c.params,
-        "result": match &c.result {
-            Output::Text => json!(Output::Text.to_string()),
-            Output::Json(s) => s.clone(),
-        },
-        "timeout_secs": c.timeout_secs,
-        "platform": c.platform.as_str(),
-    })
+    c.entry()
 }
 
 /// The folders Landlock holds a command of a config capability to as
@@ -575,6 +563,7 @@ fn schema_names(schema: &Value) -> std::collections::BTreeSet<&str> {
 mod tests {
     use super::*;
     use nerve_proto::descriptor::Effect;
+    use serde_json::json;
 
     fn cfg(entries: &str) -> NodeConfig {
         NodeConfig::parse(entries).unwrap()

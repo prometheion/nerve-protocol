@@ -432,6 +432,25 @@ impl ConfigCapability {
         Ok(out)
     }
 
+    /// The capability as JSON, as the owner declared it, the schemas as
+    /// JSON: what `cap ls --json` gives, and the form a center sends and is
+    /// given its own in (`settings.cap-add`, `settings.get`).
+    pub fn entry(&self) -> Value {
+        json!({
+            "name": self.name,
+            "summary": self.summary,
+            "effect": self.effect,
+            "command": self.command,
+            "params": self.params,
+            "result": match &self.result {
+                Output::Text => json!(Output::Text.to_string()),
+                Output::Json(s) => s.clone(),
+            },
+            "timeout_secs": self.timeout_secs,
+            "platform": self.platform.as_str(),
+        })
+    }
+
     /// The command as declared, as one line ([`ConfigCapability::line`]),
     /// for `cap ls`.
     pub fn command_line(&self) -> String {

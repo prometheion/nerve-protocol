@@ -399,6 +399,30 @@ impl Ui {
                 )
                 .await
                 .map_err(refused),
+            // ---- Capabilities ----
+            ("GET", "/api/caps") => {
+                let id = req.query_param("id").unwrap_or_default();
+                c.node_caps(&id)
+                    .await
+                    .map_err(|e| (404, json!({"error": e})))
+            }
+            // The form, checked as the node checks a capability of its
+            // config: what is wrong with each field, "" where nothing is.
+            ("POST", "/api/caps/check") => {
+                let form = cap_form(b)?;
+                let errors = nerve_policy::config::form::check(&form, CAP_TIMEOUT_MAX);
+                Ok(json!({"ok": errors.none(), "errors": errors}))
+            }
+            ("POST", "/api/caps/save") => {
+                let form = cap_form(b)?;
+                let adding = b.get("adding").and_then(Value::as_bool) == Some(true);
+                let cap = nerve_policy::config::form::capability(&form, CAP_TIMEOUT_MAX)
+                    .map_err(|e| (400, json!({"error": e.first(), "errors": e})))?;
+                c.save_cap(&s("id"), &cap, adding).await.map_err(refused)
+            }
+            ("POST", "/api/caps/remove") => {
+                c.remove_cap(&s("id"), &s("name")).await.map_err(refused)
+            }
             // The four buttons of an audit entry: `list` is allow, deny, or
             // sudo for a sudo command; `cap`, `action` and `target` are the
             // entry's own fields.
@@ -635,6 +659,16 @@ fn log_query(req: &Request) -> Result<Query, (u16, Value)> {
 
 fn bad(m: impl Into<String>) -> (u16, Value) {
     (400, json!({"error": m.into()}))
+}
+
+/// The time limit the center's check of a capability allows: the node
+/// knows its own `limits.max_timeout_secs` and checks it when it saves.
+const CAP_TIMEOUT_MAX: u64 = u64::MAX;
+
+/// The form of the Capabilities tab in a request's `form`.
+fn cap_form(b: &Value) -> Result<nerve_policy::config::form::CapForm, (u16, Value)> {
+    serde_json::from_value(b.get("form").cloned().unwrap_or(Value::Null))
+        .map_err(|e| bad(format!("the form is not valid: {e}")))
 }
 
 /// A node's refusal, with its code and reason, for the UI to show.
@@ -1243,6 +1277,158 @@ mod tests {
             save.find("return; }").unwrap() < save.find("await saveChecker()").unwrap(),
             "{save}"
         );
+    }
+
+    /// The Capabilities tab's form is checked with the node's own rules
+    /// for a capability (nerve_policy::config::form), field by field; a
+    /// save that does not pass them is refused before anything is sent, and
+    /// a machine the center does not know, or that is offline, is said so.
+    #[tokio::test]
+    async fn the_capabilities_tab_checks_its_form_before_the_node_does() {
+        let d = tempfile::tempdir().unwrap();
+        let ui = Ui::new(&center(d.path()), None, false, false);
+        let good = json!({"name": "say.back", "summary": "Says it back.", "effect": "read",
+                          "command": "echo {word}",
+                          "params": r#"{"type": "object", "properties": {"word": {"type": "string"}}, "required": ["word"]}"#,
+                          "result": "", "timeout": "", "platform": "any"});
+        let check = async |form: &Value| {
+            ui.api(
+                &req("POST", "/api/caps/check", &[], ""),
+                &json!({"form": form}),
+            )
+            .await
+            .unwrap()
+        };
+        let v = check(&good).await;
+        assert_eq!(v["ok"], true, "{v}");
+        for (field, value, said) in [
+            ("name", "say", "name it `cap.action`"),
+            ("name", "fs.read", "the node's or the center's own"),
+            ("command", "echo {nothing}", "{nothing} names no argument"),
+            ("command", "\"echo", "a double quote is not closed"),
+            ("params", "{", "not JSON"),
+            ("params", r#"{"type": "object", "oneOf": []}"#, "oneOf"),
+            ("result", "[1]", ""),
+            ("timeout", "soon", "seconds, as a whole number"),
+            ("timeout", "0", "timeout_secs 0"),
+            ("summary", "two\nlines", "one line"),
+        ] {
+            let mut form = good.clone();
+            form[field] = json!(value);
+            let v = check(&form).await;
+            assert_eq!(v["ok"], false, "{field} {value}: {v}");
+            let e = v["errors"][field].as_str().unwrap();
+            assert!(!e.is_empty() && e.contains(said), "{field} {value}: {v}");
+        }
+        // A save that does not pass is not sent.
+        let mut bad = good.clone();
+        bad["command"] = json!("echo {nothing}");
+        let (status, e) = ui
+            .api(
+                &req("POST", "/api/caps/save", &[], ""),
+                &json!({"id": "n1", "form": bad, "adding": true}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(status, 400);
+        assert!(
+            e["error"].as_str().unwrap().contains("names no argument"),
+            "{e}"
+        );
+        assert!(e["errors"]["command"].is_string(), "{e}");
+        // One that passes goes to the node, which is not linked.
+        let (status, e) = ui
+            .api(
+                &req("POST", "/api/caps/save", &[], ""),
+                &json!({"id": "n1", "form": good, "adding": true}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!((status, &e["code"]), (409, &json!("unavailable")), "{e}");
+        let (status, e) = ui
+            .api(
+                &req("POST", "/api/caps/remove", &[], ""),
+                &json!({"id": "n1", "name": "say.back"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!((status, &e["code"]), (409, &json!("unavailable")), "{e}");
+        // A form with a field the tab does not have is no form.
+        let mut odd = good.clone();
+        odd["account"] = json!("owner");
+        let (status, e) = ui
+            .api(
+                &req("POST", "/api/caps/check", &[], ""),
+                &json!({"form": odd}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(status, 400, "{e}");
+        let mut get = req("GET", "/api/caps", &[], "");
+        get.query = "id=nobody".into();
+        let (status, _) = ui.api(&get, &json!({})).await.unwrap_err();
+        assert_eq!(status, 404);
+    }
+
+    /// The Capabilities tab (Q24): a page of its own in the menu, with a
+    /// machine picker; drawn only when asked, so the poll does not draw over
+    /// its form; units with their source, the left-out ones with the reason;
+    /// the form checked by the center as it is typed in, and the node's
+    /// refusal shown in it; a machine without the settings grant read only,
+    /// with no form.
+    #[test]
+    fn the_capabilities_tab_has_a_picker_a_checked_form_and_a_read_only_view() {
+        assert!(INDEX.contains(r##"<a href="#capabilities" data-page="capabilities">"##));
+        assert!(APP_JS.contains(r#"capabilities: { title: "Capabilities", view: pageCaps },"#));
+        let draw = &APP_JS[APP_JS.find("function draw(").unwrap()..];
+        assert!(draw.contains(
+            r#"if (page === "settings" || page === "checker" || page === "capabilities") {"#
+        ));
+        let page = &APP_JS[APP_JS.find("function pageCaps(").unwrap()..];
+        let page = &page[..page.find("\n}\n").unwrap()];
+        for part in [
+            "capsPicker.root",
+            "d.units.map(capUnitRow)",
+            "d.broken.map(",
+            "b.reason",
+            "!d.settings_write ? banner(",
+            "d.settings_write ? addedSection(d) : null",
+        ] {
+            assert!(page.contains(part), "{part}: {page}");
+        }
+        let load = &APP_JS[APP_JS.find("async function loadCaps(").unwrap()..];
+        assert!(load.contains("`/api/caps?id=${encodeURIComponent(state.capsNode)}`"));
+        let row = &APP_JS[APP_JS.find("function capUnitRow(").unwrap()..];
+        let row = &row[..row.find("\n}\n").unwrap()];
+        assert!(row.contains("u.source") && row.contains("effectPill(u.effect)"));
+        let added = &APP_JS[APP_JS.find("function addedSection(").unwrap()..];
+        let added = &added[..added.find("\n}\n").unwrap()];
+        assert!(
+            added.contains("a.refused ? null : btn(\"Add a capability\""),
+            "{added}"
+        );
+        assert!(added.contains("takes no capability from a center: ${a.refused}"));
+        let entry = &APP_JS[APP_JS.find("function addedRow(").unwrap()..];
+        let entry = &entry[..entry.find("\n}\n").unwrap()];
+        assert!(entry.contains("\"/api/caps/remove\"") && entry.contains("await modal("));
+        assert!(entry.contains("e.left_out"));
+        let form = &APP_JS[APP_JS.find("function capForm(").unwrap()..];
+        let form = &form[..form.find("\n}\n").unwrap()];
+        for part in [
+            "api(\"POST\", \"/api/caps/check\", { form: v })",
+            "api(\"POST\", \"/api/caps/save\", { id: d.node.id, form: v, adding: f.adding })",
+            "if (e.body && e.body.errors) { show(e.body.errors); return; }",
+            "The machine refused: ${e.message}",
+            "readonly: !f.adding",
+        ] {
+            assert!(form.contains(part), "{part}");
+        }
+        // Every field the center checks has its place for what is wrong.
+        for f in ["name", "timeout", "summary", "command", "params", "result"] {
+            assert!(form.contains(&format!("field(\"{f}\", ")), "{f}");
+        }
+        assert!(APP_JS.contains("err.body = v;"));
+        assert!(!APP_JS.contains("el(\"select\""));
     }
 
     /// The node card names each action the center left out with its
