@@ -400,7 +400,7 @@ pub fn senses(effect: nerve_proto::descriptor::Effect) -> bool {
 /// only read) or allow rule would let that center use it at once: such a
 /// switch was set for what it did then, perhaps by the center itself, and
 /// only the owner turns on what senses or actuates. One a center added
-/// that senses counts as new again where its effect or command changed.
+/// that senses counts as new again where anything but its summary changed.
 /// A center cannot take that `off` away. Returns those centers, each with the action. Whoever
 /// changes the config's capabilities does it: `cap add` and `cap edit`, and
 /// the node as it takes a file the owner wrote (`config accept`).
@@ -422,14 +422,15 @@ pub fn hold_new(before: &NodeConfig, after: &mut NodeConfig) -> Vec<(String, Str
         };
         // A center edits what it added itself, so the owner's `on` for one
         // that senses was given for what it did then: one of its own counts
-        // as new again where its effect or command changed.
+        // as new again where anything but its summary changed. Its params
+        // decide what fills the command, its timeout how long it records.
         let same = |c: &ConfigCapability| {
-            was.iter().any(|b| {
-                b.name == c.name
-                    && senses(b.effect)
-                    && b.effect == c.effect
-                    && b.command == c.command
-            })
+            let plain = |x: &ConfigCapability| ConfigCapability {
+                summary: String::new(),
+                ..x.clone()
+            };
+            was.iter()
+                .any(|b| b.name == c.name && senses(b.effect) && plain(b) == plain(c))
         };
         let came: Vec<ConfigCapability> = after
             .capabilities
@@ -951,7 +952,7 @@ command = ["sensors", "-l"]
 
     /// A center removes its own entry also once the owner declares the
     /// same name, and an edit of one that senses waits for the owner's
-    /// `on` again where its effect or command changed.
+    /// `on` again where anything but its summary changed.
     #[test]
     fn a_center_removes_its_own_and_an_edit_of_a_sensing_one_waits_again() {
         use nerve_policy::config::CapSetting;
@@ -1005,14 +1006,25 @@ command = ["sensors", "-l"]
         same.summary = "A look.".into();
         change(&mut c, CenterChange::Edit(same)).unwrap();
         assert_eq!(setting(&c), Some(CapSetting::On));
-        for (effect, word) in [("sense", "other"), ("actuate", "frame")] {
-            let mut edited = c.clone();
-            change(
-                &mut edited,
-                CenterChange::Edit(sent("cam.look", effect, word)),
-            )
-            .unwrap();
-            assert_eq!(setting(&edited), Some(CapSetting::Off), "{effect} {word}");
+        let mut narrow = c.clone();
+        let mut with_dev = sent("cam.look", "sense", "frame");
+        with_dev.params =
+            json!({"type": "object", "properties": {"dev": {"enum": ["/dev/video0"]}}});
+        change(&mut narrow, CenterChange::Edit(with_dev.clone())).unwrap();
+        on(&mut narrow);
+        let mut wide = with_dev.clone();
+        wide.params = json!({"type": "object", "properties": {"dev": {"type": "string"}}});
+        let mut longer = with_dev.clone();
+        longer.timeout_secs = Some(59);
+        for (base, edit, what) in [
+            (&c, sent("cam.look", "sense", "other"), "command"),
+            (&c, sent("cam.look", "actuate", "frame"), "effect"),
+            (&narrow, wide, "params"),
+            (&narrow, longer, "timeout"),
+        ] {
+            let mut edited = base.clone();
+            change(&mut edited, CenterChange::Edit(edit)).unwrap();
+            assert_eq!(setting(&edited), Some(CapSetting::Off), "{what}");
         }
     }
 

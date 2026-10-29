@@ -210,9 +210,10 @@ these limits:
   allow commands is refused. A `read` never passes for a read.
 - **Sensing waits for you.** One that says `sense` or `actuate` stays so, and
   only you turn it on (`cap set NAME on --center <name>`), in every mode. When
-  a center changes one to sense or act, or changes the effect or the command
-  of one that does, a switch or rule that covered it is switched off, also
-  your `on`: you turn on what it does now.
+  a center changes one to sense or act, or changes anything but the summary
+  of one that does (its command, the arguments it takes, its time limit),
+  a switch or rule that covered it is switched off, also your `on`: you turn
+  on what it does now.
 - **Yours come first.** A center changes and removes none of your
   capabilities, adds none under the name of a capability of yours or of a
   program you allow, and one it added is left out while you declare its

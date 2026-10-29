@@ -645,7 +645,8 @@ entries as it checks the owner's. The node:
 - runs a call of one as it runs the owner's (above), always as `nerve-run`;
 - after an add or edit, switches an action that came to sense or actuate off
   for that center where its own `on` or allow rule covers it, as above; an
-  edit of one that senses or actuates that changes its effect or command
+  edit of one that senses or actuates that changes anything but its
+  `summary` (effect, command, `params`, `result`, `timeout_secs`, `platform`)
   counts as one that came to, so the owner's `on` goes too;
 - keeps, in `settings.set`, an `off` or `hidden` switch (of the capability or
   one of its actions) of a capability the center added, while the center

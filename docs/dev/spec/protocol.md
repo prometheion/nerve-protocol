@@ -911,7 +911,7 @@ A center with the settings grant `write` may add capabilities of its own
   `provider: "center-added"`, each action's effect `execute` unless it
   declared `sense` or `actuate`. They run as the node's command account;
   only the node's owner turns on one that senses or actuates (again after an
-  edit changes the effect or command of one that does), and an `off` of one
+  edit changes anything but the summary of one that does), and an `off` of one
   stays, while the center keeps that capability, until the owner changes it.
 - `get` key `capabilities` → `{entries, refused}`: each entry this center
   added, as it sent it, with `left_out` (why) where the node leaves it out;
