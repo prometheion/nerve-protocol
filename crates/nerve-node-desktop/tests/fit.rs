@@ -369,6 +369,36 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
     assert!(end < -20.0, "the box scrolls {end} pixels at most");
     wheel(x, y, 5000.0);
     assert_eq!(caps.get_params_scrolled(), 0.0);
+    // A drag up inside the box selects text and leaves the box where it is;
+    // it is the wheel that scrolls.
+    let at = |dy: f32| slint::LogicalPosition::new(x, y + dy);
+    window
+        .window()
+        .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at(70.0) });
+    window
+        .window()
+        .dispatch_event(slint::platform::WindowEvent::PointerPressed {
+            position: at(70.0),
+            button: slint::platform::PointerEventButton::Left,
+        });
+    for dy in [62.0, 54.0, 46.0, 38.0, 30.0, 22.0] {
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at(dy) });
+        screen.draw();
+    }
+    window
+        .window()
+        .dispatch_event(slint::platform::WindowEvent::PointerReleased {
+            position: at(22.0),
+            button: slint::platform::PointerEventButton::Left,
+        });
+    screen.draw();
+    assert_eq!(
+        caps.get_params_scrolled(),
+        0.0,
+        "a drag in the Arguments box scrolls it and does not select"
+    );
     // Focused by a click, Ctrl+End puts the cursor after the last line.
     for event in [
         slint::platform::WindowEvent::PointerMoved {

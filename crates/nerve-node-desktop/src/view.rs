@@ -2487,9 +2487,6 @@ mod tests {
         assert!(plain.none(), "{plain:?}");
     }
 
-    /// What the dialog saves: `cap add` with what is given, `cap edit` with
-    /// every field, the arguments' schema on stdin; and an entry of `cap
-    /// ls` back in the dialog's fields.
     #[test]
     fn the_nodes_time_limit_is_its_default_once_unset() {
         let set = Ok(json!({"key": "limits.max_timeout_secs", "value": 1800}));
@@ -2502,6 +2499,9 @@ mod tests {
         assert_eq!(max_timeout(&down, 3600), None);
     }
 
+    /// What the dialog saves: `cap add` with what is given, `cap edit` with
+    /// every field, the arguments' schema on stdin; and an entry of `cap
+    /// ls` back in the dialog's fields.
     #[test]
     fn the_dialog_saves_with_cap_add_or_edit() {
         let form = CapForm {

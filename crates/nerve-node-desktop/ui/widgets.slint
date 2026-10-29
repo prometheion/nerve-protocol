@@ -1814,8 +1814,10 @@ export component TextArea {
         clip: true;
         // A TextInput does not scroll itself: the lines past the box's
         // height are reached with the wheel, and the box follows the
-        // cursor to the line it moves to.
+        // cursor to the line it moves to. A mouse drag selects text and does
+        // not pan the box, as in Slint's own TextEdit.
         flick := Flickable {
+            mouse-drag-pan-enabled: false;
             width: parent.width;
             height: parent.height;
             content-width: self.width;
