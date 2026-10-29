@@ -370,18 +370,20 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
     wheel(x, y, 5000.0);
     assert_eq!(caps.get_params_scrolled(), 0.0);
     // A drag up inside the box selects text and leaves the box where it is;
-    // it is the wheel that scrolls.
+    // it is the wheel that scrolls. The drag starts high in the box: a press
+    // on a line that is cut off at the bottom brings that line into view, and
+    // how many lines fit depends on the platform's font.
     let at = |dy: f32| slint::LogicalPosition::new(x, y + dy);
     window
         .window()
-        .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at(70.0) });
+        .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at(50.0) });
     window
         .window()
         .dispatch_event(slint::platform::WindowEvent::PointerPressed {
-            position: at(70.0),
+            position: at(50.0),
             button: slint::platform::PointerEventButton::Left,
         });
-    for dy in [62.0, 54.0, 46.0, 38.0, 30.0, 22.0] {
+    for dy in [44.0, 38.0, 32.0, 26.0, 20.0, 14.0] {
         window
             .window()
             .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at(dy) });
@@ -390,7 +392,7 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
     window
         .window()
         .dispatch_event(slint::platform::WindowEvent::PointerReleased {
-            position: at(22.0),
+            position: at(14.0),
             button: slint::platform::PointerEventButton::Left,
         });
     screen.draw();
