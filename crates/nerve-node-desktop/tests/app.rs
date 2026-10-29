@@ -728,6 +728,22 @@ fn the_app_drives_the_cli_end_to_end() {
     // The provider allow list is here too: a program by its full path,
     // listed without its state while the node does not run, and removed.
     let program = std::env::current_exe().unwrap().display().to_string();
+    // Its Choose... button fills the path from the system's dialog; a
+    // cancelled dialog leaves what was typed.
+    let exe = std::path::PathBuf::from(&program);
+    ctl.set_chooser(Arc::new(move |c| {
+        Ok(match c {
+            Choose::Provider => Some(exe.clone()),
+            _ => None,
+        })
+    }));
+    caps.set_program_exe("".into());
+    caps.invoke_program_choose();
+    assert_eq!(caps.get_program_exe(), program.as_str());
+    ctl.set_chooser(Arc::new(|_| Ok(None)));
+    caps.set_program_exe("typed".into());
+    caps.invoke_program_choose();
+    assert_eq!(caps.get_program_exe(), "typed");
     caps.set_program_name("desk".into());
     caps.set_program_exe("not/a/full/path".into());
     caps.invoke_program_allow();

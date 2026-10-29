@@ -446,6 +446,65 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
         0.0,
         "the box did not follow the cursor back to the first line"
     );
+    // Enter in a one-line field saves, as it does with no field focused:
+    // the TextField takes the key for its own `accepted`, so the dialog's
+    // `enter` never sees it. Each field is found by a click that a typed
+    // letter then lands in.
+    let tap = |x: f32, y: f32| {
+        let position = slint::LogicalPosition::new(x, y);
+        let w = window.window();
+        w.dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+        w.dispatch_event(slint::platform::WindowEvent::PointerPressed {
+            position,
+            button: slint::platform::PointerEventButton::Left,
+        });
+        w.dispatch_event(slint::platform::WindowEvent::PointerReleased {
+            position,
+            button: slint::platform::PointerEventButton::Left,
+        });
+    };
+    let key = |text: SharedString| {
+        w.dispatch_event(slint::platform::WindowEvent::KeyPressed { text: text.clone() });
+        w.dispatch_event(slint::platform::WindowEvent::KeyReleased { text });
+    };
+    let fields = |c: &Caps| {
+        [
+            c.get_edit_name(),
+            c.get_edit_timeout(),
+            c.get_edit_summary(),
+            c.get_edit_command(),
+        ]
+    };
+    let mut entered = [false; 4];
+    for y in (0..1600).step_by(6) {
+        for x in [400.0, 640.0, 900.0] {
+            if !caps.get_edit_open() {
+                caps.set_edit_open(true);
+                screen.draw();
+            }
+            let before = fields(&caps);
+            tap(x, y as f32);
+            key("x".into());
+            let after = fields(&caps);
+            let Some(i) = (0..4).find(|&i| before[i] != after[i]) else {
+                continue;
+            };
+            if entered[i] {
+                continue;
+            }
+            saved.set(false);
+            key(slint::platform::Key::Return.into());
+            assert!(
+                saved.get(),
+                "Enter in the dialog's field {i} (name, time limit, summary, command) does not save"
+            );
+            entered[i] = true;
+        }
+        if entered == [true; 4] {
+            break;
+        }
+    }
+    assert_eq!(entered, [true; 4], "a field of the dialog was not found");
     caps.set_edit_open(false);
     screen.resize(ROOM.0 as u32, ROOM.1 as u32);
     screen.draw();

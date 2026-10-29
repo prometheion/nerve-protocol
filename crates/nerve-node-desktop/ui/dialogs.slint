@@ -468,6 +468,11 @@ export component CapDialog inherits Dialog {
                     edited => {
                         Caps.edit-check();
                     }
+                    accepted => {
+                        if (!Caps.edit-busy) {
+                            Caps.edit-save();
+                        }
+                    }
                 }
             }
         }
@@ -485,6 +490,11 @@ export component CapDialog inherits Dialog {
                     label: "Time limit";
                     edited => {
                         Caps.edit-check();
+                    }
+                    accepted => {
+                        if (!Caps.edit-busy) {
+                            Caps.edit-save();
+                        }
                     }
                 }
             }
@@ -514,6 +524,11 @@ export component CapDialog inherits Dialog {
             edited => {
                 Caps.edit-check();
             }
+            accepted => {
+                if (!Caps.edit-busy) {
+                    Caps.edit-save();
+                }
+            }
         }
     }
     Field {
@@ -528,6 +543,11 @@ export component CapDialog inherits Dialog {
             label: "Command";
             edited => {
                 Caps.edit-check();
+            }
+            accepted => {
+                if (!Caps.edit-busy) {
+                    Caps.edit-save();
+                }
             }
         }
     }
