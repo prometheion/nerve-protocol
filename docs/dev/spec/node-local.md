@@ -649,13 +649,25 @@ entries as it checks the owner's. The node:
   `summary` (effect, command, `params`, `result`, `timeout_secs`, `platform`)
   counts as one that came to, so the owner's `on` goes too;
 - keeps, in `settings.set`, an `off` or `hidden` switch (of the capability or
-  one of its actions) of a capability the center added, while the center
-  keeps an entry of it, until the owner changes it, whoever set it, as only
-  the owner unpauses (a pause: a center that removes its entry and adds it
-  again starts afresh; only taking the grant back stops it): the owner turns one
+  one of its actions) of a capability the center added until the owner
+  changes it, whoever set it, as only the owner unpauses: while the center
+  keeps an entry of it, and also after it removes the entry, when nothing
+  offers the capability and only the owner takes such a switch away. Only
+  another name, or taking the grant back, gets past it. The owner turns one
   off (`cap set NAME off --center <name>`) and removes one (`cap rm NAME
-  --center <name>`); a center turns on, by `caps` or its rules, one that
-  neither senses nor actuates, as it may for the owner's.
+  --center <name>`);
+- lets a center turn on, by `caps` or an allow rule, an action it added that
+  neither senses nor actuates by that action's key or scope only
+  (`cap.action`), where neither the owner's config nor an attached provider
+  offers its `cap`: the capability as a whole stays as one nothing offers,
+  the owner's, since a provider the owner allows may offer more under it
+  later;
+- does not offer that center an attached provider's capability whose `cap`
+  it added an entry under, while it keeps the entry (the entry is left out
+  too): its switches and rules were set for its own command;
+- drops, when an entry is removed (`settings.cap-rm` or the owner's `cap rm
+  NAME --center <name>`), that center's `on` for `NAME` and its allow rules
+  whose scope is `NAME`; an `off`, a `hidden` and deny rules stay.
 
 `get {cap: "settings", keys: ["capabilities"]}` gives `{entries, refused}`:
 each entry the center added as it sent it, with `left_out` where this node

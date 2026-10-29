@@ -94,8 +94,12 @@ center reads, or the node refuses the whole change and names the field.
     they always run as `nerve-run` (no account field), count as `execute`
     whatever they declare unless they sense or actuate (item 9 then holds
     for them), never take the name of a capability of the owner's or of an
-    attached provider, and an `off` or `hidden` switch of one of them stays,
-    while the center keeps it, until the owner changes it, whoever set it. The store checks the write
+    attached provider, and an `off` or `hidden` switch of one of them stays
+    until the owner changes it, whoever set it, also after the center removes
+    and adds it again. The center turns on or allows each of its actions by
+    its `cap.action` only, an attached provider's capability of a `cap` it
+    added under is not offered to it, and a removal drops its `on` and allow
+    rules for that action (nerve-node `config_cap`). The store checks the write
     grant and audits each change as the center's (`Writer::Center`).
 
 One item is in the document a center reads and is still the owner's: the

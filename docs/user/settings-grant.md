@@ -71,11 +71,15 @@ No grant lets a center change:
   acts counts whether this machine offers that action now or not
 - adding, changing or removing a capability of `node.toml`, or one another
   center added
-- turning on again a capability it added, while it keeps it, that you, or
-  it, turned off or hid; you turn it off with `cap set NAME off --center
-  <name>` and remove it with `cap rm NAME --center <name>`. That is a pause:
-  the center may remove the capability and add it again, so to stop it from
-  adding commands, take the grant back
+- turning on again a capability it added that you, or it, turned off or
+  hid, also after it removes that capability and adds it again; you turn it
+  off with `cap set NAME off --center <name>` and remove it with `cap rm NAME
+  --center <name>`. The `off` holds for that name only: the center may add
+  the same command under another name, so to stop it from adding commands,
+  take the grant back
+- turning on or allowing a capability it added as a whole: it switches each
+  of its actions by its full name, as a program you allow may offer more
+  under that capability's name later
 
 A change that touches one of these is refused as a whole, and the refusal names
 the field.

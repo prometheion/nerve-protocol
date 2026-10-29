@@ -112,7 +112,11 @@ one off. While no provider offers a capability or one of its actions, only
 you can allow it or turn it on, as the node cannot tell yet what it does. An
 entry a center wrote while the capability did neither stays when a new
 version of the program makes it sense or act: after such an update, check
-`nerve-node rule ls allow` and `nerve-node cap ls`.
+`nerve-node rule ls allow` and `nerve-node cap ls`. A capability a center
+[added itself](config-capabilities.md#capabilities-a-center-adds) does not
+count as offered for this: that center switches only its own actions, each
+by its name, and while it keeps one under the name a program offers, it is
+not offered the program's.
 
 ## Paths it takes
 

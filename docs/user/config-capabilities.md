@@ -208,6 +208,11 @@ these limits:
   a command: in `folder` mode one that takes no path needs an `on`, which that
   center may set itself, and one whose paths lie outside the folders that
   allow commands is refused. A `read` never passes for a read.
+- **Switched by its full name.** The center turns on or allows each action it
+  added by its name (`"caps": {"say.back": "on"}`, the allow rule
+  `say.back`), not its capability as a whole (`say`): that stays yours while
+  nothing else offers it, as a program you allow may offer more under that
+  name later.
 - **Sensing waits for you.** One that says `sense` or `actuate` stays so, and
   only you turn it on (`cap set NAME on --center <name>`), in every mode. When
   a center changes one to sense or act, or changes anything but the summary
@@ -215,21 +220,28 @@ these limits:
   a switch or rule that covered it is switched off, also your `on`: you turn
   on what it does now.
 - **Yours come first.** A center changes and removes none of your
-  capabilities, adds none under the name of a capability of yours or of a
-  program you allow, and one it added is left out while you declare its
-  capability or such a program offers it. The center can still remove that
-  one.
+  capabilities, and adds none under the name of a capability of yours or of
+  a program you allow that is attached now. One it added is left out while
+  you declare its capability or such a program offers it. The center can
+  still remove that one. While it keeps it, that center is not offered the
+  program's capability of that name either: its switches and rules were set
+  for its own command, not for what the program does.
+- **Removed with its switches.** When the center removes one, or you do,
+  the node also drops that center's `on` and allow rules for that very
+  action, yours too: they were given for that command. An `off`, a `hidden`
+  and a deny rule stay.
 - **Audited.** Each add, change and removal is in the [audit log](audit.md)
   as that center's change of the settings, with the old and the new entry.
 - **You can turn it off or remove it.** `cap set NAME off --center <name>`
-  turns it off, and the center cannot turn it on again while it keeps that
-  capability: an `off` or `hidden` of a capability a center added stays
-  until you change it, also one the center set itself. `cap rm NAME --center
-  <name>` removes it. The desktop app lists them on that center's
+  turns it off, and the center cannot turn it on again: an `off` or `hidden`
+  of a capability a center added stays until you change it, also one the
+  center set itself, and also after the center removes the capability and
+  adds it again under the same name. `cap rm NAME --center <name>` removes
+  it. The desktop app lists them on that center's
   Capabilities page with their switches; removing one is `cap rm` there.
-- **Only the grant stops a center.** An `off` is a pause, not a ban: the
-  center may remove its capability and add it again, or add the same command
-  under another name, with nothing of yours to undo. To stop a center from
+- **Only the grant stops a center.** An `off` holds for that name only: the
+  center may add the same command under another name, with nothing of yours
+  to undo. To stop a center from
   adding commands, take the grant back (`center grant settings off`). That
   leaves what it added; remove it too if you want it gone.
 
@@ -245,7 +257,7 @@ command after yours:
 say.back  execute  center lab  lab: on
 cam.look  sense    center lab  lab: off
 capability say.back (added by center lab, counted as execute): echo {word}
-capability cam.look (added by center lab, waits for your cap set on): cam-snap
+capability cam.look (added by center lab, senses: only you turn it on): cam-snap
 ```
 
 ## See what is there
