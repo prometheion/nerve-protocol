@@ -51,6 +51,18 @@ fn a_capability_is_added_through_the_dialog() {
         "home",
         "--yes",
     ]);
+    // A second center, with its own switch for exec.run: the page has to
+    // show the rows of the center it names.
+    let lab = rt.block_on(FakeCenter::start(false)).unwrap();
+    run(&[
+        "center",
+        "add",
+        &lab.link().render(),
+        "--name",
+        "lab",
+        "--yes",
+    ]);
+    run(&["cap", "set", "exec.run", "off", "--center=lab"]);
     // The node's own limit for a capability's time, lower than the default:
     // the dialog checks against it.
     run(&["config", "set", "limits.max_timeout_secs", "30"]);
@@ -92,6 +104,52 @@ fn a_capability_is_added_through_the_dialog() {
             .all(|r| !r.name.starts_with("elsewhere"))
     );
     assert_eq!(caps.get_declared().row_count(), 0);
+
+    // Picking the other center shows its rows, and its switches are the
+    // ones a click changes.
+    let run_setting = || {
+        caps.get_rows()
+            .iter()
+            .find(|r| r.name == "exec.run")
+            .unwrap()
+            .setting
+    };
+    let lab_set = || {
+        config(&paths).centers[1]
+            .policy
+            .caps
+            .get("exec.run")
+            .cloned()
+    };
+    assert_eq!(caps.get_centers().row_count(), 2);
+    assert_eq!(run_setting(), -1, "home has no switch of its own");
+    caps.invoke_pick(1);
+    assert_eq!((caps.get_center().as_str(), caps.get_current()), ("lab", 1));
+    assert_eq!(caps.get_load(), Load::Ready, "{}", caps.get_error());
+    assert_eq!(run_setting(), 1, "lab's rows, not home's");
+    caps.invoke_cap_set("exec.run".into(), 2);
+    assert_eq!(lab_set(), Some(nerve_policy::config::CapSetting::Hidden));
+    assert_eq!(config(&paths).centers[0].policy.caps.get("exec.run"), None);
+    assert_eq!(run_setting(), 2);
+    // The center it shows is unpaired meanwhile: the status no longer
+    // names it, and the page is read again for the one that is left.
+    let status = |names: &[&str]| {
+        let centers: Vec<_> = names
+            .iter()
+            .map(|n| serde_json::json!({"name": n, "mode": "user"}))
+            .collect();
+        serde_json::json!({"daemon": "running", "centers": centers})
+    };
+    ctl.show_status(Ok(status(&["home"])));
+    assert_eq!(
+        (caps.get_center().as_str(), caps.get_current()),
+        ("home", 0)
+    );
+    assert_eq!(run_setting(), -1, "the rows of the center that is gone");
+    // The center it shows is still there: nothing changes.
+    ctl.show_status(Ok(status(&["home", "lab"])));
+    assert_eq!(caps.get_center(), "home");
+    assert_eq!(run_setting(), -1);
 
     // A new one: the dialog opens empty, without errors, its Arguments box
     // at the top whatever an earlier dialog left.

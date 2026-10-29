@@ -91,7 +91,7 @@ component OfferedSection inherits Section {
             if c.now != "": VerticalLayout {
                 alignment: center;
                 Pill {
-                    text: c.now == "on" ? "In use" : "Not now";
+                    text: c.now == "on" ? "Usable now" : "Not now";
                     tone: c.now == "on" ? Tone.ok : Tone.neutral;
                     dot: true;
                 }
