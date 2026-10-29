@@ -1470,7 +1470,7 @@ function pageCaps() {
   if (!d) return [head_, el("div", { class: "picker-row" }, capsPicker.root), loading()];
   return [head_, el("div", { class: "picker-row" }, capsPicker.root),
     !d.online ? banner("warn", "alert", "This machine is offline: the list is what it offered when it was last linked.") : null,
-    !d.settings_write ? banner("", "info", "This machine does not let this center change its settings (settings grant off), so it is shown read only. Its owner gives the grant with nerve-node center grant settings write.") : null,
+    !d.settings_write ? banner("info", "info", "This machine does not let this center change its settings (settings grant off), so it is shown read only. Its owner gives the grant with nerve-node center grant settings write.") : null,
     section("Offered", "Each unit the agent may be offered here, with what it does and where it comes from.", null,
       d.units.length ? el("div", { class: "list" }, d.units.map(capUnitRow)) : empty("This machine offers no capability to the agent now.", "plug")),
     d.broken.length ? section("Left out", "Units the center does not offer the agent, with the reason.", null,
