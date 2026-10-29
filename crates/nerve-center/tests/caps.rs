@@ -187,6 +187,16 @@ fn form(name: &str, command: &str) -> Value {
 /// and one capability of the owner's. `takes` stands for the installed node
 /// that takes a center's capabilities (NodeOptions::config_caps_by_hand).
 async fn node(r: &Running, dir: &std::path::Path, takes: bool) -> (Daemon, NodePaths) {
+    node_in(r, dir, takes, nerve_policy::Mode::User).await
+}
+
+/// [`node`] in the mode `mode`.
+async fn node_in(
+    r: &Running,
+    dir: &std::path::Path,
+    takes: bool,
+    mode: nerve_policy::Mode,
+) -> (Daemon, NodePaths) {
     let root = dir.join("node");
     let mut o = NodeOptions::new(NodePaths::new(root.join("config"), root.join("state")));
     o.home = root.join("home");
@@ -200,7 +210,7 @@ async fn node(r: &Running, dir: &std::path::Path, takes: bool) -> (Daemon, NodeP
     owner_edit(&o.paths, |c| {
         let e = &mut c.centers[0];
         e.settings = nerve_policy::config::SettingsGrant::Write;
-        e.policy.mode = nerve_policy::Mode::User;
+        e.policy.mode = mode;
         c.capabilities = nerve_policy::NodeConfig::parse(
             "[[capability]]\nname = \"owner.who\"\neffect = \"read\"\ncommand = [\"id\", \"-un\"]\n",
         )
@@ -399,6 +409,80 @@ async fn a_capability_added_through_the_web_ui_is_listed_and_runs() {
         )
         .await;
     assert_eq!(status, 409, "{v}");
+    daemon.stop().await;
+    r.stop().await;
+}
+
+/// In folder mode, which a new pairing starts in, what a center added
+/// waits for an `on`: the tab gets it as added, neither left out nor among
+/// the units, which the page marks "not offered". An `on` for that action
+/// by its name, which the center sets in its settings, offers it; one for
+/// its capability as a whole stays the owner's.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_folder_mode_an_added_capability_waits_for_its_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(&dir.path().join("center")).await;
+    let (daemon, _) = node_in(&r, dir.path(), true, nerve_policy::Mode::Folder).await;
+    let ui = Ui::open(&r).await;
+    let id = online(&ui).await["id"].as_str().unwrap().to_string();
+    let (status, v) = ui
+        .api(
+            "POST",
+            "/api/caps/save",
+            json!({"id": id, "form": form("say.back", "echo {word}"), "adding": true}),
+        )
+        .await;
+    assert_eq!(status, 200, "{v}");
+    let has_unit = |v: &Value| {
+        v["units"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|u| u["name"] == "say.back")
+    };
+    let v = ui.caps(&id).await;
+    let entry = &v["added"]["entries"][0];
+    assert_eq!(entry["name"], "say.back", "{v}");
+    assert_eq!(entry["left_out"], Value::Null, "{v}");
+    assert!(!has_unit(&v), "{v}");
+
+    // The center's own settings: not all of `say`, but `say.back`.
+    let set = async |caps: Value| {
+        let (status, got) = ui
+            .api("GET", &format!("/api/nodes/settings?id={id}"), Value::Null)
+            .await;
+        assert_eq!(status, 200, "{got}");
+        let mut doc = got["document"].clone();
+        doc["policy"]["caps"] = caps;
+        ui.api(
+            "POST",
+            "/api/nodes/settings",
+            json!({"id": id, "document": doc, "if_version": got["version"]}),
+        )
+        .await
+    };
+    let (status, e) = set(json!({"say": "on"})).await;
+    assert_ne!(status, 200, "{e}");
+    assert!(e.to_string().contains("only the owner can turn on"), "{e}");
+    let (status, v) = set(json!({"say.back": "on"})).await;
+    assert_eq!(status, 200, "{v}");
+    let v = wait_for("the tab lists it once it is on", async || {
+        let v = ui.caps(&id).await;
+        has_unit(&v).then_some(v)
+    })
+    .await;
+    let say = v["units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["name"] == "say.back")
+        .unwrap();
+    assert_eq!(
+        (&say["source"], &say["effect"]),
+        (&json!("this center"), &json!("execute")),
+        "{v}"
+    );
+    assert_eq!(v["added"]["entries"][0]["left_out"], Value::Null, "{v}");
     daemon.stop().await;
     r.stop().await;
 }

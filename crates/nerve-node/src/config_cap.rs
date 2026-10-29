@@ -168,7 +168,9 @@ pub fn center_left_out(
     } else if names(cfg, cap) {
         Some(format!("the owner declares {cap} in node.toml"))
     } else if taken.contains(cap) {
-        Some(format!("a program the owner allows offers {cap}"))
+        Some(format!(
+            "a program the owner allows offers {cap}, which this center is offered only once it removes its own"
+        ))
     } else {
         left_out(c, os, installed)
     }
@@ -196,11 +198,54 @@ pub fn center_offered(
     )
 }
 
-/// Every capability `entry`'s center added, offered or not, with their
-/// [`counted`] effects: what only the owner may turn on for that center
-/// goes by them as by the owner's ([`declared`]).
-pub fn center_declared(entry: &CenterEntry) -> Vec<Capability> {
-    capabilities_of(entry.capabilities.iter(), CENTER_ADDED, counted)
+/// The attached programs' capabilities (`programs`) `entry`'s center is
+/// offered: none under a capability it added one of its own under. Its own
+/// is left out then ([`center_left_out`]), and its switches and allow rules
+/// for its own were set for what its own does: they must not reach what a
+/// program offers under that name. Once the center removes its own, with
+/// them ([`remove_added`]), the program's is offered to it as to any other.
+pub fn programs_for(entry: &CenterEntry, mut programs: Vec<Capability>) -> Vec<Capability> {
+    programs.retain(|p| !entry.capabilities.iter().any(|c| c.split().0 == p.id));
+    programs
+}
+
+/// Whether a `caps` key or an allow rule's scope names an action
+/// `entry`'s center added that neither senses nor actuates, under a
+/// capability nothing in `known` (the owner's and the attached programs')
+/// offers: the center may turn on or allow that very action itself. Its
+/// capability as a whole stays as the owner's to turn on as one nothing
+/// offers (crate::provider::owner_only_of): an `on` or a rule for all of it
+/// would also cover what a program the owner allows offers under that name
+/// later.
+pub fn own_action(entry: &CenterEntry, known: &[Capability]) -> impl Fn(&str) -> bool + use<> {
+    let ids: BTreeSet<&str> = known.iter().map(|c| c.id.as_str()).collect();
+    let own: BTreeSet<String> = entry
+        .capabilities
+        .iter()
+        .filter(|c| !senses(c.effect) && !ids.contains(c.split().0))
+        .map(|c| c.name.clone())
+        .collect();
+    move |scope| own.contains(scope)
+}
+
+/// Removes the capability `name` that `entry`'s center added, with that
+/// center's `on` and allow rules for that very action: they were set for
+/// its command (by the center, or by the owner for one that senses), and
+/// kept they would cover what a program the owner allows offers under that
+/// name later. An `off` or `hidden`, and a deny rule, stay. Whether it had
+/// one.
+pub fn remove_added(entry: &mut CenterEntry, name: &str) -> bool {
+    use nerve_policy::config::CapSetting;
+    let Some(i) = entry.capabilities.iter().position(|c| c.name == name) else {
+        return false;
+    };
+    entry.capabilities.remove(i);
+    let p = &mut entry.policy;
+    if p.caps.get(name) == Some(&CapSetting::On) {
+        p.caps.remove(name);
+    }
+    p.allow.retain(|r| nerve_policy::rules::scope_of(r) != name);
+    true
 }
 
 /// The entry of `cfg` (`provider` [`PROVIDER`]) or of `entry`'s center
@@ -337,8 +382,8 @@ pub fn center_change(
         }
         (CenterChange::Add(c), None) => e.capabilities.push(c),
         (CenterChange::Edit(c), Some(i)) => e.capabilities[i] = c,
-        (CenterChange::Rm(_), Some(i)) => {
-            e.capabilities.remove(i);
+        (CenterChange::Rm(_), Some(_)) => {
+            remove_added(e, &name);
         }
         (CenterChange::Edit(_) | CenterChange::Rm(_), None) => {
             return Err(SetError::Invalid(format!(
@@ -838,6 +883,18 @@ command = ["sensors", "-l"]
             center_change(c, who, CenterChange::Add(x), "linux", true, &programs)
         };
         add(&mut c, "lab", sent("notes.show", "read")).unwrap();
+        // Lab may turn on that action itself, by its name: not all of
+        // `notes`, not another action, and not once a program offers `notes`.
+        let mine = own_action(c.center("lab").unwrap(), &[]);
+        assert!(mine("notes.show") && !mine("notes") && !mine("notes.other"));
+        let notes = Capability {
+            id: "notes".into(),
+            ..programs[0].clone()
+        };
+        assert!(!own_action(
+            c.center("lab").unwrap(),
+            std::slice::from_ref(&notes)
+        )("notes.show"));
         // Under the owner's capability or a program's, none.
         for (name, why) in [
             ("sensors.extra", "the owner declares sensors in node.toml"),
@@ -919,13 +976,14 @@ command = ["sensors", "-l"]
             c.center("lab").unwrap().policy.caps.get("notes.show"),
             Some(&nerve_policy::config::CapSetting::Off)
         );
-        // An owner's program that comes later takes its capability's place.
+        assert!(!own_action(c.center("lab").unwrap(), &[])("notes.show"));
+        // An owner's program that comes later takes its capability's place,
+        // and lab, which keeps its own, is not offered the program's either.
         let lab = c.center("lab").unwrap();
-        let notes = Capability {
-            id: "notes".into(),
-            ..programs[0].clone()
-        };
-        assert!(center_offered(&c, lab, "linux", true, &[notes]).is_empty());
+        assert!(center_offered(&c, lab, "linux", true, std::slice::from_ref(&notes)).is_empty());
+        assert!(programs_for(lab, vec![notes.clone()]).is_empty());
+        let ops = c.center("ops").unwrap();
+        assert_eq!(programs_for(ops, vec![notes.clone()]), [notes]);
         // What it sends names no account and keeps to the validator.
         for bad in [
             json!({"name": "a.b", "effect": "read", "command": ["id"], "account": "owner"}),

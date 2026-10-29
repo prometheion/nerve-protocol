@@ -16,7 +16,7 @@ use nerve_node::{Daemon, NodeOptions, NodePaths};
 use nerve_policy::NodeConfig;
 use nerve_policy::config::{CapSetting, SettingsGrant};
 use serde_json::{Value, json};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UnixStream};
 
 const WAIT: Duration = Duration::from_secs(15);
 
@@ -410,10 +410,12 @@ async fn a_center_names_no_account_and_leaves_the_owners_alone() {
 }
 
 /// A center's capability counts as `execute` whatever it declares, so in
-/// folder mode one that names no path needs `on`, which the center may set;
-/// one that senses waits for the owner's `on` in every mode, also where
-/// an earlier `on` of the center's would cover it; and an `off` the owner
-/// set stays until the owner changes it.
+/// folder mode one that names no path needs `on`, which the center may set
+/// for that action, not for its capability as a whole; one that senses
+/// waits for the owner's `on` in every mode, also where an earlier `on` of
+/// the center's would cover it; and an `off` the owner set stays until the
+/// owner changes it, also after the center removes the capability and adds
+/// it again.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_centers_capability_counts_as_execute_and_sensing_waits_for_the_owner() {
     let dir = tempfile::tempdir().unwrap();
@@ -443,9 +445,17 @@ async fn a_centers_capability_counts_as_execute_and_sensing_waits_for_the_owner(
     let e = call(&mut conn, "notes.show", json!({})).await.unwrap_err();
     assert_eq!(code_of(&e), "forbidden");
     assert!(e.message.contains("set to on"), "{}", e.message);
-    settings_set(&mut conn, |d| d["policy"]["caps"] = json!({"notes": "on"}))
+    // Not its capability as a whole: that would cover what a program the
+    // owner allows offers under that name later.
+    let e = settings_set(&mut conn, |d| d["policy"]["caps"] = json!({"notes": "on"}))
         .await
-        .expect("the center turns its own on");
+        .unwrap_err();
+    assert_eq!(code_of(&e), "forbidden");
+    settings_set(&mut conn, |d| {
+        d["policy"]["caps"] = json!({"notes.show": "on"})
+    })
+    .await
+    .expect("the center turns its own on");
     let notes = described(&mut conn, "notes").await.unwrap();
     assert_eq!(notes["actions"]["show"]["effect"], "execute");
     assert_eq!(
@@ -453,7 +463,7 @@ async fn a_centers_capability_counts_as_execute_and_sensing_waits_for_the_owner(
         json!("notes\n")
     );
 
-    // It comes to sense: the center's own `on` for `notes` covered it, so
+    // It comes to sense: the center's own `on` for `notes.show` covered it, so
     // the node switches the action off, and the center cannot turn it on.
     let look = json!({"name": "notes.show", "effect": "sense", "command": ["echo", "seen"]});
     invoke(
@@ -494,7 +504,7 @@ async fn a_centers_capability_counts_as_execute_and_sensing_waits_for_the_owner(
     let ls = cli(&paths, &["cap", "ls"]).await.unwrap();
     assert!(
         ls.contains(
-            "capability cam.look (added by center lab, waits for your cap set on): echo frame"
+            "capability cam.look (added by center lab, senses: only you turn it on): echo frame"
         ),
         "{ls}"
     );
@@ -511,6 +521,13 @@ async fn a_centers_capability_counts_as_execute_and_sensing_waits_for_the_owner(
         call(&mut conn, "cam.look", json!({})).await.unwrap(),
         json!("frame\n")
     );
+    // That `on` was for this command: it goes with it, whoever removes it.
+    cli(&paths, &["cap", "rm", "cam.look", "--center", "lab"])
+        .await
+        .unwrap();
+    let cfg = nerve_node::cli::read_config(&paths).await.unwrap().0;
+    assert_eq!(cfg.centers[0].policy.caps.get("cam.look"), None);
+    daemon.reload().unwrap();
     // The owner turns off one that does not sense, which the center turned
     // on itself, and the center does not turn it on again. As with a
     // pause, an `off` the center set itself holds alike: the node cannot
@@ -524,34 +541,186 @@ async fn a_centers_capability_counts_as_execute_and_sensing_waits_for_the_owner(
     )
     .await
     .unwrap();
-    settings_set(&mut conn, |d| d["policy"]["caps"]["tool"] = json!("on"))
+    settings_set(&mut conn, |d| d["policy"]["caps"]["tool.go"] = json!("on"))
         .await
         .expect("the center turns on one that does not sense");
     assert_eq!(
         call(&mut conn, "tool.go", json!({})).await.unwrap(),
         json!("went\n")
     );
-    cli(&paths, &["cap", "set", "tool", "off", "--center", "lab"])
+    cli(&paths, &["cap", "set", "tool.go", "off", "--center", "lab"])
         .await
         .unwrap();
     daemon.reload().unwrap();
     let e = call(&mut conn, "tool.go", json!({})).await.unwrap_err();
     assert_eq!(code_of(&e), "disabled");
-    let e = settings_set(&mut conn, |d| d["policy"]["caps"]["tool"] = json!("on"))
+    let lift = async |conn: &mut Conn<TcpStream>| {
+        let e = settings_set(conn, |d| d["policy"]["caps"]["tool.go"] = json!("on"))
+            .await
+            .unwrap_err();
+        assert_eq!(code_of(&e), "forbidden");
+        e.message
+    };
+    let m = lift(&mut conn).await;
+    assert!(
+        m.contains("a capability this center added stays off until the owner turns it on"),
+        "{m}"
+    );
+    // Removed and added again, it is still off: the `off` is the name's.
+    // While removed, nothing offers `tool`, which only the owner turns on.
+    invoke(&mut conn, "settings", "cap-rm", json!({"name": "tool.go"}))
+        .await
+        .unwrap();
+    let m = lift(&mut conn).await;
+    assert!(m.contains("only the owner can turn on"), "{m}");
+    invoke(
+        &mut conn,
+        "settings",
+        "cap-add",
+        json!({"capability": tool}),
+    )
+    .await
+    .unwrap();
+    let e = call(&mut conn, "tool.go", json!({})).await.unwrap_err();
+    assert_eq!(code_of(&e), "disabled");
+    let m = lift(&mut conn).await;
+    assert!(m.contains("stays off until the owner turns it on"), "{m}");
+    let cfg = nerve_node::cli::read_config(&paths).await.unwrap().0;
+    assert_eq!(
+        cfg.centers[0].policy.caps.get("tool.go"),
+        Some(&CapSetting::Off)
+    );
+    daemon.stop().await;
+}
+
+/// This test program: what a provider started from here runs.
+fn me() -> String {
+    std::env::current_exe().unwrap().display().to_string()
+}
+
+/// Attaches this test program as the provider `desk` with the
+/// capabilities `caps`, on the node's provider socket, and waits for the
+/// node's answer: the connection, which detaches it when dropped.
+async fn attach(daemon: &Daemon, caps: Value) -> UnixStream {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let socket = daemon.paths().ctl_socket();
+    let token = std::fs::read_to_string(socket.with_file_name("ctl.token")).unwrap();
+    let mut io = UnixStream::connect(&socket).await.unwrap();
+    let hello = json!({"method": "hello", "token": token,
+                       "params": {"role": "provider", "name": "desk", "capabilities": caps}});
+    io.write_all(format!("{hello}\n").as_bytes()).await.unwrap();
+    let mut line = String::new();
+    let mut r = BufReader::new(&mut io);
+    tokio::time::timeout(WAIT, r.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(line.contains("\"ok\""), "{line}");
+    io
+}
+
+/// A center's own switch and allow rule cover only its own action, by its
+/// name: not its capability as a whole, and not what a program the owner
+/// allows offers under that name once it attaches. While the center keeps
+/// its own under that name, it is offered neither; once it removes its
+/// own, its `on` and rule for it go too, and what the program offers waits
+/// for the owner as for any center.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_centers_own_switches_never_reach_what_a_program_offers_later() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let daemon = node(
+        dir.path(),
+        &[(&center, "lab")],
+        nerve_policy::Mode::Folder,
+        true,
+        |c| {
+            c.providers.allowed = vec![nerve_policy::config::AllowedProvider {
+                name: "desk".into(),
+                exe: me(),
+            }];
+        },
+    )
+    .await;
+    let paths = daemon.paths().clone();
+    let mut conn = linked(&mut center).await;
+    // While the program is not attached, the center adds a harmless one
+    // under the name the program offers later.
+    let list = json!({"name": "cam.list", "effect": "read", "command": ["echo", "list"]});
+    invoke(
+        &mut conn,
+        "settings",
+        "cap-add",
+        json!({"capability": list}),
+    )
+    .await
+    .unwrap();
+    for caps in [json!({"cam": "on"}), json!({"cam.list": "on", "cam": "on"})] {
+        let e = settings_set(&mut conn, |d| d["policy"]["caps"] = caps.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(code_of(&e), "forbidden", "{caps}");
+    }
+    let e = settings_set(&mut conn, |d| d["policy"]["allow"] = json!(["cam"]))
         .await
         .unwrap_err();
     assert_eq!(code_of(&e), "forbidden");
-    assert!(
-        e.message
-            .contains("a capability this center added stays off until the owner turns it on"),
-        "{}",
-        e.message
-    );
-    let cfg = nerve_node::cli::read_config(&paths).await.unwrap().0;
+    settings_set(&mut conn, |d| {
+        d["policy"]["caps"] = json!({"cam.list": "on"});
+        d["policy"]["allow"] = json!(["cam.list"]);
+    })
+    .await
+    .expect("its own action, by its name");
     assert_eq!(
-        cfg.centers[0].policy.caps.get("tool"),
-        Some(&CapSetting::Off)
+        call(&mut conn, "cam.list", json!({})).await.unwrap(),
+        json!("list\n")
     );
+
+    // The program attaches: its `cam.list` senses, `cam.snap` too.
+    let program = attach(
+        &daemon,
+        json!([{"id": "cam", "actions": {"list": {"effect": "sense"},
+                                         "snap": {"effect": "sense"}}}]),
+    )
+    .await;
+    // Neither the center's own, which the program's name leaves out, nor
+    // the program's, which the center's own `on` must not cover.
+    assert!(described(&mut conn, "cam").await.is_none());
+    for unit in ["cam.list", "cam.snap"] {
+        let e = call(&mut conn, unit, json!({})).await.unwrap_err();
+        assert_eq!(code_of(&e), "unknown_capability", "{unit}: {}", e.message);
+    }
+    let got = settings_get(&mut conn, &["capabilities"]).await;
+    assert!(
+        got["capabilities"]["entries"][0]["left_out"]
+            .as_str()
+            .is_some_and(|w| w.contains("only once it removes its own")),
+        "{got}"
+    );
+    let ls = cli(&paths, &["cap", "ls", "--json"]).await.unwrap();
+    let ls: Value = serde_json::from_str(&ls).unwrap();
+    let row = ls["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "cam.list" && r["source"] == "program desk")
+        .cloned()
+        .unwrap();
+    assert_eq!(row["now"]["lab"], "off", "{row}");
+
+    // The center removes its own: its `on` and its rule for it go along,
+    // and the program's waits for the owner's `on`.
+    invoke(&mut conn, "settings", "cap-rm", json!({"name": "cam.list"}))
+        .await
+        .unwrap();
+    let cfg = nerve_node::cli::read_config(&paths).await.unwrap().0;
+    assert_eq!(cfg.centers[0].policy.caps.get("cam.list"), None);
+    assert!(cfg.centers[0].policy.allow.is_empty(), "{cfg:?}");
+    for unit in ["cam.list", "cam.snap"] {
+        let e = call(&mut conn, unit, json!({})).await.unwrap_err();
+        assert_ne!(code_of(&e), "unknown_capability", "{unit}: {}", e.message);
+    }
+    drop(program);
     daemon.stop().await;
 }
 

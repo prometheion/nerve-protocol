@@ -2217,9 +2217,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                 let e = c
                     .center_mut(&center)
                     .ok_or_else(|| format!("no center named {center}"))?;
-                let before = e.capabilities.len();
-                e.capabilities.retain(|d| d.name != name);
-                if e.capabilities.len() == before {
+                if !crate::config_cap::remove_added(e, &name) {
                     return Err(format!("center {center} added no capability {name}"));
                 }
                 Ok(())
@@ -3724,10 +3722,15 @@ fn config_lines(v: &Value) -> Vec<String> {
         .filter_map(|e| serde_json::from_value::<ConfigEntry>(e.clone()).ok())
         .map(|e| {
             // One a center added says which, and how it counts: as execute,
-            // unless it senses or actuates, which waits for the owner's `on`.
+            // unless it senses or actuates, which only the owner turns on.
+            // It says so as what the capability is, not whether it is on
+            // now: the rows of `cap ls` above say that.
             let by = match &e.center {
-                Some(c) if crate::config_cap::senses(e.effect) => {
-                    format!(" (added by center {c}, waits for your cap set on)")
+                Some(c) if e.effect == nerve_proto::descriptor::Effect::Sense => {
+                    format!(" (added by center {c}, senses: only you turn it on)")
+                }
+                Some(c) if e.effect == nerve_proto::descriptor::Effect::Actuate => {
+                    format!(" (added by center {c}, actuates: only you turn it on)")
                 }
                 Some(c) => format!(" (added by center {c}, counted as execute)"),
                 None => String::new(),

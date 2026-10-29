@@ -1421,8 +1421,8 @@ mod tests {
         for part in [
             "if (e.left_out || d.units.some((u) => u.name === e.name)) return null;",
             "only the machine's owner turns it on",
-            "in folder mode with an on for it",
-            "in allowlist mode with an allow rule",
+            "in folder mode with an on for it (\"caps\": {\"${e.name}\": \"on\"})",
+            "in allowlist mode with the allow rule ${e.name}.",
         ] {
             assert!(idle.contains(part), "{part}: {idle}");
         }

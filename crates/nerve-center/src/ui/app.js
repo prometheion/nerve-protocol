@@ -1518,11 +1518,14 @@ function addedSection(d) {
 // left out: its policy decides it as a command, so in folder mode it needs an
 // on and in allowlist mode an allow rule, and one that senses or actuates
 // waits for the owner. The machine leaves it out of the description then.
+// The center sets either for that action by its name only: the machine
+// keeps its capability as a whole for the owner, as a program the owner
+// allows may offer more under it later.
 function notOffered(d, e) {
   if (e.left_out || d.units.some((u) => u.name === e.name)) return null;
   const why = e.effect === "sense" || e.effect === "actuate"
     ? `only the machine's owner turns it on, with nerve-node cap set ${e.name} on --center and this center's name on that machine.`
-    : `the machine's policy does not let the agent use it yet. Turn it on in Settings › Machines: in folder mode with an on for it ("caps": {"${e.name.split(".")[0]}": "on"}), in allowlist mode with an allow rule. An off the owner set stays.`;
+    : `the machine's policy does not let the agent use it yet. Turn it on in Settings › Machines, by its full name: in folder mode with an on for it ("caps": {"${e.name}": "on"}), in allowlist mode with the allow rule ${e.name}. An off the owner set stays.`;
   return el("p", { class: "meta" }, `Not offered now: ${why}`);
 }
 

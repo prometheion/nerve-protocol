@@ -2767,12 +2767,17 @@ impl Link {
         let attached = self.shared.providers.caps();
         let mut store = lock(&self.shared.store);
         let mut known = crate::config_cap::declared(store.config());
-        // So do the ones this center added, as their effects count.
-        if let Some(e) = store.config().center(&self.name) {
-            known.extend(crate::config_cap::center_declared(e));
-        }
         known.extend(attached);
-        let owner_only = crate::provider::owner_only_of(&known);
+        let others = crate::provider::owner_only_of(&known);
+        // The actions this center added that do not sense it turns on
+        // itself, each by its name; their capability as a whole stays the
+        // owner's, as one nothing offers (crate::config_cap::own_action).
+        let mine = store
+            .config()
+            .center(&self.name)
+            .map(|e| crate::config_cap::own_action(e, &known));
+        let owner_only =
+            move |scope: &str| others(scope) && !mine.as_ref().is_some_and(|f| f(scope));
         let r =
             store.set_center_document(&self.name, s.document, s.if_version, owner_only, |opts| {
                 self.protected_with(opts, account.as_ref(), &own)

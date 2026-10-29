@@ -659,21 +659,23 @@ impl Shared {
     }
 
     /// The capabilities `entry`'s center is offered besides the node's own:
-    /// the attached programs' (crate::provider), the config's and those that
-    /// center added itself (crate::config_cap).
+    /// the attached programs' (crate::provider) but those under a name it
+    /// added one of its own under (crate::config_cap::programs_for), the
+    /// config's and those that center added itself (crate::config_cap).
     pub fn added_caps(
         &self,
         cfg: &NodeConfig,
         entry: &nerve_policy::CenterEntry,
     ) -> Vec<nerve_proto::descriptor::Capability> {
-        let mut caps = self.providers.caps();
+        let programs = self.providers.caps();
         let added = crate::config_cap::center_offered(
             cfg,
             entry,
             std::env::consts::OS,
             self.config_caps,
-            &caps,
+            &programs,
         );
+        let mut caps = crate::config_cap::programs_for(entry, programs);
         caps.extend(crate::config_cap::offered(cfg, self.config_caps));
         caps.extend(added);
         caps
