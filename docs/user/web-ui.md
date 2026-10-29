@@ -154,8 +154,13 @@ header (it works like the one on the Statistics page).
   [settings grant](settings-grant.md) and is online:
   the [capabilities this center added](config-capabilities.md#capabilities-a-center-adds),
   each with what it says it does, its command and, where the machine leaves
-  it out, why. **Add a capability** opens a form; **Edit** fills it with one;
-  **Remove** asks first.
+  it out, why. One the machine takes but does not offer the agent yet is
+  marked **not offered**, with what turns it on: the machine decides it as
+  a command, so in `folder` mode (a new pairing's) it needs an `on` for it
+  and in `allowlist` mode an allow rule, both set on the Settings page under
+  Machines; one that senses or acts waits for the owner's `on`. **Add a
+  capability** opens a form; **Edit** fills it with one; **Remove** asks
+  first. After a change the page shows what the machine offers then.
 
 The form has the fields of `nerve-node cap add`: the name (`cap.action`), the
 time limit, what it does, a summary, the command (the program first; a word

@@ -641,9 +641,11 @@ over the center's message limit: the call fails with `too_large` instead.
   one set of names, as each is a unit `<cap>.<name>` of its own to the
   harness (harness.md §4.5), and they read or sense; a center leaves out
   every unit of a name given to two kinds.
-- `provider` names what serves a capability: `node`, or a local program
-  attached to the node (node-local.md §7). A center treats both alike; the
-  node decides every call either way.
+- `provider` names what serves a capability: `node`, a local program
+  attached to the node (node-local.md §7), `config` for one of the owner's
+  `[[capability]]` entries (node-local.md §2), or `center-added` for one the
+  receiving center added itself (§7.4.2; no other center sees it). A center
+  treats them alike; the node decides every call either way.
 - Exposure: `on`, `off`. A capability that is `hidden` for a center is
   absent from that center's descriptor; `off` is listed with exposure `off`.
   An action the owner switched off while its capability stays on carries

@@ -1514,14 +1514,28 @@ function addedSection(d) {
     entries.length ? el("div", { class: "list" }, entries.map((e) => addedRow(d, e))) : (a.refused ? null : el("p", { class: "meta" }, "None yet.")));
 }
 
+// Why the machine does not offer one this center added, where it is not
+// left out: its policy decides it as a command, so in folder mode it needs an
+// on and in allowlist mode an allow rule, and one that senses or actuates
+// waits for the owner. The machine leaves it out of the description then.
+function notOffered(d, e) {
+  if (e.left_out || d.units.some((u) => u.name === e.name)) return null;
+  const why = e.effect === "sense" || e.effect === "actuate"
+    ? `only the machine's owner turns it on, with nerve-node cap set ${e.name} on --center and this center's name on that machine.`
+    : `the machine's policy does not let the agent use it yet. Turn it on in Settings › Machines: in folder mode with an on for it ("caps": {"${e.name.split(".")[0]}": "on"}), in allowlist mode with an allow rule. An off the owner set stays.`;
+  return el("p", { class: "meta" }, `Not offered now: ${why}`);
+}
+
 function addedRow(d, e) {
   const c = state.caps;
+  const idle = notOffered(d, e);
   return el("div", { class: "card cap-row" },
     el("div", { class: "card-top" },
       el("code", { class: "mono name" }, e.name),
       effectPill(e.effect),
       e.effect === "sense" || e.effect === "actuate" ? null : el("span", { class: "meta" }, "counted as execute"),
       e.left_out ? pill("down", "left out") : null,
+      idle ? pill("warn", "not offered") : null,
       el("span", { class: "push" }),
       btn("Edit", "ghost", () => { c.form = { adding: false, form: { ...e.form } }; draw(true); }, "edit", `cap:${e.name}:edit`),
       btn("Remove", "ghost", act(async () => {
@@ -1533,7 +1547,8 @@ function addedRow(d, e) {
       }), "trash", `cap:${e.name}:remove`)),
     e.summary ? el("p", { class: "meta" }, e.summary) : null,
     el("p", { class: "meta" }, el("code", { class: "mono" }, e.form.command)),
-    e.left_out ? el("p", { class: "meta" }, `Left out: ${e.left_out}`) : null);
+    e.left_out ? el("p", { class: "meta" }, `Left out: ${e.left_out}`) : null,
+    idle);
 }
 
 function blankCapForm() {

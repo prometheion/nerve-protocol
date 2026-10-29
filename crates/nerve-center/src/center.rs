@@ -2663,6 +2663,11 @@ impl Center {
         r
     }
 
+    /// Runs the settings action `action` on the node and, once the node took
+    /// it, fetches the node's description before it answers: the node says
+    /// that it changed by an event, which the center follows in a task of its
+    /// own, and a page that asks for the tab right after the answer would
+    /// get the units from before the change.
     async fn settings_action(
         &self,
         node_id: &str,
@@ -2672,12 +2677,15 @@ impl Center {
         let link = self
             .link(node_id)
             .ok_or_else(|| RpcError::new(ErrorCode::Unavailable, "the node is offline"))?;
-        link.call(
-            msg::method::INVOKE,
-            json!({"cap": "settings", "action": action, "args": args, "ctx": {}}),
-            Some(SHORT_CALL),
-        )
-        .await
+        let r = link
+            .call(
+                msg::method::INVOKE,
+                json!({"cap": "settings", "action": action, "args": args, "ctx": {}}),
+                Some(SHORT_CALL),
+            )
+            .await?;
+        self.refresh(&link).await;
+        Ok(r)
     }
 
     // ---- Calls ----
@@ -4182,9 +4190,6 @@ pub(crate) fn plural(n: u32, one: &str) -> String {
     }
 }
 
-/// Where a unit comes from, as the Capabilities tab says it: the node's
-/// own, the owner's node.toml, this center (it added it), or a program the
-/// owner allows.
 /// The rows of the Capabilities tab for a node's `units`: all but the
 /// center's own, told as the catalog tells them (catalog::is_center), not
 /// by the provider a node names.
@@ -4221,6 +4226,9 @@ fn added_of(answer: &Value) -> Value {
     Value::Object(added)
 }
 
+/// Where a unit comes from, as the Capabilities tab says it: the node's
+/// own, the owner's node.toml, this center (it added it), or a program the
+/// owner allows.
 fn unit_source(provider: &str) -> String {
     match provider {
         "node" => "built-in".into(),

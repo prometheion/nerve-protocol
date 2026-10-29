@@ -1414,6 +1414,18 @@ mod tests {
         let entry = &entry[..entry.find("\n}\n").unwrap()];
         assert!(entry.contains("\"/api/caps/remove\"") && entry.contains("await modal("));
         assert!(entry.contains("e.left_out"));
+        // One the machine neither offers nor leaves out says why.
+        assert!(entry.contains("const idle = notOffered(d, e);") && entry.contains("    idle);"));
+        let idle = &APP_JS[APP_JS.find("function notOffered(").unwrap()..];
+        let idle = &idle[..idle.find("\n}\n").unwrap()];
+        for part in [
+            "if (e.left_out || d.units.some((u) => u.name === e.name)) return null;",
+            "only the machine's owner turns it on",
+            "in folder mode with an on for it",
+            "in allowlist mode with an allow rule",
+        ] {
+            assert!(idle.contains(part), "{part}: {idle}");
+        }
         let form = &APP_JS[APP_JS.find("function capForm(").unwrap()..];
         let form = &form[..form.find("\n}\n").unwrap()];
         for part in [

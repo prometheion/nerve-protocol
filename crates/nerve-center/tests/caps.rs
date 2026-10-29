@@ -293,12 +293,9 @@ async fn a_capability_added_through_the_web_ui_is_listed_and_runs() {
         )
         .await;
     assert_eq!(status, 200, "{v}");
-    let v = wait_for("the node offers it", async || {
-        let v = ui.caps(&id).await;
-        unit(&v, "say.back").is_some().then_some(v)
-    })
-    .await;
-    let say = unit(&v, "say.back").unwrap();
+    // The answer comes once the center has the node's new description.
+    let v = ui.caps(&id).await;
+    let say = unit(&v, "say.back").expect("offered at once");
     assert_eq!(say["source"], "this center", "{v}");
     assert_eq!(say["effect"], "execute", "{v}");
     let entry = &v["added"]["entries"][0];
@@ -376,11 +373,9 @@ async fn a_capability_added_through_the_web_ui_is_listed_and_runs() {
         )
         .await;
     assert_eq!(status, 200, "{v}");
-    wait_for("it is gone", async || {
-        let v = ui.caps(&id).await;
-        (unit(&v, "say.back").is_none() && v["added"]["entries"] == json!([])).then_some(())
-    })
-    .await;
+    let v = ui.caps(&id).await;
+    assert!(unit(&v, "say.back").is_none(), "{v}");
+    assert_eq!(v["added"]["entries"], json!([]), "{v}");
 
     // Without the grant the machine is shown read only: no added list, and
     // a save is the node's refusal.
