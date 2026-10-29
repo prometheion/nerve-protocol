@@ -667,7 +667,13 @@ entries as it checks the owner's. The node:
   too): its switches and rules were set for its own command;
 - drops, when an entry is removed (`settings.cap-rm` or the owner's `cap rm
   NAME --center <name>`), that center's `on` for `NAME` and its allow rules
-  whose scope is `NAME`; an `off`, a `hidden` and deny rules stay.
+  whose scope is `NAME`; an `off`, a `hidden` and deny rules stay, and all of
+  them stay where the owner's config declares `NAME` (they then turn on the
+  owner's for that center);
+- counts, in `settings.set`, the entries of that center that sense or
+  actuate with what the owner's config declares and the attached providers
+  offer, so their `cap` and `cap.action` stay the owner's to turn on or
+  allow also while something else offers that `cap` without sensing.
 
 `get {cap: "settings", keys: ["capabilities"]}` gives `{entries, refused}`:
 each entry the center added as it sent it, with `left_out` where this node

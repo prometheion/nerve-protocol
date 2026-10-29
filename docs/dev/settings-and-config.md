@@ -99,7 +99,9 @@ center reads, or the node refuses the whole change and names the field.
     and adds it again. The center turns on or allows each of its actions by
     its `cap.action` only, an attached provider's capability of a `cap` it
     added under is not offered to it, and a removal drops its `on` and allow
-    rules for that action (nerve-node `config_cap`). The store checks the write
+    rules for that action unless the owner declares that action too; its
+    sensing ones keep their `cap` owner-only whatever else offers it
+    (nerve-node `config_cap`). The store checks the write
     grant and audits each change as the center's (`Writer::Center`).
 
 One item is in the document a center reads and is still the owner's: the

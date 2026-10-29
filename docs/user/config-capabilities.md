@@ -214,7 +214,9 @@ these limits:
   nothing else offers it, as a program you allow may offer more under that
   name later.
 - **Sensing waits for you.** One that says `sense` or `actuate` stays so, and
-  only you turn it on (`cap set NAME on --center <name>`), in every mode. When
+  only you turn it on (`cap set NAME on --center <name>`), in every mode,
+  also while a program or a capability of yours offers its name without
+  sensing: the center sets no `on` or rule for that name meanwhile. When
   a center changes one to sense or act, or changes anything but the summary
   of one that does (its command, the arguments it takes, its time limit),
   a switch or rule that covered it is switched off, also your `on`: you turn
@@ -229,7 +231,8 @@ these limits:
 - **Removed with its switches.** When the center removes one, or you do,
   the node also drops that center's `on` and allow rules for that very
   action, yours too: they were given for that command. An `off`, a `hidden`
-  and a deny rule stay.
+  and a deny rule stay. Where you declare that very name yourself, they all
+  stay: the center's was left out, so they turn on yours for that center.
 - **Audited.** Each add, change and removal is in the [audit log](audit.md)
   as that center's change of the settings, with the old and the new entry.
 - **You can turn it off or remove it.** `cap set NAME off --center <name>`
