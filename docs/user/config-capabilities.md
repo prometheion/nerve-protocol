@@ -234,7 +234,8 @@ these limits:
   neither, and `cap set` refuses an `on` for that name with the reason: it
   would turn on the center's command once the program goes. Turn it on once
   the center is offered it. A file you take with `config accept` that has
-  such an `on` gets it switched off.
+  such an `on` gets it switched off, and `config accept` tells you to turn
+  it on once the center is offered it, or to remove it.
 - **Yours come first.** A center changes and removes none of your
   capabilities, and adds none under the name of a capability of yours or of
   a program you allow that is attached now. One it added is left out while
@@ -249,8 +250,13 @@ these limits:
   one the center keeps under its capability, the `on` and allow rules for
   the capability as a whole (`cap set cam on --center <name>`, the rule
   `cam`) go as well: you gave them for the center's commands, and kept they
-  would turn on what a program you allow offers under that name later. An
-  `off`, a `hidden` and a deny rule stay. Where you declare that very name
+  would turn on what a program you allow offers under that name later. So
+  a center adds none under a name while that center has an `on` or allow
+  rule set for what else offers it, for that very action or, for its first
+  one under that capability, for the capability as a whole (say yours for a
+  program that is away for now): the add is refused with the reason, as the
+  center's removal would take that switch along. Take it away first, if
+  you want the center's. An `off`, a `hidden` and a deny rule stay. Where you declare that very name
   yourself, they all stay, and those for the capability as a whole where
   you declare any action of it: the center's was left out, so they turn on
   yours for that center (an `on` for one of yours that senses or acts only
@@ -261,13 +267,17 @@ these limits:
   as a whole for that center, nor the center's own action by its name: the
   center is offered neither, and the switch would go with the center's own
   when it is removed. `cap set` refuses it and says why; `config accept`
-  switches it off and says so. Remove the center's first (`cap rm NAME
-  --center <name>`), then turn the program's on. An `on` for one of the
+  switches it off, and says that the center keeps its own under that name.
+  The `off` stays when the center's goes. Remove the center's first (`cap rm
+  NAME --center <name>`), then turn the program's on. An `on` for one of the
   program's actions by its full name (`cap set cam.snap on --center
   <name>`) is taken and stays.
 - **Time limit.** Its `timeout_secs` is checked against your
   `limits.max_timeout_secs` when the center adds or changes it. You may
   lower that limit later: the command then stops at your limit.
+- **Size.** A center adds at most 64, as many as you may declare, and
+  together at most 256 KiB as JSON; the summary and each word of the
+  command are bounded as yours are (above).
 - **Audited.** Each add, change and removal is in the [audit log](audit.md)
   as that center's change of the settings, under the key `center`: with the
   old and the new list of this node's centers, each with what it added.

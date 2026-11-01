@@ -633,9 +633,12 @@ The node:
   removes its own also where the owner came to declare that name), and an
   add or edit whose `cap` the owner's
   `[[capability]]` names or an attached provider offers, or that this node
-  would leave out (its platform); `invalid_args` an add of a name the center
+  would leave out (its platform), and an add while that center has an `on`
+  or allow rule for its `NAME`, or, where it keeps no other entry under that
+  `cap`, for the `cap` (they were set for what else offers that name, and
+  would go with the entry, below); `invalid_args` an add of a name the center
   added already, an edit or removal of one it did not add, and one that
-  takes the center's entries together past 256 KiB as JSON (a summary is at
+  takes the center's entries past 64 or together past 256 KiB as JSON (a summary is at
   most 2048 bytes and a command element at most 4096 bytes, for the owner's
   entries too);
 - offers them to that center alone, with `provider: "center-added"`, each
@@ -658,7 +661,8 @@ The node:
   center's own that senses or actuates and is left out for an attached
   provider's `cap` is refused: the center is offered neither, and the `on`
   would turn on the center's command once the provider goes. `config accept`
-  switches such an `on` off instead and names it in `held`;
+  switches such an `on` off instead and names it in `shadowed` (the action
+  switched off, with its center), apart from those in `held`;
 - keeps, in `settings.set`, an `off` or `hidden` switch (of the capability or
   one of its actions) of a capability the center added until the owner
   changes it, whoever set it, as only the owner unpauses: while the center
@@ -688,8 +692,9 @@ The node:
   rule for `NAME` or its `cap` while that center keeps `NAME` and an attached
   provider offers the `cap` (and the owner's config declares none of it): the
   center is offered neither then, so the switch would be for the provider's,
-  and would go with `NAME`; `config accept` switches it `off` and reports it
-  as held. The provider's actions by their own keys stay the owner's;
+  and would go with `NAME`; `config accept` switches it `off` and names it in
+  `with_own` (the key switched off, with its center). The provider's actions
+  by their own keys stay the owner's;
 - counts, in `settings.set`, the entries of that center that sense or
   actuate with what the owner's config declares and the attached providers
   offer, so their `cap` and `cap.action` stay the owner's to turn on or

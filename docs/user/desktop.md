@@ -296,10 +296,11 @@ and `sense` and `actuate` need your **On**. One the
 node leaves out, such as a program's action whose schema is outside what a
 center takes, says why in red and has no switch. A capability the chosen
 center [added itself](config-capabilities.md#capabilities-a-center-adds)
-shows with the source `center <name>`, its switches and the command it
-runs, and only while that center is chosen: its line for the agent is the
-center's own words, so read the command before you turn on one that senses
-or acts. Remove it with `nerve-node cap rm NAME --center <name>`.
+shows with the source `center <name>`, its switches and the whole command
+it runs, over as many lines as it takes, and only while that center is
+chosen: its line for the agent is the center's own words, so read the
+command before you turn on one that senses or acts (`nerve-node cap ls
+--center <name>` prints it too). Remove it with `nerve-node cap rm NAME --center <name>`.
 A stopped node shows its own capabilities and those of `node.toml`; the
 programs' show while it runs.
 

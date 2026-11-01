@@ -902,7 +902,7 @@ A center with the settings grant `write` may add capabilities of its own
   (`result` `"text"` or null for what the command prints), with no other
   field. `cap-edit {capability}` replaces the one of that name;
   `cap-rm {name}` removes it. A summary is at most 2048 bytes, each command
-  element at most 4096 bytes, and all of a center's capabilities together at
+  element at most 4096 bytes, and a center adds at most 64, together at
   most 256 KiB as JSON.
 - A node that takes none answers `unavailable` with the reason. A broken
   entry, a name the center added already, or one it did not add is

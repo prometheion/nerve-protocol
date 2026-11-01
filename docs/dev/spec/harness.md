@@ -677,7 +677,14 @@ blocklist, the allow rules, the decision model, taint and the per-node
 switches and notes: `GET` and `POST /api/checker`, the endpoint token with
 `POST /api/checker/token`, which is never sent back, the local model with
 `POST /api/checker/install` and `/api/checker/remove`, and the audit tab's
-allow buttons on a model refusal with `POST /api/checker/allow`). The sudo password is sealed in the browser for the
+allow buttons on a model refusal with `POST /api/checker/allow`), capabilities (a
+node picker; per node what it offers this center, and the capabilities this center
+added there, each left-out one with the node's reason; only a node with the
+settings grant `write` takes an add, edit or removal, one without it is shown read
+only: `GET /api/caps?id=`, `POST /api/caps/check` checks the form as the node checks
+a capability of its config and sends nothing, `POST /api/caps/save` with `adding`
+checks it again before it sends `settings.cap-add` or `cap-edit`, and
+`POST /api/caps/remove` sends `settings.cap-rm`; protocol §7.4.2). The sudo password is sealed in the browser for the
 node's signed offer (protocol §7.4.1); the center checks the offer's
 signature against the paired node key, relays the sealed box
 (`POST /api/nodes/sudo/offer`, `POST /api/nodes/sudo`) and keeps no copy. The pages,
