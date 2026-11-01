@@ -793,6 +793,67 @@ mod tests {
         ));
     }
 
+    /// The checker reads a rule's conditions from the call's arguments: a
+    /// blocklist entry refuses a call that may meet them (one that leaves
+    /// the argument out counts), a saved allow rule covers only a call that
+    /// meets them all, and a path argument is matched as a path (#152, C1).
+    #[tokio::test]
+    async fn conditions_hold_a_calls_arguments_in_the_checker() {
+        let mut cfg = CheckerConfig::default();
+        cfg.blocklist.push(entry("lamp.set:brightness>50", None));
+        cfg.blocklist.push(entry("notes.save:file~~/.ssh/*", None));
+        cfg.allow_rules.push(AllowRule {
+            rule: "lamp.set:room=office".into(),
+            node_id: None,
+        });
+        let checker = Checker::build(cfg, None);
+        assert!(checker.rejected.is_empty(), "{:?}", checker.rejected);
+        let lamp = async |args: Value| {
+            let args = args.as_object().unwrap().clone();
+            checker
+                .check(
+                    &call("lamp", "set", Effect::Actuate, "lamp.set", &args),
+                    None,
+                )
+                .await
+        };
+        for args in [
+            json!({"room": "office", "brightness": 80}),
+            json!({"room": "office"}),
+            json!({"room": "office", "brightness": "dim"}),
+        ] {
+            assert!(
+                matches!(lamp(args.clone()).await, Decision::Refuse { layer: Layer::Blocklist, ref detail, .. } if detail == "lamp.set:brightness>50"),
+                "{args}"
+            );
+        }
+        assert!(matches!(
+            lamp(json!({"room": "office", "brightness": 20})).await,
+            Decision::Allowed { layer: Layer::AllowRule, ref detail, .. } if detail == "lamp.set:room=office"
+        ));
+        assert!(matches!(
+            lamp(json!({"room": "hall", "brightness": 20})).await,
+            Decision::Pass
+        ));
+        let marked = [("file".to_string(), PathMark::Write)];
+        let save = async |file: &str| {
+            let args = json!({"file": file}).as_object().unwrap().clone();
+            let c = CallInfo {
+                marked: &marked,
+                ..call("notes", "save", Effect::Write, file, &args)
+            };
+            checker.check(&c, None).await
+        };
+        assert!(matches!(
+            save("/home/me/work/../.ssh/authorized_keys").await,
+            Decision::Refuse {
+                layer: Layer::Blocklist,
+                ..
+            }
+        ));
+        assert!(matches!(save("/home/me/notes/a.md").await, Decision::Pass));
+    }
+
     /// A program's action that writes a path is held by the `fs.write`
     /// entries as `fs.write` is, however the path is spelled; one that only
     /// reads it is not held by them, but by an `fs.read` or `fs` entry.
