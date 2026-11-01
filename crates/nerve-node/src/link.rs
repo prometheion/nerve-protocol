@@ -2482,6 +2482,7 @@ impl Link {
                     } else {
                         PathAccess::Read
                     },
+                    arg: Some(field.clone()),
                 });
                 Ok(())
             })
@@ -2577,6 +2578,9 @@ impl Link {
         unconfined: Option<&str>,
         program: Option<u32>,
     ) -> Result<(), RpcError> {
+        // The arguments were checked against the action's schema before
+        // the call got here; a rule's conditions read them (a path argument
+        // as resolved, from `targets`).
         let call = Call {
             cap: &inv.cap,
             action: &inv.action,
@@ -2585,6 +2589,7 @@ impl Link {
             command,
             cwd,
             now_ms: crate::now_ms(),
+            args: Some(&inv.args),
         };
         let judged = Judged {
             home: self.home(),
@@ -2622,6 +2627,7 @@ impl Link {
             let closed = closed_for(program, walker, crate::account::own_uid());
             let account = account.cloned();
             let now_ms = call.now_ms;
+            let args = inv.args.clone();
             // A call whose deadline passes, or that is cancelled, while its
             // links are walked is dropped at the await below: the walk
             // stops then, and the call is in the audit log all the same.
@@ -2635,6 +2641,7 @@ impl Link {
                         command: command.as_deref(),
                         cwd: cwd.as_deref(),
                         now_ms,
+                        args: Some(&args),
                     };
                     let _as = act_as(account.as_ref())?;
                     Ok::<_, RpcError>(judged.with(|env| {
@@ -2729,6 +2736,7 @@ impl Link {
             session: inv.ctx.session.clone(),
             reason: reason.map(Into::into),
             command: ran.map(Into::into),
+            args: nerve_policy::audit::pinnable_args(&inv.cap, &inv.action, &inv.args),
         })
     }
 
@@ -2766,9 +2774,21 @@ impl Link {
         // (crate::provider::Providers::hold takes them, then the store).
         let attached = self.shared.providers.caps();
         let mut store = lock(&self.shared.store);
+        // A rule's conditions are checked against the schemas of what the
+        // node offers, or would offer as it is set: its own, the config's,
+        // the programs' and what this center added.
+        let mut offered = crate::descriptor::built_in(store.config());
+        offered.extend(crate::config_cap::declared(store.config()));
+        offered.extend(attached.iter().cloned());
         let mut known = crate::config_cap::declared(store.config());
         known.extend(attached);
         let entry = store.config().center(&self.name);
+        offered.extend(
+            entry
+                .map(crate::config_cap::center_declared)
+                .unwrap_or_default(),
+        );
+        let params = crate::descriptor::arg_schemas(offered);
         // The actions this center added that do not sense it turns on
         // itself, each by its name; their capability as a whole stays the
         // owner's, as one nothing offers (crate::config_cap::own_action).
@@ -2783,10 +2803,14 @@ impl Link {
         let others = crate::provider::owner_only_of(&known);
         let owner_only =
             move |scope: &str| others(scope) && !mine.as_ref().is_some_and(|f| f(scope));
-        let r =
-            store.set_center_document(&self.name, s.document, s.if_version, owner_only, |opts| {
-                self.protected_with(opts, account.as_ref(), &own)
-            });
+        let r = store.set_center_document(
+            &self.name,
+            s.document,
+            s.if_version,
+            owner_only,
+            |opts| self.protected_with(opts, account.as_ref(), &own),
+            &params,
+        );
         settings_result(r)
     }
 
@@ -2882,6 +2906,7 @@ impl Link {
             version,
             |_| false,
             |opts| self.protected_with(opts, account.as_ref(), &own),
+            &|_, _| None,
         );
         settings_result(r).map(|_| json!({}))
     }
@@ -3165,6 +3190,7 @@ impl Link {
             session: inv.ctx.session.clone(),
             reason: Some(reason.into()),
             command: ran,
+            args: None,
         });
     }
 
@@ -3508,6 +3534,7 @@ pub(crate) fn may_take(
         command: None,
         cwd: None,
         now_ms: crate::now_ms(),
+        args: None,
     };
     judged.with(|env| nerve_policy::decide(&entry.policy, env, &call)) == Decision::Allow
 }

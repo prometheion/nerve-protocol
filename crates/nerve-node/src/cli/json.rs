@@ -129,9 +129,22 @@ pub(super) async fn command(
                 Some(l) => vec![l],
                 None => vec![List::Allow, List::Deny, List::Sudo],
             };
+            let mut shown = Vec::new();
             for l in lists {
                 v[l.word()] = json!(l.of(&mut policy));
+                if l != List::Sudo {
+                    shown.extend(l.of(&mut policy).clone());
+                }
             }
+            // The rules whose conditions no longer fit the action's
+            // arguments, each with why (`rule ls` says it after the rules).
+            let stale = stale_rules(paths, &cfg, &name, shown.iter()).await?;
+            v["stale"] = Value::Object(
+                stale
+                    .into_iter()
+                    .map(|(r, why)| (r, Value::String(why)))
+                    .collect(),
+            );
             v
         }
         Cmd::Cap(CapCmd::Ls { center }) => {

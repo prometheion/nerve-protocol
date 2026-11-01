@@ -428,8 +428,17 @@ impl Ui {
             // entry's own fields.
             ("POST", "/api/audit/rule") => {
                 let wildcard = b.get("wildcard").and_then(Value::as_bool) == Some(true);
-                let rule = audit_rule(&s("list"), &s("cap"), &s("action"), &s("target"), wildcard)
-                    .map_err(bad)?;
+                let pin = pin_of(b)?;
+                let pin = pin.as_ref().map(|(f, v)| (f.as_str(), v));
+                let rule = audit_rule(
+                    &s("list"),
+                    &s("cap"),
+                    &s("action"),
+                    &s("target"),
+                    wildcard,
+                    pin,
+                )
+                .map_err(bad)?;
                 c.add_rule(&s("node_id"), &s("list"), &rule)
                     .await
                     .map(|v| json!({"rule": rule, "result": v}))
@@ -472,7 +481,9 @@ impl Ui {
                     .and_then(Value::as_str)
                     .filter(|n| !n.is_empty())
                     .map(str::to_string);
-                c.add_checker_allow(&s("cap"), &s("action"), &s("target"), wildcard, node)
+                let pin = pin_of(b)?;
+                let pin = pin.as_ref().map(|(f, v)| (f.as_str(), v));
+                c.add_checker_allow(&s("cap"), &s("action"), &s("target"), wildcard, pin, node)
                     .map(|rule| json!({"rule": rule}))
                     .map_err(bad)
             }
@@ -659,6 +670,21 @@ fn log_query(req: &Request) -> Result<Query, (u16, Value)> {
 
 fn bad(m: impl Into<String>) -> (u16, Value) {
     (400, json!({"error": m.into()}))
+}
+
+/// The argument an audit button pins, from the request's `pin`
+/// (`{"field": "room", "value": "office"}`), the value as the entry has it.
+fn pin_of(b: &Value) -> Result<Option<(String, Value)>, (u16, Value)> {
+    match b.get("pin") {
+        None | Some(Value::Null) => Ok(None),
+        Some(p) => {
+            let field = p.get("field").and_then(Value::as_str);
+            match (field, p.get("value")) {
+                (Some(f), Some(v)) => Ok(Some((f.to_string(), v.clone()))),
+                _ => Err(bad("a pin is {field, value}")),
+            }
+        }
+    }
 }
 
 /// The time limit the center's check of a capability allows: the node
@@ -1378,6 +1404,124 @@ mod tests {
     /// the form checked by the center as it is typed in, and the node's
     /// refusal shown in it; a machine without the settings grant read only,
     /// with no form.
+    /// The audit buttons pin one argument by its field and value: the
+    /// checker's allow button saves the rule the node's syntax makes of it,
+    /// typed against the machines' schemas; a pin of another shape, one on
+    /// a command, or one with a wildcard is refused. The checker page names
+    /// the arguments each action takes, and the page's code offers them
+    /// under each rule field and on the audit rows (#152, C1).
+    #[tokio::test]
+    async fn the_audit_buttons_pin_an_argument_and_the_forms_offer_the_fields() {
+        use crate::tools::tests::{cap, desc};
+        let d = tempfile::tempdir().unwrap();
+        let c = center(d.path());
+        let lamp = cap(
+            "lamp",
+            "lamp",
+            &[(
+                "set",
+                nerve_proto::Effect::Actuate,
+                json!({"type": "object", "properties": {
+                    "room": {"type": "string"}, "level": {"type": "integer"}}}),
+            )],
+        );
+        c.update(|s| {
+            let mut n = crate::center::tests::node_record("n1", "linux");
+            n.set_descriptor(desc("n1", vec![lamp]));
+            s.nodes.insert("n1".into(), n);
+        });
+        let ui = Ui::new(&c, None, false, false);
+        let allow = async |body: Value| {
+            ui.api(&req("POST", "/api/checker/allow", &[], ""), &body)
+                .await
+        };
+        let v = allow(json!({"cap": "lamp", "action": "set", "target": "lamp.set",
+                             "pin": {"field": "room", "value": "a,b"}}))
+        .await
+        .unwrap();
+        assert_eq!(v["rule"], "lamp.set:room=a\\,b");
+        let v = allow(json!({"cap": "lamp", "action": "set", "target": "lamp.set",
+                             "pin": {"field": "level", "value": 3}, "node_id": "n1"}))
+        .await
+        .unwrap();
+        assert_eq!(v["rule"], "lamp.set:level=3");
+        let rules: Vec<String> = c.read(|s| {
+            s.checker
+                .allow_rules
+                .iter()
+                .map(|a| a.rule.clone())
+                .collect()
+        });
+        assert!(
+            rules.contains(&"lamp.set:room=a\\,b".to_string()),
+            "{rules:?}"
+        );
+        for (body, said) in [
+            (
+                json!({"cap": "lamp", "action": "set", "target": "lamp.set", "pin": {"field": "size", "value": 1}}),
+                "no argument size",
+            ),
+            (
+                json!({"cap": "lamp", "action": "set", "target": "lamp.set", "pin": {"field": "level", "value": "x"}}),
+                "is an integer",
+            ),
+            (
+                json!({"cap": "lamp", "action": "set", "target": "lamp.set", "pin": {"value": 1}}),
+                "a pin is {field, value}",
+            ),
+            (
+                json!({"cap": "lamp", "action": "set", "target": "lamp.set", "wildcard": true, "pin": {"field": "room", "value": "x"}}),
+                "no wildcard form",
+            ),
+            (
+                json!({"cap": "exec", "action": "run", "target": "ls", "pin": {"field": "command", "value": "ls"}}),
+                "names its command",
+            ),
+        ] {
+            let (status, e) = allow(body.clone()).await.unwrap_err();
+            assert_eq!(status, 400, "{body}");
+            assert!(e["error"].as_str().unwrap().contains(said), "{body}: {e}");
+        }
+        let (status, e) = ui
+            .api(
+                &req("POST", "/api/audit/rule", &[], ""),
+                &json!({"list": "sudo", "cap": "lamp", "action": "set", "target": "lamp.set",
+                        "node_id": "n1", "pin": {"field": "room", "value": "x"}}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(status, 400);
+        assert!(e["error"].as_str().unwrap().contains("sudo list"), "{e}");
+        let v = ui
+            .api(&req("GET", "/api/checker", &[], ""), &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(
+            v["fields"]["lamp.set"],
+            json!(["level (an integer)", "room (a string)"])
+        );
+        assert_eq!(v["stale"], json!({}));
+        // The page offers them: under each rule field, and on the rows.
+        let row = &APP_JS[APP_JS.find("function auditRow(").unwrap()..];
+        let row = &row[..row.find("\n}\n").unwrap()];
+        for part in [
+            "const pins = pinPicker(d, auditKey);",
+            "pin: pin ? pin() : null",
+            r#"ruleBtn("Allow with this value", "", "allow", false, null, pins.pin)"#,
+            r#"ruleBtn("Deny with this value", "danger-soft", "deny", false, null, pins.pin)"#,
+        ] {
+            assert!(row.contains(part), "{part}");
+        }
+        let checker = &APP_JS[APP_JS.find("function checkerAuditRow(").unwrap()..];
+        assert!(checker.contains(r#"btn("Allow with this value", "", allow(false, pins.pin)"#));
+        assert_eq!(
+            APP_JS.matches(", ruleIn, ruleFieldsHint(ruleIn))").count(),
+            3
+        );
+        assert!(APP_JS.contains("    staleBanner(c.meta.stale),\n"));
+        assert!(APP_JS.contains("((state.checker && state.checker.meta.fields) || {})[scope]"));
+    }
+
     #[test]
     fn the_capabilities_tab_has_a_picker_a_checked_form_and_a_read_only_view() {
         assert!(INDEX.contains(r##"<a href="#capabilities" data-page="capabilities">"##));

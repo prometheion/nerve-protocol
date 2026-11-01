@@ -101,7 +101,7 @@ async fn node_of(
         policy.allow.push("exec.run:echo *".into());
         policy
             .allow
-            .push(rules::rule_for("exec", "run", CHAINED, false)?);
+            .push(rules::rule_for("exec", "run", CHAINED, false, None)?);
         more(cfg)
     })
     .await
@@ -349,7 +349,7 @@ async fn a_stream_carries_no_password_and_a_sudo_command_none() {
     let (head, rest) = RIGHT.split_at(6);
     let prints = format!("printf 'a {head}'; sleep 0.6; printf '{rest} b\\n'; sleep 0.3");
     let node = node_with(dir.path(), &center, |cfg| {
-        let rule = rules::rule_for("exec", "run", &prints, false)?;
+        let rule = rules::rule_for("exec", "run", &prints, false, None)?;
         cfg.centers[0].policy.allow.push(rule);
         cfg.centers[0].policy.sudo_allow.push("sudo sleep *".into());
         Ok(())
@@ -462,7 +462,7 @@ async fn a_result_kept_for_a_resume_carries_no_password() {
     let waits =
         format!("touch started; while [ ! -e go ]; do sleep 0.05; done; echo {RIGHT}; touch done");
     let node = node_with(dir.path(), &center, |cfg| {
-        let rule = rules::rule_for("exec", "run", &waits, false)?;
+        let rule = rules::rule_for("exec", "run", &waits, false, None)?;
         cfg.centers[0].policy.allow.push(rule);
         Ok(())
     })

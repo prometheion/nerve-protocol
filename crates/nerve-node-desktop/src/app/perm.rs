@@ -169,6 +169,20 @@ impl Ctl {
             },
             move |c, answers| c.perm_loaded(asked, answers),
         );
+        // What the rule fields offer: the arguments of the actions the node
+        // offers this center (`cap ls`), read beside the page.
+        let center = self.perm_center();
+        self.job(
+            move |r| r.run(&["cap", "ls", &format!("--center={center}")]),
+            move |c, answer| {
+                if asked != c.perm_asked.get() {
+                    return;
+                }
+                if let Ok(v) = answer {
+                    *c.rule_listing.borrow_mut() = v;
+                }
+            },
+        );
     }
 
     /// The reading of the page that runs now, or ran last.
@@ -198,6 +212,13 @@ impl Ctl {
                         &r, "allow",
                     ))));
                     p.set_deny(ModelRc::new(VecModel::from(view::rule_list_of(&r, "deny"))));
+                    // Rules whose action no longer takes what they name.
+                    p.set_allow_unfit(ModelRc::new(VecModel::from(view::rule_unfit_of(
+                        &r, "allow",
+                    ))));
+                    p.set_deny_unfit(ModelRc::new(VecModel::from(view::rule_unfit_of(
+                        &r, "deny",
+                    ))));
                     p.set_guard_missing(view::guard_missing(&r));
                     p.set_guard_older(view::guard_older(&r));
                     p.set_sudo_list(ModelRc::new(VecModel::from(view::rule_list_of(&r, "sudo"))));
@@ -402,12 +423,16 @@ impl Ctl {
                 c.with_perm(|p| {
                     p.set_allow_text(SharedString::new());
                     p.set_allow_wild(false);
+                    p.set_allow_hint(SharedString::new());
+                    p.set_allow_hint_error(false);
                 });
             },
             1 => |c| {
                 c.with_perm(|p| {
                     p.set_deny_text(SharedString::new());
                     p.set_deny_wild(false);
+                    p.set_deny_hint(SharedString::new());
+                    p.set_deny_hint_error(false);
                 });
             },
             _ => |c| {
@@ -497,6 +522,29 @@ impl Ctl {
                 c.toast(e, Tone::Danger);
             },
         );
+    }
+
+    /// What the rule field of `list` (3: the rule being edited) says under
+    /// it for `text`, typed so far ([`view::rule_hint`]): from the node's
+    /// `cap ls` as this page last read it.
+    fn rule_typed(&self, list: i32, text: &str) {
+        let center = self.perm_center();
+        let (hint, error) = view::rule_hint(text, &self.rule_listing.borrow(), &center);
+        self.with_perm(|p| match list {
+            0 => {
+                p.set_allow_hint(hint.into());
+                p.set_allow_hint_error(error);
+            }
+            1 => {
+                p.set_deny_hint(hint.into());
+                p.set_deny_hint_error(error);
+            }
+            3 => {
+                p.set_edit_hint(hint.into());
+                p.set_edit_hint_error(error);
+            }
+            _ => {}
+        });
     }
 
     fn rule_remove(self: &Rc<Self>, list: i32, rule: &str) {
@@ -606,6 +654,8 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     p.on_folder_remove(move |path| c.folder_remove(&path));
     let c = ctl.clone();
     p.on_rule_add(move |list| c.rule_add(list));
+    let c = ctl.clone();
+    p.on_rule_typed(move |list, text| c.rule_typed(list, &text));
     let c = ctl.clone();
     p.on_rule_edit_save(move || c.rule_edit_save());
     let c = ctl.clone();

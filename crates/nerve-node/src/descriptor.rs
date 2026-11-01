@@ -862,6 +862,17 @@ pub fn switchable(cfg: &NodeConfig, entry: &CenterEntry) -> Vec<(String, Vec<Str
         .collect()
 }
 
+/// The arguments schema of `cap.action` among `caps`, the first that has
+/// it, for a rule's conditions (nerve_policy::rules::check_typed).
+pub fn arg_schemas(caps: Vec<Capability>) -> impl Fn(&str, &str) -> Option<Value> {
+    move |cap, action| {
+        caps.iter()
+            .filter(|c| c.id == cap)
+            .find_map(|c| c.actions.get(action))
+            .map(|a| a.params.clone())
+    }
+}
+
 /// The node's own capabilities that have actions, every action in: what
 /// `cap ls` lists as built in (crate::provider::listing). `settings` among
 /// them, which no switch but `center grant settings` governs.
@@ -1231,6 +1242,7 @@ mod tests {
             command: None,
             cwd: None,
             now_ms: 0,
+            args: None,
         };
         let cfg = NodeConfig::default();
         let mut offered = Vec::new();
@@ -1291,6 +1303,7 @@ mod tests {
             command: None,
             cwd: None,
             now_ms: 0,
+            args: None,
         };
         let cfg = NodeConfig::default();
         let mut e = entry();
@@ -1487,6 +1500,7 @@ mod tests {
                 command: None,
                 cwd: None,
                 now_ms: 0,
+                args: None,
             };
             for mode in [Mode::Allowlist, Mode::Folder, Mode::User] {
                 for on in [false, true] {
@@ -1675,6 +1689,7 @@ mod tests {
                                 command: None,
                                 cwd: None,
                                 now_ms: 0,
+                                args: None,
                             };
                             let allowed =
                                 decide(&e.policy, &env(confined), &call) == Decision::Allow;
@@ -1764,6 +1779,7 @@ mod tests {
                                     path: path.clone().into(),
                                     access,
                                     holds: true,
+                                    arg: None,
                                 }];
                                 let run = cap == "exec";
                                 let call = Call {
@@ -1774,6 +1790,7 @@ mod tests {
                                     command: run.then_some("make"),
                                     cwd: run.then_some(std::path::Path::new(&path)),
                                     now_ms: 0,
+                                    args: None,
                                 };
                                 let want = by_table(all_in_folders);
                                 let allowed =

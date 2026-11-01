@@ -21,12 +21,15 @@ const FIELD_MAX: usize = 200;
 /// The fields an entry keeps: the event's (docs/dev/spec/protocol.md §7.5), `by`,
 /// which the web UI shows, and the node the center adds. Anything else a
 /// node sends is dropped, so no other field can make an entry large.
-const FIELDS: [&str; 11] = [
+const FIELDS: [&str; 12] = [
     "ts", "cap", "action", "target", "decision", "code", "session", "by", "node_id", "node",
     // The action checker's own decisions carry this: `{layer, scope,
     // detail}`, all short and built by the center, so it cannot blow an
     // entry up.
     "checker",
+    // The call's arguments an audit button may pin: kept as the node keeps
+    // them (nerve_policy::audit::pinnable_args), bounded in count and size.
+    "args",
 ];
 
 #[derive(Debug, Default)]
@@ -88,6 +91,12 @@ fn trim(e: Value) -> Value {
             Value::String(s) if k != "ts" => util::clip(&s, FIELD_MAX).into(),
             // The checker marker: an object the center built, kept with its
             // `layer`, `scope` (global or node) and `detail` strings clipped.
+            // What a node sends as `args` is held to what a node keeps:
+            // strings, numbers and booleans, the strings short, a few.
+            Value::Object(o) if k == "args" => match nerve_policy::audit::pinnable(&o) {
+                Some(a) => Value::Object(a),
+                None => continue,
+            },
             Value::Object(o) if k == "checker" => {
                 let mut m = Map::new();
                 for key in ["layer", "scope", "detail"] {

@@ -406,6 +406,80 @@ pub fn rule_list_of(v: &Value, list: &str) -> Vec<SharedString> {
         .collect()
 }
 
+/// For each rule of `list` in `rule ls --json`, in [`rule_list_of`]'s
+/// order, why its conditions no longer fit the arguments its action takes
+/// now (`stale`), or "" where they fit.
+pub fn rule_unfit_of(v: &Value, list: &str) -> Vec<SharedString> {
+    v[list]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|r| SharedString::from(s(&v["stale"][r])))
+        .collect()
+}
+
+/// What a rule field says under it while the owner types (#152, C1): for
+/// a rule `cap.action:…` of an action the node offers (`listing`, `cap ls
+/// --json`, as `center` sees it), the arguments it takes, or what is wrong
+/// with the conditions typed so far, and whether that is an error. Nothing
+/// for any other text: a command, a path rule, a rule without conditions.
+pub fn rule_hint(text: &str, listing: &Value, center: &str) -> (String, bool) {
+    let text = text.trim();
+    let Some((scope, pattern)) = text.split_once(':') else {
+        return (String::new(), false);
+    };
+    let Some((cap, action)) = scope.split_once('.') else {
+        return (String::new(), false);
+    };
+    if !nerve_policy::rules::valid_scope(scope)
+        || !nerve_policy::conditions::takes_conditions(scope)
+    {
+        return (String::new(), false);
+    }
+    let params = listing["capabilities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| {
+            s(&r["source"])
+                .strip_prefix("center ")
+                .is_none_or(|by| by == center)
+        })
+        .find(|r| r["name"] == format!("{cap}.{action}"))
+        .and_then(|r| r.get("params"))
+        .cloned();
+    if !pattern.trim().is_empty() {
+        let schema = |_: &str, _: &str| params.clone();
+        if let Err(e) = nerve_policy::rules::check_typed(text, &schema) {
+            // Without the rule's own text, which the field shows.
+            let e = e.split_once(": ").map_or(e.as_str(), |(_, why)| why);
+            return (format!("{}.", e.trim_end_matches('.')), true);
+        }
+    }
+    let fields = params
+        .as_ref()
+        .map(nerve_policy::conditions::fields)
+        .unwrap_or_default();
+    match fields.first() {
+        Some(first) => {
+            let name = first.split(' ').next().unwrap_or(first);
+            (
+                format!(
+                    "{scope} takes {}. Pin them after the colon, joined by commas: {scope}:{name}=…",
+                    fields.join(", ")
+                ),
+                false,
+            )
+        }
+        None if params.is_some() => (
+            format!("{scope} takes no argument a rule can pin."),
+            !pattern.trim().is_empty(),
+        ),
+        None => (String::new(), false),
+    }
+}
+
 /// Whether the deny list of `rule ls --json` lacks a rule of the guard a
 /// new pairing gets (`nerve-node rule guard`).
 pub fn guard_missing(v: &Value) -> bool {
@@ -1402,6 +1476,7 @@ fn audit_row(e: &Value, index: usize, centers: &[String], now_ms: u64) -> AuditR
         when_exact: exact(ts).into(),
         rules: false,
         rules_why: SharedString::new(),
+        pins: ModelRc::default(),
         index: index as i32,
     };
     if e.get("changes").is_some() {
@@ -1506,6 +1581,12 @@ fn audit_row(e: &Value, index: usize, centers: &[String], now_ms: u64) -> AuditR
             let (rules, why) = rules_for(e, centers);
             row.rules = rules;
             row.rules_why = why.into();
+            // The arguments a rule may pin, for the pin buttons.
+            let pins: Vec<SharedString> = audit_pins(e)
+                .into_iter()
+                .map(|(shown, _)| shown.into())
+                .collect();
+            row.pins = ModelRc::new(VecModel::from(pins));
         }
     }
     row
@@ -1543,6 +1624,38 @@ pub fn rule_list(e: &Value, list: &str) -> &'static str {
         _ if sudo => "sudo",
         _ => "allow",
     }
+}
+
+/// The arguments of an audit entry's call a rule may pin (its `args`, kept
+/// by the node): each as the rule writes it (`room=office`) and as `rule
+/// add --pin` takes it (the value as it is).
+pub fn audit_pins(e: &Value) -> Vec<(String, String)> {
+    e["args"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(field, v)| {
+            let shown = nerve_policy::conditions::pin(field, v).ok()?;
+            let raw = v.as_str().map_or_else(|| v.to_string(), str::to_string);
+            Some((shown, format!("{field}={raw}")))
+        })
+        .collect()
+}
+
+/// The command a pin button runs: `rule add` of the entry's action that
+/// holds the rule to its argument `pin` ([`audit_pins`]), on the allow or
+/// deny list.
+pub fn pin_args(e: &Value, list: &str, pin: usize) -> Option<Vec<String>> {
+    let (_, given) = audit_pins(e).into_iter().nth(pin)?;
+    Some(vec![
+        "rule".to_string(),
+        "add".into(),
+        if list == "deny" { "deny" } else { "allow" }.into(),
+        s(&e["target"]).into(),
+        format!("--action={}.{}", s(&e["cap"]), s(&e["action"])),
+        format!("--pin={given}"),
+        format!("--center={}", s(&e["center"])),
+    ])
 }
 
 /// The command a button runs: `rule add` with the entry's action, target
@@ -2098,6 +2211,97 @@ mod tests {
             rule_args(&e, "deny", false)[3..5],
             ["/srv/a", "--action=fs.write"]
         );
+    }
+
+    /// An audit entry's arguments a rule may pin, as the pin buttons name
+    /// them and as `rule add --pin` takes them; a rule field's hint from
+    /// `cap ls` (a center's own action only for that center); and the rules
+    /// `rule ls` says no longer fit, row by row (#152, C1).
+    #[test]
+    fn pins_hints_and_rules_that_no_longer_fit() {
+        let e = json!({"center": "home", "cap": "lamp", "action": "set", "target": "lamp.set",
+                       "args": {"room": "a,b", "level": 5, "on": true}});
+        assert_eq!(
+            audit_pins(&e),
+            [
+                ("level=5".to_string(), "level=5".to_string()),
+                ("on=true".into(), "on=true".into()),
+                ("room=a\\,b".into(), "room=a,b".into()),
+            ]
+        );
+        assert_eq!(
+            pin_args(&e, "deny", 2).unwrap(),
+            [
+                "rule",
+                "add",
+                "deny",
+                "lamp.set",
+                "--action=lamp.set",
+                "--pin=room=a,b",
+                "--center=home"
+            ]
+        );
+        assert_eq!(pin_args(&e, "allow", 0).unwrap()[2], "allow");
+        assert!(pin_args(&e, "allow", 3).is_none());
+        assert!(audit_pins(&json!({"cap": "exec", "action": "run"})).is_empty());
+        let listing = json!({"capabilities": [
+            {"name": "lamp.set", "source": "config",
+             "params": {"type": "object", "properties": {"room": {"type": "string"}}}},
+            {"name": "say.back", "source": "center lab",
+             "params": {"type": "object", "properties": {"word": {"type": "string"}}}},
+            {"name": "cam.snap", "source": "config", "params": {"type": "object"}},
+        ]});
+        let hint = |t: &str, center: &str| rule_hint(t, &listing, center);
+        assert_eq!(
+            hint("lamp.set:", "home"),
+            (
+                "lamp.set takes room (a string). Pin them after the colon, joined by commas: lamp.set:room=…"
+                    .to_string(),
+                false
+            )
+        );
+        assert!(!hint(" lamp.set:room=x ", "home").1);
+        assert_eq!(
+            hint("lamp.set:rooms=x", "home"),
+            (
+                "lamp.set has no argument rooms; it takes room.".to_string(),
+                true
+            )
+        );
+        assert!(
+            hint("say.back:word=x", "lab")
+                .0
+                .starts_with("say.back takes word")
+        );
+        assert_eq!(
+            hint("say.back:word=x", "home"),
+            ("nothing offers say.back now, so its arguments cannot be checked; add the rule once it is offered.".to_string(), true)
+        );
+        assert_eq!(
+            hint("cam.snap:", "home"),
+            (
+                "cam.snap takes no argument a rule can pin.".to_string(),
+                false
+            )
+        );
+        assert!(hint("cam.snap:x=1", "home").1);
+        for plain in [
+            "git status",
+            "fs.read:/a/*",
+            "exec.run:git *",
+            "lamp:room=x",
+            "lamp.set",
+        ] {
+            assert_eq!(hint(plain, "home"), (String::new(), false), "{plain}");
+        }
+        let ls = json!({"allow": ["exec.run:ls", "lamp.set:room=x"], "deny": [],
+                        "stale": {"lamp.set:room=x": "gone"}});
+        let unfit: Vec<String> = rule_unfit_of(&ls, "allow")
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(unfit, ["", "gone"]);
+        assert!(rule_unfit_of(&ls, "deny").is_empty());
     }
 
     /// A capability a center added (`cap ls` source `center <name>`) is

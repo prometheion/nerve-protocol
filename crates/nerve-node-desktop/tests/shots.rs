@@ -148,6 +148,7 @@ fn decided(
             session: None,
             reason: reason.map(str::to_string),
             command: None,
+            args: None,
         })
         .unwrap();
 }

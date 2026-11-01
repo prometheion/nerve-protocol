@@ -817,17 +817,19 @@ function auditRow(d, n) {
   if (d.by === "action checker") return checkerAuditRow(d, k);
   const write = n && n.settings_write;
   const why = !n ? "The machine is no longer paired." : !write ? "This machine did not give this center the settings grant." : "";
-  const rule = (list, wildcard) => act(async () => {
-    const r = await api("POST", "/api/audit/rule", { node_id: d.node_id, list, cap: d.cap, action: d.action, target: d.target || "", wildcard });
+  const rule = (list, wildcard, pin) => act(async () => {
+    const r = await api("POST", "/api/audit/rule", { node_id: d.node_id, list, cap: d.cap, action: d.action, target: d.target || "", wildcard, pin: pin ? pin() : null });
     notify(`Added to the ${list === "sudo" ? "sudo allow" : list} list: ${r.rule}`);
   });
   // A decision has no id; its time, machine and call name it.
   const auditKey = `audit:${d.ts}:${d.node_id}:${d.cap}.${d.action}`;
-  const ruleBtn = (label, kind, list, wildcard, ic) => {
-    const b = btn(label, kind, rule(list, wildcard), ic, `${auditKey}:${label}`);
+  const ruleBtn = (label, kind, list, wildcard, ic, pin) => {
+    const b = btn(label, kind, rule(list, wildcard, pin), ic, `${auditKey}:${label}`);
     if (!write) { b.disabled = true; b.title = why; }
     return b;
   };
+  // The call's arguments a rule may pin: the rule then holds that one value.
+  const pins = pinPicker(d, auditKey);
   // A rule needs the entry's target: a command line or a path. Any other
   // action is its own target. A target cut to its start names no call, which
   // only matters where the rule names the target (a command line or a path).
@@ -846,8 +848,26 @@ function auditRow(d, n) {
     known ? el("div", { class: "actions" },
       ruleBtn("Allow", "", allow, false, "check"), ruleBtn("Allow as wildcard", "", allow, true),
       ruleBtn("Deny", "danger-soft", "deny", false, "ban"), ruleBtn("Deny as wildcard", "danger-soft", "deny", true)) : null,
+    known && pins ? el("div", { class: "actions pins" }, pins.root,
+      ruleBtn("Allow with this value", "", "allow", false, null, pins.pin), ruleBtn("Deny with this value", "danger-soft", "deny", false, null, pins.pin)) : null,
     known && !write ? el("p", { class: "meta" }, why) : null,
     cut ? el("p", { class: "meta" }, "The target was cut to its start, so no rule can name it.") : null);
+}
+
+// A choice of the arguments of an audit entry's call that a rule may pin
+// (`d.args`, kept by the machine), or null where there are none: its root and
+// the pin chosen, as {field, value}, for /api/audit/rule and
+// /api/checker/allow.
+function pinPicker(d, auditKey) {
+  const args = d.args && typeof d.args === "object" ? Object.entries(d.args) : [];
+  if (!args.length) return null;
+  const text = ([k, v]) => `${k}=${typeof v === "string" ? v.replace(/\\/g, "\\\\").replace(/,/g, "\\,") : String(v)}`;
+  const sel = el("select", { class: "input mono", "aria-label": "The argument to pin", "data-focus": `${auditKey}:pin` },
+    ...args.map((a, i) => el("option", { value: String(i) }, text(a))));
+  return {
+    root: el("label", { class: "field" }, el("span", { class: "label" }, "Pin one argument"), sel),
+    pin: () => { const [field, value] = args[Number(sel.value) || 0]; return { field, value }; },
+  };
 }
 
 // A row for a decision the action checker made. A refusal offers allow
@@ -870,10 +890,11 @@ function checkerAuditRow(d, k) {
   const byBlocklist = layer === "blocklist";
   const cut = (d.cap === "fs" || (d.cap === "exec" && d.action === "run")) && /… \[cut at \d+ of \d+ characters\]$/.test(d.target || "");
   const known = d.cap && d.action && !cut && (d.target || !["exec", "fs"].includes(d.cap));
-  const allow = (wildcard) => act(async () => {
-    const r = await api("POST", "/api/checker/allow", { cap: d.cap, action: d.action, target: d.target || "", wildcard, node_id: d.node_id });
+  const allow = (wildcard, pin) => act(async () => {
+    const r = await api("POST", "/api/checker/allow", { cap: d.cap, action: d.action, target: d.target || "", wildcard, node_id: d.node_id, pin: pin ? pin() : null });
     notify(`Added a checker allow rule: ${r.rule}`);
   });
+  const pins = pinPicker(d, auditKey);
   return el("div", { class: "card audit-row" },
     itile(byBlocklist ? "ban" : "bot", k.tone || "neutral"),
     el("div", { class: "line" },
@@ -884,6 +905,8 @@ function checkerAuditRow(d, k) {
     detail ? el("p", { class: "meta" }, `${layer === "model" ? "Decision model" : layer === "allow rule" ? "Allow rule" : "Blocklist"}${whose}: ${detail}`) : null,
     refused && !byBlocklist && known ? el("div", { class: "actions" },
       btn("Allow", "", allow(false), "check", `${auditKey}:Allow`), btn("Allow as wildcard", "", allow(true), null, `${auditKey}:Allow as wildcard`)) : null,
+    refused && !byBlocklist && known && pins ? el("div", { class: "actions pins" }, pins.root,
+      btn("Allow with this value", "", allow(false, pins.pin), null, `${auditKey}:Allow with this value`)) : null,
     byBlocklist ? el("p", { class: "meta" }, scope === "global"
       ? "On the blocklist for every machine (hard deny). To let it through, switch the entry off for this machine (Per machine) or for every machine on the Action checker page."
       : "On the blocklist (hard deny). Remove or switch off the entry on the Action checker page to let it through.") : null);
@@ -997,11 +1020,38 @@ function pageChecker() {
       checkerToggle("taint_on", "Taint marking (a session is tainted after a call returns content)", cfg.taint_on, (v) => { cfg.taint_on = v; }))),
     c.meta.rejected && c.meta.rejected.length ? banner("warn", "alert", `Some rules do not parse and were left out: ${c.meta.rejected.join("; ")}`) : null,
     c.meta.unpublished && c.meta.unpublished.length ? banner("warn", "alert", `Some rules name a capability no machine offers, so they match no call now (a typo, or a capability that is gone): ${c.meta.unpublished.join("; ")}`) : null,
+    staleBanner(c.meta.stale),
     blocklistCard(cfg, c.meta),
     allowCard(cfg),
     machinesCard(cfg),
     modelCard(cfg, c.meta),
   ];
+}
+
+// The rules whose conditions no longer fit the arguments their action
+// takes now (an argument gone, or of another type), each with why. They
+// fail closed until the owner changes them.
+function staleBanner(stale) {
+  const list = Object.entries(stale || {});
+  if (!list.length) return null;
+  return banner("warn", "alert", `Some rules name an argument their action no longer takes as they say: on the blocklist such a rule refuses every call of that action, as an allow rule it covers none. Change or remove them: ${list.map(([r, why]) => `${r} (${why})`).join("; ")}`);
+}
+
+// Under a rule field: the arguments the action typed so far takes, which a
+// rule may pin after its colon (room=office, brightness<=50), from what the
+// machines publish. The center checks the rule against them when it saves.
+function ruleFieldsHint(input) {
+  const hint = el("p", { class: "hint", "aria-live": "polite" });
+  const show = () => {
+    const scope = input.value.trim().split(":")[0];
+    const fields = ((state.checker && state.checker.meta.fields) || {})[scope];
+    hint.textContent = fields && fields.length
+      ? `${scope} takes ${fields.join(", ")}. Pin them after a colon, joined by commas: ${scope}:${fields[0].split(" ")[0]}=…`
+      : "";
+  };
+  input.addEventListener("input", show);
+  show();
+  return hint;
 }
 
 // A switch that mutates the working copy and saves at once.
@@ -1053,9 +1103,9 @@ function blocklistCard(cfg, meta) {
     cfg.blocklist = meta.default_blocklist.map((e) => ({ ...e }));
     await saveChecker();
   });
-  return section("Blocklist", "Exact commands or wildcards that are refused at once, in the machine's own rule syntax (exec.run:…, fs.write:…), for every machine or for one. A re: regex form is allowed where a glob is not enough. An fs.read: or fs.write: path also holds the paths any other capability reads or writes; any other capability is named whole (lamp.set, or lamp for all its actions). The blocklist wins over the allow rules and the model. An entry for every machine can be switched off for single machines under Per machine.", btn("Reset to defaults", "ghost", reset, "refresh", "blocklist:reset"),
+  return section("Blocklist", "Exact commands or wildcards that are refused at once, in the machine's own rule syntax (exec.run:…, fs.write:…), for every machine or for one. A re: regex form is allowed where a glob is not enough. An fs.read: or fs.write: path also holds the paths any other capability reads or writes. Any other action is named whole (lamp.set, or lamp for all its actions), or with conditions on its arguments (lamp.set:room=office,brightness>50); a call that gives such an argument another type, or leaves it out, is refused too. The blocklist wins over the allow rules and the model. An entry for every machine can be switched off for single machines under Per machine.", btn("Reset to defaults", "ghost", reset, "refresh", "blocklist:reset"),
     el("div", { class: "card" }, el("div", { class: "form-row" },
-      el("label", { class: "field grow" }, el("span", { class: "label" }, "Add a rule"), ruleIn),
+      el("label", { class: "field grow" }, el("span", { class: "label" }, "Add a rule"), ruleIn, ruleFieldsHint(ruleIn)),
       el("label", { class: "field grow" }, el("span", { class: "label" }, "Note"), noteIn),
       nodePicker.root),
       el("div", { class: "actions" }, el("button", { type: "button", class: "btn primary", "data-focus": "blocklist:add", onclick: add }, icon("plus", "sm"), "Add"))),
@@ -1087,7 +1137,7 @@ function allowCard(cfg) {
   });
   return section("Allow rules", "A call that matches an allow rule skips the decision model and goes straight to the machine. It does not skip the blocklist.", null,
     el("div", { class: "card" }, el("div", { class: "form-row" },
-      el("label", { class: "field grow" }, el("span", { class: "label" }, "Add a rule"), ruleIn),
+      el("label", { class: "field grow" }, el("span", { class: "label" }, "Add a rule"), ruleIn, ruleFieldsHint(ruleIn)),
       nodePicker.root),
       el("div", { class: "actions" }, el("button", { type: "button", class: "btn primary", "data-focus": "allow:add", onclick: add }, icon("plus", "sm"), "Add"))),
     cfg.allow_rules.length ? el("div", { class: "list" }, cfg.allow_rules.map((a, i) => allowRow(cfg, a, i, "all"))) : empty("No allow rules.", "shield"));
@@ -1212,7 +1262,7 @@ function machineCard(cfg, m) {
     el("div", { class: "actions" }, btn("Save note", "primary", saveNote, null, `node:${m.id}:note:save`)),
     el("h4", { class: "sub-head" }, "Block entries for this machine only"),
     entries.length ? el("div", { class: "list" }, entries.map(([e, i]) => blockRow(cfg, e, i, m.id))) : el("p", { class: "meta" }, "None."),
-    el("div", { class: "form-row" }, el("label", { class: "field grow" }, el("span", { class: "label" }, "Add a rule for this machine"), ruleIn)),
+    el("div", { class: "form-row" }, el("label", { class: "field grow" }, el("span", { class: "label" }, "Add a rule for this machine"), ruleIn, ruleFieldsHint(ruleIn))),
     el("div", { class: "actions" }, el("button", { type: "button", class: "btn primary", "data-focus": `node:${m.id}:add`, onclick: add }, icon("plus", "sm"), "Add")),
     el("h4", { class: "sub-head" }, "Entries for every machine, switched off here"),
     offs.length ? el("div", { class: "list" }, offs.map(offRow)) : el("p", { class: "meta" }, "None."),

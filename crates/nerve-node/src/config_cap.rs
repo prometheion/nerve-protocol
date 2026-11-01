@@ -236,6 +236,12 @@ pub fn center_sensing(entry: &CenterEntry) -> Vec<Capability> {
     )
 }
 
+/// Every capability `entry`'s center added, offered now or not: a rule of
+/// that center that names an argument of one is checked against it.
+pub fn center_declared(entry: &CenterEntry) -> Vec<Capability> {
+    capabilities_of(entry.capabilities.iter(), CENTER_ADDED, counted)
+}
+
 /// Whether a `caps` key or an allow rule's scope names an action
 /// `entry`'s center added that neither senses nor actuates, under a
 /// capability nothing in `known` (the owner's and the attached programs')

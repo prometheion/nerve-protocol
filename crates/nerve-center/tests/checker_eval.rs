@@ -157,6 +157,7 @@ async fn evaluate_decision_model() {
             node_id: "n1",
             os: &c.os,
             tainted: false,
+            marked: &[],
         };
         let state = checker::model_state(&call);
         let started = Instant::now();

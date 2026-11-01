@@ -1062,7 +1062,7 @@ async fn a_path_taking_provider_is_held_to_the_folders() {
 }
 
 /// A file handed to a provider holds nothing below it, so a deny rule that
-/// names places below its folder (`files:**/.env`) refuses the folder and a
+/// names places below its folder (`files.open:path~**/.env`) refuses the folder and a
 /// path a write may make a folder at, not the files beside those places. A
 /// path given as a link is refused by the name given: the refusal does not
 /// say where it leads (a link of another process under `/proc` leads where
@@ -1082,7 +1082,6 @@ async fn a_deny_rule_below_a_folder_leaves_the_files_there_alone() {
     let daemon = node(&root, &center, &me(), |p| {
         p.mode = nerve_policy::Mode::Folder;
         p.folders = folders.clone();
-        p.deny = vec!["files:**/.env".into()];
     })
     .await;
     let mut conn = linked(&mut center).await;
@@ -1103,6 +1102,15 @@ async fn a_deny_rule_below_a_folder_leaves_the_files_there_alone() {
     let (mut p, first) = hello_with(&daemon.paths().ctl_socket(), caps).await;
     assert_eq!(first["ok"]["broken"], json!([]), "{first}");
     descriptor_changed(&mut conn).await;
+    // The rules name the program's path argument, so they go on once it
+    // offers the actions: the node checks a rule's conditions against the
+    // schema as it is written.
+    owner_edit(daemon.paths(), |c| {
+        c.centers[0].policy.deny = ["open", "save", "peek"]
+            .map(|a| format!("files.{a}:path~**/.env"))
+            .to_vec();
+    })
+    .await;
     let served = tokio::spawn(async move {
         while let Some(call) = p.next().await {
             p.send(json!({"id": call["id"], "ok": call["params"]["args"]}))
@@ -1833,6 +1841,7 @@ async fn cap_ls_lists_what_the_attached_programs_offer() {
         *on,
         json!({"name": "lamp.on", "effect": "actuate", "source": "program desk",
                "summary": "Switches it on.", "centers": {"lab": "off"},
+               "params": {"type": "object"},
                "now": {"lab": "off"}})
     );
     let read = v["capabilities"]

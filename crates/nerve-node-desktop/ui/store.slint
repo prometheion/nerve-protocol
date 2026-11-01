@@ -92,6 +92,8 @@ export global Store {
     // Asks before `audit clear`.
     callback audit-clear();
     callback audit-rule(int, string, bool);
+    // Allow or deny with one argument pinned: the entry, the list, the pin.
+    callback audit-pin(int, string, int);
 
     callback pair-start();
     callback pair-check(string, string);
@@ -191,6 +193,20 @@ export global Perm {
     in-out property <bool> deny-wild;
     in-out property <string> sudo-text;
     in-out property <bool> sudo-wild;
+    // Rules with conditions on an action's arguments (#152, C1): for each
+    // rule of the allow and deny list, why it no longer fits what its
+    // action takes ("" where it fits); and under the new rule's field (and
+    // the edited one's), the arguments its action takes or what is wrong
+    // with them, set as the owner types (rule-typed: the list, 3 for the
+    // rule being edited, and its text).
+    in-out property <[string]> allow-unfit;
+    in-out property <[string]> deny-unfit;
+    in-out property <string> allow-hint;
+    in-out property <bool> allow-hint-error;
+    in-out property <string> deny-hint;
+    in-out property <bool> deny-hint-error;
+    in-out property <string> edit-hint;
+    in-out property <bool> edit-hint-error;
     // Allowlist mode: whether its exceptions (the deny rules) are open.
     in-out property <bool> except-open;
     // The rule being edited in place: its list (-1: none), its row, and
@@ -237,6 +253,7 @@ export global Perm {
     callback folder-set(string, bool, bool, bool);
     callback folder-remove(string);
     callback rule-add(int);
+    callback rule-typed(int, string);
     callback rule-remove(int, string);
     callback rule-edit-save();
     callback sudo-ask();

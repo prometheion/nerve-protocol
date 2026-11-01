@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use nerve_proto::Effect;
 
 use crate::command::Shell;
+use crate::conditions::Arg;
 use crate::config::{CapSetting, CenterPolicy, Folder, Mode};
 use crate::paths::{depth, to_wire, within};
 use crate::protected::Protected;
@@ -45,6 +46,11 @@ pub struct Target {
     /// its paths ([`works_below`]) is not judged by what may lie below a
     /// file. `true` where the node does not know, which errs wide.
     pub holds: bool,
+    /// The argument it was given in, for an action whose schema marks it
+    /// (`x-nerve-path`): the conditions of a rule on that argument match
+    /// this path ([`crate::conditions`]). `None` for an `fs` call's path
+    /// and a command's working directory.
+    pub arg: Option<String>,
 }
 
 /// What a call does at one of its paths. Each needs its own folder flag:
@@ -196,6 +202,10 @@ pub struct Call<'a> {
     /// `targets`).
     pub command: Option<&'a str>,
     pub cwd: Option<&'a Path>,
+    /// The call's arguments, checked against its action's schema, for the
+    /// conditions of a rule ([`crate::conditions`]). A path argument is
+    /// matched as resolved, from `targets`.
+    pub args: Option<&'a serde_json::Map<String, serde_json::Value>>,
     pub now_ms: u64,
 }
 
@@ -407,6 +417,27 @@ fn find_rule<'r>(rules: &'r RuleSet, call: &Call, target: &RuleTarget) -> Option
     }
 }
 
+/// Whether the rules of `call` look at its arguments (the conditions of
+/// [`crate::conditions`]) instead of a target: every call but a command
+/// line and an `fs` call's path.
+fn by_args(call: &Call) -> bool {
+    call.command.is_none() && call.cap != crate::rules::FS
+}
+
+/// What `call` gives for its argument `field`, as a rule's conditions read
+/// it: a path argument as resolved (from `targets`, so a link's place
+/// stands in for the path it lies below), else the value it was sent.
+fn arg_of<'a>(call: &Call<'a>, field: &str) -> Arg<'a> {
+    match call
+        .targets
+        .iter()
+        .find(|t| t.arg.as_deref() == Some(field))
+    {
+        Some(t) => Arg::Path(to_wire(&t.path)),
+        None => crate::conditions::arg_of(call.args, field),
+    }
+}
+
 /// How a refusal names a rule target.
 fn name(call: &Call, target: &str) -> String {
     if call.command.is_some() {
@@ -529,25 +560,39 @@ fn decide_with(policy: &CenterPolicy, env: &Env, call: &Call, rules: &Rules) -> 
     // Deny rules: forbidden in every mode, and they win over any allow.
     let targets = rule_targets(call);
     let deny = &rules.deny;
-    for t in &targets {
-        if let Some(rule) = find_rule(deny, call, t) {
-            // The rule as `rule ls` shows it: the guard's hold tabs and line
-            // breaks, and a reason is one line in the audit and the log.
-            let rule = crate::rules::escape_controls(rule);
-            return Decision::Forbidden(format!("{} is denied ({rule})", name(call, &t.text)));
+    let arg = |f: &str| arg_of(call, f);
+    if by_args(call) {
+        // A deny rule whose conditions the call may meet: one it gives a
+        // value of another type, or leaves out, counts (fails closed).
+        if let Some(rule) = deny.find_args(call.cap, call.action, &arg, true) {
+            return Decision::Forbidden(format!("{}.{} is denied ({rule})", call.cap, call.action));
+        }
+    } else {
+        for t in &targets {
+            if let Some(rule) = find_rule(deny, call, t) {
+                // The rule as `rule ls` shows it: the guard's hold tabs and
+                // line breaks, and a reason is one line in the audit and
+                // the log.
+                let rule = crate::rules::escape_controls(rule);
+                return Decision::Forbidden(format!("{} is denied ({rule})", name(call, &t.text)));
+            }
         }
     }
     // A program handed a folder works below it, so a deny rule of its own
     // that covers a place there refuses the folder as well; the node's own
     // walks skip such places instead.
     // A file holds no place, so a rule that names files below its folder
-    // (`notes:~/proj/*.env`) leaves the other files there alone.
+    // (`notes.open:file~~/proj/*.env`) leaves the other files there alone.
     if works_below(call) {
         for t in call.targets.iter().filter(|t| t.holds) {
+            let Some(field) = &t.arg else { continue };
             let text = to_wire(&t.path);
             // As for the other places below it, the refusal does not name
             // the rule: the rule names that place.
-            if deny.find_below(call.cap, call.action, &text).is_some() {
+            if deny
+                .find_below(call.cap, call.action, field, &text, &arg)
+                .is_some()
+            {
                 return Decision::Forbidden(format!("{text} holds a place that is denied"));
             }
         }
@@ -709,7 +754,12 @@ impl<'a> LinkCheck<'a> {
             return None;
         }
         let mut targets = self.call.targets.to_vec();
-        targets[link.handed] = link.to.clone();
+        // The place stands in for the path in that path's argument, which a
+        // rule's conditions read.
+        targets[link.handed] = Target {
+            arg: handed.arg.clone(),
+            ..link.to.clone()
+        };
         let instead = Call {
             targets: &targets,
             ..*self.call
@@ -771,6 +821,28 @@ fn by_allow_rules(
     reasons: &mut Vec<String>,
 ) -> bool {
     let allow = rules.allow();
+    // Any other action's allow rule covers its call by its arguments: one
+    // without a pattern, or one whose every condition the call meets.
+    if by_args(call) {
+        let arg = |f: &str| arg_of(call, f);
+        if allow
+            .find_args(call.cap, call.action, &arg, false)
+            .is_some()
+        {
+            return true;
+        }
+        reasons.push(format!(
+            "no allow rule matches {}.{}{}",
+            call.cap,
+            call.action,
+            if call.args.is_some_and(|a| !a.is_empty()) {
+                " with these arguments"
+            } else {
+                ""
+            }
+        ));
+        return false;
+    }
     for t in targets {
         // Commands run unconfined here, so a wildcard must not cover a second
         // command chained on or an expression the shell runs: only a rule
@@ -1062,6 +1134,7 @@ mod tests {
                 command: None,
                 cwd: None,
                 now_ms: NOW,
+                args: None,
             };
             decide(policy, &env, &call)
         };
@@ -1155,6 +1228,7 @@ mod tests {
                         _ => PathAccess::Read,
                     },
                     holds: true,
+                    arg: None,
                 }]
             };
             let (inside_t, outside_t) = (at("/w/rw/a"), at("/elsewhere/a"));
@@ -1210,6 +1284,7 @@ mod tests {
                                 command: command.map(|_| "make"),
                                 cwd: command.map(|t| t.path.as_path()),
                                 now_ms: NOW,
+                                args: None,
                             };
                             // A read call's path in no folder that the
                             // account holds counts as in the folders.
@@ -1271,6 +1346,7 @@ mod tests {
             command: None,
             cwd: None,
             now_ms: NOW,
+            args: None,
         }
     }
 
@@ -1331,11 +1407,13 @@ mod tests {
                 path: "/w/rw/out".into(),
                 access: PathAccess::Write,
                 holds: true,
+                arg: Some("to".into()),
             },
             Target {
                 path: "/elsewhere/a".into(),
                 access: PathAccess::Read,
                 holds: true,
+                arg: Some("from".into()),
             },
         ];
         assert_eq!(
@@ -1348,7 +1426,7 @@ mod tests {
             run(&p, &account, &marked("open", Effect::Read, &key)),
             "refused"
         );
-        p.deny.push("notes.open:/elsewhere/*".into());
+        p.deny.push("notes.open:path~/elsewhere/*".into());
         assert_eq!(
             run(&p, &account, &marked("open", Effect::Read, &outside)),
             "refused"
@@ -1743,7 +1821,7 @@ mod tests {
         assert_eq!(run(&p, &t("/h/proj", false)), Decision::Allow);
     }
 
-    /// A path argument of any action meets the rules as an `fs` path does:
+    /// A condition on a path argument meets the path as an `fs` rule does:
     /// `~/` is the owner's home, and on Windows a path rule ignores case.
     #[test]
     fn a_deny_rule_with_tilde_covers_a_provider_path() {
@@ -1752,40 +1830,133 @@ mod tests {
         let secret = t("/h/secret/k", false);
         let other = t("/h/other", false);
         let mut p = policy(Mode::User);
-        p.deny = rules(&["notes:~/secret/*"]);
+        p.deny = rules(&["notes.open:path~~/secret/*"]);
         assert_eq!(
             decide(&p, &env, &marked("open", Effect::Read, &secret)),
-            Decision::Forbidden("/h/secret/k is denied (notes:~/secret/*)".into())
+            Decision::Forbidden("notes.open is denied (notes.open:path~~/secret/*)".into())
         );
         assert_eq!(
             run(&p, &env, &marked("open", Effect::Read, &other)),
             "allow"
         );
-        // An action that names no path is not a path, and one rule of an
-        // action covers no other.
-        p.deny = rules(&["notes.save:~/*"]);
+        // A rule of one action covers no other.
+        p.deny = rules(&["notes.save:path~~/*"]);
         assert_eq!(
             run(&p, &env, &marked("open", Effect::Read, &secret)),
             "allow"
         );
         // Allow rules read it the same way.
         let mut p = policy(Mode::Allowlist);
-        p.allow = rules(&["notes.open:~/secret/*"]);
+        p.allow = rules(&["notes.open:path~~/secret/*"]);
         assert_eq!(
             run(&p, &env, &marked("open", Effect::Read, &secret)),
             "allow"
         );
         assert_eq!(
-            run(&p, &env, &marked("open", Effect::Read, &other)),
-            "refused"
+            decide(&p, &env, &marked("open", Effect::Read, &other)),
+            Decision::Forbidden("no allow rule matches notes.open".into())
         );
         // NTFS ignores case, and so does a path rule on Windows.
         let mut p = policy(Mode::User);
-        p.deny = rules(&["notes:~/SECRET/*"]);
+        p.deny = rules(&["notes.open:path~~/SECRET/*"]);
         assert_eq!(
             run(&p, &env, &marked("open", Effect::Read, &secret)),
             if cfg!(windows) { "refused" } else { "allow" }
         );
+    }
+
+    /// A deny rule that pins an argument wins over every allow rule and
+    /// mode, and fails closed: a call that gives the argument a value of
+    /// another type, or leaves it out, is refused by it. An allow rule
+    /// that pins one covers only a call that meets it.
+    #[test]
+    fn a_deny_pin_wins_and_fails_closed() {
+        let x = T::new();
+        let env = x.env(true);
+        let lamp = |args: &serde_json::Value| -> Decision {
+            let call = Call {
+                cap: "lamp",
+                action: "set",
+                effect: Effect::Actuate,
+                targets: &[],
+                command: None,
+                cwd: None,
+                args: args.as_object(),
+                now_ms: NOW,
+            };
+            let mut d = Vec::new();
+            for mode in MODES {
+                let mut p = policy(mode);
+                p.caps.insert("lamp".into(), CapSetting::On);
+                p.allow = rules(&["lamp.set", "lamp.set:room=bedroom"]);
+                p.deny = rules(&["lamp.set:room=bedroom", "lamp.set:brightness>50"]);
+                d.push(decide(&p, &env, &call));
+            }
+            assert!(d.iter().all(|x| *x == d[0]), "{d:?}");
+            d.remove(0)
+        };
+        use serde_json::json;
+        assert_eq!(
+            lamp(&json!({"room": "office", "brightness": 20})),
+            Decision::Allow
+        );
+        assert_eq!(
+            lamp(&json!({"room": "bedroom", "brightness": 20})),
+            Decision::Forbidden("lamp.set is denied (lamp.set:room=bedroom)".into())
+        );
+        for args in [
+            json!({"room": "office", "brightness": 80}),
+            json!({"room": "office", "brightness": "80"}),
+            json!({"room": "office"}),
+            json!({"room": "office", "brightness": null}),
+        ] {
+            assert_eq!(
+                lamp(&args),
+                Decision::Forbidden("lamp.set is denied (lamp.set:brightness>50)".into()),
+                "{args}"
+            );
+        }
+        // In allowlist mode an allow rule that pins an argument covers a
+        // call that meets it, and no other.
+        let mut p = policy(Mode::Allowlist);
+        p.allow = rules(&["lamp.set:room=office,brightness<=50"]);
+        let call = |args: &'static str| {
+            let v: serde_json::Value = serde_json::from_str(args).unwrap();
+            let m = v.as_object().unwrap().clone();
+            Box::leak(Box::new(m))
+        };
+        let decided = |args: &'static str| {
+            decide(
+                &p,
+                &env,
+                &Call {
+                    cap: "lamp",
+                    action: "set",
+                    effect: Effect::Actuate,
+                    targets: &[],
+                    command: None,
+                    cwd: None,
+                    args: Some(call(args)),
+                    now_ms: NOW,
+                },
+            )
+        };
+        assert_eq!(
+            decided(r#"{"room": "office", "brightness": 50}"#),
+            Decision::Allow
+        );
+        for args in [
+            r#"{"room": "office", "brightness": 51}"#,
+            r#"{"room": "kitchen", "brightness": 5}"#,
+            r#"{"room": 1, "brightness": 5}"#,
+            r#"{"brightness": 5}"#,
+        ] {
+            assert_eq!(
+                decided(args),
+                Decision::Forbidden("no allow rule matches lamp.set with these arguments".into()),
+                "{args}"
+            );
+        }
     }
 
     /// A deny rule of a capability holds below a folder handed to it: the
@@ -1807,7 +1978,10 @@ mod tests {
                 access: acc("rw"),
             },
         ];
-        p.deny = rules(&["notes:/h/work/clients/*", "notes.save:~/proj/keep/*"]);
+        p.deny = rules(&[
+            "notes.search:path~/h/work/clients/*",
+            "notes.save:path~~/proj/keep/*",
+        ]);
         let denied = |p: &CenterPolicy, c: &Call| match decide(p, &env, c) {
             Decision::Forbidden(why) => why,
             d => panic!("{d:?}"),
@@ -1817,7 +1991,7 @@ mod tests {
                 &p,
                 &marked("search", Effect::Read, &t("/h/work/clients/a.txt", false))
             ),
-            "/h/work/clients/a.txt is denied (notes:/h/work/clients/*)"
+            "notes.search is denied (notes.search:path~/h/work/clients/*)"
         );
         let work = t("/h/work", false);
         assert_eq!(
@@ -1841,7 +2015,7 @@ mod tests {
         assert_eq!(run(&p, &env, &fs_read(&work)), "allow");
         // An allow rule above the denied place does not let it through.
         p.mode = Mode::Allowlist;
-        p.allow = rules(&["notes.search:/h/work/*"]);
+        p.allow = rules(&["notes.search:path~/h/work/*"]);
         assert_eq!(
             run(&p, &env, &marked("search", Effect::Read, &work)),
             "refused"
@@ -1871,7 +2045,7 @@ mod tests {
                 access: acc("rw"),
             }];
             p.allow = rules(&["notes"]);
-            p.deny = rules(&["notes:~/secrets/*"]);
+            p.deny = rules(&["notes.search:path~~/secrets/*"]);
             assert_eq!(decide(&p, &env, &call), Decision::Allow, "{mode:?}");
             let refused = |to: &str| refuse_links(&p, &env, &call, &[link(to)]);
             // In the folder, and in allowlist and user mode anywhere the
@@ -1958,7 +2132,7 @@ mod tests {
 
         // Allowlist mode: the rule names the folder, not what lies below.
         let mut p = policy(Mode::Allowlist);
-        p.allow = rules(&["notes.search:/w/proj"]);
+        p.allow = rules(&["notes.search:path=/w/proj"]);
         p.deny = Vec::new();
         let proj = t("/w/proj", false);
         let call = marked("search", Effect::Read, &proj);
@@ -1983,7 +2157,7 @@ mod tests {
         // A folder a link leads to passed with what lies below it, as the
         // handed folder did: a link found in it that stays within it asks
         // nothing new either.
-        p.allow = rules(&["notes.search:/w/proj", "notes.search:/w/lib"]);
+        p.allow = rules(&["notes.search:path=/w/proj", "notes.search:path=/w/lib"]);
         let lib = link(0, "/w/proj", "/w/proj/lib", t("/w/lib", false).remove(0));
         let v2 = link(
             0,
@@ -2003,7 +2177,7 @@ mod tests {
         let x = T::new();
         let env = x.env(true);
         let mut p = policy(Mode::Allowlist);
-        p.allow = rules(&["notes:/w/**"]);
+        p.allow = rules(&["notes.search:path~/w/**"]);
         let proj = t("/w/proj", false);
         let call = marked("search", Effect::Read, &proj);
         let links: Vec<Link> = (0..50)
@@ -2040,11 +2214,11 @@ mod tests {
             }];
             p.allow = rules(&["notes"]);
             for rule in [
-                "notes:~/proj/*.env",
-                "notes:**/.env",
-                "notes:/h/proj/*/secrets/*",
+                "path~~/proj/*.env",
+                "path~**/.env",
+                "path~/h/proj/*/secrets/*",
             ] {
-                p.deny = rules(&[rule]);
+                p.deny = rules(&[&format!("notes.open:{rule}"), &format!("notes.save:{rule}")]);
                 for (action, effect, path, write) in [
                     ("open", Effect::Read, "/h/proj/readme.md", false),
                     ("open", Effect::Read, "/h/proj/src/main.rs", false),
@@ -2122,6 +2296,7 @@ mod tests {
             command,
             cwd: command.and(targets.first().map(|t| t.path.as_path())),
             now_ms: NOW,
+            args: None,
         }
     }
 
@@ -2135,6 +2310,7 @@ mod tests {
             command: None,
             cwd: None,
             now_ms: NOW,
+            args: None,
         }
     }
 
@@ -2143,6 +2319,8 @@ mod tests {
         call(Effect::Read, targets, None)
     }
 
+    /// A path given as the argument `path` (an `fs` call's has no name,
+    /// which an `fs` call does not look at).
     fn t(p: &str, write: bool) -> Vec<Target> {
         vec![Target {
             path: p.into(),
@@ -2152,6 +2330,7 @@ mod tests {
                 PathAccess::Read
             },
             holds: true,
+            arg: Some("path".into()),
         }]
     }
 
@@ -2161,6 +2340,7 @@ mod tests {
             path: p.into(),
             access: PathAccess::Run,
             holds: true,
+            arg: None,
         }]
     }
 
@@ -2370,6 +2550,7 @@ mod tests {
             path: path.into(),
             access,
             holds: true,
+            arg: None,
         };
         let read_there = [
             at("/h/.ssh/config", PathAccess::Read),
@@ -2432,6 +2613,7 @@ mod tests {
             path: path.into(),
             access,
             holds: true,
+            arg: None,
         };
         let cases = [
             (vec![at("/w/rw", PathAccess::Run)], Decision::Allow),
@@ -3033,11 +3215,11 @@ mod tests {
         }
         // A rule that names the whole line covers it.
         p.allow
-            .push(crate::rules::rule_for("exec", "run", "git log | head", false).unwrap());
+            .push(crate::rules::rule_for("exec", "run", "git log | head", false, None).unwrap());
         assert_eq!(run(&p, &env, &c("git log | head")), "allow");
         assert_eq!(run(&p, &env, &c("git log | sh")), "refused");
         // A literal `*` in the line is not a wildcard.
-        p.allow = vec![crate::rules::rule_for("exec", "run", "rm *", false).unwrap()];
+        p.allow = vec![crate::rules::rule_for("exec", "run", "rm *", false, None).unwrap()];
         assert_eq!(run(&p, &env, &c("rm *")), "allow");
         assert_eq!(run(&p, &env, &c("rm -rf /")), "refused");
     }
@@ -3103,7 +3285,7 @@ mod tests {
         }
         // A rule that names the line exactly still covers it.
         p.allow
-            .push(crate::rules::rule_for("exec", "run", "echo @{a=1}", false).unwrap());
+            .push(crate::rules::rule_for("exec", "run", "echo @{a=1}", false, None).unwrap());
         assert_eq!(run(&p, &env, &c("echo @{a=1}")), "allow");
     }
 

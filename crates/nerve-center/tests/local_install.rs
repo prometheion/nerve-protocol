@@ -107,6 +107,7 @@ async fn the_real_cpu_build_installs_and_runs_d1() {
         node_id: "n1",
         os: std::env::consts::OS,
         tainted: false,
+        marked: &[],
     };
     let endpoint = server.endpoint();
     let t = Instant::now();

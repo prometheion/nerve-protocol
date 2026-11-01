@@ -35,6 +35,48 @@ pub struct Entry {
     /// is shown, so it stays in this log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// The call's arguments a rule may pin ([`pinnable_args`]), for the
+    /// audit buttons that make such a rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Map<String, Value>>,
+}
+
+/// The most arguments an audit entry keeps for the buttons that pin one.
+pub const ARGS_MAX: usize = 16;
+/// The most characters of a string argument an audit entry keeps; a longer
+/// one is left out, as a rule could not pin it from a cut value.
+pub const ARG_MAX_CHARS: usize = 200;
+
+/// The arguments of a call of `cap.action` a rule may pin
+/// ([`crate::rules::rule_for`]): for any action but the `fs` ones and
+/// `exec.run`, which name a path and a command line, each top-level
+/// string, number and boolean, up to [`ARGS_MAX`] of them, a string only
+/// up to [`ARG_MAX_CHARS`] characters. `None` where there is none.
+pub fn pinnable_args(
+    cap: &str,
+    action: &str,
+    args: &serde_json::Map<String, Value>,
+) -> Option<serde_json::Map<String, Value>> {
+    if !crate::conditions::takes_conditions(&format!("{cap}.{action}")) {
+        return None;
+    }
+    pinnable(args)
+}
+
+/// The arguments of `args` a rule may pin, for any action that takes
+/// conditions ([`pinnable_args`]).
+pub fn pinnable(args: &serde_json::Map<String, Value>) -> Option<serde_json::Map<String, Value>> {
+    let kept: serde_json::Map<String, Value> = args
+        .iter()
+        .filter(|(k, v)| {
+            crate::conditions::pin(k, v).is_ok()
+                && v.as_str()
+                    .is_none_or(|s| s.chars().count() <= ARG_MAX_CHARS)
+        })
+        .take(ARGS_MAX)
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    (!kept.is_empty()).then_some(kept)
 }
 
 impl Entry {
@@ -486,6 +528,7 @@ mod tests {
             session: None,
             reason: None,
             command: None,
+            args: None,
         };
         log.decision(&e).unwrap();
         log.settings(
@@ -531,6 +574,7 @@ mod tests {
             session: None,
             reason: Some(format!("the command {:?} is denied", "ü".repeat(3000))),
             command: Some(format!("tool --token=secret -- {}", "ü".repeat(3000))),
+            args: None,
         };
         log.decision(&e).unwrap();
         let line = &log.read().unwrap()[0];
@@ -719,6 +763,7 @@ mod tests {
             session: None,
             reason: None,
             command: None,
+            args: None,
         }
     }
 

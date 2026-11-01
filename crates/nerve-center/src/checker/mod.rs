@@ -103,7 +103,10 @@ pub struct CallInfo<'a> {
     /// the action does there. The `fs` blocklist entries hold them, whoever
     /// the capability is.
     pub paths: &'a [(PathMark, String)],
-    /// The call's arguments, for the model's state.
+    /// The arguments the action's schema marks as paths, which a rule's
+    /// conditions match as paths.
+    pub marked: &'a [(String, PathMark)],
+    /// The call's arguments, for the model's state and a rule's conditions.
     pub args: &'a serde_json::Map<String, Value>,
     pub node_id: &'a str,
     /// The node's OS (`linux`, `windows`, …), for the model's state.
@@ -216,6 +219,8 @@ impl Checker {
             cap: call.cap,
             action: call.action,
             target: call.target,
+            args: Some(call.args),
+            marked: call.marked,
         };
         // For an `exec.run` call the command line is pulled apart once, by
         // the rules of the node's shell, and reused across every entry. A
@@ -277,7 +282,7 @@ impl Checker {
                 .iter()
                 .filter(|b| b.entry.applies_to(call.node_id))
                 .find_map(|b| {
-                    if b.rule.matches_with(&target, commands) {
+                    if b.rule.blocks_with(&target, commands) {
                         return Some((b, None));
                     }
                     let (_, p) = paths.iter().find(|(m, p)| b.rule.matches_path(*m, p))?;
@@ -487,6 +492,7 @@ mod tests {
             description: "",
             target,
             paths: &[],
+            marked: &[],
             args,
             node_id: "n1",
             os: "linux",

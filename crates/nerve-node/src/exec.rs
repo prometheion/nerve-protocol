@@ -130,6 +130,7 @@ impl RunCall {
             path: self.cwd.clone(),
             access: PathAccess::Run,
             holds: true,
+            arg: None,
         }]
     }
 }

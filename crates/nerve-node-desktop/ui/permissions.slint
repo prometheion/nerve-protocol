@@ -318,6 +318,12 @@ component FolderSection inherits Section {
 component RuleList {
     in property <int> list;
     in property <[string]> rules;
+    // For each rule, why it no longer fits what its action takes ("" where
+    // it fits), and under the new rule's field the arguments its action
+    // takes or what is wrong with them.
+    in property <[string]> unfit;
+    in property <string> hint;
+    in property <bool> hint-error;
     in property <string> placeholder;
     in-out property <string> new-text;
     in-out property <bool> new-wild;
@@ -341,6 +347,20 @@ component RuleList {
                             wrap: word-wrap;
                         }
                     }
+                    // A rule whose action no longer takes what it names
+                    // fails closed: the node keeps it, and says so here.
+                    Reveal {
+                        shown: !editing && root.unfit[i] != "";
+                        gap: 2px;
+                        Text {
+                            text: "No longer fits: " + root.unfit[i] + (root.list == 1
+                                ? ". As a deny rule it refuses every call of its action until you change it."
+                                : ". As an allow rule it covers no call until you change it.");
+                            color: Theme.warn;
+                            font-size: Type.caption;
+                            wrap: word-wrap;
+                        }
+                    }
                     Reveal {
                         shown: editing;
                         TextField {
@@ -348,9 +368,23 @@ component RuleList {
                             mono: true;
                             label: "Rule";
                             enabled: !Perm.edit-busy;
+                            invalid: Perm.edit-hint-error;
                             accepted => {
                                 Perm.rule-edit-save();
                             }
+                            edited(t) => {
+                                Perm.rule-typed(3, t);
+                            }
+                        }
+                    }
+                    Reveal {
+                        shown: editing && Perm.edit-hint != "";
+                        gap: 4px;
+                        Text {
+                            text: Perm.edit-hint;
+                            color: Perm.edit-hint-error ? Theme.danger : Theme.text-muted;
+                            font-size: Type.caption;
+                            wrap: word-wrap;
                         }
                     }
                 }
@@ -363,6 +397,7 @@ component RuleList {
                         Perm.edit-text = r;
                         Perm.edit-index = i;
                         Perm.edit-list = root.list;
+                        Perm.rule-typed(3, r);
                     }
                 }
                 if !editing: Button {
@@ -398,6 +433,7 @@ component RuleList {
         HorizontalLayout {
             padding: Space.lg;
             padding-left: Space.xl;
+            padding-bottom: root.hint != "" ? Space.sm : Space.lg;
             spacing: Space.md;
             TextField {
                 horizontal-stretch: 1;
@@ -405,8 +441,12 @@ component RuleList {
                 mono: true;
                 label: "New rule";
                 placeholder: root.placeholder;
+                invalid: root.hint-error;
                 accepted => {
                     Perm.rule-add(root.list);
+                }
+                edited(t) => {
+                    Perm.rule-typed(root.list, t);
                 }
             }
             VerticalLayout {
@@ -438,6 +478,20 @@ component RuleList {
                 }
             }
         }
+        Reveal {
+            shown: root.hint != "";
+            HorizontalLayout {
+                padding-left: Space.xl;
+                padding-right: Space.xl;
+                padding-bottom: Space.lg;
+                Text {
+                    text: root.hint;
+                    color: root.hint-error ? Theme.danger : Theme.text-muted;
+                    font-size: Type.caption;
+                    wrap: word-wrap;
+                }
+            }
+        }
     }
 }
 
@@ -457,6 +511,9 @@ component RuleSection inherits Section {
         RuleList {
             list: 0;
             rules: Perm.allow;
+            unfit: Perm.allow-unfit;
+            hint: Perm.allow-hint;
+            hint-error: Perm.allow-hint-error;
             placeholder: "git status";
             new-text <=> Perm.allow-text;
             new-wild <=> Perm.allow-wild;
@@ -467,6 +524,9 @@ component RuleSection inherits Section {
         RuleList {
             list: 1;
             rules: Perm.deny;
+            unfit: Perm.deny-unfit;
+            hint: Perm.deny-hint;
+            hint-error: Perm.deny-hint-error;
             placeholder: "git push --force";
             new-text <=> Perm.deny-text;
             new-wild <=> Perm.deny-wild;
@@ -538,6 +598,9 @@ component RuleSection inherits Section {
                             RuleList {
                                 list: 1;
                                 rules: Perm.deny;
+                                unfit: Perm.deny-unfit;
+                                hint: Perm.deny-hint;
+                                hint-error: Perm.deny-hint-error;
                                 placeholder: "git push --force";
                                 new-text <=> Perm.deny-text;
                                 new-wild <=> Perm.deny-wild;

@@ -43,6 +43,7 @@ fn decided(paths: &NodePaths, ts: u64, center: &str, cap: &str, action: &str, ta
             session: None,
             reason: Some("no allow rule matches it (allowlist mode)".into()),
             command: None,
+            args: None,
         })
         .unwrap();
 }
@@ -353,7 +354,7 @@ fn the_app_drives_the_cli_end_to_end() {
     store.invoke_audit_rule(index_of("git push origin main"), "deny".into(), false);
     let policy = config(&paths).centers[0].policy.clone();
     let rule = |cap, action, target, wildcard| {
-        nerve_policy::rules::rule_for(cap, action, target, wildcard).unwrap()
+        nerve_policy::rules::rule_for(cap, action, target, wildcard, None).unwrap()
     };
     assert_eq!(
         policy.allow,

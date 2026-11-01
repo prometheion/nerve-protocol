@@ -159,6 +159,9 @@ pub struct Ctl {
     /// then show as errors until it closes.
     cap_tried: Cell<bool>,
     caps_listing: RefCell<Value>,
+    /// `cap ls` as the Permissions page last read it for its center: the
+    /// arguments its rule fields offer (view::rule_hint).
+    rule_listing: RefCell<Value>,
     /// Restarts the service a moment after a change it takes only then.
     restart_timer: slint::Timer,
     /// A restart the app said would come and that has not run yet; the
@@ -319,6 +322,7 @@ impl Ctl {
             cap_dialogs: Cell::new(0),
             cap_tried: Cell::new(false),
             caps_listing: RefCell::new(Value::Null),
+            rule_listing: RefCell::new(Value::Null),
             restart_timer: slint::Timer::default(),
             restart_waits: Cell::new(false),
             scheme_timer: slint::Timer::default(),
@@ -387,6 +391,8 @@ impl Ctl {
         store.on_audit_filtered(move || c.show_audit());
         let c = ctl.clone();
         store.on_audit_rule(move |i, list, wildcard| c.audit_rule(i as usize, &list, wildcard));
+        let c = ctl.clone();
+        store.on_audit_pin(move |i, list, pin| c.audit_pin(i as usize, &list, pin as usize));
         let c = ctl.clone();
         store.on_pair_start(move || c.pair_start());
         let c = ctl.clone();
@@ -890,6 +896,30 @@ impl Ctl {
                         "deny" => "deny list",
                         _ => "allow list",
                     };
+                    c.done(&v, format!("Added to the {list} of {center}."));
+                }
+                Err(e) => c.toast(e, Tone::Danger),
+            }
+        });
+    }
+
+    /// One of the pin buttons on an audit entry: allow or deny the call's
+    /// action with its argument `pin` held to the entry's value.
+    fn audit_pin(self: &Rc<Self>, index: usize, list: &str, pin: usize) {
+        let Some(entry) = self.audit.borrow().get(index).cloned() else {
+            return;
+        };
+        let Some(args) = view::pin_args(&entry, list, pin) else {
+            return;
+        };
+        let deny = list == "deny";
+        let center = entry["center"].as_str().unwrap_or_default().to_string();
+        self.with_store(|s| s.set_busy(format!("audit-{index}").into()));
+        self.command(args, None, move |c, answer| {
+            c.with_store(|s| s.set_busy(SharedString::new()));
+            match answer {
+                Ok(v) => {
+                    let list = if deny { "deny list" } else { "allow list" };
                     c.done(&v, format!("Added to the {list} of {center}."));
                 }
                 Err(e) => c.toast(e, Tone::Danger),
