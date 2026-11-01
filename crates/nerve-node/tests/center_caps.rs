@@ -1527,6 +1527,20 @@ async fn a_node_run_by_hand_takes_none_and_says_why() {
     daemon.stop().await;
 }
 
+/// A `sudo` that takes one password, which no test gives: the conformance
+/// part's wrong one is refused, whatever the machine's own sudo does.
+fn fake_sudo(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let p = dir.join("fake-sudo");
+    let body = "#!/bin/sh\nv=\nwhile [ $# -gt 0 ]; do case \"$1\" in -S|-k) shift ;; -p) p=\"$2\"; shift 2 ;; \
+                -v) v=1; shift ;; *) break ;; esac; done\nprintf %s \"$p\" >&2\nIFS= read -r pw\n\
+                [ \"$pw\" = 'the-one-right-password' ] || { echo 'Sorry, try again.' >&2; exit 1; }\n\
+                [ -n \"$v\" ] && exit 0\nexec \"$@\"\n";
+    std::fs::write(&p, body).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
 /// The node part of the conformance runner, with the settings grant and a
 /// node that takes capabilities from a center: its §7.4.2 checks pass, not
 /// only the refusal of a node that takes none.
@@ -1540,7 +1554,15 @@ async fn passes_the_conformance_checks_of_capabilities_a_center_adds() {
     let report = nerve_conformance::node_part::run(move |link| async move {
         let o = options(&root, true);
         nerve_node::pair::pair(&o.paths, &link, None).await?;
-        owner_edit(&o.paths, |c| c.centers[0].settings = SettingsGrant::Write).await;
+        // The part sends one wrong sudo password. A fake sudo that wants a
+        // password nobody gives refuses it; the machine's own sudo may be
+        // passwordless (a CI runner's is) and take any.
+        let sudo = fake_sudo(&root);
+        owner_edit(&o.paths, |c| {
+            c.centers[0].settings = SettingsGrant::Write;
+            c.machine.sudo_path = Some(sudo.display().to_string());
+        })
+        .await;
         let folder = root.join("home").join("work");
         std::fs::create_dir_all(&folder).unwrap();
         let d = Daemon::start(o).await?;
