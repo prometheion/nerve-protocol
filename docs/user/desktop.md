@@ -241,7 +241,15 @@ in allowlist mode its allowed commands, with the deny rules below them as
 forbidden commands, and a line that the allow rules count only in allowlist
 mode. The sudo list is in **Sudo**, beside its switch. The pencil beside a
 rule edits it in place, as one change (`rule edit`), the rules of the guard
-too. A list longer than some eight rows (rules, folders, capabilities, a
+too. A rule on an action's arguments (`lamp.set:room=office`,
+[rules](rules.md#rules-on-an-actions-arguments)) goes on the allow or deny
+list as it is: while you type one, the line below the field names the
+arguments that action takes, from what the node offers this center, or says
+what is wrong with the conditions so far (an argument it does not take, a value
+not of its type). The node checks it again as it saves it. A rule whose
+action no longer takes the argument it names says so on its row: as a deny
+rule it refuses every call of that action, as an allow rule it covers none,
+until you change it. A list longer than some eight rows (rules, folders, capabilities, a
 relay's nodes, the centers on the Overview) scrolls in a box of its own, with
 its scroll bar beside it, so the page stays short. A center's capability
 switches are on [Capabilities](#capabilities).
@@ -351,6 +359,11 @@ newest 1000 entries and filters them: **All**, **Allowed**, **Refused** or
 words to find in the target and the reason (in a change, its settings). The
 filters combine, each choice shows how many entries it has, and the line below
 says how many match. **Newest first** or **Oldest first** turns the list.
+An entry of a call has the four buttons of the web UI's audit page
+(**Allow**, **Allow as wildcard**, **Deny**, **Deny as wildcard**, which run
+`rule add --action`); one whose call has arguments a rule may pin also offers
+them: pick one (`room=office`), then **Allow with this value** or **Deny with
+this value** (`rule add --pin`, [rules](rules.md#rules-on-an-actions-arguments)).
 **Clear** on either asks
 first, then runs `nerve-node audit clear` or `log clear`. A cleared audit log
 is not gone: its entries stay in `audit.jsonl.1` ([audit](audit.md#clear-it)),

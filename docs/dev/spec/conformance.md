@@ -198,7 +198,7 @@ installed node's provider socket, which tells the caller by its peer
 credentials and takes no token (node-local §5). The part writes its
 own policy with `settings.set` (`user` mode and a deny rule for `echo.shout`
 before the provider comes, allow rules for `echo.say`, `echo.fail` and
-`echo.peek:/nerve-conformance/inside/*` once it is there) and attaches an
+`echo.peek:path~/nerve-conformance/inside/*` once it is there) and attaches an
 `echo` provider with the actions `say` (a string `text`), `shout`, `fail`,
 `odd`, whose schema has a `oneOf` and so is outside the subset of
 protocol.md §6.1, and `peek`, whose `path` is marked `x-nerve-path: "read"`;
