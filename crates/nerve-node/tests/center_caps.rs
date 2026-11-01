@@ -865,8 +865,16 @@ async fn the_owners_on_for_a_program_waits_while_a_center_keeps_its_own() {
     caps.insert("cam".into(), CapSetting::On);
     std::fs::write(&file, cfg.to_toml()).unwrap();
     let said = cli(&paths, &["config", "accept"]).await.unwrap();
-    assert!(said.contains("lab: a switch or allow rule"), "{said}");
-    assert!(said.contains("covered cam;"), "{said}");
+    assert!(
+        said.contains("lab: keeps a capability of its own under cam,"),
+        "{said}"
+    );
+    assert!(
+        said.contains("the file's on or allow rule for cam would go with the center's own"),
+        "{said}"
+    );
+    assert!(said.contains("remove the center's first"), "{said}");
+    assert!(!said.contains("set before"), "{said}");
     invoke(&mut conn, "settings", "cap-rm", json!({"name": "cam.list"}))
         .await
         .unwrap();
@@ -877,7 +885,46 @@ async fn the_owners_on_for_a_program_waits_while_a_center_keeps_its_own() {
     cli(&paths, &["cap", "set", "cam", "on", "--center", "lab"])
         .await
         .unwrap();
+    // That `on` is the program's. Once it leaves, the center adds nothing
+    // under `cam` that would run under it, and take it along when removed.
     drop(program);
+    let mut tries = 0;
+    let e = loop {
+        let e = invoke(
+            &mut conn,
+            "settings",
+            "cap-add",
+            json!({"capability": list}),
+        )
+        .await
+        .unwrap_err();
+        if !e.message.contains("a program the owner allows offers cam") {
+            break e;
+        }
+        // Until the node has seen the program leave.
+        tries += 1;
+        assert!(tries < 100, "{}", e.message);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(code_of(&e), "forbidden", "{}", e.message);
+    assert!(
+        e.message
+            .contains("this center has an on or allow rule for cam,"),
+        "{}",
+        e.message
+    );
+    owner_edit(&paths, |c| {
+        c.center_mut("lab").unwrap().policy.caps.remove("cam");
+    })
+    .await;
+    invoke(
+        &mut conn,
+        "settings",
+        "cap-add",
+        json!({"capability": list}),
+    )
+    .await
+    .unwrap();
     daemon.stop().await;
 }
 
@@ -1236,9 +1283,12 @@ async fn the_owners_on_for_another_never_turns_on_a_centers_of_that_name() {
     std::fs::write(&file, cfg.to_toml()).unwrap();
     let said = cli(&paths, &["config", "accept"]).await.unwrap();
     assert!(
-        said.contains("lab: a switch or allow rule set before covered notes.look"),
+        said.contains(
+            "lab: its own notes.look senses or actuates and is left out while a program offers notes,"
+        ),
         "{said}"
     );
+    assert!(!said.contains("set before"), "{said}");
     drop(program);
     let deadline = tokio::time::Instant::now() + WAIT;
     loop {

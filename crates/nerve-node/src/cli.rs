@@ -3670,6 +3670,27 @@ fn held_note(center: &str, name: &str) -> String {
     )
 }
 
+/// What the owner is told of `name`, an action `center` added that senses
+/// or actuates, switched off as `config accept` took a file that turns it
+/// on while a program keeps it out (crate::config_cap::hold_shadowed).
+fn shadowed_note(center: &str, name: &str) -> String {
+    let cap = name.split_once('.').map_or(name, |(c, _)| c);
+    format!(
+        "{center}: its own {name} senses or actuates and is left out while a program offers {cap}, so the file's on or allow rule for it is off there now; turn it on once the center is offered it (cap set {name} on --center {center}), or remove it (cap rm {name} --center {center})"
+    )
+}
+
+/// What the owner is told of `name`, a switch `config accept` set to `off`
+/// for `center`, which keeps one of its own under a program's capability:
+/// the file's `on` or allow rule for it would go with the center's own
+/// (crate::config_cap::hold_with_own).
+fn with_own_note(center: &str, name: &str) -> String {
+    let cap = name.split_once('.').map_or(name, |(c, _)| c);
+    format!(
+        "{center}: keeps a capability of its own under {cap}, so it is offered neither that one nor a program's {cap}, and the file's on or allow rule for {name} would go with the center's own when it is removed; {name} is off there now, and stays so: remove the center's first (cap ls --center {center} lists them, cap rm NAME --center {center} removes one), then turn on the program's (cap set {name} on --center {center})"
+    )
+}
+
 /// The programs whose rows in `listing` (`caps.list`) offer the capability
 /// `cap` now.
 fn programs_offering(listing: &Value, cap: &str) -> Vec<String> {
@@ -4256,10 +4277,10 @@ pub const NO_ACCOUNT_TO_CHOOSE: &str = "machine.user is Windows's: on Linux comm
 /// a `[[center]]` entry by its name.
 async fn config_cmd(paths: &NodePaths, c: ConfigCmd, out: &mut dyn Write) -> Result<(), String> {
     if let ConfigCmd::Accept = c {
-        let (v, held) = accept(paths).await?;
+        let (v, notes) = accept(paths).await?;
         let _ = writeln!(out, "accepted node.toml as version {v}");
-        for (center, name) in held {
-            let _ = writeln!(out, "{}", held_note(&center, &name));
+        for note in notes {
+            let _ = writeln!(out, "{note}");
         }
         return Ok(());
     }
@@ -5282,10 +5303,11 @@ fn pct_decode(s: &str) -> Option<String> {
 }
 
 /// `config accept`: the running daemon takes the file, or, when none runs,
-/// the file is signed here. Also the centers and actions the daemon
-/// switched off as it took it (crate::config_cap::hold_new); a stopped node
-/// cannot tell what the file had before, so it switches off none.
-async fn accept(paths: &NodePaths) -> Result<(u64, Vec<(String, String)>), String> {
+/// the file is signed here. Also a note for each switch the daemon set to
+/// `off` as it took it, each saying what to do for its kind
+/// (crate::config_cap::hold_new, hold_shadowed, hold_with_own); a stopped
+/// node cannot tell what the file had before, so it switches off none.
+async fn accept(paths: &NodePaths) -> Result<(u64, Vec<String>), String> {
     // Keys already in the keyring move nowhere when the file is taken, so
     // the settings store alone would not refuse it.
     if crate::secrets::stated_storage(paths) == SecretStorage::Keyring
@@ -5306,8 +5328,16 @@ async fn accept(paths: &NodePaths) -> Result<(u64, Vec<(String, String)>), Strin
     .await
     {
         Ok(v) => {
-            let held = serde_json::from_value(v["held"].clone()).unwrap_or_default();
-            return Ok((v["version"].as_u64().unwrap_or_default(), held));
+            let of = |key: &str| -> Vec<(String, String)> {
+                serde_json::from_value(v[key].clone()).unwrap_or_default()
+            };
+            let notes = of("held")
+                .iter()
+                .map(|(center, name)| held_note(center, name))
+                .chain(of("shadowed").iter().map(|(c, n)| shadowed_note(c, n)))
+                .chain(of("with_own").iter().map(|(c, n)| with_own_note(c, n)))
+                .collect();
+            return Ok((v["version"].as_u64().unwrap_or_default(), notes));
         }
         Err(e) if e != nerve_transport::ctl::NOT_RUNNING => return Err(e),
         Err(_) => {}

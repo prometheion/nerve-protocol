@@ -2365,20 +2365,27 @@ pub(crate) fn control(
                 // senses where a program keeps it out (hold_shadowed), and an
                 // `on` for that program's that would go with the center's own
                 // (hold_with_own), in the one write that puts it in force.
+                // Each apart, since the owner is told what to do for each.
                 let r = store.accept_with(|before, after| {
-                    let mut held = crate::config_cap::hold_new(before, after);
-                    held.extend(crate::config_cap::hold_shadowed(before, after, &taken));
-                    held.extend(crate::config_cap::hold_with_own(before, after, &taken));
-                    held
+                    (
+                        crate::config_cap::hold_new(before, after),
+                        crate::config_cap::hold_shadowed(before, after, &taken),
+                        crate::config_cap::hold_with_own(before, after, &taken),
+                    )
                 });
                 store.set_user(None);
                 r
             };
             match r {
-                Ok((v, held)) => {
+                Ok((v, (held, shadowed, with_own))) => {
                     shared.settle_sudo();
                     shared.bump();
-                    Reply::Ok(json!({"version": v, "held": held}))
+                    Reply::Ok(json!({
+                        "version": v,
+                        "held": held,
+                        "shadowed": shadowed,
+                        "with_own": with_own,
+                    }))
                 }
                 Err(e) => Reply::Err(e.to_string()),
             }

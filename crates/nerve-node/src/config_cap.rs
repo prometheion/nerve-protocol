@@ -291,6 +291,32 @@ pub fn remove_added(entry: &mut CenterEntry, name: &str, owners: &[ConfigCapabil
     true
 }
 
+/// The switch (`on`) or allow rule's scope of `entry`'s center that `c`,
+/// a capability it asks to add, would come under though it was not set
+/// for one of its own: one for `c`'s very name, or, where the center keeps
+/// nothing else under its capability, for that capability as a whole.
+/// Such a one was set for what else offers that name (a program away now,
+/// or nothing yet), by the owner where only the owner may; [`remove_added`]
+/// would take it along with `c`, unseen.
+fn set_for_else(entry: &CenterEntry, c: &ConfigCapability) -> Option<String> {
+    use nerve_policy::config::CapSetting;
+    let cap = c.split().0;
+    let mut scopes = vec![c.name.as_str()];
+    if !keeps_own(entry, cap) {
+        scopes.push(cap);
+    }
+    let p = &entry.policy;
+    scopes
+        .into_iter()
+        .find(|scope| {
+            p.caps.get(*scope) == Some(&CapSetting::On)
+                || p.allow
+                    .iter()
+                    .any(|r| nerve_policy::rules::scope_of(r) == *scope)
+        })
+        .map(str::to_string)
+}
+
 /// The entry of `cfg` (`provider` [`PROVIDER`]) or of `entry`'s center
 /// ([`CENTER_ADDED`]) for `cap.action`.
 pub fn find_for<'a>(
@@ -377,9 +403,10 @@ pub enum CenterChange {
 /// on `os` (`installed` tells the installed node) with `programs` attached:
 /// a center changes only what it added, adds nothing under a name of the
 /// owner's or a program's, and adds or edits only what this node would
-/// offer it. An action that comes to sense or actuate is switched off for
-/// that center where an earlier switch or rule of its own would cover it
-/// ([`hold_new`]).
+/// offer it. It adds none under a switch or rule set for what else offers
+/// that name ([`set_for_else`]). An action that comes to sense or actuate
+/// is switched off for that center where an earlier switch or rule of its
+/// own would cover it ([`hold_new`]).
 pub fn center_change(
     cfg: &mut NodeConfig,
     center: &str,
@@ -424,7 +451,14 @@ pub fn center_change(
                 "this center added a capability {name} already; settings.cap-edit changes it"
             )));
         }
-        (CenterChange::Add(c), None) => e.capabilities.push(c),
+        (CenterChange::Add(c), None) => {
+            if let Some(scope) = set_for_else(e, &c) {
+                return Err(SetError::Forbidden(format!(
+                    "capability {name}: this center has an on or allow rule for {scope}, set for what else offers that name; a capability of its own under it would run under it and take it along when removed, so the owner takes it away first"
+                )));
+            }
+            e.capabilities.push(c)
+        }
         (CenterChange::Edit(c), Some(i)) => e.capabilities[i] = c,
         (CenterChange::Rm(_), Some(_)) => {
             remove_added(e, &name, &before.capabilities);
@@ -1471,6 +1505,60 @@ command = ["sensors", "-l"]
         assert!(remove_added(&mut snap.centers[0], "cam.list", &[]));
         let caps = &snap.centers[0].policy.caps;
         assert_eq!(caps.get("cam.snap"), Some(&CapSetting::On));
+    }
+
+    /// A center's first capability under a name comes under no `on` or
+    /// allow rule set for what else offers it (a program away for now):
+    /// the center's removal would take that along, unseen. One for the
+    /// capability as a whole that the center's own came under is its own,
+    /// and so is one for another action.
+    #[test]
+    fn a_center_adds_none_under_a_switch_set_for_what_else_offers_its_name() {
+        use nerve_policy::config::CapSetting;
+        let lab = cfg(
+            "[[center]]\nname = \"lab\"\ncenter_id = \"c1\"\nurl = \"https://lab.example\"\nnode_id = \"n1\"\nsettings = \"write\"\n",
+        );
+        let sent = |name: &str| {
+            from_sent(
+                &json!({"name": name, "effect": "read", "command": ["echo", name]}),
+                60,
+            )
+            .unwrap()
+        };
+        let add = |c: &mut NodeConfig, name: &str| {
+            center_change(c, "lab", CenterChange::Add(sent(name)), "linux", true, &[])
+        };
+        for (on, rule) in [
+            (Some("cam"), None),
+            (None, Some("cam")),
+            (Some("cam.list"), None),
+            (None, Some("cam.list:/dev/*")),
+        ] {
+            let mut c = lab.clone();
+            let p = &mut c.center_mut("lab").unwrap().policy;
+            if let Some(on) = on {
+                p.caps.insert(on.into(), CapSetting::On);
+            }
+            p.allow.extend(rule.map(String::from));
+            let scope = on.or(rule).unwrap().split(':').next().unwrap();
+            let err = add(&mut c, "cam.list").unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("an on or allow rule for {scope},")),
+                "{err}"
+            );
+            assert!(c.center("lab").unwrap().capabilities.is_empty());
+        }
+        // Another action's, an `off`, and the capability's `on` once the
+        // center keeps one of its own under it.
+        let mut c = lab.clone();
+        let p = &mut c.center_mut("lab").unwrap().policy;
+        p.caps.insert("cam.snap".into(), CapSetting::On);
+        p.caps.insert("cam.list".into(), CapSetting::Off);
+        p.allow = vec!["cam.snap".into()];
+        add(&mut c, "cam.list").unwrap();
+        let p = &mut c.center_mut("lab").unwrap().policy;
+        p.caps.insert("cam".into(), CapSetting::On);
+        add(&mut c, "cam.info").unwrap();
     }
 
     /// A center removes its own entry also once the owner declares the

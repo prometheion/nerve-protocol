@@ -594,13 +594,20 @@ pub fn refuse_units(doc: &toml::Table) -> Result<(), String> {
     Ok(())
 }
 
-/// Checks the capabilities a center added ([`validate_all`]), and that they
-/// keep to [`MAX_CENTER_BYTES`] together. Their time limits are checked
+/// Checks the capabilities a center added ([`validate_all`]), at most
+/// [`MAX_CAPABILITIES`] as the owner's, said in a center's words, and that
+/// they keep to [`MAX_CENTER_BYTES`] together. Their time limits are checked
 /// against the node's `limits.max_timeout_secs` as the center adds or
 /// changes one (nerve-node's `from_sent`), not here: the owner may lower
 /// that limit later, and cannot change what a center added, while a run is
 /// held to the limit anyway.
 pub fn validate_center(caps: &[ConfigCapability]) -> Result<(), String> {
+    if caps.len() > MAX_CAPABILITIES {
+        return Err(format!(
+            "at most {MAX_CAPABILITIES} capabilities of its own, and it has {}",
+            caps.len()
+        ));
+    }
     validate_all(caps, u64::MAX)?;
     let bytes: usize = caps.iter().map(|c| c.entry().to_string().len()).sum();
     if bytes > MAX_CENTER_BYTES {
@@ -1063,5 +1070,15 @@ mod tests {
         let e = validate_center(&many).unwrap_err();
         assert!(e.contains("at most 262144 together"), "{e}");
         assert_eq!(validate_center(&many[..2]), Ok(()));
+        // As many small ones as the owner may declare, and no more.
+        let small: Vec<ConfigCapability> = (0..=MAX_CAPABILITIES)
+            .map(|i| ConfigCapability {
+                name: format!("files.show{i}"),
+                ..cap(&["echo"], Value::Null)
+            })
+            .collect();
+        assert_eq!(validate_center(&small[..MAX_CAPABILITIES]), Ok(()));
+        let e = validate_center(&small).unwrap_err();
+        assert_eq!(e, "at most 64 capabilities of its own, and it has 65");
     }
 }

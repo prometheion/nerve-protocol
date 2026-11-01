@@ -2126,6 +2126,15 @@ mod tests {
         // Its command shows, from `added`: the summary is the center's.
         assert_eq!(lab[1].command, "echo {word}");
         assert_eq!(lab[3].command, "");
+        // The page shows it whole, wrapped, not cut at its start as a path.
+        let page = include_str!("../ui/capabilities.slint");
+        let shown = page
+            .split("if c.command != \"\": ")
+            .nth(1)
+            .and_then(|s| s.split('}').next())
+            .unwrap();
+        assert!(shown.starts_with("Text {"), "{shown}");
+        assert!(shown.contains("wrap: char-wrap;"), "{shown}");
     }
 
     /// The Capabilities page: each capability once over its units, in the
