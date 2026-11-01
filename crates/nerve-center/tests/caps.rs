@@ -386,6 +386,29 @@ async fn a_capability_added_through_the_web_ui_is_listed_and_runs() {
     let v = ui.caps(&id).await;
     assert!(unit(&v, "say.back").is_none(), "{v}");
     assert_eq!(v["added"]["entries"], json!([]), "{v}");
+    // Each change the web UI made is in the log, the node's refusal as a
+    // warning.
+    let log = r.center.log_json(&q);
+    let level_of = |text: &str| -> Vec<String> {
+        log["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["msg"].as_str().is_some_and(|m| m.contains(text)))
+            .map(|e| e["level"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    for (text, level) in [
+        ("capability say.back added from the web UI", "info"),
+        ("capability say.back changed from the web UI", "info"),
+        ("capability say.back removed from the web UI", "info"),
+        (
+            "the node did not add a capability from the web UI (forbidden)",
+            "warn",
+        ),
+    ] {
+        assert_eq!(level_of(text), [level], "{text}: {log}");
+    }
 
     // Without the grant the machine is shown read only: no added list, and
     // a save is the node's refusal.

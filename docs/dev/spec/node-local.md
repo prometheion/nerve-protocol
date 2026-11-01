@@ -680,8 +680,12 @@ The node:
 - does not offer that center an attached provider's capability whose `cap`
   it added an entry under, while it keeps the entry (the entry is left out
   too): its switches and rules were set for its own command;
-- drops, when an entry is removed (`settings.cap-rm` or the owner's `cap rm
-  NAME --center <name>`), that center's `on` for `NAME` and its allow rules
+- drops, when an entry is removed (`settings.cap-rm`, the owner's `cap rm
+  NAME --center <name>`, or any write of the owner's that leaves it out:
+  `config.write`, `config accept` with the node running, which names each
+  such scope in `dropped` (with its center), and a `config` command with no
+  node running; an `on` or rule that write sets anew stays), that center's
+  `on` for `NAME` and its allow rules
   whose scope is `NAME`, and, where that center keeps no other entry under
   `NAME`'s `cap`, its `on` and allow rules for the `cap` (only the owner sets
   those for a `cap` nothing else offers); an `off`, a `hidden` and deny rules

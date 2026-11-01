@@ -2291,6 +2291,9 @@ pub(crate) fn control(
                     "machine.sudo changes only through nerve-node sudo on|off".into(),
                 );
             }
+            // A center's own that the write removes (`config unset`, say,
+            // not only `cap rm --center`) takes its switches along.
+            let dropped = crate::config_cap::drop_removed(store.config(), &mut new);
             // An action that comes to sense waits for the owner's `on`,
             // whichever program of the owner's wrote the change.
             let held = crate::config_cap::hold_new(store.config(), &mut new);
@@ -2326,7 +2329,7 @@ pub(crate) fn control(
             match r {
                 Ok(v) => {
                     shared.bump();
-                    Reply::Ok(json!({"version": v, "held": held}))
+                    Reply::Ok(json!({"version": v, "held": held, "dropped": dropped}))
                 }
                 Err(SetError::Conflict { current }) => {
                     Reply::Err(format!("conflict: the config changed (version {current})"))
@@ -2366,7 +2369,10 @@ pub(crate) fn control(
                 // `on` for that program's that would go with the center's own
                 // (hold_with_own), in the one write that puts it in force.
                 // Each apart, since the owner is told what to do for each.
+                // First a center's own the file no longer holds takes its
+                // switches along (crate::config_cap::drop_removed).
                 let r = store.accept_with(|before, after| {
+                    let dropped = crate::config_cap::drop_removed(before, after);
                     let held = crate::config_cap::hold_new(before, after);
                     let shadowed = crate::config_cap::hold_shadowed(before, after, &taken);
                     let mut with_own = crate::config_cap::hold_with_own(before, after, &taken);
@@ -2375,13 +2381,13 @@ pub(crate) fn control(
                     // counts again. The owner gets one note for it, the one
                     // that fits the center's own.
                     with_own.retain(|w| !shadowed.contains(w));
-                    (held, shadowed, with_own)
+                    (held, shadowed, with_own, dropped)
                 });
                 store.set_user(None);
                 r
             };
             match r {
-                Ok((v, (held, shadowed, with_own))) => {
+                Ok((v, (held, shadowed, with_own, dropped))) => {
                     shared.settle_sudo();
                     shared.bump();
                     Reply::Ok(json!({
@@ -2389,6 +2395,7 @@ pub(crate) fn control(
                         "held": held,
                         "shadowed": shadowed,
                         "with_own": with_own,
+                        "dropped": dropped,
                     }))
                 }
                 Err(e) => Reply::Err(e.to_string()),

@@ -1564,3 +1564,115 @@ async fn passes_the_conformance_checks_of_capabilities_a_center_adds() {
     assert_eq!(caps.len(), 2, "{report}");
     assert!(caps.iter().all(|o| o.result.is_ok()), "{report}");
 }
+
+/// However the owner takes a center's own out of node.toml, that center's
+/// `on` and allow rules for it go along, as with `cap rm --center`: by
+/// `config unset` with the node running, by a hand edit that `config
+/// accept` takes, and for the owner's `on` of the capability as a whole
+/// given for the center's own that senses, and by `config unset` with the
+/// node stopped. Kept, they would turn on what a program the owner allows
+/// offers under that name later.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_centers_switches_go_with_its_own_however_the_owner_removes_it() {
+    for route in ["unset", "accept", "owners-on", "stopped"] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut center = FakeCenter::start(false).await.unwrap();
+        let daemon = node(
+            dir.path(),
+            &[(&center, "lab")],
+            nerve_policy::Mode::Folder,
+            true,
+            allow_desk,
+        )
+        .await;
+        let paths = daemon.paths().clone();
+        let mut conn = linked(&mut center).await;
+        let sensing = route == "owners-on";
+        let effect = if sensing { "sense" } else { "execute" };
+        let snap = json!({"name": "cam.snap", "effect": effect, "command": ["echo", "list"]});
+        invoke(
+            &mut conn,
+            "settings",
+            "cap-add",
+            json!({"capability": snap}),
+        )
+        .await
+        .unwrap();
+        if sensing {
+            cli(&paths, &["cap", "set", "cam", "on", "--center", "lab"])
+                .await
+                .unwrap();
+        } else {
+            settings_set(&mut conn, |d| {
+                d["policy"]["caps"] = json!({"cam.snap": "on"});
+                d["policy"]["allow"] = json!(["cam.snap"]);
+            })
+            .await
+            .expect("its own action, by its name");
+        }
+        assert_eq!(
+            call(&mut conn, "cam.snap", json!({})).await.unwrap(),
+            json!("list\n"),
+            "{route}"
+        );
+
+        if route == "stopped" {
+            daemon.stop().await;
+            cli(&paths, &["config", "unset", "center.lab.capability"])
+                .await
+                .unwrap();
+            nothing_of_lab_for_cam(&paths, route).await;
+            continue;
+        }
+        if route == "accept" {
+            let file = paths.config_file();
+            let mut cfg = NodeConfig::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
+            cfg.center_mut("lab").unwrap().capabilities.clear();
+            std::fs::write(&file, cfg.to_toml()).unwrap();
+            let said = cli(&paths, &["config", "accept"]).await.unwrap();
+            assert!(
+                said.contains("lab: its own capability is gone from the file, so its on and allow rules for cam.snap went with it"),
+                "{said}"
+            );
+        } else {
+            cli(&paths, &["config", "unset", "center.lab.capability"])
+                .await
+                .unwrap();
+        }
+        nothing_of_lab_for_cam(&paths, route).await;
+
+        // The program attaches with a `cam.snap` that senses: it waits for
+        // the owner's `on`.
+        let program = attach(
+            &daemon,
+            json!([{"id": "cam", "actions": {"snap": {"effect": "sense"}}}]),
+        )
+        .await;
+        let e = call(&mut conn, "cam.snap", json!({})).await.unwrap_err();
+        assert_eq!(code_of(&e), "forbidden", "{route}: {}", e.message);
+        assert!(e.message.contains("set to on"), "{route}: {}", e.message);
+        let ls = cli(&paths, &["cap", "ls", "--json"]).await.unwrap();
+        let ls: Value = serde_json::from_str(&ls).unwrap();
+        let row = ls["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "cam.snap" && r["source"] == "program desk")
+            .cloned()
+            .unwrap();
+        assert_ne!(row["now"]["lab"], "on", "{route}: {row}");
+        drop(program);
+        daemon.stop().await;
+    }
+}
+
+/// That the center `lab` has no capability of its own left, and no `on`
+/// or allow rule for `cam.snap` or `cam`.
+async fn nothing_of_lab_for_cam(paths: &NodePaths, route: &str) {
+    let cfg = nerve_node::cli::read_config(paths).await.unwrap().0;
+    let lab = cfg.center("lab").unwrap();
+    assert!(lab.capabilities.is_empty(), "{route}");
+    assert_eq!(lab.policy.caps.get("cam.snap"), None, "{route}");
+    assert_eq!(lab.policy.caps.get("cam"), None, "{route}");
+    assert!(lab.policy.allow.is_empty(), "{route}: {:?}", lab.policy);
+}

@@ -1031,6 +1031,9 @@ pub async fn edit_saved(
     let old = store.config().clone();
     match store.update(|c| {
         f(c)?;
+        // As the daemon's `config.write` does: a center's own the change
+        // removes takes its switches along.
+        crate::config_cap::drop_removed(&old, c);
         crate::owner::check_change(&old, c)
     }) {
         Ok(_) => {
@@ -3693,6 +3696,16 @@ fn with_own_note(center: &str, name: &str) -> String {
     )
 }
 
+/// What the owner is told of `scope`, an `on` or allow rule of `center`
+/// that `config accept` took away with that center's own capability, which
+/// the file no longer holds (crate::config_cap::drop_removed).
+#[cfg(unix)]
+fn dropped_note(center: &str, scope: &str) -> String {
+    format!(
+        "{center}: its own capability is gone from the file, so its on and allow rules for {scope} went with it"
+    )
+}
+
 /// The programs whose rows in `listing` (`caps.list`) offer the capability
 /// `cap` now.
 fn programs_offering(listing: &Value, cap: &str) -> Vec<String> {
@@ -5307,8 +5320,10 @@ fn pct_decode(s: &str) -> Option<String> {
 /// `config accept`: the running daemon takes the file, or, when none runs,
 /// the file is signed here. Also a note for each switch the daemon set to
 /// `off` as it took it, each saying what to do for its kind
-/// (crate::config_cap::hold_new, hold_shadowed, hold_with_own); a stopped
-/// node cannot tell what the file had before, so it switches off none.
+/// (crate::config_cap::hold_new, hold_shadowed, hold_with_own), and for
+/// each a center's capability took along as the file dropped it
+/// (drop_removed); a stopped node cannot tell what the file had before, so
+/// it switches off and takes along none.
 async fn accept(paths: &NodePaths) -> Result<(u64, Vec<String>), String> {
     // Keys already in the keyring move nowhere when the file is taken, so
     // the settings store alone would not refuse it.
@@ -5338,6 +5353,7 @@ async fn accept(paths: &NodePaths) -> Result<(u64, Vec<String>), String> {
                 .map(|(center, name)| held_note(center, name))
                 .chain(of("shadowed").iter().map(|(c, n)| shadowed_note(c, n)))
                 .chain(of("with_own").iter().map(|(c, n)| with_own_note(c, n)))
+                .chain(of("dropped").iter().map(|(c, n)| dropped_note(c, n)))
                 .collect();
             return Ok((v["version"].as_u64().unwrap_or_default(), notes));
         }
