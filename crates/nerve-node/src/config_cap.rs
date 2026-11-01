@@ -454,7 +454,7 @@ pub fn center_change(
         (CenterChange::Add(c), None) => {
             if let Some(scope) = set_for_else(e, &c) {
                 return Err(SetError::Forbidden(format!(
-                    "capability {name}: this center has an on or allow rule for {scope}, set for what else offers that name; a capability of its own under it would run under it and take it along when removed, so the owner takes it away first"
+                    "capability {name}: this center has an on or allow rule for {scope}, set for what else offers that name; a capability of its own under it would run under it and take it along when removed, so take it away first: this center can, in its settings for the node, as can the node's owner"
                 )));
             }
             e.capabilities.push(c)

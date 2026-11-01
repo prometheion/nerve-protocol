@@ -2367,11 +2367,15 @@ pub(crate) fn control(
                 // (hold_with_own), in the one write that puts it in force.
                 // Each apart, since the owner is told what to do for each.
                 let r = store.accept_with(|before, after| {
-                    (
-                        crate::config_cap::hold_new(before, after),
-                        crate::config_cap::hold_shadowed(before, after, &taken),
-                        crate::config_cap::hold_with_own(before, after, &taken),
-                    )
+                    let held = crate::config_cap::hold_new(before, after);
+                    let shadowed = crate::config_cap::hold_shadowed(before, after, &taken);
+                    let mut with_own = crate::config_cap::hold_with_own(before, after, &taken);
+                    // hold_shadowed switches off the center's own action, and
+                    // leaves a new allow rule for it, which hold_with_own then
+                    // counts again. The owner gets one note for it, the one
+                    // that fits the center's own.
+                    with_own.retain(|w| !shadowed.contains(w));
+                    (held, shadowed, with_own)
                 });
                 store.set_user(None);
                 r

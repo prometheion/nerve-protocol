@@ -174,7 +174,12 @@ field with the machine's own rules and shows what is wrong under it. On
 **Add** or **Save** the center checks it once more and sends it, and the
 machine checks it again against its own limits (the time limit against its
 `limits.max_timeout_secs`). A refusal of the machine shows in the form with
-its reason, for example a name of the owner's.
+its reason, for example a name of the owner's. The machine also refuses to
+add one under a name this center has an `on` or allow rule for (or, for its
+first one under a capability, one for the capability as a whole), set for
+something else, say a program that is away for now: the center's removal
+would take that switch along. Take it away first on the Settings page under
+Machines, or ask the machine's owner.
 
 A capability the center adds runs as `nerve-run`, counts as `execute`, and
 one that senses or acts stays off until the machine's owner turns it on. A

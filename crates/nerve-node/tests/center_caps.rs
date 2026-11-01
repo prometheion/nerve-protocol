@@ -913,6 +913,13 @@ async fn the_owners_on_for_a_program_waits_while_a_center_keeps_its_own() {
         "{}",
         e.message
     );
+    // The center may take its own `on` away itself, so it is told so.
+    assert!(
+        e.message
+            .contains("take it away first: this center can, in its settings for the node,"),
+        "{}",
+        e.message
+    );
     owner_edit(&paths, |c| {
         c.center_mut("lab").unwrap().policy.caps.remove("cam");
     })
@@ -1289,6 +1296,21 @@ async fn the_owners_on_for_another_never_turns_on_a_centers_of_that_name() {
         "{said}"
     );
     assert!(!said.contains("set before"), "{said}");
+    // An allow rule in place of the `on` is told once, the same way: it is
+    // the center's own that the rule would turn on, not the program's.
+    let mut cfg = NodeConfig::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let lab = cfg.center_mut("lab").unwrap();
+    lab.policy.caps.remove("notes.look");
+    lab.policy.allow.push("notes.look".into());
+    std::fs::write(&file, cfg.to_toml()).unwrap();
+    let said = cli(&paths, &["config", "accept"]).await.unwrap();
+    assert_eq!(
+        said.matches("lab: its own notes.look senses or actuates")
+            .count(),
+        1,
+        "{said}"
+    );
+    assert!(!said.contains("would go with the center's own"), "{said}");
     drop(program);
     let deadline = tokio::time::Instant::now() + WAIT;
     loop {

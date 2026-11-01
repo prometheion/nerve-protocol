@@ -255,8 +255,8 @@ these limits:
   rule set for what else offers it, for that very action or, for its first
   one under that capability, for the capability as a whole (say yours for a
   program that is away for now): the add is refused with the reason, as the
-  center's removal would take that switch along. Take it away first, if
-  you want the center's. An `off`, a `hidden` and a deny rule stay. Where you declare that very name
+  center's removal would take that switch along. You or the center take it
+  away first, if you want the center's. An `off`, a `hidden` and a deny rule stay. Where you declare that very name
   yourself, they all stay, and those for the capability as a whole where
   you declare any action of it: the center's was left out, so they turn on
   yours for that center (an `on` for one of yours that senses or acts only

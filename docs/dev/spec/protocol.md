@@ -907,7 +907,10 @@ A center with the settings grant `write` may add capabilities of its own
 - A node that takes none answers `unavailable` with the reason. A broken
   entry, a name the center added already, or one it did not add is
   `invalid_args`; adding or editing under a name or capability of the node's
-  owner (or of a program the owner allows) is `forbidden`. `cap-rm` removes
+  owner (or of a program the owner allows) is `forbidden`, and so is adding
+  one while the center has an `on` or allow rule for its name, or, for its
+  first one under a `cap`, for that `cap` (set for what else offers that
+  name; the center may take it away itself). `cap-rm` removes
   the center's own entry also where the owner came to declare its name.
 - The node offers them to that center alone, in its descriptor with
   `provider: "center-added"`, each action's effect `execute` unless it
