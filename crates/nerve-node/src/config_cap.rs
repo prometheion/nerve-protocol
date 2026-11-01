@@ -1496,17 +1496,22 @@ command = ["sensors", "-l"]
         let mut same = before.clone();
         assert_eq!(drop_removed(&before, &mut same), []);
         assert_eq!(same, before);
-        // An `on` and a rule the owner sets in the same change stay theirs.
-        let mut unset = before.clone();
-        unset.center_mut("lab").unwrap().capabilities.clear();
-        let _ = drop_removed(&before, &mut unset);
-        let mut set = unset.clone();
-        let p = &mut set.center_mut("lab").unwrap().policy;
-        p.caps.insert("cam".into(), CapSetting::On);
-        p.allow.push("cam.snap".into());
-        let kept = set.clone();
-        assert_eq!(drop_removed(&unset, &mut set), []);
-        assert_eq!(set, kept);
+        // An `on` and a rule the owner sets in the same change stay theirs;
+        // those set before go.
+        let mut quiet = before.clone();
+        let p = &mut quiet.center_mut("lab").unwrap().policy;
+        p.caps.remove("cam");
+        p.allow.retain(|r| r != "cam.snap");
+        let mut set = quiet.clone();
+        let e = set.center_mut("lab").unwrap();
+        e.capabilities.clear();
+        e.policy.caps.insert("cam".into(), CapSetting::On);
+        e.policy.allow.push("cam.snap".into());
+        assert_eq!(drop_removed(&quiet, &mut set).len(), 3);
+        let p = &set.center("lab").unwrap().policy;
+        assert_eq!(p.caps.get("cam"), Some(&CapSetting::On));
+        assert_eq!(p.caps.get("cam.snap"), None);
+        assert_eq!(p.allow, ["other", "cam.snap"]);
         // The owner's config declares the name: they are for the owner's.
         let mut owners = before.clone();
         owners.center_mut("lab").unwrap().capabilities.clear();
