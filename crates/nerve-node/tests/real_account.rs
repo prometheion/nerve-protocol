@@ -1595,3 +1595,203 @@ async fn as_account(conn: &mut Conn<TcpStream>, name: &str) -> Value {
         .map(|c| c["actions"][action]["as_account"].clone())
         .unwrap_or_default()
 }
+
+/// Rules on a capability's arguments on the installed node (#152, C1): the
+/// owner adds a capability of node.toml, then rules that pin its arguments;
+/// each call is decided as the rule says (a deny pin wins over any allow, an
+/// allow pin in allowlist mode covers its values only), the audit log keeps
+/// the decision with the arguments, a rule naming an argument the action does
+/// not take is refused, and `rule ls` says which rule no longer fits once the
+/// capability changes. For a test machine only, as root: it installs the node
+/// and removes it again.
+///
+/// `NERVE_NODE_REAL=<the nerve-node to install> NERVE_REAL_OWNER=<an account
+/// with a home, the owner> cargo test -p nerve-node --test real_account --
+/// --ignored --exact argument_rules_decide_a_config_capability_on_the_installed_node`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "installs the node on this machine; NERVE_NODE_REAL and NERVE_REAL_OWNER name it"]
+async fn argument_rules_decide_a_config_capability_on_the_installed_node() {
+    let (Some(exe), Some(owner)) = (
+        std::env::var_os("NERVE_NODE_REAL").map(PathBuf::from),
+        std::env::var("NERVE_REAL_OWNER").ok(),
+    ) else {
+        eprintln!("NERVE_NODE_REAL or NERVE_REAL_OWNER is not set");
+        return;
+    };
+    assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
+    let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
+    assert!(ok, "{said}");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "real-c1\n\n\n");
+    assert!(ok, "{said}");
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let link = center.link().render();
+    let (ok, said) = as_owner(&owner, &["center", "add", &link, "--yes"]);
+    assert!(ok, "{said}");
+    let params = r#"{"type": "object", "properties": {"room": {"type": "string"}, "level": {"type": "integer"}}, "required": ["room", "level"]}"#;
+    let (ok, said) = as_owner(
+        &owner,
+        &[
+            "cap", "add", "lamp.set", "--effect", "write", "--params", params, "--", "echo", "set",
+            "{room}", "{level}",
+        ],
+    );
+    assert!(ok, "{said}");
+    // User mode: the deny pin refuses its room, every other one runs.
+    for args in [
+        &["mode", "set", "user"][..],
+        &["rule", "add", "deny", "lamp.set:room=bedroom"],
+    ] {
+        let (ok, said) = as_owner(&owner, args);
+        assert!(ok, "{args:?}: {said}");
+    }
+    let (ok, said) = as_owner(&owner, &["rule", "add", "deny", "lamp.set:size=1"]);
+    assert!(
+        !ok && said.contains("lamp.set has no argument size; it takes level, room"),
+        "{said}"
+    );
+    let paired = center.paired().expect("paired");
+    let mut inc = center.next_link(WAIT).await.expect("the node dials");
+    fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
+        .await
+        .expect("handshake");
+    let mut conn = inc.conn;
+    let lamp = |room: &str, level: i64| json!({"room": room, "level": level});
+    let mut first = Err(String::new());
+    for _ in 0..100 {
+        first = config_call(&mut conn, "lamp.set", lamp("office", 3)).await;
+        if first.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(first.unwrap(), json!("set office 3\n"));
+    let e = config_call(&mut conn, "lamp.set", lamp("bedroom", 3))
+        .await
+        .unwrap_err();
+    assert!(
+        e.contains("lamp.set is denied (lamp.set:room=bedroom)"),
+        "{e}"
+    );
+
+    // Allowlist mode: the allow pins cover their values only, and the deny
+    // pin wins over an allow rule that covers its call.
+    for args in [
+        &["mode", "set", "allowlist"][..],
+        &["rule", "add", "allow", "lamp.set:level<=5"],
+        &[
+            "rule",
+            "add",
+            "allow",
+            "",
+            "--action",
+            "lamp.set",
+            "--pin",
+            "room=kitchen",
+        ],
+    ] {
+        let (ok, said) = as_owner(&owner, args);
+        assert!(ok, "{args:?}: {said}");
+    }
+    let (_, ls) = as_owner(&owner, &["rule", "ls"]);
+    for line in [
+        "allow  lamp.set:level<=5",
+        "allow  lamp.set:room=kitchen",
+        "deny  lamp.set:room=bedroom",
+    ] {
+        assert!(ls.lines().any(|l| l == line), "{line}: {ls}");
+    }
+    assert!(!ls.contains("warning"), "{ls}");
+    assert_eq!(
+        config_call(&mut conn, "lamp.set", lamp("office", 3))
+            .await
+            .unwrap(),
+        json!("set office 3\n")
+    );
+    assert_eq!(
+        config_call(&mut conn, "lamp.set", lamp("kitchen", 9))
+            .await
+            .unwrap(),
+        json!("set kitchen 9\n")
+    );
+    let e = config_call(&mut conn, "lamp.set", lamp("office", 9))
+        .await
+        .unwrap_err();
+    assert!(
+        e.contains("no allow rule matches lamp.set with these arguments"),
+        "{e}"
+    );
+    let e = config_call(&mut conn, "lamp.set", lamp("bedroom", 1))
+        .await
+        .unwrap_err();
+    assert!(
+        e.contains("lamp.set is denied (lamp.set:room=bedroom)"),
+        "{e}"
+    );
+
+    // The audit log has each decision with the arguments.
+    let audit = std::fs::read_to_string("/var/lib/nerve/state/audit.jsonl").unwrap();
+    let calls: Vec<Value> = audit
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e["cap"] == "lamp" && e["action"] == "set")
+        .collect();
+    let seen: Vec<(String, Value)> = calls
+        .iter()
+        .map(|e| {
+            (
+                e["decision"].as_str().unwrap().to_string(),
+                e["args"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("allowed".to_string(), lamp("office", 3)),
+            ("forbidden".into(), lamp("bedroom", 3)),
+            ("allowed".into(), lamp("office", 3)),
+            ("allowed".into(), lamp("kitchen", 9)),
+            ("forbidden".into(), lamp("office", 9)),
+            ("forbidden".into(), lamp("bedroom", 1)),
+        ],
+        "{audit}"
+    );
+    assert_eq!(
+        calls[1]["reason"],
+        "lamp.set is denied (lamp.set:room=bedroom)"
+    );
+
+    // The capability takes no room now: the rules that name it stay, and
+    // `rule ls` says what they do.
+    let (ok, said) = as_owner(
+        &owner,
+        &[
+            "cap",
+            "edit",
+            "lamp.set",
+            "--params",
+            r#"{"type": "object", "properties": {"level": {"type": "integer"}}, "required": ["level"]}"#,
+            "--",
+            "echo",
+            "set",
+            "{level}",
+        ],
+    );
+    assert!(ok, "{said}");
+    let (_, ls) = as_owner(&owner, &["rule", "ls"]);
+    assert!(
+        ls.contains("warning: the deny rule \"lamp.set:room=bedroom\" no longer fits: lamp.set has no argument room; it takes level; as a deny rule it refuses every call of lamp.set until you change it"),
+        "{ls}"
+    );
+    // It fails closed: a call that cannot give the room is refused by it.
+    let e = config_call(&mut conn, "lamp.set", json!({"level": 1}))
+        .await
+        .unwrap_err();
+    assert!(
+        e.contains("lamp.set is denied (lamp.set:room=bedroom)"),
+        "{e}"
+    );
+
+    let (ok, said) = sh(Command::new(BIN).args(["uninstall", "--purge"]));
+    assert!(ok, "{said}");
+}
