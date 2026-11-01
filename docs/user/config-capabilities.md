@@ -312,6 +312,12 @@ capability logs.tail: tail -n {lines} -- {path}
 capability win.who: whoami; windows only
 ```
 
+A word of a command that holds a blank, a quote or a character that shows
+as nothing (a control character, a zero-width or a direction mark) is shown
+in double quotes, with that character written as an escape such as
+`\u202e`, so the line reads as what runs. The audit writes a command the
+same way.
+
 A capability this node does not offer says why. `nerve-node cap ls --json`
 gives each one as declared under `config`, and those the centers added under
 `added`, each with its `center`.

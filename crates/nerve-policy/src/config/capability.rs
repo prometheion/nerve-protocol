@@ -478,26 +478,68 @@ impl ConfigCapability {
 
     /// `words` as one line, such as the command with a call's values
     /// filled in ([`ConfigCapability::argv`]) for the audit: an element
-    /// that holds a blank, a quote, a backslash or a control character is
-    /// quoted with its escapes, as JSON writes a string, so the line stays
-    /// one.
+    /// that holds a blank, a quote, a backslash, a control character or
+    /// one that shows as nothing is quoted with its escapes, as JSON writes
+    /// a string, so the line stays one and reads as what runs. JSON leaves
+    /// DEL, the C1 controls, the line separators and the format characters
+    /// as they are, which a terminal may act on or which may turn the words
+    /// around, so those are written as `\u` escapes too.
     pub fn line(words: &[String]) -> String {
         words
             .iter()
             .map(|e| {
                 let plain = !e.is_empty()
-                    && !e.contains(|c: char| {
-                        c.is_whitespace() || c.is_control() || "'\"\\".contains(c)
-                    });
+                    && !e.contains(|c: char| c.is_whitespace() || unseen(c) || "'\"\\".contains(c));
                 if plain {
-                    e.clone()
-                } else {
-                    Value::String(e.clone()).to_string()
+                    return e.clone();
                 }
+                let mut out = String::new();
+                for c in Value::String(e.clone()).to_string().chars() {
+                    if unseen(c) {
+                        for u in c.encode_utf16(&mut [0; 2]) {
+                            out.push_str(&format!("\\u{u:04x}"));
+                        }
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out
             })
             .collect::<Vec<_>>()
             .join(" ")
     }
+}
+
+/// Whether `c` is a control character, a line or paragraph separator, or
+/// a format character (Unicode's category Cf: soft hyphen, zero-width
+/// marks, bidirectional controls, tags and the like), which show as
+/// nothing or change how the text around them shows.
+fn unseen(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{ad}'
+                | '\u{600}'..='\u{605}'
+                | '\u{61c}'
+                | '\u{6dd}'
+                | '\u{70f}'
+                | '\u{890}'..='\u{891}'
+                | '\u{8e2}'
+                | '\u{180e}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206f}'
+                | '\u{feff}'
+                | '\u{fff9}'..='\u{fffb}'
+                | '\u{110bd}'
+                | '\u{110cd}'
+                | '\u{13430}'..='\u{1343f}'
+                | '\u{1bca0}'..='\u{1bca3}'
+                | '\u{1d173}'..='\u{1d17a}'
+                | '\u{e0001}'
+                | '\u{e0020}'..='\u{e007f}'
+        )
 }
 
 /// Refuses an entry of the file `doc` that names an `account`: every
@@ -929,6 +971,31 @@ mod tests {
             c.command_line(),
             r#"grep -e "a b" "it's" "x\ny" "\u001b[1m" "" -- {x}"#
         );
+    }
+
+    /// What a terminal may act on, or what shows as nothing or turns the
+    /// words around, is written as an escape in quotes: the line holds
+    /// none of it, stays one, and reads back to the same words.
+    #[test]
+    fn the_command_line_shows_what_shows_as_nothing_as_escapes() {
+        let words = [
+            "a\u{9b}2J",
+            "\u{202e}txt.exe",
+            "x\u{7f}",
+            "\u{85}",
+            "zero\u{200b}width",
+            "\u{2028}",
+            "\u{e0041}",
+            "plain",
+        ];
+        let c = cap(&words, Value::Null);
+        let line = c.command_line();
+        assert_eq!(
+            line,
+            r#""a\u009b2J" "\u202etxt.exe" "x\u007f" "\u0085" "zero\u200bwidth" "\u2028" "\udb40\udc41" plain"#
+        );
+        assert!(line.is_ascii(), "{line}");
+        assert_eq!(crate::config::form::command_words(&line).unwrap(), words);
     }
 
     #[test]
