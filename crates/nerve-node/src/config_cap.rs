@@ -615,6 +615,53 @@ pub fn hold_shadowed(
     held
 }
 
+/// Where `after` newly sets an `on` or allow rule that [`remove_added`]
+/// would take with a center's own entry left out for a program's
+/// capability of its name (`taken`, as for [`hold_shadowed`]): one for
+/// that entry's action, or for its capability as a whole. While the center
+/// keeps its own, it is offered neither ([`programs_for`]), so such an
+/// `on` was set for the program's, and would go unseen once the center
+/// removes its own. Switches it off there, and returns those centers, each
+/// with the switch's name; the owner's write is refused for it
+/// (`config.write`, crate::daemon), and a file the owner takes keeps it off
+/// (`config accept`).
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn hold_with_own(
+    before: &NodeConfig,
+    after: &mut NodeConfig,
+    taken: &BTreeSet<String>,
+) -> Vec<(String, String)> {
+    use nerve_policy::config::CapSetting;
+    let on =
+        |p: &nerve_policy::CenterPolicy, scope: &str| p.caps.get(scope) == Some(&CapSetting::On);
+    let mut held = Vec::new();
+    for e in &mut after.centers {
+        let was = before.center(&e.name).map(|b| &b.policy);
+        let mut came: Vec<String> = Vec::new();
+        for c in &e.capabilities {
+            let cap = c.split().0;
+            if !taken.contains(cap) || after.capabilities.iter().any(|o| o.split().0 == cap) {
+                continue;
+            }
+            for scope in [c.name.as_str(), cap] {
+                let set = on(&e.policy, scope) && was.is_none_or(|b| !on(b, scope));
+                let rule = e.policy.allow.iter().any(|r| {
+                    nerve_policy::rules::scope_of(r) == scope
+                        && was.is_none_or(|b| !b.allow.contains(r))
+                });
+                if (set || rule) && !came.iter().any(|s| s == scope) {
+                    came.push(scope.to_string());
+                }
+            }
+        }
+        for name in came {
+            e.policy.caps.insert(name.clone(), CapSetting::Off);
+            held.push((e.name.clone(), name));
+        }
+    }
+    held
+}
+
 /// The config's entry for `cap.action`.
 pub fn find<'a>(cfg: &'a NodeConfig, cap: &str, action: &str) -> Option<&'a ConfigCapability> {
     cfg.capabilities.iter().find(|c| c.split() == (cap, action))
@@ -1306,7 +1353,8 @@ command = ["sensors", "-l"]
     /// under a name lets a center's own of that name be offered again:
     /// any other write of the owner's keeps the owner's `on` for it, and
     /// an `on` that covers a center's own that neither senses nor actuates
-    /// is never held for a program keeping it out.
+    /// is not held for turning on that command ([`hold_with_own`] holds it
+    /// for the program's).
     #[test]
     fn the_owners_other_writes_keep_the_owners_on_for_its_own() {
         use nerve_policy::config::CapSetting;
@@ -1363,6 +1411,66 @@ command = ["sensors", "-l"]
             let caps = &after.centers[0].policy.caps;
             assert_eq!(caps.get(on), Some(&CapSetting::On), "{on}");
         }
+    }
+
+    /// While a center keeps its own under a program's `cap`, it is offered
+    /// neither, so the owner's `on` or allow rule set then for that `cap`
+    /// as a whole, or for the center's own action, would be for the
+    /// program's: it is held, as it would go with the center's own once
+    /// the center removes it. One set before the program came, an `on` for
+    /// another action of the program's, and one where nothing keeps the
+    /// center's own out stay.
+    #[test]
+    fn the_owners_on_for_a_program_waits_while_a_center_keeps_its_own() {
+        use nerve_policy::config::CapSetting;
+        let mut lab = cfg(
+            "[[center]]\nname = \"lab\"\ncenter_id = \"c1\"\nurl = \"https://lab.example\"\nnode_id = \"n1\"\nsettings = \"write\"\n",
+        );
+        let list = from_sent(
+            &json!({"name": "cam.list", "effect": "read", "command": ["echo", "list"]}),
+            60,
+        )
+        .unwrap();
+        center_change(&mut lab, "lab", CenterChange::Add(list), "linux", true, &[]).unwrap();
+        let taken: BTreeSet<String> = ["cam".to_string()].into();
+        for on in ["cam", "cam.list"] {
+            let mut after = lab.clone();
+            after.centers[0].policy.caps = [(on.to_string(), CapSetting::On)].into();
+            assert_eq!(
+                hold_with_own(&lab, &mut after, &taken),
+                [("lab".to_string(), on.to_string())],
+                "{on}"
+            );
+            let caps = &after.centers[0].policy.caps;
+            assert_eq!(caps.get(on), Some(&CapSetting::Off), "{on}");
+            let mut rule = lab.clone();
+            rule.centers[0].policy.allow = vec![on.to_string()];
+            assert_eq!(
+                hold_with_own(&lab, &mut rule, &taken),
+                [("lab".to_string(), on.to_string())],
+                "{on}"
+            );
+            // Set before the program came: the center's.
+            let mut set = lab.clone();
+            set.centers[0].policy.caps = [(on.to_string(), CapSetting::On)].into();
+            assert_eq!(hold_with_own(&set, &mut set.clone(), &taken), [], "{on}");
+            // Nothing keeps the center's own out.
+            let mut alone = lab.clone();
+            alone.centers[0].policy.caps = [(on.to_string(), CapSetting::On)].into();
+            assert_eq!(
+                hold_with_own(&lab, &mut alone, &BTreeSet::new()),
+                [],
+                "{on}"
+            );
+        }
+        // The program's other action by its name stays the owner's: the
+        // center's removal keeps it.
+        let mut snap = lab.clone();
+        snap.centers[0].policy.caps = [("cam.snap".to_string(), CapSetting::On)].into();
+        assert_eq!(hold_with_own(&lab, &mut snap, &taken), []);
+        assert!(remove_added(&mut snap.centers[0], "cam.list", &[]));
+        let caps = &snap.centers[0].policy.caps;
+        assert_eq!(caps.get("cam.snap"), Some(&CapSetting::On));
     }
 
     /// A center removes its own entry also once the owner declares the

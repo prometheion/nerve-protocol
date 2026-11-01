@@ -2306,6 +2306,17 @@ pub(crate) fn control(
                     "center {center} keeps its own {name}, which senses or actuates and is left out while a program offers {cap}: an on or allow rule for it now would turn on that center's command once the program goes; turn it on once the center is offered it, or remove it (cap rm {name} --center {center})"
                 ));
             }
+            // An `on` set now for a program's capability that a center's own
+            // keeps from it would go with the center's own once it removes
+            // it (crate::config_cap::remove_added), unseen.
+            if let Some((center, name)) =
+                crate::config_cap::hold_with_own(store.config(), &mut new, &taken).first()
+            {
+                let cap = name.split_once('.').map_or(&name[..], |(c, _)| c);
+                return Reply::Err(format!(
+                    "center {center} keeps a capability of its own under {cap}, so it is offered neither that one nor a program's {cap}: an on or allow rule for {name} now would go with the center's own when it is removed; remove the center's first (cap ls --center {center} lists them, cap rm NAME --center {center} removes one), then turn on the program's"
+                ));
+            }
             // Who made it, as the CLI names its user (crate::cli::invoker):
             // only the owner's programs hold the token.
             store.set_user(str_of("user"));
@@ -2351,11 +2362,13 @@ pub(crate) fn control(
                 // The file as the owner wrote it, with an action that came to
                 // sense in it switched off where an earlier switch covered it
                 // (crate::config_cap::hold_new), and a center's own that
-                // senses where a program keeps it out (hold_shadowed), in the
-                // one write that puts it in force.
+                // senses where a program keeps it out (hold_shadowed), and an
+                // `on` for that program's that would go with the center's own
+                // (hold_with_own), in the one write that puts it in force.
                 let r = store.accept_with(|before, after| {
                     let mut held = crate::config_cap::hold_new(before, after);
                     held.extend(crate::config_cap::hold_shadowed(before, after, &taken));
+                    held.extend(crate::config_cap::hold_with_own(before, after, &taken));
                     held
                 });
                 store.set_user(None);

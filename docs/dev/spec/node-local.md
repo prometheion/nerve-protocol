@@ -684,6 +684,12 @@ The node:
   stay, and those for `NAME` stay where the owner's config declares `NAME`,
   those for the `cap` where it declares any action of it (they then turn on
   the owner's for that center);
+- refuses the owner's write (`config.write`) that newly sets an `on` or allow
+  rule for `NAME` or its `cap` while that center keeps `NAME` and an attached
+  provider offers the `cap` (and the owner's config declares none of it): the
+  center is offered neither then, so the switch would be for the provider's,
+  and would go with `NAME`; `config accept` switches it `off` and reports it
+  as held. The provider's actions by their own keys stay the owner's;
 - counts, in `settings.set`, the entries of that center that sense or
   actuate with what the owner's config declares and the attached providers
   offer, so their `cap` and `cap.action` stay the owner's to turn on or

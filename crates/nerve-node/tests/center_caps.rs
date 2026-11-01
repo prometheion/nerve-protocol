@@ -812,6 +812,75 @@ async fn the_owners_on_for_a_centers_capability_goes_with_its_last_action() {
     daemon.stop().await;
 }
 
+/// While a center keeps its own under a program's `cap`, it is offered
+/// neither, so the owner's `on` for that `cap` or for the center's own
+/// action would be set for the program's, and go with the center's own
+/// when the center removes it: the owner's write is refused, and a file
+/// the owner takes keeps it off and says so. The program's actions by
+/// their names stay the owner's, and once the center keeps none of its
+/// own under `cap`, the owner turns the program's on.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owners_on_for_a_program_waits_while_a_center_keeps_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let daemon = node(
+        dir.path(),
+        &[(&center, "lab")],
+        nerve_policy::Mode::Folder,
+        true,
+        allow_desk,
+    )
+    .await;
+    let paths = daemon.paths().clone();
+    let mut conn = linked(&mut center).await;
+    let list = json!({"name": "cam.list", "effect": "read", "command": ["echo", "mine"]});
+    invoke(
+        &mut conn,
+        "settings",
+        "cap-add",
+        json!({"capability": list}),
+    )
+    .await
+    .unwrap();
+    let program = attach(
+        &daemon,
+        json!([{"id": "cam", "actions": {"snap": {"effect": "sense"}}}]),
+    )
+    .await;
+    for on in ["cam", "cam.list"] {
+        let e = cli(&paths, &["cap", "set", on, "on", "--center", "lab"])
+            .await
+            .unwrap_err();
+        assert!(
+            e.contains("center lab keeps a capability of its own under cam"),
+            "{on}: {e}"
+        );
+    }
+    cli(&paths, &["cap", "set", "cam.snap", "on", "--center", "lab"])
+        .await
+        .unwrap();
+    let file = paths.config_file();
+    let mut cfg = NodeConfig::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let caps = &mut cfg.center_mut("lab").unwrap().policy.caps;
+    caps.insert("cam".into(), CapSetting::On);
+    std::fs::write(&file, cfg.to_toml()).unwrap();
+    let said = cli(&paths, &["config", "accept"]).await.unwrap();
+    assert!(said.contains("lab: a switch or allow rule"), "{said}");
+    assert!(said.contains("covered cam;"), "{said}");
+    invoke(&mut conn, "settings", "cap-rm", json!({"name": "cam.list"}))
+        .await
+        .unwrap();
+    let cfg = nerve_node::cli::read_config(&paths).await.unwrap().0;
+    let caps = &cfg.centers[0].policy.caps;
+    assert_eq!(caps.get("cam"), Some(&CapSetting::Off), "{cfg:?}");
+    assert_eq!(caps.get("cam.snap"), Some(&CapSetting::On), "{cfg:?}");
+    cli(&paths, &["cap", "set", "cam", "on", "--center", "lab"])
+        .await
+        .unwrap();
+    drop(program);
+    daemon.stop().await;
+}
+
 /// The next event of `cap` the center gets within `wait`, if one comes.
 async fn event_of(conn: &mut Conn<TcpStream>, cap: &str, wait: Duration) -> Option<Value> {
     let end = tokio::time::Instant::now() + wait;

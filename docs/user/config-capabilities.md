@@ -255,6 +255,16 @@ these limits:
   you declare any action of it: the center's was left out, so they turn on
   yours for that center (an `on` for one of yours that senses or acts only
   where you set it after declaring it).
+- **A program's capability waits for the center's.** While the center
+  keeps one of its own under the name of a program's capability (one it
+  added before the program attached), you cannot turn on that capability
+  as a whole for that center, nor the center's own action by its name: the
+  center is offered neither, and the switch would go with the center's own
+  when it is removed. `cap set` refuses it and says why; `config accept`
+  switches it off and says so. Remove the center's first (`cap rm NAME
+  --center <name>`), then turn the program's on. An `on` for one of the
+  program's actions by its full name (`cap set cam.snap on --center
+  <name>`) is taken and stays.
 - **Time limit.** Its `timeout_secs` is checked against your
   `limits.max_timeout_secs` when the center adds or changes it. You may
   lower that limit later: the command then stops at your limit.
