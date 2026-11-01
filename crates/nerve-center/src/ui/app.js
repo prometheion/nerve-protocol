@@ -862,11 +862,14 @@ function pinPicker(d, auditKey) {
   const args = d.args && typeof d.args === "object" ? Object.entries(d.args) : [];
   if (!args.length) return null;
   const text = ([k, v]) => `${k}=${typeof v === "string" ? v.replace(/\\/g, "\\\\").replace(/,/g, "\\,") : String(v)}`;
-  const sel = el("select", { class: "input mono", "aria-label": "The argument to pin", "data-focus": `${auditKey}:pin` },
-    ...args.map((a, i) => el("option", { value: String(i) }, text(a))));
+  const items = args.map((a, i) => ({ value: String(i), text: text(a) }));
+  let chosen = "0";
+  const p = picker({ label: "Pin one argument", search: "Search arguments", none: "No argument matches.", key: `${auditKey}:pin`,
+    onpick: (v) => { chosen = v; p.set(items, v); } });
+  p.set(items, chosen);
   return {
-    root: el("label", { class: "field" }, el("span", { class: "label" }, "Pin one argument"), sel),
-    pin: () => { const [field, value] = args[Number(sel.value) || 0]; return { field, value }; },
+    root: p.root,
+    pin: () => { const [field, value] = args[Number(chosen) || 0]; return { field, value }; },
   };
 }
 

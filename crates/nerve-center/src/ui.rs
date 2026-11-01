@@ -1836,8 +1836,13 @@ mod tests {
         let audit = "`audit:${d.ts}:${d.node_id}:${d.cap}.${d.action}`";
         assert_eq!(APP_JS.matches(audit).count(), 2);
         assert!(
-            APP_JS.contains("btn(label, kind, rule(list, wildcard), ic, `${auditKey}:${label}`)")
+            APP_JS.contains(
+                "btn(label, kind, rule(list, wildcard, pin), ic, `${auditKey}:${label}`)"
+            )
         );
+        // The pin of an argument, and its buttons, are named by the entry.
+        assert!(APP_JS.contains("key: `${auditKey}:pin`"));
+        assert!(APP_JS.contains("`${auditKey}:Allow with this value`"));
         assert!(APP_JS.contains("`${auditKey}:Allow as wildcard`"));
     }
 
