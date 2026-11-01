@@ -3673,6 +3673,7 @@ fn held_note(center: &str, name: &str) -> String {
 /// What the owner is told of `name`, an action `center` added that senses
 /// or actuates, switched off as `config accept` took a file that turns it
 /// on while a program keeps it out (crate::config_cap::hold_shadowed).
+#[cfg(unix)]
 fn shadowed_note(center: &str, name: &str) -> String {
     let cap = name.split_once('.').map_or(name, |(c, _)| c);
     format!(
@@ -3684,6 +3685,7 @@ fn shadowed_note(center: &str, name: &str) -> String {
 /// for `center`, which keeps one of its own under a program's capability:
 /// the file's `on` or allow rule for it would go with the center's own
 /// (crate::config_cap::hold_with_own).
+#[cfg(unix)]
 fn with_own_note(center: &str, name: &str) -> String {
     let cap = name.split_once('.').map_or(name, |(c, _)| c);
     format!(
