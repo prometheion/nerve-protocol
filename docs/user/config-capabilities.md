@@ -269,7 +269,8 @@ these limits:
   `limits.max_timeout_secs` when the center adds or changes it. You may
   lower that limit later: the command then stops at your limit.
 - **Audited.** Each add, change and removal is in the [audit log](audit.md)
-  as that center's change of the settings, with the old and the new entry.
+  as that center's change of the settings, under the key `center`: with the
+  old and the new list of this node's centers, each with what it added.
 - **You can turn it off or remove it.** `cap set NAME off --center <name>`
   turns it off, and the center cannot turn it on again: an `off` or `hidden`
   of a capability a center added stays until you change it, also one the
