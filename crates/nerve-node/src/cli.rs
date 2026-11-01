@@ -2214,11 +2214,11 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             center: Some(center),
         }) => {
             edit(&paths, |c| {
-                let owners = c.capabilities.iter().any(|d| d.name == name);
+                let owners = c.capabilities.clone();
                 let e = c
                     .center_mut(&center)
                     .ok_or_else(|| format!("no center named {center}"))?;
-                if !crate::config_cap::remove_added(e, &name, owners) {
+                if !crate::config_cap::remove_added(e, &name, &owners) {
                     return Err(format!("center {center} added no capability {name}"));
                 }
                 Ok(())

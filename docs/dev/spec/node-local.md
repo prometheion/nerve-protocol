@@ -678,9 +678,12 @@ The node:
   too): its switches and rules were set for its own command;
 - drops, when an entry is removed (`settings.cap-rm` or the owner's `cap rm
   NAME --center <name>`), that center's `on` for `NAME` and its allow rules
-  whose scope is `NAME`; an `off`, a `hidden` and deny rules stay, and all of
-  them stay where the owner's config declares `NAME` (they then turn on the
-  owner's for that center);
+  whose scope is `NAME`, and, where that center keeps no other entry under
+  `NAME`'s `cap`, its `on` and allow rules for the `cap` (only the owner sets
+  those for a `cap` nothing else offers); an `off`, a `hidden` and deny rules
+  stay, and those for `NAME` stay where the owner's config declares `NAME`,
+  those for the `cap` where it declares any action of it (they then turn on
+  the owner's for that center);
 - counts, in `settings.set`, the entries of that center that sense or
   actuate with what the owner's config declares and the attached providers
   offer, so their `cap` and `cap.action` stay the owner's to turn on or

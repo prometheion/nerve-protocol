@@ -245,11 +245,16 @@ these limits:
   were set for its own command, not for what the program does.
 - **Removed with its switches.** When the center removes one, or you do,
   the node also drops that center's `on` and allow rules for that very
-  action, yours too: they were given for that command. An `off`, a `hidden`
-  and a deny rule stay. Where you declare that very name yourself, they all
-  stay: the center's was left out, so they turn on yours for that center
-  (an `on` for one of yours that senses or acts only where you set it after
-  declaring it).
+  action, yours too: they were given for that command. When it was the last
+  one the center keeps under its capability, the `on` and allow rules for
+  the capability as a whole (`cap set cam on --center <name>`, the rule
+  `cam`) go as well: you gave them for the center's commands, and kept they
+  would turn on what a program you allow offers under that name later. An
+  `off`, a `hidden` and a deny rule stay. Where you declare that very name
+  yourself, they all stay, and those for the capability as a whole where
+  you declare any action of it: the center's was left out, so they turn on
+  yours for that center (an `on` for one of yours that senses or acts only
+  where you set it after declaring it).
 - **Time limit.** Its `timeout_secs` is checked against your
   `limits.max_timeout_secs` when the center adds or changes it. You may
   lower that limit later: the command then stops at your limit.

@@ -748,6 +748,70 @@ async fn a_centers_own_switches_never_reach_what_a_program_offers_later() {
     daemon.stop().await;
 }
 
+/// The owner's `on` for a center's capability as a whole, given while
+/// only that center offered it, was given for that center's command: it
+/// goes with the last action the center keeps under it, so a program the
+/// owner allows that offers that name later waits for the owner's `on`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owners_on_for_a_centers_capability_goes_with_its_last_action() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let daemon = node(
+        dir.path(),
+        &[(&center, "lab")],
+        nerve_policy::Mode::Folder,
+        true,
+        allow_desk,
+    )
+    .await;
+    let paths = daemon.paths().clone();
+    let mut conn = linked(&mut center).await;
+    let snap = json!({"name": "cam.snap", "effect": "sense", "command": ["echo", "mine"]});
+    invoke(
+        &mut conn,
+        "settings",
+        "cap-add",
+        json!({"capability": snap}),
+    )
+    .await
+    .unwrap();
+    cli(&paths, &["cap", "set", "cam", "on", "--center", "lab"])
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&mut conn, "cam.snap", json!({})).await.unwrap(),
+        json!("mine\n")
+    );
+    invoke(&mut conn, "settings", "cap-rm", json!({"name": "cam.snap"}))
+        .await
+        .unwrap();
+    let cfg = nerve_node::cli::read_config(&paths).await.unwrap().0;
+    assert_eq!(cfg.centers[0].policy.caps.get("cam"), None, "{cfg:?}");
+
+    // The program attaches with a `cam.snap` that senses: it waits for the
+    // owner's `on` for lab.
+    let program = attach(
+        &daemon,
+        json!([{"id": "cam", "actions": {"snap": {"effect": "sense"}}}]),
+    )
+    .await;
+    let ls = cli(&paths, &["cap", "ls", "--json"]).await.unwrap();
+    let ls: Value = serde_json::from_str(&ls).unwrap();
+    let row = ls["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "cam.snap" && r["source"] == "program desk")
+        .cloned()
+        .unwrap();
+    assert_ne!(row["now"]["lab"], "on", "{row}");
+    let e = call(&mut conn, "cam.snap", json!({})).await.unwrap_err();
+    assert_eq!(code_of(&e), "forbidden", "{}", e.message);
+    assert!(e.message.contains("set to on"), "{}", e.message);
+    drop(program);
+    daemon.stop().await;
+}
+
 /// The next event of `cap` the center gets within `wait`, if one comes.
 async fn event_of(conn: &mut Conn<TcpStream>, cap: &str, wait: Duration) -> Option<Value> {
     let end = tokio::time::Instant::now() + wait;
@@ -1054,6 +1118,15 @@ async fn the_owners_on_for_another_never_turns_on_a_centers_of_that_name() {
         .await
         .unwrap();
         cli(&paths, &["cap", "set", "cam.look", "on", "--center", "lab"])
+            .await
+            .unwrap();
+        assert_eq!(
+            call(&mut conn, "cam.look", json!({})).await.unwrap(),
+            json!("owners\n"),
+            "{effect}"
+        );
+        // Another write of the owner's leaves that `on` alone.
+        cli(&paths, &["cap", "set", "other", "off", "--center", "lab"])
             .await
             .unwrap();
         assert_eq!(

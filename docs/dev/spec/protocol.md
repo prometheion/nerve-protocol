@@ -919,7 +919,8 @@ A center with the settings grant `write` may add capabilities of its own
   `cap` as a whole; while it keeps one under a `cap` a provider offers, it is
   offered neither, and removing one drops the center's `on` and allow rules
   for that `cap.action`, except where the owner declares that `cap.action`
-  too. One that senses or actuates keeps its `cap` and `cap.action` the
+  too, and, once the center keeps none under that `cap`, those for the `cap`
+  as a whole, except where the owner declares that `cap` too. One that senses or actuates keeps its `cap` and `cap.action` the
   owner's to turn on also while a provider or the owner offers that `cap`
   without sensing, and an `on` the owner gave while the center's own was left
   out does not carry over to it.

@@ -1464,7 +1464,10 @@ async function loadCaps(fresh) {
     try {
       data = await api("GET", `/api/caps?id=${encodeURIComponent(state.capsNode)}`);
     } catch (e) {
-      if (e.auth || run !== capsRun) throw e;
+      if (e.auth) throw e;
+      // A machine picked since then has its own load: this one's error
+      // is not about the page shown.
+      if (run !== capsRun) return;
       // A machine removed meanwhile is still in the list the page has:
       // the list is read again, and the first machine left is shown.
       if (e.status === 404 && !fresh) {

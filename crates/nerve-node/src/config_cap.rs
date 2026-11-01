@@ -259,25 +259,35 @@ pub fn own_action(entry: &CenterEntry, known: &[Capability]) -> impl Fn(&str) ->
 /// center's `on` and allow rules for that very action: they were set for
 /// its command (by the center, or by the owner for one that senses), and
 /// kept they would cover what a program the owner allows offers under that
-/// name later. An `off` or `hidden`, and a deny rule, stay. Where the
-/// owner's config declares `name` too (`owners`), the switch and rules stay
-/// as well: the center's own was left out, so they are what turns the
-/// owner's on for that center ([`hold_new`] guards it). Whether it had
-/// one.
-pub fn remove_added(entry: &mut CenterEntry, name: &str, owners: bool) -> bool {
+/// name later. So go the `on` and allow rules for its capability as a
+/// whole once the center keeps nothing else under it: only the owner sets
+/// those for one nothing else offers (crate::provider::owner_only_of), for
+/// the center's commands. An `off` or `hidden`, and a deny rule, stay.
+/// Where the owner's config (`owners`) declares `name` too, or for the
+/// capability's switch any action under it, they stay as well: the
+/// center's own was left out, so they are what turns the owner's on for
+/// that center ([`hold_new`] guards it). Whether it had one.
+pub fn remove_added(entry: &mut CenterEntry, name: &str, owners: &[ConfigCapability]) -> bool {
     use nerve_policy::config::CapSetting;
     let Some(i) = entry.capabilities.iter().position(|c| c.name == name) else {
         return false;
     };
-    entry.capabilities.remove(i);
-    if owners {
-        return true;
+    let cap = entry.capabilities.remove(i).split().0.to_string();
+    let mut drop: Vec<&str> = Vec::new();
+    if !owners.iter().any(|o| o.name == name) {
+        drop.push(name);
+    }
+    if !keeps_own(entry, &cap) && !owners.iter().any(|o| o.split().0 == cap) {
+        drop.push(&cap);
     }
     let p = &mut entry.policy;
-    if p.caps.get(name) == Some(&CapSetting::On) {
-        p.caps.remove(name);
+    for scope in drop {
+        if p.caps.get(scope) == Some(&CapSetting::On) {
+            p.caps.remove(scope);
+        }
+        p.allow
+            .retain(|r| nerve_policy::rules::scope_of(r) != scope);
     }
-    p.allow.retain(|r| nerve_policy::rules::scope_of(r) != name);
     true
 }
 
@@ -417,7 +427,7 @@ pub fn center_change(
         (CenterChange::Add(c), None) => e.capabilities.push(c),
         (CenterChange::Edit(c), Some(i)) => e.capabilities[i] = c,
         (CenterChange::Rm(_), Some(_)) => {
-            remove_added(e, &name, owner_has);
+            remove_added(e, &name, &before.capabilities);
         }
         (CenterChange::Edit(_) | CenterChange::Rm(_), None) => {
             return Err(SetError::Invalid(format!(
@@ -1240,6 +1250,119 @@ command = ["sensors", "-l"]
         let mut rule = lab.clone();
         rule.centers[0].policy.allow = vec!["cam.snap".into()];
         assert_eq!(hold_shadowed(&lab, &mut rule, &taken).len(), 1);
+    }
+
+    /// The owner's `on` and allow rule for a capability as a whole that
+    /// only a center offers were given for that center's commands: they
+    /// go with the last action the center keeps under it, so they never
+    /// cover what a program the owner allows offers under that name later.
+    /// Where the owner declares that capability too, they stay for the
+    /// owner's.
+    #[test]
+    fn the_owners_on_for_a_centers_capability_goes_with_its_last_action() {
+        use nerve_policy::config::CapSetting;
+        let lab = "[[center]]\nname = \"lab\"\ncenter_id = \"c1\"\nurl = \"https://lab.example\"\nnode_id = \"n1\"\nsettings = \"write\"\n";
+        let sent = |name: &str, effect: &str| {
+            from_sent(
+                &json!({"name": name, "effect": effect, "command": ["echo", name]}),
+                60,
+            )
+            .unwrap()
+        };
+        let change =
+            |c: &mut NodeConfig, x: CenterChange| center_change(c, "lab", x, "linux", true, &[]);
+        let mut c = cfg(lab);
+        change(&mut c, CenterChange::Add(sent("cam.snap", "sense"))).unwrap();
+        change(&mut c, CenterChange::Add(sent("cam.list", "read"))).unwrap();
+        let p = &mut c.center_mut("lab").unwrap().policy;
+        p.caps.insert("cam".into(), CapSetting::On);
+        p.caps.insert("cam.wide".into(), CapSetting::Off);
+        p.allow = vec!["cam".into(), "other".into()];
+        p.deny = vec!["cam".into()];
+        let mut owners = c.clone();
+        owners.capabilities.push(sent("cam.other", "read"));
+        // While the center keeps another action under `cam`, the `on` and
+        // the rule are for that one.
+        change(&mut c, CenterChange::Rm("cam.snap".into())).unwrap();
+        let p = &c.center("lab").unwrap().policy;
+        assert_eq!(p.caps.get("cam"), Some(&CapSetting::On));
+        assert_eq!(p.allow, ["cam", "other"]);
+        change(&mut c, CenterChange::Rm("cam.list".into())).unwrap();
+        let p = &c.center("lab").unwrap().policy;
+        assert_eq!(p.caps.get("cam"), None);
+        assert_eq!(p.caps.get("cam.wide"), Some(&CapSetting::Off));
+        assert_eq!(p.allow, ["other"]);
+        assert_eq!(p.deny, ["cam"]);
+        // The owner declares `cam` as well: they turn on the owner's.
+        for name in ["cam.snap", "cam.list"] {
+            change(&mut owners, CenterChange::Rm(name.into())).unwrap();
+        }
+        let p = &owners.center("lab").unwrap().policy;
+        assert_eq!(p.caps.get("cam"), Some(&CapSetting::On));
+        assert_eq!(p.allow, ["cam", "other"]);
+    }
+
+    /// Only a write that takes away the last of the owner's capabilities
+    /// under a name lets a center's own of that name be offered again:
+    /// any other write of the owner's keeps the owner's `on` for it, and
+    /// an `on` that covers a center's own that neither senses nor actuates
+    /// is never held for a program keeping it out.
+    #[test]
+    fn the_owners_other_writes_keep_the_owners_on_for_its_own() {
+        use nerve_policy::config::CapSetting;
+        let mut lab = cfg(
+            "[[center]]\nname = \"lab\"\ncenter_id = \"c1\"\nurl = \"https://lab.example\"\nnode_id = \"n1\"\nsettings = \"write\"\n",
+        );
+        let sent = |name: &str, effect: &str| {
+            from_sent(
+                &json!({"name": name, "effect": effect, "command": ["echo", name]}),
+                60,
+            )
+            .unwrap()
+        };
+        center_change(
+            &mut lab,
+            "lab",
+            CenterChange::Add(sent("cam.snap", "sense")),
+            "linux",
+            true,
+            &[],
+        )
+        .unwrap();
+        let mut before = lab.clone();
+        before.capabilities.push(sent("cam.snap", "read"));
+        before.centers[0].policy.caps = [("cam.snap".to_string(), CapSetting::On)].into();
+        let mut after = before.clone();
+        after.limits.max_running += 1;
+        assert_eq!(hold_new(&before, &mut after), []);
+        let caps = &after.centers[0].policy.caps;
+        assert_eq!(caps.get("cam.snap"), Some(&CapSetting::On));
+        // Another of the owner's goes, one under `cam` stays.
+        before.capabilities.push(sent("cam.list", "read"));
+        let mut after = before.clone();
+        after.capabilities.retain(|c| c.name != "cam.snap");
+        assert_eq!(hold_new(&before, &mut after), []);
+
+        let mut plain = cfg(
+            "[[center]]\nname = \"lab\"\ncenter_id = \"c1\"\nurl = \"https://lab.example\"\nnode_id = \"n1\"\nsettings = \"write\"\n",
+        );
+        center_change(
+            &mut plain,
+            "lab",
+            CenterChange::Add(sent("cam.list", "read")),
+            "linux",
+            true,
+            &[],
+        )
+        .unwrap();
+        let taken: BTreeSet<String> = ["cam".to_string()].into();
+        for on in ["cam.list", "cam"] {
+            let mut after = plain.clone();
+            after.centers[0].policy.caps = [(on.to_string(), CapSetting::On)].into();
+            assert_eq!(hold_shadowed(&plain, &mut after, &taken), [], "{on}");
+            let caps = &after.centers[0].policy.caps;
+            assert_eq!(caps.get(on), Some(&CapSetting::On), "{on}");
+        }
     }
 
     /// A center removes its own entry also once the owner declares the

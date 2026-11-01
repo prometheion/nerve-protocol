@@ -1405,6 +1405,9 @@ mod tests {
         for part in [
             "`/api/caps?id=${encodeURIComponent(state.capsNode)}`",
             // One removed meanwhile: the machines are read again.
+            // A load a later pick took over ends quietly.
+            "      if (e.auth) throw e;\n",
+            "      if (run !== capsRun) return;\n      // A machine removed",
             "if (e.status === 404 && !fresh) {",
             "return loadCaps(true);",
             "state.caps = { nodes, data: null, failed: e.message, form: null };",
