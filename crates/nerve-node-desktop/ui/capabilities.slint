@@ -91,12 +91,15 @@ component OfferedSection inherits Section {
                     // Whole, over as many lines as it takes: the owner reads
                     // what it runs, the program first, before turning on one
                     // that senses or acts.
-                    if c.command != "": Text {
-                        text: c.command;
-                        color: Theme.text-muted;
-                        font-size: Type.small;
-                        font-family: Type.mono;
-                        wrap: char-wrap;
+                    Reveal {
+                        shown: c.command != "";
+                        Text {
+                            text: c.command;
+                            color: Theme.text-muted;
+                            font-size: Type.small;
+                            font-family: Type.mono;
+                            wrap: char-wrap;
+                        }
                     }
                 }
             }

@@ -2129,11 +2129,12 @@ mod tests {
         // The page shows it whole, wrapped, not cut at its start as a path.
         let page = include_str!("../ui/capabilities.slint");
         let shown = page
-            .split("if c.command != \"\": ")
+            .split("shown: c.command != \"\";")
             .nth(1)
             .and_then(|s| s.split('}').next())
             .unwrap();
-        assert!(shown.starts_with("Text {"), "{shown}");
+        assert!(shown.trim_start().starts_with("Text {"), "{shown}");
+        assert!(shown.contains("text: c.command;"), "{shown}");
         assert!(shown.contains("wrap: char-wrap;"), "{shown}");
     }
 
