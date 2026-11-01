@@ -646,7 +646,9 @@ pub fn pattern_rule(text: &str) -> bool {
 /// each switch as `caps` holds it (-1 where none is set and the mode
 /// decides), and whether the running node lets that center use the unit
 /// now. A unit the node leaves out says why, and has no switch; neither has
-/// `settings`, which the center's settings grant governs.
+/// `settings`, which the center's settings grant governs. A unit a center
+/// added shows its command (from `added`), as `cap ls` does: its summary is
+/// the center's own words.
 pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
     let word = |w: &Value| match w.as_str() {
         Some("on") => 0,
@@ -679,6 +681,18 @@ pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
         }
     }
     let left_out = |r: &Value| s(&r["broken"]).to_string() + s(&r["left_out"]);
+    let command = |source: &str, name: &str| {
+        let Some(by) = source.strip_prefix("center ") else {
+            return String::new();
+        };
+        v["added"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|a| s(&a["center"]) == by && s(&a["name"]) == name)
+            .map(|a| cap_form_of(a).command)
+            .unwrap_or_default()
+    };
     let mut rows = Vec::new();
     for (cap, source, units) in groups {
         let switches = !center.is_empty() && cap != "settings";
@@ -694,6 +708,7 @@ pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
             setting: setting(cap),
             inherited: false,
             now: SharedString::new(),
+            command: SharedString::new(),
         });
         for r in units {
             let name = s(&r["name"]);
@@ -734,6 +749,7 @@ pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
                 setting: shown,
                 inherited: own < 0 && shown >= 0,
                 now: now.into(),
+                command: command(source, name).into(),
             });
         }
     }
@@ -2093,6 +2109,9 @@ mod tests {
              "centers": {"lab": "default"}, "now": {"lab": "on"}},
             {"name": "fs.read", "effect": "read", "source": "built-in", "summary": "",
              "centers": {"lab": "default", "ops": "default"}},
+        ], "added": [
+            {"name": "say.back", "effect": "execute", "command": ["echo", "{other}"], "center": "ops"},
+            {"name": "say.back", "effect": "execute", "command": ["echo", "{word}"], "center": "lab"},
         ]});
         let names = |center: &str| -> Vec<String> {
             cap_rows(&v, center)
@@ -2104,6 +2123,9 @@ mod tests {
         assert_eq!(names("ops"), ["fs", "fs.read"]);
         let lab = cap_rows(&v, "lab");
         assert!(lab[0].switchable && lab[0].source == "center lab");
+        // Its command shows, from `added`: the summary is the center's.
+        assert_eq!(lab[1].command, "echo {word}");
+        assert_eq!(lab[3].command, "");
     }
 
     /// The Capabilities page: each capability once over its units, in the

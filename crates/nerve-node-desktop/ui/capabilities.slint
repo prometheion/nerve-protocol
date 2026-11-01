@@ -76,15 +76,21 @@ component OfferedSection inherits Section {
                         tone: Tone.danger;
                     }
                 }
-                // Its line for the agent, or why the node leaves it out.
+                // Its line for the agent, or why the node leaves it out, and
+                // what a center's runs.
                 VerticalLayout {
                     alignment: center;
                     horizontal-stretch: 1;
+                    spacing: 2px;
                     Text {
                         text: c.left-out != "" ? c.left-out : c.summary;
                         color: c.left-out != "" ? Theme.tone(Tone.danger) : Theme.text-muted;
                         font-size: Type.small;
                         overflow: elide;
+                    }
+                    if c.command != "": PathText {
+                        text: c.command;
+                        color: Theme.text-muted;
                     }
                 }
             }
