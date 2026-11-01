@@ -684,7 +684,9 @@ The node:
   NAME --center <name>`, or any write of the owner's that leaves it out:
   `config.write`, `config accept` with the node running, which names each
   such scope in `dropped` (with its center), and a `config` command with no
-  node running; an `on` or rule that write sets anew stays), that center's
+  node running; an `on` or rule that write sets anew stays; a stopped node's
+  `config accept` cannot tell what the file had and drops none, and `cap rm
+  NAME --center` then finds no entry to remove), that center's
   `on` for `NAME` and its allow rules
   whose scope is `NAME`, and, where that center keeps no other entry under
   `NAME`'s `cap`, its `on` and allow rules for the `cap` (only the owner sets

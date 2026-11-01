@@ -249,10 +249,15 @@ these limits:
   action, yours too: they were given for that command. That holds however
   you remove it: `cap rm NAME --center <name>`, `nerve-node config unset
   center.<name>.capability`, or an edit of node.toml that `config accept`
-  takes while the node runs, which names each switch it dropped (a stopped
-  node cannot tell what the file had before, so after a hand edit with the
-  node stopped use `cap rm --center` or check the center's `caps` and
-  `allow`). An `on` or rule you set in that same change stays yours. When it was the last
+  takes while the node runs, which names each switch it dropped. An `on` or
+  rule you set in that same change stays yours. A stopped node cannot tell
+  what the file had before, and drops none. So with the node stopped,
+  remove one with `cap rm NAME --center <name>` rather than by hand, or take
+  that center's `on` and allow rules for it out in the same edit. Once the
+  entry is gone, `cap rm --center` finds nothing to remove; then switch it
+  off with `cap set NAME off --center <name>` and take the rule away with
+  `nerve-node config remove center.<name>.policy.allow 'NAME'` (and the same
+  for the capability as a whole, see next). When it was the last
   one the center keeps under its capability, the `on` and allow rules for
   the capability as a whole (`cap set cam on --center <name>`, the rule
   `cam`) go as well: you gave them for the center's commands, and kept they
