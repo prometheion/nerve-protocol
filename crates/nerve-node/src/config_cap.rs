@@ -479,10 +479,12 @@ pub fn senses(effect: nerve_proto::descriptor::Effect) -> bool {
 /// only read) or allow rule would let that center use it at once: such a
 /// switch was set for what it did then, perhaps by the center itself, and
 /// only the owner turns on what senses or actuates. One a center added
-/// that senses counts as new again where anything but its summary changed.
-/// A center cannot take that `off` away. Returns those centers, each with the action. Whoever
-/// changes the config's capabilities does it: `cap add` and `cap edit`, and
-/// the node as it takes a file the owner wrote (`config accept`).
+/// that senses counts as new again where anything but its summary changed,
+/// and where the owner's config named its capability before and names it
+/// no more. A center cannot take that `off` away. Returns those centers,
+/// each with the action. Whoever changes the config's capabilities does it:
+/// `cap add`, `cap edit` and `cap rm`, and the node as it takes a file the
+/// owner wrote (`config accept`).
 pub fn hold_new(before: &NodeConfig, after: &mut NodeConfig) -> Vec<(String, String)> {
     use nerve_policy::config::CapSetting;
     let mut held = Vec::new();
@@ -513,6 +515,15 @@ pub fn hold_new(before: &NodeConfig, after: &mut NodeConfig) -> Vec<(String, Str
             was.iter()
                 .any(|b| b.name == c.name && senses(b.effect) && plain(b) == plain(c))
         };
+        // One the center kept while the owner's config named its capability
+        // was left out, so the owner's `on` for that name was given for the
+        // owner's: once the owner's goes, the center's own is offered again
+        // and waits for an `on` given for its command.
+        let owners = |caps: &[ConfigCapability], cap: &str| caps.iter().any(|o| o.split().0 == cap);
+        let shown = |c: &ConfigCapability| {
+            let cap = c.split().0;
+            owners(&before.capabilities, cap) && !owners(&after.capabilities, cap)
+        };
         let came: Vec<ConfigCapability> = after
             .capabilities
             .iter()
@@ -520,7 +531,7 @@ pub fn hold_new(before: &NodeConfig, after: &mut NodeConfig) -> Vec<(String, Str
             .chain(
                 e.capabilities
                     .iter()
-                    .filter(|c| senses(c.effect) && !same(c)),
+                    .filter(|c| senses(c.effect) && (!same(c) || shown(c))),
             )
             .cloned()
             .collect();
@@ -532,16 +543,63 @@ pub fn hold_new(before: &NodeConfig, after: &mut NodeConfig) -> Vec<(String, Str
             if on(&e.policy) && before.center(&e.name).is_none_or(|b| !on(&b.policy)) {
                 continue;
             }
-            let p = &mut e.policy;
-            let covered = match p.cap_setting(cap, Some(action)) {
-                Some(CapSetting::Off | CapSetting::Hidden) => false,
-                Some(CapSetting::On) => true,
-                None => nerve_policy::rules::offers(&p.allow, cap, action),
-            };
-            if covered {
-                p.caps.insert(c.name.clone(), CapSetting::Off);
+            if covers(&e.policy, cap, action) {
+                e.policy.caps.insert(c.name.clone(), CapSetting::Off);
                 held.push((e.name.clone(), c.name.clone()));
             }
+        }
+    }
+    held
+}
+
+/// Whether a switch (`on`) or, where none is set, an allow rule of `p`
+/// would let its center use `cap.action`.
+fn covers(p: &nerve_policy::CenterPolicy, cap: &str, action: &str) -> bool {
+    use nerve_policy::config::CapSetting;
+    match p.cap_setting(cap, Some(action)) {
+        Some(CapSetting::Off | CapSetting::Hidden) => false,
+        Some(CapSetting::On) => true,
+        None => nerve_policy::rules::offers(&p.allow, cap, action),
+    }
+}
+
+/// Where `after` comes to cover (an `on` or allow rule, [`covers`]) an
+/// action a center added that senses or actuates and that is left out now
+/// for a program's capability of its name (`taken`, the ids the attached
+/// programs offer; [`center_left_out`]): switches it off there, and returns
+/// those centers, each with the action. That center is offered neither
+/// while it keeps its own ([`programs_for`]), so such an `on` turns on
+/// nothing now, and the center's own command once the program goes, which
+/// the owner never saw it run. The owner's write is refused for it
+/// (`config.write`, crate::daemon); a file the owner takes keeps it off
+/// (`config accept`), as [`hold_new`] does.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn hold_shadowed(
+    before: &NodeConfig,
+    after: &mut NodeConfig,
+    taken: &BTreeSet<String>,
+) -> Vec<(String, String)> {
+    use nerve_policy::config::CapSetting;
+    let mut held = Vec::new();
+    for e in &mut after.centers {
+        let came: Vec<String> = e
+            .capabilities
+            .iter()
+            .filter(|c| {
+                let (cap, action) = c.split();
+                senses(c.effect)
+                    && taken.contains(cap)
+                    && !after.capabilities.iter().any(|o| o.split().0 == cap)
+                    && covers(&e.policy, cap, action)
+                    && before
+                        .center(&e.name)
+                        .is_none_or(|b| !covers(&b.policy, cap, action))
+            })
+            .map(|c| c.name.clone())
+            .collect();
+        for name in came {
+            e.policy.caps.insert(name.clone(), CapSetting::Off);
+            held.push((e.name.clone(), name));
         }
     }
     held
@@ -1100,6 +1158,88 @@ command = ["sensors", "-l"]
         // The center's own, unchanged, is not held again.
         let mut again = after.clone();
         assert_eq!(hold_new(&after, &mut again), []);
+    }
+
+    /// The owner's `on` for a capability of the owner's, or for a program's,
+    /// was given for that one: a center's own of that name that senses,
+    /// left out meanwhile, waits for an `on` given for its command once it
+    /// is offered again, whatever the owner's did.
+    #[test]
+    fn the_owners_on_for_another_never_turns_on_a_centers_of_that_name() {
+        use nerve_policy::config::CapSetting;
+        let mut lab = cfg(
+            "[[center]]\nname = \"lab\"\ncenter_id = \"c1\"\nurl = \"https://lab.example\"\nnode_id = \"n1\"\nsettings = \"write\"\n",
+        );
+        let sent = |effect: &str, word: &str| {
+            from_sent(
+                &json!({"name": "cam.snap", "effect": effect, "command": ["echo", word]}),
+                60,
+            )
+            .unwrap()
+        };
+        center_change(
+            &mut lab,
+            "lab",
+            CenterChange::Add(sent("sense", "theirs")),
+            "linux",
+            true,
+            &[],
+        )
+        .unwrap();
+        for effect in ["read", "sense"] {
+            let mut before = lab.clone();
+            before.capabilities.push(sent(effect, "mine"));
+            for on in ["cam.snap", "cam"] {
+                before.centers[0].policy.caps = [(on.to_string(), CapSetting::On)].into();
+                let mut after = before.clone();
+                after.capabilities.clear();
+                assert_eq!(
+                    hold_new(&before, &mut after),
+                    [("lab".to_string(), "cam.snap".to_string())],
+                    "{effect}, {on}"
+                );
+                let caps = &after.centers[0].policy.caps;
+                assert_eq!(caps.get("cam.snap"), Some(&CapSetting::Off), "{effect}");
+                // An `on` the removal itself brings is the owner's for it.
+                let mut after = before.clone();
+                after.capabilities.clear();
+                after.centers[0].policy.caps = [("cam.snap".into(), CapSetting::On)].into();
+                let brought = !before.centers[0].policy.caps.contains_key("cam.snap");
+                assert_eq!(hold_new(&before, &mut after).is_empty(), brought, "{on}");
+            }
+        }
+        // A program offers `cam`: the center is offered neither, so an `on`
+        // set now would turn on the center's own once the program goes.
+        let taken: BTreeSet<String> = ["cam".to_string()].into();
+        for on in ["cam.snap", "cam"] {
+            let mut after = lab.clone();
+            after.centers[0].policy.caps = [(on.to_string(), CapSetting::On)].into();
+            assert_eq!(
+                hold_shadowed(&lab, &mut after, &taken),
+                [("lab".to_string(), "cam.snap".to_string())],
+                "{on}"
+            );
+            let caps = &after.centers[0].policy.caps;
+            assert_eq!(caps.get("cam.snap"), Some(&CapSetting::Off), "{on}");
+            // One set before the program came was given for the center's.
+            let mut again = after.clone();
+            again.centers[0].policy.caps = [(on.to_string(), CapSetting::On)].into();
+            let set = again.clone();
+            assert_eq!(hold_shadowed(&set, &mut again, &taken), []);
+            // Nor does an `on` reach it where nothing keeps it out, or where
+            // the owner's config does: that `on` is for the owner's.
+            let mut alone = after.clone();
+            alone.centers[0].policy.caps = [(on.to_string(), CapSetting::On)].into();
+            assert_eq!(
+                hold_shadowed(&lab, &mut alone.clone(), &BTreeSet::new()),
+                []
+            );
+            alone.capabilities.push(sent("read", "mine"));
+            assert_eq!(hold_shadowed(&lab, &mut alone, &taken), []);
+        }
+        let mut rule = lab.clone();
+        rule.centers[0].policy.allow = vec!["cam.snap".into()];
+        assert_eq!(hold_shadowed(&lab, &mut rule, &taken).len(), 1);
     }
 
     /// A center removes its own entry also once the owner declares the

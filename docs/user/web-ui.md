@@ -141,7 +141,9 @@ endpoint token and the local model's files.
 
 What each machine offers the agent, and the capabilities this center added
 there itself. Pick the machine from the **Machine** list under the page
-header (it works like the one on the Statistics page).
+header (it works like the one on the Statistics page). A machine whose list
+does not load says why there, and one removed meanwhile drops out of the
+list.
 
 - **Offered.** Each unit the agent may be offered on that machine: its name,
   what it does (its effect), whether it is an action, a state, an event or a

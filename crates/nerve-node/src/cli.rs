@@ -2228,10 +2228,11 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             Ok(())
         }
         Cmd::Cap(CapCmd::Rm { name, center: None }) => {
+            let held = std::sync::Mutex::new(Vec::new());
             edit(&paths, |c| {
-                let before = c.capabilities.len();
+                let was = c.clone();
                 c.capabilities.retain(|d| d.name != name);
-                if c.capabilities.len() == before {
+                if c.capabilities.len() == was.capabilities.len() {
                     // One a center added is removed with that center named.
                     let by: Vec<&str> = c
                         .centers
@@ -2247,10 +2248,16 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                         None => format!("no capability {name} is declared"),
                     });
                 }
+                // A center's own of that name that senses is offered again,
+                // and waits for an `on` given for its command.
+                *held.lock().unwrap() = crate::config_cap::hold_new(&was, c);
                 Ok(())
             })
             .await?;
             w(out, format!("capability {name} removed"));
+            for (center, name) in held.into_inner().unwrap() {
+                w(out, held_note(&center, &name));
+            }
             Ok(())
         }
         Cmd::Cap(CapCmd::Provider(ProviderCmd::Allow { name, exe })) => {

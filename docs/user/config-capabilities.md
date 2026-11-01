@@ -46,6 +46,9 @@ What follows `--` is the command: the program first (a name looked up in
 | `--timeout` | seconds it may run, at most `limits.max_timeout_secs`; `default` for `limits.default_timeout_secs` |
 | `--platform` | `any` (the default), `linux` or `windows`: a node offers only those of its own platform |
 
+A summary is at most 2048 bytes, and each word of the command at most 4096
+bytes. This holds for what you write into `node.toml` too.
+
 `--params-stdin` and `--result-stdin` read the schema from stdin instead, for
 one too long for the command line. Only one of them can come from stdin: add
 the capability with one and `cap edit` the other.
@@ -223,7 +226,15 @@ these limits:
   on what it does now. So it is when you declare one that senses or acts
   under the name of one a center added: your `on` for the center's was
   given for its command, so `cap add` switches it off for that center too,
-  and says so.
+  and says so. It works the other way round as well. While you declare
+  that capability, the center's own is left out, and an `on` you set for
+  that name turns on yours. When you remove yours, the center's own is
+  offered again, so `cap rm` switches that `on` off and says so. While a
+  program you allow keeps the center's own out, that center is offered
+  neither, and `cap set` refuses an `on` for that name with the reason: it
+  would turn on the center's command once the program goes. Turn it on once
+  the center is offered it. A file you take with `config accept` that has
+  such an `on` gets it switched off.
 - **Yours come first.** A center changes and removes none of your
   capabilities, and adds none under the name of a capability of yours or of
   a program you allow that is attached now. One it added is left out while
@@ -239,6 +250,9 @@ these limits:
   stay: the center's was left out, so they turn on yours for that center
   (an `on` for one of yours that senses or acts only where you set it after
   declaring it).
+- **Time limit.** Its `timeout_secs` is checked against your
+  `limits.max_timeout_secs` when the center adds or changes it. You may
+  lower that limit later: the command then stops at your limit.
 - **Audited.** Each add, change and removal is in the [audit log](audit.md)
   as that center's change of the settings, with the old and the new entry.
 - **You can turn it off or remove it.** `cap set NAME off --center <name>`

@@ -1012,6 +1012,174 @@ async fn the_owners_on_for_a_centers_sensing_one_never_turns_on_the_owners() {
     daemon.stop().await;
 }
 
+/// The owner's `on` for a capability of the owner's, or for a program's,
+/// is given for that one: a center's own of that name that senses, left
+/// out meanwhile, waits for an `on` given for its command once it is
+/// offered again. The owner's `cap rm` says so; while a program keeps the
+/// center's own out, the owner sets no `on` for it, and a file the owner
+/// takes keeps it off.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owners_on_for_another_never_turns_on_a_centers_of_that_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let daemon = node(
+        dir.path(),
+        &[(&center, "lab")],
+        nerve_policy::Mode::Folder,
+        true,
+        allow_desk,
+    )
+    .await;
+    let paths = daemon.paths().clone();
+    let mut conn = linked(&mut center).await;
+    for name in ["cam.look", "notes.look"] {
+        let look = json!({"name": name, "effect": "sense", "command": ["echo", "centers"]});
+        invoke(
+            &mut conn,
+            "settings",
+            "cap-add",
+            json!({"capability": look}),
+        )
+        .await
+        .unwrap();
+    }
+    // The owner's node.toml takes the name, as a read and as a sense.
+    for effect in ["read", "sense"] {
+        cli(
+            &paths,
+            &[
+                "cap", "add", "cam.look", "--effect", effect, "--", "echo", "owners",
+            ],
+        )
+        .await
+        .unwrap();
+        cli(&paths, &["cap", "set", "cam.look", "on", "--center", "lab"])
+            .await
+            .unwrap();
+        assert_eq!(
+            call(&mut conn, "cam.look", json!({})).await.unwrap(),
+            json!("owners\n"),
+            "{effect}"
+        );
+        let out = cli(&paths, &["cap", "rm", "cam.look"]).await.unwrap();
+        assert!(
+            out.contains("lab: a switch or allow rule set before covered cam.look"),
+            "{effect}: {out}"
+        );
+        let e = call(&mut conn, "cam.look", json!({})).await.unwrap_err();
+        assert_eq!(code_of(&e), "disabled", "{effect}: {}", e.message);
+    }
+
+    // A program offers `notes`, whose `look` only reads: lab is offered
+    // neither, and the owner sets no `on` that would reach lab's own.
+    let program = attach(
+        &daemon,
+        json!([{"id": "notes", "actions": {"look": {"effect": "read"}}}]),
+    )
+    .await;
+    for on in ["notes.look", "notes"] {
+        let e = cli(&paths, &["cap", "set", on, "on", "--center", "lab"])
+            .await
+            .unwrap_err();
+        assert!(
+            e.contains("center lab keeps its own notes.look, which senses or actuates"),
+            "{on}: {e}"
+        );
+    }
+    // A file the owner takes with that `on` keeps it off, and says so.
+    let file = paths.config_file();
+    let mut cfg = NodeConfig::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let caps = &mut cfg.center_mut("lab").unwrap().policy.caps;
+    caps.insert("notes.look".into(), CapSetting::On);
+    std::fs::write(&file, cfg.to_toml()).unwrap();
+    let said = cli(&paths, &["config", "accept"]).await.unwrap();
+    assert!(
+        said.contains("lab: a switch or allow rule set before covered notes.look"),
+        "{said}"
+    );
+    drop(program);
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let got = settings_get(&mut conn, &["capabilities"]).await;
+        let entries = got["capabilities"]["entries"].as_array().unwrap().clone();
+        if entries.iter().all(|e| e["left_out"].is_null()) {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{got}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let e = call(&mut conn, "notes.look", json!({})).await.unwrap_err();
+    assert_eq!(code_of(&e), "disabled", "{}", e.message);
+    daemon.stop().await;
+}
+
+/// A center's capability that takes a path is decided as a command on
+/// it, in `folder` mode, whatever it says it does: the folder rule lets it
+/// through on a path in a folder that allows commands, and refuses it on
+/// one in a folder that only allows reading, or outside the folders, also
+/// once the center turned it on. The test node cannot confine a command
+/// (no Landlock, [`options`]), so one let through stops there, as the
+/// installed node's would run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_centers_capability_takes_a_path_only_in_a_folder_that_allows_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let (work, read, outside) = (root.join("work"), root.join("read"), root.join("outside"));
+    for d in [&work, &read, &outside] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let folder = |path: &Path, access: &str| nerve_policy::config::Folder {
+        path: path.display().to_string(),
+        access: nerve_policy::config::Access::parse(access).unwrap(),
+    };
+    let daemon = node(
+        &root,
+        &[(&center, "lab")],
+        nerve_policy::Mode::Folder,
+        true,
+        |c| c.centers[0].policy.folders = vec![folder(&work, "rwx"), folder(&read, "r")],
+    )
+    .await;
+    let mut conn = linked(&mut center).await;
+    let show = json!({"name": "files.show", "effect": "read", "command": ["cat", "--", "{path}"],
+                      "params": {"type": "object", "required": ["path"],
+                                 "properties": {"path": {"type": "string", "x-nerve-path": "read"}}}});
+    invoke(
+        &mut conn,
+        "settings",
+        "cap-add",
+        json!({"capability": show}),
+    )
+    .await
+    .unwrap();
+    let wire = |p: &Path| nerve_policy::paths::to_wire(&p.join("in.txt"));
+    for on in [false, true] {
+        if on {
+            settings_set(&mut conn, |d| {
+                d["policy"]["caps"] = json!({"files.show": "on"})
+            })
+            .await
+            .expect("the center turns its own on");
+        }
+        let e = call(&mut conn, "files.show", json!({"path": wire(&work)}))
+            .await
+            .unwrap_err();
+        assert_eq!(e.message, nerve_node::daemon::NOT_CONFINED, "on {on}");
+        for at in [&read, &outside] {
+            let e = call(&mut conn, "files.show", json!({"path": wire(at)}))
+                .await
+                .unwrap_err();
+            assert_eq!(code_of(&e), "forbidden", "{at:?}, on {on}");
+            assert_eq!(
+                e.message, "outside the folders that allow running",
+                "{at:?}, on {on}"
+            );
+        }
+    }
+    daemon.stop().await;
+}
+
 /// What one center added is that center's alone: another one is not
 /// offered it, cannot call it, does not see it in its settings or in `cap
 /// ls` for it, and cannot remove it.

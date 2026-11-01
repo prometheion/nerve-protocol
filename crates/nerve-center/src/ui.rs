@@ -1395,11 +1395,32 @@ mod tests {
             "b.reason",
             "!d.settings_write ? banner(",
             "d.settings_write ? addedSection(d) : null",
+            // A machine that did not load says why, beside the picker.
+            "c.failed ? banner(\"error\", \"alert\", `The machine's capabilities did not load: ${c.failed}`) : loading()",
         ] {
             assert!(page.contains(part), "{part}: {page}");
         }
         let load = &APP_JS[APP_JS.find("async function loadCaps(").unwrap()..];
-        assert!(load.contains("`/api/caps?id=${encodeURIComponent(state.capsNode)}`"));
+        let load = &load[..load.find("\n}\n").unwrap()];
+        for part in [
+            "`/api/caps?id=${encodeURIComponent(state.capsNode)}`",
+            // One removed meanwhile: the machines are read again.
+            "if (e.status === 404 && !fresh) {",
+            "return loadCaps(true);",
+            "state.caps = { nodes, data: null, failed: e.message, form: null };",
+        ] {
+            assert!(load.contains(part), "{part}: {load}");
+        }
+        // Picking one keeps the picker on the page and says what failed.
+        let pick = &APP_JS[APP_JS.find("const capsPicker = picker(").unwrap()..];
+        let pick = &pick[..pick.find("\n});\n").unwrap()];
+        for part in [
+            "state.caps = { nodes: state.caps.nodes, data: null, form: null };",
+            "loadCaps().catch((e) => { if (!e.auth) notify(e.message, \"error\"); });",
+        ] {
+            assert!(pick.contains(part), "{part}: {pick}");
+        }
+        assert!(APP_JS.contains("err.status = r.status;"));
         let row = &APP_JS[APP_JS.find("function capUnitRow(").unwrap()..];
         let row = &row[..row.find("\n}\n").unwrap()];
         assert!(row.contains("u.source") && row.contains("effectPill(u.effect)"));

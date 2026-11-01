@@ -622,7 +622,9 @@ JSON, `result` `"text"` or a schema); a field it does not know, such as
 (against this node's `limits.max_timeout_secs`). Each change goes through the
 settings store, which checks the grant and audits it as that center's
 (`by: "center <name>"`), and `NodeConfig::validate` checks every center's
-entries as it checks the owner's. The node:
+entries as it checks the owner's, but their `timeout_secs` against no limit:
+the owner may lower `limits.max_timeout_secs` later, and a run is held to it.
+The node:
 
 - answers `unavailable` with the reason where it takes none: Windows (issue
   #176) and a node run by hand, which has no `nerve-run`;
@@ -648,6 +650,15 @@ entries as it checks the owner's. The node:
   edit of one that senses or actuates that changes anything but its
   `summary` (effect, command, `params`, `result`, `timeout_secs`, `platform`)
   counts as one that came to, so the owner's `on` goes too;
+- in a write of the owner's (`cap rm`, `config.write`, `config accept`) that
+  removes the last of the owner's entries under a `cap`, counts each of the
+  center's own under that `cap` that senses or actuates as one that came to:
+  it was left out, so an `on` for its name was the owner's for the owner's.
+  A write of the owner's that comes to cover (`on` or allow rule) one of the
+  center's own that senses or actuates and is left out for an attached
+  provider's `cap` is refused: the center is offered neither, and the `on`
+  would turn on the center's command once the provider goes. `config accept`
+  switches such an `on` off instead and names it in `held`;
 - keeps, in `settings.set`, an `off` or `hidden` switch (of the capability or
   one of its actions) of a capability the center added until the owner
   changes it, whoever set it, as only the owner unpauses: while the center

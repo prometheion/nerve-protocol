@@ -681,6 +681,12 @@ impl Shared {
         caps
     }
 
+    /// The capabilities the attached programs offer, by id.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub fn taken(&self) -> std::collections::BTreeSet<String> {
+        self.providers.caps().into_iter().map(|c| c.id).collect()
+    }
+
     /// [`Shared::added_caps`] as the pairing with `policy` is offered them:
     /// a config capability that runs as `nerve-run` is marked a command of
     /// the pairing's command account (`as_account`) only where its commands
@@ -2276,6 +2282,9 @@ pub(crate) fn control(
                 Err(e) => return Reply::Err(e),
             };
             let if_version = params.get("if_version").and_then(Value::as_u64);
+            // The programs before the store's lock, as a center's write
+            // reads them (crate::link).
+            let taken = shared.taken();
             let mut store = lock(&shared.store);
             if new.machine.sudo != store.config().machine.sudo {
                 return Reply::Err(
@@ -2285,6 +2294,18 @@ pub(crate) fn control(
             // An action that comes to sense waits for the owner's `on`,
             // whichever program of the owner's wrote the change.
             let held = crate::config_cap::hold_new(store.config(), &mut new);
+            // An `on` for a center's own that senses, while a program's of
+            // its name keeps it out, would turn on the center's command
+            // once the program goes: the owner turns it on once it is
+            // offered.
+            if let Some((center, name)) =
+                crate::config_cap::hold_shadowed(store.config(), &mut new, &taken).first()
+            {
+                let cap = name.split_once('.').map_or(&name[..], |(c, _)| c);
+                return Reply::Err(format!(
+                    "center {center} keeps its own {name}, which senses or actuates and is left out while a program offers {cap}: an on or allow rule for it now would turn on that center's command once the program goes; turn it on once the center is offered it, or remove it (cap rm {name} --center {center})"
+                ));
+            }
             // Who made it, as the CLI names its user (crate::cli::invoker):
             // only the owner's programs hold the token.
             store.set_user(str_of("user"));
@@ -2323,14 +2344,20 @@ pub(crate) fn control(
             }
         }
         "config.accept" => {
+            let taken = shared.taken();
             let r = {
                 let mut store = lock(&shared.store);
                 store.set_user(str_of("user"));
                 // The file as the owner wrote it, with an action that came to
                 // sense in it switched off where an earlier switch covered it
-                // (crate::config_cap::hold_new), in the one write that puts
-                // it in force.
-                let r = store.accept_with(crate::config_cap::hold_new);
+                // (crate::config_cap::hold_new), and a center's own that
+                // senses where a program keeps it out (hold_shadowed), in the
+                // one write that puts it in force.
+                let r = store.accept_with(|before, after| {
+                    let mut held = crate::config_cap::hold_new(before, after);
+                    held.extend(crate::config_cap::hold_shadowed(before, after, &taken));
+                    held
+                });
                 store.set_user(None);
                 r
             };

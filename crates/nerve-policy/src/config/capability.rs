@@ -553,9 +553,13 @@ pub fn refuse_units(doc: &toml::Table) -> Result<(), String> {
 }
 
 /// Checks the capabilities a center added ([`validate_all`]), and that they
-/// keep to [`MAX_CENTER_BYTES`] together.
-pub fn validate_center(caps: &[ConfigCapability], max_timeout_secs: u64) -> Result<(), String> {
-    validate_all(caps, max_timeout_secs)?;
+/// keep to [`MAX_CENTER_BYTES`] together. Their time limits are checked
+/// against the node's `limits.max_timeout_secs` as the center adds or
+/// changes one (nerve-node's `from_sent`), not here: the owner may lower
+/// that limit later, and cannot change what a center added, while a run is
+/// held to the limit anyway.
+pub fn validate_center(caps: &[ConfigCapability]) -> Result<(), String> {
+    validate_all(caps, u64::MAX)?;
     let bytes: usize = caps.iter().map(|c| c.entry().to_string().len()).sum();
     if bytes > MAX_CENTER_BYTES {
         return Err(format!(
@@ -989,8 +993,8 @@ mod tests {
             })
             .collect();
         assert_eq!(validate_all(&many, 60), Ok(()));
-        let e = validate_center(&many, 60).unwrap_err();
+        let e = validate_center(&many).unwrap_err();
         assert!(e.contains("at most 262144 together"), "{e}");
-        assert_eq!(validate_center(&many[..2], 60), Ok(()));
+        assert_eq!(validate_center(&many[..2]), Ok(()));
     }
 }

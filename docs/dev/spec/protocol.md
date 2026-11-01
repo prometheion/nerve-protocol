@@ -921,7 +921,8 @@ A center with the settings grant `write` may add capabilities of its own
   for that `cap.action`, except where the owner declares that `cap.action`
   too. One that senses or actuates keeps its `cap` and `cap.action` the
   owner's to turn on also while a provider or the owner offers that `cap`
-  without sensing.
+  without sensing, and an `on` the owner gave while the center's own was left
+  out does not carry over to it.
 - `get` key `capabilities` → `{entries, refused}`: each entry this center
   added, as it sent it, with `left_out` (why) where the node leaves it out;
   `refused` why the node takes none, or null.

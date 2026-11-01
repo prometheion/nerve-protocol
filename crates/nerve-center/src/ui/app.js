@@ -114,6 +114,7 @@ async function api(method, path, body) {
     const err = new Error((v.error || r.statusText) + (v.code ? ` [${v.code}]` : "") + why);
     // A form shows what the answer says of each field.
     err.body = v;
+    err.status = r.status;
     throw err;
   }
   return v;
@@ -1438,21 +1439,42 @@ const CAP_EFFECTS = ["read", "write", "execute", "sense", "actuate"];
 const CAP_PLATFORMS = ["any", "linux", "windows"];
 let capsRun = 0;
 
-// The picker is made once and kept, as the statistics page's.
+// The picker is made once and kept, as the statistics page's. It stays on
+// the page while the machine picked loads, so another one can be picked.
 const capsPicker = picker({
   label: "Machine", search: "Search machines", none: "No machine matches.", key: "caps:machine",
-  onpick: (id) => { state.capsNode = id; state.caps = null; draw(true); loadCaps(); },
+  onpick: (id) => {
+    state.capsNode = id;
+    if (state.caps) state.caps = { nodes: state.caps.nodes, data: null, form: null };
+    draw(true);
+    loadCaps().catch((e) => { if (!e.auth) notify(e.message, "error"); });
+  },
 });
 
-async function loadCaps() {
+// `fresh` reads the machines again, not the overview the poll keeps.
+async function loadCaps(fresh) {
   const run = ++capsRun;
-  const o = state.overview || await api("GET", "/api/overview");
+  const o = (!fresh && state.overview) || await api("GET", "/api/overview");
   const nodes = o.nodes || [];
   if (!nodes.some((n) => n.id === state.capsNode)) state.capsNode = nodes.length ? nodes[0].id : null;
   if (state.capsNode === null) {
     state.caps = { nodes, data: null, form: null };
   } else {
-    const data = await api("GET", `/api/caps?id=${encodeURIComponent(state.capsNode)}`);
+    let data;
+    try {
+      data = await api("GET", `/api/caps?id=${encodeURIComponent(state.capsNode)}`);
+    } catch (e) {
+      if (e.auth || run !== capsRun) throw e;
+      // A machine removed meanwhile is still in the list the page has:
+      // the list is read again, and the first machine left is shown.
+      if (e.status === 404 && !fresh) {
+        notify(e.message, "error");
+        return loadCaps(true);
+      }
+      state.caps = { nodes, data: null, failed: e.message, form: null };
+      if (current() === "capabilities") draw(true);
+      return;
+    }
     if (run !== capsRun) return;
     // An open form stays open over a reload.
     state.caps = { nodes, data, form: state.caps && state.caps.form };
@@ -1467,7 +1489,10 @@ function pageCaps() {
   if (!c.nodes.length) return [head_, empty("No machines yet.", "server")];
   capsPicker.set(c.nodes.map((n) => ({ value: n.id, text: n.name })), state.capsNode);
   const d = c.data;
-  if (!d) return [head_, el("div", { class: "picker-row" }, capsPicker.root), loading()];
+  if (!d) {
+    return [head_, el("div", { class: "picker-row" }, capsPicker.root),
+      c.failed ? banner("error", "alert", `The machine's capabilities did not load: ${c.failed}`) : loading()];
+  }
   return [head_, el("div", { class: "picker-row" }, capsPicker.root),
     !d.online ? banner("warn", "alert", "This machine is offline: the list is what it offered when it was last linked.") : null,
     !d.settings_write ? banner("info", "info", "This machine does not let this center change its settings (settings grant off), so it is shown read only. Its owner gives the grant with nerve-node center grant settings write.") : null,

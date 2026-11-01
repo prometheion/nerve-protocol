@@ -1245,7 +1245,7 @@ impl NodeConfig {
             c.policy
                 .validate()
                 .map_err(|e| format!("center {}: {e}", c.name))?;
-            capability::validate_center(&c.capabilities, self.limits.max_timeout_secs)
+            capability::validate_center(&c.capabilities)
                 .map_err(|e| format!("center {}: {e}", c.name))?;
         }
         Ok(())
@@ -1733,6 +1733,27 @@ sudo_allow = ["sudo apt update"]
         format!(
             "[[center]]\nname = \"home\"\nurl = \"https://c.example:8443\"\ncenter_id = \"c\"\nnode_id = \"n\"\n[center.policy]\n{policy}\n"
         )
+    }
+
+    /// The owner may lower `limits.max_timeout_secs` below a time limit a
+    /// center chose for a capability it added, which the owner cannot change:
+    /// a run is held to the node's limit anyway. One of the owner's is
+    /// checked against it, as the owner can change that one.
+    #[test]
+    fn a_centers_time_limit_never_holds_the_owners_up() {
+        let cap =
+            "name = \"say.back\"\neffect = \"read\"\ncommand = [\"echo\"]\ntimeout_secs = 3000\n";
+        let text = format!(
+            "[limits]\nmax_timeout_secs = 600\n{}[[center.capability]]\n{cap}",
+            center("")
+        );
+        let c = NodeConfig::parse(&text).unwrap();
+        assert_eq!(c.center("home").unwrap().capabilities.len(), 1);
+        let e = NodeConfig::parse(&format!(
+            "[limits]\nmax_timeout_secs = 600\n[[capability]]\n{cap}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("timeout_secs 3000"), "{e}");
     }
 
     /// A center's pin given with base64 padding is kept without it: the same
