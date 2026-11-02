@@ -91,16 +91,35 @@ async fn the_local_server_starts_and_gates_a_call() {
         matches!(ordinary, Decision::Allowed { .. }),
         "got {ordinary:?}"
     );
-    // A command of 2,000 random characters is about 3,400 tokens, which the
+    // A command of 2,000 random characters is about 3,200 tokens, which the
     // model cannot read within 8 s at the speed it measured: it is refused
     // as too long at once, not sent to hold the server past the timeout
     // (#178).
-    let long: String = (0..2000u32)
-        .map(|i| char::from(b'!' + (i.wrapping_mul(2_654_435_761) >> 7) as u8 % 90))
+    let mut x = 0x2545_f491_4f6c_dd1du64;
+    let long: String = (0..2000)
+        .map(|_| {
+            // xorshift: random printable ASCII, which tokenizes poorly.
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            char::from(b'!' + (x % 94) as u8)
+        })
         .collect();
-    let long: &'static str = Box::leak(long.into_boxed_str());
+    // As `exec.run` sends it: in the target and in the arguments.
+    let mut long_args = Map::new();
+    long_args.insert("command".into(), long.clone().into());
     let asked = Instant::now();
-    let too_long = checker.check(&call(long), Some(&endpoint)).await;
+    let too_long = checker
+        .check(
+            &CallInfo {
+                target: &long,
+                args: &long_args,
+                ..call("")
+            },
+            Some(&endpoint),
+        )
+        .await;
+    println!("the long call, after {:?}: {too_long:?}", asked.elapsed());
     assert!(
         matches!(&too_long, Decision::Refuse { detail, .. } if detail.contains("too long")),
         "got {too_long:?}"

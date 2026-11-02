@@ -482,11 +482,12 @@ mod tests {
             "{e}"
         );
         assert_eq!(asked.load(Ordering::SeqCst), 0);
-        // 512 tokens are sent even so; this one is answered at once, so the
-        // speed measured is well under 20 ms per token.
+        // 512 tokens at 20 ms are 10.2 s, over a 10 s timeout, and are sent
+        // even so; this one is answered at once, so the speed measured is
+        // well under 20 ms per token.
         let (ep, asked) = local(ALWAYS_SENT_TOKENS);
         assert_eq!(
-            ask(&ep, &with_timeout(12_000), json!({})).await.unwrap(),
+            ask(&ep, &with_timeout(10_000), json!({})).await.unwrap(),
             0.01
         );
         assert_eq!(asked.load(Ordering::SeqCst), 1);
