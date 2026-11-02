@@ -1139,8 +1139,9 @@ without a pattern covers every call of its scope.
 Any other action's pattern is conditions on the call's arguments, joined by
 `,`: `field=value`, `field!=value`, `field<n`, `<=`, `>`, `>=` and `field~glob`.
 A field is a top-level property of the action's arguments schema (`[A-Za-z0-9_-]`);
-a `,` in a value is `\,`, a `\` before it `\\` (a glob's `{a,b}` and `[...]`
-need no escape); at most 16 conditions. They name one action: a scope `cap`
+a `,` in a value is `\,`, a `\` before it `\\` (a `~` glob's `{a,b}` and
+`[...]` need no escape; in any other value `[` and `{` are plain); at most 16
+conditions. A stream's parameters count as its arguments. They name one action: a scope `cap`
 with a pattern is refused. A string or path takes `=`, `!=`, `~`; an integer
 or number all but `~` (the value must be one; integers compare exactly); a
 boolean `=` and `!=` with `true` or `false`; an `enum` without a `type` has
@@ -1149,7 +1150,11 @@ its choices' type; an object or array cannot be named. A property marked
 the owner's home, without case on Windows, `=` the escaped exact path; as a
 deny rule it also refuses a folder handed in that argument where a place below
 it may meet the condition (its fixed start lies below the folder, or the
-folder below it with a wildcard after), as a path rule does.
+folder below it with a wildcard after), as a path rule does. A path
+condition's value starts with `/`, `\`, `~` or a drive (a `~` glob also with a
+wildcard), and a string condition's value does not start with `~/`, so a
+property that gains or loses the mark no longer fits the rule. An `fs` pattern
+that parses as conditions is refused.
 
 The node checks the conditions against the action's schema as it publishes
 it when a rule is written (`rule add`, `rule edit`, `config add`, a center's
@@ -1160,8 +1165,10 @@ is kept as it is. Matching is three-valued per condition: a call that leaves
 the argument out, gives `null`, or a value of another type cannot be told; an
 allow rule covers a call only where every condition holds, a deny rule wherever
 none is known not to hold. A rule whose argument went from the schema thus
-refuses every call of its action (deny) or covers none (allow); `rule ls`
-names such rules (`stale` in its JSON). The center's action checker reads the
+refuses every call of its action (deny) or covers none (allow), and one whose
+`=` value left an `enum` holds for no call; `rule ls` names every rule that no
+longer fits (`stale` in its JSON). The audit entry's `args` hold a marked path
+as resolved. The center's action checker reads the
 same syntax with the same code (`nerve_policy::conditions`), with `~` as any
 home and paths without case.
 

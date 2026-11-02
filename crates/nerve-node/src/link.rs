@@ -884,16 +884,21 @@ impl Streams {
 /// unit it is, which the policy is asked about again when it changes.
 struct OpenStream {
     task: AbortHandle,
-    unit: Option<(String, String, Effect)>,
+    unit: Option<StreamUnit>,
 }
 
+/// A program's stream as the policy decides it: `cap`, `stream`, its
+/// effect, and the params it was opened with, which a rule's conditions
+/// read as a call's arguments.
+type StreamUnit = (String, String, Effect, Map<String, Value>);
+
 /// A program's stream the program opened: its sid, what it sends, what
-/// tells the program when dropped, and the unit (`cap`, `stream`, effect).
+/// tells the program when dropped, and the unit.
 type ProgramOpen = (
     u32,
     Arc<crate::tap::Reader>,
     crate::provider::ProgramStream,
-    (String, String, Effect),
+    StreamUnit,
 );
 
 /// A link's state shared with its calls. A link the center resumes keeps it
@@ -1498,8 +1503,8 @@ impl Link {
                 .open
                 .iter()
                 .filter(|(_, s)| {
-                    s.unit.as_ref().is_some_and(|(cap, name, effect)| {
-                        !may_take(&self.shared, &cfg, &entry, cap, name, *effect)
+                    s.unit.as_ref().is_some_and(|(cap, name, effect, args)| {
+                        !may_take(&self.shared, &cfg, &entry, cap, name, *effect, Some(args))
                     })
                 })
                 .map(|(sid, _)| *sid)
@@ -1880,9 +1885,9 @@ impl Link {
             // Decided before the program answered: a change of the policy
             // since was looked at by recheck_streams while this stream was
             // not open yet, so it is looked at here, under the same lock.
-            let (cap, name, effect) = &unit;
+            let (cap, name, effect, args) = &unit;
             let allowed = self.entry().is_some_and(|(cfg, entry)| {
-                may_take(&self.shared, &cfg, &entry, cap, name, *effect)
+                may_take(&self.shared, &cfg, &entry, cap, name, *effect, Some(args))
             });
             if allowed {
                 self.open_unit(&mut streams, sid, reader, held, unit, start);
@@ -1911,7 +1916,7 @@ impl Link {
         sid: u32,
         reader: Arc<crate::tap::Reader>,
         held: crate::provider::ProgramStream,
-        unit: (String, String, Effect),
+        unit: StreamUnit,
         start: oneshot::Receiver<()>,
     ) {
         let link = self.clone();
@@ -1978,7 +1983,7 @@ impl Link {
             .await
             .unwrap_or_else(|_| Err(program_late(&cap.provider, wait)))?;
         let sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
-        Ok((sid, reader, held, (o.cap, o.stream, decl.effect)))
+        Ok((sid, reader, held, (o.cap, o.stream, decl.effect, inv.args)))
     }
 
     fn get(&self, p: &Map<String, Value>) -> Result<Value, RpcError> {
@@ -2591,6 +2596,21 @@ impl Link {
             now_ms: crate::now_ms(),
             args: Some(&inv.args),
         };
+        // The audit's arguments hold each marked path as resolved, as the
+        // rules match it: a pin made from the entry names the place the
+        // call reached, not the spelling it was given in (a link, a `..`).
+        let mut audited = inv.args.clone();
+        for t in targets {
+            if let Some(field) = &t.arg
+                && audited.contains_key(field)
+            {
+                audited.insert(
+                    field.clone(),
+                    Value::String(nerve_policy::paths::to_wire(&t.path)),
+                );
+            }
+        }
+        let audited = &audited;
         let judged = Judged {
             home: self.home(),
             protected: self.protected(entry),
@@ -2659,7 +2679,9 @@ impl Link {
                         }
                     }))
                 },
-                |decision, code, reason| self.audit_ran(inv, &target, ran, decision, code, reason),
+                |decision, code, reason| {
+                    self.audit_ran(inv, audited, &target, ran, decision, code, reason)
+                },
             )
             .await;
             walk.map_err(|e| RpcError::internal(e.to_string()))??
@@ -2667,7 +2689,7 @@ impl Link {
             decision
         };
         let audit = |decision: &str, code: Option<&str>, reason: Option<&str>| {
-            self.audit_ran(inv, &target, ran, decision, code, reason)
+            self.audit_ran(inv, audited, &target, ran, decision, code, reason)
         };
         match decision {
             Decision::Allow => {
@@ -2711,14 +2733,17 @@ impl Link {
         code: Option<&str>,
         reason: Option<&str>,
     ) {
-        self.audit_ran(inv, target, None, decision, code, reason)
+        self.audit_ran(inv, &inv.args, target, None, decision, code, reason)
     }
 
     /// [`Link::audit`], with the command a capability of `node.toml` runs
-    /// for the call (`ran`), which only the node's own log keeps.
+    /// for the call (`ran`), which only the node's own log keeps, and the
+    /// call's arguments as the policy judged them (`args`).
+    #[allow(clippy::too_many_arguments)]
     fn audit_ran(
         &self,
         inv: &Invoke,
+        args: &Map<String, Value>,
         target: &str,
         ran: Option<&str>,
         decision: &str,
@@ -2736,7 +2761,7 @@ impl Link {
             session: inv.ctx.session.clone(),
             reason: reason.map(Into::into),
             command: ran.map(Into::into),
-            args: nerve_policy::audit::pinnable_args(&inv.cap, &inv.action, &inv.args),
+            args: nerve_policy::audit::pinnable_args(&inv.cap, &inv.action, args),
         })
     }
 
@@ -3490,8 +3515,9 @@ fn unit_call(cap: &str, name: &str, args: Map<String, Value>, ctx: msg::Ctx) -> 
 
 /// Whether `entry` may have the unit `cap.name` of a program now (an
 /// event, a state key's change, or more of an open stream): its policy
-/// allows it as a call that names no path. Nothing is audited: the
-/// subscription or the open was.
+/// allows it as a call that names no path, with `args`, the params a
+/// stream was opened with, for a rule's conditions. Nothing is audited:
+/// the subscription or the open was.
 pub(crate) fn may_take(
     shared: &Shared,
     cfg: &NodeConfig,
@@ -3499,6 +3525,7 @@ pub(crate) fn may_take(
     cap: &str,
     name: &str,
     effect: Effect,
+    args: Option<&Map<String, Value>>,
 ) -> bool {
     // A center that keeps its own under `cap` is offered none of the
     // program's (crate::config_cap::programs_for): its switches were set
@@ -3534,7 +3561,7 @@ pub(crate) fn may_take(
         command: None,
         cwd: None,
         now_ms: crate::now_ms(),
-        args: None,
+        args,
     };
     judged.with(|env| nerve_policy::decide(&entry.policy, env, &call)) == Decision::Allow
 }

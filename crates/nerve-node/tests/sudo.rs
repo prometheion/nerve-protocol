@@ -77,6 +77,9 @@ async fn node_of(
 ) -> Daemon {
     let mut o = NodeOptions::new(NodePaths::new(root.join("config"), root.join("state")));
     o.owner = owner.map(String::from);
+    // A capability of the config runs as the node's own user here, for
+    // `nerve-run`, which a node by hand does not have.
+    o.config_caps_by_hand = true;
     o.home = root.join("home");
     std::fs::create_dir_all(&o.home).unwrap();
     o.exe = Some(
@@ -219,7 +222,20 @@ fn now() -> u64 {
 async fn the_sudo_switch() {
     let dir = tempfile::tempdir().unwrap();
     let mut center = FakeCenter::start(false).await.unwrap();
-    let node = node(dir.path(), &center).await;
+    // A capability of the config whose argument the audit keeps.
+    let node = node_with(dir.path(), &center, |cfg| {
+        let say = nerve_policy::NodeConfig::parse(
+            r#"[[capability]]
+name = "say.back"
+effect = "read"
+command = ["true", "{a}"]
+params = '{"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}'"#,
+        )?;
+        cfg.capabilities = say.capabilities;
+        cfg.centers[0].policy.allow.push("say.back".into());
+        Ok(())
+    })
+    .await;
     let mut conn = linked(&mut center).await;
     let mut seen = Seen { frames: Vec::new() };
     seen.call(&mut conn, "sub", json!({"topics": ["audit/decision"]}))
@@ -293,6 +309,20 @@ async fn the_sudo_switch() {
         .await
         .expect("echo");
     assert_eq!(r["stdout"], "[redacted]\n", "{r}");
+    // An argument that quotes it, which the audit keeps for its buttons.
+    seen.invoke(
+        &mut conn,
+        "say",
+        "back",
+        json!({"a": format!("the {RIGHT} again")}),
+    )
+    .await
+    .expect("say.back");
+    let audit = std::fs::read_to_string(node.paths().audit_log()).unwrap();
+    assert!(
+        audit.contains(r#""args":{"a":"the [redacted] again"}"#),
+        "{audit}"
+    );
 
     // Off drops the password; a replayed box finds no offer.
     let r = seen

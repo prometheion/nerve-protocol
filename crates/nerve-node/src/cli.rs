@@ -1611,8 +1611,17 @@ async fn rule_cmd(paths: &NodePaths, c: RuleCmd, out: &mut dyn Write) -> Result<
                     };
                     let scope = rules::scope_of(rule);
                     let does = match l {
-                        List::Deny => format!("as a deny rule it refuses every call of {scope}"),
-                        _ => format!("as an allow rule it covers no call of {scope}"),
+                        // What it does depends on why it no longer fits: a
+                        // gone argument refuses every call, a value the action
+                        // no longer takes may refuse none.
+                        List::Deny => {
+                            format!(
+                                "as a deny rule it may refuse calls of {scope} it was not meant for"
+                            )
+                        }
+                        _ => format!(
+                            "as an allow rule it may not cover the calls of {scope} it was meant for"
+                        ),
                     };
                     let _ = writeln!(
                         out,
@@ -9630,7 +9639,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(policy().deny, ["lamp.set:room=bedroom,level>50"]);
-        let warning = "warning: the deny rule \"lamp.set:room=bedroom,level>50\" no longer fits: lamp.set has no argument room; it takes level; as a deny rule it refuses every call of lamp.set until you change it";
+        let warning = "warning: the deny rule \"lamp.set:room=bedroom,level>50\" no longer fits: lamp.set has no argument room; it takes level; as a deny rule it may refuse calls of lamp.set it was not meant for until you change it";
         for args in [&["rule", "ls"][..], &["rule", "ls", "deny"]] {
             let out = run(&paths, args).unwrap();
             assert!(out.lines().any(|l| l == warning), "{out}");

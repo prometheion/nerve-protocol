@@ -2413,6 +2413,75 @@ async fn a_programs_stream_ends_when_the_policy_no_longer_allows_it() {
     daemon.stop().await;
 }
 
+/// A rule may hold conditions on a stream's parameters, which the gate
+/// reads as a call's arguments: the node checks them against the stream's
+/// schema when the rule is written, and decides an open by them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rule_on_a_streams_parameters_is_typed_and_holds() {
+    use clap::Parser;
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, _work, mut p) = two_centers_with_sensors(dir.path()).await;
+    let paths = daemon.paths().clone();
+    let rule = |words: &[&str]| {
+        let mut args: Vec<PathBuf> = vec![
+            "nerve-node".into(),
+            "--config-dir".into(),
+            paths.config_dir.clone(),
+            "--state-dir".into(),
+            paths.state_dir.clone(),
+        ];
+        args.extend(words.iter().map(PathBuf::from));
+        let cli = nerve_node::cli::Cli::parse_from(args);
+        async move { nerve_node::cli::execute(cli, &mut Vec::new()).await }
+    };
+    rule(&[
+        "rule",
+        "add",
+        "deny",
+        "sensors.feed:every_ms<100",
+        "--center=lab",
+    ])
+    .await
+    .expect("the stream takes every_ms");
+    let e = rule(&["rule", "add", "deny", "sensors.feed:size=1", "--center=lab"])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("sensors.feed has no argument size; it takes every_ms"),
+        "{e}"
+    );
+    let open = |params: Value| {
+        json!({"cap": "sensors", "stream": "feed", "params": params,
+               "ctx": {"session": "s-1"}})
+    };
+    let e = lab
+        .call("stream.open", open(json!({"every_ms": 50})), WAIT)
+        .await
+        .unwrap()
+        .expect_err("the rule denies it");
+    assert_eq!(code_of(&e), "forbidden", "{}", e.message);
+    assert!(
+        e.message
+            .contains("sensors.feed is denied (sensors.feed:every_ms<100)"),
+        "{}",
+        e.message
+    );
+    // Another value opens, as the program answers.
+    let id = lab
+        .request("stream.open", open(json!({"every_ms": 500})))
+        .await
+        .unwrap();
+    let asked = p.next().await.expect("the stream.open");
+    assert_eq!(asked["params"]["params"], json!({"every_ms": 500}));
+    p.send(json!({"id": asked["id"], "ok": {}})).await;
+    lab.answer(id, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .expect("opened");
+    daemon.stop().await;
+}
+
 /// Opens of a program's stream that wait for the program together keep
 /// the link's limit of streams: the place is taken before the program is
 /// asked, so one past it is `busy` at once. An open that still waits when

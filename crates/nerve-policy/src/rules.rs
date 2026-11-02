@@ -110,9 +110,24 @@ pub fn validate(rule: &str) -> Result<(), String> {
             conditions_of(rule, scope, p)?;
         }
         Some(p) => {
+            if always_paths(scope) {
+                fs_pattern(rule, p)?;
+            }
             build(p, always_paths(scope)).map_err(|e| format!("rule {rule:?}: {e}"))?;
         }
         None => {}
+    }
+    Ok(())
+}
+
+/// Refuses the pattern `p` of the `fs` rule `rule` where it is written as
+/// conditions: an `fs` rule names the path itself, and as conditions it
+/// would match no path, so a deny would hold nothing.
+pub fn fs_pattern(rule: &str, p: &str) -> Result<(), String> {
+    if crate::conditions::parse(p).is_ok() {
+        return Err(format!(
+            "rule {rule:?}: an fs rule names the path itself (fs:~/private/*), not a condition on an argument"
+        ));
     }
     Ok(())
 }
@@ -168,8 +183,8 @@ pub fn has_conditions(rule: &str) -> bool {
 
 /// Why `rule` no longer fits the schema its action publishes now (an
 /// argument it names is gone or has another type, or the action is not
-/// offered), or `None`: what `rule ls` and the app flag. Such a rule fails
-/// closed: a deny refuses every call of its action, an allow covers none.
+/// offered), or `None`: what `rule ls` and the app flag. Such a rule no
+/// longer decides as was meant ([`crate::conditions::stale`]).
 pub fn stale(
     rule: &str,
     params: &dyn Fn(&str, &str) -> Option<serde_json::Value>,
@@ -1163,6 +1178,14 @@ mod tests {
             "exec.run:{a",
         ] {
             assert!(validate(bad).is_err(), "{bad}");
+        }
+        // An fs rule written as conditions would match no path.
+        for bad in ["fs.read:path~~/private/*", "fs:path=/h/a", "fs.write:p!=x"] {
+            let e = validate(bad).unwrap_err();
+            assert!(e.contains("names the path itself"), "{bad}: {e}");
+        }
+        for ok in ["fs:C:\\a=b\\*", "fs:**/a=b", "fs:~/x,y"] {
+            validate(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
         }
         assert!(validate_command_glob("sudo apt *").is_ok());
         assert!(validate_command_glob("sudo [").is_err());

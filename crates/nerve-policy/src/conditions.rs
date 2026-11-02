@@ -89,24 +89,34 @@ pub fn parse(pattern: &str) -> Result<Vec<Condition>, String> {
 }
 
 /// `pattern` cut at each `,` that is not escaped and not inside a glob's
-/// `{...}` or `[...]`.
+/// `{...}` or `[...]`. Only a `~` condition is a glob: in the value of any
+/// other a `[` or `{` is a character like any, so one left open does not
+/// take the conditions after it into the value.
 fn split(pattern: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let (mut start, mut braces, mut bracket, mut escaped) = (0, 0usize, false, false);
+    // Whether the condition being read is a glob: the first character
+    // after its field's name says.
+    let mut glob = None;
     for (i, c) in pattern.char_indices() {
         if escaped {
             escaped = false;
             continue;
         }
+        if glob.is_none() && !field_char(c) {
+            glob = Some(c == '~');
+        }
+        let in_glob = glob == Some(true);
         match c {
             '\\' => escaped = true,
-            '[' if !bracket => bracket = true,
+            '[' if in_glob && !bracket => bracket = true,
             ']' if bracket => bracket = false,
-            '{' if !bracket => braces += 1,
-            '}' if !bracket => braces = braces.saturating_sub(1),
+            '{' if in_glob && !bracket => braces += 1,
+            '}' if in_glob && !bracket => braces = braces.saturating_sub(1),
             ',' if !bracket && braces == 0 => {
                 out.push(&pattern[start..i]);
                 start = i + 1;
+                glob = None;
             }
             _ => {}
         }
@@ -348,6 +358,32 @@ fn check_one(scope: &str, c: &Condition, params: &Value) -> Result<(), String> {
             c.field, c.value
         )
     };
+    // A path condition names a place as the node resolves one, which is
+    // absolute: a path, one from the home (`~`), or for `~` a glob that
+    // starts with a wildcard. A string's `~/` is no home. So a rule written
+    // for a path argument that is a plain string now, or the other way
+    // round, no longer fits, and is flagged.
+    match kind {
+        Kind::Path if !path_form(&c.value, c.op == Op::Like) => {
+            return Err(format!(
+                "{scope} argument {} is a path, and {:?} is none: it starts with /, ~ or a drive{}",
+                c.field,
+                c.value,
+                if c.op == Op::Like {
+                    ", or a wildcard"
+                } else {
+                    ""
+                }
+            ));
+        }
+        Kind::String if from_home(&c.value) => {
+            return Err(format!(
+                "{scope} argument {} is a string, not a path, so {:?} does not start at the home",
+                c.field, c.value
+            ));
+        }
+        _ => {}
+    }
     match kind {
         Kind::Integer if Number::parse(&c.value).is_none_or(|n| !n.integral()) => {
             return Err(not_a("an integer"));
@@ -382,6 +418,19 @@ fn check_one(scope: &str, c: &Condition, params: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `value` may name a place as the node resolves one: an absolute
+/// path (`/…`, `\\…`, `C:…`), one from the home (`~`), or, for a glob
+/// (`glob`), one that starts with a wildcard.
+fn path_form(value: &str, glob: bool) -> bool {
+    let drive = value.as_bytes().get(1) == Some(&b':') && value.as_bytes()[0].is_ascii_alphabetic();
+    value.starts_with(['/', '\\', '~']) || drive || glob && value.starts_with(['*', '?', '[', '{'])
+}
+
+/// Whether `value` starts at the home, as a path condition writes it.
+fn from_home(value: &str) -> bool {
+    value == "~" || value.starts_with("~/") || value.starts_with("~\\")
+}
+
 /// Whether the enum choice `v` is the value `text` names.
 fn literal_is(v: &Value, text: &str) -> bool {
     match v {
@@ -397,8 +446,10 @@ fn literal_is(v: &Value, text: &str) -> bool {
 /// Why `pattern` no longer fits the arguments schema `params` of `scope`
 /// (an argument it names is gone, or has another type now), or `None`.
 /// `params` is `None` where the action is not published now. A rule that
-/// no longer fits still fails closed: as a deny it refuses every call of
-/// its action, as an allow it covers none.
+/// no longer fits still decides as written, which is no longer what was
+/// meant: where an argument it names is gone, a deny refuses every call of
+/// its action and an allow covers none; where the action no longer takes
+/// its value, an `=` holds for no call.
 pub fn stale(scope: &str, pattern: &str, params: Option<&Value>) -> Option<String> {
     let Some(params) = params else {
         return Some(format!(
@@ -740,6 +791,20 @@ pub(crate) mod tests {
             ("label=C:\\temp\\\\", vec![c("label", Op::Eq, "C:\\temp\\")]),
             ("label~{a,b}*", vec![c("label", Op::Like, "{a,b}*")]),
             ("label~[,x]", vec![c("label", Op::Like, "[,x]")]),
+            // Outside a glob a `[` or `{` is a character like any: one left
+            // open does not swallow the conditions after it.
+            (
+                "label=a[b,level>5",
+                vec![c("label", Op::Eq, "a[b"), c("level", Op::Gt, "5")],
+            ),
+            (
+                "label!={x,on=true",
+                vec![c("label", Op::Ne, "{x"), c("on", Op::Eq, "true")],
+            ),
+            (
+                "label~{a,b},room=[x",
+                vec![c("label", Op::Like, "{a,b}"), c("room", Op::Eq, "[x")],
+            ),
             ("my_field-2=1", vec![c("my_field-2", Op::Eq, "1")]),
         ] {
             assert_eq!(one(text), want, "{text}");
@@ -782,6 +847,11 @@ pub(crate) mod tests {
             "on!=false",
             "file~~/notes/*",
             "file=/srv/a",
+            "file=~",
+            "file~**/.env",
+            "file=C:\\data\\a",
+            "file~\\\\server\\*",
+            "label=~x",
             "room=office,brightness<=50,on=true",
             "signal=term",
             "level>=2",
@@ -805,6 +875,13 @@ pub(crate) mod tests {
             ("signal=stop", "is one of term, kill"),
             ("level=4", "is one of 1, 2, 3"),
             ("level~1", "which ~ does not compare"),
+            // A path is matched as the node resolves it, which is absolute;
+            // a string's `~/` is no home.
+            ("file=notes/a", "is a path, and \"notes/a\" is none"),
+            ("file~notes/*", "or a wildcard"),
+            ("file=", "is a path"),
+            ("label=~/a", "is a string, not a path"),
+            ("label~~/notes/*", "is a string, not a path"),
         ] {
             let e = check("lamp.set", bad, &p).unwrap_err();
             assert!(e.contains(why), "{bad}: {e}");
@@ -820,6 +897,20 @@ pub(crate) mod tests {
                 .contains("no argument room")
         );
         assert!(stale("lamp.set", "room=office", None).is_some());
+        // A path argument that is a plain string now, or the other way
+        // round, is flagged too: the rule no longer matches as written.
+        let plain = json!({"type": "object", "properties": {"file": {"type": "string"},
+                                                            "label": {"type": "string", "x-nerve-path": "read"}}});
+        assert!(
+            stale("lamp.set", "file~~/secret/*", Some(&plain))
+                .unwrap()
+                .contains("is a string, not a path")
+        );
+        assert!(
+            stale("lamp.set", "label=draft", Some(&plain))
+                .unwrap()
+                .contains("is a path")
+        );
     }
 
     /// The arguments `v` as a rule reads them.
@@ -930,6 +1021,42 @@ pub(crate) mod tests {
             !compile("file=/h/data/key.pem").below("file", "/h/data/key.pem", |_| Arg::Missing)
         );
         assert!(!compile("file!=/h/x").below("file", "/h", |_| Arg::Missing));
+    }
+
+    /// A pinned string reads back as the value it was made of, whatever it
+    /// holds, and a condition written after it stays a condition of its
+    /// own.
+    #[test]
+    fn a_pinned_value_reads_back_as_it_was() {
+        for value in [
+            "a{b",
+            "x[y",
+            "a}b]c",
+            "line\nbreak",
+            " padded ",
+            "a,b\\c\\",
+            "C:\\temp\\,x",
+            "room=x",
+            "",
+        ] {
+            let pinned = pin("label", &json!(value)).unwrap();
+            let rule = format!("{pinned},level>3");
+            let conds = parse(&rule).unwrap();
+            assert_eq!(conds.len(), 2, "{rule:?}: {conds:?}");
+            assert_eq!(conds[0].value, value, "{rule:?}");
+            assert_eq!(
+                conds[1],
+                Condition {
+                    field: "level".into(),
+                    op: Op::Gt,
+                    value: "3".into(),
+                }
+            );
+            let args = json!({"label": value, "level": 4});
+            assert!(compile(&rule).met(by(&args)), "{rule:?}");
+            let other = json!({"label": format!("{value}."), "level": 4});
+            assert!(!compile(&rule).may_hold(by(&other)), "{rule:?}");
+        }
     }
 
     /// What an audit button pins, and the fields a form offers.

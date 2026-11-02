@@ -3090,6 +3090,7 @@ impl Center {
                     scope,
                     &detail,
                     args,
+                    &seen.marked,
                 );
                 return Err(RpcError::forbidden(message).into());
             }
@@ -3098,7 +3099,17 @@ impl Center {
                 scope,
                 detail,
             } => {
-                self.audit_checker(sess, route, &target, "allowed", layer, scope, &detail, args);
+                self.audit_checker(
+                    sess,
+                    route,
+                    &target,
+                    "allowed",
+                    layer,
+                    scope,
+                    &detail,
+                    args,
+                    &seen.marked,
+                );
             }
             Decision::Pass => {}
         }
@@ -4037,6 +4048,7 @@ impl Center {
         scope: Scope,
         detail: &str,
         args: &Map<String, Value>,
+        marked: &[(String, PathMark)],
     ) {
         let node = self.node_name(&route.node_id);
         let mut e = Map::new();
@@ -4056,8 +4068,10 @@ impl Center {
             "checker".into(),
             json!({"layer": layer.as_str(), "scope": scope.as_str(), "detail": detail}),
         );
-        // What its allow buttons may pin, as a node's entry has it.
-        if let Some(args) = nerve_policy::audit::pinnable_args(&route.cap, &route.action, args) {
+        // What its allow buttons may pin, as a node's entry has it, a path
+        // argument as the checker matched it.
+        let args = checker::blocklist::as_matched(args, marked);
+        if let Some(args) = nerve_policy::audit::pinnable_args(&route.cap, &route.action, &args) {
             e.insert("args".into(), Value::Object(args));
         }
         self.audit.lock().unwrap().push(Value::Object(e));
@@ -4181,11 +4195,15 @@ fn published_params(
     nodes: &BTreeMap<String, NodeRecord>,
     node: Option<&str>,
     unit: &str,
-) -> Vec<Value> {
+) -> Vec<(String, Value)> {
     nodes
         .iter()
         .filter(|(id, _)| node.is_none_or(|n| n == id.as_str()))
-        .filter_map(|(_, n)| n.catalog.unit(unit).map(|u| u.params.clone()))
+        .filter_map(|(_, n)| {
+            n.catalog
+                .unit(unit)
+                .map(|u| (n.name.clone(), u.params.clone()))
+        })
         .collect()
 }
 
@@ -4206,7 +4224,7 @@ fn checker_typed(
     let (scope, pattern) = rule.split_once(':').expect("has conditions");
     let found = published_params(nodes, node, scope);
     let mut first = None;
-    for params in &found {
+    for (_, params) in &found {
         match nerve_policy::conditions::check(scope, pattern, params) {
             Ok(()) => return Ok(()),
             Err(e) => {
@@ -4252,10 +4270,12 @@ fn rule_fields(nodes: &BTreeMap<String, NodeRecord>) -> Value {
 }
 
 /// The owner's blocklist entries and allow rules whose conditions no longer
-/// fit what the machines publish for their action (an argument gone, or of
-/// another type), each with why: as a blocklist entry such a rule refuses
-/// every call of its action, as an allow rule it covers none. A rule whose
-/// action no machine publishes is [`unpublished_rules`]'.
+/// fit what a machine publishes for their action (an argument gone, or of
+/// another type, a value it no longer takes), each with why: such a rule
+/// no longer decides that machine's calls as written. A rule for every
+/// machine is flagged where any one that publishes the action does not fit
+/// it, naming that machine, for a blocklist entry there may refuse every
+/// call. A rule whose action no machine publishes is [`unpublished_rules`]'.
 fn stale_checker_rules(cfg: &CheckerConfig, nodes: &BTreeMap<String, NodeRecord>) -> Value {
     let own = cfg.blocklist.iter().filter(|e| !e.builtin);
     let rules = own.map(|e| (&e.rule, e.node_id.as_deref())).chain(
@@ -4273,12 +4293,18 @@ fn stale_checker_rules(cfg: &CheckerConfig, nodes: &BTreeMap<String, NodeRecord>
         if found.is_empty() {
             continue;
         }
-        let errs: Vec<String> = found
-            .iter()
-            .filter_map(|p| nerve_policy::conditions::check(scope, pattern, p).err())
-            .collect();
-        if errs.len() == found.len() {
-            out.insert(rule.clone(), json!(errs[0]));
+        let misfit = found.iter().find_map(|(name, p)| {
+            nerve_policy::conditions::check(scope, pattern, p)
+                .err()
+                .map(|e| (name, e))
+        });
+        if let Some((name, e)) = misfit {
+            let why = if node.is_some() {
+                e
+            } else {
+                format!("on {name}: {e}")
+            };
+            out.insert(rule.clone(), json!(why));
         }
     }
     Value::Object(out)
@@ -5386,6 +5412,24 @@ pub(crate) mod tests {
         );
         c.apply_checker_config(c.read(|s| s.checker.clone()))
             .unwrap();
+        // A rule for every machine that one of them no longer fits is
+        // flagged, naming that machine, while another still fits it.
+        c.update(|s| {
+            let mut n = node_record("n2", "linux");
+            n.set_descriptor(desc("n2", vec![lamp(full.clone())]));
+            s.nodes.insert("n2".into(), n);
+        });
+        let stale = c.checker_json()["stale"].clone();
+        assert_eq!(
+            stale["lamp.set:room=office,brightness>50"],
+            json!("on n1: lamp.set has no argument room; it takes brightness"),
+            "{stale}"
+        );
+        assert_eq!(
+            stale["lamp.set:room=office"],
+            json!("lamp.set has no argument room; it takes brightness"),
+            "{stale}"
+        );
     }
 
     /// An `fs` entry holds the path arguments of other capabilities, so it

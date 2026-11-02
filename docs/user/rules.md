@@ -210,8 +210,9 @@ nerve-node rule add deny '' --action lamp.set --pin room=bedroom              # 
 ## Rules on an action's arguments
 
 A rule for any action but the `fs` ones and `exec.run` may name values of
-the call's arguments. Its pattern is one or more conditions, joined by `,`.
-The rule covers a call that meets all of them; the other arguments are free.
+the call's arguments, and a rule for a program's stream the values of its
+parameters. Its pattern is one or more conditions, joined by `,`. The rule
+covers a call that meets all of them; the other arguments are free.
 
 ```sh
 nerve-node rule add allow 'lamp.set:room=office,brightness<=50'
@@ -229,13 +230,18 @@ nerve-node rule add deny  'notes.save:path~~/private/*'
 - A field is a top-level argument of the action, as its schema in
   `cap ls --json` names it. A value is read as that argument's type.
 - A `,` in a value is written `\,`, a `\` before it `\\`. The `,` inside a
-  glob's `{a,b}` or `[...]` needs none.
+  glob's `{a,b}` or `[...]` needs none. In the value of `=` and `!=` a `[` or
+  `{` is a character like any other.
 - An argument the schema marks as a path (`x-nerve-path`) is matched as a
   path, as an `fs` rule matches one: as the node resolved it, `~/` is your
   home, and on Windows case does not count. `path=/srv/a` names that path,
   `path~/srv/*` a folder and below. As a deny rule it also refuses a call
   handed a folder above that place, such as `~`, since the program works
-  below it.
+  below it. A path condition starts with `/` or `~` (a `~` glob also with a
+  wildcard, such as `path~**/.env`), as the paths the node resolves do. A
+  plain string's value does not start with `~/`, which is a path's home: so
+  a rule written for a path argument no longer fits once the program takes a
+  plain string there, and is flagged (see below).
 - Conditions name the arguments of one action: `lamp.set:…`, not `lamp:…`.
   A rule without a pattern (`lamp.set`, `lamp`) still covers every call.
 
@@ -252,20 +258,25 @@ out, cannot be told by the rule. Then a deny rule refuses it and an allow rule
 does not cover it: `lamp.set:brightness>50` on the deny list also refuses a
 `lamp.set` call without `brightness`.
 
-When a capability changes and its schema no longer has an argument a rule
-names, the rule stays, and keeps failing closed: as a deny rule it refuses
-every call of that action, as an allow rule it covers none. `rule ls` says so
-after the rules, `rule ls --json` lists them under `stale`, and the desktop app
-marks the row:
+When a capability changes and its schema no longer fits a rule (an argument
+the rule names is gone or has another type, or a value it names is no longer
+one the schema lists), the rule stays and decides as written, which is no
+longer what you meant. Where its argument is gone it fails closed: as a deny
+rule it refuses every call of that action, as an allow rule it covers none.
+Where its value is no longer listed, `room=bedroom` holds for no call. `rule
+ls` says so after the rules, `rule ls --json` lists them under `stale`, and the
+desktop app marks the row:
 
 ```text
-warning: the deny rule "lamp.set:room=bedroom" no longer fits: lamp.set has no argument room; it takes level; as a deny rule it refuses every call of lamp.set until you change it
+warning: the deny rule "lamp.set:room=bedroom" no longer fits: lamp.set has no argument room; it takes level; as a deny rule it may refuse calls of lamp.set it was not meant for until you change it
 ```
 
 The audit keeps the arguments a rule may pin (top-level strings of up to 200
 characters, numbers and booleans, at most 16) on each entry of such an
 action. The audit pages of the desktop app and the web UI offer each of them:
-pick one, then **Allow with this value** or **Deny with this value**.
+pick one, then **Allow with this value** or **Deny with this value**. A path
+argument is kept as the node resolved it, so the rule names the place the call
+reached, however the agent spelt it.
 
 ## Rule syntax
 
@@ -308,7 +319,9 @@ path it would write to, where it may make a folder; a file it is handed holds
 nothing below it); an `fs` walk
 (`grep`, `find`, `list`) skips the denied place instead. A path rule covers
 only the paths a program marks as such. An unknown rule shape is refused
-when you add it.
+when you add it, and so is an `fs` rule written as conditions
+(`fs.read:path~~/private/*`): an `fs` rule names the path itself
+(`fs.read:~/private/*`).
 
 ## What a wildcard covers
 

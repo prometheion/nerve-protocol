@@ -565,6 +565,9 @@ fn decide_with(policy: &CenterPolicy, env: &Env, call: &Call, rules: &Rules) -> 
         // A deny rule whose conditions the call may meet: one it gives a
         // value of another type, or leaves out, counts (fails closed).
         if let Some(rule) = deny.find_args(call.cap, call.action, &arg, true) {
+            // A pinned string may hold a line break; the reason stays one
+            // line, the rule as `rule ls` shows it.
+            let rule = crate::rules::escape_controls(rule);
             return Decision::Forbidden(format!("{}.{} is denied ({rule})", call.cap, call.action));
         }
     } else {
@@ -1903,6 +1906,24 @@ mod tests {
         assert_eq!(
             lamp(&json!({"room": "bedroom", "brightness": 20})),
             Decision::Forbidden("lamp.set is denied (lamp.set:room=bedroom)".into())
+        );
+        // A pin of a value with a line break refuses on one line.
+        let mut p = policy(Mode::User);
+        p.deny = rules(&["lamp.set:room=a\nb"]);
+        let two = json!({"room": "a\nb"});
+        let call = Call {
+            cap: "lamp",
+            action: "set",
+            effect: Effect::Actuate,
+            targets: &[],
+            command: None,
+            cwd: None,
+            args: two.as_object(),
+            now_ms: NOW,
+        };
+        assert_eq!(
+            decide(&p, &env, &call),
+            Decision::Forbidden("lamp.set is denied (lamp.set:room=a\\nb)".into())
         );
         for args in [
             json!({"room": "office", "brightness": 80}),

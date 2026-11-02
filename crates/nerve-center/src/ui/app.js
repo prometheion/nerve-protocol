@@ -1037,7 +1037,7 @@ function pageChecker() {
 function staleBanner(stale) {
   const list = Object.entries(stale || {});
   if (!list.length) return null;
-  return banner("warn", "alert", `Some rules name an argument their action no longer takes as they say: on the blocklist such a rule refuses every call of that action, as an allow rule it covers none. Change or remove them: ${list.map(([r, why]) => `${r} (${why})`).join("; ")}`);
+  return banner("warn", "alert", `Some rules no longer fit what their action takes (an argument gone or of another type, a value it no longer takes): on the blocklist such a rule may refuse calls it was not meant for, as an allow rule it may not cover the calls it was meant for. Change or remove them: ${list.map(([r, why]) => `${r} (${why})`).join("; ")}`);
 }
 
 // Under a rule field: the arguments the action typed so far takes, which a

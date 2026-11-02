@@ -354,8 +354,8 @@ component RuleList {
                         gap: 2px;
                         Text {
                             text: "No longer fits: " + root.unfit[i] + (root.list == 1
-                                ? ". As a deny rule it refuses every call of its action until you change it."
-                                : ". As an allow rule it covers no call until you change it.");
+                                ? ". As a deny rule it may refuse calls it was not meant for until you change it."
+                                : ". As an allow rule it may not cover the calls it was meant for until you change it.");
                             color: Theme.warn;
                             font-size: Type.caption;
                             wrap: word-wrap;

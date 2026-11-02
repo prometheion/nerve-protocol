@@ -247,9 +247,10 @@ list as it is: while you type one, the line below the field names the
 arguments that action takes, from what the node offers this center, or says
 what is wrong with the conditions so far (an argument it does not take, a value
 not of its type). The node checks it again as it saves it. A rule whose
-action no longer takes the argument it names says so on its row: as a deny
-rule it refuses every call of that action, as an allow rule it covers none,
-until you change it. A list longer than some eight rows (rules, folders, capabilities, a
+action no longer takes the argument or the value it names says so on its row:
+it no longer decides as you meant (a deny rule whose argument is gone refuses
+every call of that action, such an allow rule covers none) until you change
+it. A list longer than some eight rows (rules, folders, capabilities, a
 relay's nodes, the centers on the Overview) scrolls in a box of its own, with
 its scroll bar beside it, so the page stays short. A center's capability
 switches are on [Capabilities](#capabilities).

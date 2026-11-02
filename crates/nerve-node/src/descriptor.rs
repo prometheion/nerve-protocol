@@ -863,13 +863,17 @@ pub fn switchable(cfg: &NodeConfig, entry: &CenterEntry) -> Vec<(String, Vec<Str
 }
 
 /// The arguments schema of `cap.action` among `caps`, the first that has
-/// it, for a rule's conditions (nerve_policy::rules::check_typed).
+/// it, for a rule's conditions (nerve_policy::rules::check_typed): an
+/// action's, or a stream's parameters, which the gate reads as a call's
+/// arguments.
 pub fn arg_schemas(caps: Vec<Capability>) -> impl Fn(&str, &str) -> Option<Value> {
     move |cap, action| {
-        caps.iter()
-            .filter(|c| c.id == cap)
-            .find_map(|c| c.actions.get(action))
-            .map(|a| a.params.clone())
+        caps.iter().filter(|c| c.id == cap).find_map(|c| {
+            c.actions
+                .get(action)
+                .map(|a| a.params.clone())
+                .or_else(|| c.streams.get(action).map(|s| s.params.clone()))
+        })
     }
 }
 

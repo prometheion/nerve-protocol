@@ -1780,7 +1780,7 @@ async fn argument_rules_decide_a_config_capability_on_the_installed_node() {
     assert!(ok, "{said}");
     let (_, ls) = as_owner(&owner, &["rule", "ls"]);
     assert!(
-        ls.contains("warning: the deny rule \"lamp.set:room=bedroom\" no longer fits: lamp.set has no argument room; it takes level; as a deny rule it refuses every call of lamp.set until you change it"),
+        ls.contains("warning: the deny rule \"lamp.set:room=bedroom\" no longer fits: lamp.set has no argument room; it takes level; as a deny rule it may refuse calls of lamp.set it was not meant for until you change it"),
         "{ls}"
     );
     // It fails closed: a call that cannot give the room is refused by it.

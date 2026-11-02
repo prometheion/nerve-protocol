@@ -118,9 +118,13 @@ Entries are in the machine's own rule syntax, `<scope>:<pattern>`:
   some program on a machine takes paths, since it holds those; an allow rule
   for `fs` is listed unless the machine offers `fs`, since it never
   skips the model for a program's call. It also warns about an entry or rule
-  whose conditions name an argument the action no longer takes (or no
-  longer of that type): such a blocklist entry refuses every call of the
-  action, such an allow rule covers none, until you change it.
+  whose conditions no longer fit what a machine publishes for the action (an
+  argument gone or of another type, a value it no longer takes), naming the
+  machine for an entry of every machine. Such a rule no longer decides as you
+  meant until you change it: where its argument is gone, a blocklist entry
+  refuses every call of the action there and an allow rule covers none. The
+  allow button of a checker refusal pins a path argument as the checker
+  matched it (with `..` and `.` taken out).
 - `cmd-re:` for a regular expression over **each command** of the line, e.g.
   `exec.run:cmd-re:^terraform destroy( |$)`. The checker pulls the commands
   apart (see below) and writes each one as `program arg1 arg2 …`: the

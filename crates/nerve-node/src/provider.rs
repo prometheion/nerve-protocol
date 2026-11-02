@@ -1313,8 +1313,10 @@ pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>, installed: bool) 
     // A program's state keys, events and streams are rows too, with their
     // kind; an action's row names none.
     let row = |c: &Capability, source: &str| -> Vec<Value> {
-        // An action's row holds its arguments schema: a rule's conditions
-        // on them are checked against it (nerve_policy::rules::check_typed).
+        // An action's row holds its arguments schema, and a stream's the
+        // schema of its parameters, which the gate's rules read as a call's
+        // arguments: a rule's conditions on them are checked against it
+        // (nerve_policy::rules::check_typed).
         let actions = c
             .actions
             .iter()
@@ -1330,7 +1332,7 @@ pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>, installed: bool) 
         let streams = c
             .streams
             .iter()
-            .map(|(a, d)| (a, d.effect, &d.summary, Some("stream"), None));
+            .map(|(a, d)| (a, d.effect, &d.summary, Some("stream"), Some(&d.params)));
         let units: Vec<_> = match c.provider.as_str() {
             "node" => actions.collect(),
             _ => actions.chain(state).chain(events).chain(streams).collect(),

@@ -51,6 +51,19 @@ impl Call<'_> {
     }
 }
 
+/// `args` with each argument of `marked` (a path) as a condition reads it
+/// ([`Call::arg`]): what an audit entry keeps, so a rule pinned from it
+/// matches the call it was made of, however the path was spelled.
+pub fn as_matched(args: &Map<String, Value>, marked: &[(String, PathMark)]) -> Map<String, Value> {
+    let mut out = args.clone();
+    for (field, _) in marked {
+        if let Some(Value::String(p)) = out.get_mut(field) {
+            *p = normalize_path(p);
+        }
+    }
+    out
+}
+
 /// A compiled rule: how it decides whether a call matches.
 enum Matcher {
     /// `exec.run` structured form.
@@ -113,6 +126,7 @@ impl Rule {
         } else if cap == "fs" {
             let pattern =
                 pattern.ok_or_else(|| format!("rule {rule:?}: an fs rule needs a path"))?;
+            nerve_policy::rules::fs_pattern(rule, pattern)?;
             Matcher::Path(path_glob(pattern).map_err(|e| format!("rule {rule:?}: {e}"))?)
         } else if let Some(p) = pattern {
             // Conditions name the arguments of one action, read as the node
@@ -708,11 +722,26 @@ mod tests {
         assert!(r.blocks_with(&save("/home/any/.ssh/authorized_keys"), None));
         assert!(r.blocks_with(&save("/home/any/x/../.SSH/config"), None));
         assert!(!r.blocks_with(&save("/home/any/notes/a"), None));
+        // An allow rule an audit button pins from the entry's path, which
+        // holds it as matched, covers the call it was made of.
+        let given = "/home/any/x/../notes//./a";
+        let kept = as_matched(save(given).args.unwrap(), &marked);
+        assert_eq!(kept["file"], "/home/any/notes/a");
+        let pinned = nerve_policy::rules::rule_for(
+            "notes",
+            "save",
+            "notes.save",
+            false,
+            Some(("file", &kept["file"])),
+        )
+        .unwrap();
+        assert!(rule(&pinned).matches_with(&save(given), None), "{pinned}");
         for (bad, why) in [
             (
                 "lamp:room=office",
                 "conditions name the arguments of one action",
             ),
+            ("fs.read:path~~/private/*", "names the path itself"),
             ("lamp.set:office", "comes =, !=, <, <=, >, >= or ~"),
             ("exec.signal:*", "starts with an argument's name"),
             ("notes.save:file~[", "condition file~"),
