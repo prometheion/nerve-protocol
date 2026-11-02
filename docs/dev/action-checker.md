@@ -275,7 +275,7 @@ refuse every call). There is no path or build to choose; the
 model is one of the two pinned in `install::MODELS` (`ModelConfig::local_model`,
 d1-2B by default), independent of the device. Each pin carries its repo,
 revision, file, size, SHA-256, licence, the evaluation's default threshold
-and timeout (d1-2B 0.75 / 12 s, Kev-4B 0.25 / 15 s) and the context the
+and timeout (d1-2B 0.75 / 12 s, Kev-4B 0.25 / 35 s) and the context the
 server gets (d1-2B 12,288 tokens, Kev-4B 8,192; see below); a model switch
 (`CheckerConfig::local_installed`) downloads the other file, deletes the first,
 and takes that model's defaults, while a reinstall of the same model keeps the
@@ -526,9 +526,9 @@ ordinary refusals go to 3.1 %. Sweep (catch / ordinary refused / injection):
 | 0.90 | 39.6 / 0.8 / 53.3 | 31.7 / 0.0 / 46.7 |
 
 d1-2B's timeout is about twice its 2-vCPU p95 (5.8 to 6.1 s in three runs):
-12 s, 1.6 times the slowest call seen (7.6 s). Kev-4B keeps 15 s, which a
-desktop CPU stays inside; on 2 vCPUs its p50 is about that, so there it needs
-a longer one.
+12 s, 1.6 times the slowest call seen (7.6 s). Kev-4B's by the same rule
+(16.2 to 17.0 s in two runs): 35 s, where its former 15 s was about its p50
+on 2 vCPUs and failed closed on about half the calls there.
 
 **The context and memory.** A decision model reads the whole prompt in one
 physical batch: llama-server refuses a longer prompt with HTTP 500 ("input
@@ -628,8 +628,9 @@ length is the agent's choice, and padding a call must not get it past the
 model. The refusal names the tokens and the time and says that a longer timeout
 gets longer calls judged. On a desktop CPU d1-2B reads about 1,500 to 1,800
 tokens within its 12 s, so a 2 KB write of code is judged; on 2 vCPUs about 500
-to 600. Kev-4B on a desktop CPU reads 350 to 700 tokens within its 15 s, which
-keeps its memory under 7 GB; a GPU reads much faster, so there a long call can
+to 600. Kev-4B on a desktop CPU reads 800 to 1,500 tokens within its 35 s, which
+keeps its memory under about 8.5 GB; on 2 vCPUs only calls of up to 512 tokens
+are sent to it; a GPU reads much faster, so there a long call can
 still take it up to 13 GB. A call of up to 512 tokens can still hold a slow
 server past the timeout, by what that call takes (about 10 s for d1-2B on
 2 vCPUs, 30 s for Kev-4B). `model::tests` covers the budget against a loopback
@@ -647,7 +648,7 @@ Kev-4B catches more dangerous actions (80.2 %) and far more injection attempts
 matters more than a few seconds per call and 6 GB of memory (up to 13 GB for a
 call with long arguments), or on a machine
 with a GPU, where its latency drops; it is the second model of the one-click
-local mode (Apache-2.0), with its own default threshold of 0.25 and a 15 s
+local mode (Apache-2.0), with its own default threshold of 0.25 and a 35 s
 timeout. d1-2B's licence is the **LFM Open License v1.0** (not Apache); both
 licences are named in the UI and the user guide.
 

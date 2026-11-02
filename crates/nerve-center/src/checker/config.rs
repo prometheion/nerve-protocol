@@ -1316,7 +1316,7 @@ mod tests {
         assert_eq!(c.model.source, ModelSource::Local);
         assert_eq!(c.model.local_model, LocalModel::Kev4b);
         assert_eq!(c.model.threshold, 0.25);
-        assert!(c.model.timeout_ms >= 10_000);
+        assert!(c.model.timeout_ms >= 34_000, "{}", c.model.timeout_ms);
         c.model.threshold = 0.6;
         c.local_installed(true, LocalModel::Kev4b);
         assert_eq!(c.model.threshold, 0.6, "the owner's threshold stays");

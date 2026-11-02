@@ -168,8 +168,9 @@ pub const MODELS: [ModelPin; 2] = [
         sha256: "33ae6b18926502b2209a1bf7d3b61a350d65938441515c686bb87d226a19eff9",
         licence: "Apache-2.0",
         threshold: 0.25,
-        // p95 was 5.6 s on the test CPU; leave room for a busy machine.
-        timeout_ms: 15_000,
+        // p95 was 16.2 to 17.0 s on 2 vCPUs (#178): about twice that, as for
+        // d1-2B. A desktop CPU answers in about 5 s.
+        timeout_ms: 35_000,
         // Its tokenizer reads the largest state as about 4,600 tokens
         // (characters outside the basic plane); the rest holds the longest
         // question.
@@ -936,15 +937,15 @@ mod tests {
     }
 
     /// The two models: d1-2B is the default and first; each has its own
-    /// pins and evaluation defaults, and Kev-4B's timeout leaves room for
-    /// its measured 4 to 5 s per call on a CPU.
+    /// pins and evaluation defaults, and each timeout is about twice the
+    /// model's p95 on 2 vCPUs (d1-2B 6.1 s, Kev-4B 17 s).
     #[test]
     fn the_two_models_have_their_own_pins_and_defaults() {
         assert_eq!(MODELS[0].id, LocalModel::default());
         let d1 = model_pin(LocalModel::D1_2b);
         let kev = model_pin(LocalModel::Kev4b);
         assert_eq!((d1.threshold, kev.threshold), (0.75, 0.25));
-        assert!(kev.timeout_ms >= 10_000, "{}", kev.timeout_ms);
+        assert!(kev.timeout_ms >= 34_000, "{}", kev.timeout_ms);
         assert!(d1.timeout_ms >= 10_000, "{}", d1.timeout_ms);
         assert_ne!(d1.file, kev.file);
         assert_eq!(

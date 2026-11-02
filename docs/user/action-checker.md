@@ -327,10 +327,9 @@ Pick d1-2B when the checker should stay quick on a CPU, Kev-4B when catching
 more matters more than a few seconds per call and memory, or when the machine
 has a GPU. Switching the model downloads the other one and removes the first.
 Each model comes with its own default threshold and timeout (d1-2B 0.75 and
-12 s, Kev-4B 0.25 and 15 s, so normal calls on a desktop CPU are not cut off;
-on 2 vCPUs Kev-4B needs a longer one); a switch sets them, and you can change
-them afterwards. Check that a model's
-licence suits you before you install it.
+12 s, Kev-4B 0.25 and 35 s, so normal calls are not cut off, on 2 vCPUs
+either); a switch sets them, and you can change them afterwards. Check that
+a model's licence suits you before you install it.
 
 The speeds above are for a desktop CPU. A small machine is much slower (d1-2B
 took about 22 s per call on a 4-core virtual machine, Windows); there, raise
