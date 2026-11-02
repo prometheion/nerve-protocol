@@ -932,6 +932,12 @@ mod tests {
         let (failing, asked) = local(model::fake::server_failing(100));
         refused(checker.check(&c, Some(&failing)).await, "not judged");
         assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // The server is counted ready and fails the count: not sent, and
+        // not allowed as a model that is down is (review T5 of #178).
+        let (counting, asked) = local(model::fake::server_failing_to_count(500));
+        counting.budget.as_ref().unwrap().became_ready();
+        refused(checker.check(&c, Some(&counting)).await, "not judged");
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
         // Sent, and the server answers with a probability it cannot read.
         let (unreadable, asked) =
             local(model::fake::server_answering(100, serde_json::Value::Null));

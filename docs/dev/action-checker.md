@@ -672,7 +672,13 @@ The mark goes in the step that makes the restarted process ready, and when the
 restart comes to nothing (the process cannot be started, or exits before it is
 ready with no call sent to it): then the model is down, and allow-and-log
 applies. A call sent to a process that exits before it is ready marks it as
-any other end on a call does. `/tokenize`'s answer is read up to eight bytes per byte of
+any other end on a call does, whether the call's own task saw the end first
+or the supervisor did. The Ready step clears only the mark of an earlier
+process (`marked_in < process`): a call may have ended the process between
+its answer to the probe and that step, and the end is not seen again. A
+`/tokenize` that fails while the supervisor counts the process ready is not a
+model that is down: the server is running and failed on the call's text, or
+has just ended, and the call is refused as not judged. `/tokenize`'s answer is read up to eight bytes per byte of
 the text (at least 128 KiB), so a question over the cap is counted and refused
 as too long, and not reported as an unreachable model. Each new process of the server starts with the
 speeds forgotten (`ReadBudget::restart`, called by `supervise`), as it may read

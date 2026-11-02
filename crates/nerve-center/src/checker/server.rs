@@ -823,6 +823,36 @@ mod tests {
         server.stop().await;
     }
 
+    /// The usual order of a real end: the call's own task sees its connection
+    /// end first, marks the process and frees the slot, and the supervisor
+    /// reaps the process after that. The mark stays (review T5 of #178).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restarted_server_whose_call_saw_the_end_first_stays_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = loaded_but_not_counted_ready(dir.path()).await;
+        let ended = |server: &LocalServer| {
+            server
+                .status()
+                .output
+                .iter()
+                .filter(|l| l.contains("llama-server ended"))
+                .count()
+        };
+        assert_eq!(ended(&server), 1);
+        // The call's task marks this process, as `Flight::died` does, and
+        // the slot is free when the supervisor reaps it.
+        server.budget.die_on_call();
+        kill_fake(dir.path());
+        until(&server, "ended again", &|| ended(&server) == 2).await;
+        assert!(server.died_on_call());
+        assert!(server.takes_calls());
+        std::fs::remove_file(dir.path().join("models-closed")).unwrap();
+        until(&server, "ready", &|| server.ready()).await;
+        assert!(!server.died_on_call());
+        server.stop().await;
+    }
+
     /// Whether the server takes calls is read with the phase and the mark
     /// together: the reader keeps the phase's lock while it reads the mark,
     /// and the supervisor changes the mark under that lock. Otherwise a call

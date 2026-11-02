@@ -209,11 +209,21 @@ impl ReadBudget {
     }
 
     /// The process is ready: calls are sent to it, and the mark of the
-    /// process before it no longer stands.
+    /// process before it no longer stands. A mark of this process stays: a
+    /// call may have ended it between its answer to the probe and this step
+    /// (a failed connect while it runs is cleared by the next count, now
+    /// that it is ready; review T5 of #178).
     pub(super) fn became_ready(&self) {
         let mut s = self.state.lock().unwrap();
         s.ready = true;
-        s.died_on_call = false;
+        if s.marked_in < s.process {
+            s.died_on_call = false;
+        }
+    }
+
+    /// Whether the supervisor counts the process as ready.
+    fn is_ready(&self) -> bool {
+        self.state.lock().unwrap().ready
     }
 
     /// The mark no longer stands: there is no process, and the model is
@@ -606,6 +616,16 @@ async fn ask_local(
                 e.reason()
             )));
         }
+        // A server counted ready that fails the count is running and failed
+        // on this call's text, or has just ended: either way the call is not
+        // judged, and a model that is down is another case (review T5 of
+        // #178).
+        Err(e) if budget.is_ready() => {
+            return Err(ModelError::NotJudged(format!(
+                "the model, which is running, did not count the call's tokens ({})",
+                e.reason()
+            )));
+        }
         Err(e) => return Err(e),
     };
     budget.admit(tokens, timeout_ms)?;
@@ -965,6 +985,38 @@ pub(crate) mod fake {
         )
     }
 
+    /// How the fake answers `/tokenize`.
+    #[derive(Clone)]
+    enum Count {
+        Tokens,
+        /// This HTTP status, with an empty JSON object.
+        Status(u16),
+        /// No answer: the connection ends.
+        HangUp,
+    }
+
+    /// The same, but `/tokenize` answers with this HTTP status.
+    pub(crate) fn server_failing_to_count(status: u16) -> (Endpoint, Arc<AtomicUsize>) {
+        serve_counting(Count::Status(status), 100)
+    }
+
+    /// The same, but it ends the connection of every `/tokenize` request
+    /// without an answer.
+    pub(crate) fn server_hanging_up_on_count() -> (Endpoint, Arc<AtomicUsize>) {
+        serve_counting(Count::HangUp, 100)
+    }
+
+    fn serve_counting(count: Count, tokens: usize) -> (Endpoint, Arc<AtomicUsize>) {
+        serve_with(
+            tokens,
+            Some(tokens),
+            Duration::ZERO,
+            Reply::Noul(json!(0.01)),
+            Duration::ZERO,
+            count,
+        )
+    }
+
     /// How the fake answers a decision request.
     #[derive(Clone)]
     enum Reply {
@@ -983,6 +1035,17 @@ pub(crate) mod fake {
         reply: Reply,
         count_delay: Duration,
     ) -> (Endpoint, Arc<AtomicUsize>) {
+        serve_with(tokens, read, delay, reply, count_delay, Count::Tokens)
+    }
+
+    fn serve_with(
+        tokens: usize,
+        read: Option<usize>,
+        delay: Duration,
+        reply: Reply,
+        count_delay: Duration,
+        count: Count,
+    ) -> (Endpoint, Arc<AtomicUsize>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -990,7 +1053,10 @@ pub(crate) mod fake {
         let counter = asked.clone();
         // Each connection in a thread of its own, as llama-server answers
         // `/tokenize` while it reads a call.
-        let answer = move |mut c: std::net::TcpStream, counter: Arc<AtomicUsize>, reply: Reply| {
+        let answer = move |mut c: std::net::TcpStream,
+                           counter: Arc<AtomicUsize>,
+                           reply: Reply,
+                           count: Count| {
             let mut got = Vec::new();
             let mut buf = [0u8; 8192];
             // The request is small; read until its body is in.
@@ -1010,6 +1076,17 @@ pub(crate) mod fake {
             }
             let text = String::from_utf8_lossy(&got);
             let (status, body) = if text.starts_with("POST /tokenize ") {
+                match count {
+                    Count::HangUp => return,
+                    Count::Status(status) => {
+                        let _ = write!(
+                            c,
+                            "HTTP/1.1 {status} Error\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                        );
+                        return;
+                    }
+                    Count::Tokens => {}
+                }
                 // Like llama-server, it reads special spellings as one
                 // token each unless asked not to; here as one for the
                 // whole text.
@@ -1042,7 +1119,8 @@ pub(crate) mod fake {
             for c in listener.incoming().flatten() {
                 let counter = counter.clone();
                 let reply = reply.clone();
-                std::thread::spawn(move || answer(c, counter, reply));
+                let count = count.clone();
+                std::thread::spawn(move || answer(c, counter, reply, count));
             }
         });
         let ep = Endpoint::parse(&format!("http://127.0.0.1:{port}"), None, None).unwrap();
@@ -1388,7 +1466,9 @@ mod tests {
             "{e}"
         );
         assert!(budget.died_on_call());
-        // It is up: a call is counted, which clears the mark, and sent.
+        // It is up: a call is counted and sent. The budget is not ready
+        // here, so the mark stays until the supervisor counts the process
+        // ready.
         let _ = ask(&ep, &cfg, json!({})).await;
         assert_eq!(asked.load(Ordering::SeqCst), 2);
 
@@ -1482,6 +1562,56 @@ mod tests {
         budget.counted(budget.marks());
         assert!(budget.died_on_call(), "marked, and not ready");
         drop(reading);
+    }
+
+    /// The Ready step clears the mark of the process before it, not one the
+    /// process it makes ready set itself: a call may have ended it between
+    /// its answer to the probe and that step, and the end is then not seen
+    /// again (review T5 of #178).
+    #[test]
+    fn the_ready_step_keeps_the_mark_of_its_own_process() {
+        let budget = linear(12_288, 0.1);
+        budget.restart();
+        budget.die_on_call();
+        budget.became_ready();
+        assert!(budget.died_on_call(), "marked in this process");
+        // The next count clears it, the budget being ready.
+        budget.counted(budget.marks());
+        assert!(!budget.died_on_call());
+        // A mark of the process before goes with the Ready step.
+        budget.die_on_call();
+        budget.restart();
+        budget.became_ready();
+        assert!(!budget.died_on_call(), "marked in the process before");
+    }
+
+    /// A server counted ready that fails the count is not down: it failed on
+    /// the call's text, or has just ended. The call is refused as not
+    /// judged, whatever the owner chose for an unreachable model. A server
+    /// not counted ready is down, and that case goes on as it was (review T5
+    /// of #178).
+    #[tokio::test]
+    async fn a_ready_server_that_fails_the_count_does_not_judge_the_call() {
+        let cfg = with_timeout(2000);
+        for (name, (ep, asked)) in [
+            ("an error status", fake::server_failing_to_count(500)),
+            ("a hang-up", fake::server_hanging_up_on_count()),
+        ] {
+            let budget = Arc::new(linear(12_288, 0.1));
+            let ep = Endpoint {
+                budget: Some(budget.clone()),
+                ..ep
+            };
+            let e = ask(&ep, &cfg, json!({})).await.unwrap_err();
+            assert!(
+                matches!(e, ModelError::Unreachable(_) | ModelError::Bad(_)),
+                "{name}, not ready: {e}"
+            );
+            budget.became_ready();
+            let e = ask(&ep, &cfg, json!({})).await.unwrap_err();
+            assert!(matches!(e, ModelError::NotJudged(_)), "{name}: {e}");
+            assert_eq!(asked.load(Ordering::SeqCst), 0, "{name}: nothing is sent");
+        }
     }
 
     /// The speed is learned from the tokens the server read, not from the

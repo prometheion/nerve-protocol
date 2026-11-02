@@ -355,9 +355,12 @@ call it cannot judge in time.
   allow-and-log as well: with the local model, allow-and-log lets a call
   through only while the model is not running (not installed, starting, or
   failed); a model that ended while it read a call counts as running until it
-  is up again, and the calls in between are refused as lost. If it does not
-  come back up (the page shows it failed or starting again), it counts as down
-  and the calls are allowed and logged again. The
+  is up again, and the calls in between are refused as lost. If the restart
+  does not come up and no call was sent to it, it counts as down and the calls
+  are allowed and logged again (the page may say "starting" in both cases; the
+  refusal or the log entry tells them apart). A running model that fails to
+  count a call's tokens does not judge the call either, and the call is
+  refused. The
   refusal says which; a longer timeout gets longer calls judged.
   On a desktop CPU d1-2B judges a 2 KB write in its 12 s.
 - **The question.** The instructions and the true/false criteria the model is
