@@ -19,7 +19,12 @@ pub const NO_WEB_UI_HERE: &str =
     "the node has no web UI on Windows: the desktop app is its UI there";
 
 /// Why `ui on` is refused for a node that is not the installed one.
-const ONLY_INSTALLED: &str = "the web UI is part of the installed node (`sudo nerve-node install`); a node run by hand serves none";
+fn only_installed() -> String {
+    format!(
+        "the web UI is part of the installed node (`sudo {} install`); a node run by hand serves none",
+        crate::edition::get().program
+    )
+}
 
 #[derive(Debug, Subcommand)]
 pub enum UiCmd {
@@ -118,7 +123,7 @@ pub(super) async fn ui_cmd(
             }
             let live = live_ui(paths).await?;
             if !served_here(paths, live.as_ref()) {
-                return Err(ONLY_INSTALLED.into());
+                return Err(only_installed());
             }
             let (now, _) = read_config(paths).await?;
             let cert = if tls {
@@ -412,7 +417,7 @@ fn status_lines(cfg: &NodeConfig, live: Option<&Value>, print: Option<&str>) -> 
         lines.push(format!("its TLS certificate's SHA-256 fingerprint: {f}"));
     }
     if live.is_some_and(|v| v["served"] == false) {
-        lines.push(ONLY_INSTALLED.into());
+        lines.push(only_installed());
     }
     if cfg.ui.tokens.is_empty() {
         lines.push("no token: `nerve-node ui token add <label>` makes one".into());

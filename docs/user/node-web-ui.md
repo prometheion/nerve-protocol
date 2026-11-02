@@ -69,6 +69,8 @@ one.
   browser opened again, logs in again. No cookie is kept.
 - A session ends with **Sign out**, when its token is revoked, with `ui off`,
   when the node restarts, and with **panic**.
+- **Sign out** also clears what the page kept in this browser for the UI's
+  address, so its other tabs of the UI sign in again too.
 
 ## Panic
 

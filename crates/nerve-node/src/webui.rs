@@ -431,12 +431,10 @@ async fn request(ctx: &Ctx, req: Request, local: SocketAddr) -> Response {
         match req.path.as_str() {
             "/" | "/index.html" => return Response::new(200, "text/html; charset=utf-8", INDEX),
             "/app.js" => return Response::new(200, "text/javascript; charset=utf-8", APP_JS),
-            // What a page that held this port before left at this origin
-            // goes: its storage and its workers.
-            "/login" => {
-                return webui::login_page("Web UI token", "This machine's node.")
-                    .with_header("Clear-Site-Data", "\"storage\"");
-            }
+            // No Clear-Site-Data here: a browser clears the storage of
+            // every tab of the origin with it, and a tab that opens the
+            // login would sign the others out.
+            "/login" => return webui::login_page("Web UI token", "This machine's node."),
             _ => {}
         }
     }
@@ -454,6 +452,9 @@ async fn request(ctx: &Ctx, req: Request, local: SocketAddr) -> Response {
             if let Some((t, _)) = ctx.shared.webui.sessions.of(&req) {
                 ctx.shared.webui.sessions.end(&t);
             }
+            // What a page that held this port before left at this origin
+            // goes with Sign out: its storage and its workers (and the
+            // sessions of this browser's other tabs).
             return Response::json(200, &json!({})).with_header("Clear-Site-Data", "\"storage\"");
         }
         _ => {}

@@ -324,9 +324,9 @@ async fn a_token_logs_in_and_the_session_is_the_header() {
     let cookie = format!("nerve_ui={session}; nerve.session={session}");
     let a = http(addr, "GET", "/api/overview", &[("Cookie", &cookie)], "").await;
     assert_eq!(a.status, 401);
-    // The login page clears what a page that held the port left.
+    // The login page leaves the storage of other tabs alone.
     let a = get(addr, "/login", "").await;
-    assert_eq!(a.header("clear-site-data"), Some("\"storage\""));
+    assert_eq!(a.header("clear-site-data"), None);
 
     // Only loopback names reach a loopback UI (DNS rebinding).
     let a = http(
