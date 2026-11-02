@@ -17,7 +17,9 @@ use nerve_node_desktop::app::{Choose, Ctl, Exec};
 use nerve_node_desktop::broker::Launch;
 use nerve_node_desktop::headless::Screen;
 use nerve_node_desktop::runner::Runner;
-use nerve_node_desktop::{AppWindow, Install, Load, Logs, NodeStatus, Page, Perm, Prefs, Store};
+use nerve_node_desktop::{
+    AppWindow, Caps, Install, Load, Logs, NodeStatus, Page, Perm, Prefs, Store,
+};
 use slint::{ComponentHandle, Model};
 
 const WIDTH: u32 = 1180;
@@ -30,7 +32,10 @@ const INSTALLER: (u32, u32) = (760, 700);
 const SMALL: (u32, u32) = (1280, 800);
 /// The shots also taken on [`SMALL`], as `<name>-1280x800`: the installer's
 /// steps and the dialogs.
-const ALSO_SMALL: [&str; 22] = [
+const ALSO_SMALL: [&str; 25] = [
+    "capabilities-add",
+    "capabilities-edit",
+    "capabilities-remove",
     "setup-",
     "pair-",
     "centers-unpair",
@@ -305,6 +310,68 @@ fn every_page_light_and_dark() {
         run(&["rule", "add", list, rule, "--center", "home"]);
     }
     run(&["cap", "set", "exec.signal", "off", "--center", "home"]);
+    // Capabilities of node.toml, one for another platform, and a program
+    // allowed as a provider that is not attached.
+    let sensors = r#"{"type": "object", "properties": {"chip": {"type": "string", "description": "One chip, like coretemp-isa-0000."}}}"#;
+    for args in [
+        vec![
+            "cap",
+            "add",
+            "sensors.read",
+            "--effect",
+            "sense",
+            "--summary",
+            "The machine's temperatures and fans, as JSON.",
+            "--params",
+            sensors,
+            "--result",
+            r#"{"type": "object"}"#,
+            "--timeout",
+            "10",
+            "--",
+            "sensors",
+            "-j",
+            "--",
+            "{chip}",
+        ],
+        vec![
+            "cap",
+            "add",
+            "disk.free",
+            "--effect",
+            "read",
+            "--summary",
+            "Free space of each mounted file system.",
+            "--",
+            "df",
+            "-h",
+            "--output=source,size,avail,target",
+        ],
+        vec![
+            "cap",
+            "add",
+            "lamp.on",
+            "--effect",
+            "actuate",
+            "--platform",
+            "windows",
+            "--summary",
+            "The desk lamp on.",
+            "--",
+            "C:\\Tools\\lamp.exe",
+            "on",
+        ],
+    ] {
+        run(&args);
+    }
+    run(&["cap", "set", "sensors.read", "on", "--center", "home"]);
+    run(&[
+        "cap",
+        "provider",
+        "allow",
+        "desk",
+        "/usr/lib/nerve-desk/nerve-desk",
+    ]);
     run(&["relay", "add", "laptop-2"]);
 
     // Calls the centers made, as the node records them.
@@ -395,6 +462,8 @@ fn every_page_light_and_dark() {
     opts.home = root.to_path_buf();
     opts.full_rights = Some(false);
     opts.exe = Some(env!("CARGO_BIN_EXE_nerve-node-desktop").into());
+    // It offers the capabilities of node.toml as the installed node does.
+    opts.config_caps_by_hand = true;
     opts.cgroups = Some(Err(
         "the node runs outside a cgroup it may manage; start it as the installed service, or under systemd-run --user --scope -p Delegate=yes".into(),
     ));
@@ -639,6 +708,49 @@ fn every_page_light_and_dark() {
     shots.take("permissions-many-centers");
     perm.set_centers(centers);
     perm.invoke_pick(0);
+
+    // Capabilities: what the node offers, home's switches, the commands of
+    // node.toml and the programs, as on the installed node.
+    let caps = window.global::<Caps>();
+    store.set_installed(true);
+    store.invoke_show(Page::Capabilities);
+    caps.invoke_pick(0);
+    shots.take("capabilities");
+    shots.take_full("capabilities", 2300);
+    caps.invoke_add();
+    shots.take("capabilities-add");
+    caps.set_edit_name("board.feed".into());
+    caps.set_edit_command("feed --chip {chip}".into());
+    caps.set_edit_params(r#"{"type": "object", "properties": {"chip": {"oneOf": [{"type": "string"}, {"type": "integer"}]}}}"#.into());
+    caps.invoke_edit_check();
+    shots.take("capabilities-add-broken");
+    caps.set_edit_open(false);
+    caps.invoke_edit("sensors.read".into());
+    shots.take("capabilities-edit");
+    caps.set_edit_timeout("7200".into());
+    caps.invoke_edit_save();
+    shots.take("capabilities-edit-refused");
+    caps.set_edit_open(false);
+    caps.invoke_remove("disk.free".into());
+    shots.take("capabilities-remove");
+    store.set_confirm_open(false);
+    caps.set_program_name("pad".into());
+    caps.set_program_exe("pad".into());
+    caps.invoke_program_allow();
+    shots.take("capabilities-program-refused");
+    caps.set_program_error("".into());
+    // A node by hand, and Windows: why their commands, or their programs
+    // too, are not offered there.
+    store.set_installed(false);
+    caps.invoke_refresh();
+    shots.take("capabilities-by-hand");
+    let (programs, config) = nerve_node_desktop::view::caps_notes(true, true);
+    caps.set_windows(true);
+    caps.set_programs_note(programs.into());
+    caps.set_config_note(config.into());
+    shots.take_full("capabilities-windows", 2300);
+    caps.set_windows(false);
+    store.set_installed(true);
 
     // The log the running node wrote.
     store.invoke_show(Page::Log);

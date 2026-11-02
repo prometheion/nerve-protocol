@@ -24,6 +24,10 @@ nerve-node cap add sensors.read --effect sense --summary "Temperatures of this m
   --result '{"type": "object"}' -- sensors -j
 ```
 
+In the [desktop app](desktop.md#capabilities), **Capabilities** › **Add a
+capability…** does the same in a form that checks each field as you type,
+and **Edit** and remove beside each one change and remove it.
+
 The name is `cap.action`: the capability and its action, as rules, `cap set`
 and the audit log name them. It may not be one of the node's own (`fs`,
 `exec`, `settings`, `audit`, `node`) nor the center's (`job`, `stream`), and

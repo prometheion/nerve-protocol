@@ -3,7 +3,7 @@
 //! it. One test: Slint takes one platform per process.
 
 use nerve_node_desktop::headless::Screen;
-use nerve_node_desktop::{AppWindow, CapRow, FolderRow, Load, Page, Perm, Store};
+use nerve_node_desktop::{AppWindow, FolderRow, Load, Page, Perm, Store};
 use slint::platform::WindowEvent;
 use slint::{
     ComponentHandle, LogicalPosition, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString,
@@ -56,17 +56,8 @@ fn long_lists_scroll_in_their_own_box() {
     )])));
     perm.set_center("home".into());
     perm.set_mode("allowlist".into());
-    // The page shows once the capabilities are there.
-    let caps: Vec<CapRow> = ["exec", "fs"]
-        .iter()
-        .map(|c| CapRow {
-            name: (*c).into(),
-            action: false,
-            setting: 0,
-            set: false,
-        })
-        .collect();
-    perm.set_caps(ModelRc::new(VecModel::from(caps)));
+    // The page shows once it read its center.
+    perm.set_read(true);
     perm.set_load(Load::Ready);
     let rules = |n: usize| {
         let all: Vec<SharedString> = (0..n)

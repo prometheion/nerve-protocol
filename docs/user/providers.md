@@ -36,7 +36,8 @@ list. To let a program go:
 nerve-node cap provider rm desk
 ```
 
-Its capabilities leave at once. `nerve-node cap provider ls` lists the
+Its capabilities leave at once. In the [desktop app](desktop.md#capabilities)
+the list is on **Capabilities** › **Programs**. `nerve-node cap provider ls` lists the
 programs you allow and whether each is attached; `nerve-node status` lists the
 providers that are attached:
 

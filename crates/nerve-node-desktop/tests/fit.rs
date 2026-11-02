@@ -1,17 +1,21 @@
 //! The app fits a screen of 1280x800: its windows open no larger than such a
 //! screen leaves them, what an install, update or uninstall did fits the
 //! installer and the dialogs without scrolling, and a longer step or dialog
-//! scrolls inside the window.
+//! scrolls inside the window. The sidebar holds all its items at the
+//! window's least height.
 
 use nerve_node_desktop::headless::Screen;
-use nerve_node_desktop::{AppWindow, Install, Load, Page, PairPreview, Perm, Pick, Prefs, Store};
+use nerve_node_desktop::{
+    AppWindow, Caps, Install, Load, Page, PairPreview, Perm, Pick, Prefs, Store,
+};
 use slint::{ComponentHandle, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 
 /// What a screen of 1280x800 leaves a window's content: less a panel (the
 /// taskbar of Windows is 48 pixels high) and the window's title bar.
 const ROOM: (f32, f32) = (1280.0, 720.0);
-/// The app's window, as it opens.
+/// The app's window, as it opens, and as small as it gets (ui/app.slint).
 const APP: (u32, u32) = (1180, 700);
+const LEAST: (u32, u32) = (900, 580);
 
 fn lines(n: usize, text: &str) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(
@@ -262,5 +266,311 @@ fn every_installer_step_and_dialog_fits_a_small_screen() {
     assert!(
         settled(&screen).as_slice() != empty.as_slice(),
         "no password field for the account on Windows"
+    );
+
+    // The dialog of a capability on a screen of 1280x800, with what is
+    // wrong shown at every field: its card stays in the window, and
+    // scrolls to its buttons, whose main one saves.
+    screen.resize(ROOM.0 as u32, ROOM.1 as u32);
+    store.set_page(Page::Capabilities);
+    store.set_elevate_open(true);
+    let foot = bottom(&screen.draw(), 20);
+    store.set_elevate_open(false);
+    let caps = window.global::<Caps>();
+    let saved = std::rc::Rc::new(std::cell::Cell::new(false));
+    let s = saved.clone();
+    caps.on_edit_save(move || s.set(true));
+    let long = "the schema's /properties/chip/oneOf: alternatives are not supported here; give one type, or an enum of plain values for a choice";
+    caps.set_edit_new(true);
+    caps.set_edit_name("sensors.read".into());
+    caps.set_edit_effect(3);
+    let schema: Vec<String> = (0..8).map(|i| format!("  \"line-{i}\": {{}},")).collect();
+    caps.set_edit_params(schema.join("\n").into());
+    for set in [
+        Caps::set_name_error,
+        Caps::set_summary_error,
+        Caps::set_command_error,
+        Caps::set_params_error,
+        Caps::set_result_error,
+        Caps::set_timeout_error,
+        Caps::set_edit_error,
+    ] {
+        set(&caps, long.into());
+    }
+    // Add is there with the fields not ready: a click shows what is missing.
+    caps.set_edit_ready(false);
+    caps.set_edit_open(true);
+    assert!(
+        bottom(&screen.draw(), 20) == foot,
+        "the capability's dialog runs out of the window"
+    );
+    window
+        .window()
+        .dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+            position: slint::LogicalPosition::new(640.0, 360.0),
+            delta_x: 0.0,
+            delta_y: -5000.0,
+        });
+    screen.draw();
+    // Add, the last button: right in the card of 640, above its padding.
+    let at = slint::LogicalPosition::new(
+        (ROOM.0 + 640.0) / 2.0 - 24.0 - 24.0,
+        ROOM.1 - 24.0 - 24.0 - 17.0,
+    );
+    for event in [
+        slint::platform::WindowEvent::PointerMoved { position: at },
+        slint::platform::WindowEvent::PointerPressed {
+            position: at,
+            button: slint::platform::PointerEventButton::Left,
+        },
+        slint::platform::WindowEvent::PointerReleased {
+            position: at,
+            button: slint::platform::PointerEventButton::Left,
+        },
+    ] {
+        window.window().dispatch_event(event);
+    }
+    assert!(
+        saved.get(),
+        "the dialog's Add is not at the end of its scroll"
+    );
+
+    // The Arguments box holds more lines than it shows, and a TextInput
+    // does not scroll itself: the wheel over the box moves its text, and
+    // the cursor sent to the end brings the last line into view. The window
+    // is tall for this, so the dialog's own body has nothing to scroll and
+    // only the box takes the wheel; the box is found by where it does.
+    screen.resize(ROOM.0 as u32, 1600);
+    caps.set_params_scrolled(0.0);
+    screen.draw();
+    let wheel = |x: f32, y: f32, delta_y: f32| {
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+                position: slint::LogicalPosition::new(x, y),
+                delta_x: 0.0,
+                delta_y,
+            });
+        screen.draw();
+    };
+    let mut over = None;
+    'find: for y in (0..1600).step_by(8) {
+        for x in [380.0, 450.0, 520.0, 600.0, 680.0, 760.0, 840.0, 900.0] {
+            wheel(x, y as f32, -20.0);
+            if caps.get_params_scrolled() < 0.0 {
+                over = Some((x, y as f32));
+                break 'find;
+            }
+        }
+    }
+    let (x, y) = over.expect("the wheel does not scroll the Arguments box");
+    wheel(x, y, -5000.0);
+    let end = caps.get_params_scrolled();
+    assert!(end < -20.0, "the box scrolls {end} pixels at most");
+    wheel(x, y, 5000.0);
+    assert_eq!(caps.get_params_scrolled(), 0.0);
+    // A drag up inside the box selects text and leaves the box where it is;
+    // it is the wheel that scrolls. The drag starts high in the box: a press
+    // on a line that is cut off at the bottom brings that line into view, and
+    // how many lines fit depends on the platform's font.
+    let at = |dy: f32| slint::LogicalPosition::new(x, y + dy);
+    window
+        .window()
+        .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at(50.0) });
+    window
+        .window()
+        .dispatch_event(slint::platform::WindowEvent::PointerPressed {
+            position: at(50.0),
+            button: slint::platform::PointerEventButton::Left,
+        });
+    for dy in [44.0, 38.0, 32.0, 26.0, 20.0, 14.0] {
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at(dy) });
+        screen.draw();
+    }
+    window
+        .window()
+        .dispatch_event(slint::platform::WindowEvent::PointerReleased {
+            position: at(14.0),
+            button: slint::platform::PointerEventButton::Left,
+        });
+    screen.draw();
+    assert_eq!(
+        caps.get_params_scrolled(),
+        0.0,
+        "a drag in the Arguments box scrolls it and does not select"
+    );
+    // Focused by a click, Ctrl+End puts the cursor after the last line.
+    for event in [
+        slint::platform::WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(x, y),
+        },
+        slint::platform::WindowEvent::PointerPressed {
+            position: slint::LogicalPosition::new(x, y),
+            button: slint::platform::PointerEventButton::Left,
+        },
+        slint::platform::WindowEvent::PointerReleased {
+            position: slint::LogicalPosition::new(x, y),
+            button: slint::platform::PointerEventButton::Left,
+        },
+    ] {
+        window.window().dispatch_event(event);
+    }
+    let control: SharedString = slint::platform::Key::Control.into();
+    let w = window.window();
+    w.dispatch_event(slint::platform::WindowEvent::KeyPressed {
+        text: control.clone(),
+    });
+    let key: SharedString = slint::platform::Key::End.into();
+    w.dispatch_event(slint::platform::WindowEvent::KeyPressed { text: key.clone() });
+    w.dispatch_event(slint::platform::WindowEvent::KeyReleased { text: key });
+    w.dispatch_event(slint::platform::WindowEvent::KeyReleased {
+        text: control.clone(),
+    });
+    screen.draw();
+    let followed = caps.get_params_scrolled();
+    assert!(
+        followed < end / 2.0,
+        "the box did not follow the cursor to the last line: {followed} of {end}"
+    );
+    // And back to the first line with Ctrl+Home.
+    let key: SharedString = slint::platform::Key::Home.into();
+    w.dispatch_event(slint::platform::WindowEvent::KeyPressed {
+        text: control.clone(),
+    });
+    w.dispatch_event(slint::platform::WindowEvent::KeyPressed { text: key.clone() });
+    w.dispatch_event(slint::platform::WindowEvent::KeyReleased { text: key });
+    w.dispatch_event(slint::platform::WindowEvent::KeyReleased { text: control });
+    screen.draw();
+    assert_eq!(
+        caps.get_params_scrolled(),
+        0.0,
+        "the box did not follow the cursor back to the first line"
+    );
+    // Enter in a one-line field saves, as it does with no field focused:
+    // the TextField takes the key for its own `accepted`, so the dialog's
+    // `enter` never sees it. Each field is found by a click that a typed
+    // letter then lands in.
+    let tap = |x: f32, y: f32| {
+        let position = slint::LogicalPosition::new(x, y);
+        let w = window.window();
+        w.dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+        w.dispatch_event(slint::platform::WindowEvent::PointerPressed {
+            position,
+            button: slint::platform::PointerEventButton::Left,
+        });
+        w.dispatch_event(slint::platform::WindowEvent::PointerReleased {
+            position,
+            button: slint::platform::PointerEventButton::Left,
+        });
+    };
+    let key = |text: SharedString| {
+        w.dispatch_event(slint::platform::WindowEvent::KeyPressed { text: text.clone() });
+        w.dispatch_event(slint::platform::WindowEvent::KeyReleased { text });
+    };
+    let fields = |c: &Caps| {
+        [
+            c.get_edit_name(),
+            c.get_edit_timeout(),
+            c.get_edit_summary(),
+            c.get_edit_command(),
+        ]
+    };
+    let mut entered = [false; 4];
+    for y in (0..1600).step_by(6) {
+        for x in [400.0, 640.0, 900.0] {
+            if !caps.get_edit_open() {
+                caps.set_edit_open(true);
+                screen.draw();
+            }
+            let before = fields(&caps);
+            tap(x, y as f32);
+            key("x".into());
+            let after = fields(&caps);
+            let Some(i) = (0..4).find(|&i| before[i] != after[i]) else {
+                continue;
+            };
+            if entered[i] {
+                continue;
+            }
+            saved.set(false);
+            key(slint::platform::Key::Return.into());
+            assert!(
+                saved.get(),
+                "Enter in the dialog's field {i} (name, time limit, summary, command) does not save"
+            );
+            entered[i] = true;
+        }
+        if entered == [true; 4] {
+            break;
+        }
+    }
+    assert_eq!(entered, [true; 4], "a field of the dialog was not found");
+    caps.set_edit_open(false);
+    screen.resize(ROOM.0 as u32, ROOM.1 as u32);
+    screen.draw();
+
+    // The sidebar at the window's least height: each page's item, About,
+    // and the look's switch at its foot are all in the window, in their
+    // order. A click every few pixels down the sidebar opens them one
+    // after the other; an item pushed below the window's foot opens none.
+    screen.resize(LEAST.0, LEAST.1);
+    install.set_windows(false);
+    store.set_page(Page::Overview);
+    let w = window.as_weak();
+    store.on_show(move |page| w.unwrap().global::<Store>().set_page(page));
+    let w = window.as_weak();
+    store.on_set_appearance(move |i| w.unwrap().global::<Store>().set_appearance(i));
+    let click = |x: f32, y: f32| {
+        let position = slint::LogicalPosition::new(x, y);
+        let w = window.window();
+        w.dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+        w.dispatch_event(slint::platform::WindowEvent::PointerPressed {
+            position,
+            button: slint::platform::PointerEventButton::Left,
+        });
+        w.dispatch_event(slint::platform::WindowEvent::PointerReleased {
+            position,
+            button: slint::platform::PointerEventButton::Left,
+        });
+        screen.draw();
+    };
+    let mut opened = vec![Page::Overview];
+    let mut about = false;
+    for y in (40..LEAST.1 as i32).step_by(6) {
+        click(118.0, y as f32);
+        if store.get_about_open() {
+            about = opened.len() == 9;
+            store.set_about_open(false);
+            screen.draw();
+        }
+        let page = store.get_page();
+        if opened.last() != Some(&page) {
+            opened.push(page);
+        }
+    }
+    assert_eq!(
+        opened,
+        [
+            Page::Overview,
+            Page::Centers,
+            Page::Relay,
+            Page::Policy,
+            Page::Capabilities,
+            Page::Audit,
+            Page::Log,
+            Page::Settings,
+            Page::Help,
+        ],
+        "the sidebar's items at the least height"
+    );
+    assert!(about, "About is not below Help in the window");
+    // Dark, the last third of the switch, 27 pixels above the foot.
+    click(12.0 + 211.0 * 5.0 / 6.0, LEAST.1 as f32 - 27.0);
+    assert_eq!(
+        store.get_appearance(),
+        2,
+        "the look's switch is not at the foot"
     );
 }

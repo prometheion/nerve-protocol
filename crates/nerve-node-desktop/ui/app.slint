@@ -3,16 +3,17 @@
 import { Palette } from "std-widgets.slint";
 import { Theme, Type, Space, Radius, Size, Tone, Motion, Curve } from "theme.slint";
 import {
-    Page, Load, NodeStatus, CenterRow, AuditRow, PairPreview, FolderRow, CapRow, LogRow,
-    HelpArg, RefRow, RefGroup, RelayNodeRow, TunnelRow, Pick, Limit,
+    Page, Load, NodeStatus, CenterRow, AuditRow, PairPreview, FolderRow, CapRow, DeclaredRow,
+    ProgramRow, LogRow, HelpArg, RefRow, RefGroup, RelayNodeRow, TunnelRow, Pick, Limit,
 } from "data.slint";
-import { Store, Perm, Logs, Manual, Prefs, Install } from "store.slint";
+import { Store, Perm, Caps, Logs, Manual, Prefs, Install } from "store.slint";
 import { NavItem, StatusDot, Toast, Banner, Reveal, SchemeSwitch } from "widgets.slint";
 import { OverviewPage } from "overview.slint";
 import { CentersPage } from "centers.slint";
 import { RelayPage } from "relay.slint";
 import { AuditPage } from "audit.slint";
 import { PermissionsPage } from "permissions.slint";
+import { CapabilitiesPage } from "capabilities.slint";
 import { LogPage } from "log.slint";
 import { SettingsPage } from "settings.slint";
 import { HelpPage } from "help.slint";
@@ -20,14 +21,14 @@ import { SetupDialog } from "setup.slint";
 import {
     PairDialog, ConfirmDialog, AboutDialog, ModeDialog, FolderDialog, SudoDialog, ProxyDialog,
     OnceDialog, BackupDialog, RestoreDialog, ElevateDialog, UpdateDialog, UninstallDialog,
-    MissingDialog, RelayNodeDialog, OtherCopyDialog, RelayAddDialog, ConnectDialog,
+    MissingDialog, RelayNodeDialog, OtherCopyDialog, RelayAddDialog, ConnectDialog, CapDialog,
 } from "dialogs.slint";
 import { InstallerView } from "installer.slint";
 
 export {
-    Store, Perm, Logs, Manual, Prefs, Install, Type, Motion, Tone, Page, Load, NodeStatus, CenterRow, AuditRow,
-    PairPreview, FolderRow, CapRow, LogRow, HelpArg, RefRow, RefGroup, RelayNodeRow, TunnelRow,
-    Pick, Limit,
+    Store, Perm, Caps, Logs, Manual, Prefs, Install, Type, Motion, Tone, Page, Load, NodeStatus, CenterRow,
+    AuditRow, PairPreview, FolderRow, CapRow, DeclaredRow, ProgramRow, LogRow, HelpArg, RefRow, RefGroup,
+    RelayNodeRow, TunnelRow, Pick, Limit,
 }
 
 component Sidebar inherits Rectangle {
@@ -99,6 +100,14 @@ component Sidebar inherits Rectangle {
             selected: Store.page == Page.policy;
             clicked => {
                 Store.show(Page.policy);
+            }
+        }
+        NavItem {
+            icon: @image-url("icons/plug.svg");
+            text: "Capabilities";
+            selected: Store.page == Page.capabilities;
+            clicked => {
+                Store.show(Page.capabilities);
             }
         }
         NavItem {
@@ -231,7 +240,8 @@ export component AppWindow inherits Window {
         || Perm.mode-open || Perm.folder-open || Perm.sudo-open || Prefs.proxy-open
         || Prefs.once-open || Prefs.relay-edit-open || Prefs.backup-open || Prefs.restore-open
         || Store.setup-open || Store.elevate-open || Install.update-open || Install.uninstall-open
-        || Store.missing-open || Prefs.relay-add-open || Prefs.connect-open || Install.other-open;
+        || Store.missing-open || Prefs.relay-add-open || Prefs.connect-open || Install.other-open
+        || Caps.edit-open;
     changed dialog-open => {
         if (!self.dialog-open) {
             keys.focus();
@@ -242,7 +252,9 @@ export component AppWindow inherits Window {
     }
 
     // The window's shortcuts: Ctrl+1 to Ctrl+8 open the pages in the
-    // sidebar's order, Ctrl+R and F5 read the page again. They come here
+    // sidebar's order as they were before Capabilities came, which took
+    // Ctrl+9 so that the others kept theirs; Ctrl+R and F5 read the page
+    // again. They come here
     // from wherever the focus is, unless a field takes the key itself.
     keys := FocusScope {
         width: 100%;
@@ -305,6 +317,13 @@ export component AppWindow inherits Window {
             }
         }
         KeyBinding {
+            keys: @keys(Control + "9");
+            enabled: keys.pages;
+            activated => {
+                Store.show(Page.capabilities);
+            }
+        }
+        KeyBinding {
             keys: @keys(Control + "r");
             enabled: keys.pages;
             activated => {
@@ -352,6 +371,7 @@ export component AppWindow inherits Window {
                 if Store.page == Page.centers: CentersPage { }
                 if Store.page == Page.relay: RelayPage { }
                 if Store.page == Page.policy: PermissionsPage { }
+                if Store.page == Page.capabilities: CapabilitiesPage { }
                 if Store.page == Page.audit: AuditPage { }
                 if Store.page == Page.log: LogPage { }
                 if Store.page == Page.settings: SettingsPage { }
@@ -378,6 +398,7 @@ export component AppWindow inherits Window {
         if Perm.mode-open: ModeDialog { }
         if Perm.folder-open: FolderDialog { }
         if Perm.sudo-open: SudoDialog { }
+        if Caps.edit-open: CapDialog { }
         if Prefs.proxy-open: ProxyDialog { }
         if Prefs.once-open: OnceDialog { }
         if Prefs.relay-edit-open: RelayNodeDialog { }
