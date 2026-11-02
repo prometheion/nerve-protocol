@@ -582,13 +582,56 @@ not change it), so the context bounds what an ordinary call takes (5.9 GB, from
 13.3), but a state near the clip still takes up to 13 GB. d1-2B stays under
 3.4 GB.
 
+The question cap holds for the local source only: an endpoint's context is its
+machine's, not the center's, and the Action checker page saves the whole config
+for every change, so a cap there would block every other setting of an owner
+whose endpoint takes a longer question. A question stored over the cap (from
+before it, or with an endpoint, then a switch to the local model) is kept; the
+center logs a warning when it starts the local model with it, and the client
+refuses a call it pushes past the context (below).
+
+**What the model reads in time.** The context bounds the tokens, not the time.
+A decision task is read in one batch, which llama-server does not stop when the
+client gives up on it, and with one slot every other call waits behind it.
+d1-2B on 4 threads took 12 s for 1,982 tokens and 60 s for 8,070
+(`raw/peak-d1-2b-c12288.server.log` in the evaluation folder), Kev-4B 42 s for
+2,002 and 135 s for 4,386; on 2 vCPUs they read about 18 and 60 ms per token.
+So with the 12 s timeout one long call held the server for a minute, and every
+model-checked call of every session in that minute timed out: refused, or with
+allow-and-log let through unjudged (review round 2 of #178). The client
+therefore holds the local server to a budget (`model::ReadBudget`, carried by
+the local `Endpoint` only). It counts the request's tokens with `POST
+/tokenize` first, which the server answers on its HTTP thread at once, not
+behind the busy slot. A request of up to 512 tokens
+(`model::ALWAYS_SENT_TOKENS`, what every earlier release sent) is sent as
+before. A longer one is sent only when it is read within the timeout at the
+slowest speed of the last eight calls that ran alone (a call that overlapped
+another one would count its wait; a timed-out one counts as taking at least the
+timeout), or, before the server's first answer, at the pin's 2-vCPU speed
+(`ModelPin::read_ms`: d1-2B 20 ms, Kev-4B 65 ms per token). A request whose
+tokens with 64 for the prompt template exceed the context is never sent. Either
+is refused as too long (`ModelError::TooLong`), also with allow-and-log: the
+length is the agent's choice, and padding a call must not get it past the
+model. The refusal names the tokens and the time and says that a longer timeout
+gets longer calls judged. On a desktop CPU d1-2B reads about 1,700 to 2,000
+tokens within its 12 s, so a 2 KB write of code is judged; on 2 vCPUs about 550
+to 650. Kev-4B on a desktop CPU reads 400 to 750 tokens within its 15 s, which
+keeps its memory under 7 GB; a GPU reads much faster, so there a long call can
+still take it up to 13 GB. A call of up to 512 tokens can still hold a slow
+server past the timeout, by what that call takes (about 10 s for d1-2B on
+2 vCPUs, 30 s for Kev-4B). `model::tests` covers the budget against a loopback
+fake, `checker::tests` the refusal with allow-and-log, and
+`tests/local_model.rs` (ignored, a real server) a 2,000-character command refused
+at once.
+
 **The default is LiquidAI d1-2B** (Q4_K_M) at a threshold of **0.75**: it
 catches what d1-3B caught (55.4 % against 54.5 %, 73 % of injections, the same
 1.5 % of ordinary work refused) at two thirds of the download, half the memory
 and a third to six tenths of the time. On quality it is **not** the best:
 Kev-4B catches more dangerous actions (80.2 %) and far more injection attempts
 (93 %) at the same ordinary refusals. **Pick Kev-4B** when catching more
-matters more than a few seconds per call and 6 GB of memory, or on a machine
+matters more than a few seconds per call and 6 GB of memory (up to 13 GB for a
+call with long arguments), or on a machine
 with a GPU, where its latency drops; it is the second model of the one-click
 local mode (Apache-2.0), with its own default threshold of 0.25 and a 15 s
 timeout. d1-2B's licence is the **LFM Open License v1.0** (not Apache); both

@@ -356,13 +356,20 @@ call it cannot judge in time.
 - **Threshold.** At or above this probability the call is refused. The default
   (per model, see above) is tuned so ordinary work is almost never refused.
 - **Timeout**, and what to do on an error or a timeout: **fail closed** (refuse
-  the call, the default and the safe choice) or allow-and-log.
+  the call, the default and the safe choice) or allow-and-log. The local model
+  is not sent a call it cannot read within the timeout on your machine (long
+  arguments, a long write on a slow CPU): such a call is refused as too long,
+  with allow-and-log too, so that one long call cannot keep the model busy
+  while every other call waits. The refusal says so; a longer timeout gets
+  longer calls judged. On a desktop CPU d1-2B judges a 2 KB write in its 12 s.
 - **The question.** The instructions and the true/false criteria the model is
   asked. You can edit and reset them. The command text is never put into the
   question — it goes only into the state the model reads — so a crafted command
-  cannot rephrase what is asked. Together they take at most 2,000 bytes (the
-  default about 800; a control character counts as six), so that the local
-  model's context holds the question beside the longest call.
+  cannot rephrase what is asked. With the local model they take at most
+  2,000 bytes together (the default about 800; a control character counts as
+  six), so that its context holds the question beside the longest call; an
+  endpoint takes a longer one. A longer question kept from before is not cut,
+  but shorten it: a long call beside it does not fit and is refused.
 
 If the model is on and cannot be reached, a call is refused (fail closed) with a
 message that says so and where to switch the model off. Switch it to

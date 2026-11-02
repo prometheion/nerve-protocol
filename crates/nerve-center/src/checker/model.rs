@@ -56,6 +56,11 @@ impl Endpoint {
 /// speed measured. Only a longer one is held to the timeout.
 pub const ALWAYS_SENT_TOKENS: usize = 512;
 
+/// Room in the context for the prompt template the server wraps around the
+/// request (d1-2B's is about 30 tokens), as `/tokenize` counts the request's
+/// text only.
+const TEMPLATE_TOKENS: usize = 64;
+
 /// The local server's speed, and with it the longest call it can judge in
 /// time (#178). A decision model reads the whole prompt in one batch, which
 /// the server does not stop when the center gives up on it: a call too long
@@ -111,7 +116,7 @@ impl ReadBudget {
 
     /// Whether a request of `tokens` may be sent with `timeout_ms`.
     fn admit(&self, tokens: usize, timeout_ms: u64) -> Result<(), ModelError> {
-        if tokens > self.context {
+        if tokens + TEMPLATE_TOKENS > self.context {
             return Err(ModelError::TooLong(format!(
                 "about {tokens} tokens, more than the model's context of {} holds",
                 self.context
@@ -492,8 +497,9 @@ mod tests {
             0.01
         );
         assert_eq!(asked.load(Ordering::SeqCst), 1);
-        // A call over the context is never sent, however fast the model.
-        let (ep, asked) = local(4097);
+        // A call over the context (with room for the template) is never
+        // sent, however fast the model.
+        let (ep, asked) = local(4096 - TEMPLATE_TOKENS + 1);
         let e = ask(&ep, &with_timeout(12_000), json!({}))
             .await
             .unwrap_err();

@@ -1241,21 +1241,39 @@ mod tests {
             "<|a|>".repeat(1000),
         ];
         let name = "a".repeat(NAME_MAX);
+        // The node's platform: any 1 to 32 bytes the pairing took (review
+        // r2), of each kind too.
+        let platforms: Vec<String> = kinds
+            .iter()
+            .map(|k| {
+                let mut p = String::new();
+                for c in k.chars() {
+                    if p.len() + c.len_utf8() > 32 {
+                        break;
+                    }
+                    p.push(c);
+                }
+                p
+            })
+            .collect();
+        assert!(platforms.iter().all(|p| p.len() > 28 && p.len() <= 32));
         let (mut d1, mut kev) = (0, 0);
         for target in &kinds {
             for description in &kinds {
                 for arg in &kinds {
-                    let mut args = Map::new();
-                    args.insert("command".into(), Value::String(arg.clone()));
-                    let c = CallInfo {
-                        description,
-                        os: "windows",
-                        tainted: true,
-                        ..call(&name, &name, Effect::Execute, target, &args)
-                    };
-                    let state = model_state(&c);
-                    d1 = d1.max(json_tokens(&state));
-                    kev = kev.max(text_tokens(&state));
+                    for os in &platforms {
+                        let mut args = Map::new();
+                        args.insert("command".into(), Value::String(arg.clone()));
+                        let c = CallInfo {
+                            description,
+                            os,
+                            tainted: true,
+                            ..call(&name, &name, Effect::Execute, target, &args)
+                        };
+                        let state = model_state(&c);
+                        d1 = d1.max(json_tokens(&state));
+                        kev = kev.max(text_tokens(&state));
+                    }
                 }
             }
         }

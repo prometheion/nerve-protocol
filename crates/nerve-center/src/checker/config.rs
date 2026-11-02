@@ -438,12 +438,12 @@ mod d1_3b {
     }
 }
 
-/// The longest question the center takes, in bytes: the instructions and
-/// both criteria, each counted as JSON writes it (a control character takes
-/// six). Every pinned model's context holds a question this long beside the
-/// largest state the checker sends (`install::ModelPin::context`): a prompt
-/// that does not fit is an error on every call, and an error lets the call
-/// through when the owner chose allow-and-log. The default is about 800.
+/// The longest question the center takes for the local source, in bytes:
+/// the instructions and both criteria, each counted as JSON writes it (a
+/// control character takes six). Every pinned model's context holds a
+/// question this long beside the largest state the checker sends
+/// (`install::ModelPin::context`); the client refuses a call that does not
+/// fit (`model::ReadBudget`). The default is about 800.
 pub const QUESTION_MAX: usize = 2000;
 
 /// The question's length as [`QUESTION_MAX`] counts it.

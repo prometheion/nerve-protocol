@@ -3662,6 +3662,20 @@ impl Center {
                 }) {
                 Ok(srv) => {
                     *self.local_model.lock().unwrap() = Some(Arc::new(srv));
+                    // A question stored before the cap (or with an
+                    // endpoint) is kept; the client refuses a call it
+                    // pushes over the context, so say why.
+                    let question = checker::config::question_len(&cfg.model);
+                    if question > checker::config::QUESTION_MAX {
+                        self.log.record(
+                            Level::Warn,
+                            None,
+                            &format!(
+                                "the action checker's model question is {question} bytes long, over the {} the local model's context is sized for: a long call beside it is refused as too long; shorten the question on the Action checker page",
+                                checker::config::QUESTION_MAX
+                            ),
+                        );
+                    }
                     self.log.record(
                         Level::Info,
                         None,
@@ -3801,8 +3815,10 @@ impl Center {
         if cfg.model.instructions.trim().is_empty() {
             return Err("the model question needs instructions".into());
         }
+        // Only the local server's context is the center's to size; an
+        // endpoint's model reads what its own machine holds.
         let question = checker::config::question_len(&cfg.model);
-        if question > checker::config::QUESTION_MAX {
+        if cfg.model.source == ModelSource::Local && question > checker::config::QUESTION_MAX {
             return Err(format!(
                 "the model question (the instructions and both criteria) is {question} bytes long; at most {} fit",
                 checker::config::QUESTION_MAX
@@ -5824,8 +5840,9 @@ pub(crate) mod tests {
     }
 
     /// A question longer than every model's context holds beside the
-    /// largest state is refused at the save (#178), counted as the model
-    /// reads it: a control character as its six-byte escape.
+    /// largest state is refused at the save with the local source (#178),
+    /// counted as the model reads it: a control character as its six-byte
+    /// escape.
     #[test]
     fn a_question_too_long_for_the_context_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -5848,6 +5865,13 @@ pub(crate) mod tests {
             .apply_checker_config(with(format!("{}\u{1}", "x".repeat(fits - 5))))
             .unwrap_err();
         assert!(e.contains("is 2001 bytes"), "{e}");
+        // An endpoint's context is not the center's: a longer question
+        // saves there (review r2), and other settings with it.
+        let mut cfg = with("x".repeat(fits + 1000));
+        cfg.model.source = ModelSource::Endpoint;
+        cfg.model_on = !cfg.model_on;
+        c.apply_checker_config(cfg).unwrap();
+        assert_eq!(c.read(|s| s.checker.model.instructions.len()), fits + 1000);
     }
 
     /// The owner's note on a machine is kept on one line, refused when long,

@@ -165,7 +165,7 @@ pub const MODELS: [ModelPin; 2] = [
         context: 8192,
         // 60 to 62 ms per prompt token on 2 vCPUs, rounded up.
         read_ms: 65.0,
-        summary: "Catches more: about 80 % of dangerous actions and 93 % of injection attempts, refusing about 1.5 % of ordinary work, but about 5 s per call on a desktop CPU, 15 s on 2 vCPUs, and 6 GB of memory.",
+        summary: "Catches more: about 80 % of dangerous actions and 93 % of injection attempts, refusing about 1.5 % of ordinary work, but about 5 s per call on a desktop CPU, 15 s on 2 vCPUs, and about 6 GB of memory, up to 13 GB for a call with long arguments.",
     },
 ];
 
