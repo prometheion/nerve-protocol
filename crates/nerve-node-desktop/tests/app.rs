@@ -88,6 +88,18 @@ fn logged_level(paths: &NodePaths, ts: u64, level: &str, msg: &str) {
     f.write_all(line.as_bytes()).unwrap();
 }
 
+/// Ends what follows the audit or the log when the test ends, as the app
+/// does when it closes, also when an assertion failed: the window and the
+/// controller hold each other, so nothing drops the follow and its process
+/// would outlive the test run.
+struct Ends(std::rc::Rc<Ctl>);
+
+impl Drop for Ends {
+    fn drop(&mut self) {
+        self.0.end();
+    }
+}
+
 #[test]
 fn the_app_drives_the_cli_end_to_end() {
     // No keyring answers the CLI's probe: the app must not offer one.
@@ -113,6 +125,7 @@ fn the_app_drives_the_cli_end_to_end() {
 
     let window = AppWindow::new().unwrap();
     let ctl = Ctl::attach(&window, runner, Exec::Inline);
+    let _ends = Ends(ctl.clone());
     let store = window.global::<Store>();
     ctl.refresh_status();
     assert_eq!(store.get_status_load(), Load::Ready);
