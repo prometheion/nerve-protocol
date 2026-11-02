@@ -601,16 +601,16 @@ and the server read 2,519 (review round 3). A request of up to 512 tokens
 (`model::ALWAYS_SENT_TOKENS`, what every earlier release sent) is sent as
 before. A longer one is sent only when it is read within the timeout at the
 slowest speed of the last eight calls that ran alone (a call that overlapped
-another one would count its wait; a timed-out one counts as taking at least the
-timeout), or, before the server's first answer, at the pin's 2-vCPU speed
+another one would count its wait), or, before the server's first answer, at the pin's 2-vCPU speed
 (`ModelPin::read_ms`: d1-2B 20 ms, Kev-4B 65 ms per token). A call's speed
 is taken from the tokens the server says it read (`usage.input_tokens` of its
 answer), not from the count it was let through with: that count only bounds
 them, and a call padded with plain `<` counts about four times what d1-2B
 reads, so calls of `<` taught a speed four times too fast, after which a call
 that held the server for a minute was let through (review round 4). An answer
-that does not say teaches nothing; a timed-out call has none, and counts as
-the timeout for the tokens counted, but never as faster than the slowest speed
+that does not say teaches nothing; a call the server has not answered after
+ten timeouts (`STUCK_AFTER_TIMEOUTS`, a stuck server) has none, and counts as
+that time for the tokens counted, but never as faster than the slowest speed
 already kept (or the assumed one): a call of up to 512 tokens is not checked
 against the timeout, and a timeout the owner raised later would otherwise turn
 its too fast speed into a stall (review round 5). A token of a long prompt also takes longer than one of a short
@@ -631,13 +631,41 @@ tokens within its 12 s, so a 2 KB write of code is judged; on 2 vCPUs about 500
 to 600. Kev-4B on a desktop CPU reads 800 to 1,500 tokens within its 35 s, which
 keeps its memory under about 8.5 GB; on 2 vCPUs only calls of up to 512 tokens
 are sent to it; a GPU reads much faster, so there a long call can
-still take it up to 13 GB. A call of up to 512 tokens can still hold a slow
-server past the timeout, by what that call takes (about 10 s for d1-2B on
-2 vCPUs, 30 s for Kev-4B). `model::tests` covers the budget against a loopback
-fake, `checker::tests` the refusal with allow-and-log, and
-`tests/local_model.rs` (ignored, a real server) a 2,000-character command and
-one of special-token spellings, both refused at once, and that calls of `<`
-do not make the learned speed faster.
+still take it up to 13 GB. A call of up to 512 tokens can still run past the timeout on a slow
+server (by the budget's own estimate Kev-4B reads 512 tokens in about 42 s on
+2 vCPUs, d1-2B in 12.1 s).
+
+The budget bounds each call as if it ran alone, but the server reads one at a
+time, and a session runs up to 16 calls at once. So the client also holds the
+server's one slot itself (a semaphore in the budget, as `-np 1`): a call is
+sent only once the call before it was answered. A task of its own sends it and
+keeps the slot until the server answered, also after the caller gave up at its
+timeout, since the server reads a call it took to the end; that whole read
+gives the call's speed. The timeout covers the wait for the slot and the read.
+A call that did not get the slot within it, or that got it with less time left
+than its estimate (one of up to 512 tokens too), is not sent and is refused as
+busy (`ModelError::Busy`). A call that was sent and got no answer in time, or
+none that could be read (an HTTP error, a reset connection, no `noul`), is
+refused as not judged (`ModelError::NotJudged`). Both are refused with
+allow-and-log too, as `TooLong` is: before review T1 of #178 parallel calls
+queued in the server, and every call behind them, of any session, timed out
+and was with allow-and-log let through unjudged ("model unreachable"), and so
+was a Kev-4B call of 430 to 512 tokens on 2 vCPUs. With the local model,
+allow-and-log covers only a server that does not answer `/tokenize` (not
+installed, starting, crashed). Each new process of the server starts with the
+speeds forgotten (`ReadBudget::restart`, called by `supervise`), as it may read
+slower than the one before it: a Vulkan build that finds no usable GPU at its
+start runs on the CPU, and a machine may swap after an out-of-memory kill.
+How many calls one session may have waiting is not bounded (the queue is
+first come, first served), so one session's many calls can keep another's
+refused as busy for as long as they come; that is a refusal, never a call let
+through.
+
+`model::tests` covers the budget and the slot against a loopback fake,
+`checker::tests` the refusals with allow-and-log, `server::tests` the restart,
+and `tests/local_model.rs` (ignored, a real server) a 2,000-character command
+and one of special-token spellings, both refused at once, and that calls of
+`<` do not make the learned speed faster.
 
 **The default is LiquidAI d1-2B** (Q4_K_M) at a threshold of **0.75**: it
 catches what d1-3B caught (55.4 % against 54.5 %, 73 % of injections, the same

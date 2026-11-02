@@ -345,11 +345,17 @@ call it cannot judge in time.
   (per model, see above) is tuned so ordinary work is almost never refused.
 - **Timeout**, and what to do on an error or a timeout: **fail closed** (refuse
   the call, the default and the safe choice) or allow-and-log. The local model
-  is not sent a call it cannot read within the timeout on your machine (long
-  arguments, a long write on a slow CPU): such a call is refused as too long,
-  with allow-and-log too, so that one long call cannot keep the model busy
-  while every other call waits. The refusal says so; a longer timeout gets
-  longer calls judged. On a desktop CPU d1-2B judges a 2 KB write in its 12 s.
+  reads one call at a time, and is not sent a call it cannot read within the
+  timeout on your machine: a call too long for that (long arguments, a long
+  write on a slow CPU) is refused as too long, and one that would wait too long
+  behind the calls checked before it as busy, so that long calls, or many at
+  once, cannot keep the model busy while every other call waits. A call the
+  running local model took and then did not judge (it ran past the timeout, or
+  the model failed on it) is refused too. All three are refused with
+  allow-and-log as well: with the local model, allow-and-log lets a call
+  through only while the model is not running (not installed, starting, or
+  failed). The refusal says which; a longer timeout gets longer calls judged.
+  On a desktop CPU d1-2B judges a 2 KB write in its 12 s.
 - **The question.** The instructions and the true/false criteria the model is
   asked. You can edit and reset them. The command text is never put into the
   question — it goes only into the state the model reads — so a crafted command
@@ -361,7 +367,8 @@ call it cannot judge in time.
 
 If the model is on and cannot be reached, a call is refused (fail closed) with a
 message that says so and where to switch the model off. Switch it to
-allow-and-log if you would rather let calls through when the model is down.
+allow-and-log if you would rather let calls through when the model is down
+(for the local model: not running, see **Timeout** above).
 
 ## Taint
 
