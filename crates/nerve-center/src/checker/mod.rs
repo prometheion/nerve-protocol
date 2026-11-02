@@ -429,6 +429,19 @@ impl Checker {
                     "the center's action checker refused this call: its decision model was running and took the call, but did not judge it ({why}), and such a call is refused also when the owner chose allow-and-log for a model that cannot be reached. A call with shorter arguments is judged as usual; if calls keep ending this way, the timeout is too short for the model on this machine. The owner can raise the timeout or switch the model off in the center's web UI (Action checker); {switch}."
                 ),
             },
+            // Not sent: the local model could not be reached while an earlier
+            // call was in it, which is most likely its end on that call. It
+            // is refused with allow-and-log too (review T3 of #178). The
+            // text does not say the call was taken, or blame the timeout:
+            // neither is so.
+            Err(model::ModelError::Lost(why)) => Decision::Refuse {
+                layer: Layer::Model,
+                scope,
+                detail: format!("model lost: {why}"),
+                message: format!(
+                    "the center's action checker refused this call without asking its decision model: the model was lost while it read an earlier call ({why}), and a call is refused then also when the owner chose allow-and-log for a model that cannot be reached. The same call is judged as usual once the model is up again; a longer timeout does not change that. The owner can switch the model off in the center's web UI (Action checker); {switch}."
+                ),
+            },
             Err(e) => fail(e.to_string()),
         }
     }
@@ -924,12 +937,18 @@ mod tests {
             local(model::fake::server_answering(100, serde_json::Value::Null));
         refused(checker.check(&c, Some(&unreadable)).await, "not judged");
         assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
-        // The server ended on an earlier call and is starting again: not
-        // sent.
-        let (restarting, asked) = local(model::fake::server(100, Duration::ZERO));
+        // The server ended on an earlier call and is starting again (nothing
+        // answers on its port): not sent, and not allowed as a model that is
+        // down is.
+        let gone = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = gone.local_addr().unwrap().port();
+        drop(gone);
+        let restarting = Endpoint {
+            budget: Some(Arc::new(model::ReadBudget::new(12_288, 0.1, f64::INFINITY))),
+            ..Endpoint::parse(&format!("http://127.0.0.1:{port}"), None, None).unwrap()
+        };
         restarting.budget.as_ref().unwrap().die_on_call();
-        refused(checker.check(&c, Some(&restarting)).await, "not judged");
-        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+        refused(checker.check(&c, Some(&restarting)).await, "model lost");
         // No server listening: allowed and logged, as the owner chose.
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()

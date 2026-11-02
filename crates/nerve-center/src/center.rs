@@ -3696,7 +3696,8 @@ impl Center {
     }
 
     /// The model endpoint to use now: the owner's endpoint, or the local
-    /// server's once it is ready. `None` when the model is on but not
+    /// server's once it is ready (or while it starts again after it ended
+    /// on a call). `None` when the model is on but not
     /// reachable (the checker then fails closed, or logs, by its setting).
     fn resolved_endpoint(&self, checker: &Checker) -> Option<Endpoint> {
         match checker.model_source() {
@@ -3708,7 +3709,7 @@ impl Center {
                 // calls of that window as not judged, and allow-and-log
                 // does not let them through as it does for a model that is
                 // down (review T2 of #178).
-                (srv.ready() || srv.died_on_call()).then(|| srv.endpoint())
+                srv.takes_calls().then(|| srv.endpoint())
             }
         }
     }

@@ -159,6 +159,16 @@ impl LocalServer {
         self.inner.lock().unwrap().phase == Some(Phase::Ready)
     }
 
+    /// Whether calls are sent to the server: it is ready, or it ended on a
+    /// call and is starting again, when the client refuses them as lost.
+    /// Both are read under the lock the supervisor changes them under, so a
+    /// call never meets the moment between "not ready" and "marked", or
+    /// between "ready" and "unmarked" (review T3 of #178).
+    pub fn takes_calls(&self) -> bool {
+        let i = self.inner.lock().unwrap();
+        i.phase == Some(Phase::Ready) || self.budget.died_on_call()
+    }
+
     pub fn status(&self) -> Status {
         let i = self.inner.lock().unwrap();
         Status {
@@ -234,6 +244,7 @@ async fn supervise(
         match run_once(&program, &args, port, timeout, &inner, &shutdown, &budget).await {
             RunEnd::NotDecision => {
                 // A clear, final failure: do not restart.
+                budget.settled();
                 exited.notify_waiters();
                 return;
             }
@@ -245,6 +256,9 @@ async fn supervise(
             }
             RunEnd::Exited => {}
             RunEnd::StartFailed(e) => {
+                // The restart came to nothing: the model is down, not
+                // ended on a call, and allow-and-log applies as it says.
+                budget.settled();
                 set(&inner, |i| {
                     i.phase = Some(Phase::Failed);
                     i.message = format!("cannot start {}: {e}", program.display());
@@ -327,6 +341,9 @@ async fn run_once(
             }
             status = child.wait() => {
                 let how = status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
+                // It ended before it was ready: a restart that did not come
+                // up (review T3 of #178).
+                budget.settled();
                 set(inner, |i| {
                     if i.phase != Some(Phase::Failed) {
                         i.phase = Some(Phase::Starting);
@@ -339,12 +356,13 @@ async fn run_once(
             _ = tokio::time::sleep(Duration::from_millis(500)) => {
                 match tokio::time::timeout(timeout, model::is_decision_model(&endpoint)).await {
                     Ok(Ok(true)) => {
-                        // Calls are sent to the server again.
-                        budget.recovered();
                         set(inner, |i| {
                             i.phase = Some(Phase::Ready);
                             i.url = Some(url.clone());
                             i.message.clear();
+                            // Calls are sent to the server again. Unmarked
+                            // with the phase, under its lock.
+                            budget.settled();
                         });
                         // Stay here until the child exits or we are stopped.
                         tokio::select! {
@@ -357,6 +375,9 @@ async fn run_once(
                                     .map(|s| s.to_string())
                                     .unwrap_or_else(|e| e.to_string());
                                 set(inner, |i| {
+                                    // Marked with the phase, under its lock,
+                                    // if a call was in it.
+                                    budget.ended();
                                     i.phase = Some(Phase::Starting);
                                     i.url = None;
                                     push_line(&mut i.output, format!("llama-server ended ({how})"));
@@ -603,6 +624,173 @@ mod tests {
         until("ready again", &|| server.ready()).await;
         assert!(!server.died_on_call());
         assert_eq!(server.budget.ms_per_token(), pin.read_ms);
+        server.stop().await;
+    }
+
+    /// Starts the fake server and waits until it is ready.
+    #[cfg(unix)]
+    async fn ready_fake(dir: &std::path::Path) -> LocalServer {
+        let bin = super::fake::fake_llama_server(dir);
+        let model = dir.join("model.gguf");
+        std::fs::write(&model, b"x").unwrap();
+        let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
+        let server = LocalServer::start(bin, model, false, 5000, pin).expect("start");
+        until(&server, "ready", &|| server.ready()).await;
+        server
+    }
+
+    #[cfg(unix)]
+    async fn until(server: &LocalServer, what: &str, f: &dyn Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !f() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{what}: {:?}",
+                server.status()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    fn kill_fake(dir: &std::path::Path) {
+        let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
+        let killed = std::process::Command::new("kill")
+            .args(["-9", pid.trim()])
+            .status()
+            .unwrap();
+        assert!(killed.success());
+    }
+
+    /// A server that ends with a call in it is marked in the same step as it
+    /// leaves the ready phase, without waiting for that call's own task to
+    /// see its connection end: a call that arrives in between would find it
+    /// neither ready nor marked, and be let through by allow-and-log (review
+    /// T3 of #178). The mark goes when the restarted process is ready.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_server_that_ends_with_a_call_in_it_is_marked_as_it_leaves_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = ready_fake(dir.path()).await;
+        let reading = server.budget.hold_slot();
+        kill_fake(dir.path());
+        until(&server, "ended", &|| !server.ready()).await;
+        assert!(server.died_on_call());
+        assert!(server.takes_calls());
+        drop(reading);
+        until(&server, "ready again", &|| server.ready()).await;
+        assert!(!server.died_on_call());
+        server.stop().await;
+    }
+
+    /// A server that ends with no call in it is down, not marked.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_server_that_ends_with_no_call_in_it_is_not_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = ready_fake(dir.path()).await;
+        kill_fake(dir.path());
+        until(&server, "ended", &|| !server.ready()).await;
+        assert!(!server.died_on_call());
+        assert!(!server.takes_calls());
+        server.stop().await;
+    }
+
+    /// A restart that does not come up leaves the mark: the model is down
+    /// then, which is what the docs say allow-and-log applies to, and not
+    /// "starting again" for as long as the center runs (review T3 of #178).
+    /// Either way the new process does not come up: it ends at once, or it
+    /// cannot be started.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_that_does_not_come_up_clears_the_mark() {
+        use std::os::unix::fs::PermissionsExt;
+        for ends_at_once in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let server = ready_fake(dir.path()).await;
+            let bin = dir.path().join("llama-server");
+            // The running process keeps its file; a restart finds this.
+            std::fs::remove_file(&bin).unwrap();
+            if ends_at_once {
+                std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+                std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let reading = server.budget.hold_slot();
+            kill_fake(dir.path());
+            until(&server, "marked", &|| server.died_on_call()).await;
+            drop(reading);
+            // The restart follows after the backoff.
+            until(&server, "unmarked", &|| !server.died_on_call()).await;
+            assert!(!server.takes_calls(), "ends_at_once: {ends_at_once}");
+            server.stop().await;
+        }
+    }
+
+    /// Whether the server takes calls is read with the phase and the mark
+    /// together: the reader keeps the phase's lock while it reads the mark,
+    /// and the supervisor changes the mark under that lock. Otherwise a call
+    /// could read "not ready" just before the restarted server is ready and
+    /// "not marked" just after the mark went, and be let through by
+    /// allow-and-log (review T3 of #178).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_phase_is_read_together_with_the_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
+        // A server that cannot start (the file cannot be run): not ready,
+        // not marked.
+        let bin = dir.path().join("llama-server");
+        std::fs::write(&bin, "x").unwrap();
+        let server = Arc::new(
+            LocalServer::start(bin, dir.path().join("m"), false, 5000, pin).expect("start"),
+        );
+        while server.status().phase != Phase::Failed {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let mark = server.budget.hold_state();
+        let asking = {
+            let server = server.clone();
+            std::thread::spawn(move || server.takes_calls())
+        };
+        // The reader waits for the mark, holding the phase's lock.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while server.inner.try_lock().is_ok() {
+            assert!(std::time::Instant::now() < deadline, "never waited");
+            // Not tokio's sleep: the supervisor blocked on the mark may hold
+            // the thread that drives its timers.
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(mark);
+        assert!(!asking.join().unwrap());
+        server.stop().await;
+    }
+
+    /// The supervisor unmarks the server in the step that makes it ready,
+    /// under the phase's lock, and sets the phase first (review T3 of
+    /// #178).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_mark_goes_in_the_step_that_makes_the_server_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = super::fake::fake_llama_server(dir.path());
+        let model = dir.path().join("model.gguf");
+        std::fs::write(&model, b"x").unwrap();
+        let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
+        let server = LocalServer::start(bin, model, false, 5000, pin).expect("start");
+        // The supervisor is past its restart and probing; the first probe is
+        // after 500 ms.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mark = server.budget.hold_state();
+        // When the server answers, the step waits for the mark with the
+        // phase's lock held: nobody reads between the two.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while server.inner.try_lock().is_ok() {
+            assert!(std::time::Instant::now() < deadline, "never waited");
+            // Not tokio's sleep: the supervisor blocked on the mark may hold
+            // the thread that drives its timers.
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(mark);
+        until(&server, "ready", &|| server.ready()).await;
         server.stop().await;
     }
 }

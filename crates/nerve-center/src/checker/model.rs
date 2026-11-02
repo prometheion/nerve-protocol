@@ -143,14 +143,39 @@ impl ReadBudget {
 
     /// Whether the server went away while it read a call, and its
     /// replacement is not up yet. The calls in that window are refused as
-    /// not judged: the server is not just down, it ended on a call, and
-    /// that call may be why (review T2 of #178).
+    /// lost: the server is not just down, it ended on a call, and that call
+    /// may be why (review T2 of #178).
     pub(crate) fn died_on_call(&self) -> bool {
         self.state.lock().unwrap().died_on_call
     }
 
-    /// The restarted server answers: calls are sent to it again.
-    pub(super) fn recovered(&self) {
+    /// Whether a call is in the server (it holds the slot).
+    fn reading(&self) -> bool {
+        self.slot.available_permits() == 0
+    }
+
+    /// Whether a failure to reach the server may be the end of one that had
+    /// a call: a call is in it, or one was and marked it. The slot is read
+    /// first: `read_alone` marks before it frees the slot, so a caller that
+    /// finds the slot free also finds the mark (review T3 of #178).
+    fn lost_a_call(&self) -> bool {
+        self.reading() || self.died_on_call()
+    }
+
+    /// The server process ended. If a call was in it, it ended on that call,
+    /// and the mark is set here without waiting for the call's own task to
+    /// see its connection end: the calls in between would meet a server
+    /// that is neither ready nor marked (review T3 of #178).
+    pub(super) fn ended(&self) {
+        if self.reading() {
+            self.state.lock().unwrap().died_on_call = true;
+        }
+    }
+
+    /// The mark no longer stands: the server answers, or its restart came
+    /// to nothing and it is down, which is not the same as ended on a call
+    /// (review T3 of #178).
+    pub(super) fn settled(&self) {
         self.state.lock().unwrap().died_on_call = false;
     }
 
@@ -159,6 +184,21 @@ impl ReadBudget {
     #[cfg(test)]
     pub(crate) fn die_on_call(&self) {
         self.state.lock().unwrap().died_on_call = true;
+    }
+
+    /// Holds the budget's lock, so a step that needs it waits.
+    #[cfg(test)]
+    pub(super) fn hold_state(&self) -> impl Sized + '_ {
+        self.state.lock().unwrap()
+    }
+
+    /// Takes the slot, as a call in the server does.
+    #[cfg(test)]
+    pub(crate) fn hold_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
+        self.slot
+            .clone()
+            .try_acquire_owned()
+            .expect("the slot is free")
     }
 
     /// Lands a call of `tokens` that took `ms`, as an answered one does.
@@ -361,6 +401,12 @@ pub enum ModelError {
     /// call's tokens), so the call itself may be why: its read took longer
     /// than the timeout, or the server failed on it (review T1 of #178).
     NotJudged(String),
+    /// The call was not sent: the local model could not be reached while an
+    /// earlier call was in it, so it most likely ended on that call and is
+    /// starting again (or it stopped answering). Refused whatever the owner
+    /// chose for an unreachable model, as that call may be why it ended
+    /// (review T3 of #178).
+    Lost(String),
 }
 
 impl ModelError {
@@ -371,7 +417,8 @@ impl ModelError {
             | ModelError::Bad(e)
             | ModelError::TooLong(e)
             | ModelError::Busy(e)
-            | ModelError::NotJudged(e) => e,
+            | ModelError::NotJudged(e)
+            | ModelError::Lost(e) => e,
         }
     }
 }
@@ -398,6 +445,12 @@ impl std::fmt::Display for ModelError {
                 write!(
                     f,
                     "the action checker's model took the call but did not judge it: {e}"
+                )
+            }
+            ModelError::Lost(e) => {
+                write!(
+                    f,
+                    "the action checker's model was lost while it read an earlier call: {e}"
                 )
             }
         }
@@ -472,15 +525,26 @@ async fn ask_local(
 ) -> Result<f64, ModelError> {
     // The timeout covers the wait for the slot as well as the read.
     let deadline = tokio::time::Instant::now() + timeout;
-    // The server ended on a call and is starting again: refused, not sent
-    // (the center keeps this endpoint for the window, so the call does not
-    // meet "not running" and its allow-and-log).
-    if budget.died_on_call() {
-        return Err(ModelError::NotJudged(
-            "the model ended while it read an earlier call, and is starting again".into(),
-        ));
-    }
-    let tokens = tokenize(endpoint, &body.to_string(), timeout).await?;
+    // The count is also the probe of a server marked as ended on a call: one
+    // that answers is up (a mark set by a failed connect while it ran
+    // clears here), and one that does not is refused as lost, not sent. The
+    // same when a call is in the server and it cannot be reached: it has
+    // just ended on that call, whether or not the center saw it yet. The
+    // center keeps the endpoint for the window, so the call does not meet
+    // "not running" and its allow-and-log (review T2 and T3 of #178).
+    let tokens = match tokenize(endpoint, &body.to_string(), timeout).await {
+        Ok(tokens) => {
+            budget.settled();
+            tokens
+        }
+        Err(e) if budget.lost_a_call() => {
+            return Err(ModelError::Lost(format!(
+                "the model ended while it read an earlier call and is starting again, or stopped answering ({})",
+                e.reason()
+            )));
+        }
+        Err(e) => return Err(e),
+    };
     budget.admit(tokens, timeout_ms)?;
     let slot = match budget.slot.clone().try_acquire_owned() {
         Ok(slot) => {
@@ -1222,10 +1286,24 @@ mod tests {
         assert_eq!(asked.load(Ordering::SeqCst), 0);
     }
 
+    /// An endpoint on a port nothing listens on, with `budget`: a server that
+    /// is down.
+    fn nothing_listening(budget: &Arc<ReadBudget>) -> Endpoint {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        Endpoint {
+            budget: Some(budget.clone()),
+            ..Endpoint::parse(&format!("http://127.0.0.1:{port}"), None, None).unwrap()
+        }
+    }
+
     /// A server that ended without answering a call it took is gone, not
-    /// slow: the calls after it are refused as not judged, not sent, until
-    /// the restarted server is up (review T2 of #178). An HTTP error is not
-    /// that.
+    /// slow: the calls after it are refused as lost, not sent, until the
+    /// restarted server is up (review T2 and T3 of #178). An HTTP error is
+    /// not that.
     #[tokio::test]
     async fn a_server_that_ended_on_a_call_gets_no_calls_until_it_is_back() {
         let budget = Arc::new(linear(12_288, 0.1));
@@ -1239,13 +1317,15 @@ mod tests {
         assert!(matches!(e, ModelError::NotJudged(_)), "{e}");
         assert!(budget.died_on_call());
         assert_eq!(asked.load(Ordering::SeqCst), 1);
-        let e = ask(&ep, &cfg, json!({})).await.unwrap_err();
+        // The restarting process does not answer yet.
+        let restarting = nothing_listening(&budget);
+        let e = ask(&restarting, &cfg, json!({})).await.unwrap_err();
         assert!(
-            matches!(&e, ModelError::NotJudged(why) if why.contains("ended")),
+            matches!(&e, ModelError::Lost(why) if why.contains("ended")),
             "{e}"
         );
-        assert_eq!(asked.load(Ordering::SeqCst), 1);
-        budget.recovered();
+        assert!(budget.died_on_call());
+        // It is up: a call is counted, which clears the mark, and sent.
         let _ = ask(&ep, &cfg, json!({})).await;
         assert_eq!(asked.load(Ordering::SeqCst), 2);
 
@@ -1257,6 +1337,44 @@ mod tests {
         };
         let e = ask(&ep, &cfg, json!({})).await.unwrap_err();
         assert!(matches!(e, ModelError::NotJudged(_)), "{e}");
+        assert!(!budget.died_on_call());
+    }
+
+    /// A server that ends while a call is in it closes the connections of
+    /// the calls counting their tokens at that moment, and of those that
+    /// come before the center has seen it end: they cannot reach it, and are
+    /// refused as lost, not reported as an unreachable model, which
+    /// allow-and-log lets through. With no call in the server it is just
+    /// down (review T3 of #178).
+    #[tokio::test]
+    async fn a_call_that_cannot_reach_a_server_with_a_call_in_it_is_lost() {
+        let budget = Arc::new(linear(12_288, 0.1));
+        let down = nothing_listening(&budget);
+        let cfg = with_timeout(2000);
+        let reading = budget.hold_slot();
+        let e = ask(&down, &cfg, json!({})).await.unwrap_err();
+        assert!(matches!(e, ModelError::Lost(_)), "{e}");
+        // Nothing is in the server and nothing marked it: it is just down.
+        drop(reading);
+        let e = ask(&down, &cfg, json!({})).await.unwrap_err();
+        assert!(matches!(e, ModelError::Unreachable(_)), "{e}");
+    }
+
+    /// A mark set by a connection that failed while the server went on
+    /// running (the center ran out of file descriptors, say) does not refuse
+    /// calls until the next restart: a server that counts a call's tokens is
+    /// up, and the mark is gone (review T3 of #178).
+    #[tokio::test]
+    async fn a_mark_on_a_server_that_answers_is_cleared_by_the_next_call() {
+        let budget = Arc::new(linear(12_288, 0.1));
+        let (ep, asked) = fake::server(100, Duration::ZERO);
+        let ep = Endpoint {
+            budget: Some(budget.clone()),
+            ..ep
+        };
+        budget.die_on_call();
+        let _ = ask(&ep, &with_timeout(2000), json!({})).await.unwrap();
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
         assert!(!budget.died_on_call());
     }
 

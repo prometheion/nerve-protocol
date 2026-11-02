@@ -655,11 +655,19 @@ and was with allow-and-log let through unjudged ("model unreachable"), and so
 was a Kev-4B call of 430 to 512 tokens on 2 vCPUs. With the local model,
 allow-and-log covers only a server that does not answer `/tokenize` (not
 installed, starting, failed to start). A server that ended while it read a call
-(its connection ended without an answer, not an HTTP error) sets
-`ReadBudget::died_on_call`; until the restarted process answers its readiness
-probe (`run_once` clears it), `resolved_endpoint` keeps the endpoint and
-`ask_local` refuses every call as not judged, so those seconds are not a
-model that is down. `/tokenize`'s answer is read up to eight bytes per byte of
+is marked (`ReadBudget::died_on_call`): by the call's own task when its
+connection ended without an answer (not an HTTP error), and by `run_once` when
+the process exits while a call holds the slot, in the step that sets the phase
+(under the phase's lock, which `LocalServer::takes_calls` reads it under).
+`resolved_endpoint` keeps the endpoint while the mark stands, and `ask_local`
+refuses a call as lost (`ModelError::Lost`, not sent) when `/tokenize` cannot
+reach the server and the mark stands or a call holds the slot (the slot is
+read first: a call marks before it frees it), so those seconds are not a model
+that is down. A `/tokenize` that answers clears the mark, so one set by a
+failed connect while the server ran does not outlast the next call. The mark
+also goes when the restarted process is ready, and when the restart comes to
+nothing (the process cannot be started, or exits before it is ready): then
+the model is down, and allow-and-log applies. `/tokenize`'s answer is read up to eight bytes per byte of
 the text (at least 128 KiB), so a question over the cap is counted and refused
 as too long, and not reported as an unreachable model. Each new process of the server starts with the
 speeds forgotten (`ReadBudget::restart`, called by `supervise`), as it may read
