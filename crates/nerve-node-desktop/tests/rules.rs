@@ -39,6 +39,18 @@ fn until(ctl: &Ctl, what: &str, done: impl Fn() -> bool) {
 
 const LAMP: &str = r#"--params={"type": "object", "required": ["room", "level"], "properties": {"room": {"type": "string"}, "level": {"type": "integer"}}}"#;
 
+/// Ends what follows the audit when the test ends, as the app does when it
+/// closes, also when an assertion failed: the window and the controller
+/// hold each other, so nothing drops the follow and its process would
+/// outlive the test run.
+struct Ends(std::rc::Rc<Ctl>);
+
+impl Drop for Ends {
+    fn drop(&mut self) {
+        self.0.end();
+    }
+}
+
 #[test]
 fn rule_fields_offer_the_arguments_and_the_audit_pins_one() {
     let _screen = Screen::install(1180, 780, 1.0).unwrap();
@@ -79,6 +91,7 @@ fn rule_fields_offer_the_arguments_and_the_audit_pins_one() {
 
     let window = AppWindow::new().unwrap();
     let ctl = Ctl::attach(&window, runner.clone(), Exec::Inline);
+    let _ends = Ends(ctl.clone());
     window.show().unwrap();
     let store = window.global::<Store>();
     let perm = window.global::<Perm>();
