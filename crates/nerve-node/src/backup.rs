@@ -828,6 +828,30 @@ fn write_keys<'a>(
         }
         (None, None) => {}
     }
+    // The web UI's TLS key is never in a backup: a browser takes a new
+    // certificate after one warning. One here that fits the pin stays.
+    let mut ui_key = false;
+    if let Some(pin) = &cfg.ui.pin {
+        let fits = |t: &str| {
+            nerve_transport::tls::ServerIdentity::from_pem(t).is_ok_and(|i| i.pin() == *pin)
+        };
+        if let Some((place, text)) = here(Key::UiTls, &fits) {
+            if place != to {
+                put(Key::UiTls, &text)?;
+            }
+            ui_key = true;
+        }
+    }
+    // A backup carries the UI's settings and its tokens, so the restored
+    // node may serve it at once; the owner hears of it here.
+    if let Some(at) = cfg
+        .ui
+        .listen
+        .as_deref()
+        .filter(|_| cfg!(target_os = "linux"))
+    {
+        report.notes.push(ui_note(at, cfg.ui.tokens.len(), ui_key));
+    }
     match (&b.proxy_login, &cfg.connection.login) {
         (Some(t), _) => put(Key::ProxyLogin, t)?,
         (None, Some(_)) => {
@@ -982,6 +1006,28 @@ fn roll_back(paths: &NodePaths, undo: Vec<Undo>) {
                 let _ = secrets::remove_proxy_headers(paths);
             }
         }
+    }
+}
+
+/// What a restore says of a config that turns the web UI on at `at`, with
+/// `tokens` tokens, and the TLS key it needs beyond loopback here or not.
+fn ui_note(at: &str, tokens: usize, key_here: bool) -> String {
+    let loopback = at
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|a| a.ip().is_loopback());
+    if loopback || key_here {
+        let tokens = if tokens == 1 {
+            "its token".to_string()
+        } else {
+            format!("its {tokens} tokens")
+        };
+        format!(
+            "the restored config turns the web UI on at {at}, and {tokens} from the backup log in to it: `nerve-node ui token ls` lists them, `nerve-node ui off` turns it off"
+        )
+    } else {
+        format!(
+            "the restored config turns the web UI on at {at}, but its TLS key is not in the backup and not here: it does not listen until `nerve-node ui on --listen {at} --new-cert` makes one (or `nerve-node ui off`)"
+        )
     }
 }
 
@@ -2108,6 +2154,55 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_restore_says_that_the_restored_config_turns_the_web_ui_on() {
+        let (_a, n) = node();
+        paired(&n, SecretStorage::Keyring, &["home"]);
+        let ui = nerve_transport::tls::ServerIdentity::generate(&["node.example".into()]).unwrap();
+        secrets::store_ui_tls(&n, SecretStorage::Keyring, &ui).unwrap();
+        let mut s = open_store(&n);
+        s.update(|c| {
+            c.ui.listen = Some("0.0.0.0:7470".into());
+            c.ui.pin = Some(ui.pin());
+            c.ui.tokens.push(nerve_policy::config::UiToken {
+                label: "laptop".into(),
+                token_sha256: "d".repeat(64),
+                made: String::new(),
+            });
+            Ok(())
+        })
+        .unwrap();
+        drop(s);
+        let (_f, parsed, _) = roundtrip(&n, false);
+        // Here, with the keys moved to their files: the UI's key is taken
+        // along, so the UI listens on, and the owner is told.
+        let r = restore_into(&n, &parsed, Some(SecretStorage::File));
+        assert_eq!(
+            secrets::ui_tls(&n, SecretStorage::File)
+                .unwrap()
+                .unwrap()
+                .pin(),
+            ui.pin()
+        );
+        // On another machine there is no key.
+        let (_b, m) = node();
+        let elsewhere = restore_into(&m, &parsed, None);
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                r.notes,
+                [
+                    "the restored config turns the web UI on at 0.0.0.0:7470, and its token from the backup log in to it: `nerve-node ui token ls` lists them, `nerve-node ui off` turns it off"
+                ]
+            );
+            assert_eq!(elsewhere.notes.len(), 1, "{elsewhere:?}");
+            assert!(
+                elsewhere.notes[0].contains("`nerve-node ui on --listen 0.0.0.0:7470 --new-cert`"),
+                "{elsewhere:?}"
+            );
+        }
+        assert!(ui_note("127.0.0.1:7470", 2, false).contains("its 2 tokens"));
     }
 
     /// A node that uses relay A as its proxy, with a password for it.
