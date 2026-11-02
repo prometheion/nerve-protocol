@@ -111,6 +111,11 @@ pub struct ModelPin {
     /// chose allow-and-log.
     #[serde(skip)]
     pub context: u32,
+    /// How long it takes to read a token of a request on 2 vCPUs, in
+    /// milliseconds: what the center assumes until its server answered a
+    /// call, then it measures (`model::ReadBudget`).
+    #[serde(skip)]
+    pub read_ms: f64,
     /// One plain line on speed and quality, for the UI.
     pub summary: &'static str,
 }
@@ -137,6 +142,9 @@ pub const MODELS: [ModelPin; 2] = [
         // arguments); the rest holds the longest question
         // (`config::QUESTION_MAX`). checker::tests checks the sum.
         context: 12_288,
+        // 18 ms per prompt token on 2 vCPUs (the median of the 231 cases,
+        // #178), rounded up.
+        read_ms: 20.0,
         summary: "Faster: about 2 s per call on a desktop CPU, 5 s on 2 vCPUs. Catches about 55 % of dangerous actions and 73 % of injection attempts; refuses about 1.5 % of ordinary work.",
     },
     ModelPin {
@@ -155,6 +163,8 @@ pub const MODELS: [ModelPin; 2] = [
         // (characters outside the basic plane); the rest holds the longest
         // question.
         context: 8192,
+        // 60 to 62 ms per prompt token on 2 vCPUs, rounded up.
+        read_ms: 65.0,
         summary: "Catches more: about 80 % of dangerous actions and 93 % of injection attempts, refusing about 1.5 % of ordinary work, but about 5 s per call on a desktop CPU, 15 s on 2 vCPUs, and 6 GB of memory.",
     },
 ];

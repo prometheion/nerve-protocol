@@ -31,9 +31,9 @@ async fn the_local_server_starts_and_gates_a_call() {
         std::env::var("NERVE_TEST_LLAMA").expect("set NERVE_TEST_LLAMA to a llama-server"),
     );
 
-    // The default model's context; a larger model may need its own.
-    let context = nerve_center::checker::install::MODELS[0].context;
-    let server = LocalServer::start(llama, model, false, 8000, context).expect("start the server");
+    // The default model's pin; a larger model may need its own.
+    let pin = &nerve_center::checker::install::MODELS[0];
+    let server = LocalServer::start(llama, model, false, 8000, pin).expect("start the server");
 
     // Wait up to two minutes for it to load the model and report ready.
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -90,5 +90,24 @@ async fn the_local_server_starts_and_gates_a_call() {
     assert!(
         matches!(ordinary, Decision::Allowed { .. }),
         "got {ordinary:?}"
+    );
+    // A command of 2,000 random characters is about 3,400 tokens, which the
+    // model cannot read within 8 s at the speed it measured: it is refused
+    // as too long at once, not sent to hold the server past the timeout
+    // (#178).
+    let long: String = (0..2000u32)
+        .map(|i| char::from(b'!' + (i.wrapping_mul(2_654_435_761) >> 7) as u8 % 90))
+        .collect();
+    let long: &'static str = Box::leak(long.into_boxed_str());
+    let asked = Instant::now();
+    let too_long = checker.check(&call(long), Some(&endpoint)).await;
+    assert!(
+        matches!(&too_long, Decision::Refuse { detail, .. } if detail.contains("too long")),
+        "got {too_long:?}"
+    );
+    assert!(
+        asked.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        asked.elapsed()
     );
 }

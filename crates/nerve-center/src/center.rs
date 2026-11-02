@@ -3652,13 +3652,12 @@ impl Center {
             match bin
                 .ok_or_else(|| "the local model is not installed".to_string())
                 .and_then(|bin| {
-                    let context = checker::install::model_pin(cfg.model.local_model).context;
                     LocalServer::start(
                         bin,
                         model,
                         cfg.model.local_gpu,
                         cfg.model.timeout_ms,
-                        context,
+                        checker::install::model_pin(cfg.model.local_model),
                     )
                 }) {
                 Ok(srv) => {

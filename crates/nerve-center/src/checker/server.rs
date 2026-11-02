@@ -17,7 +17,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::task::JoinHandle;
 
-use super::model::{self, Endpoint};
+use super::install::ModelPin;
+use super::model::{self, Endpoint, ReadBudget};
 
 /// How far along the local server is, for the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -64,6 +65,8 @@ pub struct LocalServer {
     shutdown: Arc<tokio::sync::Notify>,
     /// Fired by the supervisor once the child has exited and it is returning.
     exited: Arc<tokio::sync::Notify>,
+    /// Its speed, kept across calls for as long as this server runs.
+    budget: Arc<ReadBudget>,
 }
 
 impl Drop for LocalServer {
@@ -76,17 +79,18 @@ impl Drop for LocalServer {
 impl LocalServer {
     /// Starts the supervisor for the installed `llama-server` at `bin` with
     /// the installed `model`, on the GPU (all layers, the Vulkan build) or the
-    /// CPU, with a context of `context` tokens (the model's
-    /// [`ModelPin::context`](super::install::ModelPin)). It returns at once; the status moves from starting to ready (or
-    /// failed) as the server comes up. The model is already on disk (the
-    /// one-click install fetched it), so there is no download at start.
+    /// CPU, with the context of its `pin` ([`ModelPin::context`]). It returns
+    /// at once; the status moves from starting to ready (or failed) as the
+    /// server comes up. The model is already on disk (the one-click install
+    /// fetched it), so there is no download at start.
     pub fn start(
         bin: PathBuf,
         model: PathBuf,
         gpu: bool,
         timeout_ms: u64,
-        context: u32,
+        pin: &ModelPin,
     ) -> Result<LocalServer, String> {
+        let context = pin.context;
         if !bin.exists() {
             return Err("the local model is not installed".into());
         }
@@ -111,6 +115,7 @@ impl LocalServer {
             task,
             shutdown,
             exited,
+            budget: Arc::new(ReadBudget::new(context, pin.read_ms)),
         })
     }
 
@@ -135,8 +140,11 @@ impl LocalServer {
 
     /// The endpoint for the client, once the server is listening.
     pub fn endpoint(&self) -> Endpoint {
-        Endpoint::parse(&format!("http://127.0.0.1:{}", self.port), None, None)
-            .expect("a loopback URL parses")
+        Endpoint {
+            budget: Some(self.budget.clone()),
+            ..Endpoint::parse(&format!("http://127.0.0.1:{}", self.port), None, None)
+                .expect("a loopback URL parses")
+        }
     }
 
     pub fn ready(&self) -> bool {
@@ -409,6 +417,9 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         self.rfile.read(n)
+        if self.path == "/tokenize":
+            self._send(b'{"tokens":[1,2,3]}')
+            return
         self._send(b'{"answers":{"danger":{"type":"noul","noul":0.99}}}')
     def log_message(self, *a):
         pass
@@ -471,7 +482,14 @@ mod tests {
         let bin = super::fake::fake_llama_server(dir.path());
         let model = dir.path().join("model.gguf");
         std::fs::write(&model, b"x").unwrap();
-        let server = LocalServer::start(bin, model, false, 5000, 4096).expect("start");
+        let server = LocalServer::start(
+            bin,
+            model,
+            false,
+            5000,
+            crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b),
+        )
+        .expect("start");
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while std::time::Instant::now() < deadline && !server.ready() {
             tokio::time::sleep(Duration::from_millis(200)).await;

@@ -398,6 +398,16 @@ impl Checker {
                 scope,
                 detail: format!("score {score:.2} < threshold {:.2}", m.threshold),
             },
+            // Not sent: refused with allow-and-log too, or a long enough
+            // call would get past the model by its length alone (#178).
+            Err(model::ModelError::TooLong(why)) => Decision::Refuse {
+                layer: Layer::Model,
+                scope,
+                detail: format!("too long to judge: {why}"),
+                message: format!(
+                    "the center's action checker refused this call without asking its decision model: the call is too long for the model to read within the checker's timeout ({why}). A call with shorter arguments is judged as usual. The owner can raise the timeout or switch the model off in the center's web UI (Action checker); {switch}."
+                ),
+            },
             Err(e) => fail(e.to_string()),
         }
     }
@@ -791,6 +801,37 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A call too long for the local model to read within the timeout is
+    /// refused without being sent, also with allow-and-log: an unreachable
+    /// model lets calls through there, but a long call is the agent's
+    /// choice, and its length alone must not get it past the model (#178).
+    #[tokio::test]
+    async fn a_call_too_long_to_judge_is_refused_with_allow_and_log_too() {
+        let mut cfg = CheckerConfig::default();
+        cfg.blocklist_on = false;
+        cfg.model_on = true;
+        cfg.model.fail_closed = false;
+        let checker = Checker::build(cfg, None);
+        let (ep, asked) = model::fake::server(5000, std::time::Duration::ZERO);
+        let ep = Endpoint {
+            budget: Some(std::sync::Arc::new(model::ReadBudget::new(12_288, 20.0))),
+            ..ep
+        };
+        let args = Map::new();
+        let c = call("exec", "run", Effect::Execute, "make", &args);
+        let Decision::Refuse {
+            layer: Layer::Model,
+            message,
+            ..
+        } = checker.check(&c, Some(&ep)).await
+        else {
+            panic!("should be refused");
+        };
+        assert!(message.contains("too long"), "{message}");
+        assert!(message.contains("raise the timeout"), "{message}");
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     /// The checker reads a rule's conditions from the call's arguments: a
