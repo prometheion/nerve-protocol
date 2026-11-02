@@ -622,8 +622,10 @@ them, and a call padded with plain `<` counts about four times what d1-2B
 reads, so calls of `<` taught a speed four times too fast, after which a call
 that held the server for a minute was let through (review round 4). An answer
 that does not say teaches nothing; a timed-out call has none, and counts as
-the timeout for the tokens counted, which for a call over 512 tokens is never
-faster than the speed that let it through. A token of a long prompt also takes longer than one of a short
+the timeout for the tokens counted, but never as faster than the slowest speed
+already kept (or the assumed one): a call of up to 512 tokens is not checked
+against the timeout, and a timeout the owner raised later would otherwise turn
+its too fast speed into a stall (review round 5). A token of a long prompt also takes longer than one of a short
 prompt: d1-2B took 5.7 ms per token for 376 tokens and 7.4 ms for 8,070, and
 in review round 4 1.53 times a 240-token call's time per token for 8,500;
 Kev-4B 19 to 20 ms for 455 to 1,191 and 30.8 ms for 4,386. So the time of a

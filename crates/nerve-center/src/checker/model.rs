@@ -187,13 +187,32 @@ impl Flight<'_> {
     /// Takes the speed of a call whose prompt of `tokens` took `ms` (or,
     /// timed out, at least that long).
     fn land(&self, tokens: usize, ms: f64) {
+        self.take(tokens, ms, false);
+    }
+
+    /// Like [`land`](Self::land) for a call that timed out. That speed is
+    /// only a lower bound on the real one, and a call of up to 512 tokens
+    /// was never checked against the timeout, so nothing else keeps it from
+    /// being faster than the server: it never makes the budget faster, or a
+    /// timeout the owner raised afterwards would turn it into a budget far
+    /// above what the server reads (review round 5 of #178).
+    fn land_timed_out(&self, tokens: usize, ms: f64) {
+        self.take(tokens, ms, true);
+    }
+
+    fn take(&self, tokens: usize, ms: f64, timed_out: bool) {
         let work = self.budget.work(tokens);
         let mut s = self.budget.state.lock().unwrap();
         if self.alone && s.started == self.number && tokens > 0 {
+            let mut speed = ms / work;
+            if timed_out {
+                let slowest = s.speeds.iter().copied().reduce(f64::max);
+                speed = speed.max(slowest.unwrap_or(self.budget.assumed));
+            }
             if s.speeds.len() == SPEEDS_KEPT {
                 s.speeds.pop_front();
             }
-            s.speeds.push_back(ms / work);
+            s.speeds.push_back(speed);
         }
     }
 }
@@ -291,7 +310,7 @@ pub async fn ask(endpoint: &Endpoint, cfg: &ModelConfig, state: Value) -> Result
             // A timed-out call took at least the timeout for at most the
             // tokens counted (and the template); that is its speed's lower
             // bound, so a machine slower than assumed is learned from it.
-            Err(_) => flight.land(*tokens + TEMPLATE_TOKENS, ms),
+            Err(_) => flight.land_timed_out(*tokens + TEMPLATE_TOKENS, ms),
             Ok(Err(_)) => {}
         }
     }
@@ -682,6 +701,28 @@ mod tests {
         assert_eq!(asked.load(Ordering::SeqCst), 1);
         assert!(budget.ms_per_token() >= 0.56, "{}", budget.ms_per_token());
         assert!(budget.admit(1000, 600).is_err());
+    }
+
+    /// Timed-out calls of up to 512 tokens were never checked against the
+    /// timeout, so what they teach is only a lower bound: a short timeout
+    /// must not leave a budget that a raised one turns into a stall (review
+    /// round 5 of #178).
+    #[tokio::test]
+    async fn timed_out_short_calls_do_not_make_the_budget_faster() {
+        // Assumed 20 ms per token; a 300-token call timing out at 100 ms
+        // would land about 0.27 ms per token.
+        let budget = Arc::new(linear(100_000, 20.0));
+        let (ep, _) = fake::server(300, Duration::from_millis(1500));
+        let ep = Endpoint {
+            budget: Some(budget.clone()),
+            ..ep
+        };
+        for _ in 0..8 {
+            ask(&ep, &with_timeout(100), json!({})).await.unwrap_err();
+        }
+        assert!(budget.ms_per_token() >= 20.0, "{}", budget.ms_per_token());
+        // 2,500 tokens take 50 s at 20 ms; a raised timeout of 12 s refuses.
+        assert!(budget.admit(2500, 12_000).is_err());
     }
 
     /// The speed is learned from the tokens the server read, not from the
