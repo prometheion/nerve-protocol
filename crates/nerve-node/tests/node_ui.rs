@@ -157,7 +157,8 @@ async fn http(
     req.push_str(body);
     let _ = io.write_all(req.as_bytes()).await;
     let mut raw = Vec::new();
-    let _ = io.read_to_end(&mut raw).await;
+    // A node that never answers is a failed test, not a hung one.
+    let _ = tokio::time::timeout(Duration::from_secs(30), io.read_to_end(&mut raw)).await;
     let text = String::from_utf8_lossy(&raw).to_string();
     let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
     let mut lines = head.lines();
