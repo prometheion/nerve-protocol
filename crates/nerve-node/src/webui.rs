@@ -35,7 +35,7 @@ use nerve_policy::NodeConfig;
 use nerve_transport::http::{self, Request, Response};
 use nerve_transport::net::BoxIo;
 use nerve_transport::tls::Acceptor;
-use nerve_transport::webui::{self, Sessions, host_is_loopback, origin_matches};
+use nerve_transport::webui::{self, Sessions, host_is_address, host_is_loopback, origin_matches};
 
 use crate::daemon::{Shared, lock};
 use crate::owner::{Endpoint, Owners};
@@ -419,9 +419,7 @@ async fn connection(ctx: &Arc<Ctx>, tcp: TcpStream, peer: SocketAddr, tls: Optio
 
 /// Answers one request.
 async fn request(ctx: &Ctx, req: Request, local: SocketAddr) -> Response {
-    // A page of another name that resolves to this address (DNS rebinding)
-    // is refused on loopback.
-    if local.ip().is_loopback() && !host_is_loopback(req.header("host")) {
+    if !host_allowed(req.header("host"), local) {
         return Response::text(403, "this UI answers only to a loopback host name");
     }
     if req.method == "GET" {
@@ -486,6 +484,15 @@ async fn request(ctx: &Ctx, req: Request, local: SocketAddr) -> Response {
         Ok(v) => Response::json(200, &v),
         Err((status, e)) => Response::json(status, &json!({ "error": e })),
     }
+}
+
+/// Whether a request may name `host`: on loopback only a loopback name, or
+/// the address the UI listens on as a number (`ui on --listen 127.0.0.2:…`),
+/// since a page of another name that resolves to this address (DNS
+/// rebinding) must be refused. Beyond loopback any name: the owner may use
+/// one of their own.
+fn host_allowed(host: Option<&str>, local: SocketAddr) -> bool {
+    !local.ip().is_loopback() || host_is_loopback(host) || host_is_address(host, local.ip())
 }
 
 /// Checks the token a login posted. The answer is the session for the page

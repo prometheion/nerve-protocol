@@ -157,18 +157,30 @@ pub fn see_other(to: &str) -> Response {
     Response::new(303, "text/plain; charset=utf-8", Vec::new()).with_header("Location", to)
 }
 
-/// Whether a `Host` header names loopback.
-pub fn host_is_loopback(host: Option<&str>) -> bool {
-    let Some(h) = host else { return false };
-    let name = if let Some(rest) = h.strip_prefix('[') {
+/// The name of a `Host` header, without its port.
+fn host_name(h: &str) -> &str {
+    if let Some(rest) = h.strip_prefix('[') {
         rest.split(']').next().unwrap_or("")
     } else {
         h.rsplit_once(':').map(|(n, _)| n).unwrap_or(h)
-    };
+    }
+}
+
+/// Whether a `Host` header names loopback.
+pub fn host_is_loopback(host: Option<&str>) -> bool {
+    let Some(h) = host else { return false };
     matches!(
-        name.to_ascii_lowercase().as_str(),
+        host_name(h).to_ascii_lowercase().as_str(),
         "127.0.0.1" | "localhost" | "::1"
     )
+}
+
+/// Whether a `Host` header is the address `ip` itself, written as a number:
+/// a server on another loopback address than 127.0.0.1 is reached so, and
+/// no page of another name (DNS rebinding) sends it.
+pub fn host_is_address(host: Option<&str>, ip: std::net::IpAddr) -> bool {
+    host.and_then(|h| host_name(h).parse::<std::net::IpAddr>().ok())
+        .is_some_and(|a| a.to_canonical() == ip.to_canonical())
 }
 
 /// Whether an `Origin` names the host the request was sent to.
@@ -255,6 +267,21 @@ mod tests {
             assert!(!host_is_loopback(Some(h)), "{h}");
         }
         assert!(!host_is_loopback(None));
+    }
+
+    #[test]
+    fn a_host_is_an_address_only_as_a_number() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        assert!(host_is_address(Some("127.0.0.2:7470"), ip("127.0.0.2")));
+        assert!(host_is_address(Some("[::1]:7470"), ip("::1")));
+        assert!(host_is_address(
+            Some("127.0.0.2:7470"),
+            ip("::ffff:127.0.0.2")
+        ));
+        for h in ["127.0.0.3:7470", "localhost:7470", "127.0.0.2.evil.example"] {
+            assert!(!host_is_address(Some(h), ip("127.0.0.2")), "{h}");
+        }
+        assert!(!host_is_address(None, ip("127.0.0.2")));
     }
 
     #[test]
