@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 use nerve_proto::{ErrorCode, RpcError, UnitKind};
 use nerve_transport::http::{self, Request, Response};
 use nerve_transport::net::BoxIo;
+use nerve_transport::webui::origin_matches;
 
 use crate::catalog;
 use crate::center::{CallError, Center, Change, Opened, Ran, Session};
@@ -1336,16 +1337,6 @@ impl HttpMcp {
     }
 }
 
-/// Whether an `Origin` names the host the request was sent to.
-pub fn origin_matches(origin: &str, host: Option<&str>) -> bool {
-    let Some(host) = host else { return false };
-    let rest = origin
-        .strip_prefix("http://")
-        .or_else(|| origin.strip_prefix("https://"))
-        .unwrap_or("");
-    rest.eq_ignore_ascii_case(host)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2228,20 +2219,6 @@ mod tests {
             ));
             assert_eq!(rt.block_on(read_box(e, "box-1")), CALLED);
         }
-    }
-
-    #[test]
-    fn origins() {
-        assert!(origin_matches(
-            "http://127.0.0.1:7481",
-            Some("127.0.0.1:7481")
-        ));
-        assert!(!origin_matches(
-            "http://evil.example",
-            Some("127.0.0.1:7481")
-        ));
-        assert!(!origin_matches("null", Some("127.0.0.1:7481")));
-        assert!(!origin_matches("http://127.0.0.1:7481", None));
     }
 
     #[tokio::test]

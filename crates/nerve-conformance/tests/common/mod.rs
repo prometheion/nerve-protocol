@@ -150,7 +150,7 @@ impl HttpCenter {
             child,
             ui: Ui {
                 addr: ui,
-                cookie: Arc::new(Mutex::new(None)),
+                session: Arc::new(Mutex::new(None)),
             },
             mcp_addr,
             token: token.to_string(),
@@ -211,7 +211,7 @@ impl Mcp {
             notes: Vec::new(),
             ui: Ui {
                 addr: ui,
-                cookie: Arc::new(Mutex::new(None)),
+                session: Arc::new(Mutex::new(None)),
             },
             node_port,
             next_id: 1,
@@ -363,25 +363,20 @@ impl Drop for Mcp {
 #[derive(Clone)]
 pub struct Ui {
     pub addr: String,
-    cookie: Arc<Mutex<Option<(String, String)>>>,
+    session: Arc<Mutex<Option<String>>>,
 }
 
 impl Ui {
     /// A web UI API call (the open loopback UI: a session from
-    /// `/api/session`, its CSRF token on every change).
+    /// `/api/session`, sent as a header with every call).
     pub fn api(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
-        let (cookie, csrf) = {
-            let mut c = self.cookie.lock().unwrap();
+        let session = {
+            let mut c = self.session.lock().unwrap();
             if c.is_none() {
-                let (status, headers, body) = http(&self.addr, "GET", "/api/session", &[], "");
+                let (status, _, body) = http(&self.addr, "GET", "/api/session", &[], "");
                 assert_eq!(status, 200, "{body}");
-                let set = headers
-                    .iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
-                    .map(|(_, v)| v.split(';').next().unwrap_or("").to_string())
-                    .expect("a session cookie");
                 let v: Value = serde_json::from_str(&body).unwrap();
-                *c = Some((set, v["csrf"].as_str().unwrap().to_string()));
+                *c = Some(v["session"].as_str().expect("a session").to_string());
             }
             c.clone().unwrap()
         };
@@ -394,7 +389,7 @@ impl Ui {
             &self.addr,
             method,
             path,
-            &[("Cookie", &cookie), ("x-nerve-csrf", &csrf)],
+            &[("X-Nerve-Session", &session)],
             &body,
         );
         (

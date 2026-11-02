@@ -17,6 +17,10 @@ HTTP endpoint takes.
 
 - A browser without a session goes to `/login` and posts the token once.
 - The session lasts 12 hours. **Sign out** ends it.
+- The session belongs to the browser tab. A new tab, or the browser opened
+  again, logs in again (a password manager can fill the token). No cookie is
+  kept: a cookie would also go to every other program that listens on a port
+  of the same host in your browser.
 - Five wrong tokens in a minute lock the login for the rest of that minute.
 - Deleting a token ends the sessions that used it.
 - Lost the token? Start the center once with `--ui-no-login` on loopback and
