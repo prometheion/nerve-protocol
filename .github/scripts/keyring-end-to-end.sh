@@ -29,6 +29,8 @@
 #    the node starts again with its keys; the second test of real_account.rs
 #    pairs a center, restarts the node and runs a folder mode command as
 #    nerve-run, which cannot reach the node's bus or keyring folder;
+#    then the web UI (#161): off until `ui on`, the owner logs in with its
+#    token and changes a setting, nerve-run is closed unanswered, `ui off`;
 #    `uninstall --purge` takes it all away.
 # The system-wide /etc/environment of the machine is given another user's
 # runtime folder, bus and XDG folders first, as a runner image has: the
@@ -305,6 +307,47 @@ install -m 755 "$OUT/generator" "$GENERATOR"
 step "6. real_account.rs: a center, a restart, a folder mode command as nerve-run"
 NERVE_REAL_KEYRING=1 NERVE_REAL_OWNER=$OWNER \
   "$TESTS" --ignored --exact --nocapture the_installed_node_with_its_keys_in_the_keyring_runs_folder_commands_as_nerve_run
+
+step "6b. The web UI: off until ui on, the owner's account only, a token to log in"
+# On the installed node with a real owner and nerve-run (issue #161): off,
+# nothing listens; `ui on` listens at once; the owner's account logs in with
+# the token and changes a setting; a command's account, nerve-run, is closed
+# before it gets a byte; `ui off` leaves nothing.
+UI=http://127.0.0.1:7470
+ui_listeners() { ss -Hltnp 'sport = :7470' | tee -a "$OUT/ui-ss"; }
+[ -z "$(ui_listeners)" ] || fail "something listens on 7470 before ui on"
+as_owner ui on | tee "$OUT/ui-on"
+grep -q 'listening on 127.0.0.1:7470' "$OUT/ui-on" || fail "ui on does not say the web UI listens"
+UI_TOKEN=$(sed -n 's/^token [^:]*: //p' "$OUT/ui-on" | head -n 1)
+[ -n "$UI_TOKEN" ] || fail "ui on showed no first token"
+ui_listeners | grep -q '"nerve-node"' || fail "7470 is not the node's"
+[ "$(ui_listeners | wc -l)" = 1 ] || fail "the web UI listens more than once"
+# The page's way: JSON with its own Origin, then the session as a header.
+ui_curl() { runuser -u "$OWNER" -- curl -sS --max-time 10 -H "Origin: $UI" -H 'Content-Type: application/json' "$@"; }
+code=$(printf '{"token":"wrong"}' | ui_curl -o /dev/null -w '%{http_code}' --data @- "$UI/login") || true
+[ "$code" = 401 ] || fail "a wrong token got $code, not 401"
+SESSION=$(printf '{"token":"%s"}' "$UI_TOKEN" | ui_curl --data @- "$UI/login" \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["session"])') || fail "the owner cannot log in to the web UI"
+printf '{"key":"node.name","value":"\\"ci-web-ui\\""}' \
+  | ui_curl -H "X-Nerve-Session: $SESSION" --data @- "$UI/api/settings/set" | tee "$OUT/ui-set"
+echo
+as_owner config get node.name | tee "$OUT/ui-name"
+grep -q 'ci-web-ui' "$OUT/ui-name" || fail "the setting made in the web UI is not the node's"
+code=$(ui_curl -o /dev/null -w '%{http_code}' "$UI/api/overview") || true
+[ "$code" = 401 ] || fail "the API answered $code without a session"
+# nerve-run, the account of every folder and allowlist mode command: the
+# connection is closed with no answer (curl: empty reply, or reset).
+rc=0
+runuser -u nerve-run -- curl -sS --max-time 10 -o /dev/null "$UI/login" 2> "$OUT/ui-nerve-run" || rc=$?
+cat "$OUT/ui-nerve-run"
+case $rc in
+  52|56) ;;
+  *) fail "nerve-run's connection to the web UI was not closed unanswered (curl exit $rc)" ;;
+esac
+as_owner ui off | tee "$OUT/ui-off"
+for _ in $(seq 1 50); do [ -z "$(ui_listeners)" ] && break; sleep 0.1; done
+[ -z "$(ui_listeners)" ] || fail "the web UI still listens after ui off"
+summary "- the web UI on the installed node: passed"
 
 step "7. uninstall --purge"
 [ -e "$GENERATOR" ] || fail "the generator is not there before uninstall, so its removal would show nothing"
