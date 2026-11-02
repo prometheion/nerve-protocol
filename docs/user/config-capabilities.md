@@ -46,6 +46,9 @@ What follows `--` is the command: the program first (a name looked up in
 | `--timeout` | seconds it may run, at most `limits.max_timeout_secs`; `default` for `limits.default_timeout_secs` |
 | `--platform` | `any` (the default), `linux` or `windows`: a node offers only those of its own platform |
 
+A summary is at most 2048 bytes, and each word of the command at most 4096
+bytes. This holds for what you write into `node.toml` too.
+
 `--params-stdin` and `--result-stdin` read the schema from stdin instead, for
 one too long for the command line. Only one of them can come from stdin: add
 the capability with one and `cap edit` the other.
@@ -170,7 +173,8 @@ One that senses or acts on the world (`sense`, `actuate`) needs you: your
 `cap set NAME on` in `folder` and `user` mode, an allow rule you add in
 `allowlist` mode. A center with the [settings grant](settings-grant.md) may
 turn on or allow the others itself, never one that senses or acts, and cannot
-add, change or remove a capability of `node.toml`.
+change or remove a capability of `node.toml`. It may add capabilities of its
+own ([below](#capabilities-a-center-adds)).
 
 A switch or allow rule set earlier may cover a capability you add later: `cap
 set sensors on`, or an allow rule `sensors`, also covers a new
@@ -191,6 +195,131 @@ No program may [attach](providers.md) with the name of one of your
 capabilities, and one that is attached with such a name is let go when you
 declare it.
 
+## Capabilities a center adds
+
+A center with the [settings grant](settings-grant.md) (`write`) may add
+capabilities of the same kind itself, from its web UI's
+[Capabilities](web-ui.md#capabilities) page. They are kept in that center's
+own entry of the pairing, and only that center is offered them: another
+center never sees them, cannot call them and cannot remove them. Within
+these limits:
+
+- **Always `nerve-run`.** It runs as the command account, held like that
+  account's commands (above), never as you or root. There is no account to
+  choose.
+- **Counted as `execute`.** Whatever it says it does, the node decides it as
+  a command: in `folder` mode one that takes no path needs an `on`, which that
+  center may set itself, and one whose paths lie outside the folders that
+  allow commands is refused. A `read` never passes for a read.
+- **Switched by its full name.** The center turns on or allows each action it
+  added by its name (`"caps": {"say.back": "on"}`, the allow rule
+  `say.back`), not its capability as a whole (`say`): that stays yours while
+  nothing else offers it, as a program you allow may offer more under that
+  name later.
+- **Sensing waits for you.** One that says `sense` or `actuate` stays so, and
+  only you turn it on (`cap set NAME on --center <name>`), in every mode,
+  also while a program or a capability of yours offers its name without
+  sensing: the center sets no `on` or rule for that name meanwhile. When
+  a center changes one to sense or act, or changes anything but the summary
+  of one that does (its command, the arguments it takes, its time limit),
+  a switch or rule that covered it is switched off, also your `on`: you turn
+  on what it does now. So it is when you declare one that senses or acts
+  under the name of one a center added: your `on` for the center's was
+  given for its command, so `cap add` switches it off for that center too,
+  and says so. It works the other way round as well. While you declare
+  that capability, the center's own is left out, and an `on` you set for
+  that name turns on yours. When you remove yours, the center's own is
+  offered again, so `cap rm` switches that `on` off and says so. While a
+  program you allow keeps the center's own out, that center is offered
+  neither, and `cap set` refuses an `on` for that name with the reason: it
+  would turn on the center's command once the program goes. Turn it on once
+  the center is offered it. A file you take with `config accept` that has
+  such an `on` gets it switched off, and `config accept` tells you to turn
+  it on once the center is offered it, or to remove it.
+- **Yours come first.** A center changes and removes none of your
+  capabilities, and adds none under the name of a capability of yours or of
+  a program you allow that is attached now. One it added is left out while
+  you declare its capability or such a program offers it. The center can
+  still remove that one. While it keeps it, that center is not offered the
+  program's capability of that name either, and gets none of its events,
+  state or streams, also where it subscribed before: its switches and rules
+  were set for its own command, not for what the program does.
+- **Removed with its switches.** When the center removes one, or you do,
+  the node also drops that center's `on` and allow rules for that very
+  action, yours too: they were given for that command. That holds however
+  you remove it: `cap rm NAME --center <name>`, `nerve-node config unset
+  center.<name>.capability`, or an edit of node.toml that `config accept`
+  takes while the node runs, which names each switch it dropped. An `on` or
+  rule you set in that same change stays yours. A stopped node cannot tell
+  what the file had before, and drops none. So with the node stopped,
+  remove one with `cap rm NAME --center <name>` rather than by hand, or take
+  that center's `on` and allow rules for it out in the same edit. Once the
+  entry is gone, `cap rm --center` finds nothing to remove; then switch it
+  off with `cap set NAME off --center <name>` and take the rule away with
+  `nerve-node config remove center.<name>.policy.allow 'NAME'` (and the same
+  for the capability as a whole, see next). When it was the last
+  one the center keeps under its capability, the `on` and allow rules for
+  the capability as a whole (`cap set cam on --center <name>`, the rule
+  `cam`) go as well: you gave them for the center's commands, and kept they
+  would turn on what a program you allow offers under that name later. So
+  a center adds none under a name while that center has an `on` or allow
+  rule set for what else offers it, for that very action or, for its first
+  one under that capability, for the capability as a whole (say yours for a
+  program that is away for now): the add is refused with the reason, as the
+  center's removal would take that switch along. You or the center take it
+  away first, if you want the center's. An `off`, a `hidden` and a deny rule stay. Where you declare that very name
+  yourself, they all stay, and those for the capability as a whole where
+  you declare any action of it: the center's was left out, so they turn on
+  yours for that center (an `on` for one of yours that senses or acts only
+  where you set it after declaring it).
+- **A program's capability waits for the center's.** While the center
+  keeps one of its own under the name of a program's capability (one it
+  added before the program attached), you cannot turn on that capability
+  as a whole for that center, nor the center's own action by its name: the
+  center is offered neither, and the switch would go with the center's own
+  when it is removed. `cap set` refuses it and says why; `config accept`
+  switches it off, and says that the center keeps its own under that name.
+  The `off` stays when the center's goes. Remove the center's first (`cap rm
+  NAME --center <name>`), then turn the program's on. An `on` for one of the
+  program's actions by its full name (`cap set cam.snap on --center
+  <name>`) is taken and stays.
+- **Time limit.** Its `timeout_secs` is checked against your
+  `limits.max_timeout_secs` when the center adds or changes it. You may
+  lower that limit later: the command then stops at your limit.
+- **Size.** A center adds at most 64, as many as you may declare, and
+  together at most 256 KiB as JSON; the summary and each word of the
+  command are bounded as yours are (above).
+- **Audited.** Each add, change and removal is in the [audit log](audit.md)
+  as that center's change of the settings, under the key `center`: with the
+  old and the new list of this node's centers, each with what it added.
+- **You can turn it off or remove it.** `cap set NAME off --center <name>`
+  turns it off, and the center cannot turn it on again: an `off` or `hidden`
+  of a capability a center added stays until you change it, also one the
+  center set itself, and also after the center removes the capability and
+  adds it again under the same name. `cap rm NAME --center <name>` removes
+  it. The desktop app lists them on that center's
+  Capabilities page with their switches; removing one is `cap rm` there.
+- **Only the grant stops a center.** An `off` holds for that name only: the
+  center may add the same command under another name, with nothing of yours
+  to undo. To stop a center from
+  adding commands, take the grant back (`center grant settings off`). That
+  leaves what it added; remove it too if you want it gone.
+
+The installed Linux node takes them. Windows takes none yet (issue
+[#176](https://github.com/prometheion/nerve-protocol/issues/176)), and a node
+you run yourself has no `nerve-run`: either refuses the center's add and
+says why.
+
+`cap ls` lists them with the source `center <name>`, and each one's
+command after yours; `cap ls --center <name>` only that center's:
+
+```
+say.back  execute  center lab  lab: on
+cam.look  sense    center lab  lab: off
+capability say.back (added by center lab, counted as execute): echo {word}
+capability cam.look (added by center lab, senses: only you turn it on): cam-snap
+```
+
 ## See what is there
 
 `nerve-node cap ls` lists them with the source `config`, each with its
@@ -205,8 +334,15 @@ capability logs.tail: tail -n {lines} -- {path}
 capability win.who: whoami; windows only
 ```
 
+A word of a command that holds a blank, a quote or a character that shows
+as nothing (a control character, a zero-width or a direction mark) is shown
+in double quotes, with that character written as an escape such as
+`\u202e`, so the line reads as what runs. The audit writes a command the
+same way.
+
 A capability this node does not offer says why. `nerve-node cap ls --json`
-gives each one as declared under `config`.
+gives each one as declared under `config`, and those the centers added under
+`added`, each with its `center`.
 
 ## In `node.toml`
 

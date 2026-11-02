@@ -6345,3 +6345,35 @@ async fn a_programs_streams_on_their_way_count_once() {
     assert!(started.elapsed() < SLOW, "{:?}", started.elapsed());
     r.stop().await;
 }
+
+/// A change from the Capabilities tab answers once the center has the
+/// node's description after it: the page draws the tab again right after
+/// the answer, and the node's word that it changed comes in a task of its
+/// own. This node never says it changed, so only that fetch brings it.
+#[tokio::test]
+async fn a_change_from_the_capabilities_tab_answers_with_the_new_description() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(dir.path()).await;
+    let c = r.center.clone();
+    let key = NodeKey::generate().unwrap();
+    assert_eq!(pair(&r, &key, "box-1").await.0, 200);
+    let (ws, _) = handshake(&r, &key).await;
+    let (_seen, node) = serve_described(ws, descriptor(&key, "box-1"));
+    described(&c).await;
+    let mut d = descriptor(&key, "box-1");
+    d["rev"] = json!(2);
+    d["capabilities"].as_array_mut().unwrap().push(json!(
+        {"id": "say", "provider": nerve_policy::config::CENTER_ADDED, "exposure": "on",
+         "summary": "Says it back.",
+         "actions": {"back": {"effect": "execute", "params": {"type": "object"}}}}));
+    *node.0.lock().unwrap() = d;
+    let cap: nerve_policy::config::ConfigCapability =
+        serde_json::from_value(json!({"name": "say.back", "effect": "read", "command": ["echo"]}))
+            .unwrap();
+    c.save_cap(&key.node_id(), &cap, true).await.unwrap();
+    assert_eq!(offered(&c, "box-1"), ["exec.run", "fs.read", "say.back"]);
+    *node.0.lock().unwrap() = descriptor(&key, "box-1");
+    c.remove_cap(&key.node_id(), "say.back").await.unwrap();
+    assert_eq!(offered(&c, "box-1"), ["exec.run", "fs.read"]);
+    r.stop().await;
+}

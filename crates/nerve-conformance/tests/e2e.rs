@@ -842,7 +842,7 @@ fn node_part_passes_against_nerve_node() {
         .outcomes
         .iter()
         .filter(|o| o.section.starts_with('7'));
-    assert_eq!(profiles.count(), 20, "{report}");
+    assert_eq!(profiles.count(), 22, "{report}");
     drop(node);
 }
 

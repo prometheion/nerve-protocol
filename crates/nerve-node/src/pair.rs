@@ -244,6 +244,7 @@ pub async fn pair(
                 .collect(),
             ..CenterPolicy::default()
         },
+        capabilities: Vec::new(),
     };
 
     // The key goes first, where `machine.secret_storage` says: an entry

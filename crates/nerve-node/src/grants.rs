@@ -3619,6 +3619,7 @@ mod tests {
                     folders,
                     ..Default::default()
                 },
+                capabilities: Vec::new(),
             });
         }
         let want = wanted(&cfg, &paths, &home, &Platform::Unix);
@@ -3690,6 +3691,7 @@ mod tests {
                     .collect(),
                 ..Default::default()
             },
+            capabilities: Vec::new(),
         }
     }
 
@@ -4331,6 +4333,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            capabilities: Vec::new(),
         });
         let want = wanted(&cfg, &paths, &home, &crate::paths::platform());
         let granted = |p: &Path| want.iter().any(|g| within(p, &g.path));

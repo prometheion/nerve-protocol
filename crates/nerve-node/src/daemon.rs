@@ -658,12 +658,33 @@ impl Shared {
         self.account_as(cfg, false)
     }
 
-    /// The capabilities offered besides the node's own: the attached
-    /// programs' (crate::provider) and the config's (crate::config_cap).
-    pub fn added_caps(&self, cfg: &NodeConfig) -> Vec<nerve_proto::descriptor::Capability> {
-        let mut caps = self.providers.caps();
+    /// The capabilities `entry`'s center is offered besides the node's own:
+    /// the attached programs' (crate::provider) but those under a name it
+    /// added one of its own under (crate::config_cap::programs_for), the
+    /// config's and those that center added itself (crate::config_cap).
+    pub fn added_caps(
+        &self,
+        cfg: &NodeConfig,
+        entry: &nerve_policy::CenterEntry,
+    ) -> Vec<nerve_proto::descriptor::Capability> {
+        let programs = self.providers.caps();
+        let added = crate::config_cap::center_offered(
+            cfg,
+            entry,
+            std::env::consts::OS,
+            self.config_caps,
+            &programs,
+        );
+        let mut caps = crate::config_cap::programs_for(entry, programs);
         caps.extend(crate::config_cap::offered(cfg, self.config_caps));
+        caps.extend(added);
         caps
+    }
+
+    /// The capabilities the attached programs offer, by id.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub fn taken(&self) -> std::collections::BTreeSet<String> {
+        self.providers.caps().into_iter().map(|c| c.id).collect()
     }
 
     /// [`Shared::added_caps`] as the pairing with `policy` is offered them:
@@ -675,10 +696,10 @@ impl Shared {
     pub fn offered_caps(
         &self,
         cfg: &NodeConfig,
-        policy: &nerve_policy::config::CenterPolicy,
+        entry: &nerve_policy::CenterEntry,
     ) -> Vec<nerve_proto::descriptor::Capability> {
-        let mut caps = self.added_caps(cfg);
-        crate::config_cap::as_account_for(&mut caps, self.separate(policy));
+        let mut caps = self.added_caps(cfg, entry);
+        crate::config_cap::as_account_for(&mut caps, self.separate(&entry.policy));
         caps
     }
 
@@ -2261,15 +2282,44 @@ pub(crate) fn control(
                 Err(e) => return Reply::Err(e),
             };
             let if_version = params.get("if_version").and_then(Value::as_u64);
+            // The programs before the store's lock, as a center's write
+            // reads them (crate::link).
+            let taken = shared.taken();
             let mut store = lock(&shared.store);
             if new.machine.sudo != store.config().machine.sudo {
                 return Reply::Err(
                     "machine.sudo changes only through nerve-node sudo on|off".into(),
                 );
             }
+            // A center's own that the write removes (`config unset`, say,
+            // not only `cap rm --center`) takes its switches along.
+            let dropped = crate::config_cap::drop_removed(store.config(), &mut new);
             // An action that comes to sense waits for the owner's `on`,
             // whichever program of the owner's wrote the change.
             let held = crate::config_cap::hold_new(store.config(), &mut new);
+            // An `on` for a center's own that senses, while a program's of
+            // its name keeps it out, would turn on the center's command
+            // once the program goes: the owner turns it on once it is
+            // offered.
+            if let Some((center, name)) =
+                crate::config_cap::hold_shadowed(store.config(), &mut new, &taken).first()
+            {
+                let cap = name.split_once('.').map_or(&name[..], |(c, _)| c);
+                return Reply::Err(format!(
+                    "center {center} keeps its own {name}, which senses or actuates and is left out while a program offers {cap}: an on or allow rule for it now would turn on that center's command once the program goes; turn it on once the center is offered it, or remove it (cap rm {name} --center {center})"
+                ));
+            }
+            // An `on` set now for a program's capability that a center's own
+            // keeps from it would go with the center's own once it removes
+            // it (crate::config_cap::remove_added), unseen.
+            if let Some((center, name)) =
+                crate::config_cap::hold_with_own(store.config(), &mut new, &taken).first()
+            {
+                let cap = name.split_once('.').map_or(&name[..], |(c, _)| c);
+                return Reply::Err(format!(
+                    "center {center} keeps a capability of its own under {cap}, so it is offered neither that one nor a program's {cap}: an on or allow rule for {name} now would go with the center's own when it is removed; remove the center's first (cap ls --center {center} lists them, cap rm NAME --center {center} removes one), then turn on the program's"
+                ));
+            }
             // Who made it, as the CLI names its user (crate::cli::invoker):
             // only the owner's programs hold the token.
             store.set_user(str_of("user"));
@@ -2279,7 +2329,7 @@ pub(crate) fn control(
             match r {
                 Ok(v) => {
                     shared.bump();
-                    Reply::Ok(json!({"version": v, "held": held}))
+                    Reply::Ok(json!({"version": v, "held": held, "dropped": dropped}))
                 }
                 Err(SetError::Conflict { current }) => {
                     Reply::Err(format!("conflict: the config changed (version {current})"))
@@ -2308,22 +2358,45 @@ pub(crate) fn control(
             }
         }
         "config.accept" => {
+            let taken = shared.taken();
             let r = {
                 let mut store = lock(&shared.store);
                 store.set_user(str_of("user"));
                 // The file as the owner wrote it, with an action that came to
                 // sense in it switched off where an earlier switch covered it
-                // (crate::config_cap::hold_new), in the one write that puts
-                // it in force.
-                let r = store.accept_with(crate::config_cap::hold_new);
+                // (crate::config_cap::hold_new), and a center's own that
+                // senses where a program keeps it out (hold_shadowed), and an
+                // `on` for that program's that would go with the center's own
+                // (hold_with_own), in the one write that puts it in force.
+                // Each apart, since the owner is told what to do for each.
+                // First a center's own the file no longer holds takes its
+                // switches along (crate::config_cap::drop_removed).
+                let r = store.accept_with(|before, after| {
+                    let dropped = crate::config_cap::drop_removed(before, after);
+                    let held = crate::config_cap::hold_new(before, after);
+                    let shadowed = crate::config_cap::hold_shadowed(before, after, &taken);
+                    let mut with_own = crate::config_cap::hold_with_own(before, after, &taken);
+                    // hold_shadowed switches off the center's own action, and
+                    // leaves a new allow rule for it, which hold_with_own then
+                    // counts again. The owner gets one note for it, the one
+                    // that fits the center's own.
+                    with_own.retain(|w| !shadowed.contains(w));
+                    (held, shadowed, with_own, dropped)
+                });
                 store.set_user(None);
                 r
             };
             match r {
-                Ok((v, held)) => {
+                Ok((v, (held, shadowed, with_own, dropped))) => {
                     shared.settle_sudo();
                     shared.bump();
-                    Reply::Ok(json!({"version": v, "held": held}))
+                    Reply::Ok(json!({
+                        "version": v,
+                        "held": held,
+                        "shadowed": shadowed,
+                        "with_own": with_own,
+                        "dropped": dropped,
+                    }))
                 }
                 Err(e) => Reply::Err(e.to_string()),
             }
@@ -2574,6 +2647,7 @@ mod every_platform {
                 sudo_allow: vec!["sudo apt *".into()],
                 ..Default::default()
             },
+            capabilities: Vec::new(),
         };
         let told = || {
             let r = s.reach(&s.config(), &entry);
@@ -3028,6 +3102,7 @@ mod tests {
                         }],
                         ..Default::default()
                     },
+                    capabilities: Vec::new(),
                 };
                 let r = s.reach(&cfg, &entry);
                 let a = crate::descriptor::for_center(&cfg, &entry, &r, &[])
@@ -3120,6 +3195,7 @@ mod tests {
                     mode: Mode::Folder,
                     ..Default::default()
                 },
+                capabilities: Vec::new(),
             };
             let r = s.reach(&s.config(), &entry);
             assert_eq!(r.held_by_account, held, "landlock {landlock:?}");
@@ -3195,6 +3271,7 @@ mod tests {
                             folders,
                             ..Default::default()
                         },
+                        capabilities: Vec::new(),
                     })
                     .collect();
                 let r = control(
@@ -3361,6 +3438,7 @@ mod tests {
                     pin_rotations: 0,
                     old_pin: None,
                     policy: Default::default(),
+                    capabilities: Vec::new(),
                 });
                 Ok(())
             })
@@ -3511,6 +3589,7 @@ mod tests {
                     pin_rotations: 0,
                     old_pin: None,
                     policy: Default::default(),
+                    capabilities: Vec::new(),
                 });
                 Ok(())
             })
@@ -3668,6 +3747,7 @@ mod tests {
                         }],
                         ..Default::default()
                     },
+                    capabilities: Vec::new(),
                 });
                 Ok(())
             })
@@ -4234,6 +4314,7 @@ mod old_pin_tests {
                         until_ms: 1,
                     }),
                     policy: Default::default(),
+                    capabilities: Vec::new(),
                 });
                 Ok(())
             })

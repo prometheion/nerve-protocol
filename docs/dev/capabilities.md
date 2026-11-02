@@ -84,14 +84,18 @@ and state included) and `validate` before every call it sends.
 - `provider` says which process serves the capability: `node` for the node's
   own, `config` for one the owner declared in `node.toml` (`[[capability]]`:
   a fixed command the node runs itself, [node-local §2](spec/node-local.md#capabilities-of-the-config)),
+  `center-added` for one a center with the settings grant added itself
+  (`settings.cap-add`: a fixed command as in `node.toml`, kept in that
+  center's entry and offered to that center alone, [node-local §2](spec/node-local.md#capabilities-a-center-adds)),
   else the name of a local program the owner allowed to attach to the
   node ([node-local §7](spec/node-local.md#7-capability-providers)). A
-  config capability has actions only; a program's may add state, events and
-  streams. The node decides each call, `get`, subscription and stream to
+  config or center-added capability has actions only; a program's may add
+  state, events and streams. The node decides each call, `get`, subscription and stream to
   them by the center's policy before the program or the command sees it. The names
   `node`, `fs`, `exec`, `settings`, `audit`, `job` and `stream`
-  (`nerve_policy::config::BUILT_IN`) are taken by neither, and no program may
-  add a capability the config declares.
+  (`nerve_policy::config::BUILT_IN`) are taken by none of them, no program
+  may add a capability the config declares, and no center one the config
+  declares or an attached program offers.
 
 ## Effects
 

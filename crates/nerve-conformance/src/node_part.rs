@@ -221,6 +221,14 @@ const PROFILE_CHECKS: &[(&str, &str)] = &[
     ("7.4", "settings set with a stale if_version is conflict"),
     ("7.4", "settings set applies a document"),
     (
+        "7.4.2",
+        "settings cap-add adds a capability offered to this center as center-added with effect execute, or is unavailable with its reason where the node takes none",
+    ),
+    (
+        "7.4.2",
+        "settings cap-rm of a capability this center did not add is refused, and of one it added removes it",
+    ),
+    (
         "7.2",
         "fs read returns what fs write wrote, with the same etag",
     ),
@@ -450,6 +458,19 @@ async fn streams_output(conn: &mut Conn, command: &str) -> Result<(), String> {
     )
 }
 
+/// The provider and effect of `conformance.probe` in the descriptor the
+/// node gives now, if it offers it.
+async fn offered_probe(conn: &mut Conn) -> Result<Option<(String, String)>, String> {
+    let d = ok(conn
+        .call(method::DESCRIBE, json!({"detail": "full"}), WAIT)
+        .await)?;
+    let caps = d["capabilities"].as_array().cloned().unwrap_or_default();
+    Ok(caps.iter().find(|c| c["id"] == "conformance").map(|c| {
+        let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
+        (text(&c["provider"]), text(&c["actions"]["probe"]["effect"]))
+    }))
+}
+
 /// Whether `m` is the answer to the request `id`.
 fn answers(m: &nerve_proto::Message, id: u64) -> bool {
     let want = nerve_proto::Id::Num(id);
@@ -567,6 +588,85 @@ async fn profile_steps(
             ensure(now > version, format!("got {v}"))
         }),
     )?;
+
+    // §7.4.2: a capability of this center's own. A node may take none
+    // (Windows for now, one without the account it runs them as), and says
+    // why; one that takes it offers it to this center as `center-added`,
+    // counted as `execute` whatever it declares.
+    let probe = json!({"name": "conformance.probe", "effect": "read",
+                       "summary": "Says a word back.", "command": ["echo", "nerve-conformance"]});
+    let mut added = false;
+    step(
+        match invoke(conn, "settings", "cap-add", json!({"capability": probe})).await {
+            Ok(Err(e)) if e.kind() == ErrorCode::Unavailable => {
+                ensure(!e.message.trim().is_empty(), "unavailable without a reason")
+            }
+            Ok(Ok(v)) if v["version"].is_u64() => {
+                added = true;
+                // In allowlist mode a rule offers it.
+                let mut with = doc.clone();
+                if let Some(a) = with["policy"]["allow"].as_array_mut() {
+                    a.push(json!("conformance.probe"));
+                }
+                let set = json!({"document": with, "if_version": v["version"]});
+                let allowed = ok(invoke(conn, "settings", "set", set).await);
+                let offered = match allowed {
+                    Ok(_) => offered_probe(conn).await,
+                    Err(e) => Err(e),
+                };
+                offered.and_then(|a| match a {
+                    Some((provider, effect)) => ensure(
+                        provider == "center-added" && effect == "execute",
+                        format!("offered by {provider} with effect {effect}"),
+                    ),
+                    None => Err("the descriptor does not offer conformance.probe".into()),
+                })
+            }
+            other => Err(format!("got {other:?}")),
+        },
+    )?;
+    step(
+        async {
+            match invoke(
+                conn,
+                "settings",
+                "cap-rm",
+                json!({"name": "conformance.other"}),
+            )
+            .await
+            {
+                Ok(Err(_)) => {}
+                other => return Err(format!("cap-rm of another one: {other:?}")),
+            }
+            if !added {
+                return Ok(());
+            }
+            ok(invoke(
+                conn,
+                "settings",
+                "cap-rm",
+                json!({"name": "conformance.probe"}),
+            )
+            .await)?;
+            match offered_probe(conn).await? {
+                None => Ok(()),
+                Some(_) => Err("conformance.probe is still offered".into()),
+            }
+        }
+        .await,
+    )?;
+    // The changes moved the version.
+    let now = match ok(conn
+        .call(
+            method::GET,
+            json!({"cap": "settings", "keys": ["version"]}),
+            WAIT,
+        )
+        .await)
+    {
+        Ok(v) => v["version"].as_u64().unwrap_or(now),
+        Err(e) => return Err(e),
+    };
 
     let path = format!("{}/nerve-conformance.txt", folder.trim_end_matches('/'));
     let content = "nerve conformance\n";

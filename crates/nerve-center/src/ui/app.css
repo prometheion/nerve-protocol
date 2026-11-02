@@ -658,6 +658,30 @@ input[type="checkbox"] {
   flex: 1 1 16rem;
 }
 
+/* What is wrong with a field, in the danger colour, where the app's
+   TextField shows it; nothing while the field is right. */
+.field > .hint.error {
+  color: var(--danger);
+}
+
+.field > .hint.error:empty {
+  display: none;
+}
+
+/* The schemas of a capability are a few lines, not a whole document. */
+.cap-form textarea.json {
+  min-height: 7rem;
+}
+
+/* The hint under a row of choices stands on a line of its own. */
+.cap-form .field > .hint {
+  display: block;
+}
+
+.cap-row .card-top {
+  flex-wrap: wrap;
+}
+
 .card .form-row + .form-row,
 .card .form-row + div > .form-row:first-child {
   margin-top: 14px;

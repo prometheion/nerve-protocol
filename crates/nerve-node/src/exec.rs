@@ -3170,6 +3170,7 @@ mod tests {
             pin_rotations: 0,
             old_pin: None,
             policy: policy(&work),
+            capabilities: Vec::new(),
         };
         cfg.centers.push(entry.clone());
         // A plain folder, one that is not there yet, and the owner's link
@@ -3350,6 +3351,7 @@ mod tests {
                 folders,
                 ..Default::default()
             },
+            capabilities: Vec::new(),
         };
         let mut cfg = NodeConfig::default();
         cfg.centers.push(entry(
@@ -3707,6 +3709,7 @@ mod windows_tests {
                 }],
                 ..Default::default()
             },
+            capabilities: Vec::new(),
         });
         cfg
     }

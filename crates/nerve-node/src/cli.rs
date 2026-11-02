@@ -345,10 +345,13 @@ pub enum CapCmd {
         #[arg(last = true, value_name = "COMMAND")]
         command: Vec<String>,
     },
-    /// Remove a capability you declared; it leaves every center at once.
+    /// Remove a capability you declared; it leaves every center at once. With --center, remove one that center added itself (settings grant write); `cap set NAME off --center` turns it off instead.
     Rm {
         /// The capability, `cap.action`.
         name: String,
+        /// The center that added it, for a capability a center added.
+        #[arg(long)]
+        center: Option<String>,
     },
     /// Allow a program on this machine to add capabilities (a provider), remove it, or list them.
     #[command(subcommand)]
@@ -1028,6 +1031,9 @@ pub async fn edit_saved(
     let old = store.config().clone();
     match store.update(|c| {
         f(c)?;
+        // As the daemon's `config.write` does: a center's own the change
+        // removes takes its switches along.
+        crate::config_cap::drop_removed(&old, c);
         crate::owner::check_change(&old, c)
     }) {
         Ok(_) => {
@@ -2206,23 +2212,61 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             }
             Ok(())
         }
-        Cmd::Cap(CapCmd::Rm { name }) => {
+        Cmd::Cap(CapCmd::Rm {
+            name,
+            center: Some(center),
+        }) => {
             edit(&paths, |c| {
-                let before = c.capabilities.len();
-                c.capabilities.retain(|d| d.name != name);
-                if c.capabilities.len() == before {
-                    return Err(format!("no capability {name} is declared"));
+                let owners = c.capabilities.clone();
+                let e = c
+                    .center_mut(&center)
+                    .ok_or_else(|| format!("no center named {center}"))?;
+                if !crate::config_cap::remove_added(e, &name, &owners) {
+                    return Err(format!("center {center} added no capability {name}"));
                 }
                 Ok(())
             })
             .await?;
+            w(out, format!("capability {name} of center {center} removed"));
+            Ok(())
+        }
+        Cmd::Cap(CapCmd::Rm { name, center: None }) => {
+            let held = std::sync::Mutex::new(Vec::new());
+            edit(&paths, |c| {
+                let was = c.clone();
+                c.capabilities.retain(|d| d.name != name);
+                if c.capabilities.len() == was.capabilities.len() {
+                    // One a center added is removed with that center named.
+                    let by: Vec<&str> = c
+                        .centers
+                        .iter()
+                        .filter(|e| e.capabilities.iter().any(|d| d.name == name))
+                        .map(|e| e.name.as_str())
+                        .collect();
+                    return Err(match by.first() {
+                        Some(first) => format!(
+                            "no capability {name} is declared in node.toml; center {} added one: cap rm {name} --center {first}",
+                            by.join(", center ")
+                        ),
+                        None => format!("no capability {name} is declared"),
+                    });
+                }
+                // A center's own of that name that senses is offered again,
+                // and waits for an `on` given for its command.
+                *held.lock().unwrap() = crate::config_cap::hold_new(&was, c);
+                Ok(())
+            })
+            .await?;
             w(out, format!("capability {name} removed"));
+            for (center, name) in held.into_inner().unwrap() {
+                w(out, held_note(&center, &name));
+            }
             Ok(())
         }
         Cmd::Cap(CapCmd::Provider(ProviderCmd::Allow { name, exe })) => {
             if !nerve_policy::config::valid_provider_name(&name) {
                 return Err(format!(
-                    "{name:?} cannot name a provider: 1 to 32 of a-z, 0-9 and -, starting and ending with a letter or digit, and not node or config"
+                    "{name:?} cannot name a provider: 1 to 32 of a-z, 0-9 and -, starting and ending with a letter or digit, and not node, config or center-added"
                 ));
             }
             if !Path::new(&exe).is_absolute() {
@@ -3452,9 +3496,13 @@ async fn cap_listing(paths: &NodePaths, cfg: &NodeConfig) -> Result<Value, Strin
 /// from and each center's setting (`center` only), the settings that name
 /// no action offered now, and the programs.
 fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
-    let rows = v["capabilities"].as_array().cloned().unwrap_or_default();
+    let mut rows = v["capabilities"].as_array().cloned().unwrap_or_default();
+    // What a center added is offered to it alone: one center's view leaves
+    // out what the others added.
+    if let Some(w) = center {
+        rows.retain(|r| !added_by_other(r, w));
+    }
     let text = |r: &Value, k: &str| r[k].as_str().unwrap_or("-").to_string();
-    let names: Vec<String> = rows.iter().map(|r| text(r, "name")).collect();
     // A program's state key, event or stream says its kind after its effect.
     let effect = |r: &Value| match r["kind"].as_str() {
         Some(kind) => format!("{} {kind}", text(r, "effect")),
@@ -3502,6 +3550,11 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
         if center.is_some_and(|w| w != c.name) {
             continue;
         }
+        let names: Vec<String> = rows
+            .iter()
+            .filter(|r| !added_by_other(r, &c.name))
+            .map(|r| text(r, "name"))
+            .collect();
         for (key, set) in &c.policy.caps {
             let offered = names
                 .iter()
@@ -3521,9 +3574,19 @@ fn cap_lines(cfg: &NodeConfig, v: &Value, center: Option<&str>) -> Vec<String> {
                 .into(),
         );
     }
-    lines.extend(config_lines(v));
+    lines.extend(config_lines(v, center));
     lines.extend(program_lines(v));
     lines
+}
+
+/// Whether the row `r` of `cap ls --json` is of a capability a center other
+/// than `center` added (crate::provider::listing gives it the source
+/// `center NAME`).
+fn added_by_other(r: &Value, center: &str) -> bool {
+    r["source"]
+        .as_str()
+        .and_then(|s| s.strip_prefix("center "))
+        .is_some_and(|c| c != center)
 }
 
 /// The schema `spec` takes from stdin, if it takes one: read in the
@@ -3610,6 +3673,39 @@ fn held_note(center: &str, name: &str) -> String {
     )
 }
 
+/// What the owner is told of `name`, an action `center` added that senses
+/// or actuates, switched off as `config accept` took a file that turns it
+/// on while a program keeps it out (crate::config_cap::hold_shadowed).
+#[cfg(unix)]
+fn shadowed_note(center: &str, name: &str) -> String {
+    let cap = name.split_once('.').map_or(name, |(c, _)| c);
+    format!(
+        "{center}: its own {name} senses or actuates and is left out while a program offers {cap}, so the file's on or allow rule for it is off there now; turn it on once the center is offered it (cap set {name} on --center {center}), or remove it (cap rm {name} --center {center})"
+    )
+}
+
+/// What the owner is told of `name`, a switch `config accept` set to `off`
+/// for `center`, which keeps one of its own under a program's capability:
+/// the file's `on` or allow rule for it would go with the center's own
+/// (crate::config_cap::hold_with_own).
+#[cfg(unix)]
+fn with_own_note(center: &str, name: &str) -> String {
+    let cap = name.split_once('.').map_or(name, |(c, _)| c);
+    format!(
+        "{center}: keeps a capability of its own under {cap}, so it is offered neither that one nor a program's {cap}, and the file's on or allow rule for {name} would go with the center's own when it is removed; {name} is off there now, and stays so: remove the center's first (cap ls --center {center} lists them, cap rm NAME --center {center} removes one), then turn on the program's (cap set {name} on --center {center})"
+    )
+}
+
+/// What the owner is told of `scope`, an `on` or allow rule of `center`
+/// that `config accept` took away with that center's own capability, which
+/// the file no longer holds (crate::config_cap::drop_removed).
+#[cfg(unix)]
+fn dropped_note(center: &str, scope: &str) -> String {
+    format!(
+        "{center}: its own capability is gone from the file, so its on and allow rules for {scope} went with it"
+    )
+}
+
 /// The programs whose rows in `listing` (`caps.list`) offer the capability
 /// `cap` now.
 fn programs_offering(listing: &Value, cap: &str) -> Vec<String> {
@@ -3678,14 +3774,35 @@ impl CapNotes {
 }
 
 /// The lines of `cap ls` for the capabilities of node.toml: each one's
-/// command and what else the owner set.
-fn config_lines(v: &Value) -> Vec<String> {
+/// command and what else the owner set. Of those the centers added, only
+/// `center`'s where one is given.
+fn config_lines(v: &Value, center: Option<&str>) -> Vec<String> {
+    let added = v["added"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(move |e| center.is_none_or(|w| e["center"] == w));
     v["config"]
         .as_array()
         .into_iter()
         .flatten()
+        .chain(added)
         .filter_map(|e| serde_json::from_value::<ConfigEntry>(e.clone()).ok())
         .map(|e| {
+            // One a center added says which, and how it counts: as execute,
+            // unless it senses or actuates, which only the owner turns on.
+            // It says so as what the capability is, not whether it is on
+            // now: the rows of `cap ls` above say that.
+            let by = match &e.center {
+                Some(c) if e.effect == nerve_proto::descriptor::Effect::Sense => {
+                    format!(" (added by center {c}, senses: only you turn it on)")
+                }
+                Some(c) if e.effect == nerve_proto::descriptor::Effect::Actuate => {
+                    format!(" (added by center {c}, actuates: only you turn it on)")
+                }
+                Some(c) => format!(" (added by center {c}, counted as execute)"),
+                None => String::new(),
+            };
             let c = nerve_policy::config::ConfigCapability {
                 name: e.name,
                 summary: String::new(),
@@ -3696,7 +3813,7 @@ fn config_lines(v: &Value) -> Vec<String> {
                 timeout_secs: e.timeout_secs,
                 platform: nerve_policy::config::Platform::parse(&e.platform).unwrap_or_default(),
             };
-            format!("capability {}: {}", c.name, cap_line(&c))
+            format!("capability {}{by}: {}", c.name, cap_line(&c))
         })
         .collect()
 }
@@ -3709,6 +3826,9 @@ struct ConfigEntry {
     command: Vec<String>,
     timeout_secs: Option<u64>,
     platform: String,
+    /// The center that added it; none for the owner's.
+    #[serde(default)]
+    center: Option<String>,
 }
 
 /// What `cap provider allow` and `ls` add where no program attaches: the
@@ -4172,10 +4292,10 @@ pub const NO_ACCOUNT_TO_CHOOSE: &str = "machine.user is Windows's: on Linux comm
 /// a `[[center]]` entry by its name.
 async fn config_cmd(paths: &NodePaths, c: ConfigCmd, out: &mut dyn Write) -> Result<(), String> {
     if let ConfigCmd::Accept = c {
-        let (v, held) = accept(paths).await?;
+        let (v, notes) = accept(paths).await?;
         let _ = writeln!(out, "accepted node.toml as version {v}");
-        for (center, name) in held {
-            let _ = writeln!(out, "{}", held_note(&center, &name));
+        for note in notes {
+            let _ = writeln!(out, "{note}");
         }
         return Ok(());
     }
@@ -5198,10 +5318,13 @@ fn pct_decode(s: &str) -> Option<String> {
 }
 
 /// `config accept`: the running daemon takes the file, or, when none runs,
-/// the file is signed here. Also the centers and actions the daemon
-/// switched off as it took it (crate::config_cap::hold_new); a stopped node
-/// cannot tell what the file had before, so it switches off none.
-async fn accept(paths: &NodePaths) -> Result<(u64, Vec<(String, String)>), String> {
+/// the file is signed here. Also a note for each switch the daemon set to
+/// `off` as it took it, each saying what to do for its kind
+/// (crate::config_cap::hold_new, hold_shadowed, hold_with_own), and for
+/// each a center's capability took along as the file dropped it
+/// (drop_removed); a stopped node cannot tell what the file had before, so
+/// it switches off and takes along none.
+async fn accept(paths: &NodePaths) -> Result<(u64, Vec<String>), String> {
     // Keys already in the keyring move nowhere when the file is taken, so
     // the settings store alone would not refuse it.
     if crate::secrets::stated_storage(paths) == SecretStorage::Keyring
@@ -5222,8 +5345,17 @@ async fn accept(paths: &NodePaths) -> Result<(u64, Vec<(String, String)>), Strin
     .await
     {
         Ok(v) => {
-            let held = serde_json::from_value(v["held"].clone()).unwrap_or_default();
-            return Ok((v["version"].as_u64().unwrap_or_default(), held));
+            let of = |key: &str| -> Vec<(String, String)> {
+                serde_json::from_value(v[key].clone()).unwrap_or_default()
+            };
+            let notes = of("held")
+                .iter()
+                .map(|(center, name)| held_note(center, name))
+                .chain(of("shadowed").iter().map(|(c, n)| shadowed_note(c, n)))
+                .chain(of("with_own").iter().map(|(c, n)| with_own_note(c, n)))
+                .chain(of("dropped").iter().map(|(c, n)| dropped_note(c, n)))
+                .collect();
+            return Ok((v["version"].as_u64().unwrap_or_default(), notes));
         }
         Err(e) if e != nerve_transport::ctl::NOT_RUNNING => return Err(e),
         Err(_) => {}
@@ -5433,6 +5565,7 @@ mod tests {
             pin_rotations: 0,
             old_pin: None,
             policy: Default::default(),
+            capabilities: Vec::new(),
         }
     }
 

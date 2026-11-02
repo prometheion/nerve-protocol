@@ -101,6 +101,8 @@ With a `Setup::folder`, before `bye revoked`:
 | 7.4 | settings get returns document and version |
 | 7.4 | settings set with a stale `if_version` is `conflict` |
 | 7.4 | settings set applies a document |
+| 7.4.2 | settings cap-add adds a capability offered to this center as `center-added` with effect `execute`, or is `unavailable` with its reason where the node takes none |
+| 7.4.2 | settings cap-rm of a capability this center did not add is refused, and of one it added removes it |
 | 7.2 | fs read returns what fs write wrote, with the same etag |
 | 7.2 | fs read outside the allowed folder is `forbidden` |
 | 7.3 | exec run of a command an allow rule names runs |

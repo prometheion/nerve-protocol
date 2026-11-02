@@ -19,12 +19,28 @@ use nerve_proto::schema::{self, Role};
 /// and a center never leaves its capability out for the name.
 pub const BUILT_IN: &[&str] = &["node", "fs", "exec", "settings", "audit", "job", "stream"];
 
+/// The `provider` of a capability a center added (`settings.cap-add`) in
+/// the descriptor that center gets: the node routes its calls by it, and the
+/// center tells by it which capabilities it added itself.
+pub const CENTER_ADDED: &str = "center-added";
+
 /// The most `[[capability]]` entries a node keeps: far past what an owner
 /// declares, and a bound on what every descriptor carries.
 pub const MAX_CAPABILITIES: usize = 64;
 
 /// The most elements of one command.
 pub const MAX_COMMAND: usize = 64;
+
+/// The most bytes of one element of a command.
+pub const MAX_ELEMENT: usize = 4096;
+
+/// The most bytes of a summary: what a center keeps of a description.
+pub const MAX_SUMMARY: usize = 2048;
+
+/// The most bytes the capabilities one center added take together, as
+/// JSON ([`ConfigCapability::entry`]): that center's descriptor carries
+/// them on top of the owner's, and node.toml keeps them.
+pub const MAX_CENTER_BYTES: usize = 256 * 1024;
 
 /// What the `result` of an entry is when the file says none.
 pub const TEXT: &str = "text";
@@ -277,6 +293,11 @@ impl ConfigCapability {
                 "capability {n}: the summary is one line, without blanks at either end"
             ));
         }
+        if self.summary.len() > MAX_SUMMARY {
+            return Err(format!(
+                "capability {n}: the summary is at most {MAX_SUMMARY} bytes"
+            ));
+        }
         if let Some(t) = self.timeout_secs
             && !(1..=max_timeout_secs).contains(&t)
         {
@@ -310,6 +331,9 @@ impl ConfigCapability {
         }
         if self.command.iter().any(|e| e.contains('\0')) {
             return Err("an element holds a NUL character".into());
+        }
+        if self.command.iter().any(|e| e.len() > MAX_ELEMENT) {
+            return Err(format!("an element is at most {MAX_ELEMENT} bytes"));
         }
         if program.is_empty() || placeholder(program).is_some() {
             return Err("the first element is the program, fixed".into());
@@ -427,6 +451,25 @@ impl ConfigCapability {
         Ok(out)
     }
 
+    /// The capability as JSON, as the owner declared it, the schemas as
+    /// JSON: what `cap ls --json` gives, and the form a center sends and is
+    /// given its own in (`settings.cap-add`, `settings.get`).
+    pub fn entry(&self) -> Value {
+        json!({
+            "name": self.name,
+            "summary": self.summary,
+            "effect": self.effect,
+            "command": self.command,
+            "params": self.params,
+            "result": match &self.result {
+                Output::Text => json!(Output::Text.to_string()),
+                Output::Json(s) => s.clone(),
+            },
+            "timeout_secs": self.timeout_secs,
+            "platform": self.platform.as_str(),
+        })
+    }
+
     /// The command as declared, as one line ([`ConfigCapability::line`]),
     /// for `cap ls`.
     pub fn command_line(&self) -> String {
@@ -435,26 +478,68 @@ impl ConfigCapability {
 
     /// `words` as one line, such as the command with a call's values
     /// filled in ([`ConfigCapability::argv`]) for the audit: an element
-    /// that holds a blank, a quote, a backslash or a control character is
-    /// quoted with its escapes, as JSON writes a string, so the line stays
-    /// one.
+    /// that holds a blank, a quote, a backslash, a control character or
+    /// one that shows as nothing is quoted with its escapes, as JSON writes
+    /// a string, so the line stays one and reads as what runs. JSON leaves
+    /// DEL, the C1 controls, the line separators and the format characters
+    /// as they are, which a terminal may act on or which may turn the words
+    /// around, so those are written as `\u` escapes too.
     pub fn line(words: &[String]) -> String {
         words
             .iter()
             .map(|e| {
                 let plain = !e.is_empty()
-                    && !e.contains(|c: char| {
-                        c.is_whitespace() || c.is_control() || "'\"\\".contains(c)
-                    });
+                    && !e.contains(|c: char| c.is_whitespace() || unseen(c) || "'\"\\".contains(c));
                 if plain {
-                    e.clone()
-                } else {
-                    Value::String(e.clone()).to_string()
+                    return e.clone();
                 }
+                let mut out = String::new();
+                for c in Value::String(e.clone()).to_string().chars() {
+                    if unseen(c) {
+                        for u in c.encode_utf16(&mut [0; 2]) {
+                            out.push_str(&format!("\\u{u:04x}"));
+                        }
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out
             })
             .collect::<Vec<_>>()
             .join(" ")
     }
+}
+
+/// Whether `c` is a control character, a line or paragraph separator, or
+/// a format character (Unicode's category Cf: soft hyphen, zero-width
+/// marks, bidirectional controls, tags and the like), which show as
+/// nothing or change how the text around them shows.
+fn unseen(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{ad}'
+                | '\u{600}'..='\u{605}'
+                | '\u{61c}'
+                | '\u{6dd}'
+                | '\u{70f}'
+                | '\u{890}'..='\u{891}'
+                | '\u{8e2}'
+                | '\u{180e}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206f}'
+                | '\u{feff}'
+                | '\u{fff9}'..='\u{fffb}'
+                | '\u{110bd}'
+                | '\u{110cd}'
+                | '\u{13430}'..='\u{1343f}'
+                | '\u{1bca0}'..='\u{1bca3}'
+                | '\u{1d173}'..='\u{1d17a}'
+                | '\u{e0001}'
+                | '\u{e0020}'..='\u{e007f}'
+        )
 }
 
 /// Refuses an entry of the file `doc` that names an `account`: every
@@ -505,6 +590,30 @@ pub fn refuse_units(doc: &toml::Table) -> Result<(), String> {
                 "{name}: {key} is no setting: a capability of node.toml offers actions only, so a state it reads is an action with effect read or sense; events and streams come from a program you allow as a provider (docs/user/providers.md)"
             ));
         }
+    }
+    Ok(())
+}
+
+/// Checks the capabilities a center added ([`validate_all`]), at most
+/// [`MAX_CAPABILITIES`] as the owner's, said in a center's words, and that
+/// they keep to [`MAX_CENTER_BYTES`] together. Their time limits are checked
+/// against the node's `limits.max_timeout_secs` as the center adds or
+/// changes one (nerve-node's `from_sent`), not here: the owner may lower
+/// that limit later, and cannot change what a center added, while a run is
+/// held to the limit anyway.
+pub fn validate_center(caps: &[ConfigCapability]) -> Result<(), String> {
+    if caps.len() > MAX_CAPABILITIES {
+        return Err(format!(
+            "at most {MAX_CAPABILITIES} capabilities of its own, and it has {}",
+            caps.len()
+        ));
+    }
+    validate_all(caps, u64::MAX)?;
+    let bytes: usize = caps.iter().map(|c| c.entry().to_string().len()).sum();
+    if bytes > MAX_CENTER_BYTES {
+        return Err(format!(
+            "its capabilities take {bytes} bytes as JSON, at most {MAX_CENTER_BYTES} together"
+        ));
     }
     Ok(())
 }
@@ -871,6 +980,31 @@ mod tests {
         );
     }
 
+    /// What a terminal may act on, or what shows as nothing or turns the
+    /// words around, is written as an escape in quotes: the line holds
+    /// none of it, stays one, and reads back to the same words.
+    #[test]
+    fn the_command_line_shows_what_shows_as_nothing_as_escapes() {
+        let words = [
+            "a\u{9b}2J",
+            "\u{202e}txt.exe",
+            "x\u{7f}",
+            "\u{85}",
+            "zero\u{200b}width",
+            "\u{2028}",
+            "\u{e0041}",
+            "plain",
+        ];
+        let c = cap(&words, Value::Null);
+        let line = c.command_line();
+        assert_eq!(
+            line,
+            r#""a\u009b2J" "\u202etxt.exe" "x\u007f" "\u0085" "zero\u200bwidth" "\u2028" "\udb40\udc41" plain"#
+        );
+        assert!(line.is_ascii(), "{line}");
+        assert_eq!(crate::config::form::command_words(&line).unwrap(), words);
+    }
+
     #[test]
     fn a_program_is_named_in_the_form_of_its_platform() {
         for (program, platform, ok) in [
@@ -905,5 +1039,46 @@ mod tests {
         for p in [Platform::Any, Platform::Linux, Platform::Windows] {
             assert_eq!(Platform::parse(p.as_str()), Some(p));
         }
+    }
+
+    /// A summary and a command element keep to their bounds, and the
+    /// capabilities of one center to theirs together: a center writes them
+    /// from afar, and its descriptor carries them.
+    #[test]
+    fn a_summary_an_element_and_a_centers_capabilities_have_a_bound() {
+        let mut c = cap(&["echo", &"x".repeat(MAX_ELEMENT)], Value::Null);
+        c.summary = "s".repeat(MAX_SUMMARY);
+        assert_eq!(c.validate(60), Ok(()));
+        let mut long = c.clone();
+        long.summary.push('s');
+        let e = long.validate(60).unwrap_err();
+        assert!(e.contains("the summary is at most 2048 bytes"), "{e}");
+        let mut long = c.clone();
+        long.command[1].push('x');
+        let e = long.validate(60).unwrap_err();
+        assert!(
+            e.contains("command: an element is at most 4096 bytes"),
+            "{e}"
+        );
+        let many: Vec<ConfigCapability> = (0..MAX_CAPABILITIES)
+            .map(|i| ConfigCapability {
+                name: format!("files.show{i}"),
+                ..c.clone()
+            })
+            .collect();
+        assert_eq!(validate_all(&many, 60), Ok(()));
+        let e = validate_center(&many).unwrap_err();
+        assert!(e.contains("at most 262144 together"), "{e}");
+        assert_eq!(validate_center(&many[..2]), Ok(()));
+        // As many small ones as the owner may declare, and no more.
+        let small: Vec<ConfigCapability> = (0..=MAX_CAPABILITIES)
+            .map(|i| ConfigCapability {
+                name: format!("files.show{i}"),
+                ..cap(&["echo"], Value::Null)
+            })
+            .collect();
+        assert_eq!(validate_center(&small[..MAX_CAPABILITIES]), Ok(()));
+        let e = validate_center(&small).unwrap_err();
+        assert_eq!(e, "at most 64 capabilities of its own, and it has 65");
     }
 }

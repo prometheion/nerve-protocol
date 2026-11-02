@@ -105,11 +105,18 @@ allow = ["exec.run:git status", "fs.read:~/notes/*"]
 deny = ["fs:~/private/*", "exec.run:rm *"]
 sudo_allow = ["sudo apt update"]
 protected = { extra = [], allow = [] }
+
+[[center.capability]]       # one this center added itself (config-capabilities.md)
+name = "say.back"           # the same keys as [[capability]]
+effect = "read"
+command = ["echo", "{word}"]
 ```
 
 The file also holds a `version` that grows with every write, `locked`
 (set by `panic`), and per center the `url`, `pin`, `center_id` and `node_id`
-the pairing filled in. Unknown keys are refused. `places` is the node's
+the pairing filled in, and the capabilities that center added with the
+settings grant (`[[center.capability]]`; `cap ls` lists them, `cap rm NAME
+--center NAME` removes one). Unknown keys are refused. `places` is the node's
 record of the folders `folder add` stored ([modes](modes.md#a-folder-keeps-the-place-you-added)).
 
 ## How long a command may run

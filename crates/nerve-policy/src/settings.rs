@@ -25,8 +25,8 @@ use serde_json::Value;
 
 use crate::audit::{AuditLog, Change, diff};
 use crate::config::{
-    Access, CapSetting, CenterDocument, Folder, NodeConfig, ProtectedOptions, SecretStorage,
-    SettingsGrant, Sudo,
+    Access, CapSetting, CenterDocument, ConfigCapability, Folder, NodeConfig, ProtectedOptions,
+    SecretStorage, SettingsGrant, Sudo,
 };
 use crate::paths::to_wire;
 use crate::protected::Protected;
@@ -669,15 +669,7 @@ impl SettingsStore {
         owner_only: impl Fn(&str) -> bool,
         protected: impl Fn(&ProtectedOptions) -> Protected,
     ) -> Result<u64, SetError> {
-        let entry = self
-            .config
-            .center(center)
-            .ok_or_else(|| SetError::Forbidden(format!("no center {center}")))?;
-        if entry.settings != SettingsGrant::Write {
-            return Err(SetError::Forbidden(
-                "this node does not let this center change its settings".into(),
-            ));
-        }
+        let entry = self.granted(center)?;
         if if_version != self.config.version {
             return Err(SetError::Conflict {
                 current: self.config.version,
@@ -696,7 +688,8 @@ impl SettingsStore {
             paused: entry.paused,
             policy: entry.policy.clone(),
         };
-        client_only(&old, &new, &owner_only, &protected).map_err(SetError::Forbidden)?;
+        client_only(&old, &new, &entry.capabilities, &owner_only, &protected)
+            .map_err(SetError::Forbidden)?;
         let mut cfg = self.config.clone();
         let e = cfg.center_mut(center).expect("checked above");
         e.paused = new.paused;
@@ -709,19 +702,41 @@ impl SettingsStore {
     /// it turns the switch on.
     pub fn set_sudo(&mut self, by: Writer, sudo: Sudo) -> Result<u64, SetError> {
         if let Writer::Center(center) = by {
-            let entry = self
-                .config
-                .center(center)
-                .ok_or_else(|| SetError::Forbidden(format!("no center {center}")))?;
-            if entry.settings != SettingsGrant::Write {
-                return Err(SetError::Forbidden(
-                    "this node does not let this center change its settings".into(),
-                ));
-            }
+            self.granted(center)?;
         }
         let mut cfg = self.config.clone();
         cfg.machine.sudo = sudo;
         self.commit(by, cfg)
+    }
+
+    /// A change of `center` to the capabilities it added itself
+    /// (`settings.cap-add`, `cap-edit` and `cap-rm`): `f` makes it on a copy
+    /// of the config, as the node judges it, and only a center with the
+    /// `write` grant gets that far. The change is saved, and audited, as
+    /// that center's; [`NodeConfig::validate`] checks every entry again.
+    pub fn set_center_capabilities(
+        &mut self,
+        center: &str,
+        f: impl FnOnce(&mut NodeConfig) -> Result<(), SetError>,
+    ) -> Result<u64, SetError> {
+        self.granted(center)?;
+        let mut cfg = self.config.clone();
+        f(&mut cfg)?;
+        self.commit(Writer::Center(center), cfg)
+    }
+
+    /// `center`'s entry, when it has the settings grant `write`.
+    fn granted(&self, center: &str) -> Result<&crate::config::CenterEntry, SetError> {
+        let entry = self
+            .config
+            .center(center)
+            .ok_or_else(|| SetError::Forbidden(format!("no center {center}")))?;
+        if entry.settings != SettingsGrant::Write {
+            return Err(SetError::Forbidden(
+                "this node does not let this center change its settings".into(),
+            ));
+        }
+        Ok(entry)
     }
 
     fn commit(&mut self, by: Writer, mut new: NodeConfig) -> Result<u64, SetError> {
@@ -790,6 +805,7 @@ fn to_json(c: &NodeConfig) -> Value {
 fn client_only(
     old: &CenterDocument,
     new: &CenterDocument,
+    added: &[ConfigCapability],
     owner_only: &dyn Fn(&str) -> bool,
     protected: &dyn Fn(&ProtectedOptions) -> Protected,
 ) -> Result<(), String> {
@@ -814,6 +830,20 @@ fn client_only(
         if kept && !still && owner_only(key) {
             return Err(format!(
                 "policy.caps.{key}: only the owner can turn on what senses or actuates, and a capability the node does not offer now may do either"
+            ));
+        }
+    }
+    // The owner turns off what a center added (docs/user/config-capabilities.md),
+    // and that center does not turn it on again: an `off` or `hidden` of a
+    // capability it added, or of one of its actions, stays until the owner
+    // changes it, whoever set it.
+    for (key, setting) in &o.caps {
+        let cap = key.split_once('.').map_or(key.as_str(), |(c, _)| c);
+        let kept = matches!(setting, CapSetting::Off | CapSetting::Hidden);
+        let still = matches!(n.caps.get(key), Some(CapSetting::Off | CapSetting::Hidden));
+        if kept && !still && added.iter().any(|c| c.split().0 == cap) {
+            return Err(format!(
+                "policy.caps.{key}: a capability this center added stays off until the owner turns it on"
             ));
         }
     }
@@ -946,6 +976,7 @@ mod tests {
                 pin_rotations: 0,
                 old_pin: None,
                 policy: CenterPolicy::default(),
+                capabilities: Vec::new(),
             });
             Ok(())
         })
@@ -1252,6 +1283,97 @@ mod tests {
         let mut new = doc(&s);
         new["policy"]["deny"] = json!([]);
         s.set_center_document("home", new, v, senses, unix).unwrap();
+    }
+
+    /// A center changes the capabilities it added only with the `write`
+    /// grant; the change is checked as the config is, audited as that
+    /// center's, and is no part of the document `settings.set` writes.
+    #[test]
+    fn a_center_changes_what_it_added_with_the_grant_audited_as_its_own() {
+        let d = tempfile::tempdir().unwrap();
+        let cap = |cmd: &str| {
+            crate::NodeConfig::parse(&format!(
+                "[[capability]]\nname = \"say.back\"\neffect = \"read\"\ncommand = [\"{cmd}\"]\n"
+            ))
+            .unwrap()
+            .capabilities
+            .remove(0)
+        };
+        let add = |c: ConfigCapability| {
+            move |cfg: &mut NodeConfig| {
+                cfg.center_mut("home").unwrap().capabilities.push(c);
+                Ok(())
+            }
+        };
+        let mut off = store(d.path(), SettingsGrant::Off);
+        assert!(matches!(
+            off.set_center_capabilities("home", add(cap("echo"))),
+            Err(SetError::Forbidden(_))
+        ));
+        assert!(off.config().centers[0].capabilities.is_empty());
+        let d = tempfile::tempdir().unwrap();
+        let mut s = store(d.path(), SettingsGrant::Write);
+        let v = s.set_center_capabilities("home", add(cap("echo"))).unwrap();
+        assert_eq!(v, s.version());
+        // Checked as the config is: a second one of that name is refused.
+        let e = s
+            .set_center_capabilities("home", add(cap("echo")))
+            .unwrap_err();
+        assert!(
+            matches!(&e, SetError::Invalid(m) if m.contains("center home: two capabilities are named say.back")),
+            "{e:?}"
+        );
+        // And so is their size together.
+        let big = |i: usize| {
+            let mut c = cap("echo");
+            c.name = format!("big.n{i}");
+            c.command.push("x".repeat(4096));
+            c
+        };
+        let e = s
+            .set_center_capabilities("home", |cfg| {
+                let e = cfg.center_mut("home").unwrap();
+                e.capabilities.extend((0..63).map(big));
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(
+            matches!(&e, SetError::Invalid(m) if m.contains("center home: its capabilities take")),
+            "{e:?}"
+        );
+        let entries = s.audit.read().unwrap();
+        let last = entries.last().unwrap();
+        assert_eq!(last["kind"], "settings");
+        assert_eq!(last["by"], "center home");
+        assert!(last["changes"].to_string().contains("say.back"), "{last}");
+        // The document neither shows nor takes them.
+        let doc = serde_json::to_value(s.center_document("home").unwrap()).unwrap();
+        assert!(!doc.to_string().contains("say.back"), "{doc}");
+        s.set_center_document("home", doc, s.version(), |_| false, unix)
+            .unwrap();
+        assert_eq!(s.config().centers[0].capabilities.len(), 1);
+        // An `off` of one it added stays until the owner changes it.
+        s.update(|c| {
+            c.centers[0]
+                .policy
+                .caps
+                .insert("say".into(), CapSetting::Off);
+            Ok(())
+        })
+        .unwrap();
+        let mut doc = serde_json::to_value(s.center_document("home").unwrap()).unwrap();
+        doc["policy"]["caps"] = json!({"say": "on"});
+        let e = s
+            .set_center_document("home", doc.clone(), s.version(), |_| false, unix)
+            .unwrap_err();
+        assert!(
+            matches!(&e, SetError::Forbidden(m) if m.contains("stays off until the owner turns it on")),
+            "{e:?}"
+        );
+        // Hidden is as off; another capability's switch is the center's.
+        doc["policy"]["caps"] = json!({"say": "hidden", "other": "off"});
+        s.set_center_document("home", doc, s.version(), |_| false, unix)
+            .unwrap();
     }
 
     #[test]
@@ -1693,7 +1815,7 @@ mod tests {
             },
         };
         let old = policy(&[("C:\\Users\\u\\.ssh", "r")]);
-        let check = |new: &[(&str, &str)]| client_only(&old, &policy(new), &|_| false, &win);
+        let check = |new: &[(&str, &str)]| client_only(&old, &policy(new), &[], &|_| false, &win);
         for new in [
             &[("C:\\Users\\u\\.ssh", "r"), ("C:\\Users\\u\\.ssh\\", "rw")][..],
             &[("c:/users/u/.ssh", "rw")][..],

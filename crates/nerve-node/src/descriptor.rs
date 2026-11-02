@@ -449,9 +449,38 @@ fn settings_cap() -> Capability {
             obj(json!({"sudo": {"enum": ["on", "off"]}}), &["sudo"]),
         ),
     );
+    let added = obj(json!({"capability": {"type": "object"}}), &["capability"]);
+    let version = obj(json!({"version": {"type": "integer"}}), &["version"]);
+    c.actions.insert(
+        "cap-add".into(),
+        action(
+            Effect::Write,
+            "Adds a capability of this center's own: a fixed command run as nerve-run, counted as execute (spec §7.4.2).",
+            added.clone(),
+            version.clone(),
+        ),
+    );
+    c.actions.insert(
+        "cap-edit".into(),
+        action(
+            Effect::Write,
+            "Replaces a capability this center added, named by its name.",
+            added,
+            version.clone(),
+        ),
+    );
+    c.actions.insert(
+        "cap-rm".into(),
+        action(
+            Effect::Write,
+            "Removes a capability this center added.",
+            obj(json!({"name": {"type": "string"}}), &["name"]),
+            version,
+        ),
+    );
     c.state = state(
         json!({"document": {"type": "object"}, "version": {"type": "integer"},
-                           "sudo": {"enum": ["on", "off"]}}),
+                           "sudo": {"enum": ["on", "off"]}, "capabilities": {"type": "object"}}),
     );
     c.events.insert(
         "changed".into(),
@@ -1019,6 +1048,7 @@ mod tests {
             pin_rotations: 0,
             old_pin: None,
             policy: CenterPolicy::default(),
+            capabilities: Vec::new(),
         }
     }
 
@@ -2456,7 +2486,7 @@ mod tests {
             }
         }
         // Each built-in action was looked at, `exec.signal` among them.
-        assert_eq!(actions.len(), 12, "{actions:?}");
+        assert_eq!(actions.len(), 15, "{actions:?}");
         // The path and working-folder text of the other platform too.
         let exec = |windows| {
             exec_cap(

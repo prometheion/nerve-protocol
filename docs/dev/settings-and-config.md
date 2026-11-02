@@ -88,6 +88,21 @@ center reads, or the node refuses the whole change and names the field.
     fixed command as `nerve-run`, so none is in a center's
     document. A center with the grant may switch them by `caps` and its rules
     like any capability, within item 9.
+12. Another center's capabilities, and limits on a center's own
+    (`[[center.capability]]`, through `settings.cap-add`, `cap-edit` and
+    `cap-rm`, not the document; [node-local §2](spec/node-local.md#capabilities-a-center-adds)):
+    they always run as `nerve-run` (no account field), count as `execute`
+    whatever they declare unless they sense or actuate (item 9 then holds
+    for them), never take the name of a capability of the owner's or of an
+    attached provider, and an `off` or `hidden` switch of one of them stays
+    until the owner changes it, whoever set it, also after the center removes
+    and adds it again. The center turns on or allows each of its actions by
+    its `cap.action` only, an attached provider's capability of a `cap` it
+    added under is not offered to it, and a removal drops its `on` and allow
+    rules for that action unless the owner declares that action too; its
+    sensing ones keep their `cap` owner-only whatever else offers it
+    (nerve-node `config_cap`). The store checks the write
+    grant and audits each change as the center's (`Writer::Center`).
 
 One item is in the document a center reads and is still the owner's: the
 record of the folders' real places, `policy.places`

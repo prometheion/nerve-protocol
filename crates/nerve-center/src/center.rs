@@ -2584,6 +2584,110 @@ impl Center {
         r
     }
 
+    // ---- Capabilities (the web UI's tab; changes need the settings grant) ----
+
+    /// What the Capabilities tab shows of the node `node_id`: its units as
+    /// the center has them (its own `job` and `stream` aside), each with its
+    /// effect and where it comes from, the ones the center left out with the
+    /// reason, and, where the node gave this center the settings grant
+    /// `write` and is online, the capabilities this center added there as
+    /// the node keeps them, each also as the form shows it. A node without
+    /// the grant is shown read only: the center may change nothing there.
+    pub async fn node_caps(&self, node_id: &str) -> Result<Value, String> {
+        let found = self.read(|s| {
+            s.nodes.get(node_id).map(|n| {
+                let units = cap_units(&n.catalog.units);
+                let write = n.descriptor.as_ref().is_some_and(settings_write);
+                let node = json!({"id": n.id, "name": n.name, "platform": n.platform});
+                (node, units, n.catalog.broken.clone(), write)
+            })
+        });
+        let (node, units, broken, write) = found.ok_or("no such machine")?;
+        let link = self.link(node_id);
+        let added = match (&link, write) {
+            (Some(l), true) => {
+                let got = l
+                    .call(
+                        msg::method::GET,
+                        json!({"cap": "settings", "keys": ["capabilities"]}),
+                        Some(SHORT_CALL),
+                    )
+                    .await;
+                match got {
+                    Ok(v) => added_of(&v),
+                    Err(e) => json!({"error": e.message}),
+                }
+            }
+            _ => Value::Null,
+        };
+        Ok(
+            json!({"node": node, "online": link.is_some(), "settings_write": write,
+                  "units": units, "broken": broken, "added": added}),
+        )
+    }
+
+    /// Adds (`adding`) or replaces a capability of this center's own on the
+    /// node, from the form of the Capabilities tab: checked here first by
+    /// the node's own rules (nerve_policy::config::form), then sent as
+    /// `settings.cap-add` or `cap-edit`; the node checks it again, against
+    /// its own limits, and may refuse it.
+    pub async fn save_cap(
+        &self,
+        node_id: &str,
+        c: &nerve_policy::config::ConfigCapability,
+        adding: bool,
+    ) -> Result<Value, RpcError> {
+        let action = if adding { "cap-add" } else { "cap-edit" };
+        let r = self
+            .settings_action(node_id, action, json!({"capability": c.entry()}))
+            .await;
+        let (done, wanted) = if adding {
+            (format!("capability {} added", c.name), "add a capability")
+        } else {
+            (
+                format!("capability {} changed", c.name),
+                "change a capability",
+            )
+        };
+        self.log_change(node_id, &done, wanted, &r);
+        r
+    }
+
+    /// Removes the capability `name` this center added on the node.
+    pub async fn remove_cap(&self, node_id: &str, name: &str) -> Result<Value, RpcError> {
+        let r = self
+            .settings_action(node_id, "cap-rm", json!({"name": name}))
+            .await;
+        let done = format!("capability {name} removed");
+        self.log_change(node_id, &done, "remove a capability", &r);
+        r
+    }
+
+    /// Runs the settings action `action` on the node and, once the node took
+    /// it, fetches the node's description before it answers: the node says
+    /// that it changed by an event, which the center follows in a task of its
+    /// own, and a page that asks for the tab right after the answer would
+    /// get the units from before the change.
+    async fn settings_action(
+        &self,
+        node_id: &str,
+        action: &str,
+        args: Value,
+    ) -> Result<Value, RpcError> {
+        let link = self
+            .link(node_id)
+            .ok_or_else(|| RpcError::new(ErrorCode::Unavailable, "the node is offline"))?;
+        let r = link
+            .call(
+                msg::method::INVOKE,
+                json!({"cap": "settings", "action": action, "args": args, "ctx": {}}),
+                Some(SHORT_CALL),
+            )
+            .await?;
+        self.refresh(&link).await;
+        Ok(r)
+    }
+
     // ---- Calls ----
 
     /// Runs a call of a unit (an `execute`) on its node and waits for its
@@ -4086,6 +4190,73 @@ pub(crate) fn plural(n: u32, one: &str) -> String {
     }
 }
 
+/// The rows of the Capabilities tab for a node's `units`: all but the
+/// center's own, told as the catalog tells them (catalog::is_center), not
+/// by the provider a node names.
+fn cap_units(units: &[catalog::Unit]) -> Vec<Value> {
+    units
+        .iter()
+        .filter(|u| !catalog::is_center(u))
+        .map(|u| {
+            json!({"name": u.name, "effect": u.effect, "kind": u.kind.as_str(),
+                   "summary": &*u.description, "source": unit_source(&u.provider),
+                   "off": u.off})
+        })
+        .collect()
+}
+
+/// What the Capabilities tab shows of a node's answer to `get
+/// settings.capabilities`: its `{entries, refused}`, each entry also as the
+/// form shows it. The answer is the node's word, so one of another shape
+/// is said as such, and an entry the form cannot show ([`shown`]) is left
+/// out.
+fn added_of(answer: &Value) -> Value {
+    let Some(added) = answer.get("capabilities").and_then(Value::as_object) else {
+        return json!({"error": "the machine's answer has no list of capabilities"});
+    };
+    let mut added = added.clone();
+    if let Some(entries) = added.get_mut("entries").and_then(Value::as_array_mut) {
+        entries.retain(shown);
+        for e in entries.iter_mut() {
+            let form = json!(nerve_policy::config::form::of_entry(e));
+            if let Some(o) = e.as_object_mut() {
+                o.insert("form".into(), form);
+            }
+        }
+    }
+    Value::Object(added)
+}
+
+/// Whether the form can show `e`, an entry of a node's `get
+/// settings.capabilities`: an object whose `params` and `result`, where it
+/// has them, keep to the schema subset, as the node checks what it keeps.
+/// A schema of another shape may nest far deeper, and the form's pretty
+/// text of it would be many times the size of the answer.
+fn shown(e: &Value) -> bool {
+    use nerve_proto::schema::{Role, check};
+    e.is_object()
+        && match &e["params"] {
+            Value::Null => true,
+            p => check(p, Role::Params).is_ok(),
+        }
+        && match &e["result"] {
+            Value::Null | Value::String(_) => true,
+            r => check(r, Role::Result).is_ok(),
+        }
+}
+
+/// Where a unit comes from, as the Capabilities tab says it: the node's
+/// own, the owner's node.toml, this center (it added it), or a program the
+/// owner allows.
+fn unit_source(provider: &str) -> String {
+    match provider {
+        "node" => "built-in".into(),
+        "config" => "the owner's node.toml".into(),
+        nerve_policy::config::CENTER_ADDED => "this center".into(),
+        p => format!("program {p}"),
+    }
+}
+
 /// The node gave this center `settings = write`: its descriptor carries the
 /// `settings` capability (spec §7.4).
 pub fn settings_write(d: &Descriptor) -> bool {
@@ -4157,6 +4328,73 @@ pub fn audit_rule(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Capabilities tab leaves out the center's own units by their
+    /// capability, so a node's provider named `center` stays, and shows a
+    /// node's answer of another shape as such instead of failing on it, and
+    /// an entry whose schema it would not keep not at all.
+    #[test]
+    fn the_capabilities_tab_takes_the_nodes_word_as_data() {
+        use crate::tools::tests::{cap, desc};
+        let mut lamp = cap(
+            "lamp",
+            "",
+            &[(
+                "on",
+                nerve_proto::descriptor::Effect::Execute,
+                json!({"type": "object"}),
+            )],
+        );
+        lamp.provider = catalog::CENTER.into();
+        let c = catalog::Catalog::build(&desc("box", vec![lamp]));
+        assert!(
+            c.units.iter().any(catalog::is_center),
+            "the center's own are in"
+        );
+        let rows = cap_units(&c.units);
+        let names: Vec<&str> = rows.iter().filter_map(|r| r["name"].as_str()).collect();
+        assert_eq!(names, ["lamp.on"]);
+        assert_eq!(rows[0]["source"], "program center");
+        for odd in [
+            json!(1),
+            json!({"capabilities": 1}),
+            json!({"capabilities": "x"}),
+            json!({"capabilities": [1]}),
+        ] {
+            assert!(added_of(&odd)["error"].is_string(), "{odd}");
+        }
+        let entry = json!({"name": "say.back", "effect": "read", "command": ["echo"]});
+        let v = added_of(&json!({"capabilities": {"entries": [1, "x", entry], "refused": null}}));
+        let entries = v["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "{v}");
+        assert_eq!(entries[0]["form"]["name"], "say.back");
+        assert_eq!(entries[0]["form"]["command"], "echo");
+        assert!(added_of(&json!({"capabilities": {"entries": 3}}))["entries"] == 3);
+        // A schema nested deeper than a node keeps, or of another shape, is
+        // left out before the form prints it; one in the subset is shown.
+        let mut deep = json!(0);
+        for _ in 0..100 {
+            deep = json!([deep, 0]);
+        }
+        let schema = json!({"type": "object", "properties": {"word": {"type": "string"}}});
+        let with = |key: &str, v: &Value| {
+            let mut e = json!({"name": "say.back", "effect": "read", "command": ["echo"]});
+            e[key] = v.clone();
+            e
+        };
+        let v = added_of(&json!({"capabilities": {"entries": [
+            with("params", &deep), with("result", &deep), with("params", &json!("text")),
+            with("params", &schema), with("result", &json!("text")), with("result", &schema),
+        ]}}));
+        let entries = v["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 3, "{v}");
+        assert!(
+            entries[0]["form"]["params"]
+                .as_str()
+                .unwrap()
+                .contains("word")
+        );
+    }
 
     fn open(dir: &Path, name: Option<&str>) -> Center {
         nerve_transport::init_crypto();
