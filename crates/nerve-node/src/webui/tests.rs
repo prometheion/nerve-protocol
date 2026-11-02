@@ -70,6 +70,28 @@ fn a_copy_of_the_config_older_than_the_last_look_is_passed_over() {
 }
 
 #[test]
+fn a_panic_of_a_locked_node_still_ends_the_sessions_and_counts() {
+    let a = "a".repeat(64);
+    let ui = WebUi::default();
+    let at = |version: u64| NodeConfig {
+        version,
+        ..cfg_with(&[("one", &a)], true)
+    };
+    ui.settle(&at(5));
+    assert_eq!(ui.lock_count(), 1);
+    // A session started in the lock, then the owner's next panic, which does
+    // not change the config (same version).
+    ui.sessions.start(Some(a.clone()));
+    ui.settle_panic(&at(5));
+    assert!(ui.sessions.is_empty());
+    assert_eq!(ui.lock_count(), 2);
+    // A panic that locks counts once, not twice.
+    let ui = WebUi::default();
+    ui.settle_panic(&at(1));
+    assert_eq!(ui.lock_count(), 1);
+}
+
+#[test]
 fn wrong_tokens_are_told_once_a_minute() {
     let ui = WebUi::default();
     assert_eq!(ui.wrong_token(), Some(1));

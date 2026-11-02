@@ -1001,6 +1001,19 @@ pub async fn edit_saved(
     paths: &NodePaths,
     f: impl Fn(&mut NodeConfig) -> Result<(), String>,
 ) -> Result<Saved, String> {
+    edit_saved_as(paths, false, f).await
+}
+
+/// [`edit_saved`] for `panic` when `panic` is set: the node then ends the web
+/// UI's sessions also when the config does not change (it was locked).
+async fn edit_saved_as(
+    paths: &NodePaths,
+    panic: bool,
+    f: impl Fn(&mut NodeConfig) -> Result<(), String>,
+) -> Result<Saved, String> {
+    // Windows has no node to ask: the file is the node's.
+    #[cfg(not(unix))]
+    let _ = panic;
     #[cfg(unix)]
     {
         let sock = paths.ctl_socket();
@@ -1029,6 +1042,9 @@ pub async fn edit_saved(
             // A page's request that a panic overtook writes nothing.
             if let Some(n) = crate::owner::web_epoch() {
                 params["web_locks"] = json!(n);
+            }
+            if panic {
+                params["panic"] = json!(true);
             }
             match nerve_transport::ctl::call(&sock, "config.write", params).await {
                 Ok(_) => {
@@ -2516,11 +2532,14 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
         Cmd::Config(c) => config_cmd(&paths, c, out).await,
         Cmd::Rule(c) => rule_cmd(&paths, c, out).await,
         Cmd::Panic => {
-            edit(&paths, |c| {
+            let saved = edit_saved_as(&paths, true, |c| {
                 c.locked = true;
                 Ok(())
             })
             .await?;
+            if let Some(e) = grants_failed(&saved.grants) {
+                return Err(e);
+            }
             w(
                 out,
                 "locked: every link ends and nothing runs until `nerve-node unlock`".into(),

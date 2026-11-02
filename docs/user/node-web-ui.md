@@ -81,9 +81,14 @@ one.
 
 **Panic** (on the Overview, or `nerve-node panic`) ends every web UI session
 too. Maybe a browser or a session leaked; a leaked session must not undo the
-panic. A command a session started just before it is stopped, and writes
-nothing after the node is locked. To unlock in the UI, log in again with a
+panic. A command a session started just before it is stopped, and changes no
+setting after the node is locked. (A `log clear` or `audit clear` that was
+already running may still land.) To unlock in the UI, log in again with a
 token, or run `nerve-node unlock`.
+
+Run `nerve-node panic` again when a session started while the node was
+locked may have leaked: it ends every session also when the node is locked
+already.
 
 A panic stops a leaked session, not a leaked token: whoever holds the token can
 log in again and unlock. If a browser or a machine that kept the token (a

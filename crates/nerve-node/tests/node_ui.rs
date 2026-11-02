@@ -523,6 +523,41 @@ async fn panic_revoke_and_restart_end_the_sessions() {
     daemon.stop().await;
 }
 
+/// A session started while the node is locked may leak: the owner's next
+/// `panic` ends it although the node was locked already, so it can neither
+/// stay nor unlock.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_panic_ends_a_session_started_in_the_lock() {
+    let _one = SERIAL.lock().await;
+    let d = tempfile::tempdir().unwrap();
+    let (daemon, at) = node(d.path()).await;
+    let (out, _) = cli(&at, &["ui", "on", "--listen", "127.0.0.1:0"]).await;
+    let token = token_in(&out);
+    let addr = ui_address(&daemon).unwrap();
+    let (out, code) = cli(&at, &["panic"]).await;
+    assert_eq!(code, 0, "{out}");
+    assert!(daemon.config().locked);
+    // The way back in: a login in the lock.
+    let kept = login(addr, &token).await.unwrap();
+    assert_eq!(get(addr, "/api/overview", &kept).await.status, 200);
+    let (out, code) = cli(&at, &["panic"]).await;
+    assert_eq!(code, 0, "{out}");
+    wait_until("the session ends", || {
+        daemon.status()["ui"]["sessions"] == 0
+    })
+    .await;
+    assert_eq!(get(addr, "/api/overview", &kept).await.status, 401);
+    let r = post(addr, "/api/unlock", &kept, json!({})).await;
+    assert_eq!(r.status, 401, "{}", r.body);
+    assert!(daemon.config().locked);
+    // A new login still works, and unlocks.
+    let again = login(addr, &token).await.unwrap();
+    let r = post(addr, "/api/unlock", &again, json!({})).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(!daemon.config().locked);
+    daemon.stop().await;
+}
+
 /// A command the page started before a panic does not finish after it: an
 /// unlock that was let in with the session would undo the panic.
 #[tokio::test(flavor = "multi_thread")]
@@ -823,6 +858,64 @@ async fn beyond_loopback_the_ui_is_tls_with_its_own_certificate() {
     // Loopback takes no certificate flags.
     let (out, code) = cli(&at, &["ui", "on", "--new-cert"]).await;
     assert_eq!(code, 1, "{out}");
+    daemon.stop().await;
+}
+
+/// A change of the address is tried afresh: while the key is read for it, the
+/// status is not the last failure's. `ui on` takes the first "listening" or
+/// "cannot" for the new address as its answer, and the old failure's text
+/// would be told as the new try's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_try_to_listen_does_not_keep_the_last_failure_in_the_status() {
+    let _one = SERIAL.lock().await;
+    let d = tempfile::tempdir().unwrap();
+    let (daemon, at) = node(d.path()).await;
+    let (out, code) = cli(&at, &["config", "set", "ui.listen", "\"0.0.0.0:0\""]).await;
+    assert_eq!(code, 0, "{out}");
+    let status = || {
+        daemon.status()["ui"]["status"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    wait_until("the node says why it does not listen", || {
+        status().contains("no TLS certificate")
+    })
+    .await;
+    // The key's file is a pipe: reading it waits for a writer, as a keyring
+    // that asks to be unlocked does.
+    let key = daemon.paths().ui_tls_file();
+    std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+    let made = std::process::Command::new("mkfifo")
+        .arg(&key)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    // Also when the test fails: a read that waits for ever would keep the
+    // runtime from ending.
+    struct Opener(std::path::PathBuf);
+    impl Drop for Opener {
+        fn drop(&mut self) {
+            use std::os::unix::fs::OpenOptionsExt;
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&self.0);
+        }
+    }
+    let opener = Opener(key);
+    let (out, code) = cli(&at, &["config", "set", "ui.listen", "\"0.0.0.0:1\""]).await;
+    assert_eq!(code, 0, "{out}");
+    wait_until("the new try says it started", || {
+        status().starts_with("starting on 0.0.0.0:1")
+    })
+    .await;
+    // Let the read end, with nothing in it.
+    drop(opener);
+    wait_until("the new try fails on its own", || {
+        status().starts_with("cannot listen on 0.0.0.0:1")
+    })
+    .await;
     daemon.stop().await;
 }
 

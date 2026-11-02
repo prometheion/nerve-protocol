@@ -166,6 +166,19 @@ impl WebUi {
         });
     }
 
+    /// [`settle`](Self::settle) for a `panic`: the node counts as locked
+    /// again and every session ends even when it was locked already, so the
+    /// owner's second panic (a session was started in the lock, and may have
+    /// leaked) undoes what that session could still do.
+    pub(crate) fn settle_panic(&self, cfg: &NodeConfig) {
+        let before = self.lock_count();
+        self.settle(cfg);
+        if cfg.locked && self.lock_count() == before {
+            self.sessions.end_all();
+            self.locks.send_modify(|n| *n += 1);
+        }
+    }
+
     /// Counts a wrong token, and says how many to tell in the log: the
     /// first of a minute at once, the rest when the next comes after it.
     fn wrong_token(&self) -> Option<u32> {
@@ -341,6 +354,8 @@ pub(crate) async fn run(shared: Arc<Shared>, endpoint: Endpoint) {
     // The address the last bind failed on: the first failure there is an
     // error in the log, its retries are detail.
     let mut failed_on: Option<String> = None;
+    // Whether the loop woke for its retry and not for a change of the config.
+    let mut retry = false;
     loop {
         if *stop.borrow() {
             break;
@@ -348,6 +363,14 @@ pub(crate) async fn run(shared: Arc<Shared>, endpoint: Endpoint) {
         changed.borrow_and_update();
         let cfg = shared.config();
         shared.webui.settle(&cfg);
+        // A change of the config is tried afresh: what the last try said (a
+        // failure the change may mend) must not be taken for this one's
+        // while `listen` reads the key. A retry keeps it.
+        if let Some(at) = cfg.ui.listen.as_deref()
+            && !retry
+        {
+            shared.webui.set_status(format!("starting on {at}"), None);
+        }
         let wait = match cfg.ui.listen.clone() {
             None => {
                 shared.webui.sessions.end_all();
@@ -397,6 +420,7 @@ pub(crate) async fn run(shared: Arc<Shared>, endpoint: Endpoint) {
                 if r.is_err() {
                     break;
                 }
+                retry = false;
             }
             _ = stop.changed() => break,
             _ = async {
@@ -404,7 +428,7 @@ pub(crate) async fn run(shared: Arc<Shared>, endpoint: Endpoint) {
                     Some(w) => tokio::time::sleep(w).await,
                     None => std::future::pending().await,
                 }
-            } => {}
+            } => retry = true,
         }
     }
     shared.webui.sessions.end_all();

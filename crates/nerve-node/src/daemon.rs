@@ -2397,7 +2397,13 @@ pub(crate) fn control(
             // write can be checked against the count.
             #[cfg(target_os = "linux")]
             if r.is_ok() {
-                shared.webui.settle(store.config());
+                // A panic counts also when the node is locked already: the
+                // owner's way to end a session that started in the lock.
+                if params.get("panic").and_then(Value::as_bool) == Some(true) {
+                    shared.webui.settle_panic(store.config());
+                } else {
+                    shared.webui.settle(store.config());
+                }
             }
             drop(store);
             match r {
