@@ -1280,6 +1280,13 @@ async fn the_remaining_routes_build_their_commands_and_keep_secrets_off_the_comm
     );
     // The sudo list is closed, a setting taken away, a key rotated.
     change(addr, &s, "/api/sudo/off", json!({})).await;
+    assert!(
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .any(|l| l.ends_with("sudo off")),
+        "sudo off was run"
+    );
     change(
         addr,
         &s,
