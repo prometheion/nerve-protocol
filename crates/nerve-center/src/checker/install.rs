@@ -12,7 +12,7 @@
 //!
 //! Everything is pinned in code (the release tag, each asset's hash, and each
 //! model's repo/revision/file/size/hash), so an install fetches exactly the
-//! bytes verified on 2026-10-18 or fails.
+//! bytes verified when they were pinned or fails.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -22,8 +22,9 @@ use serde::Serialize;
 
 use super::config::LocalModel;
 
-/// The pinned llama.cpp release.
-pub const LLAMA_TAG: &str = "b11719";
+/// The pinned llama.cpp release: the build of llama.cpp's v0.8.0 release, the
+/// first release that runs d1-2B (`lfm3`). Hashes checked on 2026-11-02.
+pub const LLAMA_TAG: &str = "b11960";
 const LLAMA_BASE: &str = "https://github.com/ggml-org/llama.cpp/releases/download";
 const HF_BASE: &str = "https://huggingface.co";
 
@@ -162,57 +163,57 @@ const ASSETS: [(&str, &str, bool, &str, &str); 8] = [
         "linux",
         "x86_64",
         false,
-        "llama-b11719-bin-ubuntu-x64.tar.gz",
-        "2c50edd1422cdc686a1620923a7dda9a33634509566d2821155fb3d4879510a3",
+        "llama-b11960-bin-ubuntu-x64.tar.gz",
+        "31cc3a6bc638ac6c48dc4b1b74888f1eaadf3d14227c1e5f67daf9a49541d97a",
     ),
     (
         "linux",
         "x86_64",
         true,
-        "llama-b11719-bin-ubuntu-vulkan-x64.tar.gz",
-        "9a09cce245acf8823feb99fb7ba8ddd3e878e3827564888131e0185044aa4429",
+        "llama-b11960-bin-ubuntu-vulkan-x64.tar.gz",
+        "164199e978304bb32a8a6c24b8efa015528ddf286821596eab676c90b375feac",
     ),
     (
         "windows",
         "x86_64",
         false,
-        "llama-b11719-bin-win-cpu-x64.zip",
-        "1b1234d208a8b851cc27cd3d96b850d1547a4e5cfc5cd75f0a9fdd1d4c5bea20",
+        "llama-b11960-bin-win-cpu-x64.zip",
+        "73f962f82850d244db47eaacb9d913637027b82399124324298576d58c5f4287",
     ),
     (
         "windows",
         "x86_64",
         true,
-        "llama-b11719-bin-win-vulkan-x64.zip",
-        "08dde7f4133443ac629431c35f0435e267ca73251fc002cb95e10625424e2963",
+        "llama-b11960-bin-win-vulkan-x64.zip",
+        "bac6914b5e83523eb008c6789eaa12669f93fbc196c3b9e8237b6672323b33e9",
     ),
     (
         "linux",
         "aarch64",
         false,
-        "llama-b11719-bin-ubuntu-arm64.tar.gz",
-        "290aa4432ad8e28b638285be6a75d0dd6f327d9b2d95f7048a8cf5e69704bee9",
+        "llama-b11960-bin-ubuntu-arm64.tar.gz",
+        "0065ecfbffe8a790bb0d28059a3320cdc8f723b7f3f248cdc8bfc04790927715",
     ),
     (
         "linux",
         "aarch64",
         true,
-        "llama-b11719-bin-ubuntu-vulkan-arm64.tar.gz",
-        "ec2b1e886192c9e1e686e4a5a4d95079f75b98966274264e7bf6e2e13a063185",
+        "llama-b11960-bin-ubuntu-vulkan-arm64.tar.gz",
+        "22d1f852055a95a5c969b90326a2b68b4618eca6c54638bae27b4ee603031d53",
     ),
     (
         "windows",
         "aarch64",
         false,
-        "llama-b11719-bin-win-cpu-arm64.zip",
-        "bb066fea4e7b396560704f05f227aa39057a27ae17aca604f1ef3d1b6503a1a3",
+        "llama-b11960-bin-win-cpu-arm64.zip",
+        "77349357c38da235bb0eed37bcc5ecf3efef21bb5dc42c2269589c0e71cfa00f",
     ),
     (
         "windows",
         "aarch64",
         true,
-        "llama-b11719-bin-win-vulkan-arm64.zip",
-        "69bd6da42725771831c3271d2198ebb71e9531282a755edb24917b9d81b1555e",
+        "llama-b11960-bin-win-vulkan-arm64.zip",
+        "cd375e330452496aadf8a872cde6d48c92e51d598088e5575a32a0d43bc0c9f0",
     ),
 ];
 
@@ -842,6 +843,18 @@ mod tests {
             asset_for("linux", "aarch64", true)
         );
         assert!(asset_for("freebsd", "x86_64", false).is_none());
+    }
+
+    /// The pinned build runs the default model: llama.cpp serves d1-2B's
+    /// `lfm3` from build b11946 on (ggml-org/llama.cpp#31275), and an older
+    /// build does not load it.
+    #[test]
+    fn the_pinned_build_runs_lfm3() {
+        let build: u32 = LLAMA_TAG
+            .strip_prefix('b')
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("{LLAMA_TAG} is not a b<build> tag"));
+        assert!(build >= 11946, "{LLAMA_TAG}");
     }
 
     /// Nerve runs on Linux and Windows only, so every pin is one of their
