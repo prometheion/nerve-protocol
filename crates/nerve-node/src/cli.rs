@@ -242,7 +242,7 @@ pub enum ModeCmd {
 }
 
 /// The three lists of commands in a center's policy.
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum List {
     Allow,
     Deny,
@@ -265,6 +265,9 @@ pub enum RuleCmd {
         /// Make the rule of an audit entry of this action instead, as the audit buttons do: `fs.read` takes a path and covers its folder with --wildcard, an action without a target takes "" and covers its capability.
         #[arg(long, value_name = "CAP.ACTION")]
         action: Option<String>,
+        /// With --action: hold the rule to one argument of the call, as the audit buttons do: `--pin room=office` makes `lamp.set:room=office`.
+        #[arg(long, value_name = "FIELD=VALUE", requires = "action")]
+        pin: Option<String>,
         #[command(flatten)]
         center: CenterArg,
     },
@@ -280,6 +283,9 @@ pub enum RuleCmd {
         /// The entry was added with this --action.
         #[arg(long, value_name = "CAP.ACTION")]
         action: Option<String>,
+        /// The entry was added with this --pin.
+        #[arg(long, value_name = "FIELD=VALUE", requires = "action")]
+        pin: Option<String>,
         #[command(flatten)]
         center: CenterArg,
     },
@@ -997,6 +1003,11 @@ pub async fn edit_saved(
             let mut cfg = old.clone();
             f(&mut cfg)?;
             crate::owner::check_change(&old, &cfg)?;
+            // A rule's conditions are checked against what the running node
+            // offers now, programs and all.
+            if !added_conditions(&old, &cfg).is_empty() {
+                check_conditions(&cap_listing(paths, &old).await?, &old, &cfg)?;
+            }
             let params = json!({
                 "config": cfg.to_toml(),
                 "if_version": read["version"],
@@ -1029,6 +1040,14 @@ pub async fn edit_saved(
     )?;
     store.set_user(Some(changed_by()));
     let old = store.config().clone();
+    // A rule's conditions are checked against what the node would offer as
+    // the config stands (it runs no program now).
+    let mut probe = old.clone();
+    f(&mut probe)?;
+    if !added_conditions(&old, &probe).is_empty() {
+        let listing = crate::provider::listing(&old, None, crate::service::is_service_node(paths));
+        check_conditions(&listing, &old, &probe)?;
+    }
     match store.update(|c| {
         f(c)?;
         // As the daemon's `config.write` does: a center's own the change
@@ -1051,6 +1070,75 @@ pub async fn edit_saved(
         Err(SetError::Conflict { .. }) => Err("the config changed meanwhile; try again".into()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// The allow and deny rules with conditions on a call's arguments
+/// (nerve_policy::conditions) that `new` gives a center and `old` did not,
+/// with the center's name. The rules a center kept stay as they are, also
+/// one whose argument went since (`rule ls` says so).
+fn added_conditions(old: &NodeConfig, new: &NodeConfig) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for c in &new.centers {
+        let was = old.center(&c.name).map(|e| &e.policy);
+        for (rules, before) in [
+            (&c.policy.allow, was.map(|p| &p.allow)),
+            (&c.policy.deny, was.map(|p| &p.deny)),
+        ] {
+            for r in rules {
+                if rules::has_conditions(r) && !before.is_some_and(|b| b.contains(r)) {
+                    out.push((c.name.clone(), r.clone()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The arguments schema of each action that `cap ls`'s listing `v` shows,
+/// for a rule of `center`: not one another center added.
+fn listed_params(v: &Value, center: &str) -> impl Fn(&str, &str) -> Option<Value> + use<> {
+    let rows: Vec<(String, Value)> = v["capabilities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| !added_by_other(r, center))
+        .filter_map(|r| Some((r["name"].as_str()?.to_string(), r.get("params")?.clone())))
+        .collect();
+    move |cap, action| {
+        let name = format!("{cap}.{action}");
+        rows.iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, p)| p.clone())
+    }
+}
+
+/// Checks the conditions of each rule `new` adds ([`added_conditions`])
+/// against the schemas of `listing`, `cap ls`'s.
+fn check_conditions(listing: &Value, old: &NodeConfig, new: &NodeConfig) -> Result<(), String> {
+    for (center, rule) in added_conditions(old, new) {
+        rules::check_typed(&rule, &listed_params(listing, &center))?;
+    }
+    Ok(())
+}
+
+/// The rules of `center` among `rules` whose conditions no longer fit what
+/// the node offers now (nerve_policy::rules::stale), each with why. Empty,
+/// and the node not asked, where no rule has conditions.
+async fn stale_rules<'r>(
+    paths: &NodePaths,
+    cfg: &NodeConfig,
+    center: &str,
+    rules: impl Iterator<Item = &'r String>,
+) -> Result<Vec<(String, String)>, String> {
+    let with: Vec<&String> = rules.filter(|r| rules::has_conditions(r)).collect();
+    if with.is_empty() {
+        return Ok(Vec::new());
+    }
+    let params = listed_params(&cap_listing(paths, cfg).await?, center);
+    Ok(with
+        .into_iter()
+        .filter_map(|r| Some((r.clone(), rules::stale(r, &params)?)))
+        .collect())
 }
 
 /// The center a per-center command means: the one named, or the only one.
@@ -1202,10 +1290,34 @@ impl List {
     /// [`List::command_rule`], but a line in the pattern form of `config add`
     /// (`fs.read:~/notes/*`, `fs:~/private/*`) is refused. As a command it
     /// would become a rule that never matches. A single letter before the `:`
-    /// is a drive (`C:\tools\x.exe`), not a capability.
-    fn entry(self, command: &str, wildcard: bool, action: Option<&str>) -> Result<String, String> {
+    /// is a drive (`C:\tools\x.exe`), not a capability. A rule with
+    /// conditions on an action's arguments is taken as it is.
+    fn entry(
+        self,
+        command: &str,
+        wildcard: bool,
+        action: Option<&str>,
+        pin: Option<&str>,
+    ) -> Result<String, String> {
         if let Some(action) = action {
-            return self.action_rule(action, command, wildcard);
+            return self.action_rule(action, command, wildcard, pin);
+        }
+        if pin.is_some() {
+            return Err("--pin names an argument of the action --action names".into());
+        }
+        // A rule with conditions on an action's arguments
+        // (`lamp.set:room=office`) is the rule as it is; the node checks
+        // its arguments against what the action takes as it saves it.
+        let text = command.trim();
+        if matches!(self, List::Allow | List::Deny)
+            && rules::has_conditions(text)
+            && rules::scope_of(text).contains('.')
+        {
+            if wildcard {
+                return Err("a rule with conditions has no wildcard form".into());
+            }
+            rules::validate(text)?;
+            return Ok(text.to_string());
         }
         if matches!(self, List::Allow | List::Deny)
             && let Some((scope, _)) = command.trim().split_once(':')
@@ -1258,7 +1370,13 @@ impl List {
     /// The rule of an audit entry of `action` (`fs.read`) with `target`, as
     /// the audit buttons of the desktop app and of the center make it
     /// ([`rules::rule_for`]). The sudo list takes sudo commands only.
-    fn action_rule(self, action: &str, target: &str, wildcard: bool) -> Result<String, String> {
+    fn action_rule(
+        self,
+        action: &str,
+        target: &str,
+        wildcard: bool,
+        pin: Option<&str>,
+    ) -> Result<String, String> {
         // A cut target is no longer the call's, so no rule can name it.
         if nerve_policy::audit::is_cut_target(target) {
             return Err("the target was cut to its start, so a rule cannot name it".into());
@@ -1270,9 +1388,21 @@ impl List {
             List::Sudo if (cap, act) != ("exec", "run") => {
                 Err("the sudo list is for sudo commands (--action exec.run)".into())
             }
+            List::Sudo if pin.is_some() => {
+                Err("the sudo list holds commands; --pin is for the allow and deny lists".into())
+            }
             List::Sudo => self.command_rule(target, wildcard),
+            // `--pin FIELD=VALUE`: the value as the audit entry shows it,
+            // which the rule then holds to; the node reads it as the
+            // argument's type when it saves the rule.
+            _ if pin.is_some() => {
+                let (field, value) = pin
+                    .and_then(|p| p.split_once('='))
+                    .ok_or("--pin takes FIELD=VALUE, like room=office")?;
+                rules::rule_for(cap, act, target, wildcard, Some((field, &json!(value))))
+            }
             List::Allow if (cap, act) == ("exec", "run") => self.command_rule(target, wildcard),
-            List::Allow | List::Deny => rules::rule_for(cap, act, target, wildcard),
+            List::Allow | List::Deny => rules::rule_for(cap, act, target, wildcard, None),
         }
     }
 
@@ -1285,7 +1415,7 @@ impl List {
             List::Allow if sudo_command(command).is_some() => {
                 Err("a sudo command goes on the sudo list: `nerve-node rule add sudo`".into())
             }
-            List::Allow | List::Deny => rules::rule_for("exec", "run", command, wildcard),
+            List::Allow | List::Deny => rules::rule_for("exec", "run", command, wildcard, None),
             List::Sudo if sudo_command(command).is_some() => {
                 rules::sudo_rule_for(command, wildcard)
             }
@@ -1317,9 +1447,10 @@ async fn rule_cmd(paths: &NodePaths, c: RuleCmd, out: &mut dyn Write) -> Result<
             command,
             wildcard,
             action,
+            pin,
             center,
         } => {
-            let rule = list.entry(&command, wildcard, action.as_deref())?;
+            let rule = list.entry(&command, wildcard, action.as_deref(), pin.as_deref())?;
             let name = edit_center(paths, &center, |e| {
                 push_unique(list.of(&mut e.policy), &rule);
                 Ok(())
@@ -1336,6 +1467,7 @@ async fn rule_cmd(paths: &NodePaths, c: RuleCmd, out: &mut dyn Write) -> Result<
             command,
             wildcard,
             action,
+            pin,
             center,
         } => {
             let removed = std::sync::Mutex::new(String::new());
@@ -1348,7 +1480,7 @@ async fn rule_cmd(paths: &NodePaths, c: RuleCmd, out: &mut dyn Write) -> Result<
                 // `add` stand for the command rule they made.
                 let command = shown_entry(l, &command);
                 let made = match &action {
-                    Some(a) => list.action_rule(a, &command, wildcard),
+                    Some(a) => list.action_rule(a, &command, wildcard, pin.as_deref()),
                     None => list.command_rule(&command, wildcard),
                 };
                 let rule = match made {
@@ -1456,6 +1588,48 @@ async fn rule_cmd(paths: &NodePaths, c: RuleCmd, out: &mut dyn Write) -> Result<
             let (cfg, _) = read_config(paths).await?;
             let name = pick_center(&cfg, &center)?;
             let mut policy = cfg.center(&name).expect("picked").policy.clone();
+            // After the rules, so each line stays one rule `rule rm` takes:
+            // those whose conditions no longer fit the action's arguments.
+            let shown: Vec<(List, String)> = match list {
+                Some(l) => vec![l],
+                None => vec![List::Allow, List::Deny],
+            }
+            .into_iter()
+            .filter(|l| *l != List::Sudo)
+            .flat_map(|l| {
+                l.of(&mut policy.clone())
+                    .iter()
+                    .map(|r| (l, r.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+            let stale = stale_rules(paths, &cfg, &name, shown.iter().map(|(_, r)| r)).await?;
+            let warn = |out: &mut dyn Write| {
+                for (rule, why) in &stale {
+                    let Some((l, _)) = shown.iter().find(|(_, r)| r == rule) else {
+                        continue;
+                    };
+                    let scope = rules::scope_of(rule);
+                    let does = match l {
+                        // What it does depends on why it no longer fits: a
+                        // gone argument refuses every call, a value the action
+                        // no longer takes may refuse none.
+                        List::Deny => {
+                            format!(
+                                "as a deny rule it may refuse calls of {scope} it was not meant for"
+                            )
+                        }
+                        _ => format!(
+                            "as an allow rule it may not cover the calls of {scope} it was meant for"
+                        ),
+                    };
+                    let _ = writeln!(
+                        out,
+                        "warning: the {} {rule:?} no longer fits: {why}; {does} until you change it",
+                        l.label()
+                    );
+                }
+            };
             if let Some(list) = list {
                 let entries = list.of(&mut policy);
                 if entries.is_empty() {
@@ -1464,6 +1638,7 @@ async fn rule_cmd(paths: &NodePaths, c: RuleCmd, out: &mut dyn Write) -> Result<
                 for r in entries.iter() {
                     let _ = writeln!(out, "{}", rules::escape_controls(r));
                 }
+                warn(out);
             } else {
                 // All three: each line says which list it is on.
                 let mut any = false;
@@ -1476,6 +1651,7 @@ async fn rule_cmd(paths: &NodePaths, c: RuleCmd, out: &mut dyn Write) -> Result<
                 if !any {
                     let _ = writeln!(out, "{name}: nothing on any rule list");
                 }
+                warn(out);
             }
         }
     }
@@ -9334,6 +9510,151 @@ mod tests {
         }
     }
 
+    /// A rule with conditions on an action's arguments goes on with `rule
+    /// add` (and `rule edit`, `config add`), checked against the schema of
+    /// what the node offers: an argument the action does not take, a value
+    /// not of its type, or an action nothing offers is refused. `--pin`
+    /// makes the audit buttons' rule. `rule ls` says which rules no longer
+    /// fit once their argument is gone, in text and JSON.
+    #[test]
+    fn rule_add_takes_typed_conditions_and_ls_flags_a_gone_argument() {
+        let (_d, paths) = setup(&["home"]);
+        let policy = || load(&paths).centers[0].policy.clone();
+        let params = r#"{"type": "object", "required": ["room", "level"], "properties": {"room": {"type": "string"}, "level": {"type": "integer"}}}"#;
+        run(
+            &paths,
+            &[
+                "cap",
+                "add",
+                "lamp.set",
+                "--effect=actuate",
+                &format!("--params={params}"),
+                "--",
+                "echo",
+                "{room}",
+                "{level}",
+            ],
+        )
+        .unwrap();
+        run(
+            &paths,
+            &["rule", "add", "deny", "lamp.set:room=bedroom,level>50"],
+        )
+        .unwrap();
+        run(&paths, &["rule", "add", "allow", "exec.signal:signal=term"]).unwrap();
+        let said = run(
+            &paths,
+            &[
+                "rule", "add", "allow", "", "--action", "lamp.set", "--pin", "level=20",
+            ],
+        )
+        .unwrap();
+        assert!(said.contains("\"lamp.set:level=20\""), "{said}");
+        assert_eq!(
+            policy().allow,
+            ["exec.signal:signal=term", "lamp.set:level=20"]
+        );
+        assert_eq!(policy().deny, ["lamp.set:room=bedroom,level>50"]);
+        for (args, why) in [
+            (
+                &["rule", "add", "deny", "lamp.set:size=1"][..],
+                "lamp.set has no argument size; it takes level, room",
+            ),
+            (
+                &["rule", "add", "deny", "lamp.set:level=high"],
+                "is an integer",
+            ),
+            (
+                &["rule", "add", "allow", "exec.signal:signal=stop"],
+                "is one of term, kill, int",
+            ),
+            (
+                &["rule", "add", "allow", "lamp.off:room=x"],
+                "nothing offers lamp.off now",
+            ),
+            (
+                &[
+                    "config",
+                    "add",
+                    "center.home.policy.deny",
+                    "lamp.set:size=1",
+                ],
+                "no argument size",
+            ),
+            (
+                &[
+                    "rule",
+                    "edit",
+                    "deny",
+                    "lamp.set:room=bedroom,level>50",
+                    "lamp.set:rooms=x",
+                ],
+                "no argument rooms",
+            ),
+            (
+                &[
+                    "rule", "add", "deny", "git", "--action", "exec.run", "--pin", "a=1",
+                ],
+                "names its command, not an argument",
+            ),
+            (
+                &[
+                    "rule", "add", "deny", "", "--action", "lamp.set", "--pin", "level",
+                ],
+                "--pin takes FIELD=VALUE",
+            ),
+            (
+                &["rule", "add", "deny", "lamp.set:level=1", "--wildcard"],
+                "no wildcard form",
+            ),
+        ] {
+            let e = run(&paths, args).unwrap_err();
+            assert!(e.contains(why), "{args:?}: {e}");
+        }
+        assert_eq!(policy().deny, ["lamp.set:room=bedroom,level>50"]);
+        // `rule rm` takes the arguments that made it.
+        run(
+            &paths,
+            &[
+                "rule", "rm", "allow", "", "--action", "lamp.set", "--pin", "level=20",
+            ],
+        )
+        .unwrap();
+        assert_eq!(policy().allow, ["exec.signal:signal=term"]);
+        assert!(!run(&paths, &["rule", "ls"]).unwrap().contains("warning"));
+        assert_eq!(json_of(&paths, &["rule", "ls"])["stale"], json!({}));
+        // The capability takes no `room` now: the rule that names it stays,
+        // and `rule ls` says what it does now.
+        run(
+            &paths,
+            &[
+                "cap",
+                "edit",
+                "lamp.set",
+                r#"--params={"type": "object", "required": ["level"], "properties": {"level": {"type": "integer"}}}"#,
+                "--",
+                "echo",
+                "{level}",
+            ],
+        )
+        .unwrap();
+        assert_eq!(policy().deny, ["lamp.set:room=bedroom,level>50"]);
+        let warning = "warning: the deny rule \"lamp.set:room=bedroom,level>50\" no longer fits: lamp.set has no argument room; it takes level; as a deny rule it may refuse calls of lamp.set it was not meant for until you change it";
+        for args in [&["rule", "ls"][..], &["rule", "ls", "deny"]] {
+            let out = run(&paths, args).unwrap();
+            assert!(out.lines().any(|l| l == warning), "{out}");
+        }
+        assert!(
+            !run(&paths, &["rule", "ls", "allow"])
+                .unwrap()
+                .contains("warning")
+        );
+        assert_eq!(
+            json_of(&paths, &["rule", "ls"])["stale"],
+            json!({"lamp.set:room=bedroom,level>50": "lamp.set has no argument room; it takes level"})
+        );
+    }
+
     /// `rule add --action` makes the rule an audit button makes for an entry
     /// of that action, and `rule rm` takes the same arguments.
     #[test]
@@ -9413,7 +9734,7 @@ mod tests {
             ("deny", "fs", "write", "/srv/data/a.txt", true),
             ("deny", "exec", "run", "make all", true),
         ] {
-            let rule = rules::rule_for(cap, action, target, wildcard).unwrap();
+            let rule = rules::rule_for(cap, action, target, wildcard, None).unwrap();
             let l = if list == "allow" {
                 policy().allow
             } else {

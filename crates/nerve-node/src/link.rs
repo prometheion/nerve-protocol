@@ -884,16 +884,21 @@ impl Streams {
 /// unit it is, which the policy is asked about again when it changes.
 struct OpenStream {
     task: AbortHandle,
-    unit: Option<(String, String, Effect)>,
+    unit: Option<StreamUnit>,
 }
 
+/// A program's stream as the policy decides it: `cap`, `stream`, its
+/// effect, and the params it was opened with, which a rule's conditions
+/// read as a call's arguments.
+type StreamUnit = (String, String, Effect, Map<String, Value>);
+
 /// A program's stream the program opened: its sid, what it sends, what
-/// tells the program when dropped, and the unit (`cap`, `stream`, effect).
+/// tells the program when dropped, and the unit.
 type ProgramOpen = (
     u32,
     Arc<crate::tap::Reader>,
     crate::provider::ProgramStream,
-    (String, String, Effect),
+    StreamUnit,
 );
 
 /// A link's state shared with its calls. A link the center resumes keeps it
@@ -1498,8 +1503,8 @@ impl Link {
                 .open
                 .iter()
                 .filter(|(_, s)| {
-                    s.unit.as_ref().is_some_and(|(cap, name, effect)| {
-                        !may_take(&self.shared, &cfg, &entry, cap, name, *effect)
+                    s.unit.as_ref().is_some_and(|(cap, name, effect, args)| {
+                        !may_take(&self.shared, &cfg, &entry, cap, name, *effect, Some(args))
                     })
                 })
                 .map(|(sid, _)| *sid)
@@ -1880,9 +1885,9 @@ impl Link {
             // Decided before the program answered: a change of the policy
             // since was looked at by recheck_streams while this stream was
             // not open yet, so it is looked at here, under the same lock.
-            let (cap, name, effect) = &unit;
+            let (cap, name, effect, args) = &unit;
             let allowed = self.entry().is_some_and(|(cfg, entry)| {
-                may_take(&self.shared, &cfg, &entry, cap, name, *effect)
+                may_take(&self.shared, &cfg, &entry, cap, name, *effect, Some(args))
             });
             if allowed {
                 self.open_unit(&mut streams, sid, reader, held, unit, start);
@@ -1911,7 +1916,7 @@ impl Link {
         sid: u32,
         reader: Arc<crate::tap::Reader>,
         held: crate::provider::ProgramStream,
-        unit: (String, String, Effect),
+        unit: StreamUnit,
         start: oneshot::Receiver<()>,
     ) {
         let link = self.clone();
@@ -1978,7 +1983,7 @@ impl Link {
             .await
             .unwrap_or_else(|_| Err(program_late(&cap.provider, wait)))?;
         let sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
-        Ok((sid, reader, held, (o.cap, o.stream, decl.effect)))
+        Ok((sid, reader, held, (o.cap, o.stream, decl.effect, inv.args)))
     }
 
     fn get(&self, p: &Map<String, Value>) -> Result<Value, RpcError> {
@@ -2482,6 +2487,7 @@ impl Link {
                     } else {
                         PathAccess::Read
                     },
+                    arg: Some(field.clone()),
                 });
                 Ok(())
             })
@@ -2577,6 +2583,9 @@ impl Link {
         unconfined: Option<&str>,
         program: Option<u32>,
     ) -> Result<(), RpcError> {
+        // The arguments were checked against the action's schema before
+        // the call got here; a rule's conditions read them (a path argument
+        // as resolved, from `targets`).
         let call = Call {
             cap: &inv.cap,
             action: &inv.action,
@@ -2585,7 +2594,23 @@ impl Link {
             command,
             cwd,
             now_ms: crate::now_ms(),
+            args: Some(&inv.args),
         };
+        // The audit's arguments hold each marked path as resolved, as the
+        // rules match it: a pin made from the entry names the place the
+        // call reached, not the spelling it was given in (a link, a `..`).
+        let mut audited = inv.args.clone();
+        for t in targets {
+            if let Some(field) = &t.arg
+                && audited.contains_key(field)
+            {
+                audited.insert(
+                    field.clone(),
+                    Value::String(nerve_policy::paths::to_wire(&t.path)),
+                );
+            }
+        }
+        let audited = &audited;
         let judged = Judged {
             home: self.home(),
             protected: self.protected(entry),
@@ -2622,6 +2647,7 @@ impl Link {
             let closed = closed_for(program, walker, crate::account::own_uid());
             let account = account.cloned();
             let now_ms = call.now_ms;
+            let args = inv.args.clone();
             // A call whose deadline passes, or that is cancelled, while its
             // links are walked is dropped at the await below: the walk
             // stops then, and the call is in the audit log all the same.
@@ -2635,6 +2661,7 @@ impl Link {
                         command: command.as_deref(),
                         cwd: cwd.as_deref(),
                         now_ms,
+                        args: Some(&args),
                     };
                     let _as = act_as(account.as_ref())?;
                     Ok::<_, RpcError>(judged.with(|env| {
@@ -2652,7 +2679,9 @@ impl Link {
                         }
                     }))
                 },
-                |decision, code, reason| self.audit_ran(inv, &target, ran, decision, code, reason),
+                |decision, code, reason| {
+                    self.audit_ran(inv, audited, true, &target, ran, decision, code, reason)
+                },
             )
             .await;
             walk.map_err(|e| RpcError::internal(e.to_string()))??
@@ -2660,7 +2689,7 @@ impl Link {
             decision
         };
         let audit = |decision: &str, code: Option<&str>, reason: Option<&str>| {
-            self.audit_ran(inv, &target, ran, decision, code, reason)
+            self.audit_ran(inv, audited, true, &target, ran, decision, code, reason)
         };
         match decision {
             Decision::Allow => {
@@ -2704,14 +2733,19 @@ impl Link {
         code: Option<&str>,
         reason: Option<&str>,
     ) {
-        self.audit_ran(inv, target, None, decision, code, reason)
+        self.audit_ran(inv, &inv.args, false, target, None, decision, code, reason)
     }
 
     /// [`Link::audit`], with the command a capability of `node.toml` runs
-    /// for the call (`ran`), which only the node's own log keeps.
+    /// for the call (`ran`), which only the node's own log keeps, and the
+    /// call's arguments as the policy judged them (`args`), their paths
+    /// resolved (`resolved`) or as the agent gave them.
+    #[allow(clippy::too_many_arguments)]
     fn audit_ran(
         &self,
         inv: &Invoke,
+        args: &Map<String, Value>,
+        resolved: bool,
         target: &str,
         ran: Option<&str>,
         decision: &str,
@@ -2729,7 +2763,35 @@ impl Link {
             session: inv.ctx.session.clone(),
             reason: reason.map(Into::into),
             command: ran.map(Into::into),
+            args: self.audited_args(inv, args, resolved),
         })
+    }
+
+    /// The arguments an audit entry keeps for the buttons that pin one
+    /// (nerve_policy::audit::pinnable_args): only those the action's schema
+    /// names, so a call cannot fill the log with names of its own, and not
+    /// a path before it is resolved.
+    fn audited_args(
+        &self,
+        inv: &Invoke,
+        args: &Map<String, Value>,
+        resolved: bool,
+    ) -> Option<Map<String, Value>> {
+        if !nerve_policy::conditions::takes_conditions(&format!("{}.{}", inv.cap, inv.action)) {
+            return None;
+        }
+        let view = self.view().ok()?;
+        let cap = view.capability(&inv.cap)?;
+        let params = cap
+            .actions
+            .get(&inv.action)
+            .map(|a| &a.params)
+            .or_else(|| cap.streams.get(&inv.action).map(|s| &s.params))?;
+        nerve_policy::audit::pinnable_args(
+            &inv.cap,
+            &inv.action,
+            &nerve_policy::conditions::declared(params, args, resolved),
+        )
     }
 
     /// Whether the node reads this center's files as its command account,
@@ -2766,9 +2828,27 @@ impl Link {
         // (crate::provider::Providers::hold takes them, then the store).
         let attached = self.shared.providers.caps();
         let mut store = lock(&self.shared.store);
+        // A rule's conditions are checked against the schemas of what the
+        // node offers, or would offer as it is set: its own, the config's,
+        // the programs' and what this center added.
+        let mut offered = crate::descriptor::built_in(store.config());
+        // Only a program's stream is decided by rules; the node's own
+        // (`exec.output`) goes by the call that started its command, so a
+        // rule on its parameters would hold for nothing.
+        for c in &mut offered {
+            c.streams.clear();
+        }
+        offered.extend(crate::config_cap::declared(store.config()));
+        offered.extend(attached.iter().cloned());
         let mut known = crate::config_cap::declared(store.config());
         known.extend(attached);
         let entry = store.config().center(&self.name);
+        offered.extend(
+            entry
+                .map(crate::config_cap::center_declared)
+                .unwrap_or_default(),
+        );
+        let params = crate::descriptor::arg_schemas(offered);
         // The actions this center added that do not sense it turns on
         // itself, each by its name; their capability as a whole stays the
         // owner's, as one nothing offers (crate::config_cap::own_action).
@@ -2783,10 +2863,14 @@ impl Link {
         let others = crate::provider::owner_only_of(&known);
         let owner_only =
             move |scope: &str| others(scope) && !mine.as_ref().is_some_and(|f| f(scope));
-        let r =
-            store.set_center_document(&self.name, s.document, s.if_version, owner_only, |opts| {
-                self.protected_with(opts, account.as_ref(), &own)
-            });
+        let r = store.set_center_document(
+            &self.name,
+            s.document,
+            s.if_version,
+            owner_only,
+            |opts| self.protected_with(opts, account.as_ref(), &own),
+            &params,
+        );
         settings_result(r)
     }
 
@@ -2882,6 +2966,7 @@ impl Link {
             version,
             |_| false,
             |opts| self.protected_with(opts, account.as_ref(), &own),
+            &|_, _| None,
         );
         settings_result(r).map(|_| json!({}))
     }
@@ -3165,6 +3250,7 @@ impl Link {
             session: inv.ctx.session.clone(),
             reason: Some(reason.into()),
             command: ran,
+            args: None,
         });
     }
 
@@ -3464,8 +3550,9 @@ fn unit_call(cap: &str, name: &str, args: Map<String, Value>, ctx: msg::Ctx) -> 
 
 /// Whether `entry` may have the unit `cap.name` of a program now (an
 /// event, a state key's change, or more of an open stream): its policy
-/// allows it as a call that names no path. Nothing is audited: the
-/// subscription or the open was.
+/// allows it as a call that names no path, with `args`, the params a
+/// stream was opened with, for a rule's conditions. Nothing is audited:
+/// the subscription or the open was.
 pub(crate) fn may_take(
     shared: &Shared,
     cfg: &NodeConfig,
@@ -3473,6 +3560,7 @@ pub(crate) fn may_take(
     cap: &str,
     name: &str,
     effect: Effect,
+    args: Option<&Map<String, Value>>,
 ) -> bool {
     // A center that keeps its own under `cap` is offered none of the
     // program's (crate::config_cap::programs_for): its switches were set
@@ -3508,6 +3596,7 @@ pub(crate) fn may_take(
         command: None,
         cwd: None,
         now_ms: crate::now_ms(),
+        args,
     };
     judged.with(|env| nerve_policy::decide(&entry.policy, env, &call)) == Decision::Allow
 }

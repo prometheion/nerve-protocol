@@ -60,8 +60,8 @@ steps in order.
 | 2 | The call touches the node's own folders: any path of a call (an `fs` call's, an action's marked path arguments), a working directory, a path a command line names plainly | `forbidden`. No rule, mode, folder or release lifts this |
 | 3 | The capability or action is `off` or `hidden` | `disabled` (a call of an `off` action is audited too) |
 | 4 | A `sudo` command and the sudo switch is off | `forbidden` |
-| 5 | A deny rule matches; for a path handed to a program (not `fs`, not a command), also one that may match below it (`RuleSet::find_below`) | `forbidden`, in every mode |
-| 6 | The mode decides, by the [effect table](#the-effect-table). A `sudo` command: the sudo list. `allowlist`: an allow rule for every target. `folder`: the folders' flags, and for a read the command account's reach where the node reads as it. `user`: allowed | Allowed or `forbidden` |
+| 5 | A deny rule matches (for any action but `fs` and a command, by its conditions on the arguments, `RuleSet::find_args`, failing closed); for a path handed to a program (not `fs`, not a command), also one whose condition on that argument may match below it (`RuleSet::find_below`) | `forbidden`, in every mode |
+| 6 | The mode decides, by the [effect table](#the-effect-table). A `sudo` command: the sudo list. `allowlist`: an allow rule for every target (for any other action one whose conditions the call meets). `folder`: the folders' flags, and for a read the command account's reach where the node reads as it. `user`: allowed | Allowed or `forbidden` |
 | 7 | A protected path is touched | `forbidden`, whatever allowed the call |
 
 The order only narrows. Step 6 is the only one that allows, and steps 1 to 5 and
@@ -69,14 +69,22 @@ The order only narrows. Step 6 is the only one that allows, and steps 1 to 5 and
 
 ## Rules
 
-A rule is `<scope>` or `<scope>:<pattern>`. The pattern is a glob over the
-call's target: the whole command line, the resolved path, or `<cap>.<action>`.
-A path target is any path a call names: an `fs` call's, and the arguments any
-other action's schema marks with `x-nerve-path`. `decide` tries a path target
-with `RuleSet::find_path`, which reads every scope's pattern as a path (`~/`
-is the owner's home, and on Windows case does not count), so a deny rule
-`notes:~/private/*` covers a provider's path as `fs:~/private/*` covers a
-file call's.
+A rule is `<scope>` or `<scope>:<pattern>`. The pattern of `exec.run` is a
+glob over the whole command line, that of an `fs` scope a glob over the
+resolved path (`RuleSet::find`, `find_path`). Any other action's pattern is
+conditions on its arguments (`nerve_policy::conditions`, #152 C1):
+`lamp.set:room=office,brightness<=50`. `decide::Call.args` holds the
+arguments as checked against the action's schema, and a path argument
+(`x-nerve-path`) is read from the call's targets, as resolved, by the argument
+it came in (`Target.arg`, which a link's place keeps), so a deny rule
+`notes.open:path~~/private/*` covers a provider's path as `fs:~/private/*`
+covers a file call's (`~/` the owner's home, without case on Windows). A
+condition the call cannot meet or fail (the argument left out, `null`, or of
+another type) counts for a deny rule and not for an allow rule. The rules are
+typed against the published schema when they are written (`rules::check_typed`:
+the CLI's `edit_saved`, `SettingsStore::set_center_document`); the center's
+checker parses and matches the same conditions (`checker::blocklist`), with
+`conditions::PathStyle::AnyHome`.
 
 - A rule matches the whole target. `exec.run:rm *` refuses `rm -rf x`. It does
   not see `rm` inside `git status; rm -rf x` or in `/bin/rm`.
@@ -183,11 +191,12 @@ provider's) counts with what lies below it, since the program may read or
 write there; `fs` walks skip such places themselves (`works_below`). Only a
 path that may hold others counts so (`Target::holds`): the node sets it from
 what is there as it resolves the path, a folder, or for a write a path that
-does not exist yet; a file is judged by itself alone, so `notes:**/.env`
-refuses no file handed to `notes` but a `.env`. Such a path is refused when a node-own folder lies below it (with the own-folder
-check, first), when a deny rule of its scope may match below it (step 5,
-`RuleSet::find_below`: the pattern's text up to its first wildcard lies
-below the path, or the path below that text and a wildcard follows), when a
+does not exist yet; a file is judged by itself alone, so `notes.open:path~**/.env`
+refuses no file handed to `notes.open` but a `.env`. Such a path is refused when a node-own folder lies below it (with the own-folder
+check, first), when a deny rule of its action may match below it (step 5,
+`RuleSet::find_below`: its `=` or `~` condition on that argument starts, up to
+its first wildcard, below the path, or the path lies below that text and a
+wildcard follows, and its other conditions may hold), when a
 protected entry below it is not released for its access
 (`Protected::entry_below`), or in `folder` mode when a folder below it lacks
 the flag (`closed_below`). A program's `execute` action runs there, so for it

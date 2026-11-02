@@ -1223,7 +1223,7 @@ impl Shared {
     fn may_take(&self, center: &str, cap: &str, name: &str, effect: Effect) -> bool {
         let cfg = self.config();
         cfg.center(center)
-            .is_some_and(|entry| crate::link::may_take(self, &cfg, entry, cap, name, effect))
+            .is_some_and(|entry| crate::link::may_take(self, &cfg, entry, cap, name, effect, None))
     }
 
     /// Records a rotation of a key in the audit log (crate::rotate).
@@ -1240,6 +1240,12 @@ impl Shared {
         e.target = self.scrub(e.target);
         e.decision = self.scrub(e.decision);
         e.command = e.command.map(|c| self.scrub(c));
+        // A call's string argument may quote it too.
+        for v in e.args.iter_mut().flat_map(|a| a.values_mut()) {
+            if let Value::String(text) = v {
+                *text = self.scrub(std::mem::take(text));
+            }
+        }
         let e = &e;
         if let Err(err) = lock(&self.store).audit().decision(e) {
             tracing::error!("the audit log cannot be written: {err}");

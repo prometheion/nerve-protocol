@@ -77,6 +77,9 @@ async fn node_of(
 ) -> Daemon {
     let mut o = NodeOptions::new(NodePaths::new(root.join("config"), root.join("state")));
     o.owner = owner.map(String::from);
+    // A capability of the config runs as the node's own user here, for
+    // `nerve-run`, which a node by hand does not have.
+    o.config_caps_by_hand = true;
     o.home = root.join("home");
     std::fs::create_dir_all(&o.home).unwrap();
     o.exe = Some(
@@ -101,7 +104,7 @@ async fn node_of(
         policy.allow.push("exec.run:echo *".into());
         policy
             .allow
-            .push(rules::rule_for("exec", "run", CHAINED, false)?);
+            .push(rules::rule_for("exec", "run", CHAINED, false, None)?);
         more(cfg)
     })
     .await
@@ -219,7 +222,20 @@ fn now() -> u64 {
 async fn the_sudo_switch() {
     let dir = tempfile::tempdir().unwrap();
     let mut center = FakeCenter::start(false).await.unwrap();
-    let node = node(dir.path(), &center).await;
+    // A capability of the config whose argument the audit keeps.
+    let node = node_with(dir.path(), &center, |cfg| {
+        let say = nerve_policy::NodeConfig::parse(
+            r#"[[capability]]
+name = "say.back"
+effect = "read"
+command = ["true", "{a}"]
+params = '{"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}'"#,
+        )?;
+        cfg.capabilities = say.capabilities;
+        cfg.centers[0].policy.allow.push("say.back".into());
+        Ok(())
+    })
+    .await;
     let mut conn = linked(&mut center).await;
     let mut seen = Seen { frames: Vec::new() };
     seen.call(&mut conn, "sub", json!({"topics": ["audit/decision"]}))
@@ -293,6 +309,20 @@ async fn the_sudo_switch() {
         .await
         .expect("echo");
     assert_eq!(r["stdout"], "[redacted]\n", "{r}");
+    // An argument that quotes it, which the audit keeps for its buttons.
+    seen.invoke(
+        &mut conn,
+        "say",
+        "back",
+        json!({"a": format!("the {RIGHT} again")}),
+    )
+    .await
+    .expect("say.back");
+    let audit = std::fs::read_to_string(node.paths().audit_log()).unwrap();
+    assert!(
+        audit.contains(r#""args":{"a":"the [redacted] again"}"#),
+        "{audit}"
+    );
 
     // Off drops the password; a replayed box finds no offer.
     let r = seen
@@ -349,7 +379,7 @@ async fn a_stream_carries_no_password_and_a_sudo_command_none() {
     let (head, rest) = RIGHT.split_at(6);
     let prints = format!("printf 'a {head}'; sleep 0.6; printf '{rest} b\\n'; sleep 0.3");
     let node = node_with(dir.path(), &center, |cfg| {
-        let rule = rules::rule_for("exec", "run", &prints, false)?;
+        let rule = rules::rule_for("exec", "run", &prints, false, None)?;
         cfg.centers[0].policy.allow.push(rule);
         cfg.centers[0].policy.sudo_allow.push("sudo sleep *".into());
         Ok(())
@@ -462,7 +492,7 @@ async fn a_result_kept_for_a_resume_carries_no_password() {
     let waits =
         format!("touch started; while [ ! -e go ]; do sleep 0.05; done; echo {RIGHT}; touch done");
     let node = node_with(dir.path(), &center, |cfg| {
-        let rule = rules::rule_for("exec", "run", &waits, false)?;
+        let rule = rules::rule_for("exec", "run", &waits, false, None)?;
         cfg.centers[0].policy.allow.push(rule);
         Ok(())
     })

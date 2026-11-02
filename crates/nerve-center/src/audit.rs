@@ -21,12 +21,15 @@ const FIELD_MAX: usize = 200;
 /// The fields an entry keeps: the event's (docs/dev/spec/protocol.md §7.5), `by`,
 /// which the web UI shows, and the node the center adds. Anything else a
 /// node sends is dropped, so no other field can make an entry large.
-const FIELDS: [&str; 11] = [
+const FIELDS: [&str; 12] = [
     "ts", "cap", "action", "target", "decision", "code", "session", "by", "node_id", "node",
     // The action checker's own decisions carry this: `{layer, scope,
     // detail}`, all short and built by the center, so it cannot blow an
     // entry up.
     "checker",
+    // The call's arguments an audit button may pin: kept as the node keeps
+    // them (nerve_policy::audit::pinnable_args), bounded in count and size.
+    "args",
 ];
 
 #[derive(Debug, Default)]
@@ -83,6 +86,13 @@ fn trim(e: Value) -> Value {
             continue;
         }
         let v = match v {
+            // What a node sends as `args` is held to what a node keeps:
+            // strings, numbers and booleans, the strings short, a few.
+            Value::Object(o) if k == "args" => match nerve_policy::audit::pinnable(&o) {
+                Some(a) => Value::Object(a),
+                None => continue,
+            },
+            _ if k == "args" => continue,
             Value::Number(n) if k == "ts" => Value::Number(n),
             Value::String(s) if k == "target" => nerve_policy::audit::cut_target(&s).into(),
             Value::String(s) if k != "ts" => util::clip(&s, FIELD_MAX).into(),
@@ -128,6 +138,31 @@ mod tests {
             format!("{}… [cut at 512 of 2000 characters]", "é".repeat(512))
         );
         assert_eq!(l[1], refused("ls -l".into()));
+    }
+
+    /// The arguments an audit button may pin come along, held to what a
+    /// node keeps: strings, numbers and booleans, a long string left out,
+    /// a few of them.
+    #[test]
+    fn the_arguments_a_rule_may_pin_are_kept_bounded() {
+        let mut f = AuditFeed::default();
+        let mut args = json!({"room": "office", "level": 5, "on": true, "list": [1],
+                              "long": "x".repeat(300), "odd.name": 1});
+        for i in 0..30 {
+            args[format!("f{i:02}")] = json!(i);
+        }
+        let mut e = refused("lamp.set".into());
+        e["args"] = args;
+        f.push(e);
+        let kept = f.list()[0]["args"].as_object().unwrap().clone();
+        assert_eq!(kept.len(), nerve_policy::audit::ARGS_MAX);
+        assert!(!kept.contains_key("list") && !kept.contains_key("long"));
+        assert!(!kept.contains_key("odd.name"));
+        assert_eq!(kept["f00"], 0);
+        let mut e = refused("lamp.set".into());
+        e["args"] = json!("not an object");
+        f.push(e);
+        assert!(f.list()[1].get("args").is_none());
     }
 
     /// Ten thousand refused calls with large targets: the feed stays within

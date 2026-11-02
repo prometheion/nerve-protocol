@@ -1,6 +1,7 @@
 // Audit: every decision of the node, newest first (or oldest), filtered and
 // counted, with the four buttons of issue #23 on a call: allow, allow as
-// wildcard, deny, deny as wildcard.
+// wildcard, deny, deny as wildcard; and on a call with arguments a rule may
+// pin, the pin of one of them with allow and deny (#152, C1).
 // They write the rule `nerve-node rule add --action` writes, the one the
 // center's audit page writes.
 
@@ -15,6 +16,8 @@ import {
 component AuditEntry {
     in property <AuditRow> entry;
     property <bool> waiting: Store.busy == "audit-" + root.entry.index;
+    // The argument the pin buttons hold the rule to.
+    property <int> pin: 0;
     HorizontalLayout {
         padding-left: Space.xl;
         padding-right: Space.xl;
@@ -135,6 +138,41 @@ component AuditEntry {
                         enabled: !root.waiting;
                         clicked => {
                             Store.audit-rule(root.entry.index, "deny", true);
+                        }
+                    }
+                }
+            }
+            // One argument of the call pinned: the rule holds that value
+            // (lamp.set:room=office).
+            Reveal {
+                shown: root.entry.rules && root.entry.pins.length > 0;
+                gap: Space.sm;
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    Picker {
+                        options: root.entry.pins;
+                        current: min(root.pin, max(0, root.entry.pins.length - 1));
+                        label: "The argument to pin";
+                        chosen(i) => {
+                            root.pin = i;
+                        }
+                    }
+                    Button {
+                        text: "Allow with this value";
+                        small: true;
+                        enabled: !root.waiting;
+                        clicked => {
+                            Store.audit-pin(root.entry.index, "allow", root.pin);
+                        }
+                    }
+                    Button {
+                        text: "Deny with this value";
+                        kind: ButtonKind.danger-soft;
+                        small: true;
+                        enabled: !root.waiting;
+                        clicked => {
+                            Store.audit-pin(root.entry.index, "deny", root.pin);
                         }
                     }
                 }

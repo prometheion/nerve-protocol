@@ -58,6 +58,9 @@ export struct AuditRow {
     // The four buttons: whether they work for this entry, and why not.
     rules: bool,
     rules-why: string,
+    // The call's arguments a rule may pin (room=office), for the pin
+    // buttons.
+    pins: [string],
     // The index of the entry in the app's list, for the buttons.
     index: int,
 }

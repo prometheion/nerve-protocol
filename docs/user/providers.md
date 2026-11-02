@@ -98,7 +98,7 @@ A provider's capability is decided like any other, by what it does
 
 | Mode | A provider's action runs when |
 |---|---|
-| `allowlist` | an allow rule names it: `nerve-node config add center.<name>.policy.allow 'lamp.on'`, or `'lamp'` for all its actions |
+| `allowlist` | an allow rule names it: `nerve-node config add center.<name>.policy.allow 'lamp.on'`, or `'lamp'` for all its actions, or holds it to values of its arguments (`'lamp.set:room=office'`, [rules](rules.md#rules-on-an-actions-arguments)) |
 | `folder` | it reads, writes or runs something at paths it marks ([below](#paths-it-takes)) that the folders allow; or you set it on: `nerve-node cap set lamp on` (one that names no path lies in no folder, a read included, a write whose only paths are ones it reads names no place it writes, and one that senses or acts on the world needs `on` anyway, its paths in your folders too) |
 | `user` | always, except one that senses or acts on the world, which needs `on` |
 
@@ -132,8 +132,8 @@ The node then judges each such path as it judges an `fs` call's: in `folder`
 mode a path read needs an `r` folder and one written a `w` folder (one that
 runs something also `x`, and only where the machine can confine commands: where
 it cannot, `x` lets nothing start, so `folder` mode neither offers nor runs a
-program's `execute` action with paths, as it runs no command); [rules](rules.md#rule-syntax) match the path
-(`notes:~/private/*`); protected paths and the node's own files are refused;
+program's `execute` action with paths, as it runs no command); [rules](rules.md#rules-on-an-actions-arguments) match the path
+(`notes.open:path~~/private/*`); protected paths and the node's own files are refused;
 and the [audit log](audit.md) names the path, also one that does not resolve.
 On the installed Linux node a read outside every folder goes where every
 account may read ([reading in folder mode](modes.md#reading-in-folder-mode)),
@@ -168,12 +168,12 @@ write anywhere you can.
 A folder given as a path counts with everything below it, since the program
 may read or write anywhere in it: the call is refused when a protected path
 that no folder releases, the node's own files, a place a deny rule of that
-capability names (`notes:~/private/*` refuses `notes` the folder `~` too) or,
+action names (`notes.open:path~~/private/*` refuses `notes.open` the folder `~` too) or,
 in `folder` mode, a folder you gave less lies below it. An `execute` action
 runs its program there, so for it a folder below without `x`, or a protected
 path released without `x`, refuses the call too. The refusal names the
 folder handed over, not what lies below it. A file holds nothing below it:
-`notes:~/proj/*.env` refuses `notes` the folder `~/proj`, but not
+`notes.open:path~~/proj/*.env` refuses `notes.open` the folder `~/proj`, but not
 `~/proj/readme.md`. A path a write names that does not exist yet counts as a
 folder, since the program may make one there.
 
@@ -205,8 +205,8 @@ the folders their links lead to, is refused, since the node cannot check
 them all. A call that ends (its deadline passes, or it is cancelled) while
 the node looks for the links stops that search and never reaches the
 program; the [audit log](audit.md) has it as refused, `cancelled`. An `fs:` rule covers `fs` calls
-only: to keep every capability out of a place, deny it for each one that
-takes paths (`notes:~/private/*`), or make it a [protected
+only: to keep every capability out of a place, deny it for each action that
+takes paths (`notes.open:path~~/private/*`), or make it a [protected
 path](protected-paths.md).
 
 A folder a program writes in is not checked for the places whose writes

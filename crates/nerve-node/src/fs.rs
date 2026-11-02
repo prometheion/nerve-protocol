@@ -427,6 +427,7 @@ pub fn links_below(
                             holds: holds(&to, write),
                             path: to,
                             access: t.access,
+                            arg: t.arg.clone(),
                         },
                     };
                     if let Some(why) = judge(&link) {
@@ -626,6 +627,7 @@ impl FsCall {
                 PathAccess::Read
             },
             holds: true,
+            arg: None,
         }]
     }
 
@@ -1450,6 +1452,7 @@ mod tests {
             path: proj.clone(),
             access: PathAccess::Read,
             holds: true,
+            arg: None,
         }];
         let mut pass = |_: &Link| None;
         let skipped = links_below(&handed, LINKS_LIMIT, Closed::Skip, &GOES_ON, &mut pass);
@@ -1487,6 +1490,7 @@ mod tests {
             path: inbox.clone(),
             access: PathAccess::Write,
             holds: true,
+            arg: None,
         }];
         let mut pass = |_: &Link| None;
         let skipped = links_below(&handed, LINKS_LIMIT, Closed::Skip, &GOES_ON, &mut pass);
@@ -1518,6 +1522,7 @@ mod tests {
             path: proj.clone(),
             access: PathAccess::Read,
             holds: true,
+            arg: None,
         }];
         let judged = std::cell::Cell::new(0);
         let mut count = |_: &Link| {
@@ -1568,6 +1573,7 @@ mod tests {
             path: proj.clone(),
             access,
             holds: true,
+            arg: None,
         };
         let found = |access| {
             let mut v: Vec<(PathBuf, PathBuf, bool)> = Vec::new();
@@ -1605,6 +1611,7 @@ mod tests {
             path: out.join("secret"),
             access: PathAccess::Read,
             holds: false,
+            arg: None,
         };
         let mut none = |_: &Link| -> Option<String> { panic!("a file was walked") };
         assert_eq!(
@@ -1633,6 +1640,7 @@ mod tests {
             path: p.clone(),
             access: PathAccess::Read,
             holds: true,
+            arg: None,
         });
         assert_eq!(
             links_below(&both[..1], 5, Closed::Skip, &GOES_ON, &mut pass),
@@ -1694,6 +1702,7 @@ mod tests {
             path: proj.clone(),
             access: PathAccess::Read,
             holds: true,
+            arg: None,
         }];
         let mut judged = Vec::new();
         let mut refuse_far = |l: &Link| {
@@ -1744,6 +1753,7 @@ mod tests {
             path: proj,
             access: PathAccess::Read,
             holds: true,
+            arg: None,
         }];
         let before = LOOKED_UP.with(|c| c.get());
         let mut judged = 0;

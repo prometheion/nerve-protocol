@@ -535,7 +535,7 @@ async fn steps(
                 p["allow"] = json!([
                     format!("{CAP}.say"),
                     format!("{CAP}.fail"),
-                    format!("{CAP}.peek:{PEEK_INSIDE}/*"),
+                    format!("{CAP}.peek:path~{PEEK_INSIDE}/*"),
                     format!("{CAP}.level"),
                     format!("{CAP}.ping"),
                     format!("{CAP}.talk")

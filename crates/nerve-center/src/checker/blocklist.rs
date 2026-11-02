@@ -7,24 +7,61 @@
 //! over the whole normalized line where a glob is not enough. `fs` patterns
 //! are path globs (with `~` standing for any home); a blocklist entry's
 //! also holds the path arguments (`x-nerve-path`) of every other capability.
-//! Any other `cap` or `cap.action` takes no pattern and matches that whole
-//! scope: a pattern there is refused, since it would have nothing to match
-//! until rules on arguments come.
+//! Any other `cap.action` takes conditions on its arguments, as the node's
+//! rules do ([`nerve_policy::conditions`], matched with the same code): a
+//! blocklist entry refuses a call that may meet them (one that gives an
+//! argument another type, or leaves it out, counts), an allow rule covers
+//! one that meets them all. A `cap` or `cap.action` without a pattern
+//! matches that whole scope.
 
 use globset::{GlobBuilder, GlobMatcher};
+use nerve_policy::conditions::{Arg, Conditions, PathStyle};
 use nerve_proto::schema::PathMark;
 use regex::Regex;
+use serde_json::{Map, Value};
 
 use super::normalize::{self, Command};
 
 /// What a rule matches on: the command line for `exec.run`, the path for an
-/// `fs` action, or `<cap>.<action>` for anything else.
+/// `fs` action, or the arguments of anything else.
 #[derive(Debug, Clone)]
 pub struct Call<'a> {
     pub cap: &'a str,
     pub action: &'a str,
     /// The command line, the path, or empty for an action without a target.
     pub target: &'a str,
+    /// The call's arguments, checked against the schema in the center's
+    /// catalog, for the conditions of a rule.
+    pub args: Option<&'a Map<String, Value>>,
+    /// The arguments the action's schema marks as paths (`x-nerve-path`):
+    /// a condition matches them as paths.
+    pub marked: &'a [(String, PathMark)],
+}
+
+impl Call<'_> {
+    /// What the call gives for `field`, as a condition reads it: a path
+    /// argument as a path, spelled as an `fs` call's path is.
+    fn arg(&self, field: &str) -> Arg<'_> {
+        if self.marked.iter().any(|(f, _)| f == field)
+            && let Some(Value::String(p)) = self.args.and_then(|a| a.get(field))
+        {
+            return Arg::Path(normalize_path(p));
+        }
+        nerve_policy::conditions::arg_of(self.args, field)
+    }
+}
+
+/// `args` with each argument of `marked` (a path) as a condition reads it
+/// ([`Call::arg`]): what an audit entry keeps, so a rule pinned from it
+/// matches the call it was made of, however the path was spelled.
+pub fn as_matched(args: &Map<String, Value>, marked: &[(String, PathMark)]) -> Map<String, Value> {
+    let mut out = args.clone();
+    for (field, _) in marked {
+        if let Some(Value::String(p)) = out.get_mut(field) {
+            *p = normalize_path(p);
+        }
+    }
+    out
 }
 
 /// A compiled rule: how it decides whether a call matches.
@@ -40,8 +77,9 @@ enum Matcher {
     CmdRegex(Regex),
     /// An `fs` path glob.
     Path(GlobMatcher),
-    /// Any other `cap` or `cap.action`, whole: a pattern on it would have
-    /// nothing to match until rules on arguments come (#152, C1).
+    /// Conditions on the arguments of any other `cap.action`.
+    Conditions(Conditions),
+    /// Any other `cap` or `cap.action`, whole.
     Scope,
 }
 
@@ -88,20 +126,27 @@ impl Rule {
         } else if cap == "fs" {
             let pattern =
                 pattern.ok_or_else(|| format!("rule {rule:?}: an fs rule needs a path"))?;
+            nerve_policy::rules::fs_pattern(rule, pattern)?;
             Matcher::Path(path_glob(pattern).map_err(|e| format!("rule {rule:?}: {e}"))?)
         } else if let Some(p) = pattern {
-            // A pattern here would be matched against nothing the call
-            // carries, so the entry would never refuse (or allow) anything:
-            // refused, so an owner does not count on it.
-            return Err(if (cap.as_str(), action.as_deref()) == ("exec", None) {
-                format!(
-                    "rule {rule:?}: a command pattern goes on exec.run (exec.run:{p}); exec alone, without a pattern, covers every exec action"
-                )
-            } else {
-                format!(
-                    "rule {rule:?}: a pattern on {scope} cannot match anything yet (rules on a capability's arguments come later); write {scope} alone for all of it. A blocklist entry fs.read:<path> or fs.write:<path> also holds the path arguments of every capability"
-                )
-            });
+            // Conditions name the arguments of one action, read as the node
+            // reads them, but a `~` stands for any home: the center does not
+            // know the node's.
+            if action.is_none() {
+                return Err(if cap == "exec" {
+                    format!(
+                        "rule {rule:?}: a command pattern goes on exec.run (exec.run:{p}); exec alone, without a pattern, covers every exec action"
+                    )
+                } else {
+                    format!(
+                        "rule {rule:?}: conditions name the arguments of one action ({scope}.<action>:{p}); {scope} alone, without a pattern, covers all of it. A blocklist entry fs.read:<path> or fs.write:<path> also holds the path arguments of every capability"
+                    )
+                });
+            }
+            Matcher::Conditions(
+                Conditions::compile(p, PathStyle::AnyHome)
+                    .map_err(|e| format!("rule {rule:?}: {e}"))?,
+            )
         } else {
             Matcher::Scope
         };
@@ -140,8 +185,20 @@ impl Rule {
     }
 
     /// Whether `call` matches this rule, with the command line already pulled
-    /// apart (the checker parses it once and reuses it across every entry).
+    /// apart (the checker parses it once and reuses it across every entry):
+    /// as an allow rule, which covers a call that meets all its conditions.
     pub fn matches_with(&self, call: &Call, commands: Option<&[Command]>) -> bool {
+        self.hits(call, commands, false)
+    }
+
+    /// Whether `call` is refused by this rule as a blocklist entry: where
+    /// the call's arguments do not tell whether a condition holds (another
+    /// type, or left out), it counts, as the node's deny rules count it.
+    pub fn blocks_with(&self, call: &Call, commands: Option<&[Command]>) -> bool {
+        self.hits(call, commands, true)
+    }
+
+    fn hits(&self, call: &Call, commands: Option<&[Command]>, deny: bool) -> bool {
         if !self.covers(call.cap, call.action) {
             return false;
         }
@@ -163,6 +220,8 @@ impl Rule {
             // and match case-insensitively so a differently-spelled or (on a
             // case-folding filesystem) differently-cased path still hits.
             Matcher::Path(g) => g.is_match(normalize_path(call.target)),
+            Matcher::Conditions(c) if deny => c.may_hold(|f| call.arg(f)),
+            Matcher::Conditions(c) => c.met(|f| call.arg(f)),
             Matcher::Scope => true,
         }
     }
@@ -341,6 +400,7 @@ fn collapse_ws(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn exec(target: &str) -> Call<'static> {
         Call {
@@ -348,6 +408,8 @@ mod tests {
             action: "run",
             // Leak for the test's lifetime; tests are short-lived.
             target: Box::leak(target.to_string().into_boxed_str()),
+            args: None,
+            marked: &[],
         }
     }
 
@@ -406,6 +468,8 @@ mod tests {
             cap,
             action,
             target,
+            args: None,
+            marked: &[],
         }
     }
 
@@ -615,43 +679,185 @@ mod tests {
                 .any(|r| r.matches_with(&exec(cmd), Some(&p.commands)))
     }
 
-    /// A pattern on a scope that has none to match (anything but `exec.run`
-    /// and `fs`) is refused with a word on what to write instead, rather
-    /// than kept as an entry that never refuses anything; the whole scope
-    /// alone is still a rule.
+    /// A pattern on any other `cap.action` is conditions on its arguments,
+    /// matched as the node matches them: a blocklist entry refuses a call
+    /// that may meet them (a value of another type, or one left out,
+    /// counts), an allow rule covers one that meets them. A path argument
+    /// is matched as a path, `~` any home. Conditions on a whole capability,
+    /// or ones that do not parse, are refused with a word on what to write.
     #[test]
-    fn a_pattern_on_a_non_fs_exec_scope_is_refused() {
-        for rule in [
-            "notes.save:~/.ssh/*",
-            "lamp.set:office",
-            "lamp:*",
-            "exec.signal:*",
-        ] {
-            let Err(why) = Rule::parse(rule) else {
-                panic!("{rule} should be refused");
-            };
-            assert!(why.contains("cannot match anything yet"), "{why}");
-            // The advice on path arguments is for the blocklist: an allow
-            // rule is never matched against them.
-            assert!(
-                why.contains("A blocklist entry fs.read:<path> or fs.write:<path>"),
-                "{why}"
-            );
+    fn conditions_on_any_other_action_match_its_arguments() {
+        let rule = |r: &str| Rule::parse(r).unwrap();
+        let marked = [("file".to_string(), PathMark::Write)];
+        let with = |args: &'static str| {
+            let v: Value = serde_json::from_str(args).unwrap();
+            Call {
+                cap: "lamp",
+                action: "set",
+                target: "lamp.set",
+                args: Some(Box::leak(Box::new(v.as_object().unwrap().clone()))),
+                marked: &[],
+            }
+        };
+        let r = rule("lamp.set:room=bedroom,brightness>50");
+        let hot = with(r#"{"room": "bedroom", "brightness": 80}"#);
+        let dim = with(r#"{"room": "bedroom", "brightness": 20}"#);
+        let odd = with(r#"{"room": "bedroom", "brightness": "80"}"#);
+        let none = with(r#"{"room": "bedroom"}"#);
+        assert!(r.blocks_with(&hot, None) && r.matches_with(&hot, None));
+        assert!(!r.blocks_with(&dim, None) && !r.matches_with(&dim, None));
+        for c in [&odd, &none] {
+            assert!(r.blocks_with(c, None) && !r.matches_with(c, None));
         }
-        for rule in [
+        let save = |file: &'static str| Call {
+            cap: "notes",
+            action: "save",
+            target: file,
+            args: Some(Box::leak(Box::new(
+                json!({"file": file}).as_object().unwrap().clone(),
+            ))),
+            marked: Box::leak(Box::new(marked.clone())),
+        };
+        let r = rule("notes.save:file~~/.ssh/*");
+        assert!(r.blocks_with(&save("/home/any/.ssh/authorized_keys"), None));
+        assert!(r.blocks_with(&save("/home/any/x/../.SSH/config"), None));
+        assert!(!r.blocks_with(&save("/home/any/notes/a"), None));
+        // An allow rule an audit button pins from the entry's path, which
+        // holds it as matched, covers the call it was made of.
+        let given = "/home/any/x/../notes//./a";
+        let kept = as_matched(save(given).args.unwrap(), &marked);
+        assert_eq!(kept["file"], "/home/any/notes/a");
+        let pinned = nerve_policy::rules::rule_for(
+            "notes",
+            "save",
+            "notes.save",
+            false,
+            Some(("file", &kept["file"])),
+        )
+        .unwrap();
+        assert!(rule(&pinned).matches_with(&save(given), None), "{pinned}");
+        for (bad, why) in [
+            (
+                "lamp:room=office",
+                "conditions name the arguments of one action",
+            ),
+            ("fs.read:path~~/private/*", "names the path itself"),
+            ("lamp.set:office", "comes =, !=, <, <=, >, >= or ~"),
+            ("exec.signal:*", "starts with an argument's name"),
+            ("notes.save:file~[", "condition file~"),
+        ] {
+            let Err(e) = Rule::parse(bad) else {
+                panic!("{bad} should be refused");
+            };
+            assert!(e.contains(why), "{bad}: {e}");
+        }
+        for ok in [
             "notes.save",
             "lamp",
             "exec",
             "fs.read:/srv/*",
             "fs:~/.ssh/*",
         ] {
-            assert!(Rule::parse(rule).is_ok(), "{rule}");
+            assert!(Rule::parse(ok).is_ok(), "{ok}");
         }
-        assert!(
-            Rule::parse("lamp")
-                .unwrap()
-                .matches(&call("lamp", "set", "lamp.set"))
-        );
+        assert!(rule("lamp").matches(&call("lamp", "set", "lamp.set")));
+    }
+
+    /// The node and the checker read a rule's conditions with the same
+    /// code, so a rule refuses or allows the same calls at both.
+    #[test]
+    fn the_node_and_the_checker_agree_on_conditions() {
+        use nerve_policy::rules::RuleSet;
+        let rules = [
+            "lamp.set:room=office",
+            "lamp.set:room!=office",
+            "lamp.set:brightness<=50,on=true",
+            "lamp.set:brightness>50",
+            "lamp.set:room~*room",
+            "lamp.set:warmth>=0.5",
+            "lamp.set:on!=false",
+        ];
+        let calls = [
+            json!({"room": "office", "brightness": 20, "on": true}),
+            json!({"room": "bed room", "brightness": 80, "warmth": 0.75}),
+            json!({"room": "office", "brightness": "20", "on": "true"}),
+            json!({"room": 3, "warmth": "warm"}),
+            json!({}),
+            json!({"room": null, "brightness": 50.0, "on": false}),
+        ];
+        for text in rules {
+            let node = RuleSet::new(&[text.to_string()], std::path::Path::new("/h"));
+            let checker = Rule::parse(text).unwrap();
+            for args in &calls {
+                let at_node = |f: &str| nerve_policy::conditions::arg_of(args.as_object(), f);
+                let at_center = Call {
+                    cap: "lamp",
+                    action: "set",
+                    target: "lamp.set",
+                    args: args.as_object(),
+                    marked: &[],
+                };
+                for deny in [false, true] {
+                    let n = node.find_args("lamp", "set", &at_node, deny).is_some();
+                    let c = if deny {
+                        checker.blocks_with(&at_center, None)
+                    } else {
+                        checker.matches_with(&at_center, None)
+                    };
+                    assert_eq!(n, c, "{text} {args} deny={deny}");
+                }
+            }
+        }
+    }
+
+    /// On a path the checker reads `~` as any home and ignores case, which
+    /// is wider than the node. That must not let a call through that the
+    /// node's own deny refuses: a `!=` is the rule that turns a wider glob
+    /// into fewer refusals.
+    #[test]
+    fn the_checker_refuses_every_path_the_nodes_deny_refuses() {
+        use nerve_policy::conditions::Arg;
+        use nerve_policy::rules::RuleSet;
+        let marked = [("file".to_string(), PathMark::Write)];
+        let rules = [
+            "notes.save:file!=~/inbox.md",
+            "notes.save:file!=/srv/drop/in.txt",
+            "notes.save:file=~/inbox.md",
+            "notes.save:file=/srv/drop/in.txt",
+            "notes.save:file~~/proj/*",
+        ];
+        let paths = [
+            "/h/inbox.md",
+            "/h/proj/inbox.md",
+            "/h/INBOX.md",
+            "/etc/x/inbox.md",
+            "/srv/drop/in.txt",
+            "/srv/drop/IN.TXT",
+        ];
+        for text in rules {
+            let node = RuleSet::new(&[text.to_string()], std::path::Path::new("/h"));
+            let checker = Rule::parse(text).unwrap();
+            for path in paths {
+                let args = json!({"file": path});
+                let at_node = |f: &str| match f {
+                    "file" => Arg::Path(path.to_string()),
+                    _ => Arg::Missing,
+                };
+                let call = Call {
+                    cap: "notes",
+                    action: "save",
+                    target: path,
+                    args: args.as_object(),
+                    marked: &marked,
+                };
+                let n = node.find_args("notes", "save", &at_node, true).is_some();
+                let c = checker.blocks_with(&call, None);
+                assert!(
+                    c || !n,
+                    "{text} {path}: the node refuses it, the checker not"
+                );
+            }
+        }
     }
 
     /// `exec:<pattern>` reads like a command rule but is not one: it is
@@ -1465,23 +1671,31 @@ mod tests {
             cap: "fs",
             action: "write",
             target: "/home/alice/.ssh/authorized_keys",
+            args: None,
+            marked: &[],
         }));
         assert!(!r.matches(&Call {
             cap: "fs",
             action: "write",
             target: "/home/alice/.ssh/config",
+            args: None,
+            marked: &[],
         }));
         // A read is not blocked by a write rule.
         assert!(!r.matches(&Call {
             cap: "fs",
             action: "read",
             target: "/home/alice/.ssh/authorized_keys",
+            args: None,
+            marked: &[],
         }));
         let r = Rule::parse("fs.write:/etc/sudoers.d/*").unwrap();
         assert!(r.matches(&Call {
             cap: "fs",
             action: "write",
             target: "/etc/sudoers.d/90-custom",
+            args: None,
+            marked: &[],
         }));
     }
 
@@ -1492,11 +1706,15 @@ mod tests {
             cap: "camera",
             action: "snap",
             target: "camera.snap",
+            args: None,
+            marked: &[],
         }));
         assert!(!r.matches(&Call {
             cap: "camera",
             action: "record",
             target: "camera.record",
+            args: None,
+            marked: &[],
         }));
     }
 

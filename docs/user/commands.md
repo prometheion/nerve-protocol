@@ -46,10 +46,10 @@ center is paired.
 | `folder add <path> +r +w +x` | Grant a folder | [modes](modes.md#folders) |
 | `folder set <path> -w` | Change a folder's rights | [modes](modes.md#folders) |
 | `folder rm <path>`, `folder ls` | Remove or list folders | [modes](modes.md#folders) |
-| `rule add allow\|deny\|sudo '<command>' [--wildcard] [--action A]` | Add a command rule, or with `--action` the rule of an audit entry | [rules](rules.md) |
-| `rule rm allow\|deny\|sudo '<command>' [--wildcard] [--action A]` | Remove a rule | [rules](rules.md#list-change-and-remove-rules) |
+| `rule add allow\|deny\|sudo '<command>' [--wildcard] [--action A [--pin F=V]]` | Add a command rule, a rule on an action's arguments (`'lamp.set:room=office'`), or with `--action` the rule of an audit entry, `--pin` holding it to one argument | [rules](rules.md), [arguments](rules.md#rules-on-an-actions-arguments) |
+| `rule rm allow\|deny\|sudo '<command>' [--wildcard] [--action A [--pin F=V]]` | Remove a rule | [rules](rules.md#list-change-and-remove-rules) |
 | `rule edit allow\|deny\|sudo '<entry>' '<new>'` | Change a rule in place, as one change | [rules](rules.md#list-change-and-remove-rules) |
-| `rule ls [allow\|deny\|sudo]` | List rules | [rules](rules.md#list-change-and-remove-rules) |
+| `rule ls [allow\|deny\|sudo]` | List rules, and after them those whose arguments the action no longer takes | [rules](rules.md#list-change-and-remove-rules) |
 | `rule guard` | Put the guard's deny rules back that a pairing lacks, in place of its older texts | [rules](rules.md#the-guard-against-changing-the-node) |
 | `cap set <cap> on\|off\|hidden` | Switch a capability or action | [rules](rules.md#switch-a-capability-off) |
 | `cap ls [--center C]` | List every capability: the node's own, yours in `node.toml` and those of the programs you allow, each action (and a program's state key, event and stream, with its kind) with its effect, where it comes from and, per center, whether it may use it now and the switch you set (a stopped node: the switch only, `default` where the mode decides; `settings`: the grant, `center grant settings`) | [providers](providers.md#see-what-is-there) |
@@ -102,8 +102,10 @@ A program that drives `nerve-node`, such as a script, adds `--json` and reads
 one JSON value from stdout:
 
 - The read commands print their data: `status`, `center ls`, `folder ls`,
-  `rule ls`, `cap ls` (`capabilities`, one row per action, state key,
-  event or stream with `"kind"` on all but actions, `programs`, `config`, each capability
+  `rule ls` (the lists, and `stale`: each rule whose arguments the action no
+  longer takes, with why), `cap ls` (`capabilities`, one row per action, state key,
+  event or stream with `"kind"` on all but actions, an action's arguments
+  schema as `"params"`, `programs`, `config`, each capability
   of `node.toml` as declared, its schemas as JSON, `running`, and for one
   center, with `--center` or where only one is paired, `center`, `caps` and
   `known`, what `cap set` switches), `cap provider ls`, `config get`,

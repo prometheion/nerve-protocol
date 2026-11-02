@@ -152,7 +152,13 @@ async fn sudo_runs_a_listed_command_elevated_on_the_installed_service() {
         );
         let e = cfg.center_mut(CENTER).expect("paired");
         e.settings = SettingsGrant::Write;
-        e.policy.allow = vec![rules::rule_for("exec", "run", "whoami /groups", false)?];
+        e.policy.allow = vec![rules::rule_for(
+            "exec",
+            "run",
+            "whoami /groups",
+            false,
+            None,
+        )?];
         e.policy.sudo_allow = vec![
             rules::sudo_rule_for("sudo whoami /groups", false)?,
             rules::sudo_rule_for("sudo net session", false)?,

@@ -1313,34 +1313,41 @@ pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>, installed: bool) 
     // A program's state keys, events and streams are rows too, with their
     // kind; an action's row names none.
     let row = |c: &Capability, source: &str| -> Vec<Value> {
+        // An action's row holds its arguments schema, and a stream's the
+        // schema of its parameters, which the gate's rules read as a call's
+        // arguments: a rule's conditions on them are checked against it
+        // (nerve_policy::rules::check_typed).
         let actions = c
             .actions
             .iter()
-            .map(|(a, d)| (a, d.effect, &d.summary, None));
+            .map(|(a, d)| (a, d.effect, &d.summary, None, Some(&d.params)));
         let state = c
             .state
             .iter()
-            .map(|(a, d)| (a, d.effect, &d.summary, Some("state")));
+            .map(|(a, d)| (a, d.effect, &d.summary, Some("state"), None));
         let events = c
             .events
             .iter()
-            .map(|(a, d)| (a, d.effect, &d.summary, Some("event")));
+            .map(|(a, d)| (a, d.effect, &d.summary, Some("event"), None));
         let streams = c
             .streams
             .iter()
-            .map(|(a, d)| (a, d.effect, &d.summary, Some("stream")));
+            .map(|(a, d)| (a, d.effect, &d.summary, Some("stream"), Some(&d.params)));
         let units: Vec<_> = match c.provider.as_str() {
             "node" => actions.collect(),
             _ => actions.chain(state).chain(events).chain(streams).collect(),
         };
         units
             .into_iter()
-            .map(|(a, effect, summary, kind)| {
+            .map(|(a, effect, summary, kind, params)| {
                 let mut r = json!({"name": format!("{}.{a}", c.id), "effect": effect,
                                    "source": source, "summary": summary,
                                    "centers": centers(&c.id, a)});
                 if let Some(kind) = kind {
                     r["kind"] = json!(kind);
+                }
+                if let Some(params) = params {
+                    r["params"] = params.clone();
                 }
                 if let Some(now) = now(&c.id, a) {
                     r["now"] = Value::Object(now);
@@ -1360,8 +1367,11 @@ pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>, installed: bool) 
     for decl in &cfg.capabilities {
         if let Some(why) = crate::config_cap::left_out(decl, std::env::consts::OS, installed) {
             let (cap, action) = decl.split();
+            // Its arguments as declared: a rule may name them before the
+            // node offers it.
             rows.push(json!({"name": decl.name, "effect": decl.effect,
                              "source": crate::config_cap::PROVIDER, "left_out": why,
+                             "params": decl.params_schema(),
                              "centers": centers(cap, action)}));
         }
     }
@@ -1403,6 +1413,7 @@ pub(crate) fn listing(cfg: &NodeConfig, live: Option<&Shared>, installed: bool) 
                 rows.push(only(
                     json!({"name": decl.name, "effect": crate::config_cap::counted(decl.effect),
                                       "source": source, "left_out": why,
+                                      "params": decl.params_schema(),
                                       "centers": centers(cap, action)}),
                 ));
             }

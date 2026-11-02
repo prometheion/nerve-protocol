@@ -2408,3 +2408,79 @@ async fn a_command_killed_for_its_memory_is_said_in_its_result_and_the_audit() {
     assert_eq!(killed[0]["reason"], why, "{log}");
     assert_eq!(killed[0]["target"], command, "{log}");
 }
+
+/// A rule's conditions read a call's arguments as the node checked them
+/// (#152, C1): a deny rule that pins one refuses the call that gives that
+/// value, another value goes on, and an allow rule in allowlist mode
+/// covers only the value it pins. The audit log keeps the arguments an
+/// audit button may pin.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rule_that_pins_an_argument_decides_by_the_calls_value() {
+    use nerve_policy::config::CapSetting;
+    let dir = tempdir();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let node = paired_node_with(dir.path(), &center, |p| {
+        p.mode = nerve_policy::Mode::User;
+        p.caps.insert("exec.signal".into(), CapSetting::On);
+        p.deny.push("exec.signal:signal=kill".into());
+    })
+    .await;
+    let mut conn = linked(&mut center).await;
+    let signal = |signal: &str| json!({"cap": "exec", "action": "signal", "args": {"call": 7, "signal": signal}});
+    let e = conn
+        .call("invoke", signal("kill"), WAIT)
+        .await
+        .unwrap()
+        .expect_err("the deny rule pins kill");
+    assert_eq!(nerve_conformance::wire::code_of(&e), "forbidden");
+    assert!(
+        e.to_string()
+            .contains("exec.signal is denied (exec.signal:signal=kill)"),
+        "{e}"
+    );
+    // Another value is not denied: the node looks for the call to signal.
+    let r = conn.call("invoke", signal("term"), WAIT).await.unwrap();
+    if let Err(e) = &r {
+        assert_ne!(nerve_conformance::wire::code_of(e), "forbidden", "{e}");
+    }
+    let log = std::fs::read_to_string(node.paths().audit_log()).unwrap();
+    let refused: Vec<Value> = log
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e["cap"] == "exec" && e["action"] == "signal")
+        .collect();
+    assert_eq!(refused[0]["decision"], "forbidden", "{log}");
+    assert_eq!(
+        refused[0]["args"],
+        json!({"call": 7, "signal": "kill"}),
+        "{log}"
+    );
+    let paths = node.paths().clone();
+    node.stop().await;
+
+    // Allowlist mode: an allow rule that pins `term` covers that call only.
+    owner_edit(&paths, |c| {
+        let p = &mut c.centers[0].policy;
+        p.mode = nerve_policy::Mode::Allowlist;
+        p.deny.clear();
+        p.allow = vec!["exec.signal:signal=term".into()];
+    })
+    .await;
+    let node = Daemon::start(options(dir.path())).await.expect("start");
+    let mut conn = linked(&mut center).await;
+    let e = conn
+        .call("invoke", signal("int"), WAIT)
+        .await
+        .unwrap()
+        .expect_err("no allow rule pins int");
+    assert!(
+        e.to_string()
+            .contains("no allow rule matches exec.signal with these arguments"),
+        "{e}"
+    );
+    let r = conn.call("invoke", signal("term"), WAIT).await.unwrap();
+    if let Err(e) = &r {
+        assert_ne!(nerve_conformance::wire::code_of(e), "forbidden", "{e}");
+    }
+    node.stop().await;
+}

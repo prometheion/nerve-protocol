@@ -179,9 +179,10 @@ other.
 
 ## Rules for files and other actions
 
-`rule add` writes command rules, and refuses an entry in the pattern form
-(`fs.read:...`, `fs:...`, and also `exec.run:...` and `exec:...`, the form
-`rule ls` prints), which would never match as a command. Give `rule add` the
+`rule add` writes command rules and rules on an action's arguments
+(`lamp.set:room=office`, see above). It refuses an entry in the other pattern
+forms (`fs.read:...`, `fs:...`, and also `exec.run:...` and `exec:...`, the
+form `rule ls` prints), which would never match as a command. Give `rule add` the
 bare command (`'git *'`), not that form. (`rule rm` does take it.) For files and
 other actions, add the rule to the policy by name. `lab` is the center's name on this machine (see
 `nerve-node center ls`).
@@ -197,11 +198,92 @@ buttons. That needs the [settings grant](settings-grant.md).
 `--action` makes the rule such a button makes for an audit entry of that
 action: the entry's path, or the folder it is in with `--wildcard`. An action
 without a path takes `''`, and covers its capability with `--wildcard`.
+`--pin FIELD=VALUE` holds such a rule to one argument of the call, as the
+audit buttons that pin one do (see below).
 
 ```sh
 nerve-node rule add allow /srv/data/report.txt --action fs.read
 nerve-node rule add deny /srv/data/report.txt --action fs.write --wildcard   # fs.write:/srv/data/*
+nerve-node rule add deny '' --action lamp.set --pin room=bedroom              # lamp.set:room=bedroom
 ```
+
+## Rules on an action's arguments
+
+A rule for any action but the `fs` ones and `exec.run` may name values of
+the call's arguments, and a rule for a program's stream the values of its
+parameters. Its pattern is one or more conditions, joined by `,`. The rule
+covers a call that meets all of them; the other arguments are free.
+
+```sh
+nerve-node rule add allow 'lamp.set:room=office,brightness<=50'
+nerve-node rule add deny  'lamp.set:room=bedroom'
+nerve-node rule add deny  'notes.save:path~~/private/*'
+```
+
+| Condition | Meets a call whose argument |
+|---|---|
+| `room=office` | is `office` (a string, number or boolean: `level=3`, `on=true`) |
+| `room!=office` | is not `office` |
+| `brightness<=50` | is a number up to 50; also `<`, `>`, `>=` |
+| `label~desk*` | is a string the glob matches |
+
+- A field is a top-level argument of the action, as its schema in
+  `cap ls --json` names it. A value is read as that argument's type.
+- A `,` in a value is written `\,`, a `\` before it `\\`. The `,` inside a
+  glob's `{a,b}` or `[...]` needs none. In the value of `=` and `!=` a `[` or
+  `{` is a character like any other.
+- An argument the schema marks as a path (`x-nerve-path`) is matched as a
+  path, as an `fs` rule matches one: as the node resolved it, `~/` is your
+  home, and on Windows case does not count. `path=/srv/a` names that path,
+  `path~/srv/*` a folder and below. As a deny rule it also refuses a call
+  handed a folder above that place, such as `~`, since the program works
+  below it. A path condition starts with `/` or `~` (a `~` glob also with a
+  wildcard, such as `path~**/.env`), as the paths the node resolves do. A
+  plain string has no home: a `~` glob that starts at the home (`~/…`) on
+  one is flagged (see below), since the rule was written for a path argument
+  that is a plain string now. An exact string, such as an audit pins, may
+  start with `~/` like any text.
+- Conditions name the arguments of one action: `lamp.set:…`, not `lamp:…`.
+  A rule without a pattern (`lamp.set`, `lamp`) still covers every call.
+
+The node checks the conditions against the action's schema when the rule is
+written, by `rule add`, `rule edit`, `config add`, the desktop app or a center
+with the [settings grant](settings-grant.md). An argument the action does not
+take, a value not of its type (`brightness=high`), an operator its type does
+not take (`room<3`), a value its schema does not list, and an action nothing
+offers now are refused. So a rule for a [program's](providers.md) action goes
+on once the program is attached.
+
+A call that gives such an argument a value of another type, or leaves it
+out, cannot be told by the rule. Then a deny rule refuses it and an allow rule
+does not cover it: `lamp.set:brightness>50` on the deny list also refuses a
+`lamp.set` call without `brightness`.
+
+When a capability changes and its schema no longer fits a rule (an argument
+the rule names is gone or has another type, or a value it names is no longer
+one the schema lists), the rule stays and decides as written, which is no
+longer what you meant. Where its argument is gone it fails closed: as a deny
+rule it refuses every call of that action, as an allow rule it covers none.
+Where its value is no longer listed, `room=bedroom` holds for no call. `rule
+ls` says so after the rules, `rule ls --json` lists them under `stale`, and the
+desktop app marks the row:
+
+```text
+warning: the deny rule "lamp.set:room=bedroom" no longer fits: lamp.set has no argument room; it takes level; as a deny rule it may refuse calls of lamp.set it was not meant for until you change it
+```
+
+The audit keeps the arguments a rule may pin (top-level strings of up to 200
+characters, numbers and booleans, at most 16) on each entry of such an
+action. The audit pages of the desktop app and the web UI offer each of them:
+pick one, then **Allow with this value** or **Deny with this value**. A path
+argument is kept as the node resolved it, so the rule names the place the call
+reached, however the agent spelt it; a call refused before its path was
+resolved (an action that is off, a path that does not resolve) keeps none, and
+neither does one for an argument the schema does not name. A value is compared
+as written, so a deny on a free string covers that exact value only
+(`mail.send:to=boss@example.com` does not refuse `Boss@Example.com`, which a
+program may read as the same person). Where a program reads values more
+loosely, let its schema list the allowed ones (`enum`), or use the allow list.
 
 ## Rule syntax
 
@@ -209,18 +291,18 @@ A rule is `<scope>` or `<scope>:<pattern>`.
 
 - The scope is a capability (`fs`, `exec`) or one action (`fs.read`,
   `exec.run`).
-- The pattern is a glob over the call's target. `*` matches across `/` and
-  spaces.
-- Without a pattern the rule covers every target of its scope.
+- The pattern of `exec.run` and of an `fs` scope is a glob over the call's
+  target. `*` matches across `/` and spaces. Any other action's pattern is
+  conditions on its arguments (see above).
+- Without a pattern the rule covers every call of its scope.
 - A pattern ending in ` *` also matches the bare program. One ending in `/*`
   also matches the folder itself.
 
-| Target of | Is |
+| Pattern of | Is |
 |---|---|
-| `exec.run` | The whole command line |
-| every `fs` action | The resolved path. `~/` is your home. On Windows the form is `/c/Users/x`, and case does not count |
-| any other action that takes paths | Each resolved path it takes (the arguments its schema marks with `x-nerve-path`), read as an `fs` path is |
-| any other action | `<cap>.<action>` |
+| `exec.run` | A glob over the whole command line |
+| every `fs` action | A glob over the resolved path. `~/` is your home. On Windows the form is `/c/Users/x`, and case does not count |
+| any other action | Conditions on its arguments, a path argument (`x-nerve-path`) read as an `fs` path is |
 
 | Rule | Covers |
 |---|---|
@@ -228,21 +310,25 @@ A rule is `<scope>` or `<scope>:<pattern>`.
 | `exec.run:git *` | `git` and anything after it |
 | `fs.read:/home/u/notes/*` | Reading the folder and below (not `list` or `grep`) |
 | `fs:~/private/*` | Every `fs` action on the folder and below |
-| `notes:~/private/*` | Every action of the capability `notes` that takes a path there; as a deny rule also one handed a folder above it, such as `~` |
+| `notes.open:path~~/private/*` | The program's `notes.open` with its path there; as a deny rule also one handed a folder above it, such as `~` |
+| `lamp.set:room=office,brightness<=50` | `lamp.set` in the office, up to half bright |
 | `exec` | Every `exec` action, so every command |
 
 Commands and paths never mix: `fs:/tmp/*` is not a command rule. A path rule
 covers the capability it names only: `fs:~/private/*` does not keep a
 [program's capability](providers.md#paths-it-takes) that takes paths out of
-that folder. Deny each such capability too, or make the place a
-[protected path](protected-paths.md), which every capability respects. A
+that folder. Deny each such action too (`notes.open:path~~/private/*`), or
+make the place a [protected path](protected-paths.md), which every capability
+respects. A
 program handed a folder works below it, so a deny rule of its capability that
 may cover a place below that folder refuses the folder as well (and a new
 path it would write to, where it may make a folder; a file it is handed holds
 nothing below it); an `fs` walk
 (`grep`, `find`, `list`) skips the denied place instead. A path rule covers
 only the paths a program marks as such. An unknown rule shape is refused
-when you add it.
+when you add it, and so is an `fs` rule written as conditions
+(`fs.read:path~~/private/*`): an `fs` rule names the path itself
+(`fs.read:~/private/*`).
 
 ## What a wildcard covers
 

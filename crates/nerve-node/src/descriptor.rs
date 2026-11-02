@@ -862,6 +862,21 @@ pub fn switchable(cfg: &NodeConfig, entry: &CenterEntry) -> Vec<(String, Vec<Str
         .collect()
 }
 
+/// The arguments schema of `cap.action` among `caps`, the first that has
+/// it, for a rule's conditions (nerve_policy::rules::check_typed): an
+/// action's, or a stream's parameters, which the gate reads as a call's
+/// arguments.
+pub fn arg_schemas(caps: Vec<Capability>) -> impl Fn(&str, &str) -> Option<Value> {
+    move |cap, action| {
+        caps.iter().filter(|c| c.id == cap).find_map(|c| {
+            c.actions
+                .get(action)
+                .map(|a| a.params.clone())
+                .or_else(|| c.streams.get(action).map(|s| s.params.clone()))
+        })
+    }
+}
+
 /// The node's own capabilities that have actions, every action in: what
 /// `cap ls` lists as built in (crate::provider::listing). `settings` among
 /// them, which no switch but `center grant settings` governs.
@@ -1010,6 +1025,33 @@ fn rev_of(d: &Descriptor) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rule's conditions are typed against an action's arguments and a
+    /// stream's parameters alike: the gate reads both as the call's.
+    #[test]
+    fn a_rule_names_an_actions_arguments_or_a_streams_params() {
+        let mut caps = built_in(&NodeConfig::default());
+        let mut feed = cap("sensors", "", Exposure::On, "Sensors.");
+        feed.streams.insert(
+            "feed".into(),
+            StreamDecl {
+                kind: StreamKind::Reliable,
+                direction: Direction::Up,
+                effect: Effect::Read,
+                summary: String::new(),
+                params: obj(json!({"room": {"type": "string"}}), &[]),
+                exposure: None,
+            },
+        );
+        caps.push(feed);
+        let params = arg_schemas(caps);
+        for (cap, unit, field) in [("exec", "signal", "signal"), ("sensors", "feed", "room")] {
+            let p = params(cap, unit).unwrap_or_else(|| panic!("{cap}.{unit}"));
+            assert!(p["properties"].get(field).is_some(), "{cap}.{unit}: {p}");
+        }
+        assert!(params("exec", "nothing").is_none());
+        assert!(params("lamp", "output").is_none());
+    }
 
     use nerve_policy::config::CenterPolicy;
     use nerve_proto::RpcError;
@@ -1231,6 +1273,7 @@ mod tests {
             command: None,
             cwd: None,
             now_ms: 0,
+            args: None,
         };
         let cfg = NodeConfig::default();
         let mut offered = Vec::new();
@@ -1291,6 +1334,7 @@ mod tests {
             command: None,
             cwd: None,
             now_ms: 0,
+            args: None,
         };
         let cfg = NodeConfig::default();
         let mut e = entry();
@@ -1487,6 +1531,7 @@ mod tests {
                 command: None,
                 cwd: None,
                 now_ms: 0,
+                args: None,
             };
             for mode in [Mode::Allowlist, Mode::Folder, Mode::User] {
                 for on in [false, true] {
@@ -1675,6 +1720,7 @@ mod tests {
                                 command: None,
                                 cwd: None,
                                 now_ms: 0,
+                                args: None,
                             };
                             let allowed =
                                 decide(&e.policy, &env(confined), &call) == Decision::Allow;
@@ -1764,6 +1810,7 @@ mod tests {
                                     path: path.clone().into(),
                                     access,
                                     holds: true,
+                                    arg: None,
                                 }];
                                 let run = cap == "exec";
                                 let call = Call {
@@ -1774,6 +1821,7 @@ mod tests {
                                     command: run.then_some("make"),
                                     cwd: run.then_some(std::path::Path::new(&path)),
                                     now_ms: 0,
+                                    args: None,
                                 };
                                 let want = by_table(all_in_folders);
                                 let allowed =

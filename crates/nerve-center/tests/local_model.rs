@@ -75,6 +75,7 @@ async fn the_local_server_starts_and_gates_a_call() {
         node_id: "n1",
         os: "linux",
         tainted: false,
+        marked: &[],
     };
     let dangerous = checker.check(&call("rm -rf /"), Some(&endpoint)).await;
     assert!(

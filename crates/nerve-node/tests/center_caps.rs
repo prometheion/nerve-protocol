@@ -1698,3 +1698,37 @@ async fn nothing_of_lab_for_cam(paths: &NodePaths, route: &str) {
     assert_eq!(lab.policy.caps.get("cam"), None, "{route}");
     assert!(lab.policy.allow.is_empty(), "{route}: {:?}", lab.policy);
 }
+
+/// A center's rule on the node's own stream is refused as written: only a
+/// program's stream is decided by rules, so such a rule would hold for
+/// nothing, while a rule on an action of the node takes its arguments.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rule_on_the_nodes_own_stream_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let daemon = node(
+        dir.path(),
+        &[(&center, "lab")],
+        nerve_policy::Mode::User,
+        true,
+        |_| {},
+    )
+    .await;
+    let mut conn = linked(&mut center).await;
+    let e = settings_set(&mut conn, |d| {
+        d["policy"]["deny"] = json!(["exec.output:call>0"])
+    })
+    .await
+    .unwrap_err();
+    assert!(
+        e.message.contains("nothing offers exec.output now"),
+        "{}",
+        e.message
+    );
+    settings_set(&mut conn, |d| {
+        d["policy"]["deny"] = json!(["exec.signal:signal=kill"])
+    })
+    .await
+    .expect("a rule on an action of the node");
+    daemon.stop().await;
+}

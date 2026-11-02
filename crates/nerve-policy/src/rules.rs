@@ -1,14 +1,14 @@
 //! Allow and deny rules (docs/dev/policy-engine.md, spec node-local §3).
 //!
 //! A rule is `<scope>` or `<scope>:<pattern>`. The scope is a capability or
-//! `cap.action`, as in `caps`. The pattern is a glob over the call's target:
-//! the whole command line for `exec.run`, the resolved path for every `fs`
-//! action and for each path argument of any other action (one its schema
-//! marks with `x-nerve-path`), and `<cap>.<action>` for an action that names
-//! no path. A path is in the center's form (`/c/Users/x` on Windows, where a
+//! `cap.action`, as in `caps`. The pattern of `exec.run` is a glob over the
+//! whole command line, and that of an `fs` scope a glob over the resolved
+//! path. A path is in the center's form (`/c/Users/x` on Windows, where a
 //! path pattern ignores case as NTFS does), and `~/` in a pattern is the
-//! owner's home. `*` matches across `/` and spaces. A rule without a pattern
-//! covers every target of its scope.
+//! owner's home. `*` matches across `/` and spaces. Any other action's
+//! pattern is a list of conditions on its arguments ([`crate::conditions`]:
+//! `lamp.set:room=office,brightness<=50`), which name one action. A rule
+//! without a pattern covers every call of its scope.
 //!
 //! A pattern ending in ` *` also covers the bare program (`git *` covers
 //! `git`), and one ending in `/*` the folder itself, so the wildcard the
@@ -24,6 +24,7 @@ use std::sync::OnceLock;
 use globset::{GlobBuilder, GlobMatcher};
 
 use crate::command::{Shell, parse};
+use crate::conditions::{Arg, Conditions, PathStyle, takes_conditions};
 use crate::decide::sudo_command;
 use crate::guard::Guard;
 use crate::paths::to_wire;
@@ -58,8 +59,7 @@ fn split(rule: &str) -> Result<(&str, Option<&str>), String> {
     Ok((scope, pattern))
 }
 
-/// Whether every target of `scope` is a path (`fs`). Any other scope's
-/// target is a path where its call names one ([`RuleSet::find_path`]).
+/// Whether every target of `scope` is a path (`fs`).
 fn always_paths(scope: &str) -> bool {
     scope.split('.').next() == Some(FS)
 }
@@ -105,13 +105,97 @@ pub fn validate(rule: &str) -> Result<(), String> {
         };
     }
     let (scope, pattern) = split(rule)?;
-    if let Some(p) = pattern {
-        // Any scope's pattern may meet a path.
-        for path in [always_paths(scope), true] {
-            build(p, path).map_err(|e| format!("rule {rule:?}: {e}"))?;
+    match pattern {
+        Some(p) if takes_conditions(scope) => {
+            conditions_of(rule, scope, p)?;
         }
+        Some(p) => {
+            if always_paths(scope) {
+                fs_pattern(rule, p)?;
+            }
+            build(p, always_paths(scope)).map_err(|e| format!("rule {rule:?}: {e}"))?;
+        }
+        None => {}
     }
     Ok(())
+}
+
+/// Refuses the pattern `p` of the `fs` rule `rule` where it is written as
+/// conditions: an `fs` rule names the path itself, and as conditions it
+/// would match no path, so a deny would hold nothing.
+pub fn fs_pattern(rule: &str, p: &str) -> Result<(), String> {
+    if crate::conditions::parse(p).is_ok() {
+        return Err(format!(
+            "rule {rule:?}: an fs rule names the path itself (fs:~/private/*), not a condition on an argument"
+        ));
+    }
+    Ok(())
+}
+
+/// The conditions of `rule`, whose scope takes them, compiled as the node
+/// reads them: they name the arguments of one action.
+fn conditions_of(rule: &str, scope: &str, pattern: &str) -> Result<Conditions, String> {
+    if !scope.contains('.') {
+        return Err(if scope == "exec" {
+            format!(
+                "rule {rule:?}: a command pattern goes on exec.run (exec.run:{pattern}); exec alone, without a pattern, covers every exec action"
+            )
+        } else {
+            format!(
+                "rule {rule:?}: conditions name the arguments of one action ({scope}.<action>:{pattern}); {scope} alone, without a pattern, covers all of it"
+            )
+        });
+    }
+    Conditions::compile(pattern, PathStyle::Home("/")).map_err(|e| format!("rule {rule:?}: {e}"))
+}
+
+/// Checks the conditions of `rule` against the schema its action publishes
+/// now, as the rule is written ([`crate::conditions::check`]): `params`
+/// gives the arguments schema of `cap.action`, or `None` where nothing
+/// offers that action. A rule without conditions passes.
+pub fn check_typed(
+    rule: &str,
+    params: &dyn Fn(&str, &str) -> Option<serde_json::Value>,
+) -> Result<(), String> {
+    validate(rule)?;
+    let Some((scope, Some(pattern))) = split(rule).ok().filter(|_| Guard::of_rule(rule).is_none())
+    else {
+        return Ok(());
+    };
+    if !takes_conditions(scope) {
+        return Ok(());
+    }
+    let (cap, action) = scope.split_once('.').expect("validate checked it");
+    let schema = params(cap, action).ok_or_else(|| {
+        format!(
+            "rule {rule:?}: nothing offers {scope} now, so its arguments cannot be checked; add the rule once it is offered"
+        )
+    })?;
+    crate::conditions::check(scope, pattern, &schema).map_err(|e| format!("rule {rule:?}: {e}"))
+}
+
+/// Whether `rule` holds conditions on a call's arguments
+/// ([`crate::conditions`]): a pattern on a scope that takes them.
+pub fn has_conditions(rule: &str) -> bool {
+    Guard::of_rule(rule).is_none()
+        && split(rule).is_ok_and(|(scope, p)| p.is_some() && takes_conditions(scope))
+}
+
+/// Why `rule` no longer fits the schema its action publishes now (an
+/// argument it names is gone or has another type, or the action is not
+/// offered), or `None`: what `rule ls` and the app flag. Such a rule no
+/// longer decides as was meant ([`crate::conditions::stale`]).
+pub fn stale(
+    rule: &str,
+    params: &dyn Fn(&str, &str) -> Option<serde_json::Value>,
+) -> Option<String> {
+    if Guard::of_rule(rule).is_some() {
+        return None;
+    }
+    let (scope, pattern) = split(rule).ok()?;
+    let pattern = pattern.filter(|_| takes_conditions(scope))?;
+    let (cap, action) = scope.split_once('.')?;
+    crate::conditions::stale(scope, pattern, params(cap, action).as_ref())
 }
 
 /// Checks an entry of the sudo allow list: a glob over the command line.
@@ -183,11 +267,11 @@ struct Compiled {
     /// The globs a path target is matched with: `~/` resolved and, on
     /// Windows, without case, whatever the scope.
     path_globs: Vec<GlobMatcher>,
-    /// The pattern as a path target reads it (`~/` resolved), which
-    /// [`RuleSet::find_below`] looks at.
-    path_pattern: Option<String>,
     /// A rule of the guard: it matches parsed commands, not the text.
     guard: Option<Guard>,
+    /// The conditions on a call's arguments, for a scope that takes them
+    /// ([`RuleSet::find_args`]).
+    conds: Option<Conditions>,
 }
 
 #[cfg(test)]
@@ -224,8 +308,8 @@ impl RuleSet {
                         pattern: None,
                         globs: Vec::new(),
                         path_globs: Vec::new(),
-                        path_pattern: None,
                         guard: Some(guard),
+                        conds: None,
                     });
                 }
                 let (scope, pattern) = split(text).ok()?;
@@ -236,6 +320,21 @@ impl RuleSet {
                     Some((c, a)) => (c, Some(a)),
                     None => (scope, None),
                 };
+                if let Some(p) = pattern.filter(|_| takes_conditions(scope)) {
+                    // Conditions name one action's arguments.
+                    action?;
+                    let conds = Conditions::compile(p, PathStyle::Home(&home)).ok()?;
+                    return Some(Compiled {
+                        text: text.clone(),
+                        cap: cap.into(),
+                        action: action.map(Into::into),
+                        pattern: None,
+                        globs: Vec::new(),
+                        path_globs: Vec::new(),
+                        guard: None,
+                        conds: Some(conds),
+                    });
+                }
                 let path = always_paths(scope);
                 let globs_of = |path: bool| match pattern {
                     Some(p) => {
@@ -253,8 +352,8 @@ impl RuleSet {
                     pattern: pattern.map(|p| expand_home(p, &home, path)),
                     globs,
                     path_globs,
-                    path_pattern: pattern.map(|p| expand_home(p, &home, true)),
                     guard: None,
+                    conds: None,
                 })
             })
             .collect();
@@ -277,7 +376,7 @@ impl RuleSet {
         let mut parsed = None;
         self.rules
             .iter()
-            .filter(|r| r.covers(cap, action))
+            .filter(|r| r.conds.is_none() && r.covers(cap, action))
             .find(|r| match r.guard {
                 Some(g) => match parsed.get_or_insert_with(|| parse(target, self.shell)) {
                     Ok(script) => g.refuses(script),
@@ -290,53 +389,58 @@ impl RuleSet {
             .map(|r| r.text.as_str())
     }
 
-    /// The first rule that covers the path `target` of `cap.action`: a path
-    /// argument of any action, matched as `fs` paths are (`~/` is the
-    /// owner's home, Windows ignores case). The guard's rules look at
-    /// command lines only.
+    /// The first rule that covers the path `target` of `cap.action`, an
+    /// `fs` call's (`~/` is the owner's home, Windows ignores case). The
+    /// guard's rules look at command lines only, and rules with conditions
+    /// at a call's arguments ([`RuleSet::find_args`]).
     pub fn find_path(&self, cap: &str, action: &str, target: &str) -> Option<&str> {
         self.rules
             .iter()
-            .filter(|r| r.guard.is_none() && r.covers(cap, action))
+            .filter(|r| r.guard.is_none() && r.conds.is_none() && r.covers(cap, action))
             .find(|r| r.path_globs.is_empty() || r.path_globs.iter().any(|g| g.is_match(target)))
             .map(|r| r.text.as_str())
     }
 
-    /// The first rule that may cover a path strictly below the folder `dir`
-    /// of `cap.action`, a path argument as [`RuleSet::find_path`] reads one:
-    /// a program handed `dir` works below it. A rule may cover such a path
-    /// where the text its pattern starts with, up to its first wildcard,
-    /// lies below `dir`, or `dir` below that text when a wildcard follows. That is wider than the pattern, which is the
-    /// side to err on: the rule is the owner's "no".
-    pub fn find_below(&self, cap: &str, action: &str, dir: &str) -> Option<&str> {
-        let fold = |s: &str| {
-            if cfg!(windows) {
-                s.replace('\\', "/").to_lowercase()
-            } else {
-                s.to_string()
-            }
-        };
-        let dir = fold(dir);
-        let below = if dir.ends_with('/') {
-            dir
-        } else {
-            format!("{dir}/")
-        };
+    /// The first rule of `cap.action` that covers its call, whose
+    /// arguments `arg` gives (a path argument as the node resolved it): one
+    /// without a pattern, or one whose conditions the call meets, or, for a
+    /// deny rule (`deny`), may meet ([`Conditions::may_hold`]). The `fs`
+    /// actions and `exec.run` are matched by their target instead.
+    pub fn find_args<'a>(
+        &self,
+        cap: &str,
+        action: &str,
+        arg: &dyn Fn(&str) -> Arg<'a>,
+        deny: bool,
+    ) -> Option<&str> {
         self.rules
             .iter()
             .filter(|r| r.guard.is_none() && r.covers(cap, action))
-            .find(|r| {
-                let Some(pattern) = &r.path_pattern else {
-                    // A rule without a pattern covers every path.
-                    return true;
-                };
-                let pattern = fold(pattern);
-                let wild = pattern.find(['*', '?', '[', '{']);
-                let fixed = &pattern[..wild.unwrap_or(pattern.len())];
-                // A pattern with no wildcard names one path; after its
-                // first wildcard it may go on with anything below.
-                fixed.starts_with(&below) || wild.is_some() && below.starts_with(fixed)
+            .find(|r| match &r.conds {
+                Some(c) if deny => c.may_hold(arg),
+                Some(c) => c.met(arg),
+                None => r.globs.is_empty(),
             })
+            .map(|r| r.text.as_str())
+    }
+
+    /// The first rule with conditions that may cover a call of `cap.action`
+    /// with a path strictly below the folder `dir` in its path argument
+    /// `field` ([`Conditions::below`]): a program handed `dir` works below
+    /// it. The call's other arguments are `arg`'s. That errs wide, which is
+    /// the side to err on: the rule is the owner's "no".
+    pub fn find_below<'a>(
+        &self,
+        cap: &str,
+        action: &str,
+        field: &str,
+        dir: &str,
+        arg: &dyn Fn(&str) -> Arg<'a>,
+    ) -> Option<&str> {
+        self.rules
+            .iter()
+            .filter(|r| r.covers(cap, action))
+            .find(|r| r.conds.as_ref().is_some_and(|c| c.below(field, dir, arg)))
             .map(|r| r.text.as_str())
     }
 
@@ -346,7 +450,7 @@ impl RuleSet {
         let want = escape(target);
         self.rules
             .iter()
-            .filter(|r| r.covers(cap, action))
+            .filter(|r| r.conds.is_none() && r.covers(cap, action))
             .find(|r| r.pattern.as_deref() == Some(want.as_str()))
             .map(|r| r.text.as_str())
     }
@@ -358,7 +462,7 @@ impl Compiled {
     }
 }
 
-fn expand_home(pattern: &str, home: &str, path: bool) -> String {
+pub(crate) fn expand_home(pattern: &str, home: &str, path: bool) -> String {
     if !path {
         return pattern.to_string();
     }
@@ -390,11 +494,31 @@ pub fn escape(s: &str) -> String {
 /// The rule an audit button writes for the entry `cap.action` with `target`
 /// (the entry's `target` field): `wildcard` widens it to the program and
 /// anything after it (`exec.run`), the folder and anything below it (`fs`),
-/// or the whole capability (any other action).
-pub fn rule_for(cap: &str, action: &str, target: &str, wildcard: bool) -> Result<String, String> {
+/// or the whole capability (any other action). `pin` names one argument of
+/// the entry's call (any action but `exec.run` and the `fs` ones) and its
+/// value, which the rule then holds to: `lamp.set:room=office`.
+pub fn rule_for(
+    cap: &str,
+    action: &str,
+    target: &str,
+    wildcard: bool,
+    pin: Option<(&str, &serde_json::Value)>,
+) -> Result<String, String> {
     let scope = format!("{cap}.{action}");
     if !valid_scope(&scope) {
         return Err(format!("{scope:?} is not a capability and action"));
+    }
+    if let Some((field, value)) = pin {
+        if !takes_conditions(&scope) {
+            return Err(format!(
+                "a rule of {scope} names its {}, not an argument",
+                if cap == FS { "path" } else { "command" }
+            ));
+        }
+        if wildcard {
+            return Err("a pinned argument names one value; it has no wildcard form".into());
+        }
+        return Ok(format!("{scope}:{}", crate::conditions::pin(field, value)?));
     }
     let target = target.trim();
     match (cap, action) {
@@ -882,6 +1006,8 @@ pub fn sudo_rule_for(command: &str, wildcard: bool) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conditions::tests::by;
+    use serde_json::json;
 
     fn set(rules: &[&str]) -> RuleSet {
         let rules: Vec<String> = rules.iter().map(|s| s.to_string()).collect();
@@ -923,73 +1049,126 @@ mod tests {
         assert!(s.find("exec", "run", "/h/bin/x").is_none());
     }
 
-    /// A path target of any scope is matched as an `fs` path: `~/` is the
-    /// owner's home and a Windows path rule ignores case. The same rule
-    /// still reads its pattern as text where the target is no path, and the
-    /// guard's rules never cover a path.
+    /// The rules of any action but the `fs` ones and `exec.run` hold
+    /// conditions on its arguments: an allow rule covers a call that meets
+    /// them all, a deny rule one that may meet them (a value of another
+    /// type, or one left out, counts). A path argument is matched as a
+    /// path, `~/` the owner's home. A rule without a pattern covers every
+    /// call, and the guard's rules none of these.
     #[test]
-    fn a_path_target_of_any_scope_is_matched_as_a_path() {
-        let s = set(&["notes:~/secret/*", "lamp.set", "guard:node-paths"]);
-        assert!(s.find_path("notes", "open", "/h/secret/a").is_some());
-        assert!(s.find_path("notes", "open", "/h/secret").is_some());
-        assert!(s.find_path("notes", "open", "/h/other").is_none());
-        assert!(s.find("notes", "open", "/h/secret/a").is_none());
-        assert!(s.find_path("lamp", "set", "/anywhere").is_some());
-        assert!(s.find_path("exec", "run", "/h/.config/nerve").is_none());
-        let s = set(&["notes:/W/Secret/*"]);
-        assert_eq!(
-            s.find_path("notes", "open", "/w/secret/a").is_some(),
-            cfg!(windows)
+    fn conditions_cover_a_calls_arguments() {
+        let s = set(&[
+            "lamp.set:room=office,brightness<=50",
+            "notes.open:file~~/secret/*",
+            "camera",
+            "guard:node-paths",
+        ]);
+        let (low, high, odd, none) = (
+            json!({"room": "office", "brightness": 20}),
+            json!({"room": "office", "brightness": 80}),
+            json!({"room": "office", "brightness": "dim"}),
+            json!({}),
         );
-        assert!(s.find("notes", "open", "/w/secret/a").is_none());
-    }
-
-    /// A rule covers what lies below a folder where its pattern may go on
-    /// below it: its fixed start lies there, or the folder lies below that
-    /// start and a wildcard follows.
-    #[test]
-    fn a_rule_may_cover_a_place_below_a_folder() {
-        let s = set(&["notes:~/work/clients/*", "notes:/h/data/key.pem"]);
-        for dir in ["/h", "/h/work", "/h/work/", "/h/work/clients", "/h/data"] {
-            assert!(s.find_below("notes", "search", dir).is_some(), "{dir}");
-        }
-        for dir in [
-            "/h/workshop",
-            "/h/other",
-            "/h/data/key.pem",
-            "/h/work/clientele",
-        ] {
-            assert!(s.find_below("notes", "search", dir).is_none(), "{dir}");
-        }
-        assert!(s.find_below("files", "search", "/h").is_none());
-        // A wildcard may go on with anything: one in the middle of a name,
-        // or one before any folder.
-        let s = set(&["notes:/h/wo*", "sync:**/.env"]);
-        assert!(s.find_below("notes", "search", "/h/work/a").is_some());
-        assert!(s.find_below("notes", "search", "/h/other").is_none());
-        assert!(s.find_below("sync", "pull", "/srv/proj").is_some());
-        // A rule of the whole scope covers every path.
-        assert!(set(&["notes"]).find_below("notes", "x", "/").is_some());
-        // The guard's rules never cover a path.
+        let (low, high, odd, none) = (by(&low), by(&high), by(&odd), by(&none));
+        assert!(s.find_args("lamp", "set", &low, false).is_some());
+        assert!(s.find_args("lamp", "set", &high, false).is_none());
+        assert!(s.find_args("lamp", "set", &high, true).is_none());
+        assert!(s.find_args("lamp", "set", &odd, false).is_none());
+        assert!(s.find_args("lamp", "set", &odd, true).is_some());
+        assert!(s.find_args("lamp", "set", &none, true).is_some());
+        assert!(s.find_args("lamp", "off", &low, true).is_none());
+        let path = |p: &'static str| move |_: &str| Arg::Path(p.into());
         assert!(
-            set(&["guard:node-paths"])
-                .find_below("exec", "run", "/")
+            s.find_args("notes", "open", &path("/h/secret/a"), false)
+                .is_some()
+        );
+        assert!(
+            s.find_args("notes", "open", &path("/h/other"), true)
                 .is_none()
         );
-        let s = set(&["notes:/W/Secret/*"]);
+        assert!(s.find_args("camera", "snap", &none, false).is_some());
+        assert!(s.find_args("exec", "signal", &none, true).is_none());
+        // A rule with conditions never meets a target as text or a path.
+        assert!(s.find("lamp", "set", "lamp.set").is_none());
+        assert!(s.find_path("notes", "open", "/h/secret/a").is_none());
+        // Below a folder handed in a path argument.
+        assert!(s.find_below("notes", "open", "file", "/h", &none).is_some());
+        assert!(
+            s.find_below("notes", "open", "file", "/h/other", &none)
+                .is_none()
+        );
+        assert!(s.find_below("notes", "open", "dir", "/h", &none).is_none());
+        let s = set(&["notes.open:file~/W/Secret/*"]);
         assert_eq!(
-            s.find_below("notes", "search", "/w").is_some(),
+            s.find_args("notes", "open", &path("/w/secret/a"), false)
+                .is_some(),
             cfg!(windows)
+        );
+    }
+
+    /// A rule's conditions are checked against the schema its action
+    /// publishes as the rule is written: an argument it does not take, or
+    /// a value not of its type, is refused, as is an action nothing
+    /// offers. A rule whose argument went later is flagged.
+    #[test]
+    fn a_rules_conditions_are_typed_and_an_unknown_field_is_refused() {
+        let lamp = json!({"type": "object", "properties": {
+            "room": {"type": "string"}, "brightness": {"type": "integer"}}});
+        let known =
+            |cap: &str, action: &str| ((cap, action) == ("lamp", "set")).then(|| lamp.clone());
+        for ok in [
+            "lamp.set:room=office,brightness<=50",
+            "lamp.set",
+            "lamp",
+            "fs.read:/a/*",
+            "exec.run:git *",
+            "guard:node-paths",
+        ] {
+            check_typed(ok, &known).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        for (bad, why) in [
+            (
+                "lamp.set:size=2",
+                "lamp.set has no argument size; it takes brightness, room",
+            ),
+            ("lamp.set:brightness=dim", "is an integer"),
+            ("lamp.off:room=office", "nothing offers lamp.off now"),
+            (
+                "lamp:room=office",
+                "conditions name the arguments of one action",
+            ),
+            ("lamp.set:room", "comes =, !=, <, <=, >, >= or ~"),
+        ] {
+            let e = check_typed(bad, &known).unwrap_err();
+            assert!(e.contains(why), "{bad}: {e}");
+        }
+        assert_eq!(stale("lamp.set:room=office", &known), None);
+        assert_eq!(stale("lamp.set", &known), None);
+        assert_eq!(stale("fs.read:/a/*", &known), None);
+        let gone = |_: &str, _: &str| Some(json!({"type": "object", "properties": {}}));
+        assert_eq!(
+            stale("lamp.set:room=office", &gone).as_deref(),
+            Some("lamp.set takes no arguments, so it has no room")
         );
     }
 
     #[test]
     fn bad_rules_are_refused() {
-        for ok in ["fs:/a/*", "exec.run:git status", "camera.snap", "fs"] {
+        for ok in [
+            "fs:/a/*",
+            "exec.run:git status",
+            "camera.snap",
+            "fs",
+            "lamp.set:room=office",
+        ] {
             validate(ok).unwrap();
         }
         for bad in [
             "",
+            "lamp:room=office",
+            "lamp.set:room",
+            "lamp.set:~/notes/*",
+            "exec:git *",
             "~/private",
             "/home/u/x",
             "git status",
@@ -999,6 +1178,14 @@ mod tests {
             "exec.run:{a",
         ] {
             assert!(validate(bad).is_err(), "{bad}");
+        }
+        // An fs rule written as conditions would match no path.
+        for bad in ["fs.read:path~~/private/*", "fs:path=/h/a", "fs.write:p!=x"] {
+            let e = validate(bad).unwrap_err();
+            assert!(e.contains("names the path itself"), "{bad}: {e}");
+        }
+        for ok in ["fs:C:\\a=b\\*", "fs:**/a=b", "fs:~/x,y"] {
+            validate(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
         }
         assert!(validate_command_glob("sudo apt *").is_ok());
         assert!(validate_command_glob("sudo [").is_err());
@@ -1020,7 +1207,7 @@ mod tests {
         }
         assert!(!build(&escape("rm *"), false).unwrap().is_match("rm -rf /"));
         // A button's exact rule names that command only.
-        let rule = rule_for("exec", "run", "rm *", false).unwrap();
+        let rule = rule_for("exec", "run", "rm *", false, None).unwrap();
         let s = set(&[&rule]);
         assert!(s.find("exec", "run", "rm *").is_some());
         assert!(s.find("exec", "run", "rm -rf /").is_none());
@@ -1034,7 +1221,7 @@ mod tests {
         let s = set(&["exec.run:Remove-Item C:\\data\\*"]);
         assert!(s.find("exec", "run", "Remove-Item C:\\data\\x").is_some());
         assert!(s.find("exec", "run", "Remove-Item C:\\other\\x").is_none());
-        let exact = rule_for("exec", "run", "type C:\\x\\a.txt", false).unwrap();
+        let exact = rule_for("exec", "run", "type C:\\x\\a.txt", false, None).unwrap();
         assert!(
             set(&[&exact])
                 .find("exec", "run", "type C:\\x\\a.txt")
@@ -1088,7 +1275,7 @@ mod tests {
 
     #[test]
     fn rules_for_the_buttons() {
-        let r = |cap, action, target, wild| rule_for(cap, action, target, wild).unwrap();
+        let r = |cap, action, target, wild| rule_for(cap, action, target, wild, None).unwrap();
         assert_eq!(
             r("exec", "run", "git push origin", false),
             "exec.run:git push origin"
@@ -1107,7 +1294,7 @@ mod tests {
             ("fs", "read", "relative"),
             ("fs.x", "read", "/a"),
         ] {
-            assert!(rule_for(cap, action, target, false).is_err());
+            assert!(rule_for(cap, action, target, false, None).is_err());
         }
         // Whatever a button writes is a valid rule that covers its entry.
         for (cap, action, target) in [
@@ -1116,10 +1303,36 @@ mod tests {
             ("camera", "snap", "camera.snap"),
         ] {
             for wild in [false, true] {
-                let rule = rule_for(cap, action, target, wild).unwrap();
+                let rule = rule_for(cap, action, target, wild, None).unwrap();
                 validate(&rule).unwrap();
                 assert!(set(&[&rule]).find(cap, action, target).is_some(), "{rule}");
             }
+        }
+        // A pinned argument: the action and the argument's value, which the
+        // rule then covers, and no other value.
+        let office = json!("office");
+        assert_eq!(
+            rule_for("lamp", "set", "lamp.set", false, Some(("room", &office))).unwrap(),
+            "lamp.set:room=office"
+        );
+        let fifty = json!(50);
+        let rule = rule_for("lamp", "set", "lamp.set", false, Some(("level", &fifty))).unwrap();
+        assert_eq!(rule, "lamp.set:level=50");
+        validate(&rule).unwrap();
+        let s = set(&[&rule]);
+        let (fifty, more) = (json!({"level": 50}), json!({"level": 51}));
+        assert!(s.find_args("lamp", "set", &by(&fifty), false).is_some());
+        assert!(s.find_args("lamp", "set", &by(&more), false).is_none());
+        for (cap, action, wild, value) in [
+            ("exec", "run", false, json!("x")),
+            ("fs", "read", false, json!("/a")),
+            ("lamp", "set", true, json!("office")),
+            ("lamp", "set", false, json!(["office"])),
+        ] {
+            assert!(
+                rule_for(cap, action, "t", wild, Some(("room", &value))).is_err(),
+                "{cap}.{action} {wild} {value}"
+            );
         }
     }
 

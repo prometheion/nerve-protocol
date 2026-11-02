@@ -104,6 +104,13 @@ Each entry with a known target has four buttons:
 | Deny | The exact deny rule |
 | Deny as wildcard | The wide deny rule |
 
+An entry whose call has arguments a rule may pin (any action but a command
+and a file action: strings, numbers and booleans) also offers them: pick one
+(`room=office`), then **Allow with this value** or **Deny with this value**
+adds `lamp.set:room=office` and the like
+([rules](rules.md#rules-on-an-actions-arguments)). The machine checks it
+against the action's arguments as it saves it.
+
 A sudo command goes on the sudo list when you press Allow. A button adds the
 rule on the machine, so it works only if the machine gave the center the
 [settings grant](settings-grant.md). Otherwise the buttons are off and the
@@ -117,7 +124,7 @@ A decision the center's [action checker](action-checker.md) made shows here
 too, marked as the checker's and with whether the entry or switch was the one
 for every machine or this machine's own. A model refusal gets **Allow** and **Allow as
 wildcard** buttons that save a checker allow rule (center-side, so no settings
-grant is needed). A blocklist refusal has none: it is a hard deny, so you
+grant is needed), and **Allow with this value** for an argument it pins. A blocklist refusal has none: it is a hard deny, so you
 change or remove the entry on the Action checker page.
 
 ### Action checker
@@ -134,7 +141,10 @@ local model the center installs with one click, d1-3B or Kev-4B) with its
 threshold, timeout, question and which calls it sees. It shows the install's
 progress and the local model's state, and names each model's size and
 licence. Taint, which marks a session once a call of it returned content, has
-its switch here too. Everything is kept in the center's state, except the
+its switch here too. Under each **Add a rule** field it names the arguments
+of the action typed so far (`lamp.set:` shows `room (a string)` and the like),
+which a rule may pin, and it warns about a rule whose action no longer takes
+an argument it names. Everything is kept in the center's state, except the
 endpoint token and the local model's files.
 
 ### Capabilities

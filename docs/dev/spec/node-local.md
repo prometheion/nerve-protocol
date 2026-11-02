@@ -1128,15 +1128,49 @@ write whose marked paths are all `read` names no place it writes and needs
 ### Rules
 
 A rule in `allow` and `deny` is `<scope>` or `<scope>:<pattern>`. The scope is
-a capability or `cap.action`, as in `caps`. The pattern is a glob over the
-call's target: the whole command line for `exec.run`, the resolved path for
-every `fs` action and for each path argument of any other action (one its
-schema marks with `x-nerve-path`, protocol.md §6.1), in the center's form
-(`/c/Users/x` on Windows, matched without case; `~/` is the owner's home),
-and `<cap>.<action>` for any other action. `*` matches across `/` and spaces. A
-rule without a pattern covers every target of its scope. A pattern ending in
-` *` also matches the bare program, one ending in `/*` the folder itself.
-Commands and paths never mix: `fs:/tmp/*` is no command rule.
+a capability or `cap.action`, as in `caps`. The pattern of `exec.run` is a
+glob over the whole command line, that of an `fs` scope a glob over the
+resolved path, in the center's form (`/c/Users/x` on Windows, matched without
+case; `~/` is the owner's home). `*` matches across `/` and spaces. A pattern
+ending in ` *` also matches the bare program, one ending in `/*` the folder
+itself. Commands and paths never mix: `fs:/tmp/*` is no command rule. A rule
+without a pattern covers every call of its scope.
+
+Any other action's pattern is conditions on the call's arguments, joined by
+`,`: `field=value`, `field!=value`, `field<n`, `<=`, `>`, `>=` and `field~glob`.
+A field is a top-level property of the action's arguments schema (`[A-Za-z0-9_-]`);
+a `,` in a value is `\,`, a `\` before it `\\` (a `~` glob's `{a,b}` and
+`[...]` need no escape; in any other value `[` and `{` are plain); at most 16
+conditions. A stream's parameters count as its arguments. They name one action: a scope `cap`
+with a pattern is refused. A string or path takes `=`, `!=`, `~`; an integer
+or number all but `~` (the value must be one; integers compare exactly); a
+boolean `=` and `!=` with `true` or `false`; an `enum` without a `type` has
+its choices' type; an object or array cannot be named. A property marked
+`x-nerve-path` is matched as a path: the value as the node resolved it, `~/`
+the owner's home, without case on Windows, `=` the escaped exact path; as a
+deny rule it also refuses a folder handed in that argument where a place below
+it may meet the condition (its fixed start lies below the folder, or the
+folder below it with a wildcard after), as a path rule does. A path
+condition's value starts with `/`, `\`, `~` or a drive (a `~` glob also with a
+wildcard), and a string condition's value does not start with `~/`, so a
+property that gains or loses the mark no longer fits the rule. An `fs` pattern
+that parses as conditions is refused.
+
+The node checks the conditions against the action's schema as it publishes
+it when a rule is written (`rule add`, `rule edit`, `config add`, a center's
+`settings.set` with the rules the document adds): an unknown field, a value
+not of its type, an operator its type does not take, a value outside an
+`enum`, and an action nothing offers are refused. A rule already on the list
+is kept as it is. Matching is three-valued per condition: a call that leaves
+the argument out, gives `null`, or a value of another type cannot be told; an
+allow rule covers a call only where every condition holds, a deny rule wherever
+none is known not to hold. A rule whose argument went from the schema thus
+refuses every call of its action (deny) or covers none (allow), and one whose
+`=` value left an `enum` holds for no call; `rule ls` names every rule that no
+longer fits (`stale` in its JSON). The audit entry's `args` hold a marked path
+as resolved. The center's action checker reads the
+same syntax with the same code (`nerve_policy::conditions`), with `~` as any
+home and paths without case.
 
 A third form is `guard:<name>`, a rule of the guard against changing the node
 (`guard:node-programs`, `guard:node-paths`, `guard:node-service`). It covers
@@ -1152,12 +1186,17 @@ documentation of rules for what each refuses.
 | `fs.read:/home/u/notes/*` | reading the folder and below (the action, not `list` or `grep`) |
 | `fs:~/private/*` | every fs action on the folder and below |
 | `camera.snap`, `camera` | that action, or every action of the capability |
-| `notes:~/private/*` | every action of `notes` with a path argument there |
+| `notes.open:path~~/private/*` | `notes.open` with its path argument there |
+| `lamp.set:room=office,brightness<=50` | `lamp.set` with those values |
 
 The four buttons of the center's audit view and `nerve-node rule add allow|deny|sudo
 <command> [--wildcard]` write exactly these forms: exact (`exec.run:git status`) or
 wildcard (`exec.run:git *`, `fs.read:/home/u/notes/*` for the folder of the
-path, the capability for another action). They only add a rule to a list;
+path, the capability for another action). For an action that takes
+conditions, an audit entry keeps the call's top-level strings (up to 200
+characters), numbers and booleans, at most 16, as `args` (§6); a pin button
+and `rule add --action <cap.action> --pin <field>=<value>` write
+`<cap.action>:<field>=<value>` from one of them. They only add a rule to a list;
 rules can be written by hand as well (`nerve-node config add
 center.<name>.policy.allow '<rule>'`).
 
@@ -1495,7 +1534,7 @@ center's folders hold its commands, in folder mode or as `nerve-run`). An error,
 | `sudo.off` | | turns the switch off and drops the password |
 | `center.rotate-key` | `center`, `end_grace` | rotates the node's key for `center` over the live link, or with `end_grace` ends the grace of the old one (protocol §4.10); `{center, public_key}`, the new key once. Waits for the center's answer, at most 15 s; an error when the node has no link to it or the center does not speak `rotate`. Also served on the control pipe (Windows) |
 | `owner.check` | | changes nothing; the CLI asks it before `install`, `setup`, `update`, `uninstall`, `backup` and `restore` |
-| `caps.list` | | what `cap ls` shows: `{capabilities, programs, config, added, running}`; each capability row `{name: "cap.action", effect, source: "built-in" \| "config" \| "program <name>", summary, centers: {<center>: "on"\|"off"\|"hidden"\|"default"}, now: {<center>: "on"\|"off"}}`, `centers` the switch (`cap set`; `default` where none is set; for `settings`, which has none, `"granted"`\|`"not granted"` by the center's `settings` grant) and `now` whether the center's descriptor offers the action now and it is not off (§3: mode, rules, switches, the machine); an action a program offered that the node left out with `broken` (its reason), no effect and no `now`; a config capability's row that this node does not offer (§2; a node run by hand offers none) has `left_out` (why) and no `now`; `config` each `[[capability]]` as declared, `{name, summary, effect, command, params, result, timeout_secs, platform}`, the schemas as JSON (`result` `"text"` or a schema); a capability a center added (§2) has the source `center <name>`, its counted effect, and `centers` and `now` for that center alone, and `added` lists each one as `config` does, with its `center`; `programs` the entries of `providers.allowed`, each `{name, exe, attached}`. A stopped node's CLI makes the same from `node.toml`, with the node's own capabilities and the config's (no program's), no `now` and `attached` null. Also served on the control pipe (Windows), where no program attaches |
+| `caps.list` | | what `cap ls` shows: `{capabilities, programs, config, added, running}`; each capability row `{name: "cap.action", effect, source: "built-in" \| "config" \| "program <name>", summary, centers: {<center>: "on"\|"off"\|"hidden"\|"default"}, now: {<center>: "on"\|"off"}, params?}`, `params` an action's arguments schema (also on a left-out config or center row; what a rule's conditions are checked against, §2 Rules), `centers` the switch (`cap set`; `default` where none is set; for `settings`, which has none, `"granted"`\|`"not granted"` by the center's `settings` grant) and `now` whether the center's descriptor offers the action now and it is not off (§3: mode, rules, switches, the machine); an action a program offered that the node left out with `broken` (its reason), no effect and no `now`; a config capability's row that this node does not offer (§2; a node run by hand offers none) has `left_out` (why) and no `now`; `config` each `[[capability]]` as declared, `{name, summary, effect, command, params, result, timeout_secs, platform}`, the schemas as JSON (`result` `"text"` or a schema); a capability a center added (§2) has the source `center <name>`, its counted effect, and `centers` and `now` for that center alone, and `added` lists each one as `config` does, with its `center`; `programs` the entries of `providers.allowed`, each `{name, exe, attached}`. A stopped node's CLI makes the same from `node.toml`, with the node's own capabilities and the config's (no program's), no `now` and `attached` null. Also served on the control pipe (Windows), where no program attaches |
 | `hello` | `role` (`provider`), `name`, `capabilities` | a capability provider attaches; the connection stays (§7); on a node run by hand only, the installed node takes it on its provider socket |
 
 Every method is refused from a process that runs below a command the node
@@ -1697,7 +1736,9 @@ its `steps` and the `error` that stopped it), and each key rotation
 `node-key-unanswered`, `node-key-grace-ended`, `center-key`,
 `center-key-refused` or `center-key-grace-ended`, and a `detail` with the
 public keys or pins; never a private key). It holds targets (paths, command lines), never
-file content or output; a target longer than 512 characters is cut there
+file content or output; an entry of an action that takes conditions also holds
+`args`, the call's arguments a rule may pin (§2 Rules), which the
+`audit/decision` event carries too; a target longer than 512 characters is cut there
 and says so; the `audit/decision` event carries the same cut target, and the
 center cuts what it gets the same way and keeps at most 500 decisions and
 1 MiB of them. When the file would pass 10 MiB it is moved to `audit.jsonl.1`,

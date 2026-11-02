@@ -1837,6 +1837,16 @@ code.target,
   margin-top: 10px;
 }
 
+/* The pin of one argument sits with its two buttons on one line. */
+.audit-row .actions.pins {
+  align-items: flex-end;
+}
+
+.audit-row .actions.pins .field {
+  min-width: 12rem;
+  max-width: 100%;
+}
+
 /* ---- Log ---- */
 
 .log-bar {

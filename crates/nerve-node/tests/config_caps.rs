@@ -364,6 +364,107 @@ params = '{"type": "object", "properties": {"path": {"type": "string", "x-nerve-
     daemon.stop().await;
 }
 
+/// The audit keeps a path argument as the node resolved it, which is what
+/// the rules match: a deny rule an audit button pins from it refuses the
+/// call again, however the path was spelled (through a link, with `..`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pinned_path_argument_names_the_place_the_call_reached() {
+    let dir = scratch();
+    let root = dir.path().canonicalize().unwrap();
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("secret.txt"), "s\n").unwrap();
+    std::os::unix::fs::symlink(&work, root.join("w")).unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let show = cap(r#"name = "files.show"
+effect = "read"
+command = ["cat", "--", "{path}"]
+params = '{"type": "object", "properties": {"path": {"type": "string", "x-nerve-path": "read"}}, "required": ["path"]}'"#);
+    let daemon = node(&root, &center, vec![show], user_mode).await;
+    let mut conn = linked(&mut center).await;
+    let wire = |p: PathBuf| nerve_policy::paths::to_wire(&p);
+    let real = wire(work.join("secret.txt"));
+    let spellings = [
+        wire(root.join("w").join("secret.txt")),
+        format!("{}/../work/./secret.txt", wire(work.clone())),
+    ];
+    for given in &spellings {
+        invoke(&mut conn, "files.show", json!({"path": given}))
+            .await
+            .expect("allowed");
+    }
+    let entries = audited(daemon.paths(), "files");
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    for e in &entries {
+        assert_eq!(e["args"], json!({"path": real}), "{e}");
+    }
+    // What **Deny with this value** writes from the entry.
+    let pinned = nerve_policy::rules::rule_for(
+        "files",
+        "show",
+        "files.show",
+        false,
+        Some(("path", &entries[0]["args"]["path"])),
+    )
+    .unwrap();
+    owner_edit(daemon.paths(), |c| {
+        c.centers[0].policy.deny = vec![pinned.clone()]
+    })
+    .await;
+    daemon.reload().unwrap();
+    for given in &spellings {
+        let e = invoke(&mut conn, "files.show", json!({"path": given}))
+            .await
+            .unwrap_err();
+        assert_eq!(code_of(&e), "forbidden", "{given}: {}", e.message);
+        assert!(e.message.contains("is denied"), "{given}: {}", e.message);
+    }
+    daemon.stop().await;
+}
+
+/// The audit keeps, for the buttons that pin one, only the arguments the
+/// schema names (a call cannot fill the log with names of its own, nor push
+/// the real ones out), and no path before it is resolved: a call refused as
+/// off would pin the spelling the agent gave, not the place.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_audit_keeps_only_the_arguments_the_schema_names() {
+    let dir = scratch();
+    let root = dir.path().canonicalize().unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let say = cap(r#"name = "lamp.set"
+effect = "read"
+command = ["echo", "{label}"]
+params = '{"type": "object", "properties": {"label": {"type": "string"}}, "required": ["label"]}'"#);
+    let show = cap(r#"name = "files.show"
+effect = "read"
+command = ["cat", "--", "{path}"]
+params = '{"type": "object", "properties": {"path": {"type": "string", "x-nerve-path": "read"}}, "required": ["path"]}'"#);
+    let daemon = node(&root, &center, vec![say, show], |p| {
+        user_mode(p);
+        p.caps.insert("files.show".into(), CapSetting::Off);
+    })
+    .await;
+    let mut conn = linked(&mut center).await;
+    let mut args = json!({"label": "hello"});
+    for i in 0..20 {
+        args[format!("a{i:02}")] = json!(i);
+    }
+    args["b".repeat(300)] = json!("long name");
+    invoke(&mut conn, "lamp.set", args).await.expect("allowed");
+    let given = format!("{}/home/../x", root.display());
+    let e = invoke(&mut conn, "files.show", json!({"path": given}))
+        .await
+        .unwrap_err();
+    assert_eq!(code_of(&e), "disabled", "{}", e.message);
+    let lamp = audited(daemon.paths(), "lamp");
+    assert_eq!(lamp.len(), 1, "{lamp:?}");
+    assert_eq!(lamp[0]["args"], json!({"label": "hello"}), "{}", lamp[0]);
+    let files = audited(daemon.paths(), "files");
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].get("args").is_none(), "{}", files[0]);
+    daemon.stop().await;
+}
+
 /// Whether a process runs `sleep` with the argument `arg`.
 fn sleeping(arg: &str) -> bool {
     std::fs::read_dir("/proc").unwrap().flatten().any(|e| {

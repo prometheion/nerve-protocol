@@ -59,6 +59,7 @@ fn fs(effect: Effect, targets: &[Target]) -> Call<'_> {
         command: None,
         cwd: None,
         now_ms: NOW,
+        args: None,
     }
 }
 
@@ -71,6 +72,7 @@ fn run<'a>(command: &'a str, cwd: &'a [Target]) -> Call<'a> {
         command: Some(command),
         cwd: Some(cwd[0].path.as_path()),
         now_ms: NOW,
+        args: None,
     }
 }
 
@@ -83,6 +85,7 @@ fn at(p: &str, write: bool) -> Vec<Target> {
             PathAccess::Read
         },
         holds: true,
+        arg: None,
     }]
 }
 
@@ -92,6 +95,7 @@ fn cwd_at(p: &str) -> Vec<Target> {
         path: p.into(),
         access: PathAccess::Run,
         holds: true,
+        arg: None,
     }]
 }
 

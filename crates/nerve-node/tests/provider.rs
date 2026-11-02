@@ -1062,7 +1062,7 @@ async fn a_path_taking_provider_is_held_to_the_folders() {
 }
 
 /// A file handed to a provider holds nothing below it, so a deny rule that
-/// names places below its folder (`files:**/.env`) refuses the folder and a
+/// names places below its folder (`files.open:path~**/.env`) refuses the folder and a
 /// path a write may make a folder at, not the files beside those places. A
 /// path given as a link is refused by the name given: the refusal does not
 /// say where it leads (a link of another process under `/proc` leads where
@@ -1082,7 +1082,6 @@ async fn a_deny_rule_below_a_folder_leaves_the_files_there_alone() {
     let daemon = node(&root, &center, &me(), |p| {
         p.mode = nerve_policy::Mode::Folder;
         p.folders = folders.clone();
-        p.deny = vec!["files:**/.env".into()];
     })
     .await;
     let mut conn = linked(&mut center).await;
@@ -1103,6 +1102,15 @@ async fn a_deny_rule_below_a_folder_leaves_the_files_there_alone() {
     let (mut p, first) = hello_with(&daemon.paths().ctl_socket(), caps).await;
     assert_eq!(first["ok"]["broken"], json!([]), "{first}");
     descriptor_changed(&mut conn).await;
+    // The rules name the program's path argument, so they go on once it
+    // offers the actions: the node checks a rule's conditions against the
+    // schema as it is written.
+    owner_edit(daemon.paths(), |c| {
+        c.centers[0].policy.deny = ["open", "save", "peek"]
+            .map(|a| format!("files.{a}:path~**/.env"))
+            .to_vec();
+    })
+    .await;
     let served = tokio::spawn(async move {
         while let Some(call) = p.next().await {
             p.send(json!({"id": call["id"], "ok": call["params"]["args"]}))
@@ -1833,6 +1841,7 @@ async fn cap_ls_lists_what_the_attached_programs_offer() {
         *on,
         json!({"name": "lamp.on", "effect": "actuate", "source": "program desk",
                "summary": "Switches it on.", "centers": {"lab": "off"},
+               "params": {"type": "object"},
                "now": {"lab": "off"}})
     );
     let read = v["capabilities"]
@@ -2401,6 +2410,75 @@ async fn a_programs_stream_ends_when_the_policy_no_longer_allows_it() {
         p.next().await.expect("the close"),
         json!({"method": "stream.close", "params": {"stream": asked["id"]}})
     );
+    daemon.stop().await;
+}
+
+/// A rule may hold conditions on a stream's parameters, which the gate
+/// reads as a call's arguments: the node checks them against the stream's
+/// schema when the rule is written, and decides an open by them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rule_on_a_streams_parameters_is_typed_and_holds() {
+    use clap::Parser;
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, mut lab, _work, mut p) = two_centers_with_sensors(dir.path()).await;
+    let paths = daemon.paths().clone();
+    let rule = |words: &[&str]| {
+        let mut args: Vec<PathBuf> = vec![
+            "nerve-node".into(),
+            "--config-dir".into(),
+            paths.config_dir.clone(),
+            "--state-dir".into(),
+            paths.state_dir.clone(),
+        ];
+        args.extend(words.iter().map(PathBuf::from));
+        let cli = nerve_node::cli::Cli::parse_from(args);
+        async move { nerve_node::cli::execute(cli, &mut Vec::new()).await }
+    };
+    rule(&[
+        "rule",
+        "add",
+        "deny",
+        "sensors.feed:every_ms<100",
+        "--center=lab",
+    ])
+    .await
+    .expect("the stream takes every_ms");
+    let e = rule(&["rule", "add", "deny", "sensors.feed:size=1", "--center=lab"])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("sensors.feed has no argument size; it takes every_ms"),
+        "{e}"
+    );
+    let open = |params: Value| {
+        json!({"cap": "sensors", "stream": "feed", "params": params,
+               "ctx": {"session": "s-1"}})
+    };
+    let e = lab
+        .call("stream.open", open(json!({"every_ms": 50})), WAIT)
+        .await
+        .unwrap()
+        .expect_err("the rule denies it");
+    assert_eq!(code_of(&e), "forbidden", "{}", e.message);
+    assert!(
+        e.message
+            .contains("sensors.feed is denied (sensors.feed:every_ms<100)"),
+        "{}",
+        e.message
+    );
+    // Another value opens, as the program answers.
+    let id = lab
+        .request("stream.open", open(json!({"every_ms": 500})))
+        .await
+        .unwrap();
+    let asked = p.next().await.expect("the stream.open");
+    assert_eq!(asked["params"]["params"], json!({"every_ms": 500}));
+    p.send(json!({"id": asked["id"], "ok": {}})).await;
+    lab.answer(id, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .expect("opened");
     daemon.stop().await;
 }
 

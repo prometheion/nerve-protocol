@@ -95,15 +95,41 @@ Entries are in the machine's own rule syntax, `<scope>:<pattern>`:
   calls only, not for a program's or a `node.toml` capability's
   `notes.save` into that folder.
 - `lamp.set`, or `lamp` for all its actions — any other capability, named
-  whole. A pattern after it (`lamp.set:office`) is refused for now: it would
-  have nothing to match until rules on a capability's arguments come.
-  `exec:rm *` is refused too; a command pattern goes on `exec.run`
+  whole.
+- `lamp.set:room=bedroom,brightness>50` — any other action with conditions on
+  its arguments, as the machine's own rules write them
+  ([rules](rules.md#rules-on-an-actions-arguments)): `=`, `!=`, `<`, `<=`,
+  `>`, `>=` and `~` (a glob), joined by `,`. A blocklist entry refuses a call
+  that meets them all, and also one that gives such an argument a value of
+  another type or leaves it out, since the checker cannot tell; an allow rule
+  covers only a call that meets them all. A path argument is matched as a path,
+  `~` any user's home, in any letter case. For `!=` on a path the checker
+  reads more narrowly: with case, and a value that starts at the home (`~/…`)
+  it cannot tell, so a blocklist entry with such a value is refused when you add
+  it (write the path in full, `/home/me/inbox.md`), and an allow rule with it
+  covers nothing. The center checks the conditions
+  against the schema the machines publish when you add the entry: an argument
+  the action does not take, a value not of its type, or an action no machine
+  (for an entry of one machine, not that one) offers is refused. Under
+  **Add a rule** the page names the arguments of the action you typed. The
+  machine reads the same conditions with the same code, but a path rule reads
+  wider here (any home, any letter case): an allow rule on a path may cover
+  more calls than on the machine, and a blocklist entry never refuses fewer.
+  Conditions name one action (`lamp:room=x` is refused), and `exec:rm *` is
+  refused too; a command pattern goes on `exec.run`
   (`exec.run:rm *`). The page warns about your own entries and allow rules
   that name a capability no paired machine offers, such as a misspelt one:
   they match no call. An `fs` path entry of the blocklist is not listed while
   some program on a machine takes paths, since it holds those; an allow rule
   for `fs` is listed unless the machine offers `fs`, since it never
-  skips the model for a program's call.
+  skips the model for a program's call. It also warns about an entry or rule
+  whose conditions no longer fit what a machine publishes for the action (an
+  argument gone or of another type, a value it no longer takes), naming the
+  machine for an entry of every machine. Such a rule no longer decides as you
+  meant until you change it: where its argument is gone, a blocklist entry
+  refuses every call of the action there and an allow rule covers none. The
+  allow button of a checker refusal pins a path argument as the checker
+  matched it (with `..` and `.` taken out).
 - `cmd-re:` for a regular expression over **each command** of the line, e.g.
   `exec.run:cmd-re:^terraform destroy( |$)`. The checker pulls the commands
   apart (see below) and writes each one as `program arg1 arg2 …`: the
@@ -245,7 +271,9 @@ those only the guard's parser sees behind `timeout`, `eval` and the like, so
 judges it.
 
 The Audit page has **Allow** and **Allow as wildcard** buttons on a model
-refusal, which save an allow rule for that machine for you.
+refusal, which save an allow rule for that machine for you. Where the call
+has arguments a rule may pin, it also offers them: pick one, then **Allow with
+this value** saves `lamp.set:room=office` and the like.
 
 ## The decision model
 

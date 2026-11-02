@@ -660,7 +660,11 @@ impl SettingsStore {
     /// owner may turn those on. It gets the whole scope of a `caps` key or an
     /// allow rule.
     /// `protected(opts)` is this node's protected list with a center's
-    /// options: only the owner may release an entry of it.
+    /// options: only the owner may release an entry of it. `params` gives
+    /// the arguments schema of `cap.action` as the node offers it now: each
+    /// allow or deny rule the document adds has its conditions checked
+    /// against it ([`crate::rules::check_typed`]); the rules it keeps stay
+    /// as they are, also one whose argument went since.
     pub fn set_center_document(
         &mut self,
         center: &str,
@@ -668,6 +672,7 @@ impl SettingsStore {
         if_version: u64,
         owner_only: impl Fn(&str) -> bool,
         protected: impl Fn(&ProtectedOptions) -> Protected,
+        params: &dyn Fn(&str, &str) -> Option<Value>,
     ) -> Result<u64, SetError> {
         let entry = self.granted(center)?;
         if if_version != self.config.version {
@@ -684,6 +689,14 @@ impl SettingsStore {
         new.policy
             .validate()
             .map_err(|e| SetError::Invalid(e.to_string()))?;
+        let (o, n) = (&entry.policy, &new.policy);
+        for (rule, kept) in
+            (n.allow.iter().map(|r| (r, &o.allow))).chain(n.deny.iter().map(|r| (r, &o.deny)))
+        {
+            if !kept.contains(rule) {
+                crate::rules::check_typed(rule, params).map_err(SetError::Invalid)?;
+            }
+        }
         let old = CenterDocument {
             paused: entry.paused,
             policy: entry.policy.clone(),
@@ -1013,12 +1026,12 @@ mod tests {
         .unwrap();
         let mut doc = serde_json::to_value(s.center_document("home").unwrap()).unwrap();
         doc["policy"]["allow"] = json!(["fs.read:/tmp/x"]);
-        s.set_center_document("home", doc, s.version(), |_| false, unix)
+        s.set_center_document("home", doc, s.version(), |_| false, unix, &|_, _| None)
             .unwrap();
         // A refused write is not a change.
         let stale = serde_json::to_value(s.center_document("home").unwrap()).unwrap();
         assert!(
-            s.set_center_document("home", stale, 1, |_| false, unix)
+            s.set_center_document("home", stale, 1, |_| false, unix, &|_, _| None)
                 .is_err()
         );
         s.set_sudo(Writer::Local, Sudo::Off).unwrap();
@@ -1121,14 +1134,14 @@ mod tests {
                 }
             }
             let v = s.version();
-            s.set_center_document("home", new, v, |_| false, host)
+            s.set_center_document("home", new, v, |_| false, host, &|_, _| None)
                 .unwrap();
             assert_eq!(placed(&s), [path(&bin)]);
             // Back to the way it was for the next round.
             let mut new = doc(&s);
             new["policy"]["caps"] = json!({});
             let v = s.version();
-            s.set_center_document("home", new, v, |_| false, host)
+            s.set_center_document("home", new, v, |_| false, host, &|_, _| None)
                 .unwrap();
         }
         // A folder the center removes takes its entry along, and one it
@@ -1136,7 +1149,7 @@ mod tests {
         let mut new = doc(&s);
         new["policy"]["folders"] = json!([{"path": path(&work), "access": "rw"}]);
         let v = s.version();
-        s.set_center_document("home", new, v, |_| false, host)
+        s.set_center_document("home", new, v, |_| false, host, &|_, _| None)
             .unwrap();
         assert!(placed(&s).is_empty());
         let mut new = doc(&s);
@@ -1146,7 +1159,7 @@ mod tests {
         ]);
         new["policy"]["places"] = json!([path(&bin)]);
         let v = s.version();
-        s.set_center_document("home", new, v, |_| false, host)
+        s.set_center_document("home", new, v, |_| false, host, &|_, _| None)
             .unwrap();
         assert!(placed(&s).is_empty());
     }
@@ -1183,13 +1196,13 @@ mod tests {
         new["policy"]["mode"] = json!("user");
         new["policy"]["until"] = json!(1000);
         let v2 = s
-            .set_center_document("home", new.clone(), v, |_| false, unix)
+            .set_center_document("home", new.clone(), v, |_| false, unix, &|_, _| None)
             .unwrap();
         assert_eq!(v2, v + 1);
         assert_eq!(s.config().center("home").unwrap().policy.mode, Mode::User);
         // A stale version conflicts.
         assert_eq!(
-            s.set_center_document("home", new, v, |_| false, unix),
+            s.set_center_document("home", new, v, |_| false, unix, &|_, _| None),
             Err(SetError::Conflict { current: v2 })
         );
         // Saved and reloaded.
@@ -1251,7 +1264,7 @@ mod tests {
                 new["policy"][k] = val.clone();
             }
             let e = s
-                .set_center_document("home", new, v, senses, unix)
+                .set_center_document("home", new, v, senses, unix, &|_, _| None)
                 .unwrap_err();
             assert!(
                 matches!(&e, SetError::Forbidden(m) if m.contains(what)),
@@ -1263,7 +1276,8 @@ mod tests {
         new["policy"]["caps"] =
             json!({"camera": "on", "camera.snap": "hidden", "camera.film": "off"});
         new["policy"]["deny"] = json!(["camera.snap"]);
-        s.set_center_document("home", new, v, senses, unix).unwrap();
+        s.set_center_document("home", new, v, senses, unix, &|_, _| None)
+            .unwrap();
     }
 
     /// A rule of the guard covers `exec.run`, which does not sense: the
@@ -1282,7 +1296,8 @@ mod tests {
         let v = s.version();
         let mut new = doc(&s);
         new["policy"]["deny"] = json!([]);
-        s.set_center_document("home", new, v, senses, unix).unwrap();
+        s.set_center_document("home", new, v, senses, unix, &|_, _| None)
+            .unwrap();
     }
 
     /// A center changes the capabilities it added only with the `write`
@@ -1349,7 +1364,7 @@ mod tests {
         // The document neither shows nor takes them.
         let doc = serde_json::to_value(s.center_document("home").unwrap()).unwrap();
         assert!(!doc.to_string().contains("say.back"), "{doc}");
-        s.set_center_document("home", doc, s.version(), |_| false, unix)
+        s.set_center_document("home", doc, s.version(), |_| false, unix, &|_, _| None)
             .unwrap();
         assert_eq!(s.config().centers[0].capabilities.len(), 1);
         // An `off` of one it added stays until the owner changes it.
@@ -1364,7 +1379,14 @@ mod tests {
         let mut doc = serde_json::to_value(s.center_document("home").unwrap()).unwrap();
         doc["policy"]["caps"] = json!({"say": "on"});
         let e = s
-            .set_center_document("home", doc.clone(), s.version(), |_| false, unix)
+            .set_center_document(
+                "home",
+                doc.clone(),
+                s.version(),
+                |_| false,
+                unix,
+                &|_, _| None,
+            )
             .unwrap_err();
         assert!(
             matches!(&e, SetError::Forbidden(m) if m.contains("stays off until the owner turns it on")),
@@ -1372,8 +1394,51 @@ mod tests {
         );
         // Hidden is as off; another capability's switch is the center's.
         doc["policy"]["caps"] = json!({"say": "hidden", "other": "off"});
-        s.set_center_document("home", doc, s.version(), |_| false, unix)
+        s.set_center_document("home", doc, s.version(), |_| false, unix, &|_, _| None)
             .unwrap();
+    }
+
+    /// A rule a center's document adds has its conditions checked against
+    /// the schema of the action as the node offers it: an argument it does
+    /// not take, or an action nothing offers, refuses the document. A rule
+    /// it keeps stays, also one whose argument went since.
+    #[test]
+    fn a_centers_new_rule_has_its_conditions_typed() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = store(d.path(), SettingsGrant::Write);
+        let lamp = json!({"type": "object", "properties": {"room": {"type": "string"}}});
+        let offered =
+            |cap: &str, action: &str| ((cap, action) == ("lamp", "set")).then(|| lamp.clone());
+        let mut set = |deny: Value, params: &dyn Fn(&str, &str) -> Option<Value>| {
+            let mut new = doc(&s);
+            new["policy"]["deny"] = deny;
+            let v = s.version();
+            s.set_center_document("home", new, v, |_| false, unix, params)
+        };
+        set(json!(["lamp.set:room=office"]), &offered).unwrap();
+        for (deny, why) in [
+            (
+                json!(["lamp.set:room=office", "lamp.set:size=1"]),
+                "lamp.set has no argument size; it takes room",
+            ),
+            (
+                json!(["lamp.off:room=office"]),
+                "nothing offers lamp.off now",
+            ),
+        ] {
+            let e = set(deny.clone(), &offered).unwrap_err();
+            assert!(
+                matches!(&e, SetError::Invalid(m) if m.contains(why)),
+                "{deny}: {e:?}"
+            );
+        }
+        // Gone from the schema since: kept as it is, with another rule.
+        let gone = |_: &str, _: &str| Some(json!({"type": "object", "properties": {}}));
+        set(json!(["lamp.set:room=office", "exec.run:rm *"]), &gone).unwrap();
+        assert_eq!(
+            s.config().center("home").unwrap().policy.deny,
+            ["lamp.set:room=office", "exec.run:rm *"]
+        );
     }
 
     #[test]
@@ -1390,6 +1455,7 @@ mod tests {
                 v,
                 |c| c.split('.').next() == Some("camera"),
                 unix,
+                &|_, _| None,
             )
             .unwrap_err();
         assert!(matches!(&e, SetError::Forbidden(m) if m.contains("policy.caps.camera")));
@@ -1403,6 +1469,7 @@ mod tests {
                 v,
                 |c| c.split('.').next() == Some("camera"),
                 unix,
+                &|_, _| None,
             )
             .unwrap_err();
         assert!(matches!(&e, SetError::Forbidden(m) if m.contains("policy.allow")));
@@ -1416,7 +1483,7 @@ mod tests {
             let mut new = doc(&s);
             new["policy"][key] = value;
             let e = s
-                .set_center_document("home", new, v, snap, unix)
+                .set_center_document("home", new, v, snap, unix, &|_, _| None)
                 .unwrap_err();
             assert!(
                 matches!(&e, SetError::Forbidden(m) if m.contains("lamp.snap")),
@@ -1424,38 +1491,39 @@ mod tests {
             );
         }
         let mut new = doc(&s);
-        new["policy"]["allow"] = json!(["fs.read:/a/*", "exec.run:ls", "lamp.on:lamp.on"]);
+        new["policy"]["allow"] = json!(["fs.read:/a/*", "exec.run:ls", "lamp.on"]);
         s.set_center_document(
             "home",
             new,
             v,
             |c| c.split('.').next() == Some("camera") || snap(c),
             unix,
+            &|_, _| None,
         )
         .unwrap();
         let v = s.version();
         let mut new = doc(&s);
         new["policy"]["protected"] = json!({"allow": ["~/.ssh"]});
         assert!(matches!(
-            s.set_center_document("home", new, v, |_| false, unix),
+            s.set_center_document("home", new, v, |_| false, unix, &|_, _| None),
             Err(SetError::Forbidden(_))
         ));
         let mut new = doc(&s);
         new["policy"]["nope"] = json!(1);
         assert!(matches!(
-            s.set_center_document("home", new, v, |_| false, unix),
+            s.set_center_document("home", new, v, |_| false, unix, &|_, _| None),
             Err(SetError::Invalid(_))
         ));
         // The center may pause, not unpause.
         let mut new = doc(&s);
         new["paused"] = json!(true);
         let v = s
-            .set_center_document("home", new, v, |_| false, unix)
+            .set_center_document("home", new, v, |_| false, unix, &|_, _| None)
             .unwrap();
         let mut new = doc(&s);
         new["paused"] = json!(false);
         assert!(matches!(
-            s.set_center_document("home", new, v, |_| false, unix),
+            s.set_center_document("home", new, v, |_| false, unix, &|_, _| None),
             Err(SetError::Forbidden(_))
         ));
         assert_eq!(s.version(), v);
@@ -1465,7 +1533,7 @@ mod tests {
         let v = off.version();
         let new = doc(&off);
         assert!(matches!(
-            off.set_center_document("home", new, v, |_| false, unix),
+            off.set_center_document("home", new, v, |_| false, unix, &|_, _| None),
             Err(SetError::Forbidden(_))
         ));
     }
@@ -1486,7 +1554,7 @@ mod tests {
         let v = s.version();
         let mut new = doc(&s);
         new["policy"]["protected"]["extra"] = json!([]);
-        let e = s.set_center_document("home", new, v, |_| false, unix);
+        let e = s.set_center_document("home", new, v, |_| false, unix, &|_, _| None);
         assert!(
             matches!(&e, Err(SetError::Forbidden(m)) if m.contains("policy.protected.extra")),
             "{e:?}"
@@ -1498,7 +1566,7 @@ mod tests {
         // Adding one more is fine.
         let mut new = doc(&s);
         new["policy"]["protected"]["extra"] = json!(["~/secret", "~/more"]);
-        s.set_center_document("home", new, v, |_| false, unix)
+        s.set_center_document("home", new, v, |_| false, unix, &|_, _| None)
             .unwrap();
         assert_eq!(
             s.config().center("home").unwrap().policy.protected.extra,
@@ -1530,7 +1598,7 @@ mod tests {
         ] {
             let mut new = doc(&s);
             new["policy"]["folders"] = json!([{"path": at_home(path), "access": "r"}]);
-            let e = s.set_center_document("home", new, v, |_| false, host);
+            let e = s.set_center_document("home", new, v, |_| false, host, &|_, _| None);
             assert!(
                 matches!(&e, Err(SetError::Forbidden(m))
                     if m.contains("policy.folders") && m.to_lowercase().contains(&shown(entry))),
@@ -1553,7 +1621,7 @@ mod tests {
         for path in odd {
             let mut new = doc(&s);
             new["policy"]["folders"] = json!([{"path": path, "access": "r"}]);
-            let e = s.set_center_document("home", new, v, |_| false, host);
+            let e = s.set_center_document("home", new, v, |_| false, host, &|_, _| None);
             assert!(
                 matches!(&e, Err(SetError::Invalid(m)) if m.contains("use the full name")),
                 "{path}: {e:?}"
@@ -1562,7 +1630,7 @@ mod tests {
         // A folder that holds a protected entry releases nothing.
         let mut new = doc(&s);
         new["policy"]["folders"] = json!([{"path": host_home(), "access": "rw"}]);
-        s.set_center_document("home", new, v, |_| false, host)
+        s.set_center_document("home", new, v, |_| false, host, &|_, _| None)
             .unwrap();
         // The owner may release it.
         s.update(|c| {
@@ -1583,11 +1651,11 @@ mod tests {
             .unwrap()
             .push(json!({"path": at_home("secret/inner"), "access": "r"}));
         let v = s
-            .set_center_document("home", new, v, |_| false, host)
+            .set_center_document("home", new, v, |_| false, host, &|_, _| None)
             .unwrap();
         let mut new = doc(&s);
         new["policy"]["folders"][1]["access"] = json!("rw");
-        let e = s.set_center_document("home", new, v, |_| false, host);
+        let e = s.set_center_document("home", new, v, |_| false, host, &|_, _| None);
         let named = format!("policy.folders {}", at_home("secret").display());
         assert!(
             matches!(&e, Err(SetError::Forbidden(m)) if m.contains(&named)),
@@ -1636,6 +1704,7 @@ mod tests {
             path: file.into(),
             access: crate::decide::PathAccess::Write,
             holds: true,
+            arg: None,
         }];
         let call = crate::decide::Call {
             cap: "fs",
@@ -1645,6 +1714,7 @@ mod tests {
             command: None,
             cwd: None,
             now_ms: 0,
+            args: None,
         };
         crate::decide::decide(policy, &env, &call)
     }
@@ -1688,11 +1758,25 @@ mod tests {
             // Next to the owner's folder ...
             let both = json!([{"path": ssh, "access": "r"},
                 {"path": spelling, "access": "rw"}]);
-            let e = s.set_center_document("home", with_folders(&s, both), v, |_| false, host);
+            let e = s.set_center_document(
+                "home",
+                with_folders(&s, both),
+                v,
+                |_| false,
+                host,
+                &|_, _| None,
+            );
             assert!(e.is_err(), "{spelling}: {e:?}");
             // ... or in its place.
             let only = json!([{"path": spelling, "access": "rw"}]);
-            let e = s.set_center_document("home", with_folders(&s, only), v, |_| false, host);
+            let e = s.set_center_document(
+                "home",
+                with_folders(&s, only),
+                v,
+                |_| false,
+                host,
+                &|_, _| None,
+            );
             assert!(
                 matches!(&e, Err(SetError::Forbidden(m)) if m.to_lowercase().contains(&ssh.to_lowercase())),
                 "{spelling}: {e:?}"
@@ -1709,7 +1793,14 @@ mod tests {
         let elsewhere = json!([{"path": ssh, "access": "r"},
             {"path": format!("{work}/"), "access": "rw"}]);
         let v = s
-            .set_center_document("home", with_folders(&s, elsewhere), v, |_| false, host)
+            .set_center_document(
+                "home",
+                with_folders(&s, elsewhere),
+                v,
+                |_| false,
+                host,
+                &|_, _| None,
+            )
             .unwrap();
         let folders = &s.config().center("home").unwrap().policy.folders;
         assert_eq!(folders[1].path, work);
@@ -1745,7 +1836,14 @@ mod tests {
         for access in ["rwx", "rw", "w", "x", "rx"] {
             let wider = json!([{"path": ssh, "access": "r"},
                 {"path": inner, "access": access}]);
-            let e = s.set_center_document("home", with_folders(&s, wider), v, |_| false, host);
+            let e = s.set_center_document(
+                "home",
+                with_folders(&s, wider),
+                v,
+                |_| false,
+                host,
+                &|_, _| None,
+            );
             let named = format!("policy.folders {inner}");
             assert!(
                 matches!(&e, Err(SetError::Forbidden(m)) if m.contains(&named)),
@@ -1760,8 +1858,15 @@ mod tests {
         // As narrow as the owner's folder, or narrower, is fine.
         let narrow = json!([{"path": ssh, "access": "r"},
             {"path": format!("{inner}/"), "access": "r"}]);
-        s.set_center_document("home", with_folders(&s, narrow), v, |_| false, host)
-            .unwrap();
+        s.set_center_document(
+            "home",
+            with_folders(&s, narrow),
+            v,
+            |_| false,
+            host,
+            &|_, _| None,
+        )
+        .unwrap();
         assert!(matches!(
             write_to(&s, &at_home(".ssh/inner/x")),
             crate::decide::Decision::Forbidden(_)
@@ -1777,7 +1882,14 @@ mod tests {
         let mut s = owner_folders(d.path(), &[(&ssh, "rw"), (&keys, "r")]);
         let v = s.version();
         let dropped = json!([{"path": ssh, "access": "rw"}]);
-        let e = s.set_center_document("home", with_folders(&s, dropped), v, |_| false, host);
+        let e = s.set_center_document(
+            "home",
+            with_folders(&s, dropped),
+            v,
+            |_| false,
+            host,
+            &|_, _| None,
+        );
         let named = format!("policy.folders {keys}");
         assert!(
             matches!(&e, Err(SetError::Forbidden(m)) if m.contains(&named)),
@@ -1789,8 +1901,15 @@ mod tests {
         ));
         // Dropping the outer one narrows.
         let outer = json!([{"path": keys, "access": "r"}]);
-        s.set_center_document("home", with_folders(&s, outer), v, |_| false, host)
-            .unwrap();
+        s.set_center_document(
+            "home",
+            with_folders(&s, outer),
+            v,
+            |_| false,
+            host,
+            &|_, _| None,
+        )
+        .unwrap();
     }
 
     /// The same checks on Windows paths, which ignore case and take either
@@ -2200,7 +2319,7 @@ mod tests {
                 let v = s.version();
                 let mut new = doc(s);
                 new["policy"]["caps"] = json!({"exec": "off"});
-                s.set_center_document("home", new, v, |_| false, unix)
+                s.set_center_document("home", new, v, |_| false, unix, &|_, _| None)
                     .map(drop)
                     .map_err(|e| e.to_string())
             }),
@@ -2310,7 +2429,7 @@ mod tests {
         let mut new = doc(&s);
         new["policy"]["mode"] = json!("user");
         new["policy"]["until"] = json!(now + year);
-        s.set_center_document("home", new, v, |_| false, unix)
+        s.set_center_document("home", new, v, |_| false, unix, &|_, _| None)
             .unwrap();
         // Once the limit has passed, the center is back in default deny.
         let past = s.config().centers[0].policy.clone();
@@ -2376,7 +2495,7 @@ mod tests {
         let mut s = owner_folders(d.path(), &[]);
         let refused = |s: &mut SettingsStore, path: &Path, access: &str| {
             let new = with_folders(s, json!([{"path": at(path), "access": access}]));
-            let e = s.set_center_document("home", new, s.version(), |_| false, prot);
+            let e = s.set_center_document("home", new, s.version(), |_| false, prot, &|_, _| None);
             matches!(&e, Err(SetError::Forbidden(m))
                 if m.contains("policy.folders") && m.contains(&at(&ssh)))
         };
@@ -2395,7 +2514,7 @@ mod tests {
         for (access, ok) in [("r", true), ("rw", false), ("rx", false)] {
             let link = json!({"path": at(&work.join("link")), "access": access});
             let new = with_folders(&s, json!([owner.clone(), link]));
-            let e = s.set_center_document("home", new, s.version(), |_| false, prot);
+            let e = s.set_center_document("home", new, s.version(), |_| false, prot, &|_, _| None);
             assert_eq!(e.is_ok(), ok, "{access}: {e:?}");
         }
     }

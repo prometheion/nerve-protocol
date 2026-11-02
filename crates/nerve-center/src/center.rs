@@ -3068,6 +3068,7 @@ impl Center {
             description: &seen.description,
             target: &target,
             paths: &paths,
+            marked: &seen.marked,
             args,
             node_id: &route.node_id,
             os: &os,
@@ -3080,7 +3081,18 @@ impl Center {
                 detail,
                 message,
             } => {
-                self.audit_checker(sess, route, &target, "forbidden", layer, scope, &detail);
+                self.audit_checker(
+                    sess,
+                    route,
+                    &target,
+                    "forbidden",
+                    layer,
+                    scope,
+                    &detail,
+                    args,
+                    &seen.marked,
+                    &seen.params,
+                );
                 return Err(RpcError::forbidden(message).into());
             }
             Decision::Allowed {
@@ -3088,7 +3100,18 @@ impl Center {
                 scope,
                 detail,
             } => {
-                self.audit_checker(sess, route, &target, "allowed", layer, scope, &detail);
+                self.audit_checker(
+                    sess,
+                    route,
+                    &target,
+                    "allowed",
+                    layer,
+                    scope,
+                    &detail,
+                    args,
+                    &seen.marked,
+                    &seen.params,
+                );
             }
             Decision::Pass => {}
         }
@@ -3712,6 +3735,8 @@ impl Center {
             "gpu_hint": checker::install::gpu_hint(),
             "rejected": self.checker().rejected,
             "unpublished": self.read(|s| unpublished_rules(&s.checker, &s.nodes)),
+            "stale": self.read(|s| stale_checker_rules(&s.checker, &s.nodes)),
+            "fields": self.read(|s| rule_fields(&s.nodes)),
         })
     }
 
@@ -3726,6 +3751,25 @@ impl Center {
     /// Validates a posted checker config and, if it holds, saves it. Taint
     /// switched off clears every session's mark.
     pub fn apply_checker_config(&self, mut cfg: CheckerConfig) -> Result<(), String> {
+        // A rule the config adds has its conditions checked against the
+        // schemas the machines publish; one it keeps stays, flagged where
+        // its argument went since (`stale` in checker_json).
+        let (old, nodes) = self.read(|s| (s.checker.clone(), s.nodes.clone()));
+        for e in &cfg.blocklist {
+            if !old
+                .blocklist
+                .iter()
+                .any(|o| o.rule == e.rule && o.node_id == e.node_id)
+            {
+                checker_typed(&e.rule, e.node_id.as_deref(), &nodes)?;
+                blocklist_typed(&e.rule, e.node_id.as_deref(), &nodes)?;
+            }
+        }
+        for a in &cfg.allow_rules {
+            if !old.allow_rules.contains(a) {
+                checker_typed(&a.rule, a.node_id.as_deref(), &nodes)?;
+            }
+        }
         for e in &mut cfg.blocklist {
             Rule::parse(&e.rule)?;
             // An entry for one node is switched off as a whole; the
@@ -3777,16 +3821,19 @@ impl Center {
     }
 
     /// Adds a saved allow rule, built for an audit button's `cap.action` and
-    /// `target` (exact or wildcard), for every node or one node.
+    /// `target` (exact or wildcard, or with one argument pinned), for every
+    /// node or one node.
     pub fn add_checker_allow(
         &self,
         cap: &str,
         action: &str,
         target: &str,
         wildcard: bool,
+        pin: Option<(&str, &Value)>,
         node_id: Option<String>,
     ) -> Result<String, String> {
-        let rule = audit_rule("allow", cap, action, target, wildcard)?;
+        let rule = audit_rule("allow", cap, action, target, wildcard, pin)?;
+        self.read(|s| checker_typed(&rule, node_id.as_deref(), &s.nodes))?;
         let mut cfg = self.read(|s| s.checker.clone());
         let entry = AllowRule {
             rule: rule.clone(),
@@ -4003,6 +4050,9 @@ impl Center {
         layer: Layer,
         scope: Scope,
         detail: &str,
+        args: &Map<String, Value>,
+        marked: &[(String, PathMark)],
+        params: &Value,
     ) {
         let node = self.node_name(&route.node_id);
         let mut e = Map::new();
@@ -4022,6 +4072,19 @@ impl Center {
             "checker".into(),
             json!({"layer": layer.as_str(), "scope": scope.as_str(), "detail": detail}),
         );
+        // What its allow buttons may pin, as a node's entry has it, a path
+        // argument as the checker matched it.
+        // Only the arguments the schema names, as the node's entries have
+        // them: an open schema lets junk keys through, and they would push
+        // the real ones out of the choices.
+        let args = nerve_policy::conditions::declared(
+            params,
+            &checker::blocklist::as_matched(args, marked),
+            true,
+        );
+        if let Some(args) = nerve_policy::audit::pinnable_args(&route.cap, &route.action, &args) {
+            e.insert("args".into(), Value::Object(args));
+        }
         self.audit.lock().unwrap().push(Value::Object(e));
         self.changed(Change::Audit);
         let (level, verb) = if decision == "forbidden" {
@@ -4137,6 +4200,164 @@ fn unpublished_rules(cfg: &CheckerConfig, nodes: &BTreeMap<String, NodeRecord>) 
     out
 }
 
+/// The arguments schemas the machines publish for `cap.action`: of the one
+/// machine `node`, or of every one that has it.
+fn published_params(
+    nodes: &BTreeMap<String, NodeRecord>,
+    node: Option<&str>,
+    unit: &str,
+) -> Vec<(String, Value)> {
+    nodes
+        .iter()
+        .filter(|(id, _)| node.is_none_or(|n| n == id.as_str()))
+        .filter_map(|(_, n)| {
+            n.catalog
+                .unit(unit)
+                .map(|u| (n.name.clone(), u.params.clone()))
+        })
+        .collect()
+}
+
+/// Checks the conditions of a checker rule as it is written, against the
+/// schema the machine it is for publishes (for every machine: one that
+/// publishes the action): an argument the action does not take, a value
+/// not of its type, or an action no machine offers is refused. A rule
+/// without conditions, or one that does not parse, is left to
+/// [`Rule::parse`].
+fn checker_typed(
+    rule: &str,
+    node: Option<&str>,
+    nodes: &BTreeMap<String, NodeRecord>,
+) -> Result<(), String> {
+    if !nerve_policy::rules::has_conditions(rule) || Rule::parse(rule).is_err() {
+        return Ok(());
+    }
+    let (scope, pattern) = rule.split_once(':').expect("has conditions");
+    let found = published_params(nodes, node, scope);
+    let mut first = None;
+    for (_, params) in &found {
+        match nerve_policy::conditions::check(scope, pattern, params) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                first.get_or_insert(e);
+            }
+        }
+    }
+    Err(match first {
+        Some(e) => format!("rule {rule:?}: {e}"),
+        None => format!(
+            "rule {rule:?}: {} offers {scope} now, so its arguments cannot be checked; add the rule once it is offered",
+            if node.is_some() {
+                "this machine no longer"
+            } else {
+                "no machine"
+            }
+        ),
+    })
+}
+
+/// Refuses a blocklist entry with a `!=` on a path from the home
+/// (`notes.save:file!=~/inbox.md`): the center cannot tell a home, so the
+/// entry would refuse every call of the action, the inbox's too. An absolute
+/// path works.
+fn blocklist_typed(
+    rule: &str,
+    node: Option<&str>,
+    nodes: &BTreeMap<String, NodeRecord>,
+) -> Result<(), String> {
+    if !nerve_policy::rules::has_conditions(rule) {
+        return Ok(());
+    }
+    let Some((scope, pattern)) = rule.split_once(':') else {
+        return Ok(());
+    };
+    for (_, params) in published_params(nodes, node, scope) {
+        if let Some(c) = nerve_policy::conditions::home_not_equal(pattern, &params) {
+            return Err(format!(
+                "rule {rule:?}: the center cannot tell the home in {c}, so the entry would refuse every call of {scope}; write the path in full (/home/…)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The arguments a rule may name for each action the machines publish
+/// (`lamp.set` → `room (a string)`, …), for the checker page's forms: the
+/// first machine's that has the action. An `fs` action and `exec.run` take
+/// a path or a command line instead, and an action whose arguments a rule
+/// cannot name is left out.
+fn rule_fields(nodes: &BTreeMap<String, NodeRecord>) -> Value {
+    let mut out = Map::new();
+    for n in nodes.values() {
+        for u in &n.catalog.units {
+            if catalog::is_center(u)
+                || out.contains_key(&u.name)
+                || !nerve_policy::conditions::takes_conditions(&u.name)
+            {
+                continue;
+            }
+            let fields = nerve_policy::conditions::fields(&u.params);
+            if !fields.is_empty() {
+                out.insert(u.name.clone(), json!(fields));
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+/// The owner's blocklist entries and allow rules whose conditions no longer
+/// fit what a machine publishes for their action (an argument gone, or of
+/// another type, a value it no longer takes), each with why: such a rule
+/// no longer decides that machine's calls as written. A rule for every
+/// machine is flagged where any one that publishes the action does not fit
+/// it, naming that machine, for a blocklist entry there may refuse every
+/// call. A rule whose action no machine publishes is [`unpublished_rules`]'.
+fn stale_checker_rules(cfg: &CheckerConfig, nodes: &BTreeMap<String, NodeRecord>) -> Value {
+    let own = cfg.blocklist.iter().filter(|e| !e.builtin);
+    let rules = own.map(|e| (&e.rule, e.node_id.as_deref(), true)).chain(
+        cfg.allow_rules
+            .iter()
+            .map(|a| (&a.rule, a.node_id.as_deref(), false)),
+    );
+    let mut out = Map::new();
+    for (rule, node, blocks) in rules {
+        if !nerve_policy::rules::has_conditions(rule) || out.contains_key(rule) {
+            continue;
+        }
+        let (scope, pattern) = rule.split_once(':').expect("has conditions");
+        let found = published_params(nodes, node, scope);
+        if found.is_empty() {
+            continue;
+        }
+        // A blocklist entry that types can still refuse every call: a `!=`
+        // from the home on a field that became a path after the entry was
+        // saved (the save checks only the schemas of its day).
+        let misfit = found.iter().find_map(|(name, p)| {
+            let err = nerve_policy::conditions::check(scope, pattern, p).err();
+            let err = err.or_else(|| {
+                blocks
+                    .then(|| nerve_policy::conditions::home_not_equal(pattern, p))
+                    .flatten()
+                    .map(|c| {
+                        format!(
+                            "the center cannot tell the home in {c}, so the entry refuses every call of {scope}; write the path in full (/home/…)"
+                        )
+                    })
+            });
+            err.map(|e| (name, e))
+        });
+        if let Some((name, e)) = misfit {
+            let why = if node.is_some() {
+                e
+            } else {
+                format!("on {name}: {e}")
+            };
+            out.insert(rule.clone(), json!(why));
+        }
+    }
+    Value::Object(out)
+}
+
 /// What the center's catalog says of the unit a call is for, as the action
 /// checker is shown it. Empty for a unit the catalog no longer has: the
 /// node refuses such a call anyway.
@@ -4146,6 +4367,9 @@ struct CheckerUnit {
     description: String,
     /// The arguments the unit's schema marks as paths.
     marked: Vec<(String, PathMark)>,
+    /// The unit's arguments schema, which tells the audit what a rule can
+    /// name.
+    params: Value,
 }
 
 impl CheckerUnit {
@@ -4169,6 +4393,7 @@ impl CheckerUnit {
         CheckerUnit {
             description,
             marked: nerve_proto::schema::path_args(&u.params),
+            params: u.params.clone(),
         }
     }
 
@@ -4298,14 +4523,16 @@ fn put_rule(doc: &mut Value, key: &str, rule: &str) -> Result<(), RpcError> {
 }
 
 /// The list and the rule an audit button means: the entry's `cap`, `action`
-/// and `target`, the list (`allow`, `deny`, or `sudo` for a sudo command) and
-/// whether it is the wildcard form.
+/// and `target`, the list (`allow`, `deny`, or `sudo` for a sudo command),
+/// whether it is the wildcard form, and the argument it pins with its value
+/// (one of the entry's `args`), if it pins one.
 pub fn audit_rule(
     list: &str,
     cap: &str,
     action: &str,
     target: &str,
     wildcard: bool,
+    pin: Option<(&str, &Value)>,
 ) -> Result<String, String> {
     // A cut target is no longer the call's, so no rule can be made from it.
     // Only a command line or a path is named by a rule; any other action's
@@ -4316,7 +4543,8 @@ pub fn audit_rule(
         return Err("the target was cut to its start, so a rule cannot name it".into());
     }
     match list {
-        "allow" | "deny" => nerve_policy::rules::rule_for(cap, action, target, wildcard),
+        "allow" | "deny" => nerve_policy::rules::rule_for(cap, action, target, wildcard, pin),
+        "sudo" if pin.is_some() => Err("the sudo list holds commands, not arguments".into()),
         "sudo" if (cap, action) == ("exec", "run") => {
             nerve_policy::rules::sudo_rule_for(target, wildcard)
         }
@@ -4326,7 +4554,7 @@ pub fn audit_rule(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// The Capabilities tab leaves out the center's own units by their
@@ -4408,7 +4636,7 @@ mod tests {
         .unwrap()
     }
 
-    fn node_record(id: &str, platform: &str) -> NodeRecord {
+    pub(crate) fn node_record(id: &str, platform: &str) -> NodeRecord {
         NodeRecord {
             id: id.into(),
             name: id.into(),
@@ -4823,6 +5051,10 @@ mod tests {
             let mut m = Map::new();
             m.insert("path".into(), json!(path));
             m.insert("text".into(), json!("hello"));
+            // Keys the schema does not name, which an open schema lets by.
+            for i in 0..16 {
+                m.insert(format!("a{i:02}"), json!(i));
+            }
             m
         };
         // Into an ordinary file: the allow rule lets it go to the node, and
@@ -4835,6 +5067,9 @@ mod tests {
         let last = c.audit().pop().unwrap();
         assert_eq!(last["checker"]["layer"], "allow rule");
         assert_eq!(last["target"], "/home/me/notes/today.md");
+        // Its pin choices are the schema's arguments, not the junk keys.
+        let kept: Vec<&String> = last["args"].as_object().unwrap().keys().collect();
+        assert_eq!(kept, ["path", "text"]);
         // Into the SSH keys: the `fs.write` entry refuses it, under the path.
         let CallError::Rpc(e) = c
             .call(&sess, &route, save("/home/me/.ssh/authorized_keys"))
@@ -5081,6 +5316,7 @@ mod tests {
             description: &seen.description,
             target: "door.unlock",
             paths: &[],
+            marked: &[],
             args: &args,
             node_id: "n1",
             os: "linux",
@@ -5115,7 +5351,7 @@ mod tests {
         let mut cfg = c.read(|s| s.checker.clone());
         cfg.blocklist.push(entry("lamp.set:office"));
         let why = c.apply_checker_config(cfg).unwrap_err();
-        assert!(why.contains("cannot match anything"), "{why}");
+        assert!(why.contains("comes =, !=, <, <=, >, >= or ~"), "{why}");
         let mut cfg = c.read(|s| s.checker.clone());
         cfg.allow_rules.push(AllowRule {
             rule: "exec:rm *".into(),
@@ -5130,6 +5366,209 @@ mod tests {
         assert_eq!(rejected.as_array().unwrap().len(), 1, "{rejected}");
         assert!(rejected[0].as_str().unwrap().contains("lamp.set:office"));
         assert!(c.checker().rejected[0].contains("lamp.set:office"));
+    }
+
+    /// A blocklist entry `!=` a path from the home is refused when it is
+    /// written: the center cannot tell a home, so it would refuse every call
+    /// of the action. An absolute path is taken, and so is the same on a
+    /// plain string argument.
+    #[test]
+    fn a_blocklist_entry_the_center_cannot_tell_is_refused_on_save() {
+        use crate::tools::tests::{cap, desc};
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let params = json!({"type": "object",
+            "properties": {"file": {"type": "string", "x-nerve-path": "write"},
+                           "tag": {"type": "string"}}});
+        let notes = cap(
+            "notes",
+            "notes",
+            &[("save", nerve_proto::Effect::Write, params)],
+        );
+        c.update(|s| {
+            let mut n = node_record("n1", "linux");
+            n.set_descriptor(desc("n1", vec![notes]));
+            s.nodes.insert("n1".into(), n);
+        });
+        let add = |rule: &str| {
+            let mut cfg = c.read(|s| s.checker.clone());
+            cfg.blocklist.push(checker::BlockEntry {
+                id: String::new(),
+                rule: rule.into(),
+                on: true,
+                builtin: false,
+                note: String::new(),
+                node_id: None,
+                off_for: Vec::new(),
+            });
+            c.apply_checker_config(cfg)
+        };
+        let e = add("notes.save:file!=~/inbox.md").unwrap_err();
+        assert!(e.contains("cannot tell the home"), "{e}");
+        add("notes.save:file!=/home/me/inbox.md").unwrap();
+        add("notes.save:tag!=~/x").unwrap();
+    }
+
+    /// A blocklist entry saved while its field was plain text is flagged
+    /// once the field becomes a path, for it would refuse every call then.
+    #[test]
+    fn a_blocklist_entry_a_later_path_makes_blind_is_flagged() {
+        use crate::tools::tests::{cap, desc};
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let publish = |tag: Value| {
+            let params = json!({"type": "object", "properties": {"tag": tag}});
+            let notes = cap(
+                "notes",
+                "notes",
+                &[("save", nerve_proto::Effect::Write, params)],
+            );
+            c.update(|s| {
+                let mut n = node_record("n1", "linux");
+                n.set_descriptor(desc("n1", vec![notes]));
+                s.nodes.insert("n1".into(), n);
+            });
+        };
+        publish(json!({"type": "string"}));
+        let mut cfg = c.read(|s| s.checker.clone());
+        cfg.blocklist.push(checker::BlockEntry {
+            id: String::new(),
+            rule: "notes.save:tag!=~/drafts".into(),
+            on: true,
+            builtin: false,
+            note: String::new(),
+            node_id: None,
+            off_for: Vec::new(),
+        });
+        c.apply_checker_config(cfg).unwrap();
+        assert_eq!(c.checker_json()["stale"], json!({}));
+        publish(json!({"type": "string", "x-nerve-path": "write"}));
+        let stale = c.checker_json()["stale"].clone();
+        let why = stale["notes.save:tag!=~/drafts"].as_str().unwrap_or("");
+        assert!(why.contains("cannot tell the home"), "{stale:?}");
+    }
+
+    /// A checker rule with conditions is checked against the schema the
+    /// machines publish as it is written: an argument the action does not
+    /// take, a value not of its type, or an action no machine (or not the
+    /// rule's machine) offers is refused, from the page and from an audit
+    /// button. A stored rule whose argument went since is flagged.
+    #[test]
+    fn a_checker_rules_conditions_are_typed_against_the_catalog() {
+        use crate::tools::tests::{cap, desc};
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let lamp = |props: Value| {
+            cap(
+                "lamp",
+                "lamp",
+                &[(
+                    "set",
+                    nerve_proto::Effect::Actuate,
+                    json!({"type": "object", "properties": props}),
+                )],
+            )
+        };
+        let full = json!({"room": {"type": "string"}, "brightness": {"type": "integer"}});
+        c.update(|s| {
+            let mut n = node_record("n1", "linux");
+            n.set_descriptor(desc("n1", vec![lamp(full.clone())]));
+            s.nodes.insert("n1".into(), n);
+            s.nodes.insert("n2".into(), node_record("n2", "linux"));
+        });
+        let add = |rule: &str, node: Option<&str>| {
+            let mut cfg = c.read(|s| s.checker.clone());
+            cfg.blocklist.push(checker::BlockEntry {
+                id: String::new(),
+                rule: rule.into(),
+                on: true,
+                builtin: false,
+                note: String::new(),
+                node_id: node.map(str::to_string),
+                off_for: Vec::new(),
+            });
+            c.apply_checker_config(cfg)
+        };
+        add("lamp.set:room=office,brightness>50", None).unwrap();
+        add("lamp.set:room=office", Some("n1")).unwrap();
+        for (rule, node, why) in [
+            (
+                "lamp.set:size=2",
+                None,
+                "lamp.set has no argument size; it takes brightness, room",
+            ),
+            ("lamp.set:brightness=high", None, "is an integer"),
+            (
+                "lamp.off:room=office",
+                None,
+                "no machine offers lamp.off now",
+            ),
+            (
+                "lamp.set:room=hall",
+                Some("n2"),
+                "this machine no longer offers lamp.set",
+            ),
+        ] {
+            let e = add(rule, node).unwrap_err();
+            assert!(e.contains(why), "{rule}: {e}");
+        }
+        let one = json!("hall");
+        let e = c
+            .add_checker_allow("lamp", "off", "lamp.off", false, Some(("room", &one)), None)
+            .unwrap_err();
+        assert!(e.contains("no machine offers lamp.off now"), "{e}");
+        assert_eq!(
+            c.add_checker_allow("lamp", "set", "lamp.set", false, Some(("room", &one)), None)
+                .unwrap(),
+            "lamp.set:room=hall"
+        );
+        assert_eq!(c.checker_json()["stale"], json!({}));
+        // The machine publishes the action without `room` now: the rules
+        // that name it are flagged, and the config still saves as it is.
+        c.update(|s| {
+            let n = s.nodes.get_mut("n1").unwrap();
+            n.set_descriptor(desc(
+                "n1",
+                vec![lamp(json!({"brightness": {"type": "integer"}}))],
+            ));
+        });
+        let stale = c.checker_json()["stale"].clone();
+        let stale = stale.as_object().unwrap();
+        assert_eq!(
+            stale.keys().collect::<Vec<_>>(),
+            [
+                "lamp.set:room=hall",
+                "lamp.set:room=office",
+                "lamp.set:room=office,brightness>50"
+            ],
+            "{stale:?}"
+        );
+        assert!(
+            stale["lamp.set:room=office"]
+                .as_str()
+                .unwrap()
+                .contains("no argument room")
+        );
+        c.apply_checker_config(c.read(|s| s.checker.clone()))
+            .unwrap();
+        // A rule for every machine that one of them no longer fits is
+        // flagged, naming that machine, while another still fits it.
+        c.update(|s| {
+            let mut n = node_record("n2", "linux");
+            n.set_descriptor(desc("n2", vec![lamp(full.clone())]));
+            s.nodes.insert("n2".into(), n);
+        });
+        let stale = c.checker_json()["stale"].clone();
+        assert_eq!(
+            stale["lamp.set:room=office,brightness>50"],
+            json!("on n1: lamp.set has no argument room; it takes brightness"),
+            "{stale}"
+        );
+        assert_eq!(
+            stale["lamp.set:room=office"],
+            json!("lamp.set has no argument room; it takes brightness"),
+            "{stale}"
+        );
     }
 
     /// An `fs` entry holds the path arguments of other capabilities, so it
@@ -6390,7 +6829,8 @@ mod tests {
 
     #[test]
     fn audit_buttons_write_rules_for_every_action() {
-        let rule = |list, cap, action, target, wild| audit_rule(list, cap, action, target, wild);
+        let rule =
+            |list, cap, action, target, wild| audit_rule(list, cap, action, target, wild, None);
         assert_eq!(
             rule("allow", "exec", "run", "git status", false).unwrap(),
             "exec.run:git status"

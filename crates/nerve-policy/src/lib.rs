@@ -3,6 +3,7 @@
 
 pub mod audit;
 pub mod command;
+pub mod conditions;
 pub mod config;
 pub mod decide;
 pub mod guard;
