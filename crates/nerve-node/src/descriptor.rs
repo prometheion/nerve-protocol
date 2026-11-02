@@ -1026,6 +1026,19 @@ fn rev_of(d: &Descriptor) -> u64 {
 mod tests {
     use super::*;
 
+    /// A rule's conditions are typed against an action's arguments and a
+    /// stream's parameters alike: the gate reads both as the call's.
+    #[test]
+    fn a_rule_names_an_actions_arguments_or_a_streams_params() {
+        let params = arg_schemas(built_in(&NodeConfig::default()));
+        for (cap, unit, field) in [("exec", "signal", "signal"), ("exec", "output", "call")] {
+            let p = params(cap, unit).unwrap_or_else(|| panic!("{cap}.{unit}"));
+            assert!(p["properties"].get(field).is_some(), "{cap}.{unit}: {p}");
+        }
+        assert!(params("exec", "nothing").is_none());
+        assert!(params("lamp", "output").is_none());
+    }
+
     use nerve_policy::config::CenterPolicy;
     use nerve_proto::RpcError;
     use serde_json::Map;
