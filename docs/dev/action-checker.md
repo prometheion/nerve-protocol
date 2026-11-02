@@ -664,10 +664,15 @@ refuses a call as lost (`ModelError::Lost`, not sent) when `/tokenize` cannot
 reach the server and the mark stands or a call holds the slot (the slot is
 read first: a call marks before it frees it), so those seconds are not a model
 that is down. A `/tokenize` that answers clears the mark, so one set by a
-failed connect while the server ran does not outlast the next call. The mark
-also goes when the restarted process is ready, and when the restart comes to
-nothing (the process cannot be started, or exits before it is ready): then
-the model is down, and allow-and-log applies. `/tokenize`'s answer is read up to eight bytes per byte of
+failed connect while the server ran does not outlast the next call, but only
+while the supervisor counts the process ready and only a mark that was there
+when that `/tokenize` began: the restarted process answers before the
+supervisor's next probe, and the calls in between must still meet the mark.
+The mark goes in the step that makes the restarted process ready, and when the
+restart comes to nothing (the process cannot be started, or exits before it is
+ready with no call sent to it): then the model is down, and allow-and-log
+applies. A call sent to a process that exits before it is ready marks it as
+any other end on a call does. `/tokenize`'s answer is read up to eight bytes per byte of
 the text (at least 128 KiB), so a question over the cap is counted and refused
 as too long, and not reported as an unreachable model. Each new process of the server starts with the
 speeds forgotten (`ReadBudget::restart`, called by `supervise`), as it may read

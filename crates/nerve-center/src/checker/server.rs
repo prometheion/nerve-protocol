@@ -341,10 +341,12 @@ async fn run_once(
             }
             status = child.wait() => {
                 let how = status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
-                // It ended before it was ready: a restart that did not come
-                // up (review T3 of #178).
-                budget.settled();
                 set(inner, |i| {
+                    // It ended before it was ready: marked if a call was
+                    // sent to it, else a restart that did not come up
+                    // (review T3 and T4 of #178). With the phase, under its
+                    // lock.
+                    budget.ended_before_ready();
                     if i.phase != Some(Phase::Failed) {
                         i.phase = Some(Phase::Starting);
                     }
@@ -362,7 +364,7 @@ async fn run_once(
                             i.message.clear();
                             // Calls are sent to the server again. Unmarked
                             // with the phase, under its lock.
-                            budget.settled();
+                            budget.became_ready();
                         });
                         // Stay here until the child exits or we are stopped.
                         tokio::select! {
@@ -440,17 +442,24 @@ for a in "$@"; do
   prev="$a"
 done
 echo $$ > "$(dirname "$0")/pid"
-exec python3 - "$port" <<'PY'
-import sys, http.server
+exec python3 - "$port" "$(dirname "$0")" <<'PY'
+import os, sys, http.server
 port = int(sys.argv[1])
+here = sys.argv[2]
 class H(http.server.BaseHTTPRequestHandler):
-    def _send(self, body):
-        self.send_response(200)
+    def _send(self, body, code=200):
+        self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
     def do_GET(self):
+        # While a file `models-closed` lies beside the script, /v1/models
+        # answers "not ready" and everything else goes on, as a server that
+        # has loaded its model but is not counted ready yet.
+        if os.path.exists(here + "/models-closed"):
+            self._send(b'{}', 503)
+            return
         self._send(b'{"data":[{"architecture":{"output_modalities":["decisions"]}}]}')
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
@@ -696,7 +705,7 @@ mod tests {
         server.stop().await;
     }
 
-    /// A restart that does not come up leaves the mark: the model is down
+    /// A restart that does not come up clears the mark: the model is down
     /// then, which is what the docs say allow-and-log applies to, and not
     /// "starting again" for as long as the center runs (review T3 of #178).
     /// Either way the new process does not come up: it ends at once, or it
@@ -724,6 +733,94 @@ mod tests {
             assert!(!server.takes_calls(), "ends_at_once: {ends_at_once}");
             server.stop().await;
         }
+    }
+
+    /// Starts the fake server, ends it with a call in it, and waits until the
+    /// process that replaced it answers a call, while `/v1/models` is still
+    /// closed: it is loaded, and the supervisor does not count it ready.
+    #[cfg(unix)]
+    async fn loaded_but_not_counted_ready(dir: &std::path::Path) -> LocalServer {
+        let server = ready_fake(dir).await;
+        std::fs::write(dir.join("models-closed"), b"").unwrap();
+        let reading = server.budget.hold_slot();
+        kill_fake(dir);
+        until(&server, "marked", &|| server.died_on_call()).await;
+        drop(reading);
+        // The calls of the window are refused as lost until the new process
+        // answers.
+        let endpoint = server.endpoint();
+        let config = crate::checker::config::ModelConfig::default();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while model::ask(&endpoint, &config, serde_json::json!({"command": "x"}))
+            .await
+            .is_err()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{:?}",
+                server.status()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        server
+    }
+
+    /// The restarted process answers before the supervisor counts it ready,
+    /// and a call it answers does not clear the mark: the calls until the
+    /// supervisor's probe are still sent to it (and refused as lost while it
+    /// does not answer), not let through as a model that is down (review T4
+    /// of #178).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_call_the_restarted_server_answers_before_it_is_ready_keeps_the_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = loaded_but_not_counted_ready(dir.path()).await;
+        assert!(!server.ready());
+        assert!(server.died_on_call());
+        assert!(server.takes_calls());
+        let config = crate::checker::config::ModelConfig::default();
+        model::ask(
+            &server.endpoint(),
+            &config,
+            serde_json::json!({"command": "x"}),
+        )
+        .await
+        .expect("a second call is sent too");
+        assert!(server.takes_calls());
+        // The probe opens: ready, and the mark goes with it.
+        std::fs::remove_file(dir.path().join("models-closed")).unwrap();
+        until(&server, "ready", &|| server.ready()).await;
+        assert!(!server.died_on_call());
+        server.stop().await;
+    }
+
+    /// A restarted process that ends before it is ready, on a call sent to
+    /// it, is marked like the process before it: the backoff and the next
+    /// load are refused as lost, not let through (review T4 of #178).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restarted_server_that_ends_on_a_call_before_it_is_ready_is_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = loaded_but_not_counted_ready(dir.path()).await;
+        let ended = |server: &LocalServer| {
+            server
+                .status()
+                .output
+                .iter()
+                .filter(|l| l.contains("llama-server ended"))
+                .count()
+        };
+        assert_eq!(ended(&server), 1);
+        let reading = server.budget.hold_slot();
+        kill_fake(dir.path());
+        until(&server, "ended again", &|| ended(&server) == 2).await;
+        assert!(server.died_on_call());
+        assert!(server.takes_calls());
+        drop(reading);
+        std::fs::remove_file(dir.path().join("models-closed")).unwrap();
+        until(&server, "ready", &|| server.ready()).await;
+        assert!(!server.died_on_call());
+        server.stop().await;
     }
 
     /// Whether the server takes calls is read with the phase and the mark

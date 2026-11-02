@@ -117,6 +117,23 @@ struct Flights {
     /// without an answer), and the process that replaced it has not come up
     /// yet.
     died_on_call: bool,
+    /// How many times the mark was set, so a count can tell that the mark
+    /// is newer than the count it is answering (review T4 of #178).
+    marks: u64,
+    /// Processes started so far, and the one the mark was set in.
+    process: u64,
+    marked_in: u64,
+    /// The supervisor counts the process as ready. Set and cleared with its
+    /// phase, under the phase's lock.
+    ready: bool,
+}
+
+impl Flights {
+    fn mark(&mut self) {
+        self.died_on_call = true;
+        self.marks += 1;
+        self.marked_in = self.process;
+    }
 }
 
 impl ReadBudget {
@@ -139,6 +156,8 @@ impl ReadBudget {
         let mut s = self.state.lock().unwrap();
         s.speeds.clear();
         s.started += 1;
+        s.process += 1;
+        s.ready = false;
     }
 
     /// Whether the server went away while it read a call, and its
@@ -167,23 +186,66 @@ impl ReadBudget {
     /// see its connection end: the calls in between would meet a server
     /// that is neither ready nor marked (review T3 of #178).
     pub(super) fn ended(&self) {
+        let mut s = self.state.lock().unwrap();
+        s.ready = false;
         if self.reading() {
-            self.state.lock().unwrap().died_on_call = true;
+            s.mark();
         }
     }
 
-    /// The mark no longer stands: the server answers, or its restart came
-    /// to nothing and it is down, which is not the same as ended on a call
-    /// (review T3 of #178).
+    /// A process ended before the supervisor counted it ready. A call that
+    /// was sent to it (the server answers before the next probe) may be why:
+    /// the mark is set as in [`ended`](Self::ended). Otherwise it is a
+    /// restart that did not come up, and the mark of an earlier process
+    /// goes: the model is down, which is not the same as ended on a call
+    /// (review T3 and T4 of #178).
+    pub(super) fn ended_before_ready(&self) {
+        let mut s = self.state.lock().unwrap();
+        if self.reading() {
+            s.mark();
+        } else if s.marked_in < s.process {
+            s.died_on_call = false;
+        }
+    }
+
+    /// The process is ready: calls are sent to it, and the mark of the
+    /// process before it no longer stands.
+    pub(super) fn became_ready(&self) {
+        let mut s = self.state.lock().unwrap();
+        s.ready = true;
+        s.died_on_call = false;
+    }
+
+    /// The mark no longer stands: there is no process, and the model is
+    /// down, which is not the same as ended on a call (review T3 of #178).
     pub(super) fn settled(&self) {
         self.state.lock().unwrap().died_on_call = false;
+    }
+
+    /// How often the mark was set. A count reads it before it asks the
+    /// server and hands it to [`counted`](Self::counted).
+    fn marks(&self) -> u64 {
+        self.state.lock().unwrap().marks
+    }
+
+    /// A count the server answered, after `marks` marks: if the server is
+    /// ready and nothing marked it since the count began, a mark left by a
+    /// connection that failed on a server that went on running is stale.
+    /// Not before the supervisor counts the process ready: the restarted
+    /// process answers before its next probe, and the calls in between would
+    /// meet a server that is neither ready nor marked (review T4 of #178).
+    fn counted(&self, marks: u64) {
+        let mut s = self.state.lock().unwrap();
+        if s.ready && s.marks == marks {
+            s.died_on_call = false;
+        }
     }
 
     /// Marks the server as gone with a call, as a call that lost its
     /// connection does.
     #[cfg(test)]
     pub(crate) fn die_on_call(&self) {
-        self.state.lock().unwrap().died_on_call = true;
+        self.state.lock().unwrap().mark();
     }
 
     /// Holds the budget's lock, so a step that needs it waits.
@@ -349,7 +411,7 @@ impl Flight<'_> {
     fn died(&self) {
         let mut s = self.budget.state.lock().unwrap();
         if s.started == self.number {
-            s.died_on_call = true;
+            s.mark();
         }
     }
 
@@ -532,9 +594,10 @@ async fn ask_local(
     // just ended on that call, whether or not the center saw it yet. The
     // center keeps the endpoint for the window, so the call does not meet
     // "not running" and its allow-and-log (review T2 and T3 of #178).
+    let marks = budget.marks();
     let tokens = match tokenize(endpoint, &body.to_string(), timeout).await {
         Ok(tokens) => {
-            budget.settled();
+            budget.counted(marks);
             tokens
         }
         Err(e) if budget.lost_a_call() => {
@@ -1372,10 +1435,53 @@ mod tests {
             budget: Some(budget.clone()),
             ..ep
         };
+        budget.became_ready();
         budget.die_on_call();
         let _ = ask(&ep, &with_timeout(2000), json!({})).await.unwrap();
         assert_eq!(asked.load(Ordering::SeqCst), 1);
         assert!(!budget.died_on_call());
+    }
+
+    /// A restarted process answers a count before the supervisor counts it
+    /// ready (its next probe is up to half a second later). Until then the
+    /// mark stays, or the calls in between would meet a server that is
+    /// neither ready nor marked and be let through by allow-and-log (review
+    /// T4 of #178).
+    #[tokio::test]
+    async fn a_count_before_the_server_is_ready_leaves_the_mark() {
+        let budget = Arc::new(linear(12_288, 0.1));
+        let (ep, asked) = fake::server(100, Duration::ZERO);
+        let ep = Endpoint {
+            budget: Some(budget.clone()),
+            ..ep
+        };
+        budget.die_on_call();
+        let _ = ask(&ep, &with_timeout(2000), json!({})).await.unwrap();
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        assert!(budget.died_on_call());
+    }
+
+    /// A count clears only a mark that was there when it began, and only
+    /// while the server is ready: one that ends the server as the count is
+    /// answered, or after the server left the ready phase, does not undo the
+    /// mark of that end (review T4 of #178).
+    #[test]
+    fn a_count_leaves_the_mark_of_an_end_it_did_not_see() {
+        let budget = linear(12_288, 0.1);
+        budget.became_ready();
+        let began = budget.marks();
+        budget.die_on_call();
+        budget.counted(began);
+        assert!(budget.died_on_call(), "marked after the count began");
+        // A later count sees the mark and clears it, the server being ready.
+        budget.counted(budget.marks());
+        assert!(!budget.died_on_call());
+        // The server ended with a call in it: not ready any more.
+        let reading = budget.hold_slot();
+        budget.ended();
+        budget.counted(budget.marks());
+        assert!(budget.died_on_call(), "marked, and not ready");
+        drop(reading);
     }
 
     /// The speed is learned from the tokens the server read, not from the

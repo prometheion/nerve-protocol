@@ -3706,7 +3706,7 @@ impl Center {
                 let srv = self.local_model.lock().unwrap().clone()?;
                 // A server that ended while it read a call keeps its
                 // endpoint while it starts again, so the client refuses the
-                // calls of that window as not judged, and allow-and-log
+                // calls of that window as lost, and allow-and-log
                 // does not let them through as it does for a model that is
                 // down (review T2 of #178).
                 srv.takes_calls().then(|| srv.endpoint())
