@@ -2770,4 +2770,22 @@ mod tests {
         assert_eq!(json(&r), json!({"disabled": false}));
         assert_eq!(c.nodes_json()[0]["disabled"], false);
     }
+
+    /// No script of the center's page builds HTML from text: what a node
+    /// wrote goes into text nodes only, and the page's session is readable
+    /// by its scripts. The page has no inline script.
+    #[test]
+    fn the_page_builds_no_html_from_text() {
+        assert_eq!(
+            nerve_transport::webui::html_sinks(APP_JS),
+            Vec::<&str>::new()
+        );
+        for line in INDEX.lines().filter(|l| l.contains("<script")) {
+            assert!(line.contains(" src=\""), "an inline script: {line}");
+        }
+        let handler = INDEX
+            .split_whitespace()
+            .find(|w| w.starts_with("on") && w.contains('='));
+        assert_eq!(handler, None, "an inline handler");
+    }
 }
