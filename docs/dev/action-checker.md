@@ -510,15 +510,17 @@ dangerous, 130 ordinary, 15 injection):
 
 | Model | File | Threshold | All 231 | 214 command and file | Capability dangerous (of 8) / misleading (of 3) | p50 / p95, 4 threads | p50 / p95, 2 vCPUs |
 |---|---|---|---|---|---|---|---|
-| **d1-2B** Q4_K_M | 1.10 GB | **0.75** | **55.4 / 1.5 / 73.3** | 59.1 / 1.7 | 1 / 0 | 1.6 s / 2.0 s | 5.0 s / 5.8 s |
-| Kev-4B Q4_K_M | 3.03 GB | 0.25 | 80.2 / 1.5 / 93.3 | 82.8 / 1.7 | 4 / 1 | 4.7 s / 6.0 s | 14.7 s / 17.0 s |
+| **d1-2B** Q4_K_M | 1.10 GB | **0.75** | **55.4 / 1.5 / 73.3** | 59.1 / 1.7 | 1 / 0 | 1.6 s / 2.0 s | 5.1 s / 6.1 s |
+| Kev-4B Q4_K_M | 3.03 GB | 0.25 | 80.2 / 1.5 / 93.3 | 82.8 / 1.7 | 4 / 1 | 4.7 s / 6.0 s | 14.2 s / 16.2 s |
 | d1-3B Q4_K_M (2026-10-28, PR build) | 1.67 GB | 0.85 | 54.5 / 1.5 / 73.3 | 57.0 / 1.7 | 2 / 0 | | |
 
 The 4-thread figures are the scoring runs (all 231 cases, the machine shared
 with other work, load 3 to 5 on 16 threads); "2 vCPUs" is one core's two
-hardware threads (`taskset -c 4,5`, `-t 2`), 58 cases (every 4th), load 1.6
-to 2.5. On the busy machine of 2026-10-28 d1-2B took 0.33 (4 threads) to 0.60
-(2 threads) of d1-3B's time. One case is about 1 point of catch, so d1-2B and
+hardware threads (`taskset -c 4,5`, `-t 2`, as a 2-vCPU VM has them), in a
+quiet window (load about 2): d1-2B over all 231 cases, Kev-4B over every 4th
+(58); two more runs of each were within 0.5 s. On two separate cores d1-2B
+takes 3.3 s (p95 3.7 s). On the busy machine of 2026-10-28 d1-2B took 0.33
+(4 threads) to 0.60 (2 threads) of d1-3B's time. One case is about 1 point of catch, so d1-2B and
 d1-3B are level on this set. d1-2B's operating point sits on an edge: at 0.70
 ordinary refusals go to 3.1 %. Sweep (catch / ordinary refused / injection):
 
@@ -533,9 +535,10 @@ ordinary refusals go to 3.1 %. Sweep (catch / ordinary refused / injection):
 | 0.85 | 48.5 / 1.5 / 53.3 | 37.6 / 0.0 / 53.3 |
 | 0.90 | 39.6 / 0.8 / 53.3 | 31.7 / 0.0 / 46.7 |
 
-d1-2B's timeout is twice its 2-vCPU p95, rounded up: 12 s. Kev-4B keeps
-15 s, which a desktop CPU stays inside; on 2 vCPUs its p50 is about that, so
-there it needs a longer one.
+d1-2B's timeout is about twice its 2-vCPU p95 (5.8 to 6.1 s in three runs):
+12 s, 1.6 times the slowest call seen (7.6 s). Kev-4B keeps 15 s, which a
+desktop CPU stays inside; on 2 vCPUs its p50 is about that, so there it needs
+a longer one.
 
 **The context and memory.** A decision model reads the whole prompt in one
 physical batch: llama-server refuses a longer prompt with HTTP 500 ("input

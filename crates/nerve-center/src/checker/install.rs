@@ -127,8 +127,8 @@ pub const MODELS: [ModelPin; 2] = [
         sha256: "adca5789ad30ae6027e8e936749bb9f19673097492ab26fa1c5b69643ca50b4b",
         licence: "LFM Open License v1.0",
         threshold: 0.75,
-        // p95 was 5.8 s on 2 vCPUs (one core's two hardware threads, #178):
-        // twice that, rounded up, for a busy machine. A desktop CPU answers
+        // p95 was 5.8 to 6.1 s on 2 vCPUs (one core's two hardware threads,
+        // #178): about twice that, for a busy machine. A desktop CPU answers
         // in about 2 s.
         timeout_ms: 12_000,
         // The largest state the checker sends is 8,103 tokens for it (every
