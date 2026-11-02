@@ -3802,6 +3802,13 @@ impl Center {
         if cfg.model.instructions.trim().is_empty() {
             return Err("the model question needs instructions".into());
         }
+        let question = checker::config::question_len(&cfg.model);
+        if question > checker::config::QUESTION_MAX {
+            return Err(format!(
+                "the model question (the instructions and both criteria) is {question} bytes long; at most {} fit",
+                checker::config::QUESTION_MAX
+            ));
+        }
         // The owner's note is one line of a few sentences: `list()` gives it
         // to every harness on one line, and a long one would cost every
         // session the tokens.
@@ -5815,6 +5822,33 @@ pub(crate) mod tests {
         assert_eq!((held(), streams()), (0, 0), "then forgotten");
         let r = ring.read(64);
         assert_eq!(r.why.as_deref(), Some("its job was forgotten"));
+    }
+
+    /// A question longer than every model's context holds beside the
+    /// largest state is refused at the save (#178), counted as the model
+    /// reads it: a control character as its six-byte escape.
+    #[test]
+    fn a_question_too_long_for_the_context_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let with = |instructions: String| {
+            let mut cfg = c.read(|s| s.checker.clone());
+            cfg.model.instructions = instructions;
+            cfg
+        };
+        let m = c.read(|s| s.checker.model.clone());
+        let criteria = m.criteria_true.len() + m.criteria_false.len();
+        let fits = checker::config::QUESTION_MAX - criteria;
+        c.apply_checker_config(with("x".repeat(fits))).unwrap();
+        let e = c
+            .apply_checker_config(with("x".repeat(fits + 1)))
+            .unwrap_err();
+        assert!(e.contains("at most 2000 fit"), "{e}");
+        assert_eq!(c.read(|s| s.checker.model.instructions.len()), fits);
+        let e = c
+            .apply_checker_config(with(format!("{}\u{1}", "x".repeat(fits - 5))))
+            .unwrap_err();
+        assert!(e.contains("is 2001 bytes"), "{e}");
     }
 
     /// The owner's note on a machine is kept on one line, refused when long,

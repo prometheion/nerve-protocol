@@ -131,10 +131,11 @@ pub const MODELS: [ModelPin; 2] = [
         // #178): about twice that, for a busy machine. A desktop CPU answers
         // in about 2 s.
         timeout_ms: 12_000,
-        // The largest state the checker sends is 8,103 tokens for it (every
-        // field at its clip, made of control characters, which the state
-        // carries escaped); about 4,000 more leave room for a longer
-        // question.
+        // The largest state the checker sends is about 9,400 tokens for it
+        // (every field at its clip, control characters, which the state
+        // carries escaped, beside characters outside the basic plane in the
+        // arguments); the rest holds the longest question
+        // (`config::QUESTION_MAX`). checker::tests checks the sum.
         context: 12_288,
         summary: "Faster: about 2 s per call on a desktop CPU, 5 s on 2 vCPUs. Catches about 55 % of dangerous actions and 73 % of injection attempts; refuses about 1.5 % of ordinary work.",
     },
@@ -150,8 +151,8 @@ pub const MODELS: [ModelPin; 2] = [
         threshold: 0.25,
         // p95 was 5.6 s on the test CPU; leave room for a busy machine.
         timeout_ms: 15_000,
-        // Its tokenizer reads the largest state as 4,393 tokens (characters
-        // outside the basic plane); about 3,800 more leave room for a longer
+        // Its tokenizer reads the largest state as about 4,600 tokens
+        // (characters outside the basic plane); the rest holds the longest
         // question.
         context: 8192,
         summary: "Catches more: about 80 % of dangerous actions and 93 % of injection attempts, refusing about 1.5 % of ordinary work, but about 5 s per call on a desktop CPU, 15 s on 2 vCPUs, and 6 GB of memory.",

@@ -295,9 +295,12 @@ impl Default for ModelConfig {
 /// when Kev-4B is the better pick (it catches more).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum LocalModel {
-    /// LiquidAI d1-2B, Q4_K_M. LFM Open License v1.0.
+    /// LiquidAI d1-2B, Q4_K_M. LFM Open License v1.0. It took d1-3B's
+    /// place, so d1-3B's name reads as it too: an install posted by a page
+    /// loaded before the update installs d1-2B (a stored config also moves
+    /// its tuning, [`d1_3b`]).
     #[default]
-    #[serde(rename = "d1-2b")]
+    #[serde(rename = "d1-2b", alias = "d1-3b")]
     D1_2b,
     /// ggml-org Kev-4B, Q4_K_M. Apache-2.0.
     #[serde(rename = "kev-4b")]
@@ -394,9 +397,15 @@ mod d1_3b {
 
     use super::{LocalModel, ModelConfig, ModelSource};
 
-    /// d1-3B's defaults, as releases before d1-2B stored them.
+    /// d1-3B's defaults as centers stored them: 0.8 and 4000 ms from the
+    /// releases up to 0.0.6, 0.85 and 6000 ms from the measurement after
+    /// it. `ModelConfig` always stores both, so these values are the
+    /// defaults, not an owner's choice.
+    const THRESHOLDS: [f64; 2] = [0.8, 0.85];
+    const TIMEOUTS_MS: [u64; 2] = [4000, 6000];
+    /// The default the step to d1-2B's is taken from: the later, higher
+    /// one, so an owner's own threshold moves down the more.
     const THRESHOLD: f64 = 0.85;
-    const TIMEOUT_MS: u64 = 6000;
 
     pub fn read<'de, D: Deserializer<'de>>(d: D) -> Result<ModelConfig, D::Error> {
         let mut v = Value::deserialize(d)?;
@@ -410,7 +419,8 @@ mod d1_3b {
             if v.get("threshold").is_some() {
                 cfg.threshold = moved(cfg.threshold, pin.threshold);
             }
-            if v.get("timeout_ms").and_then(Value::as_u64) == Some(TIMEOUT_MS) {
+            let timeout = v.get("timeout_ms").and_then(Value::as_u64);
+            if timeout.is_some_and(|t| TIMEOUTS_MS.contains(&t)) {
                 cfg.timeout_ms = pin.timeout_ms;
             }
         }
@@ -421,11 +431,27 @@ mod d1_3b {
     /// for the default, else the lower (stricter) of the owner's value and
     /// that value moved by the step between the defaults.
     fn moved(threshold: f64, new: f64) -> f64 {
-        if threshold == THRESHOLD {
+        if THRESHOLDS.contains(&threshold) {
             return new;
         }
         threshold.min(threshold + new - THRESHOLD).clamp(0.0, 1.0)
     }
+}
+
+/// The longest question the center takes, in bytes: the instructions and
+/// both criteria, each counted as JSON writes it (a control character takes
+/// six). Every pinned model's context holds a question this long beside the
+/// largest state the checker sends (`install::ModelPin::context`): a prompt
+/// that does not fit is an error on every call, and an error lets the call
+/// through when the owner chose allow-and-log. The default is about 800.
+pub const QUESTION_MAX: usize = 2000;
+
+/// The question's length as [`QUESTION_MAX`] counts it.
+pub fn question_len(m: &ModelConfig) -> usize {
+    [&m.instructions, &m.criteria_true, &m.criteria_false]
+        .iter()
+        .map(|t| serde_json::to_string(t).map_or(0, |j| j.len() - 2))
+        .sum()
 }
 
 /// The question's default instructions, tuned on the evaluation
@@ -1337,6 +1363,11 @@ mod tests {
             serde_json::from_value::<LocalModel>("d1-2b".into()).unwrap(),
             LocalModel::D1_2b
         );
+        // d1-3B's name, which a page loaded before the update still posts.
+        assert_eq!(
+            serde_json::from_value::<LocalModel>("d1-3b".into()).unwrap(),
+            LocalModel::D1_2b
+        );
     }
 
     /// A stored choice of d1-3B reads as d1-2B: its default threshold and
@@ -1345,14 +1376,21 @@ mod tests {
     #[test]
     fn a_stored_d1_3b_moves_to_d1_2b_with_its_defaults() {
         let pin = crate::checker::install::model_pin(LocalModel::D1_2b);
+        // The defaults 0.0.6 and earlier stored, and the later measured ones.
+        for (threshold, timeout) in [(0.8, 4000), (0.85, 6000)] {
+            let stored = serde_json::json!({"model_on": true, "model": {"source": "local",
+                "local_model": "d1-3b", "threshold": threshold, "timeout_ms": timeout}});
+            let c: CheckerConfig = serde_json::from_value(stored).unwrap();
+            assert_eq!(c.model.local_model, LocalModel::D1_2b);
+            assert_eq!(
+                (c.model.threshold, c.model.timeout_ms),
+                (pin.threshold, pin.timeout_ms),
+                "from {threshold} and {timeout} ms"
+            );
+        }
         let stored = r#"{"model_on": true, "model": {"source": "local",
             "local_model": "d1-3b", "threshold": 0.85, "timeout_ms": 6000}}"#;
         let c: CheckerConfig = serde_json::from_str(stored).unwrap();
-        assert_eq!(c.model.local_model, LocalModel::D1_2b);
-        assert_eq!(
-            (c.model.threshold, c.model.timeout_ms),
-            (pin.threshold, pin.timeout_ms)
-        );
         let saved = serde_json::to_value(&c).unwrap();
         assert_eq!(saved["model"]["local_model"], "d1-2b");
         // Read back it is the same, not moved again.

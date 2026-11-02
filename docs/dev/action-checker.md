@@ -282,7 +282,9 @@ and takes that model's defaults, while a reinstall of the same model keeps the
 owner's. d1-2B took d1-3B's place (#178): a stored `local_model: "d1-3b"` reads
 as d1-2B (`config::d1_3b`, on `CheckerConfig::model`, so `state.json` and a
 posted config both go through it). With the local source d1-3B's default
-threshold (0.85) and timeout (6000 ms) become d1-2B's; an owner's own
+threshold and timeout become d1-2B's: 0.8 and 4000 ms, which every release up
+to 0.0.6 stored (`ModelConfig` always writes both), and 0.85 and 6000 ms, the
+defaults measured after it; an owner's own
 threshold `t` becomes `min(t, t + 0.75 - 0.85)`, as d1-2B scores the same
 calls lower, so it never lets more through than it did; an owner's own timeout
 stays, and with the endpoint source the threshold and timeout are the
@@ -553,10 +555,21 @@ of room). The context holds the largest state `model_state` builds, every
 field at its clip (description 400 bytes, target and arguments 2000 bytes
 each, names of 64), with the default question: written in control characters,
 which the state carries escaped as `\u00XX`, it is 8,103 tokens for d1-2B; in
-characters outside the basic plane 4,427 (Kev-4B 4,393, its largest); random
-ASCII 3,476 (Kev-4B 3,535); words of a command line 1,341 (Kev-4B 1,181). An
-ordinary call is 230 to 400. So d1-2B gets 12,288 and Kev-4B 8,192, about
-4,000 tokens to spare for a longer question. The memory, as `VmRSS` of the
+characters outside the basic plane 4,427 (Kev-4B 4,393); random ASCII 3,476
+(Kev-4B 3,535); words of a command line 1,341 (Kev-4B 1,181). Mixed per field
+it is more: control characters in the target and description and characters
+outside the basic plane in the arguments give 9,425 for d1-2B and 4,584 for
+Kev-4B, the largest of every mix of those kinds, quotes, backslashes and
+special-token spellings. An ordinary call is 230 to 400. So d1-2B gets 12,288
+and Kev-4B 8,192, and the question (instructions and both criteria) is capped
+at `config::QUESTION_MAX`, 2,000 bytes as JSON writes it (the default about
+800): a byte is at most one token, and the context holds the largest state
+with a question that long. `checker::tests::the_largest_state_and_question_fit_every_models_context`
+keeps that true: it builds the largest states and bounds their tokens with
+what both tokenizers were measured to read (at most a token per byte, three
+for a `\u00XX` escape, one for a two-byte escape such as `\"`; d1-2B reads
+the state as JSON, Kev-4B as `key: value` lines), so a longer clip, a longer
+question or a smaller context fails there. The memory, as `VmRSS` of the
 server with these flags:
 
 | Model | After the load | Ordinary calls (the 231 cases) | A state of about 1,300 tokens | 4,400 tokens | The largest state |

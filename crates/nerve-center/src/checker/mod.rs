@@ -1140,4 +1140,100 @@ mod tests {
         assert!(!taints(Effect::Write));
         assert!(!taints(Effect::Actuate));
     }
+
+    /// Every pinned model's context holds the largest state `model_state`
+    /// builds beside the longest question the center takes (#178): a prompt
+    /// that does not fit is an error on that call, and an error lets the
+    /// call through when the owner chose allow-and-log, so padding a command
+    /// would get it past the model. The tokens are an upper bound from what
+    /// the evaluation measured with both models' tokenizers
+    /// (docs/dev/action-checker.md, "The context and memory"): at most one
+    /// token per byte of the text the model reads (one, for characters
+    /// outside the basic plane), and for d1-2B, which reads the state as
+    /// JSON, three for the six-byte escape a control character becomes and
+    /// one for a two-byte escape (`\"`, `\\`, `\n`). A longer clip, a longer
+    /// question or a smaller context fails here; then measure again.
+    #[test]
+    fn the_largest_state_and_question_fit_every_models_context() {
+        use crate::checker::install::MODELS;
+        use nerve_proto::descriptor::NAME_MAX;
+
+        // d1-2B reads the state as compact JSON.
+        fn json_tokens(state: &Value) -> usize {
+            let short = |c: char| "\"\\\u{8}\t\n\u{c}\r".contains(c);
+            let saved = |v: &Value| {
+                v.as_str().map_or(0, |t| {
+                    t.chars()
+                        .map(|c| match c {
+                            c if short(c) => 1,
+                            c if c < ' ' => 3,
+                            _ => 0,
+                        })
+                        .sum()
+                })
+            };
+            let saved: usize = state.as_object().unwrap().values().map(saved).sum();
+            state.to_string().len() - saved
+        }
+        // Kev-4B reads it as "key: value" lines, the text as it is.
+        fn text_tokens(state: &Value) -> usize {
+            state
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| k.len() + 3 + v.as_str().map_or(5, str::len))
+                .sum()
+        }
+        // The prompt's tokens beside the state's: the template's and the
+        // default question's, as the server counted them.
+        let (d1_rest, kev_rest) = (184, 141);
+
+        // The kinds that cost the most tokens per byte of a clip, in every
+        // field: control characters, characters outside the basic plane,
+        // quotes and backslashes (escaped twice in the arguments) and a
+        // special-token spelling, which the server rewrites.
+        let kinds = [
+            "\u{1}".repeat(3000),
+            "\u{10000}".repeat(1000),
+            "\"".repeat(3000),
+            "\"\\\n\t".repeat(750),
+            "<|a|>".repeat(1000),
+        ];
+        let name = "a".repeat(NAME_MAX);
+        let (mut d1, mut kev) = (0, 0);
+        for target in &kinds {
+            for description in &kinds {
+                for arg in &kinds {
+                    let mut args = Map::new();
+                    args.insert("command".into(), Value::String(arg.clone()));
+                    let c = CallInfo {
+                        description,
+                        os: "windows",
+                        tainted: true,
+                        ..call(&name, &name, Effect::Execute, target, &args)
+                    };
+                    let state = model_state(&c);
+                    d1 = d1.max(json_tokens(&state));
+                    kev = kev.max(text_tokens(&state));
+                }
+            }
+        }
+        let question = config::QUESTION_MAX;
+        assert!(config::question_len(&config::ModelConfig::default()) <= question);
+        for m in &MODELS {
+            let need = match m.id {
+                LocalModel::D1_2b => d1 + d1_rest + question,
+                LocalModel::Kev4b => kev + kev_rest + question,
+            };
+            assert!(
+                need <= m.context as usize,
+                "{}: up to {need} tokens, context {}",
+                m.name,
+                m.context
+            );
+        }
+        // The bound covers what was measured: d1-2B 9,425 tokens for its
+        // largest prompt, Kev-4B 4,584.
+        assert!(d1 + d1_rest >= 9425 && kev + kev_rest >= 4584, "{d1} {kev}");
+    }
 }

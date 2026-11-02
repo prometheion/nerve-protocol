@@ -147,7 +147,8 @@ async fn the_center_installs_switches_and_removes_a_running_model() {
     if std::fs::hard_link(&d1, &model).is_err() {
         std::fs::copy(&d1, &model).unwrap();
     }
-    // What the earlier release left: its config, model and build.
+    // What 0.0.6 left: d1-3B with the defaults it stored, its model and
+    // build.
     let old_model = model.parent().unwrap().join("d1-3B-Q4_K_M.gguf");
     std::fs::write(&old_model, b"d1-3B").unwrap();
     let old_build = state.path().join("checker/llama/b11719");
@@ -156,8 +157,8 @@ async fn the_center_installs_switches_and_removes_a_running_model() {
     std::fs::write(
         state.path().join("state.json"),
         r#"{"center_id": "c178", "center_name": "center", "checker": {"model_on": true,
-            "model": {"source": "local", "local_model": "d1-3b", "threshold": 0.85,
-                      "timeout_ms": 6000}}}"#,
+            "model": {"source": "local", "local_model": "d1-3b", "threshold": 0.8,
+                      "timeout_ms": 4000}}}"#,
     )
     .unwrap();
     nerve_transport::init_crypto();

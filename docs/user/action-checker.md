@@ -333,9 +333,10 @@ them afterwards. Check that a model's
 licence suits you before you install it.
 
 d1-2B took the place of d1-3B. A center that had d1-3B reads it as d1-2B after
-the update: d1-3B's default threshold (0.85) and timeout (6 s) become d1-2B's.
-A threshold of your own moves down by the step between the two defaults (0.85
-to 0.75, so 0.6 becomes 0.5), since d1-2B scores the same calls a little
+the update: d1-3B's default threshold and timeout (0.8 and 4 s as 0.0.6 set
+them, or 0.85 and 6 s) become d1-2B's (0.75 and 12 s). A threshold of your own
+moves down by the step between the two defaults (0.85 to 0.75, so 0.6 becomes
+0.5), since d1-2B scores the same calls a little
 lower: it refuses at least what it did. A timeout of your own stays. The update
 does not download the new files: until you press **Install** again on the
 Action checker page the model cannot answer, so a call it would see is
@@ -359,7 +360,9 @@ call it cannot judge in time.
 - **The question.** The instructions and the true/false criteria the model is
   asked. You can edit and reset them. The command text is never put into the
   question — it goes only into the state the model reads — so a crafted command
-  cannot rephrase what is asked.
+  cannot rephrase what is asked. Together they take at most 2,000 bytes (the
+  default about 800; a control character counts as six), so that the local
+  model's context holds the question beside the longest call.
 
 If the model is on and cannot be reached, a call is refused (fail closed) with a
 message that says so and where to switch the model off. Switch it to
