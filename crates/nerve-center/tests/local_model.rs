@@ -129,4 +129,31 @@ async fn the_local_server_starts_and_gates_a_call() {
         "{:?}",
         asked.elapsed()
     );
+    // The same with a command of special-token spellings: `/tokenize` counts
+    // each as one token by default, but the server breaks each into several,
+    // and reads about 2,500 tokens here (review round 3 of #178).
+    let padded = "<|img_row_10_col_10|>".repeat(100);
+    let mut padded_args = Map::new();
+    padded_args.insert("command".into(), padded.clone().into());
+    let asked = Instant::now();
+    let too_long = checker
+        .check(
+            &CallInfo {
+                target: &padded,
+                args: &padded_args,
+                ..call("")
+            },
+            Some(&endpoint),
+        )
+        .await;
+    println!("the padded call, after {:?}: {too_long:?}", asked.elapsed());
+    assert!(
+        matches!(&too_long, Decision::Refuse { detail, .. } if detail.contains("too long")),
+        "got {too_long:?}"
+    );
+    assert!(
+        asked.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        asked.elapsed()
+    );
 }

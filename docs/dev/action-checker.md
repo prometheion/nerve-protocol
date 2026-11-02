@@ -602,7 +602,14 @@ allow-and-log let through unjudged (review round 2 of #178). The client
 therefore holds the local server to a budget (`model::ReadBudget`, carried by
 the local `Endpoint` only). It counts the request's tokens with `POST
 /tokenize` first, which the server answers on its HTTP thread at once, not
-behind the busy slot. A request of up to 512 tokens
+behind the busy slot. It counts the text as plain text (`parse_special:
+false`) and one more token for each `<`: by default `/tokenize` reads a
+special token's spelling (`<|im_start|>`) as one token, but the decision server
+breaks every spelling in the call's text into plain tokens (d1-2B's with a
+zero-width space, Kev-4B's as `<¦x¦>`), which is at most one token more per
+spelling, and every spelling of both models starts with `<`. Counted the
+default way, a command of 2 KB of spellings was 416 tokens, sent at any speed,
+and the server read 2,519 (review round 3). A request of up to 512 tokens
 (`model::ALWAYS_SENT_TOKENS`, what every earlier release sent) is sent as
 before. A longer one is sent only when it is read within the timeout at the
 slowest speed of the last eight calls that ran alone (a call that overlapped
@@ -621,8 +628,8 @@ still take it up to 13 GB. A call of up to 512 tokens can still hold a slow
 server past the timeout, by what that call takes (about 10 s for d1-2B on
 2 vCPUs, 30 s for Kev-4B). `model::tests` covers the budget against a loopback
 fake, `checker::tests` the refusal with allow-and-log, and
-`tests/local_model.rs` (ignored, a real server) a 2,000-character command refused
-at once.
+`tests/local_model.rs` (ignored, a real server) a 2,000-character command and
+one of special-token spellings, both refused at once.
 
 **The default is LiquidAI d1-2B** (Q4_K_M) at a threshold of **0.75**: it
 catches what d1-3B caught (55.4 % against 54.5 %, 73 % of injections, the same

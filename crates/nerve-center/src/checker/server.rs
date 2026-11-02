@@ -465,6 +465,30 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["-np", "1"]), "{args:?}");
     }
 
+    /// The local server's endpoint carries its budget, built from the pin of
+    /// the model it runs: without it every call is sent, however long (review
+    /// round 3 of #178).
+    #[tokio::test]
+    async fn the_local_endpoint_holds_calls_to_its_models_budget() {
+        use crate::checker::config::LocalModel;
+        let dir = tempfile::tempdir().unwrap();
+        // It only has to exist: the budget is set before the server runs.
+        let bin = dir.path().join("llama-server");
+        std::fs::write(&bin, b"").unwrap();
+        for model in [LocalModel::D1_2b, LocalModel::Kev4b] {
+            let pin = crate::checker::install::model_pin(model);
+            let server =
+                LocalServer::start(bin.clone(), dir.path().join("model.gguf"), false, 5000, pin)
+                    .expect("start");
+            let budget = server.endpoint().budget.expect("a budget");
+            assert_eq!(
+                budget.built_with(),
+                (pin.context as usize, pin.read_ms),
+                "{model:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_download_line_is_recognised() {
         assert!(is_download("downloading model.gguf"));

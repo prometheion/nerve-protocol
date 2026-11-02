@@ -103,6 +103,12 @@ impl ReadBudget {
         }
     }
 
+    /// The context and the assumed speed it was built with.
+    #[cfg(test)]
+    pub(super) fn built_with(&self) -> (usize, f64) {
+        (self.context, self.assumed)
+    }
+
     /// Milliseconds per token: the slowest recent call's, or the assumed
     /// speed before the first.
     fn ms_per_token(&self) -> f64 {
@@ -260,9 +266,20 @@ pub async fn ask(endpoint: &Endpoint, cfg: &ModelConfig, state: Value) -> Result
     parse_noul(&value)
 }
 
-/// The tokens of `text` by the model's own tokenizer (`POST /tokenize`).
+/// The tokens of `text` as the decision server reads them, by the model's
+/// own tokenizer (`POST /tokenize`).
+///
+/// `/tokenize` reads a special token's spelling in the text (`<|im_start|>`)
+/// as one token by default, but the decision server does not let the call's
+/// text hold special tokens: d1-2B's breaks each spelling with a zero-width
+/// space, Kev-4B's rewrites `<|x|>` to `<¦x¦>`, and either is several plain
+/// tokens. So the text is counted as plain text, and each `<` (every special
+/// spelling of both models starts with one) counts one more token for the
+/// break, which is at most one (measured for every spelling of both models,
+/// review round 3 of #178). Otherwise a call padded with spellings counts as
+/// a fraction of what the server reads, and gets past the budget.
 async fn tokenize(endpoint: &Endpoint, text: &str, wait: Duration) -> Result<usize, ModelError> {
-    let body = json!({ "content": text });
+    let body = json!({ "content": text, "parse_special": false });
     let value = tokio::time::timeout(
         wait,
         request(endpoint, "/tokenize", &body, wait, MAX_TOKENS_BODY),
@@ -272,7 +289,7 @@ async fn tokenize(endpoint: &Endpoint, text: &str, wait: Duration) -> Result<usi
     value
         .get("tokens")
         .and_then(Value::as_array)
-        .map(Vec::len)
+        .map(|tokens| tokens.len() + text.matches('<').count())
         .ok_or_else(|| ModelError::Bad("/tokenize answered without tokens".into()))
 }
 
@@ -392,7 +409,7 @@ pub async fn is_decision_model(endpoint: &Endpoint) -> Result<bool, ModelError> 
 }
 
 /// A loopback stand-in for the local server, for tests: `/tokenize` counts
-/// `tokens` for every text, `/v1/systemone` answers 0.01 after `delay`.
+/// `tokens` for every plain text, `/v1/systemone` answers 0.01 after `delay`.
 #[cfg(test)]
 pub(crate) mod fake {
     use super::*;
@@ -427,7 +444,11 @@ pub(crate) mod fake {
                 }
                 let text = String::from_utf8_lossy(&got);
                 let body = if text.starts_with("POST /tokenize ") {
-                    json!({ "tokens": vec![1; tokens] }).to_string()
+                    // Like llama-server, it reads special spellings as one
+                    // token each unless asked not to; here as one for the
+                    // whole text.
+                    let plain = text.contains(r#""parse_special":false"#);
+                    json!({ "tokens": vec![1; if plain { tokens } else { 1 }] }).to_string()
                 } else {
                     counter.fetch_add(1, Ordering::SeqCst);
                     std::thread::sleep(delay);
@@ -516,6 +537,31 @@ mod tests {
             0.01
         );
         assert_eq!(asked.load(Ordering::SeqCst), 1);
+    }
+
+    /// A call padded with special-token spellings is counted as the server
+    /// reads it, where each spelling is broken into plain tokens, not as
+    /// `/tokenize` counts it by default, one token per spelling (review
+    /// round 3 of #178).
+    #[tokio::test]
+    async fn a_call_padded_with_special_spellings_is_counted_as_plain_text() {
+        let budget = Arc::new(ReadBudget::new(4096, 20.0));
+        let (ep, asked) = fake::server(300, Duration::ZERO);
+        let ep = Endpoint {
+            budget: Some(budget),
+            ..ep
+        };
+        // 300 plain tokens and 300 spellings, one more token each for the
+        // break: 600 at 20 ms are 12 s, over the 8 s timeout.
+        let padded = "<|img_row_10_col_10|>".repeat(300);
+        let e = ask(&ep, &with_timeout(8000), json!({ "target": padded }))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, ModelError::TooLong(why) if why.contains("about 600 tokens")),
+            "{e}"
+        );
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
     }
 
     /// The slowest of the recent calls sets the speed, a timed-out call
