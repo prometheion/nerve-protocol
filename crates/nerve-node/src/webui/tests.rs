@@ -44,6 +44,32 @@ fn a_session_ends_with_its_token_and_every_one_with_a_panic() {
 }
 
 #[test]
+fn a_copy_of_the_config_older_than_the_last_look_is_passed_over() {
+    let a = "a".repeat(64);
+    let ui = WebUi::default();
+    let at = |version: u64, locked: bool| NodeConfig {
+        version,
+        ..cfg_with(&[("one", &a)], locked)
+    };
+    ui.settle(&at(4, false));
+    // A panic, then the unlock after it.
+    ui.settle(&at(5, true));
+    assert_eq!(ui.lock_count(), 1);
+    ui.settle(&at(6, false));
+    let s = ui.sessions.start(Some(a.clone()));
+    // The panic's copy, read before the unlock and looked at only now: it
+    // must neither end the session nor count a lock the node does not hold.
+    ui.settle(&at(5, true));
+    assert_eq!(ui.lock_count(), 1);
+    assert_eq!(ui.sessions.len(), 1);
+    // The next panic still ends it.
+    ui.settle(&at(7, true));
+    assert_eq!(ui.lock_count(), 2);
+    assert!(ui.sessions.is_empty());
+    let _ = s;
+}
+
+#[test]
 fn wrong_tokens_are_told_once_a_minute() {
     let ui = WebUi::default();
     assert_eq!(ui.wrong_token(), Some(1));

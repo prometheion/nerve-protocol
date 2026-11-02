@@ -321,7 +321,13 @@ grep -q 'listening on 127.0.0.1:7470' "$OUT/ui-on" || fail "ui on does not say t
 UI_TOKEN=$(sed -n 's/^token [^:]*: //p' "$OUT/ui-on" | head -n 1)
 [ -n "$UI_TOKEN" ] || fail "ui on showed no first token"
 ui_listeners | grep -q '"nerve-node"' || fail "7470 is not the node's"
-[ "$(ui_listeners | wc -l)" = 1 ] || fail "the web UI listens more than once"
+# One socket for each loopback family the machine has: 127.0.0.1 and ::1
+# (the node holds both, so another account cannot take the one it did not
+# bind), both its own, and nothing else.
+[ "$(ui_listeners | wc -l)" -le 2 ] || fail "the web UI listens more than twice"
+[ "$(ui_listeners | grep -vc '"nerve-node"')" = 0 ] || fail "a listener of 7470 is not the node's"
+[ "$(ui_listeners | awk '{print $4}' | grep -vxc -e '127.0.0.1:7470' -e '\[::1\]:7470')" = 0 ] \
+  || fail "the web UI listens beyond loopback"
 # The page's way: JSON with its own Origin, then the session as a header.
 ui_curl() { runuser -u "$OWNER" -- curl -sS --max-time 10 -H "Origin: $UI" -H 'Content-Type: application/json' "$@"; }
 code=$(printf '{"token":"wrong"}' | ui_curl -o /dev/null -w '%{http_code}' --data @- "$UI/login") || true

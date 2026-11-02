@@ -3330,6 +3330,17 @@ async fn set_mode(
 }
 
 /// `folder add`, and the folder step of `setup`.
+/// What `folder.add` is asked: a page's request that a panic overtook (its
+/// count of locks is no longer the node's) adds nothing.
+#[cfg(unix)]
+fn folder_add_params(center: &str, path: &str, access: Access, web_locks: Option<u64>) -> Value {
+    let mut params = json!({"center": center, "path": path, "access": access.to_string()});
+    if let Some(n) = web_locks {
+        params["web_locks"] = json!(n);
+    }
+    params
+}
+
 async fn add_folder(
     paths: &NodePaths,
     path: &Path,
@@ -3359,7 +3370,7 @@ async fn add_folder(
     // records the real place, all in one step.
     #[cfg(unix)]
     let asked = {
-        let params = json!({"center": name, "path": given, "access": access.to_string()});
+        let params = folder_add_params(&name, &given, access, crate::owner::web_epoch());
         match nerve_transport::ctl::call(&paths.ctl_socket(), "folder.add", params).await {
             Ok(v) => Some((
                 v["stored"].as_str().unwrap_or(&given).to_string(),
@@ -5679,6 +5690,21 @@ fn table_at<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder the web UI adds carries the count of locks its request began
+    /// with, so a panic that overtook it adds nothing (the node compares it
+    /// under the store's lock); the CLI of a person carries none.
+    #[cfg(unix)]
+    #[test]
+    fn a_web_folder_add_names_the_locks_it_began_with() {
+        let access = Access::parse("r").unwrap();
+        let by_hand = folder_add_params("home", "/srv/docs", access, None);
+        assert_eq!(by_hand.get("web_locks"), None, "{by_hand}");
+        let from_web = folder_add_params("home", "/srv/docs", access, Some(3));
+        assert_eq!(from_web["web_locks"], 3, "{from_web}");
+        assert_eq!(from_web["center"], "home");
+        assert_eq!(from_web["access"], "r");
+    }
 
     #[test]
     fn proxy_secrets_come_from_stdin() {

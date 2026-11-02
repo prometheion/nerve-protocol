@@ -943,6 +943,7 @@ impl Shared {
         center: &str,
         path: &str,
         access: nerve_policy::config::Access,
+        web_locks: Option<u64>,
     ) -> Result<AddedFolder, String> {
         use crate::exec::Settled;
         use crate::folder_change::{FolderChange, apply_to};
@@ -974,6 +975,15 @@ impl Shared {
         let mut applied = None;
         lock(&self.store)
             .update(|c| {
+                // A folder of the web UI's request that a panic overtook is
+                // not added; checked under the store's lock, as
+                // `config.write` does.
+                #[cfg(target_os = "linux")]
+                if web_locks.is_some_and(|n| n != self.webui.lock_count()) {
+                    return Err(WEB_LOCKED.into());
+                }
+                #[cfg(not(target_os = "linux"))]
+                let _ = web_locks;
                 applied = Some(apply_to(c, Some(center), &change)?);
                 Ok(())
             })
@@ -2181,6 +2191,10 @@ async fn rotate_key(shared: &Arc<Shared>, params: &Value) -> nerve_transport::ct
     }
 }
 
+/// What a web UI request gets when a lock overtook it.
+#[cfg(target_os = "linux")]
+const WEB_LOCKED: &str = "the node was locked while the web UI's request ran; nothing was changed";
+
 /// Why a request without the control socket's token is refused.
 #[cfg(unix)]
 const NO_TOKEN: &str = "refused: this request does not carry the control socket's token, which only the owner's own programs can read";
@@ -2338,10 +2352,7 @@ pub(crate) fn control(
             if let Some(n) = params.get("web_locks").and_then(Value::as_u64)
                 && n != shared.webui.lock_count()
             {
-                return Reply::Err(
-                    "the node was locked while the web UI's request ran; nothing was changed"
-                        .into(),
-                );
+                return Reply::Err(WEB_LOCKED.into());
             }
             if new.machine.sudo != store.config().machine.sudo {
                 return Reply::Err(
@@ -2410,7 +2421,8 @@ pub(crate) fn control(
                 Ok(a) => a,
                 Err(e) => return Reply::Err(e),
             };
-            match shared.add_folder(&center, &path, access) {
+            let web_locks = params.get("web_locks").and_then(Value::as_u64);
+            match shared.add_folder(&center, &path, access, web_locks) {
                 Ok(a) => Reply::Ok(json!({
                     "stored": a.stored,
                     "recorded": a.recorded,
@@ -3068,6 +3080,76 @@ mod tests {
         // One that began after it.
         assert!(matches!(write(false, Some(before + 1)), Reply::Ok(_)));
         assert!(!daemon.config().locked);
+        daemon.stop().await;
+    }
+
+    /// A folder that a web UI request adds after a panic overtook it is not
+    /// added (the lock is counted under the store's lock, where the folder
+    /// is stored): the panic's promise that the session writes nothing after
+    /// it holds for `folder.add` as for `config.write`.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_web_folder_that_a_lock_overtook_is_not_added() {
+        use nerve_transport::ctl::Reply;
+        let (d, daemon) = daemon().await;
+        let s = daemon.shared.clone();
+        let place = std::fs::canonicalize(d.path()).unwrap().join("docs");
+        std::fs::create_dir(&place).unwrap();
+        lock(&s.store)
+            .update(|c| {
+                c.centers.push(nerve_policy::CenterEntry {
+                    name: "home".into(),
+                    url: "https://center.example".into(),
+                    pin: None,
+                    center_id: "c".into(),
+                    node_id: "n".into(),
+                    settings: Default::default(),
+                    paused: false,
+                    revoked: false,
+                    unknown: false,
+                    public_key: None,
+                    key_rotations: 0,
+                    pin_rotations: 0,
+                    old_pin: None,
+                    policy: Default::default(),
+                    capabilities: Vec::new(),
+                });
+                Ok(())
+            })
+            .unwrap();
+        let add = |web_locks: Option<u64>| {
+            let mut params = json!({
+                "center": "home",
+                "path": place.display().to_string(),
+                "access": "r",
+            });
+            if let Some(n) = web_locks {
+                params["web_locks"] = json!(n);
+            }
+            control(&s, "folder.add", params, None)
+        };
+        let folders = || s.config().centers[0].policy.folders.len();
+        let before = s.webui.lock_count();
+        // The panic.
+        let mut locked = s.config();
+        locked.locked = true;
+        let Reply::Ok(_) = control(
+            &s,
+            "config.write",
+            json!({"config": locked.to_toml(), "if_version": locked.version}),
+            None,
+        ) else {
+            panic!("the panic was not written")
+        };
+        assert_eq!(s.webui.lock_count(), before + 1);
+        let Reply::Err(why) = add(Some(before)) else {
+            panic!("a folder from before the lock was added")
+        };
+        assert!(why.contains("was locked"), "{why}");
+        assert_eq!(folders(), 0);
+        // One that began after it, and one that is no web request.
+        assert!(matches!(add(Some(before + 1)), Reply::Ok(_)));
+        assert_eq!(folders(), 1);
         daemon.stop().await;
     }
 

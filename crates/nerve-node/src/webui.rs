@@ -83,6 +83,11 @@ pub(crate) struct WebUi {
     /// Whether the node was locked when the sessions were last looked at:
     /// a panic ends them all.
     locked: AtomicBool,
+    /// The newest version of the config that `settle` has seen. A copy of
+    /// the config that was taken before a later write settled is older than
+    /// this and is passed over: it would set `locked` back to what the node
+    /// was a moment ago.
+    seen: Mutex<u64>,
     /// How many times the node was locked. A command the web UI runs
     /// watches it and stops when it changes: a session that was let in
     /// before a panic must not finish its command after it (an unlock
@@ -140,6 +145,11 @@ impl WebUi {
     /// answer, and two changes that the UI task would see as one (a panic
     /// and an unlock after it) cannot hide the panic.
     pub(crate) fn settle(&self, cfg: &NodeConfig) {
+        let mut seen = lock(&self.seen);
+        if cfg.version < *seen {
+            return;
+        }
+        *seen = cfg.version;
         let was = self.locked.swap(cfg.locked, Ordering::SeqCst);
         if cfg.locked && !was {
             if !self.sessions.is_empty() {
