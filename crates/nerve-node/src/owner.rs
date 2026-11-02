@@ -1304,6 +1304,7 @@ async fn run_for(
 /// What a command the web UI ran gave: its exit code, its output and its
 /// error output.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct Ran {
     pub code: i32,
     pub out: String,
@@ -1312,12 +1313,14 @@ pub(crate) struct Ran {
 
 /// The output the web UI keeps of one command: far more than any listing
 /// of the node's, and no more than a page shows.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const WEB_OUTPUT_MAX: usize = 4 * 1024 * 1024;
 
 /// Runs `args` for the owner `who` as the owner socket does, asked in the
 /// web UI: with every check of [`run_for`], no working folder, and no
 /// terminal. `input` is the command's whole input (a secret goes there,
-/// never in `args`).
+/// never in `args`). The web UI is Linux's alone.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) async fn run_for_web(
     shared: &std::sync::Arc<crate::daemon::Shared>,
     program: &Path,
@@ -2070,6 +2073,37 @@ mod tests {
     }
 
     use super::*;
+
+    /// The web UI may take tokens away and nothing else of its own
+    /// settings: a session may not widen the address, swap the certificate
+    /// or give itself a token.
+    #[test]
+    fn the_web_ui_only_narrows_its_own_settings() {
+        use nerve_policy::config::{Ui, UiToken};
+        let token = |l: &str| UiToken {
+            label: l.into(),
+            token_sha256: "e".repeat(64),
+            made: String::new(),
+        };
+        let old = Ui {
+            listen: Some("127.0.0.1:7470".into()),
+            pin: None,
+            tokens: vec![token("a"), token("b")],
+        };
+        let mut new = old.clone();
+        new.tokens.retain(|t| t.label == "a");
+        assert!(ui_only_narrowed(&old, &new));
+        assert!(ui_only_narrowed(&old, &old));
+        let mut more = old.clone();
+        more.tokens.push(token("c"));
+        assert!(!ui_only_narrowed(&old, &more));
+        let mut wider = old.clone();
+        wider.listen = Some("0.0.0.0:7470".into());
+        assert!(!ui_only_narrowed(&old, &wider));
+        let mut pinned = old.clone();
+        pinned.pin = Some("p".into());
+        assert!(!ui_only_narrowed(&old, &pinned));
+    }
     use clap::Parser;
 
     fn cli(args: &[&str]) -> Cli {

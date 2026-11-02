@@ -711,6 +711,8 @@ mod tests {
         assert!(setting_key(&json!({"key": "-x"})).is_err());
         assert!(name(&json!({"name": "a b"}), "name").is_err());
         assert!(address(&json!({"address": "relay.example"})).is_err());
+        assert!(folder_like(&json!({"exe": "bin/true"}), "exe").is_err());
+        assert!(folder_like(&json!({"exe": "/usr/bin/true"}), "exe").is_ok());
         // The settings shown keep no token hash of the web UI.
         let mut cfg = nerve_policy::NodeConfig::default();
         cfg.ui.tokens.push(nerve_policy::config::UiToken {
