@@ -35,8 +35,9 @@ pub struct CheckerConfig {
     /// The saved allow rules that skip the model (never the blocklist).
     #[serde(default)]
     pub allow_rules: Vec<AllowRule>,
-    /// The decision model's source and tuning.
-    #[serde(default)]
+    /// The decision model's source and tuning. A stored choice of d1-3B,
+    /// which a release no longer offers, reads as d1-2B ([`d1_3b`]).
+    #[serde(default, deserialize_with = "d1_3b::read")]
     pub model: ModelConfig,
     /// Each node's own blocklist and model switch, by node id. A node not in
     /// here follows the center's switches, as every node did before there
@@ -233,12 +234,12 @@ pub struct ModelConfig {
     // ---- Local llama-server ----
     /// Run the installed local model on the GPU (the Vulkan build, all layers
     /// on the GPU). `false` (the default) runs it on the CPU. The center
-    /// installs and runs llama.cpp and the d1-3B model itself
+    /// installs and runs llama.cpp and the local model itself
     /// ([`crate::checker::install`]); there is no llama-server path, model repo
     /// or model file to set any more.
     #[serde(default)]
     pub local_gpu: bool,
-    /// Which model the one-click local mode installs and runs: d1-3B (the
+    /// Which model the one-click local mode installs and runs: d1-2B (the
     /// default, faster on a CPU) or Kev-4B (catches more, slower). The pins
     /// and each model's default threshold and timeout are in
     /// [`crate::checker::install::model_pin`].
@@ -290,14 +291,14 @@ impl Default for ModelConfig {
 
 /// The model the one-click local mode runs. Both are pinned in
 /// [`crate::checker::install`]; the evaluation in docs/dev/action-checker.md
-/// is why d1-3B is the default (it is about 2.5 times faster on a CPU) and
+/// is why d1-2B is the default (it is several times faster on a CPU) and
 /// when Kev-4B is the better pick (it catches more).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum LocalModel {
-    /// LiquidAI d1-3B, Q4_K_M. LFM Open License v1.0.
+    /// LiquidAI d1-2B, Q4_K_M. LFM Open License v1.0.
     #[default]
-    #[serde(rename = "d1-3b")]
-    D1_3b,
+    #[serde(rename = "d1-2b")]
+    D1_2b,
     /// ggml-org Kev-4B, Q4_K_M. Apache-2.0.
     #[serde(rename = "kev-4b")]
     Kev4b,
@@ -369,14 +370,62 @@ impl CheckerConfig {
     }
 }
 
-/// The default threshold and timeout are d1-3B's (the default model); a
-/// switch to Kev-4B sets that model's own (`install::model_pin`).
+/// The default threshold and timeout are the default model's; a switch to
+/// Kev-4B sets that model's own (`install::model_pin`).
 fn default_threshold() -> f64 {
-    0.85
+    crate::checker::install::model_pin(LocalModel::default()).threshold
 }
 
 fn default_timeout_ms() -> u64 {
-    6000
+    crate::checker::install::model_pin(LocalModel::default()).timeout_ms
+}
+
+/// A stored model config that chose d1-3B, the default before d1-2B took its
+/// place (#178): it reads as d1-2B. With the local source, d1-3B's default
+/// threshold and timeout become d1-2B's. An owner's own threshold is moved
+/// by the step between the two defaults when that refuses more, so it never
+/// lets more through than it did: d1-2B scores the same calls lower. An
+/// owner's own timeout stays. With an endpoint the threshold and timeout
+/// are that endpoint's and stay too.
+mod d1_3b {
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer};
+    use serde_json::Value;
+
+    use super::{LocalModel, ModelConfig, ModelSource};
+
+    /// d1-3B's defaults, as releases before d1-2B stored them.
+    const THRESHOLD: f64 = 0.85;
+    const TIMEOUT_MS: u64 = 6000;
+
+    pub fn read<'de, D: Deserializer<'de>>(d: D) -> Result<ModelConfig, D::Error> {
+        let mut v = Value::deserialize(d)?;
+        let was_d1_3b = v.get("local_model").and_then(Value::as_str) == Some("d1-3b");
+        if was_d1_3b {
+            v["local_model"] = serde_json::to_value(LocalModel::D1_2b).map_err(D::Error::custom)?;
+        }
+        let mut cfg: ModelConfig = serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
+        if was_d1_3b && cfg.source == ModelSource::Local {
+            let pin = crate::checker::install::model_pin(LocalModel::D1_2b);
+            if v.get("threshold").is_some() {
+                cfg.threshold = moved(cfg.threshold, pin.threshold);
+            }
+            if v.get("timeout_ms").and_then(Value::as_u64) == Some(TIMEOUT_MS) {
+                cfg.timeout_ms = pin.timeout_ms;
+            }
+        }
+        Ok(cfg)
+    }
+
+    /// d1-3B's `threshold` for d1-2B, whose default is `new`: the default
+    /// for the default, else the lower (stricter) of the owner's value and
+    /// that value moved by the step between the defaults.
+    fn moved(threshold: f64, new: f64) -> f64 {
+        if threshold == THRESHOLD {
+            return new;
+        }
+        threshold.min(threshold + new - THRESHOLD).clamp(0.0, 1.0)
+    }
 }
 
 /// The question's default instructions, tuned on the evaluation
@@ -1277,16 +1326,92 @@ mod tests {
         );
     }
 
-    /// A model config that names no local model reads as d1-3B, and the
+    /// A model config that names no local model reads as d1-2B, and the
     /// models have stable names on the wire.
     #[test]
     fn the_local_model_defaults_to_d1_and_has_stable_names() {
         let old: ModelConfig = serde_json::from_str(r#"{"source": "local"}"#).unwrap();
-        assert_eq!(old.local_model, LocalModel::D1_3b);
+        assert_eq!(old.local_model, LocalModel::D1_2b);
         assert_eq!(serde_json::to_value(LocalModel::Kev4b).unwrap(), "kev-4b");
         assert_eq!(
-            serde_json::from_value::<LocalModel>("d1-3b".into()).unwrap(),
-            LocalModel::D1_3b
+            serde_json::from_value::<LocalModel>("d1-2b".into()).unwrap(),
+            LocalModel::D1_2b
+        );
+    }
+
+    /// A stored choice of d1-3B reads as d1-2B: its default threshold and
+    /// timeout become d1-2B's, and is saved so; Kev-4B is left as it is
+    /// (#178).
+    #[test]
+    fn a_stored_d1_3b_moves_to_d1_2b_with_its_defaults() {
+        let pin = crate::checker::install::model_pin(LocalModel::D1_2b);
+        let stored = r#"{"model_on": true, "model": {"source": "local",
+            "local_model": "d1-3b", "threshold": 0.85, "timeout_ms": 6000}}"#;
+        let c: CheckerConfig = serde_json::from_str(stored).unwrap();
+        assert_eq!(c.model.local_model, LocalModel::D1_2b);
+        assert_eq!(
+            (c.model.threshold, c.model.timeout_ms),
+            (pin.threshold, pin.timeout_ms)
+        );
+        let saved = serde_json::to_value(&c).unwrap();
+        assert_eq!(saved["model"]["local_model"], "d1-2b");
+        // Read back it is the same, not moved again.
+        let back: CheckerConfig = serde_json::from_value(saved).unwrap();
+        assert_eq!(back, c);
+        // A posted config (the web UI's) reads the same way.
+        let posted = serde_json::json!({"model": {"local_model": "d1-3b", "threshold": 0.85}});
+        let c: CheckerConfig = serde_json::from_value(posted).unwrap();
+        assert_eq!(
+            (c.model.local_model, c.model.threshold),
+            (LocalModel::D1_2b, pin.threshold)
+        );
+        // Kev-4B's own values stay.
+        let kev = r#"{"model": {"local_model": "kev-4b", "threshold": 0.85, "timeout_ms": 6000}}"#;
+        let c: CheckerConfig = serde_json::from_str(kev).unwrap();
+        assert_eq!(
+            (c.model.local_model, c.model.threshold, c.model.timeout_ms),
+            (LocalModel::Kev4b, 0.85, 6000)
+        );
+    }
+
+    /// An owner's own threshold for d1-3B never lets more through on d1-2B,
+    /// whose scores sit lower: it moves down by the step between the two
+    /// defaults. An owner's own timeout stays, and with an endpoint the
+    /// threshold and timeout are the endpoint's and stay too.
+    #[test]
+    fn an_owners_d1_3b_threshold_keeps_the_safer_reading() {
+        let pin = crate::checker::install::model_pin(LocalModel::D1_2b);
+        let read = |model: serde_json::Value| -> ModelConfig {
+            let c: CheckerConfig =
+                serde_json::from_value(serde_json::json!({"model": model})).unwrap();
+            c.model
+        };
+        let step = pin.threshold - 0.85;
+        let m = read(
+            serde_json::json!({"local_model": "d1-3b", "threshold": 0.6, "timeout_ms": 20000}),
+        );
+        assert_eq!(m.local_model, LocalModel::D1_2b);
+        assert!(
+            (m.threshold - (0.6 + step).min(0.6)).abs() < 1e-9,
+            "{}",
+            m.threshold
+        );
+        assert!(m.threshold <= 0.6);
+        assert_eq!(m.timeout_ms, 20000);
+        // Never under 0.
+        let m = read(serde_json::json!({"local_model": "d1-3b", "threshold": 0.02}));
+        assert!((0.0..=0.02).contains(&m.threshold), "{}", m.threshold);
+        // No threshold stored: d1-2B's default.
+        let m = read(serde_json::json!({"local_model": "d1-3b"}));
+        assert_eq!((m.threshold, m.timeout_ms), (pin.threshold, pin.timeout_ms));
+        // An endpoint keeps its own tuning, whatever the local model was.
+        let m = read(
+            serde_json::json!({"source": "endpoint", "local_model": "d1-3b",
+            "threshold": 0.85, "timeout_ms": 6000}),
+        );
+        assert_eq!(
+            (m.local_model, m.threshold, m.timeout_ms),
+            (LocalModel::D1_2b, 0.85, 6000)
         );
     }
 
@@ -1305,8 +1430,12 @@ mod tests {
         c.local_installed(true, LocalModel::Kev4b);
         assert_eq!(c.model.threshold, 0.6, "the owner's threshold stays");
         assert!(c.model.local_gpu);
-        c.local_installed(false, LocalModel::D1_3b);
-        assert_eq!((c.model.threshold, c.model.timeout_ms), (0.85, 6000));
+        let d1 = crate::checker::install::model_pin(LocalModel::D1_2b);
+        c.local_installed(false, LocalModel::D1_2b);
+        assert_eq!(
+            (c.model.threshold, c.model.timeout_ms),
+            (d1.threshold, d1.timeout_ms)
+        );
 
         // The first local install, coming from an endpoint whose threshold and
         // timeout were the endpoint's, takes the model's own (review r2,
@@ -1315,8 +1444,11 @@ mod tests {
         e.model.source = ModelSource::Endpoint;
         e.model.threshold = 0.5;
         e.model.timeout_ms = 1000;
-        e.local_installed(false, LocalModel::D1_3b);
-        assert_eq!((e.model.threshold, e.model.timeout_ms), (0.85, 6000));
+        e.local_installed(false, LocalModel::D1_2b);
+        assert_eq!(
+            (e.model.threshold, e.model.timeout_ms),
+            (d1.threshold, d1.timeout_ms)
+        );
     }
 
     /// The config a fresh center starts with, and a stored model section
@@ -1337,7 +1469,7 @@ mod tests {
     #[test]
     fn a_switch_keeps_a_model_that_is_on_for_one_node_only() {
         let mut c = CheckerConfig::default();
-        c.local_installed(false, LocalModel::D1_3b);
+        c.local_installed(false, LocalModel::D1_2b);
         assert!(c.model_on, "the first install switches it on");
 
         c.model_on = false;
@@ -1349,7 +1481,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        c.local_installed(true, LocalModel::D1_3b);
+        c.local_installed(true, LocalModel::D1_2b);
         c.local_installed(true, LocalModel::Kev4b);
         assert!(!c.model_on);
         assert_eq!(c.model_for("n1"), (true, Scope::Node));

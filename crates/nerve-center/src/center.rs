@@ -3652,7 +3652,14 @@ impl Center {
             match bin
                 .ok_or_else(|| "the local model is not installed".to_string())
                 .and_then(|bin| {
-                    LocalServer::start(bin, model, cfg.model.local_gpu, cfg.model.timeout_ms)
+                    let context = checker::install::model_pin(cfg.model.local_model).context;
+                    LocalServer::start(
+                        bin,
+                        model,
+                        cfg.model.local_gpu,
+                        cfg.model.timeout_ms,
+                        context,
+                    )
                 }) {
                 Ok(srv) => {
                     *self.local_model.lock().unwrap() = Some(Arc::new(srv));
@@ -3745,7 +3752,7 @@ impl Center {
         self.install.lock().unwrap().clone()
     }
 
-    /// Starts the one-click install of llama.cpp and the d1-3B model on the
+    /// Starts the one-click install of llama.cpp and the chosen model on the
     /// CPU or GPU, in the background. On success it turns the local model on
     /// with the chosen device. Refused while an install is already running.
     /// Validates a posted checker config and, if it holds, saves it. Taint
@@ -6066,14 +6073,14 @@ pub(crate) mod tests {
     }
 
     /// An installed CPU build that is the fake `llama-server` (it answers as
-    /// a decision model), with a d1-3B file it ignores.
+    /// a decision model), with a d1-2B file it ignores.
     #[cfg(unix)]
     fn install_fake_build(state: &Path) {
         let bin = checker::install::llama_dir(state).join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         checker::server::fake::fake_llama_server(&bin);
         std::fs::write(bin.parent().unwrap().join("variant"), "cpu").unwrap();
-        let model = checker::install::model_path(state, LocalModel::D1_3b);
+        let model = checker::install::model_path(state, LocalModel::D1_2b);
         std::fs::create_dir_all(model.parent().unwrap()).unwrap();
         std::fs::write(model, b"x").unwrap();
     }
@@ -6170,7 +6177,7 @@ pub(crate) mod tests {
             let (base, release) = held_download();
             *c.install_from.lock().unwrap() = Arc::new(checker::install::Sources::at(&base));
             // The switch to the GPU build starts downloading.
-            c.start_checker_install(true, LocalModel::D1_3b)
+            c.start_checker_install(true, LocalModel::D1_2b)
                 .await
                 .unwrap();
             until("the download to start", || {
@@ -6239,13 +6246,13 @@ pub(crate) mod tests {
             })
             .await;
             assert_eq!(c.read(|s| s.checker.model.local_model), LocalModel::Kev4b);
-            assert!(!checker::install::model_path(dir.path(), LocalModel::D1_3b).exists());
+            assert!(!checker::install::model_path(dir.path(), LocalModel::D1_2b).exists());
             until("the new model to run", || local_ready(&c)).await;
-            // A swap that fails: something is in the way where d1-3B's file
+            // A swap that fails: something is in the way where d1-2B's file
             // goes.
-            let d1 = checker::install::model_path(dir.path(), LocalModel::D1_3b);
+            let d1 = checker::install::model_path(dir.path(), LocalModel::D1_2b);
             std::fs::create_dir_all(d1.join("in-the-way")).unwrap();
-            c.start_checker_install(false, LocalModel::D1_3b)
+            c.start_checker_install(false, LocalModel::D1_2b)
                 .await
                 .unwrap();
             until("the install to fail", || {
@@ -6300,7 +6307,7 @@ pub(crate) mod tests {
             let c = open(dir.path(), None);
             let (base, release) = held_download();
             *c.install_from.lock().unwrap() = Arc::new(checker::install::Sources::at(&base));
-            c.start_checker_install(false, LocalModel::D1_3b)
+            c.start_checker_install(false, LocalModel::D1_2b)
                 .await
                 .unwrap();
             until("the download to start", || {
@@ -6318,7 +6325,7 @@ pub(crate) mod tests {
             // still open and silent.
             let (base2, release2) = held_download();
             *c.install_from.lock().unwrap() = Arc::new(checker::install::Sources::at(&base2));
-            c.start_checker_install(false, LocalModel::D1_3b)
+            c.start_checker_install(false, LocalModel::D1_2b)
                 .await
                 .unwrap();
             until("the second download to start", || {

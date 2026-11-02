@@ -2,12 +2,12 @@
 //! docs/user/action-checker.md).
 //!
 //! The center downloads a prebuilt `llama-server` from llama.cpp's GitHub
-//! release and the pinned d1-3B model from Hugging Face into its own state
+//! release and the pinned d1-2B model from Hugging Face into its own state
 //! folder — never system-wide — verifies each against a pinned SHA-256,
 //! unpacks the archive with the system `tar` (refusing any entry that would
 //! leave the target folder), and runs `llama-server -m <model>` on the CPU or,
 //! with the Vulkan build, the GPU. The model is one of two pinned ones,
-//! d1-3B (the default) or Kev-4B, whatever the device; the endpoint mode is
+//! d1-2B (the default) or Kev-4B, whatever the device; the endpoint mode is
 //! for any other model or another llama.cpp.
 //!
 //! Everything is pinned in code (the release tag, each asset's hash, and each
@@ -103,6 +103,14 @@ pub struct ModelPin {
     pub threshold: f64,
     /// A timeout its normal calls on a CPU stay well inside.
     pub timeout_ms: u64,
+    /// The context, in tokens, the server is started with: the largest state
+    /// the checker sends ([`super::model_state`] clips every field) with the
+    /// question, and room to spare. A decision model reads the whole prompt
+    /// in one batch, so the batch is this size too; a state that did not fit
+    /// would be an error, and an error lets the call through when the owner
+    /// chose allow-and-log.
+    #[serde(skip)]
+    pub context: u32,
     /// One plain line on speed and quality, for the UI.
     pub summary: &'static str,
 }
@@ -110,19 +118,23 @@ pub struct ModelPin {
 /// The two models the local mode offers, the default first.
 pub const MODELS: [ModelPin; 2] = [
     ModelPin {
-        id: LocalModel::D1_3b,
-        name: "LiquidAI d1-3B (Q4_K_M)",
-        repo: "LiquidAI/d1-3B-GGUF",
-        revision: "bb1e436ea78eb96a3f1acb6da865f70c2fbeb563",
-        file: "d1-3B-Q4_K_M.gguf",
-        bytes: 1_674_456_672,
-        sha256: "16aff27ea2eefdc32b9897f43854a5d3170c1dc8dccb9c756905af30a4e22402",
+        id: LocalModel::D1_2b,
+        name: "LiquidAI d1-2B (Q4_K_M)",
+        repo: "LiquidAI/d1-2B-GGUF",
+        revision: "e968f6575f0d4fad928312d7af15cad90fd365c0",
+        file: "d1-2B-Q4_K_M.gguf",
+        bytes: 1_099_629_888,
+        sha256: "adca5789ad30ae6027e8e936749bb9f19673097492ab26fa1c5b69643ca50b4b",
         licence: "LFM Open License v1.0",
-        threshold: 0.85,
-        // p95 was 3.0 s on the test CPU (2.3 s before the state grew by the
-        // description): twice that, for a busy machine.
+        threshold: 0.75,
+        // For now d1-3B's: the 2-vCPU measurement of #178 sets its own.
         timeout_ms: 6000,
-        summary: "Faster: about 2.5 s per call on a desktop CPU. Catches about 57 % of dangerous actions and 73 % of injection attempts; refuses about 1.7 % of ordinary work.",
+        // The largest state the checker sends is 8,103 tokens for it (every
+        // field at its clip, made of control characters, which the state
+        // carries escaped); about 4,000 more leave room for a longer
+        // question.
+        context: 12_288,
+        summary: "Faster: about 2 s per call on a desktop CPU. Catches about 55 % of dangerous actions and 73 % of injection attempts; refuses about 1.5 % of ordinary work.",
     },
     ModelPin {
         id: LocalModel::Kev4b,
@@ -136,6 +148,10 @@ pub const MODELS: [ModelPin; 2] = [
         threshold: 0.25,
         // p95 was 5.6 s on the test CPU; leave room for a busy machine.
         timeout_ms: 15_000,
+        // Its tokenizer reads the largest state as 4,393 tokens (characters
+        // outside the basic plane); about 3,800 more leave room for a longer
+        // question.
+        context: 8192,
         summary: "Catches more: about 83 % of dangerous actions and 93 % of injection attempts, refusing about 1.7 % of ordinary work, but about 5 s per call on a desktop CPU.",
     },
 ];
@@ -514,8 +530,10 @@ async fn prepare_into(
     .map_err(|e| format!("downloading {}: {e}", pin.name))
 }
 
-/// Swaps in what [`prepare`] staged, and deletes the other model, so a
-/// switch does not leave gigabytes behind. The caller has stopped the server
+/// Swaps in what [`prepare`] staged, and deletes every other model file and
+/// llama.cpp build, so a switch does not leave gigabytes behind, nor does an
+/// update whose model or build a release no longer pins (d1-3B and its
+/// build, before d1-2B). The caller has stopped the server
 /// (Windows refuses to move or delete a file a running process holds). The
 /// old build is moved aside first and put back if the new one cannot take
 /// its place, so a failed swap keeps the working build.
@@ -547,10 +565,28 @@ pub fn commit(state: &Path, p: Prepared) -> Result<(), String> {
         std::fs::rename(staged, model_path(state, p.model_id))
             .map_err(|e| format!("cannot put the model in place: {e}"))?;
     }
-    for other in MODELS.iter().filter(|m| m.id != p.model_id) {
-        let _ = std::fs::remove_file(model_path(state, other.id));
-    }
+    let keep = model_path(state, p.model_id);
+    remove_others(&model_dir(state), &keep);
+    remove_others(&checker_dir(state).join("llama"), &llama_dir(state));
     Ok(())
+}
+
+/// Deletes everything in `dir` but `keep`, best effort.
+fn remove_others(dir: &Path, keep: &Path) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let path = e.path();
+        if path == keep {
+            continue;
+        }
+        let _ = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+    }
 }
 
 /// Downloads, unpacks and marks a llama.cpp build in `staging`, without
@@ -872,18 +908,23 @@ mod tests {
         }
     }
 
-    /// The two models: d1-3B is the default and first; each has its own
+    /// The two models: d1-2B is the default and first; each has its own
     /// pins and evaluation defaults, and Kev-4B's timeout leaves room for
     /// its measured 4 to 5 s per call on a CPU.
     #[test]
     fn the_two_models_have_their_own_pins_and_defaults() {
         assert_eq!(MODELS[0].id, LocalModel::default());
-        let d1 = model_pin(LocalModel::D1_3b);
+        let d1 = model_pin(LocalModel::D1_2b);
         let kev = model_pin(LocalModel::Kev4b);
-        assert_eq!((d1.threshold, kev.threshold), (0.85, 0.25));
+        assert_eq!((d1.threshold, kev.threshold), (0.75, 0.25));
         assert!(kev.timeout_ms >= 10_000, "{}", kev.timeout_ms);
-        assert!(d1.timeout_ms >= 6_000, "{}", d1.timeout_ms);
+        assert!(d1.timeout_ms >= 4_000, "{}", d1.timeout_ms);
         assert_ne!(d1.file, kev.file);
+        assert_eq!(
+            (d1.repo, d1.file, d1.bytes),
+            ("LiquidAI/d1-2B-GGUF", "d1-2B-Q4_K_M.gguf", 1_099_629_888)
+        );
+        assert_eq!(d1.licence, "LFM Open License v1.0");
         assert_eq!(kev.bytes, 3_033_489_824);
         assert_eq!(kev.licence, "Apache-2.0");
         let dir = tempfile::tempdir().unwrap();
@@ -973,8 +1014,8 @@ mod tests {
     }
 
     /// `commit` swaps a staged build and model in, keeps nothing of the old
-    /// build, and deletes the other model; `prepare` of a build that is
-    /// already right leaves the installed files alone.
+    /// build, and deletes the other model, and a model and a build an
+    /// earlier release installed.
     #[test]
     fn commit_swaps_in_the_staged_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -984,7 +1025,13 @@ mod tests {
         std::fs::write(ld.join("bin").join(server_name()), b"old").unwrap();
         std::fs::write(ld.join("variant"), "cpu").unwrap();
         std::fs::create_dir_all(model_dir(state)).unwrap();
-        std::fs::write(model_path(state, LocalModel::D1_3b), b"d1").unwrap();
+        std::fs::write(model_path(state, LocalModel::D1_2b), b"d1").unwrap();
+        // What an earlier release installed: a model and a build it no
+        // longer pins.
+        let old_model = model_dir(state).join("d1-3B-Q4_K_M.gguf");
+        std::fs::write(&old_model, b"d1-3b").unwrap();
+        let old_build = checker_dir(state).join("llama").join("b11719");
+        std::fs::create_dir_all(old_build.join("bin")).unwrap();
         let staging = ld.with_extension("staging");
         std::fs::create_dir_all(staging.join("bin")).unwrap();
         std::fs::write(staging.join("bin").join(server_name()), b"new").unwrap();
@@ -1006,7 +1053,8 @@ mod tests {
             std::fs::read(model_path(state, LocalModel::Kev4b)).unwrap(),
             b"kev"
         );
-        assert!(!model_path(state, LocalModel::D1_3b).exists());
+        assert!(!model_path(state, LocalModel::D1_2b).exists());
+        assert!(!old_model.exists() && !old_build.exists());
         assert!(!staging.exists() && !staged.exists());
         assert!(!ld.with_extension("old").exists());
     }
@@ -1084,12 +1132,12 @@ mod tests {
             std::fs::write(ld.join("bin").join(server_name()), b"#!/bin/sh\n").unwrap();
             std::fs::write(ld.join("variant"), "cpu").unwrap();
             std::fs::create_dir_all(model_dir(dir.path())).unwrap();
-            std::fs::write(model_path(dir.path(), LocalModel::D1_3b), b"x").unwrap();
+            std::fs::write(model_path(dir.path(), LocalModel::D1_2b), b"x").unwrap();
             // A GPU reinstall whose download fails: nothing listens there.
             let dead = Sources::at("http://127.0.0.1:9");
             let shared: Shared = Arc::new(Mutex::new(Status::default()));
             let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let r = prepare(dir.path(), true, LocalModel::D1_3b, &shared, &cancel, &dead).await;
+            let r = prepare(dir.path(), true, LocalModel::D1_2b, &shared, &cancel, &dead).await;
             assert!(r.is_err(), "{r:?}");
             // The old CPU build is still there and nothing is staged.
             assert_eq!(installed_variant(dir.path()), Some(false));

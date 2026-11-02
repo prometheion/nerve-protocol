@@ -5,7 +5,7 @@
 //! It needs a decision-model GGUF and a `llama-server` with `/v1/systemone`:
 //!
 //! ```sh
-//! NERVE_TEST_MODEL=/path/to/d1-3B-Q4_K_M.gguf \
+//! NERVE_TEST_MODEL=/path/to/d1-2B-Q4_K_M.gguf \
 //! NERVE_TEST_LLAMA=/path/to/llama-server \
 //!     cargo test -p nerve-center --test local_model -- --ignored --nocapture
 //! ```
@@ -31,7 +31,9 @@ async fn the_local_server_starts_and_gates_a_call() {
         std::env::var("NERVE_TEST_LLAMA").expect("set NERVE_TEST_LLAMA to a llama-server"),
     );
 
-    let server = LocalServer::start(llama, model, false, 8000).expect("start the server");
+    // The default model's context; a larger model may need its own.
+    let context = nerve_center::checker::install::MODELS[0].context;
+    let server = LocalServer::start(llama, model, false, 8000, context).expect("start the server");
 
     // Wait up to two minutes for it to load the model and report ready.
     let deadline = Instant::now() + Duration::from_secs(120);

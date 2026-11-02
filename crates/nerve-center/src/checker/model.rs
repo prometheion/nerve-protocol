@@ -207,7 +207,7 @@ mod tests {
 
     /// A model that thinks longer than the transport's usual 15 s head
     /// timeout is still read when the checker's own timeout allows it (a
-    /// 4B model, or d1-3B on a small VM CPU, can take that long). Found on the
+    /// 4B model, or a 2B one on a small VM CPU, can take that long). Found on the
     /// Windows test VM, where every call was cut at 15 s.
     #[tokio::test]
     async fn a_slow_model_is_waited_for_up_to_the_checkers_timeout() {

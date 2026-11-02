@@ -1,6 +1,6 @@
 //! The local `llama-server` the center runs itself (docs/dev/action-checker.md).
 //!
-//! The center installs a prebuilt `llama-server` and the d1-3B model into its
+//! The center installs a prebuilt `llama-server` and the chosen model into its
 //! state folder ([`super::install`]) and runs it from there. The server
 //! listens on `127.0.0.1` on a free port, on the CPU or (the Vulkan build) the
 //! GPU. The center checks `/v1/models` says `decisions` and refuses a
@@ -76,7 +76,8 @@ impl Drop for LocalServer {
 impl LocalServer {
     /// Starts the supervisor for the installed `llama-server` at `bin` with
     /// the installed `model`, on the GPU (all layers, the Vulkan build) or the
-    /// CPU. It returns at once; the status moves from starting to ready (or
+    /// CPU, with a context of `context` tokens (the model's
+    /// [`ModelPin::context`](super::install::ModelPin)). It returns at once; the status moves from starting to ready (or
     /// failed) as the server comes up. The model is already on disk (the
     /// one-click install fetched it), so there is no download at start.
     pub fn start(
@@ -84,13 +85,14 @@ impl LocalServer {
         model: PathBuf,
         gpu: bool,
         timeout_ms: u64,
+        context: u32,
     ) -> Result<LocalServer, String> {
         if !bin.exists() {
             return Err("the local model is not installed".into());
         }
         let port = free_port()?;
         let inner = Arc::new(Mutex::new(Inner::default()));
-        let args = build_args(&model, gpu, port);
+        let args = build_args(&model, gpu, port, context);
         let timeout = Duration::from_millis(timeout_ms.max(100));
         let shutdown = Arc::new(tokio::sync::Notify::new());
         let exited = Arc::new(tokio::sync::Notify::new());
@@ -153,8 +155,16 @@ impl LocalServer {
 }
 
 /// The llama-server command line (without the program itself): the installed
-/// model file, and all layers on the GPU or none (CPU only).
-fn build_args(model: &Path, gpu: bool, port: u16) -> Vec<String> {
+/// model file, all layers on the GPU or none (CPU only), and the context.
+///
+/// Without `-c` the server sizes the context from the model (up to 262,144
+/// tokens, 13 GB for Kev-4B), and without `-b`/`-ub` it reads 512 tokens at a
+/// time, which a decision model refuses for a longer prompt (HTTP 500), so a
+/// long command failed closed. One slot: the checker asks one question at a
+/// time per call, and four slots would share the one context, each keeping
+/// its last state in it.
+fn build_args(model: &Path, gpu: bool, port: u16, context: u32) -> Vec<String> {
+    let context = context.to_string();
     vec![
         "-m".into(),
         model.to_string_lossy().into_owned(),
@@ -165,6 +175,14 @@ fn build_args(model: &Path, gpu: bool, port: u16) -> Vec<String> {
         "-ngl".into(),
         // 999 puts every layer on the GPU; 0 keeps it on the CPU.
         if gpu { "999".into() } else { "0".into() },
+        "-c".into(),
+        context.clone(),
+        "-b".into(),
+        context.clone(),
+        "-ub".into(),
+        context,
+        "-np".into(),
+        "1".into(),
     ]
 }
 
@@ -409,16 +427,31 @@ mod tests {
 
     #[test]
     fn cpu_and_gpu_args() {
-        let model = std::path::Path::new("/s/checker/model/d1-3B-Q4_K_M.gguf");
-        let cpu = build_args(model, false, 12345);
+        let model = std::path::Path::new("/s/checker/model/d1-2B-Q4_K_M.gguf");
+        let cpu = build_args(model, false, 12345, 4096);
         assert!(cpu.windows(2).any(|w| w == ["-ngl", "0"]));
         assert!(cpu.windows(2).any(|w| w == ["--port", "12345"]));
         assert!(
             cpu.windows(2)
-                .any(|w| w == ["-m", "/s/checker/model/d1-3B-Q4_K_M.gguf"])
+                .any(|w| w == ["-m", "/s/checker/model/d1-2B-Q4_K_M.gguf"])
         );
-        let gpu = build_args(model, true, 12345);
+        let gpu = build_args(model, true, 12345, 4096);
         assert!(gpu.windows(2).any(|w| w == ["-ngl", "999"]));
+    }
+
+    /// The server gets the model's context, and reads a prompt of that size
+    /// in one batch, on one slot.
+    #[test]
+    fn the_context_is_bounded_and_read_in_one_batch() {
+        let model = std::path::Path::new("/s/checker/model/d1-2B-Q4_K_M.gguf");
+        let args = build_args(model, false, 12345, 12_288);
+        for flag in ["-c", "-b", "-ub"] {
+            assert!(
+                args.windows(2).any(|w| w == [flag, "12288"]),
+                "{flag}: {args:?}"
+            );
+        }
+        assert!(args.windows(2).any(|w| w == ["-np", "1"]), "{args:?}");
     }
 
     #[test]
@@ -438,7 +471,7 @@ mod tests {
         let bin = super::fake::fake_llama_server(dir.path());
         let model = dir.path().join("model.gguf");
         std::fs::write(&model, b"x").unwrap();
-        let server = LocalServer::start(bin, model, false, 5000).expect("start");
+        let server = LocalServer::start(bin, model, false, 5000, 4096).expect("start");
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while std::time::Instant::now() < deadline && !server.ready() {
             tokio::time::sleep(Duration::from_millis(200)).await;
