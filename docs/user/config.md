@@ -73,6 +73,15 @@ centers = ["home"]          # optional: the centers it may reach; every one with
 max_links = 12              # optional, `relay set-limits`: its own tunnels at once
 max_opens_per_minute = 300  # optional, `relay set-limits`: its own opens a minute
 
+[ui]                        # the node's web UI, set with `nerve-node ui`; off without listen
+listen = "127.0.0.1:7470"
+pin = "…"                   # beyond loopback: the pin of its own certificate
+
+[[ui.token]]                # added by `nerve-node ui token add`
+label = "laptop"
+token_sha256 = "…"          # the hash of its token; the token is in no file
+made = "2026-11-02T10:00:00Z"
+
 [log]
 level = "info"              # error | warn | info | debug: how much the node logs
 

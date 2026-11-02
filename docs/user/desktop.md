@@ -440,6 +440,13 @@ On Linux, `nerve-node-desktop <command>` is `nerve-node <command>`, with
 `nerve-node`, the command `nerve-node` runs the app's program, which says
 `nerve-node-desktop` for `--version`.
 
+## The web UI (Linux)
+
+On Linux the app's node has the [node web UI](node-web-ui.md) too, off unless
+you turn it on: `nerve-node-desktop ui on` (or `nerve-node ui on`). It works as
+for the plain `nerve-node`, and the app does not switch it. On Windows there is
+none: the app is the node's UI there.
+
 On Windows the app is the node's program, and it has no console, so a
 terminal does not wait for it. For a terminal, download the CLI edition
 `nerve-node-x86_64-windows.exe` from the release: it is a console program,

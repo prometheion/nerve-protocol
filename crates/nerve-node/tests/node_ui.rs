@@ -946,3 +946,143 @@ fn the_pairing_link_comes_from_stdin_when_asked() {
     let (code, out) = run(&["center", "add", "nerve://pair?x", "--link-stdin"], "");
     assert_eq!(code, 2, "not both: {out}");
 }
+
+/// The Capabilities, Relay, Settings and Help pages: each change one
+/// command of the CLI; what stays root's, and the web UI's own settings,
+/// are refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_capabilities_relay_settings_and_help_pages_change_the_node() {
+    let _one = SERIAL.lock().await;
+    let d = tempfile::tempdir().unwrap();
+    let (daemon, _at, addr, s) = signed_in(d.path()).await;
+    let center = nerve_conformance::fake_center::FakeCenter::start(true)
+        .await
+        .unwrap();
+    change(
+        addr,
+        &s,
+        "/api/centers/pair",
+        json!({ "link": center.link().render(), "name": "lab" }),
+    )
+    .await;
+
+    // Capabilities: a switch, one of your own, a program.
+    let v = get(addr, "/api/caps?center=lab", &s).await;
+    assert_eq!(v.status, 200, "{}", v.body);
+    assert_eq!(v.json()["center"], "lab");
+    change(
+        addr,
+        &s,
+        "/api/caps/set",
+        json!({"center": "lab", "cap": "exec", "setting": "off"}),
+    )
+    .await;
+    let caps = daemon.config().centers[0].policy.caps.clone();
+    assert!(caps.contains_key("exec"), "{caps:?}");
+    let form = json!({"name": "notes.count", "summary": "Counts the notes.", "effect": "read", "command": "ls /tmp", "platform": "any"});
+    change(
+        addr,
+        &s,
+        "/api/caps/save",
+        json!({"adding": true, "form": form}),
+    )
+    .await;
+    assert_eq!(daemon.config().capabilities[0].name, "notes.count");
+    // The form is checked as the desktop's dialog checks it.
+    let bad =
+        json!({"name": "", "summary": "", "effect": "read", "command": "", "platform": "any"});
+    let a = post(
+        addr,
+        "/api/caps/save",
+        &s,
+        json!({"adding": true, "form": bad}),
+    )
+    .await;
+    assert_eq!(a.status, 400);
+    assert!(
+        a.json()["error"].as_str().unwrap().contains("name:"),
+        "{}",
+        a.body
+    );
+    change(addr, &s, "/api/caps/remove", json!({"name": "notes.count"})).await;
+    assert!(daemon.config().capabilities.is_empty());
+    change(
+        addr,
+        &s,
+        "/api/programs/allow",
+        json!({"name": "lights", "exe": "/usr/bin/true"}),
+    )
+    .await;
+    assert_eq!(daemon.config().providers.allowed[0].name, "lights");
+    let a = post(
+        addr,
+        "/api/programs/allow",
+        &s,
+        json!({"name": "x", "exe": "bin/true"}),
+    )
+    .await;
+    assert_eq!(a.status, 400);
+    change(addr, &s, "/api/programs/remove", json!({"name": "lights"})).await;
+    assert!(daemon.config().providers.allowed.is_empty());
+
+    // Relay: on, a node with its link shown once, off.
+    change(
+        addr,
+        &s,
+        "/api/relay/set",
+        json!({"address": "127.0.0.1:0"}),
+    )
+    .await;
+    assert_eq!(daemon.config().relay.listen.as_deref(), Some("127.0.0.1:0"));
+    let v = change(addr, &s, "/api/relay/add", json!({"name": "lab-pc"})).await;
+    assert!(
+        v["token"]["link"]
+            .as_str()
+            .unwrap()
+            .starts_with("nerve://relay?"),
+        "{v}"
+    );
+    assert!(daemon.config().relay.node("lab-pc").is_some());
+    let v = get(addr, "/api/relay", &s).await.json();
+    assert_eq!(v["relay"]["nodes"][0]["name"], "lab-pc", "{v}");
+    assert!(!v.to_string().contains("token_sha256"), "{v}");
+    change(addr, &s, "/api/relay/remove", json!({"name": "lab-pc"})).await;
+    change(addr, &s, "/api/relay/off", json!({})).await;
+    assert!(daemon.config().relay.listen.is_none());
+
+    // Settings: name and log level; root's and the web UI's own refused.
+    change(
+        addr,
+        &s,
+        "/api/settings/set",
+        json!({"key": "node.name", "value": "\"lab-1\""}),
+    )
+    .await;
+    assert_eq!(daemon.config().node.name.as_deref(), Some("lab-1"));
+    let v = get(addr, "/api/settings", &s).await.json();
+    assert_eq!(v["name"], "lab-1");
+    for (key, value, why) in [
+        ("machine.shell", "\"/bin/sh\"", "machine.shell decides"),
+        ("ui.listen", "\"0.0.0.0:7470\"", "only at the CLI"),
+    ] {
+        let a = post(
+            addr,
+            "/api/settings/set",
+            &s,
+            json!({"key": key, "value": value}),
+        )
+        .await;
+        assert_eq!(a.status, 400, "{key}");
+        assert!(
+            a.json()["error"].as_str().unwrap().contains(why),
+            "{key}: {}",
+            a.body
+        );
+    }
+    assert!(daemon.config().machine.shell.is_none());
+
+    // Help: the CLI's own reference.
+    let v = get(addr, "/api/help", &s).await.json();
+    assert!(!v["node"]["sections"].as_array().unwrap().is_empty(), "{v}");
+    daemon.stop().await;
+}

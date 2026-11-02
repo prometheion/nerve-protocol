@@ -141,6 +141,139 @@ pub(super) async fn api(ctx: &Ctx, req: &Request, b: &Value) -> Option<ApiResult
         // ---- Log ----
         ("GET", "/api/log") => log(&ctx.shared.paths.log_file(), flag(query, "problems")),
         ("POST", "/api/log/clear") => command(ctx, &["log", "clear"], None).await,
+        // ---- Capabilities ----
+        ("GET", "/api/caps") => match query.query_param("center").filter(|c| !c.is_empty()) {
+            Some(c) if !nerve_policy::config::valid_center_name(&c) => {
+                Err((400, format!("{c:?} is not a center name")))
+            }
+            Some(c) => command(ctx, &["cap", "ls", &format!("--center={c}")], None).await,
+            None => command(ctx, &["cap", "ls"], None).await,
+        },
+        ("POST", "/api/caps/set") => match (center(b), name(b, "cap"), word(b, "setting")) {
+            (Ok(c), Ok(cap), Ok(setting)) => {
+                run(
+                    ctx,
+                    args(&["cap", "set"], &[("center", c)], &[cap, setting]),
+                    None,
+                )
+                .await
+            }
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Err(e),
+        },
+        ("POST", "/api/caps/save") => {
+            let form: nerve_policy::config::form::CapForm =
+                match serde_json::from_value(b["form"].clone()) {
+                    Ok(f) => f,
+                    Err(e) => return Some(Err((400, format!("the form: {e}")))),
+                };
+            // The fields are checked as the desktop's dialog checks them,
+            // and each one's reason goes back to the form.
+            let max = ctx.shared.config().limits.max_timeout_secs;
+            let errors = nerve_policy::config::form::check(&form, max);
+            if errors != Default::default() {
+                let said: Vec<String> = serde_json::to_value(&errors)
+                    .ok()
+                    .and_then(|v| v.as_object().cloned())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(field, why)| {
+                        why.as_str()
+                            .filter(|w| !w.is_empty())
+                            .map(|w| format!("{field}: {w}"))
+                    })
+                    .collect();
+                return Some(Err((400, said.join("; "))));
+            }
+            let (a, input) = nerve_policy::config::form::cli_args(&form, b["adding"] == true);
+            run(ctx, a, input.as_deref()).await
+        }
+        ("POST", "/api/caps/remove") => match name(b, "name") {
+            Ok(n) => run(ctx, args(&["cap", "rm"], &[], &[n]), None).await,
+            Err(e) => Err(e),
+        },
+        ("POST", "/api/programs/allow") => match (name(b, "name"), folder_like(b, "exe")) {
+            (Ok(n), Ok(exe)) => {
+                run(
+                    ctx,
+                    args(&["cap", "provider", "allow"], &[], &[n, exe]),
+                    None,
+                )
+                .await
+            }
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        },
+        ("POST", "/api/programs/remove") => match name(b, "name") {
+            Ok(n) => run(ctx, args(&["cap", "provider", "rm"], &[], &[n]), None).await,
+            Err(e) => Err(e),
+        },
+        // ---- Relay ----
+        ("GET", "/api/relay") => {
+            let relay = match command(ctx, &["relay", "ls"], None).await {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            command(ctx, &["proxy", "ls"], None)
+                .await
+                .map(|proxy| json!({ "relay": relay, "proxy": proxy }))
+        }
+        ("POST", "/api/relay/set") => match address(b) {
+            Ok(a) => run(ctx, args(&["relay", "set"], &[], &[a]), None).await,
+            Err(e) => Err(e),
+        },
+        ("POST", "/api/relay/off") => command(ctx, &["relay", "off"], None).await,
+        ("POST", "/api/relay/add") => match name(b, "name") {
+            Ok(n) => {
+                let mut opts = Vec::new();
+                if let Some(a) = b["address"].as_str().filter(|a| !a.trim().is_empty()) {
+                    if a.starts_with('-') || a.contains(char::is_whitespace) {
+                        return Some(Err((400, "address is HOST or HOST:PORT".into())));
+                    }
+                    opts.push(("address", a));
+                }
+                run(ctx, args(&["relay", "add"], &opts, &[n]), None).await
+            }
+            Err(e) => Err(e),
+        },
+        ("POST", "/api/relay/token") => match name(b, "name") {
+            Ok(n) => run(ctx, args(&["relay", "token"], &[], &[n]), None).await,
+            Err(e) => Err(e),
+        },
+        ("POST", "/api/relay/remove") => match name(b, "name") {
+            Ok(n) => run(ctx, args(&["relay", "rm"], &[], &[n]), None).await,
+            Err(e) => Err(e),
+        },
+        ("POST", "/api/proxy/set") => {
+            let url = match b["url"].as_str().map(str::trim).filter(|u| !u.is_empty()) {
+                Some(u) if !u.starts_with('-') => u,
+                _ => return Some(Err((400, "url is missing".into()))),
+            };
+            let mut opts = Vec::new();
+            if let Some(p) = b["pin"].as_str().filter(|p| !p.is_empty()) {
+                opts.push(("pin", p));
+            }
+            // The password goes on the input, never in a command line.
+            let password = b["password"].as_str().filter(|p| !p.is_empty());
+            let mut a = args(&["proxy", "set"], &opts, &[]);
+            if password.is_some() {
+                a.push("--password-stdin".into());
+            }
+            a.extend(["--".to_string(), url.to_string()]);
+            let input = password.map(|p| format!("{p}\n"));
+            run(ctx, a, input.as_deref()).await
+        }
+        ("POST", "/api/proxy/remove") => command(ctx, &["proxy", "rm"], None).await,
+        // ---- Settings ----
+        ("GET", "/api/settings") => Ok(settings(&ctx.shared.config())),
+        ("POST", "/api/settings/set") => match (setting_key(b), b["value"].as_str()) {
+            (Ok(k), Some(v)) => run(ctx, args(&["config", "set"], &[], &[k, v]), None).await,
+            (Err(e), _) => Err(e),
+            (_, None) => Err((400, "value is missing".into())),
+        },
+        ("POST", "/api/settings/unset") => match setting_key(b) {
+            Ok(k) => run(ctx, args(&["config", "unset"], &[], &[k]), None).await,
+            Err(e) => Err(e),
+        },
+        ("GET", "/api/help") => Ok(json!({ "node": crate::cli::help() })),
         _ => return None,
     })
 }
@@ -218,6 +351,85 @@ fn folder(b: &Value) -> Result<&str, (u16, String)> {
         return Err((400, format!("{p:?} is not a whole path: it starts at /")));
     }
     Ok(p)
+}
+
+/// A name the CLI takes (a capability, a program, a relayed node): letters,
+/// digits, `.`, `_` and `-`, not starting with `-`.
+fn name<'a>(b: &'a Value, key: &str) -> Result<&'a str, (u16, String)> {
+    let n = text(b, key)?;
+    if !n
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+    {
+        return Err((400, format!("{key} {n:?} is not a name the node takes")));
+    }
+    Ok(n)
+}
+
+/// A whole path of a body's `key`.
+fn folder_like<'a>(b: &'a Value, key: &str) -> Result<&'a str, (u16, String)> {
+    let p = b[key]
+        .as_str()
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| (400, format!("{key} is missing")))?;
+    if !Path::new(p).is_absolute() {
+        return Err((400, format!("{p:?} is not a whole path: it starts at /")));
+    }
+    Ok(p)
+}
+
+/// An address and port to listen on.
+fn address(b: &Value) -> Result<&str, (u16, String)> {
+    let a = text(b, "address")?;
+    a.parse::<std::net::SocketAddr>().map(|_| a).map_err(|_| {
+        (
+            400,
+            format!("{a:?} is not an address and a port, like 0.0.0.0:7490"),
+        )
+    })
+}
+
+/// A setting's dotted name for `config set` or `unset`. The web UI's own
+/// settings are refused here already; the command refuses them, and those
+/// that stay root's, again.
+fn setting_key(b: &Value) -> Result<&str, (u16, String)> {
+    let k = text(b, "key")?;
+    if k == "ui" || k.starts_with("ui.") {
+        return Err((400, crate::owner::NOT_FROM_THE_WEB.into()));
+    }
+    if !k
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+    {
+        return Err((400, format!("{k:?} is not a setting's name")));
+    }
+    Ok(k)
+}
+
+/// What the Settings page shows: the settings it changes, those that stay
+/// root's (shown, not changed), and the whole file's text for Advanced,
+/// without the web UI's token hashes.
+fn settings(cfg: &nerve_policy::NodeConfig) -> Value {
+    let mut shown = cfg.clone();
+    shown.ui.tokens.clear();
+    json!({
+        "name": cfg.node.name,
+        "log_level": cfg.log.level.to_string(),
+        "secret_storage": cfg.machine.secret_storage,
+        "limits": {
+            "max_running": cfg.limits.max_running,
+            "output_cap_bytes": cfg.limits.output_cap_bytes,
+            "default_timeout_secs": cfg.limits.default_timeout_secs,
+            "max_timeout_secs": cfg.limits.max_timeout_secs,
+        },
+        "root_only": crate::owner::ROOT_ONLY,
+        "machine": {
+            "shell": cfg.machine.shell,
+            "allow_root": cfg.machine.allow_root,
+            "sudo_path": cfg.machine.sudo_path,
+        },
+        "toml": shown.to_toml(),
+    })
 }
 
 /// The pairing link of a body, which goes on the command's input.
@@ -488,6 +700,26 @@ mod tests {
             "fs.read:/etc/\\u{202e}x\\u{7}"
         );
         assert!(audit_rule(&json!({"center": "home", "cap": "exec", "action": "run"})).is_err());
+    }
+
+    #[test]
+    fn a_setting_of_the_web_ui_is_refused_before_anything_runs() {
+        for k in ["ui", "ui.listen", "ui.token"] {
+            assert_eq!(setting_key(&json!({"key": k})).unwrap_err().0, 400, "{k}");
+        }
+        assert_eq!(setting_key(&json!({"key": "log.level"})), Ok("log.level"));
+        assert!(setting_key(&json!({"key": "-x"})).is_err());
+        assert!(name(&json!({"name": "a b"}), "name").is_err());
+        assert!(address(&json!({"address": "relay.example"})).is_err());
+        // The settings shown keep no token hash of the web UI.
+        let mut cfg = nerve_policy::NodeConfig::default();
+        cfg.ui.tokens.push(nerve_policy::config::UiToken {
+            label: "laptop".into(),
+            token_sha256: "d".repeat(64),
+            made: String::new(),
+        });
+        let v = settings(&cfg);
+        assert!(!v.to_string().contains(&"d".repeat(64)), "{v}");
     }
 
     #[test]

@@ -2,7 +2,8 @@
 
 `nerve-center` serves a web UI at `http://127.0.0.1:7480` (`--ui`). Its pages,
 scripts and styles are built into the program. It loads nothing from another
-host.
+host. The installed node on Linux has a web UI of its own:
+[node web UI](node-web-ui.md).
 
 ## Log in
 

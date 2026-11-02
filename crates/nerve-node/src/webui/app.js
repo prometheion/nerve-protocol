@@ -11,13 +11,26 @@ const PAGES = {
   permissions: { title: "Permissions", view: pagePermissions },
   audit: { title: "Audit", view: pageAudit },
   log: { title: "Log", view: pageLog },
+  capabilities: { title: "Capabilities", view: pageCaps },
+  relay: { title: "Relay", view: pageRelay },
   settings: { title: "Settings", view: pageSettings },
+  help: { title: "Help", view: pageHelp },
+};
+
+// The pages that ask their data once, when they open: each read is a
+// command the node runs.
+const LOADS = {
+  permissions: () => loadPerm(),
+  capabilities: () => loadCaps(),
+  relay: async () => { state.relay = await api("GET", "/api/relay"); },
+  settings: async () => { state.settings = await api("GET", "/api/settings"); },
+  help: async () => { if (!state.help) state.help = await api("GET", "/api/help"); },
 };
 
 let lastSig = null;
 let busy = false;
 let down = false;
-const state = { overview: null, ui: null, perm: null, permCenter: null, audit: null, log: null, preview: null };
+const state = { overview: null, ui: null, perm: null, permCenter: null, audit: null, log: null, preview: null, caps: null, relay: null, settings: null, help: null, shown: null };
 // The Audit and Log pages ask again every two seconds while Live is on.
 const filters = { auditDenied: false, auditLive: true, logProblems: false, logLive: true };
 
@@ -273,13 +286,147 @@ function pageLog() {
   ];
 }
 
+// ---- Capabilities ----
+
+async function loadCaps() {
+  const c = permCenter();
+  state.caps = await api("GET", `/api/caps${c ? `?center=${encodeURIComponent(c)}` : ""}`);
+}
+
+function pageCaps() {
+  const v = state.caps;
+  if (!v) return [loading()];
+  const c = v.center;
+  const known = Object.keys(v.known || {});
+  return [
+    head("plug", "Capabilities", c ? `What ${c} may use on this machine.` : "What the centers may use on this machine."),
+    c ? section("Switches", "On, off, or hidden from the center. Unset, the mode decides.", null,
+      known.length ? el("div", { class: "stack" }, known.map((cap) => {
+        const now = (v.caps || {})[cap] || "by mode";
+        return el("div", { class: "card" }, el("div", { class: "card-top" }, icon("plug"), el("span", { class: "name mono" }, cap), pill("", now),
+          el("span", { class: "push" }, ["on", "off", "hidden"].map((w) => btn(w, w === now ? "primary" : "ghost",
+            act(() => api("POST", "/api/caps/set", { center: c, cap, setting: w }).then(loadCaps)), null, `cap:${cap}:${w}`)))));
+      })) : empty("Nothing to switch.", "plug")) : null,
+    section("Your capabilities", "Actions of your own, each one fixed command, declared in node.toml.", null,
+      (v.config || []).length ? el("div", { class: "stack" }, v.config.map((d) => el("div", { class: "card" },
+        el("div", { class: "card-top" }, icon("terminal"), el("span", { class: "name mono" }, d.name), el("span", { class: "meta" }, d.summary || ""),
+          btn("Remove", "danger-soft push", act(async () => {
+            const yes = await modal({ title: `Remove ${d.name}?`, confirm: "Remove", danger: true });
+            if (yes) await api("POST", "/api/caps/remove", { name: d.name }).then(loadCaps);
+          }), "trash", `own:${d.name}:remove`))))) : empty("None yet.", "terminal"),
+      capForm()),
+    section("Programs", "Local programs that may add capabilities to the node.", null,
+      (v.programs || []).length ? el("div", { class: "stack" }, v.programs.map((p) => el("div", { class: "card" },
+        el("div", { class: "card-top" }, icon("bot"), el("span", { class: "name" }, p.name), el("span", { class: "meta mono" }, p.exe || ""),
+          btn("Remove", "danger-soft push", act(() => api("POST", "/api/programs/remove", { name: p.name }).then(loadCaps)), "trash", `program:${p.name}:remove`))))) : empty("None allowed.", "bot"),
+      programForm()),
+  ];
+}
+
+function field(label, attrs) {
+  const input = el("input", Object.assign({ class: "input", type: "text", autocomplete: "off", spellcheck: "false" }, attrs));
+  return [input, el("label", { class: "field" }, el("span", { class: "label" }, label), input)];
+}
+
+function capForm() {
+  const [name, nameF] = field("Name", { placeholder: "backup.run" });
+  const [summary, summaryF] = field("What it does", { placeholder: "Backs up my notes." });
+  const [command, commandF] = field("Command", { placeholder: "restic backup /home/you/notes" });
+  let effect = "read";
+  const effects = ["read", "write", "act"];
+  return el("div", { class: "card" }, nameF, summaryF, commandF,
+    segmented("Effect", effects, 0, (i) => { effect = effects[i]; }),
+    el("div", { class: "actions" }, btn("Add", "primary", act(async () => {
+      await api("POST", "/api/caps/save", { adding: true, form: { name: name.value, summary: summary.value, command: command.value, effect, platform: "any" } });
+      await loadCaps();
+    }), "plus", "own:add")));
+}
+
+function programForm() {
+  const [name, nameF] = field("Name", { placeholder: "lights" });
+  const [exe, exeF] = field("Program", { placeholder: "/usr/local/bin/lights-provider" });
+  return el("div", { class: "card" }, nameF, exeF,
+    el("div", { class: "actions" }, btn("Allow", "primary", act(() => api("POST", "/api/programs/allow", { name: name.value, exe: exe.value }).then(loadCaps)), "plus", "program:allow")));
+}
+
+// ---- Relay ----
+
+function pageRelay() {
+  const v = state.relay;
+  if (!v) return [loading()];
+  const r = v.relay;
+  const p = v.proxy;
+  const [address, addressF] = field("Listen on", { placeholder: "0.0.0.0:7490", value: r.listen || "" });
+  const [node, nodeF] = field("Node", { placeholder: "lab-pc" });
+  const [url, urlF] = field("Relay or proxy", { placeholder: "https://lab-pc@relay.example:7490" });
+  const [pw, pwF] = field("Its token or password", { type: "password" });
+  const reload = async () => { state.relay = await api("GET", "/api/relay"); };
+  const shown = state.shown;
+  return [
+    head("link", "Relay", "Reach centers through another node, or let other nodes reach this node's centers through this one."),
+    section("Connect through a relay", p.proxy ? `Now through ${p.proxy}.` : "This node reaches its centers directly.", null,
+      el("div", { class: "card" }, urlF, pwF, el("div", { class: "actions" },
+        btn("Connect", "primary", act(() => api("POST", "/api/proxy/set", { url: url.value, password: pw.value }).then(reload)), "link", "proxy:set"),
+        p.proxy ? btn("Disconnect", "danger-soft", act(() => api("POST", "/api/proxy/remove").then(reload)), "x", "proxy:rm") : null))),
+    section("This machine as a relay", r.listen ? `On ${r.listen}: ${r.status || ""}` : "Off.", null,
+      el("div", { class: "card" }, addressF, el("div", { class: "actions" },
+        btn(r.listen ? "Change" : "Turn on", "primary", act(() => api("POST", "/api/relay/set", { address: address.value }).then(reload)), "check", "relay:set"),
+        r.listen ? btn("Turn off", "danger-soft", act(() => api("POST", "/api/relay/off").then(reload)), "x", "relay:off") : null)),
+      shown ? el("div", { class: "banner ok" }, icon("key"), el("span", {}, `The link for ${shown.node}, shown once: `, el("code", { class: "mono" }, shown.link)),
+        el("button", { type: "button", class: "btn ghost sm", onclick: () => copy(shown.link) }, icon("copy", "sm"), "Copy"),
+        el("button", { type: "button", class: "btn ghost sm", "aria-label": "Hide", onclick: () => { state.shown = null; draw(true); } }, icon("x", "sm"))) : null,
+      (r.nodes || []).map((n) => el("div", { class: "card" }, el("div", { class: "card-top" }, icon("server"), el("span", { class: "name" }, n.name),
+        el("span", { class: "meta" }, n.centers && n.centers.length ? n.centers.join(", ") : "every https center"),
+        el("span", { class: "push" },
+          btn("New link", "ghost", act(async () => { const t = await api("POST", "/api/relay/token", { name: n.name }); state.shown = t.token; await reload(); }), "refresh", `relay:${n.name}:token`),
+          btn("Remove", "danger-soft", act(() => api("POST", "/api/relay/remove", { name: n.name }).then(reload)), "trash", `relay:${n.name}:remove`))))),
+      el("div", { class: "card" }, nodeF, el("div", { class: "actions" },
+        btn("Add a node", "primary", act(async () => { const t = await api("POST", "/api/relay/add", { name: node.value }); state.shown = t.token; await reload(); }), "plus", "relay:add")))),
+  ];
+}
+
+// ---- Help ----
+
+let helpParts = null;
+
+function pageHelp() {
+  const h = state.help && state.help.node;
+  if (!h) return [loading()];
+  if (!helpParts) helpParts = buildHelp(h);
+  return helpParts;
+}
+
 // ---- Settings ----
+
+const LEVELS = ["error", "warn", "info", "debug"];
 
 function pageSettings() {
   const s = state.ui;
-  if (!s) return [loading()];
+  const v = state.settings;
+  if (!s || !v) return [loading()];
+  const [name, nameF] = field("Name of this machine", { value: v.name || "" });
+  let level = v.log_level;
+  const [key, keyF] = field("Setting", { placeholder: "limits.max_running" });
+  const [value, valueF] = field("Value, as TOML", { placeholder: "4" });
+  const set = (k, val) => api("POST", "/api/settings/set", { key: k, value: val }).then(async () => { state.settings = await api("GET", "/api/settings"); });
   return [
     head("settings", "Settings", "The node's settings."),
+    section("This machine", null, null, el("div", { class: "card" }, nameF,
+      el("div", { class: "actions" }, btn("Save", "primary", act(() => set("node.name", JSON.stringify(name.value))), "check", "settings:name")),
+      segmented("Log level", LEVELS, Math.max(0, LEVELS.indexOf(level)), (i) => { level = LEVELS[i]; }),
+      el("div", { class: "actions" }, btn("Set the log level", "ghost", act(() => set("log.level", JSON.stringify(level))), "check", "settings:level")),
+      el("p", { class: "meta" }, `Keys are kept in ${v.secret_storage === "keyring" ? "the system keyring" : "files"}.`))),
+    section("Root's settings", "Which account and which programs commands run as. They are shown here and changed only as root: sudo nerve-node config set …", null,
+      el("div", { class: "card" }, v.root_only.map((k) => {
+        const leaf = k.split(".")[1];
+        const val = v.machine[leaf];
+        return el("p", { class: "meta" }, el("code", { class: "mono" }, k), ` ${val === undefined || val === null ? "not set" : String(val)}`);
+      }))),
+    section("Advanced", "Any setting by its name, as nerve-node config set takes it. Backup, restore, update and uninstall are done at the CLI.", null,
+      el("div", { class: "card" }, keyF, valueF, el("div", { class: "actions" },
+        btn("Set", "primary", act(() => set(key.value, value.value)), "check", "settings:set"),
+        btn("Unset", "ghost", act(() => api("POST", "/api/settings/unset", { key: key.value }).then(async () => { state.settings = await api("GET", "/api/settings"); })), "x", "settings:unset")),
+        el("pre", { class: "mono" }, v.toml))),
     section("Web UI", "Turning it on or off, its address and new tokens are changed at the CLI: nerve-node ui.", null,
       el("div", { class: "card" },
         el("div", { class: "card-top" }, itile("monitor", "accent"), el("span", { class: "name" }, s.ui.listen || "off"), pill("up", s.ui.status)),
@@ -309,7 +456,7 @@ function current() {
 
 function draw(force) {
   const page = current();
-  const extra = { settings: state.ui, permissions: state.perm, audit: state.audit, log: state.log, centers: state.preview }[page];
+  const extra = { settings: [state.ui, state.settings], permissions: state.perm, audit: state.audit, log: state.log, centers: state.preview, capabilities: state.caps, relay: [state.relay, state.shown], help: !!state.help }[page];
   const sig = JSON.stringify([page, state.overview, extra === undefined ? null : extra, Math.floor(Date.now() / 60000)]);
   if (!force && sig === lastSig) return;
   lastSig = sig;
@@ -367,9 +514,7 @@ function go() {
   p.classList.add("enter");
   $("scroll").scrollTop = 0;
   draw(true);
-  // The Permissions page asks its lists once, when it opens: each is a
-  // command the node runs.
-  if (page === "permissions") tick().then(loadPerm).then(() => draw(true)).catch((e) => { if (!e.auth) notify(e.message, "error"); });
+  if (LOADS[page]) tick().then(LOADS[page]).then(() => draw(true)).catch((e) => { if (!e.auth) notify(e.message, "error"); });
   else tick();
 }
 
