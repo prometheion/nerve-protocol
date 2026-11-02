@@ -65,7 +65,7 @@ pub struct LocalServer {
     shutdown: Arc<tokio::sync::Notify>,
     /// Fired by the supervisor once the child has exited and it is returning.
     exited: Arc<tokio::sync::Notify>,
-    /// Its speed, kept across calls for as long as this server runs.
+    /// Its speed, kept across calls for as long as one process of it runs.
     budget: Arc<ReadBudget>,
 }
 
@@ -100,6 +100,7 @@ impl LocalServer {
         let timeout = Duration::from_millis(timeout_ms.max(100));
         let shutdown = Arc::new(tokio::sync::Notify::new());
         let exited = Arc::new(tokio::sync::Notify::new());
+        let budget = Arc::new(ReadBudget::new(context, pin.read_ms, pin.read_growth));
         let task = tokio::spawn(supervise(
             bin,
             args,
@@ -108,6 +109,7 @@ impl LocalServer {
             inner.clone(),
             shutdown.clone(),
             exited.clone(),
+            budget.clone(),
         ));
         Ok(LocalServer {
             inner,
@@ -115,7 +117,7 @@ impl LocalServer {
             task,
             shutdown,
             exited,
-            budget: Arc::new(ReadBudget::new(context, pin.read_ms, pin.read_growth)),
+            budget,
         })
     }
 
@@ -203,7 +205,9 @@ fn free_port() -> Result<u16, String> {
 }
 
 /// Runs the server, restarting it with backoff until the task is aborted. A
-/// non-decision model is a reason not to restart.
+/// non-decision model is a reason not to restart. Each process starts with
+/// the budget's speeds forgotten.
+#[allow(clippy::too_many_arguments)]
 async fn supervise(
     program: PathBuf,
     args: Vec<String>,
@@ -212,6 +216,7 @@ async fn supervise(
     inner: Arc<Mutex<Inner>>,
     shutdown: Arc<tokio::sync::Notify>,
     exited: Arc<tokio::sync::Notify>,
+    budget: Arc<ReadBudget>,
 ) {
     let mut backoff = Duration::from_secs(1);
     loop {
@@ -219,6 +224,7 @@ async fn supervise(
             i.phase = Some(Phase::Starting);
             i.url = None;
         });
+        budget.restart();
         match run_once(&program, &args, port, timeout, &inner, &shutdown).await {
             RunEnd::NotDecision => {
                 // A clear, final failure: do not restart.
@@ -387,8 +393,9 @@ fn set(inner: &Arc<Mutex<Inner>>, f: impl FnOnce(&mut Inner)) {
 pub(crate) mod fake {
     /// A fake `llama-server`: a shell script that ignores the model and serves
     /// `/v1/models` (a decision model) and `/v1/systemone` on the `--port` it
-    /// is given, so the supervisor can be tested without a real model. Unix
-    /// only (it uses `/bin/sh` and `nc`-free shell); skipped elsewhere.
+    /// is given, so the supervisor can be tested without a real model. It
+    /// writes its process id to `pid` beside it. Unix only (it uses
+    /// `/bin/sh` and `nc`-free shell); skipped elsewhere.
     pub(crate) fn fake_llama_server(dir: &std::path::Path) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("llama-server");
@@ -402,6 +409,7 @@ for a in "$@"; do
   if [ "$prev" = "--port" ]; then port="$a"; fi
   prev="$a"
 done
+echo $$ > "$(dirname "$0")/pid"
 exec python3 - "$port" <<'PY'
 import sys, http.server
 port = int(sys.argv[1])
@@ -540,5 +548,46 @@ mod tests {
             std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
             "the server still answers after stop"
         );
+    }
+
+    /// A restarted server is held to the assumed speed again until it
+    /// answered a call: it may run slower than the process before it (one
+    /// that lost its GPU runs on the CPU), and a long call admitted at the
+    /// old speed would hold its one slot for many timeouts (review T1 of
+    /// #178).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restarted_server_forgets_the_speed_it_measured() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = super::fake::fake_llama_server(dir.path());
+        let model = dir.path().join("model.gguf");
+        std::fs::write(&model, b"x").unwrap();
+        let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
+        let server = LocalServer::start(bin, model, false, 5000, pin).expect("start");
+        let until = async |what: &str, f: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while !f() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{what}: {:?}",
+                    server.status()
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+        until("ready", &|| server.ready()).await;
+        // Far faster than the 20 ms assumed for d1-2B.
+        server.budget.learn(1000, 1000.0);
+        assert!(server.budget.ms_per_token() < 1.0);
+        let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
+        let killed = std::process::Command::new("kill")
+            .args(["-9", pid.trim()])
+            .status()
+            .unwrap();
+        assert!(killed.success());
+        until("ended", &|| !server.ready()).await;
+        until("ready again", &|| server.ready()).await;
+        assert_eq!(server.budget.ms_per_token(), pin.read_ms);
+        server.stop().await;
     }
 }

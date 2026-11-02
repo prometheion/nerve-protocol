@@ -408,6 +408,27 @@ impl Checker {
                     "the center's action checker refused this call without asking its decision model: the call is too long for the model to read within the checker's timeout ({why}). A call with shorter arguments is judged as usual. The owner can raise the timeout or switch the model off in the center's web UI (Action checker); {switch}."
                 ),
             },
+            // Not sent either: the calls ahead of it (any session's) decided
+            // it, so it is refused with allow-and-log too (review T1 of #178).
+            Err(model::ModelError::Busy(why)) => Decision::Refuse {
+                layer: Layer::Model,
+                scope,
+                detail: format!("model busy: {why}"),
+                message: format!(
+                    "the center's action checker refused this call without asking its decision model: the model was still reading the calls sent before it and would not have read this one within the checker's timeout ({why}). The same call is judged as usual once fewer calls are checked at once. The owner can raise the timeout or switch the model off in the center's web UI (Action checker); {switch}."
+                ),
+            },
+            // The running local model took the call and did not judge it: the
+            // call's length or the calls ahead of it may be why, so it is
+            // refused with allow-and-log too (review T1 of #178).
+            Err(model::ModelError::NotJudged(why)) => Decision::Refuse {
+                layer: Layer::Model,
+                scope,
+                detail: format!("not judged: {why}"),
+                message: format!(
+                    "the center's action checker refused this call: its decision model was running and took the call, but did not judge it ({why}), and such a call is refused also when the owner chose allow-and-log for a model that cannot be reached. A call with shorter arguments, or with fewer calls checked at once, is judged as usual. The owner can raise the timeout or switch the model off in the center's web UI (Action checker); {switch}."
+                ),
+            },
             Err(e) => fail(e.to_string()),
         }
     }
@@ -834,6 +855,80 @@ mod tests {
         assert!(message.contains("too long"), "{message}");
         assert!(message.contains("raise the timeout"), "{message}");
         assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// With allow-and-log, a call the running local model took and did not
+    /// judge (it timed out in the server, the server failed on it) is
+    /// refused, and so is one that waited behind another for the whole
+    /// timeout; only a local model that is not running lets a call through
+    /// (review T1 of #178).
+    #[tokio::test]
+    async fn a_call_the_running_local_model_did_not_judge_is_refused_with_allow_and_log_too() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let mut cfg = CheckerConfig::default();
+        cfg.blocklist_on = false;
+        cfg.model_on = true;
+        cfg.model.fail_closed = false;
+        cfg.model.timeout_ms = 600;
+        let checker = Checker::build(cfg, None);
+        let local = |(ep, asked): (Endpoint, _)| {
+            let budget = Arc::new(model::ReadBudget::new(12_288, 0.1, f64::INFINITY));
+            (
+                Endpoint {
+                    budget: Some(budget),
+                    ..ep
+                },
+                asked,
+            )
+        };
+        let args = Map::new();
+        let c = call("exec", "run", Effect::Execute, "make", &args);
+        let refused = |d: Decision, what: &str| match d {
+            Decision::Refuse {
+                layer: Layer::Model,
+                detail,
+                ..
+            } => assert!(detail.starts_with(what), "{detail}"),
+            d => panic!("should be refused as {what}: {d:?}"),
+        };
+        // Sent, and the server takes longer than the timeout.
+        let (slow, asked) = local(model::fake::server(100, Duration::from_millis(1500)));
+        refused(checker.check(&c, Some(&slow)).await, "not judged");
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Two at once: the second waits for the first, then is refused as
+        // busy, not sent.
+        let (slow, asked) = local(model::fake::server(100, Duration::from_millis(1500)));
+        let (a, b) = tokio::join!(
+            checker.check(&c, Some(&slow)),
+            checker.check(&c, Some(&slow))
+        );
+        let (a, b) = match (&a, &b) {
+            (Decision::Refuse { detail, .. }, _) if detail.starts_with("model busy") => (b, a),
+            _ => (a, b),
+        };
+        refused(a, "not judged");
+        refused(b, "model busy");
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Sent, and the server fails on it.
+        let (failing, asked) = local(model::fake::server_failing(100));
+        refused(checker.check(&c, Some(&failing)).await, "not judged");
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // No server listening: allowed and logged, as the owner chose.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let down = Endpoint::parse(&format!("http://127.0.0.1:{port}"), None, None).unwrap();
+        let down = Endpoint {
+            budget: Some(Arc::new(model::ReadBudget::new(12_288, 0.1, f64::INFINITY))),
+            ..down
+        };
+        assert!(matches!(
+            checker.check(&c, Some(&down)).await,
+            Decision::Allowed { layer: Layer::Model, ref detail, .. } if detail.starts_with("model unreachable")
+        ),);
     }
 
     /// The checker reads a rule's conditions from the call's arguments: a
