@@ -332,17 +332,6 @@ on 2 vCPUs Kev-4B needs a longer one); a switch sets them, and you can change
 them afterwards. Check that a model's
 licence suits you before you install it.
 
-d1-2B took the place of d1-3B. A center that had d1-3B reads it as d1-2B after
-the update: d1-3B's default threshold and timeout (0.8 and 4 s as 0.0.6 set
-them, or 0.85 and 6 s) become d1-2B's (0.75 and 12 s). A threshold of your own
-moves down by the step between the two defaults (0.85 to 0.75, so 0.6 becomes
-0.5), since d1-2B scores the same calls a little
-lower: it refuses at least what it did. A timeout of your own stays. The update
-does not download the new files: until you press **Install** again on the
-Action checker page the model cannot answer, so a call it would see is
-refused (or allowed and logged, if you chose that). The install deletes
-d1-3B's file and the old llama.cpp build.
-
 The speeds above are for a desktop CPU. A small machine is much slower (d1-2B
 took about 22 s per call on a 4-core virtual machine, Windows); there, raise
 the timeout, use the GPU, or use an endpoint, or the checker refuses every

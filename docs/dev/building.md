@@ -71,7 +71,7 @@ The action checker's tests that need a real model or download are
 
 | Test | Needs | Does |
 |---|---|---|
-| `tests/local_install.rs` | `NERVE_TEST_D1_MODEL`, a local copy of the d1-2B GGUF; the network. `NERVE_TEST_TIMEOUT_MS` (8000 by default) for a slow machine | Downloads the pinned llama.cpp CPU build through the center, starts d1-2B with it and checks a call each way. The second test drives the center from a state that chose d1-3B: install, switch to the GPU (only with `NERVE_TEST_GPU_SWITCH=1`), Remove |
+| `tests/local_install.rs` | `NERVE_TEST_D1_MODEL`, a local copy of the d1-2B GGUF; the network. `NERVE_TEST_TIMEOUT_MS` (8000 by default) for a slow machine | Downloads the pinned llama.cpp CPU build through the center, starts d1-2B with it and checks a call each way. The second test drives the center with a model file and a build no pin names in the checker folder: install (which deletes them), switch to the GPU (only with `NERVE_TEST_GPU_SWITCH=1`), Remove |
 | `tests/local_model.rs` | `NERVE_TEST_MODEL` (a decision-model GGUF) and `NERVE_TEST_LLAMA` (a `llama-server` with `/v1/systemone`) | Starts the server through the checker's supervisor and checks a call each way |
 | `tests/checker_eval.rs` | `NERVE_CHECKER_ENDPOINT`, a System One endpoint; `NERVE_CHECKER_TOKEN`, `NERVE_CHECKER_MODEL`, `NERVE_CHECKER_TIMEOUT_MS`, `NERVE_EVAL_STRIDE` and `NERVE_EVAL_DUMP` are optional | The evaluation: sends the cases of `tests/data/checker-eval.json` and prints, per threshold, how many dangerous and benign cases were refused and the latency |
 

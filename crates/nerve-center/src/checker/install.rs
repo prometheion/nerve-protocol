@@ -558,9 +558,9 @@ async fn prepare_into(
 }
 
 /// Swaps in what [`prepare`] staged, and deletes every other model file and
-/// llama.cpp build, so a switch does not leave gigabytes behind, nor does an
-/// update whose model or build a release no longer pins (d1-3B and its
-/// build, before d1-2B). The caller has stopped the server
+/// llama.cpp build in the checker folder, so neither a switch nor a changed
+/// pin (another model or build in a later release) leaves gigabytes behind.
+/// The caller has stopped the server
 /// (Windows refuses to move or delete a file a running process holds). The
 /// old build is moved aside first and put back if the new one cannot take
 /// its place, so a failed swap keeps the working build.
@@ -1041,8 +1041,8 @@ mod tests {
     }
 
     /// `commit` swaps a staged build and model in, keeps nothing of the old
-    /// build, and deletes the other model, and a model and a build an
-    /// earlier release installed.
+    /// build, and deletes the other model, and any model file and build no
+    /// pin names.
     #[test]
     fn commit_swaps_in_the_staged_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -1053,11 +1053,10 @@ mod tests {
         std::fs::write(ld.join("variant"), "cpu").unwrap();
         std::fs::create_dir_all(model_dir(state)).unwrap();
         std::fs::write(model_path(state, LocalModel::D1_2b), b"d1").unwrap();
-        // What an earlier release installed: a model and a build it no
-        // longer pins.
-        let old_model = model_dir(state).join("d1-3B-Q4_K_M.gguf");
-        std::fs::write(&old_model, b"d1-3b").unwrap();
-        let old_build = checker_dir(state).join("llama").join("b11719");
+        // A model and a build no pin names, such as another build left.
+        let old_model = model_dir(state).join("other-Q4_K_M.gguf");
+        std::fs::write(&old_model, b"other").unwrap();
+        let old_build = checker_dir(state).join("llama").join("b0001");
         std::fs::create_dir_all(old_build.join("bin")).unwrap();
         let staging = ld.with_extension("staging");
         std::fs::create_dir_all(staging.join("bin")).unwrap();

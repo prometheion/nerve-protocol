@@ -125,11 +125,10 @@ async fn the_real_cpu_build_installs_and_runs_d1() {
     assert!(matches!(allowed, Decision::Allowed { .. }), "{allowed:?}");
 }
 
-/// The center end to end with the real pinned build, on a state an earlier
-/// release left (d1-3B chosen at its defaults, its model file and an older
-/// build in place): the choice reads as d1-2B with d1-2B's defaults, then
-/// install on the CPU, which deletes the old files, wait for the model to be
-/// ready, optionally switch to the GPU build while it runs
+/// The center end to end with the real pinned build, with a model file and a
+/// build no pin names left in the checker folder (as another build may leave
+/// them): install on the CPU, which deletes those files, wait for the model
+/// to be ready, optionally switch to the GPU build while it runs
 /// (`NERVE_TEST_GPU_SWITCH=1`, for a machine whose GPUs may be used; on one
 /// without a device it must fall back to the CPU), then Remove while it runs.
 /// On Windows a running `llama-server.exe` holds its files, so Remove and the
@@ -147,20 +146,12 @@ async fn the_center_installs_switches_and_removes_a_running_model() {
     if std::fs::hard_link(&d1, &model).is_err() {
         std::fs::copy(&d1, &model).unwrap();
     }
-    // What 0.0.6 left: d1-3B with the defaults it stored, its model and
-    // build.
-    let old_model = model.parent().unwrap().join("d1-3B-Q4_K_M.gguf");
-    std::fs::write(&old_model, b"d1-3B").unwrap();
-    let old_build = state.path().join("checker/llama/b11719");
+    // A model and a build no pin names, as another build may leave them.
+    let old_model = model.parent().unwrap().join("other-Q4_K_M.gguf");
+    std::fs::write(&old_model, b"other").unwrap();
+    let old_build = state.path().join("checker/llama/b0001");
     std::fs::create_dir_all(old_build.join("build/bin")).unwrap();
     std::fs::write(old_build.join("variant"), "cpu").unwrap();
-    std::fs::write(
-        state.path().join("state.json"),
-        r#"{"center_id": "c178", "center_name": "center", "checker": {"model_on": true,
-            "model": {"source": "local", "local_model": "d1-3b", "threshold": 0.8,
-                      "timeout_ms": 4000}}}"#,
-    )
-    .unwrap();
     nerve_transport::init_crypto();
     let c = Center::open(Options {
         state_dir: state.path().to_path_buf(),
@@ -192,15 +183,6 @@ async fn the_center_installs_switches_and_removes_a_running_model() {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     };
-
-    let pin = install::model_pin(LocalModel::D1_2b);
-    let m = c.read(|s| s.checker.model.clone());
-    assert_eq!(
-        (m.local_model, m.threshold, m.timeout_ms),
-        (LocalModel::D1_2b, pin.threshold, pin.timeout_ms)
-    );
-    assert!(!install::installed(state.path(), LocalModel::D1_2b));
-    println!("the d1-3B choice reads as d1-2B: {m:?}");
 
     c.start_checker_install(false, LocalModel::D1_2b)
         .await

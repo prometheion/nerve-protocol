@@ -262,9 +262,9 @@ files (`Center::hold_local_files`: a `files_held` flag that
 a server from them, then `LocalServer::stop`, which ends the child and waits
 for it) and `install::commit` swaps them in (the old build is moved aside and
 put back if the swap fails) and deletes every other file in `checker/model/`
-and every other build in `checker/llama/`: the other model, and what an
-earlier release installed and this one no longer pins (d1-3B and the b11719
-build). Success or failure,
+and every other build in `checker/llama/`: the other model, and any model
+file or build no pin names, such as the former ones after a pin changed.
+Success or failure,
 the install ends with `rebuild_checker`, which starts the new build or the old
 one again. Installs are serialised (the phase is claimed under the status
 lock) and the center keeps the task's handle: `Remove` aborts it and waits for
@@ -279,18 +279,7 @@ and timeout (d1-2B 0.75 / 12 s, Kev-4B 0.25 / 15 s) and the context the
 server gets (d1-2B 12,288 tokens, Kev-4B 8,192; see below); a model switch
 (`CheckerConfig::local_installed`) downloads the other file, deletes the first,
 and takes that model's defaults, while a reinstall of the same model keeps the
-owner's. d1-2B took d1-3B's place (#178): a stored `local_model: "d1-3b"` reads
-as d1-2B (`config::d1_3b`, on `CheckerConfig::model`, so `state.json` and a
-posted config both go through it). With the local source d1-3B's default
-threshold and timeout become d1-2B's: 0.8 and 4000 ms, which every release up
-to 0.0.6 stored (`ModelConfig` always writes both), and 0.85 and 6000 ms, the
-defaults measured after it; an owner's own
-threshold `t` becomes `min(t, t + 0.75 - 0.85)`, as d1-2B scores the same
-calls lower, so it never lets more through than it did; an owner's own timeout
-stays, and with the endpoint source the threshold and timeout are the
-endpoint's and stay. The update does not install the new files: the model is
-on but not installed until the owner installs it again, so it fails closed (or
-allows and logs) meanwhile. The model client waits up to the checker's own timeout for an answer
+owner's. The model client waits up to the checker's own timeout for an answer
 (`http::read_client_response` takes it), not the transport's fixed 15 s head
 timeout, so a slow model on a small CPU is not cut short. The supervisor
 (`checker/server.rs`) runs the installed binary
@@ -321,10 +310,9 @@ With b11960 it passed on Linux x86_64 (`ubuntu-x64`, 22 686 210 bytes, about
 2 s a call on a busy desktop) and on the Windows test VM (`win-cpu-x64`,
 24 407 745 bytes, unpacked by the system bsdtar, about 22 s a call on its 4
 vCPUs, so with `NERVE_TEST_TIMEOUT_MS`) on 2026-11-02. The
-second drives the center itself, from a state an earlier release left (d1-3B
-chosen at its defaults, its model file and the b11719 build in place): the
-choice reads as d1-2B with d1-2B's defaults, then install on the CPU (which
-deletes the old file and build), wait for ready, switch to
+second drives the center itself, with a model file and a build no pin names
+in the checker folder: install on the CPU (which deletes that file and
+build), wait for ready, switch to
 the GPU build while the model runs (`NERVE_TEST_GPU_SWITCH=1`, only on a machine
 whose GPUs may be used), then Remove while it runs. On the Windows VM (no usable
 GPU: `--list-devices` finds none) it switched, fell back to the CPU with a note,
