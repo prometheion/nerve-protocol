@@ -653,7 +653,7 @@ impl Ui {
         for t in &self.tokens {
             if !valid_ui_label(&t.label) {
                 return Err(format!(
-                    "ui.token label {:?}: 1 to 32 characters of a-z, 0-9 and -",
+                    "ui.token label {:?}: 1 to 32 characters of a-z, 0-9 and -, not starting with -",
                     t.label
                 ));
             }
@@ -675,9 +675,12 @@ impl Ui {
     }
 }
 
-/// Whether `label` names a web UI token: 1 to 32 of `a-z`, `0-9` and `-`.
+/// Whether `label` names a web UI token: 1 to 32 of `a-z`, `0-9` and `-`,
+/// not starting with `-` (it would read as an option at the CLI and is
+/// refused as one in the web UI).
 pub fn valid_ui_label(label: &str) -> bool {
     (1..=32).contains(&label.len())
+        && !label.starts_with('-')
         && label
             .bytes()
             .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'))
@@ -1846,6 +1849,7 @@ sudo_allow = ["sudo apt update"]
             ("[ui]\nlogin = false\n".to_string(), "unknown field"),
             (token("Laptop", &hash), "ui.token label"),
             (token("", &hash), "ui.token label"),
+            (token("-old", &hash), "ui.token label"),
             (token(&"a".repeat(33), &hash), "ui.token label"),
             (token("lab", &"B".repeat(64)), "token_sha256"),
             (token("lab", "abc"), "token_sha256"),

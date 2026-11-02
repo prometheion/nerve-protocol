@@ -203,7 +203,7 @@ pub(super) async fn ui_cmd(
         UiCmd::Token(UiTokenCmd::Add { label }) => {
             if !nerve_policy::config::valid_ui_label(&label) {
                 return Err(format!(
-                    "{label:?} is not a token label: 1 to 32 characters of a-z, 0-9 and -"
+                    "{label:?} is not a token label: 1 to 32 characters of a-z, 0-9 and -, not starting with -"
                 ));
             }
             let (token, mut t) = new_token();

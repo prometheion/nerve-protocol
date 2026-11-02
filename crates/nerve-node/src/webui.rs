@@ -484,6 +484,7 @@ async fn connection(
     tls: Option<Acceptor>,
 ) {
     let Ok(local) = tcp.local_addr() else { return };
+    let served_over_tls = tls.is_some();
     let mut io: BoxIo = match tls {
         None => Box::new(tcp),
         Some(a) => match tokio::time::timeout(HANDSHAKE, a.accept(tcp)).await {
@@ -494,7 +495,7 @@ async fn connection(
     let (resp, api, late) = match http::read_request(&mut io, BODY_MAX).await {
         Ok(req) => {
             let api = webui::is_api(&req.path);
-            let (resp, late) = request(ctx, req, local).await;
+            let (resp, late) = request(ctx, req, local, served_over_tls).await;
             (resp, api, late)
         }
         Err(_) => (Response::text(400, "bad request"), false, false),
@@ -509,8 +510,8 @@ async fn connection(
 
 /// Answers one request, and says whether the answer is a wrong token's,
 /// which waits before it goes.
-async fn request(ctx: &Ctx, req: Request, local: SocketAddr) -> (Response, bool) {
-    if !host_allowed(req.header("host"), local) {
+async fn request(ctx: &Ctx, req: Request, local: SocketAddr, tls: bool) -> (Response, bool) {
+    if !host_allowed(req.header("host"), local, tls) {
         return (
             Response::text(403, "this UI answers only to a loopback host name"),
             false,
@@ -602,10 +603,12 @@ async fn signed_in_request(ctx: &Ctx, req: &Request) -> Response {
 /// Whether a request may name `host`: on loopback only a loopback name, or
 /// the address the UI listens on as a number (`ui on --listen 127.0.0.2:…`),
 /// since a page of another name that resolves to this address (DNS
-/// rebinding) must be refused. Beyond loopback any name: the owner may use
-/// one of their own.
-fn host_allowed(host: Option<&str>, local: SocketAddr) -> bool {
-    !local.ip().is_loopback() || host_is_loopback(host) || host_is_address(host, local.ip())
+/// rebinding) must be refused. Over TLS (a UI beyond loopback) any name: the
+/// owner may use one of their own, and the machine's own name often resolves
+/// to a loopback address on the machine itself (127.0.1.1); a rebound page
+/// cannot get past the UI's self-signed certificate.
+fn host_allowed(host: Option<&str>, local: SocketAddr, tls: bool) -> bool {
+    tls || !local.ip().is_loopback() || host_is_loopback(host) || host_is_address(host, local.ip())
 }
 
 /// Checks the token a login posted. The answer is the session for the page

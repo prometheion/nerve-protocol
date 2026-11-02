@@ -1016,13 +1016,20 @@ fn ui_note(at: &str, tokens: usize, key_here: bool) -> String {
         .parse::<std::net::SocketAddr>()
         .is_ok_and(|a| a.ip().is_loopback());
     if loopback || key_here {
+        let on = format!("the restored config turns the web UI on at {at}");
+        if tokens == 0 {
+            // Nothing can log in until the owner makes a token.
+            return format!(
+                "{on}, but the backup has no token for it: `nerve-node ui token add <label>` makes one, `nerve-node ui off` turns it off"
+            );
+        }
         let tokens = if tokens == 1 {
             "its token".to_string()
         } else {
             format!("its {tokens} tokens")
         };
         format!(
-            "the restored config turns the web UI on at {at}, and {tokens} from the backup log in to it: `nerve-node ui token ls` lists them, `nerve-node ui off` turns it off"
+            "{on}, and {tokens} from the backup log in to it: `nerve-node ui token ls` lists them, `nerve-node ui off` turns it off"
         )
     } else {
         format!(
@@ -2203,6 +2210,13 @@ mod tests {
             );
         }
         assert!(ui_note("127.0.0.1:7470", 2, false).contains("its 2 tokens"));
+        // A backup whose tokens were all revoked brings none to log in with.
+        let none = ui_note("127.0.0.1:7470", 0, false);
+        assert!(
+            none.contains("no token") && none.contains("ui token add"),
+            "{none}"
+        );
+        assert!(!none.contains("log in to it"), "{none}");
     }
 
     /// A node that uses relay A as its proxy, with a password for it.

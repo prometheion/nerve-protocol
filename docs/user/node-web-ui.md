@@ -48,7 +48,7 @@ A node you run by hand (`nerve-node run`) serves no web UI.
 
 | Command | Does |
 |---|---|
-| `nerve-node ui token add <label>` | Makes a token and shows it once. A label is 1 to 32 of `a-z`, `0-9` and `-` |
+| `nerve-node ui token add <label>` | Makes a token and shows it once. A label is 1 to 32 of `a-z`, `0-9` and `-`, and does not start with `-` |
 | `nerve-node ui token ls` | Lists the labels and when each was made, never a token |
 | `nerve-node ui token rm <label>` | Revokes a token. The sessions it opened end at once |
 

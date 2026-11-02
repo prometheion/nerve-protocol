@@ -658,6 +658,20 @@ async fn beyond_loopback_the_ui_is_tls_with_its_own_certificate() {
     .await
     .unwrap();
     assert_eq!(a.status, 200);
+    // At a loopback address of the machine by a name that is not loopback
+    // (its own name often resolves to 127.0.1.1) the page still loads.
+    let on_loopback = SocketAddr::new([127, 0, 0, 1].into(), port);
+    let a = https(
+        on_loopback,
+        &pin,
+        "GET",
+        "/",
+        &[("Host", "node.example:7470")],
+        "",
+    )
+    .await
+    .unwrap();
+    assert_eq!(a.status, 200, "{}", a.body);
     // Plain HTTP gets nothing there, and another certificate is refused.
     assert_eq!(http(addr, "GET", "/api/session", &[], "").await.status, 0);
     let other = nerve_transport::tls::ServerIdentity::generate(&[])

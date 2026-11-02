@@ -193,11 +193,22 @@ fn a_loopback_ui_answers_to_its_own_address_and_loopback_names_only() {
     let at = |s: &str| s.parse::<SocketAddr>().unwrap();
     let other = at("127.0.0.2:7470");
     for h in ["127.0.0.2:7470", "localhost:7470", "127.0.0.1:7470"] {
-        assert!(host_allowed(Some(h), other), "{h}");
+        assert!(host_allowed(Some(h), other, false), "{h}");
     }
-    assert!(!host_allowed(Some("evil.example:7470"), other));
-    assert!(!host_allowed(Some("127.0.0.3:7470"), other));
-    assert!(!host_allowed(None, other));
+    assert!(!host_allowed(Some("evil.example:7470"), other, false));
+    assert!(!host_allowed(Some("127.0.0.3:7470"), other, false));
+    assert!(!host_allowed(None, other, false));
     // Beyond loopback any name, the owner's own among them.
-    assert!(host_allowed(Some("node.lan:7470"), at("192.0.2.7:7470")));
+    assert!(host_allowed(
+        Some("node.lan:7470"),
+        at("192.0.2.7:7470"),
+        true
+    ));
+    // Over TLS also at a loopback address of this machine: its own name
+    // resolves to 127.0.1.1 on many systems.
+    assert!(host_allowed(
+        Some("box.lan:7470"),
+        at("127.0.1.1:7470"),
+        true
+    ));
 }
