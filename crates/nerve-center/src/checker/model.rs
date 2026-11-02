@@ -138,7 +138,7 @@ impl ReadBudget {
     }
 
     /// Lands a call of `tokens` that took `ms`, as an answered one does.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn learn(&self, tokens: usize, ms: f64) {
         self.take_off().land(tokens, ms);
     }
