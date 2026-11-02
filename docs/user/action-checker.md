@@ -318,25 +318,34 @@ text generated, so a judgement is fast and cheap. There are two sources:
 There are two local models; the page shows each one's size, licence, speed and
 quality in one line:
 
-| Model | Size | Licence | On a desktop CPU |
-|---|---|---|---|
-| **LiquidAI d1-3B** (the default) | 1.7 GB | LFM Open License v1.0 (not Apache) | Faster: about 2.5 s per call. Catches about 57 % of dangerous actions and 73 % of injection attempts, refuses about 1.7 % of ordinary work |
-| **Kev-4B** (ggml-org) | 3.0 GB | Apache-2.0 | Catches more: about 83 % of dangerous actions and 93 % of injection attempts, refuses about 1.7 % of ordinary work, but about 5 s per call |
+| Model | Size | Memory | Licence | Speed on a desktop CPU, and quality |
+|---|---|---|---|---|
+| **LiquidAI d1-2B** (the default) | 1.1 GB | about 2 GB | LFM Open License v1.0 (not Apache) | Faster: about 2 s per call (5 s on 2 vCPUs). Catches about 55 % of dangerous actions and 73 % of injection attempts, refuses about 1.5 % of ordinary work |
+| **Kev-4B** (ggml-org) | 3.0 GB | about 6 GB, up to 13 GB for a very long call | Apache-2.0 | Catches more: about 80 % of dangerous actions and 93 % of injection attempts, refuses about 1.5 % of ordinary work, but about 5 s per call (15 s on 2 vCPUs) |
 
-Pick d1-3B when the checker should stay quick on a CPU, Kev-4B when catching
-more matters more than a few seconds per call, or when the machine has a GPU.
-Switching the model downloads the other one and removes the first. Each model
-comes with its own default threshold and timeout (d1-3B 0.85 and 6 s, Kev-4B
-0.25 and 15 s, so Kev-4B's normal calls are not cut off); a switch sets them, and you
-can change them afterwards. A threshold and timeout you set before keep their
-values when you update: set the new defaults by hand on the Action checker page, or
-switch to the other model and back. Check that a model's licence suits you before you
-install it.
+Pick d1-2B when the checker should stay quick on a CPU, Kev-4B when catching
+more matters more than a few seconds per call and memory, or when the machine
+has a GPU. Switching the model downloads the other one and removes the first.
+Each model comes with its own default threshold and timeout (d1-2B 0.75 and
+12 s, Kev-4B 0.25 and 15 s, so normal calls on a desktop CPU are not cut off;
+on 2 vCPUs Kev-4B needs a longer one); a switch sets them, and you can change
+them afterwards. Check that a model's
+licence suits you before you install it.
 
-The speeds above are for a desktop CPU. A small machine is much slower (d1-3B
-took about 35 s per call on a 4-core virtual machine); there, raise the timeout,
-use the GPU, or use an endpoint, or the checker refuses every call it cannot
-judge in time.
+d1-2B took the place of d1-3B. A center that had d1-3B reads it as d1-2B after
+the update: d1-3B's default threshold (0.85) and timeout (6 s) become d1-2B's.
+A threshold of your own moves down by the step between the two defaults (0.85
+to 0.75, so 0.6 becomes 0.5), since d1-2B scores the same calls a little
+lower: it refuses at least what it did. A timeout of your own stays. The update
+does not download the new files: until you press **Install** again on the
+Action checker page the model cannot answer, so a call it would see is
+refused (or allowed and logged, if you chose that). The install deletes
+d1-3B's file and the old llama.cpp build.
+
+The speeds above are for a desktop CPU. A small machine is much slower (d1-2B
+took about 22 s per call on a 4-core virtual machine, Windows); there, raise
+the timeout, use the GPU, or use an endpoint, or the checker refuses every
+call it cannot judge in time.
 
 **Settings:**
 

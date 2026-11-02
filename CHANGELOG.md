@@ -70,6 +70,13 @@
 - The guard reads fish (a `fish -c` text, or `machine.shell` set to fish): its `( … )` runs commands, and `and`, `or` and `not` start one. It also reads a shell that runs its input with arguments (`bash -s x <<'EOF'`), `su`, `sudo -s` and `sudo -i` fed by a here-document, `<<` as a shift in `$(( … ))` and `(( … ))`, `coproc`, and zsh's `=( … )`.
 - The guard's command rules are three deny rules now: `guard:node-programs`, `guard:node-paths` and `guard:node-service`, shown so by `rule ls` and the desktop app; the five `fs.write` rules stay. A pairing that holds the former text patterns keeps them working until `rule guard` (or **Update the guard** on **Permissions**, which says they still read commands as text) replaces them with the three. A `guard:` rule on the allow list is refused.
 
+### d1-2B as the action checker's local model ([#178](https://github.com/prometheion/nerve-protocol/issues/178))
+
+- The one-click local model is LiquidAI d1-2B (Q4_K_M, 1.1 GB, LFM Open License v1.0) in place of d1-3B: it catches as much on the evaluation set (55 % of dangerous actions, 73 % of injection attempts, 1.5 % of ordinary work refused, at its default threshold 0.75), in about half the memory (about 2 GB) and in less time (about 2 s per call on a desktop CPU, 5 s on 2 vCPUs). Kev-4B stays the choice that catches more (80 %, 93 %, 1.5 %, threshold 0.25).
+- A center that chose d1-3B reads it as d1-2B: d1-3B's default threshold and timeout become d1-2B's (0.75, 12 s); a threshold of your own moves down by the step between the defaults (0.6 becomes 0.5), since d1-2B scores the same calls lower; a timeout of your own stays. The update does not download the new model: install it again on the Action checker page, until then a call the model would see is refused (or allowed and logged, if you chose that). The install deletes d1-3B's file and the old llama.cpp build.
+- The center pins llama.cpp b11960, the build of llama.cpp's v0.8.0 release, the first that runs d1-2B. Kev-4B scores the same on it.
+- The local model's server gets a bounded context: 12,288 tokens for d1-2B, 8,192 for Kev-4B, which hold the longest state the checker sends. Before, a call whose state was over 512 tokens (a long command, a long write) got no answer and was refused (or allowed and logged), and Kev-4B took 13 GB however short the call; now it takes about 6 GB for an ordinary call.
+
 ## 0.0.6
 
 ### The desktop app

@@ -137,7 +137,7 @@ machine or one, keep allow rules for every machine or one, set the blocklist
 and the model on or off per machine, switch single entries off for one
 machine and write a note on it that `list()` shows the agent (**Per
 machine**), and set up the model (a System One endpoint, or a
-local model the center installs with one click, d1-3B or Kev-4B) with its
+local model the center installs with one click, d1-2B or Kev-4B) with its
 threshold, timeout, question and which calls it sees. It shows the install's
 progress and the local model's state, and names each model's size and
 licence. Taint, which marks a session once a call of it returned content, has

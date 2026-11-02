@@ -121,7 +121,7 @@ In the state folder:
 | `state.json` | Center id and name, paired machines with their public keys and last descriptions, hashed harness tokens, daily statistics, the settings of the [action checker](action-checker.md) |
 | `log.jsonl` | The [log](logs.md): links, pairing, changes, refused and failed calls, the action checker's decisions, errors. `log.jsonl.1` is the older half |
 | `checker-model.token` | The bearer token of the action checker's model endpoint, when you set one (mode 0600) |
-| `checker/` | The action checker's local model, when you installed it: the llama.cpp build and the model file, 1.7 or 3.0 GB |
+| `checker/` | The action checker's local model, when you installed it: the llama.cpp build and the model file, 1.1 or 3.0 GB |
 
 It never stores file contents, command output or arguments. The one secret is
 the endpoint token, which is in a file of its own and not in a
