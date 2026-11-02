@@ -35,6 +35,8 @@ nerve-node relay add lab-pc --address relay.example
 ```
 
 `relay set` makes the relay's certificate the first time and shows its pin.
+The relay's port, 7490, is not the [web UI](node-web-ui.md)'s, 7470, and the
+two have certificates of their own.
 `relay add` makes the node's token and shows it once, in a link that holds
 all the other node needs: the relay's address, the node's name and token,
 and the pin.
