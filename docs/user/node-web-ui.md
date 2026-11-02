@@ -22,6 +22,11 @@ nerve-node ui on
   (`cannot listen on 127.0.0.1:7470: …`).
 - Open the UI after `nerve-node ui status` says `listening`. Until then
   another program could hold the port.
+- On `127.0.0.1` the node holds `[::1]` at the same port too (and on `[::1]`,
+  `127.0.0.1`), so `http://localhost:7470` reaches the node whichever address
+  the browser tries first. If another account has the port at the other
+  address, the UI does not listen and says so; a machine without IPv6 has only
+  the one.
 
 From another machine, keep the UI on loopback and use an SSH tunnel:
 
@@ -76,8 +81,14 @@ one.
 
 **Panic** (on the Overview, or `nerve-node panic`) ends every web UI session
 too. Maybe a browser or a session leaked; a leaked session must not undo the
-panic. To unlock in the UI, log in again with a token, or run
-`nerve-node unlock`.
+panic. A command a session started just before it is stopped, and writes
+nothing after the node is locked. To unlock in the UI, log in again with a
+token, or run `nerve-node unlock`.
+
+A panic stops a leaked session, not a leaked token: whoever holds the token can
+log in again and unlock. If a browser or a machine that kept the token (a
+password manager fills it) is lost, also run `nerve-node ui token rm LABEL`
+(its sessions end at once), or `nerve-node ui off`, and make a new token.
 
 ## Who can reach it
 
@@ -104,9 +115,9 @@ and nothing more.
 | **Overview** | Status, the centers and their links, the root-as-owner warning, **Panic** and **Unlock** |
 | **Centers** | Pair from a pasted link (it goes to the node as the command's input, never in a command line), pause and resume, the settings grant, a new key, remove |
 | **Permissions** | Mode (also for some hours, and as the owner), folders (a whole path), allow, deny and sudo rules, the guard, sudo off |
-| **Audit** | What the node allowed and refused, refused only, Live; **Allow**, **Allow as wildcard** and **Deny** show the rule as it will be stored first, with hidden characters written out |
+| **Audit** | What the node allowed and refused, refused only, Live; **Allow**, **Allow as wildcard** and **Deny** show the rule each one stores, made by the same code as `rule add`, and the list it goes to (the sudo list for a sudo command), with hidden characters written out; a wildcard is wider than the entry (`python3 *` for a `python3` call, the whole folder for a file), and the preview says so |
 | **Log** | Problems only, Live, clear |
-| **Capabilities** | A center's switches (on, off, hidden), your own capabilities, the programs that may add capabilities |
+| **Capabilities** | A center's switches (on, off, hidden), your own capabilities (add, edit and remove, with the same checks as the desktop app's form), the programs that may add capabilities |
 | **Relay** | Connect through a relay, or let other nodes reach this node's centers through it; a new node's link is shown once |
 | **Settings** | The name, the log level, any setting by its name (**Advanced**), and **Web UI**: where it listens and its tokens, with **Revoke** |
 | **Help** | The command reference |

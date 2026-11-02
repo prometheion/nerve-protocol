@@ -1021,11 +1021,15 @@ pub async fn edit_saved(
             if !added_conditions(&old, &cfg).is_empty() {
                 check_conditions(&cap_listing(paths, &old).await?, &old, &cfg)?;
             }
-            let params = json!({
+            let mut params = json!({
                 "config": cfg.to_toml(),
                 "if_version": read["version"],
                 "user": changed_by(),
             });
+            // A page's request that a panic overtook writes nothing.
+            if let Some(n) = crate::owner::web_epoch() {
+                params["web_locks"] = json!(n);
+            }
             match nerve_transport::ctl::call(&sock, "config.write", params).await {
                 Ok(_) => {
                     return Ok(Saved {
@@ -1383,7 +1387,7 @@ impl List {
     /// The rule of an audit entry of `action` (`fs.read`) with `target`, as
     /// the audit buttons of the desktop app and of the center make it
     /// ([`rules::rule_for`]). The sudo list takes sudo commands only.
-    fn action_rule(
+    pub(crate) fn action_rule(
         self,
         action: &str,
         target: &str,

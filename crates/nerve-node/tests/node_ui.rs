@@ -33,6 +33,11 @@ fn uid() -> u32 {
 /// A node in `root` whose owner endpoint is `root/run/owner.sock`, with this
 /// test's account as its owner.
 async fn node(root: &Path) -> (Daemon, PathBuf) {
+    node_running(root, program()).await
+}
+
+/// [`node`], whose owner endpoint runs its commands with `endpoint_program`.
+async fn node_running(root: &Path, endpoint_program: PathBuf) -> (Daemon, PathBuf) {
     let home = std::fs::canonicalize(root).unwrap();
     let paths = NodePaths::new(home.join("config"), home.join("state"));
     let mut o = NodeOptions::new(paths);
@@ -44,7 +49,7 @@ async fn node(root: &Path) -> (Daemon, PathBuf) {
     o.owners = Some(Endpoint {
         at: at.clone(),
         owners: Owners::Uids(vec![uid()]),
-        program: program(),
+        program: endpoint_program,
     });
     (Daemon::start(o).await.unwrap(), at)
 }
@@ -248,7 +253,14 @@ async fn off_listens_on_nothing() {
     assert!(out.contains("the node: listening on 127.0.0.1:"), "{out}");
     let token = token_in(&out);
     let addr = ui_address(&daemon).expect("listening");
-    assert_eq!(own_listeners().len(), 1, "{:?}", own_listeners());
+    // Loopback is held in both families (a machine without IPv6 has one).
+    let held = own_listeners();
+    assert!((1..=2).contains(&held.len()), "{held:?}");
+    assert!(
+        held.iter()
+            .all(|l| l.ends_with(&format!(":{:04X}", addr.port()))),
+        "{held:?}"
+    );
     let session = login(addr, &token).await.unwrap();
     assert_eq!(get(addr, "/api/overview", &session).await.status, 200);
 
@@ -510,6 +522,56 @@ async fn panic_revoke_and_restart_end_the_sessions() {
     daemon.stop().await;
 }
 
+/// A command the page started before a panic does not finish after it: an
+/// unlock that was let in with the session would undo the panic.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_in_flight_does_not_undo_a_panic() {
+    use std::os::unix::fs::PermissionsExt;
+    let _one = SERIAL.lock().await;
+    let d = tempfile::tempdir().unwrap();
+    // The program of the owner socket, slow to start an unlock: the panic
+    // comes while the unlock has not read the config yet.
+    let slow = d.path().join("slow-unlock.sh");
+    std::fs::write(
+        &slow,
+        format!(
+            "#!/bin/sh\ncase \" $* \" in *\" unlock \"*) sleep 2;; esac\nexec {} \"$@\"\n",
+            program().display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (daemon, at) = node_running(d.path(), slow).await;
+    let (out, _) = cli(&at, &["ui", "on", "--listen", "127.0.0.1:0"]).await;
+    let token = token_in(&out);
+    let addr = ui_address(&daemon).unwrap();
+    let session = login(addr, &token).await.unwrap();
+
+    let unlocking = {
+        let session = session.clone();
+        tokio::spawn(async move { post(addr, "/api/unlock", &session, json!({})).await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (out, code) = cli(&at, &["panic"]).await;
+    assert_eq!(code, 0, "{out}");
+    assert!(daemon.config().locked);
+    // The panic ended the session before its own answer.
+    assert_eq!(get(addr, "/api/overview", &session).await.status, 401);
+    let r = unlocking.await.unwrap();
+    // The command was stopped by the panic; the node's refusal of its write
+    // (daemon::tests::a_web_write_that_a_lock_overtook_is_refused) is the
+    // second line behind it.
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert!(r.body.contains("so it was stopped"), "{}", r.body);
+    // The unlock would have written by now.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(
+        daemon.config().locked,
+        "the unlock in flight undid the panic"
+    );
+    daemon.stop().await;
+}
+
 /// A port that is taken is said by `ui on` and `ui status`, and the node
 /// listens once it is free.
 #[tokio::test(flavor = "multi_thread")]
@@ -532,6 +594,48 @@ async fn a_taken_port_is_told() {
         ui_address(&daemon).is_some_and(|a| a.port() == port)
     })
     .await;
+    daemon.stop().await;
+}
+
+/// On `127.0.0.1` the node holds `[::1]` at the same port too, and does not
+/// listen while another account has it: `localhost` would go there.
+#[tokio::test(flavor = "multi_thread")]
+async fn both_loopback_addresses_are_held_or_neither() {
+    let _one = SERIAL.lock().await;
+    let Ok(squatter) = std::net::TcpListener::bind("[::1]:0") else {
+        eprintln!("no IPv6 loopback here; nothing to test");
+        return;
+    };
+    let port = squatter.local_addr().unwrap().port();
+    if std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
+        eprintln!("the port is taken on 127.0.0.1 as well; nothing to test");
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (daemon, at) = node(d.path()).await;
+    let listen = format!("127.0.0.1:{port}");
+    let (out, code) = cli(&at, &["ui", "on", "--listen", &listen]).await;
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains(&format!("cannot listen on {listen}")), "{out}");
+    assert!(out.contains("localhost"), "{out}");
+    assert!(ui_address(&daemon).is_none());
+    // Free there, the node holds both.
+    drop(squatter);
+    wait_until("the node listens once the port is free", || {
+        ui_address(&daemon).is_some_and(|a| a.port() == port)
+    })
+    .await;
+    for host in ["127.0.0.1", "[::1]"] {
+        let r = http(
+            format!("{host}:{port}").parse().unwrap(),
+            "GET",
+            "/login",
+            &[],
+            "",
+        )
+        .await;
+        assert_eq!(r.status, 200, "{host}: {}", r.body);
+    }
     daemon.stop().await;
 }
 
@@ -778,7 +882,15 @@ fn a_command_from_the_web_may_not_change_the_web_ui() {
 
 /// A node with its UI on, and a session of it.
 async fn signed_in(root: &Path) -> (Daemon, PathBuf, SocketAddr, String) {
-    let (daemon, at) = node(root).await;
+    signed_in_running(root, program()).await
+}
+
+/// [`signed_in`], whose owner endpoint runs its commands with `endpoint_program`.
+async fn signed_in_running(
+    root: &Path,
+    endpoint_program: PathBuf,
+) -> (Daemon, PathBuf, SocketAddr, String) {
+    let (daemon, at) = node_running(root, endpoint_program).await;
     let (out, code) = cli(&at, &["ui", "on", "--listen", "127.0.0.1:0"]).await;
     assert_eq!(code, 0, "{out}");
     let addr = ui_address(&daemon).unwrap();
@@ -1039,6 +1151,156 @@ fn the_pairing_link_comes_from_stdin_when_asked() {
     assert_eq!(code, 2, "not both: {out}");
 }
 
+/// The routes the other tests do not drive: each builds its one command, and
+/// the proxy's password goes on the command's input, never in its arguments.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_remaining_routes_build_their_commands_and_keep_secrets_off_the_command_line() {
+    use std::os::unix::fs::PermissionsExt;
+    let _one = SERIAL.lock().await;
+    let d = tempfile::tempdir().unwrap();
+    // The program of the owner socket, noting every command line, and for a
+    // `proxy set` its input.
+    let (log, input) = (d.path().join("argv.log"), d.path().join("proxy.in"));
+    let wrapper = d.path().join("noting.sh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> {log}\ncase \" $* \" in\n *\" proxy set \"*) tee {input} | {real} \"$@\";;\n *) exec {real} \"$@\";;\nesac\n",
+            log = log.display(),
+            input = input.display(),
+            real = program().display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (daemon, at, addr, s) = signed_in_running(d.path(), wrapper).await;
+    // The proxy's login is kept in a file of the node's, not a keyring this
+    // machine may not have.
+    let (out, code) = cli(
+        &at,
+        &["config", "set", "machine.secret_storage", "\"file\""],
+    )
+    .await;
+    assert_eq!(code, 0, "{out}");
+    let center = nerve_conformance::fake_center::FakeCenter::start(true)
+        .await
+        .unwrap();
+    change(
+        addr,
+        &s,
+        "/api/centers/pair",
+        json!({ "link": center.link().render(), "name": "lab" }),
+    )
+    .await;
+
+    // The proxy: its password on the input.
+    change(
+        addr,
+        &s,
+        "/api/proxy/set",
+        json!({"url": "https://alice@127.0.0.1:3128", "pin": "A".repeat(43), "password": "pw-0123456789"}),
+    )
+    .await;
+    assert!(daemon.config().connection.proxy.is_some());
+    let said = std::fs::read_to_string(&log).unwrap();
+    let line = said.lines().find(|l| l.contains("proxy set")).unwrap();
+    assert!(line.contains("--password-stdin"), "{line}");
+    assert!(!said.contains("pw-0123456789"), "{said}");
+    assert_eq!(std::fs::read_to_string(&input).unwrap(), "pw-0123456789\n");
+    let a = post(addr, "/api/proxy/set", &s, json!({"url": "--pin=x"})).await;
+    assert_eq!(a.status, 400, "{}", a.body);
+    change(addr, &s, "/api/proxy/remove", json!({})).await;
+    assert!(daemon.config().connection.proxy.is_none());
+
+    // A node of the relay gets a new token.
+    change(
+        addr,
+        &s,
+        "/api/relay/set",
+        json!({"address": "127.0.0.1:0"}),
+    )
+    .await;
+    change(addr, &s, "/api/relay/add", json!({"name": "lab-pc"})).await;
+    let before = daemon
+        .config()
+        .relay
+        .node("lab-pc")
+        .unwrap()
+        .token_sha256
+        .clone();
+    let v = change(addr, &s, "/api/relay/token", json!({"name": "lab-pc"})).await;
+    assert!(
+        v["token"]["link"]
+            .as_str()
+            .unwrap()
+            .starts_with("nerve://relay?"),
+        "{v}"
+    );
+    assert_ne!(
+        daemon.config().relay.node("lab-pc").unwrap().token_sha256,
+        before
+    );
+    assert_eq!(
+        post(addr, "/api/relay/token", &s, json!({"name": "-x"}))
+            .await
+            .status,
+        400
+    );
+
+    // A center's guard: a pairing has it, and the page puts back a rule that
+    // was taken away.
+    let guard_rule = daemon.config().center("lab").unwrap().policy.deny[0].clone();
+    let a = post(addr, "/api/rules/guard", &s, json!({"center": "lab"})).await;
+    assert_eq!(a.status, 400, "the guard is there already: {}", a.body);
+    change(
+        addr,
+        &s,
+        "/api/rules/remove",
+        json!({"center": "lab", "list": "deny", "rule": guard_rule}),
+    )
+    .await;
+    assert!(
+        !daemon
+            .config()
+            .center("lab")
+            .unwrap()
+            .policy
+            .deny
+            .contains(&guard_rule)
+    );
+    change(addr, &s, "/api/rules/guard", json!({"center": "lab"})).await;
+    assert!(
+        daemon
+            .config()
+            .center("lab")
+            .unwrap()
+            .policy
+            .deny
+            .contains(&guard_rule)
+    );
+    // The sudo list is closed, a setting taken away, a key rotated.
+    change(addr, &s, "/api/sudo/off", json!({})).await;
+    change(
+        addr,
+        &s,
+        "/api/settings/set",
+        json!({"key": "node.name", "value": "\"lab-1\""}),
+    )
+    .await;
+    change(addr, &s, "/api/settings/unset", json!({"key": "node.name"})).await;
+    assert!(daemon.config().node.name.is_none());
+    let a = post(addr, "/api/settings/unset", &s, json!({"key": "ui.listen"})).await;
+    assert_eq!(a.status, 400, "{}", a.body);
+    let a = post(addr, "/api/centers/rotate", &s, json!({"center": "lab"})).await;
+    let said = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        said.contains("center rotate-key --center=lab") || said.contains("center rotate-key lab"),
+        "{said}\n{}",
+        a.body
+    );
+    daemon.stop().await;
+}
+
 /// The Capabilities, Relay, Settings and Help pages: each change one
 /// command of the CLI; what stays root's, and the web UI's own settings,
 /// are refused.
@@ -1080,6 +1342,26 @@ async fn the_capabilities_relay_settings_and_help_pages_change_the_node() {
     )
     .await;
     assert_eq!(daemon.config().capabilities[0].name, "notes.count");
+    // The page edits it: the listing gives the form it fills, and a save
+    // that is no adding changes the capability.
+    let v = get(addr, "/api/caps?center=lab", &s).await.json();
+    let mut form = v["config"][0]["form"].clone();
+    assert_eq!(form["name"], "notes.count", "{v}");
+    assert_eq!(form["command"], "ls /tmp");
+    form["command"] = json!("ls /var/tmp");
+    form["timeout"] = json!("30");
+    form["effect"] = json!("write");
+    change(
+        addr,
+        &s,
+        "/api/caps/save",
+        json!({"adding": false, "form": form}),
+    )
+    .await;
+    let own = daemon.config().capabilities[0].clone();
+    assert_eq!(own.command, ["ls", "/var/tmp"]);
+    assert_eq!(own.timeout_secs, Some(30));
+    assert_eq!(daemon.config().capabilities.len(), 1);
     // The form is checked as the desktop's dialog checks it.
     let bad =
         json!({"name": "", "summary": "", "effect": "read", "command": "", "platform": "any"});

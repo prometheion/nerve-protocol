@@ -993,7 +993,12 @@ impl Shared {
 
     pub fn bump(&self) {
         self.changed.send_modify(|v| *v += 1);
-        self.tell_confinement(&self.config());
+        let cfg = self.config();
+        // Before the writer is answered: a panic has ended the web UI's
+        // sessions and stopped their commands when the CLI prints it.
+        #[cfg(target_os = "linux")]
+        self.webui.settle(&cfg);
+        self.tell_confinement(&cfg);
     }
 
     /// Reads the config file again because the owner asked (SIGHUP, the
@@ -2325,6 +2330,19 @@ pub(crate) fn control(
             // reads them (crate::link).
             let taken = shared.taken();
             let mut store = lock(&shared.store);
+            // A command of the web UI whose request began before the node
+            // was locked writes nothing after it. Checked under the store's
+            // lock, where a lock is counted ([`crate::webui::WebUi::settle`]
+            // below), so no write falls between.
+            #[cfg(target_os = "linux")]
+            if let Some(n) = params.get("web_locks").and_then(Value::as_u64)
+                && n != shared.webui.lock_count()
+            {
+                return Reply::Err(
+                    "the node was locked while the web UI's request ran; nothing was changed"
+                        .into(),
+                );
+            }
             if new.machine.sudo != store.config().machine.sudo {
                 return Reply::Err(
                     "machine.sudo changes only through nerve-node sudo on|off".into(),
@@ -2364,6 +2382,12 @@ pub(crate) fn control(
             store.set_user(str_of("user"));
             let r = store.set_local(new, if_version);
             store.set_user(None);
+            // A lock ends the web UI's sessions and counts, before another
+            // write can be checked against the count.
+            #[cfg(target_os = "linux")]
+            if r.is_ok() {
+                shared.webui.settle(store.config());
+            }
             drop(store);
             match r {
                 Ok(v) => {
@@ -3001,6 +3025,50 @@ mod tests {
         let mut o = options(&d, &log);
         o.full_rights = Some(false);
         Daemon::start(o).await.unwrap().stop().await;
+    }
+
+    /// A write of the config by a command of the web UI whose request began
+    /// before the node was locked is refused, whatever the order of the
+    /// processes: it must not undo the lock. One that began after it, as an
+    /// unlock from a new login does, goes through.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_web_write_that_a_lock_overtook_is_refused() {
+        use nerve_transport::ctl::Reply;
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let mut o = options(&d, &log);
+        o.full_rights = Some(false);
+        let daemon = Daemon::start(o).await.unwrap();
+        let s = daemon.shared.clone();
+        let write = |locked: bool, web_locks: Option<u64>| {
+            let Reply::Ok(v) = control(&s, "config.read", json!({}), None) else {
+                panic!("config.read failed")
+            };
+            let mut cfg = NodeConfig::parse(v["config"].as_str().unwrap()).unwrap();
+            cfg.locked = locked;
+            let mut params = json!({"config": cfg.to_toml(), "if_version": v["version"]});
+            if let Some(n) = web_locks {
+                params["web_locks"] = json!(n);
+            }
+            control(&s, "config.write", params, None)
+        };
+        let before = s.webui.lock_count();
+        assert!(matches!(write(false, Some(before)), Reply::Ok(_)));
+        // The panic.
+        assert!(matches!(write(true, None), Reply::Ok(_)));
+        assert!(daemon.config().locked);
+        assert_eq!(s.webui.lock_count(), before + 1);
+        // An unlock that began before it.
+        let Reply::Err(why) = write(false, Some(before)) else {
+            panic!("a write from before the lock went through")
+        };
+        assert!(why.contains("was locked"), "{why}");
+        assert!(daemon.config().locked);
+        // One that began after it.
+        assert!(matches!(write(false, Some(before + 1)), Reply::Ok(_)));
+        assert!(!daemon.config().locked);
+        daemon.stop().await;
     }
 
     /// With the keys moved into the keyring where Landlock cannot keep a

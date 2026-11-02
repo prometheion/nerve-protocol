@@ -67,6 +67,20 @@ pub fn via_web() -> bool {
     owner_running().is_some() && std::env::var(VIA_ENV).is_ok_and(|v| v == "web")
 }
 
+/// Set by the node, for a command from the web UI, to how many times the
+/// node was locked when the page's request began. The node refuses the
+/// command's write of the config when that has changed since: a request
+/// that a panic overtook must not write after it (an unlock would undo it).
+pub const EPOCH_ENV: &str = "NERVE_OWNER_LOCKS";
+
+/// The count [`EPOCH_ENV`] names, for a command from the web UI.
+pub fn web_epoch() -> Option<u64> {
+    if !via_web() {
+        return None;
+    }
+    std::env::var(EPOCH_ENV).ok()?.parse().ok()
+}
+
 /// Why a command from the web UI may not change the web UI.
 pub const NOT_FROM_THE_WEB: &str =
     "the web UI's own settings change only at the CLI: run `nerve-node ui …` in a terminal";
@@ -1279,6 +1293,7 @@ async fn run_for(
         cwd: params["cwd"].as_str().map(PathBuf::from),
         terminal: params["terminal"] == true,
         web,
+        epoch: params["locks"].as_u64().filter(|_| web),
         handed,
         backup,
         out: out_tx,
@@ -1319,7 +1334,10 @@ const WEB_OUTPUT_MAX: usize = 4 * 1024 * 1024;
 /// Runs `args` for the owner `who` as the owner socket does, asked in the
 /// web UI: with every check of [`run_for`], no working folder, and no
 /// terminal. `input` is the command's whole input (a secret goes there,
-/// never in `args`). The web UI is Linux's alone.
+/// never in `args`). The command is stopped, and this gives an error, when
+/// `locked` changes: the node was locked meanwhile (`panic` itself runs
+/// with none). The web UI is Linux's
+/// alone.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) async fn run_for_web(
     shared: &std::sync::Arc<crate::daemon::Shared>,
@@ -1327,9 +1345,11 @@ pub(crate) async fn run_for_web(
     who: &str,
     args: &[String],
     input: Option<&str>,
+    mut locked: Option<tokio::sync::watch::Receiver<u64>>,
+    locks: Option<u64>,
 ) -> Result<Ran, String> {
     use nerve_transport::ctl::Reply;
-    let params = json!({ "args": args });
+    let params = json!({ "args": args, "locks": locks });
     match run_for(shared, program, who, &params, Handed::None, true).await {
         Reply::Session {
             mut out, inbound, ..
@@ -1339,7 +1359,16 @@ pub(crate) async fn run_for_web(
             }
             let _ = inbound.send(json!({ "eof": true })).await;
             let mut ran = Ran::default();
-            while let Some(v) = out.recv().await {
+            loop {
+                // Dropping the command's input ends it, and the program
+                // with it.
+                let next = tokio::select! {
+                    v = out.recv() => v,
+                    () = locked_meanwhile(&mut locked) => {
+                        return Err("the node was locked while the command ran, so it was stopped".into());
+                    }
+                };
+                let Some(v) = next else { break };
                 let room = |s: &String| s.len() < WEB_OUTPUT_MAX;
                 if let Some(t) = v["out"].as_str() {
                     if room(&ran.out) {
@@ -1361,6 +1390,17 @@ pub(crate) async fn run_for_web(
         Reply::Err(e) => Err(e),
         _ => Err("the node answered no command".into()),
     }
+}
+
+/// Resolves when `locked` changes; never when there is none.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+async fn locked_meanwhile(locked: &mut Option<tokio::sync::watch::Receiver<u64>>) {
+    if let Some(w) = locked
+        && w.changed().await.is_ok()
+    {
+        return;
+    }
+    std::future::pending().await
 }
 
 /// Whether `cmd` only reads: it changes nothing of the node.
@@ -1413,6 +1453,9 @@ struct Job {
     terminal: bool,
     /// The owner asked in the web UI ([`VIA_ENV`]).
     web: bool,
+    /// How many times the node was locked when the web UI's request began
+    /// ([`EPOCH_ENV`]).
+    epoch: Option<u64>,
     handed: Handed,
     /// A backup, whose streamed file goes back to the caller.
     backup: bool,
@@ -1432,6 +1475,7 @@ async fn command(job: Job) {
         cwd,
         terminal,
         web,
+        epoch,
         handed,
         backup,
         out,
@@ -1476,6 +1520,9 @@ async fn command(job: Job) {
     }
     if web {
         env.push((VIA_ENV, "web".into()));
+    }
+    if let Some(n) = epoch {
+        env.push((EPOCH_ENV, n.to_string()));
     }
     #[cfg(unix)]
     let fd = match handed {
@@ -1599,6 +1646,7 @@ fn spawn<F: HandedFd>(
             .env_remove(crate::caller_file::OWNER_FILE_ENV)
             .env_remove(TERMINAL_ENV)
             .env_remove(VIA_ENV)
+            .env_remove(EPOCH_ENV)
             .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())

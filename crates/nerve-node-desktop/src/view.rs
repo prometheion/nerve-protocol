@@ -159,6 +159,20 @@ fn limits_line(why: &str) -> (String, bool) {
     )
 }
 
+/// The command of a pairing, and what goes on its input: the link holds the
+/// pairing code, so it is read from the input (`--link-stdin`) and is not in
+/// the list of processes. Without `yes` the command only previews.
+pub fn pair_command(link: &str, name: &str, yes: bool) -> (Vec<String>, String) {
+    let mut args = vec!["center".to_string(), "add".into(), "--link-stdin".into()];
+    if !name.trim().is_empty() {
+        args.push(format!("--name={}", name.trim()));
+    }
+    if yes {
+        args.push("--yes".into());
+    }
+    (args, link.trim().to_string())
+}
+
 /// The check before a pairing (`center add --json` without `--yes`), in the
 /// app's words: whether Pair can work, and why not.
 pub fn pair_preview(v: &Value) -> PairPreview {
@@ -1648,6 +1662,20 @@ pub fn rule_args(e: &Value, list: &str, wildcard: bool) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_pairing_link_goes_on_the_input_and_not_in_the_arguments() {
+        let link = "nerve://pair?center=https%3A%2F%2Fc.example&code=SECRETCODE&pin=x";
+        let (args, input) = super::pair_command(&format!("  {link}\n"), " lab ", true);
+        assert_eq!(
+            args,
+            ["center", "add", "--link-stdin", "--name=lab", "--yes"]
+        );
+        assert_eq!(input, link);
+        assert!(!args.iter().any(|a| a.contains("SECRETCODE")), "{args:?}");
+        let (args, _) = super::pair_command(link, "", false);
+        assert_eq!(args, ["center", "add", "--link-stdin"]);
+    }
+
     /// A pairing from before the guard read commands is told its guard is of
     /// the older kind, not that it has none.
     #[test]

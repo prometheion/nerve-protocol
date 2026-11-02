@@ -13,13 +13,14 @@ use serde_json::{Value, json};
 use nerve_policy::audit::AuditLog;
 use nerve_transport::http::Request;
 
-use super::{ApiResult, Ctx, command, text};
+use super::{ApiResult, Call, command, text};
+use crate::cli::List;
 
 /// The newest entries a page gets of the audit or the log.
 const NEWEST: usize = 500;
 
 /// The routes of this module, or `None` for a path it does not have.
-pub(super) async fn api(ctx: &Ctx, req: &Request, b: &Value) -> Option<ApiResult> {
+pub(super) async fn api(ctx: &Call<'_>, req: &Request, b: &Value) -> Option<ApiResult> {
     let query = req;
     Some(match (req.method.as_str(), req.path.as_str()) {
         // ---- Centers ----
@@ -152,8 +153,10 @@ pub(super) async fn api(ctx: &Ctx, req: &Request, b: &Value) -> Option<ApiResult
             Some(c) if !nerve_policy::config::valid_center_name(&c) => {
                 Err((400, format!("{c:?} is not a center name")))
             }
-            Some(c) => command(ctx, &["cap", "ls", &format!("--center={c}")], None).await,
-            None => command(ctx, &["cap", "ls"], None).await,
+            Some(c) => command(ctx, &["cap", "ls", &format!("--center={c}")], None)
+                .await
+                .map(with_forms),
+            None => command(ctx, &["cap", "ls"], None).await.map(with_forms),
         },
         ("POST", "/api/caps/set") => match (center(b), name(b, "cap"), word(b, "setting")) {
             (Ok(c), Ok(cap), Ok(setting)) => {
@@ -284,13 +287,23 @@ pub(super) async fn api(ctx: &Ctx, req: &Request, b: &Value) -> Option<ApiResult
     })
 }
 
+/// `cap ls` with the form each capability of your own fills when it is edited.
+fn with_forms(mut listing: Value) -> Value {
+    if let Some(own) = listing["config"].as_array_mut() {
+        for entry in own {
+            entry["form"] = json!(nerve_policy::config::form::of_entry(entry));
+        }
+    }
+    listing
+}
+
 /// Whether the query of `req` sets `key` to 1.
 fn flag(req: &Request, key: &str) -> bool {
     req.query_param(key).as_deref() == Some("1")
 }
 
 /// Runs `a` (an argument list built here) as [`command`] does.
-async fn run(ctx: &Ctx, a: Vec<String>, input: Option<&str>) -> ApiResult {
+async fn run(ctx: &Call<'_>, a: Vec<String>, input: Option<&str>) -> ApiResult {
     let refs: Vec<&str> = a.iter().map(String::as_str).collect();
     command(ctx, &refs, input).await
 }
@@ -307,7 +320,7 @@ pub(super) fn args(words: &[&str], opts: &[(&str, &str)], values: &[&str]) -> Ve
 }
 
 /// A command on one center of the body's.
-async fn on_center(ctx: &Ctx, b: &Value, words: &[&str]) -> ApiResult {
+async fn on_center(ctx: &Call<'_>, b: &Value, words: &[&str]) -> ApiResult {
     let c = center(b)?;
     run(ctx, args(words, &[("center", c)], &[]), None).await
 }
@@ -485,7 +498,7 @@ pub(super) fn rule_add(c: &str, list: &str, rule: &str, wildcard: bool) -> Vec<S
 
 /// What the Permissions page shows of one center: its rules, its folders
 /// and the sudo switch, as the CLI lists them.
-async fn perm(ctx: &Ctx, q: &Request) -> ApiResult {
+async fn perm(ctx: &Call<'_>, q: &Request) -> ApiResult {
     let c = q.query_param("center").unwrap_or_default();
     if !nerve_policy::config::valid_center_name(&c) {
         return Err((400, "center is missing".into()));
@@ -521,6 +534,7 @@ fn audit(file: &Path, denied: bool) -> ApiResult {
     for e in &mut entries {
         if let Some(p) = rule_preview(e) {
             e["rule_preview"] = json!(p);
+            e["rules"] = rules_of(e);
         }
     }
     Ok(json!({ "entries": entries }))
@@ -628,6 +642,50 @@ fn rule_preview(e: &Value) -> Option<String> {
     Some(visible(&format!("{cap}.{action}:{target}")))
 }
 
+/// The rule each button of an audit entry stores, and the list it goes to,
+/// made by the code `rule add` stores it with: `allow`, `wildcard` (the
+/// allow list, widened) and `deny`. A button whose rule cannot be made
+/// holds the reason instead.
+fn rules_of(e: &Value) -> Value {
+    let target = e["target"].as_str().unwrap_or_default();
+    let (cap, action) = (
+        e["cap"].as_str().unwrap_or_default(),
+        e["action"].as_str().unwrap_or_default(),
+    );
+    let one = |deny: bool, wildcard: bool| {
+        let list = list_of(cap, action, target, deny);
+        match list.action_rule(&format!("{cap}.{action}"), target, wildcard, None) {
+            Ok(rule) => json!({ "list": list_word(list), "rule": visible(&rule) }),
+            Err(why) => json!({ "error": why }),
+        }
+    };
+    json!({
+        "allow": one(false, false),
+        "wildcard": one(false, true),
+        "deny": one(true, false),
+    })
+}
+
+/// The list an audit button adds to: the deny list, else the sudo list for
+/// a sudo command, else the allow list.
+fn list_of(cap: &str, action: &str, target: &str, deny: bool) -> List {
+    if deny {
+        List::Deny
+    } else if cap == "exec" && action == "run" && nerve_policy::sudo_command(target).is_some() {
+        List::Sudo
+    } else {
+        List::Allow
+    }
+}
+
+fn list_word(list: List) -> &'static str {
+    match list {
+        List::Allow => "allow",
+        List::Deny => "deny",
+        List::Sudo => "sudo",
+    }
+}
+
 /// `text` with every character that would hide what it says written out:
 /// tabs and line breaks as `rule ls` writes them, any other control or
 /// direction mark as `\u{…}`.
@@ -662,15 +720,7 @@ fn audit_rule(b: &Value) -> Result<Vec<String>, (u16, String)> {
             "the target was cut to its start, so no rule can name it".into(),
         ));
     }
-    let deny = b["list"] == "deny";
-    let sudo = cap == "exec" && action == "run" && nerve_policy::sudo_command(target).is_some();
-    let list = if deny {
-        "deny"
-    } else if sudo {
-        "sudo"
-    } else {
-        "allow"
-    };
+    let list = list_word(list_of(cap, action, target, b["list"] == "deny"));
     let scope = format!("{cap}.{action}");
     let mut opts = vec![("action", scope.as_str()), ("center", c)];
     let pin = b["pin"].as_str().filter(|p| !p.is_empty());
@@ -794,6 +844,39 @@ mod tests {
             "fs.read:/etc/\\u{202e}x\\u{7}"
         );
         assert!(audit_rule(&json!({"center": "home", "cap": "exec", "action": "run"})).is_err());
+    }
+
+    /// The preview of each button is the rule `rule add` stores for it, the
+    /// wildcard's included, and the list it goes to.
+    #[test]
+    fn each_audit_button_shows_the_rule_it_stores() {
+        let entry = |cap: &str, action: &str, target: &str| {
+            let e = json!({"center": "home", "cap": cap, "action": action, "target": target});
+            rules_of(&e)
+        };
+        let r = entry("exec", "run", "python3 -c 'print(1)'");
+        assert_eq!(r["allow"]["rule"], "exec.run:python3 -c 'print(1)'");
+        assert_eq!(r["wildcard"]["rule"], "exec.run:python3 *");
+        assert_eq!(r["deny"]["rule"], "exec.run:python3 -c 'print(1)'");
+        assert_eq!(r["wildcard"]["list"], "allow");
+        assert_eq!(r["deny"]["list"], "deny");
+        let r = entry("fs", "read", "/home/o/notes/todo.txt");
+        assert_eq!(r["allow"]["rule"], "fs.read:/home/o/notes/todo.txt");
+        assert_eq!(r["wildcard"]["rule"], "fs.read:/home/o/notes/*");
+        // An action without a target pattern: the wildcard is its whole capability.
+        let r = entry("sensors", "read", "temp");
+        assert_eq!(r["allow"]["rule"], "sensors.read");
+        assert_eq!(r["wildcard"]["rule"], "sensors");
+        // A sudo command goes on the sudo list; its wildcard keeps the program.
+        let r = entry("exec", "run", "sudo -n apt install x");
+        assert_eq!(r["allow"]["list"], "sudo");
+        assert_eq!(r["wildcard"]["list"], "sudo");
+        assert_eq!(r["wildcard"]["rule"], "sudo -n apt *");
+        assert_eq!(r["deny"]["list"], "deny");
+        // A rule that cannot be made says why, and has no rule to show.
+        let r = entry("fs", "read", "relative/path");
+        assert!(r["allow"]["error"].is_string(), "{r}");
+        assert!(r["allow"]["rule"].is_null());
     }
 
     #[test]

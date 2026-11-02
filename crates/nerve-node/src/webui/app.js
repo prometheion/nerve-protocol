@@ -30,7 +30,7 @@ const LOADS = {
 let lastSig = null;
 let busy = false;
 let down = false;
-const state = { overview: null, ui: null, perm: null, permCenter: null, audit: null, log: null, preview: null, caps: null, relay: null, settings: null, help: null, shown: null };
+const state = { overview: null, ui: null, perm: null, permCenter: null, audit: null, log: null, preview: null, caps: null, relay: null, settings: null, help: null, shown: null, editing: null };
 // The Audit and Log pages ask again every two seconds while Live is on.
 const filters = { auditDenied: false, auditLive: true, logProblems: false, logLive: true };
 
@@ -250,10 +250,15 @@ function pageAudit() {
 function auditRow(e) {
   const refused = e.decision === "forbidden" || e.event === "refused";
   const what = [e.cap, e.action].filter(Boolean).join(".");
-  const add = (list, wildcard) => act(async () => {
-    const yes = await modal({ title: `Add to the ${list === "deny" ? "deny" : "allow"} list?`, message: `For ${e.center}, as it will be stored: ${e.rule_preview}${wildcard ? " (and anything after it)" : ""}`, confirm: "Add" });
-    if (yes) await api("POST", "/api/audit/rule", { center: e.center, cap: e.cap, action: e.action, target: e.target, list, wildcard });
+  // What a button stores and where, as the node makes it (not as it is shown above).
+  const add = (kind) => act(async () => {
+    const r = e.rules[kind];
+    const lists = { allow: "allow", deny: "deny", sudo: "sudo allow" };
+    const yes = await modal({ title: `Add to the ${lists[r.list]} list?`, message: `For ${e.center}, as it will be stored: ${r.rule}`, confirm: "Add" });
+    if (yes) await api("POST", "/api/audit/rule", { center: e.center, cap: e.cap, action: e.action, target: e.target, list: kind === "deny" ? "deny" : "allow", wildcard: kind === "wildcard" });
   });
+  const button = (kind, label, cls, icon) => e.rules && e.rules[kind] && e.rules[kind].rule
+    ? btn(label, cls, add(kind), icon, `audit:${e.ts}:${e.seq}:${kind}`) : null;
   return el("div", { class: "card" },
     el("div", { class: "card-top" }, itile(refused ? "ban" : "ok", refused ? "warn" : "ok"),
       el("span", { class: "name" }, what || e.event || "entry"), e.center ? pill("", e.center) : null,
@@ -261,9 +266,9 @@ function auditRow(e) {
     e.target ? el("p", { class: "mono" }, e.rule_preview || e.target) : null,
     e.reason ? el("p", { class: "meta" }, e.reason) : null,
     e.rule_preview && e.center ? el("div", { class: "actions" },
-      btn("Allow", "ghost", add("allow", false), "ok", `audit:${e.ts}:${e.seq}:allow`),
-      btn("Allow as wildcard", "ghost", add("allow", true), "ok", `audit:${e.ts}:${e.seq}:wild`),
-      btn("Deny", "danger-soft", add("deny", false), "ban", `audit:${e.ts}:${e.seq}:deny`)) : null);
+      button("allow", "Allow", "ghost", "ok"),
+      button("wildcard", "Allow as wildcard", "ghost", "ok"),
+      button("deny", "Deny", "danger-soft", "ban")) : null);
 }
 
 // ---- Log ----
@@ -310,11 +315,13 @@ function pageCaps() {
     section("Your capabilities", "Actions of your own, each one fixed command, declared in node.toml.", null,
       (v.config || []).length ? el("div", { class: "stack" }, v.config.map((d) => el("div", { class: "card" },
         el("div", { class: "card-top" }, icon("terminal"), el("span", { class: "name mono" }, d.name), el("span", { class: "meta" }, d.summary || ""),
-          btn("Remove", "danger-soft push", act(async () => {
-            const yes = await modal({ title: `Remove ${d.name}?`, confirm: "Remove", danger: true });
-            if (yes) await api("POST", "/api/caps/remove", { name: d.name }).then(loadCaps);
-          }), "trash", `own:${d.name}:remove`))))) : empty("None yet.", "terminal"),
-      capForm()),
+          el("span", { class: "push" },
+            btn("Edit", "ghost", () => { state.editing = d.name; draw(true); }, "edit", `own:${d.name}:edit`),
+            btn("Remove", "danger-soft", act(async () => {
+              const yes = await modal({ title: `Remove ${d.name}?`, confirm: "Remove", danger: true });
+              if (yes) await api("POST", "/api/caps/remove", { name: d.name }).then(loadCaps);
+            }), "trash", `own:${d.name}:remove`))))) : empty("None yet.", "terminal"),
+      capForm((v.config || []).find((d) => d.name === state.editing))),
     section("Programs", "Local programs that may add capabilities to the node.", null,
       (v.programs || []).length ? el("div", { class: "stack" }, v.programs.map((p) => el("div", { class: "card" },
         el("div", { class: "card-top" }, icon("bot"), el("span", { class: "name" }, p.name), el("span", { class: "meta mono" }, p.exe || ""),
@@ -328,18 +335,35 @@ function field(label, attrs) {
   return [input, el("label", { class: "field" }, el("span", { class: "label" }, label), input)];
 }
 
-function capForm() {
-  const [name, nameF] = field("Name", { placeholder: "backup.run" });
-  const [summary, summaryF] = field("What it does", { placeholder: "Backs up my notes." });
-  const [command, commandF] = field("Command", { placeholder: "restic backup /home/you/notes" });
-  let effect = "read";
-  const effects = ["read", "write", "act"];
+function area(label, attrs) {
+  const input = el("textarea", Object.assign({ class: "json", rows: "4", spellcheck: "false" }, attrs));
+  return [input, el("label", { class: "field" }, el("span", { class: "label" }, label), input)];
+}
+
+// One form to add a capability of your own or, with `entry`, to edit it.
+// The node checks it again, and says which field is wrong.
+function capForm(entry) {
+  const f = entry ? entry.form : { name: "", summary: "", command: "", effect: "read", params: "", result: "", timeout: "", platform: "any" };
+  const [name, nameF] = field("Name", { placeholder: "backup.run", value: f.name, disabled: !!entry });
+  const [summary, summaryF] = field("What it does", { placeholder: "Backs up my notes.", value: f.summary });
+  const [command, commandF] = field("Command", { placeholder: "restic backup /home/you/notes", value: f.command });
+  const [params, paramsF] = area("Arguments (JSON schema, optional)", { value: f.params });
+  const [result, resultF] = area("Result (JSON schema, optional; empty is plain text)", { value: f.result });
+  const [timeout, timeoutF] = field("Timeout in seconds (empty: the node's default)", { value: f.timeout });
+  let effect = f.effect;
+  const effects = ["read", "write", "execute", "sense", "actuate"];
+  let platform = f.platform;
+  const platforms = ["any", "linux", "windows"];
   return el("div", { class: "card" }, nameF, summaryF, commandF,
-    segmented("Effect", effects, 0, (i) => { effect = effects[i]; }),
-    el("div", { class: "actions" }, btn("Add", "primary", act(async () => {
-      await api("POST", "/api/caps/save", { adding: true, form: { name: name.value, summary: summary.value, command: command.value, effect, platform: "any" } });
+    segmented("Effect", effects, Math.max(0, effects.indexOf(effect)), (i) => { effect = effects[i]; }),
+    paramsF, resultF, timeoutF,
+    segmented("Runs on", platforms, Math.max(0, platforms.indexOf(platform)), (i) => { platform = platforms[i]; }),
+    el("div", { class: "actions" }, btn(entry ? "Save" : "Add", "primary", act(async () => {
+      await api("POST", "/api/caps/save", { adding: !entry, form: { name: name.value, summary: summary.value, command: command.value, effect, params: params.value, result: result.value, timeout: timeout.value, platform } });
+      state.editing = null;
       await loadCaps();
-    }), "plus", "own:add")));
+    }), entry ? "check" : "plus", entry ? `own:${f.name}:save` : "own:add"),
+    entry ? btn("Cancel", "ghost", () => { state.editing = null; draw(true); }, "x", `own:${f.name}:cancel`) : null));
 }
 
 function programForm() {

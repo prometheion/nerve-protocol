@@ -101,6 +101,17 @@ fn plain(a: SocketAddr) -> SocketAddr {
     }
 }
 
+/// Whether two socket addresses are one, whatever interface a link-local
+/// IPv6 address is scoped to: a peer from `accept` names it, an entry of the
+/// kernel's tables does not.
+fn same(a: SocketAddr, b: SocketAddr) -> bool {
+    let bare = |a: SocketAddr| match plain(a) {
+        SocketAddr::V6(v6) => SocketAddr::new(IpAddr::V6(*v6.ip()), v6.port()),
+        v4 => v4,
+    };
+    bare(a) == bare(b)
+}
+
 /// Judges the peer `peer` of a connection to `local` by the table
 /// `entries`. `allowed` are the accounts let in, `own` this machine's
 /// addresses.
@@ -117,7 +128,7 @@ pub(crate) fn judge(
     // alone, which would also find this node's end of the connection.
     let found: Vec<&Entry> = entries
         .iter()
-        .filter(|e| plain(e.local) == peer && plain(e.remote) == local)
+        .filter(|e| same(e.local, peer) && same(e.remote, local))
         .collect();
     match found[..] {
         // A remainder of a closed socket has no inode and shows root as
@@ -195,7 +206,7 @@ pub(crate) fn judge_now(
     // only needed for a peer that may be another machine.
     let found = entries
         .iter()
-        .any(|e| plain(e.local) == plain(peer) && plain(e.remote) == plain(local));
+        .any(|e| same(e.local, peer) && same(e.remote, local));
     let ip = plain(peer).ip();
     let own = if found || ip.is_loopback() || ip.is_unspecified() || ip == plain(local).ip() {
         Vec::new()
@@ -303,6 +314,30 @@ mod tests {
             judge(at("[::1]:50003"), at("[::1]:7470"), &e, &owner, &[]),
             Verdict::Local(1000)
         );
+    }
+
+    #[test]
+    fn a_link_local_peer_is_found_whatever_its_interface() {
+        // The owner on this machine, over a link-local address: `accept`
+        // names the interface, the tables do not.
+        let line = "   0: 000080FE000000000000000001000000:C350 000080FE000000000000000002000000:1D2E 01 00000000:00000000 00:00000000 00000000  1000        0 3001 1 0000000000000000 20 4 30 10 -1\n";
+        let e = parse(&format!("head\n{line}"));
+        assert_eq!(e.len(), 1);
+        let peer = SocketAddr::V6(std::net::SocketAddrV6::new(
+            "fe80::1".parse().unwrap(),
+            50000,
+            0,
+            2,
+        ));
+        let local = SocketAddr::V6(std::net::SocketAddrV6::new(
+            "fe80::2".parse().unwrap(),
+            7470,
+            0,
+            2,
+        ));
+        assert_eq!(judge(peer, local, &e, &[1000], &[]), Verdict::Local(1000));
+        // Another account's socket there is still closed.
+        assert_eq!(judge(peer, local, &e, &[1001], &[]), Verdict::Closed);
     }
 
     #[test]

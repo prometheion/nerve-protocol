@@ -83,8 +83,15 @@ pub(crate) fn tcp_socket(local: SocketAddr, remote: SocketAddr) -> Result<Option
     req.extend(remote.port().to_be_bytes());
     req.extend(words(local.ip()));
     req.extend(words(remote.ip()));
-    // No interface, and no cookie to match.
-    req.extend(0u32.to_ne_bytes());
+    // The interface of a link-local address, which a socket made with one
+    // is bound to; none for any other, and no cookie to match.
+    req.extend(
+        match local {
+            SocketAddr::V6(v6) => v6.scope_id(),
+            SocketAddr::V4(_) => 0,
+        }
+        .to_ne_bytes(),
+    );
     req.extend(u32::MAX.to_ne_bytes());
     req.extend(u32::MAX.to_ne_bytes());
     let mut answer = [0u8; 512];
@@ -185,6 +192,51 @@ fn parse_answer(a: &[u8]) -> Result<Option<Entry>, String> {
 
 #[cfg(test)]
 mod tests {
+    /// The socket of a peer that connected over a link-local address is found
+    /// by the interface the address is scoped to. A machine without such an
+    /// address has nothing to test.
+    #[test]
+    fn a_link_local_peer_is_found_by_its_interface() {
+        use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, TcpListener, TcpStream};
+        let table = std::fs::read_to_string("/proc/net/if_inet6").unwrap_or_default();
+        let link = table.lines().find_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let (hex, index, scope) = (f.first()?, f.get(1)?, f.get(3)?);
+            // Scope 0x20 is link-local; the flags say it is not tentative.
+            if *scope != "20" || u32::from_str_radix(f.get(4)?, 16).ok()? & 0x40 != 0 {
+                return None;
+            }
+            let ip = Ipv6Addr::from(u128::from_str_radix(hex, 16).ok()?);
+            Some(SocketAddrV6::new(
+                ip,
+                0,
+                0,
+                u32::from_str_radix(index, 16).ok()?,
+            ))
+        });
+        let Some(link) = link else {
+            eprintln!("no link-local address here; nothing to test");
+            return;
+        };
+        let Ok(listener) = TcpListener::bind(link) else {
+            eprintln!("cannot listen on {link}; nothing to test");
+            return;
+        };
+        let local = listener.local_addr().unwrap();
+        let Ok(client) = TcpStream::connect(local) else {
+            eprintln!("cannot connect to {local}; nothing to test");
+            return;
+        };
+        let (_server, peer) = listener.accept().unwrap();
+        assert_eq!(client.local_addr().unwrap(), peer);
+        let SocketAddr::V6(v6) = peer else { panic!() };
+        assert_ne!(v6.scope_id(), 0, "the peer names its interface");
+        let found = super::tcp_socket(peer, local).unwrap();
+        // SAFETY: a plain getter.
+        let uid = unsafe { libc::getuid() };
+        assert_eq!(found.map(|e| e.uid), Some(uid));
+    }
+
     #[test]
     fn loopback_is_one_of_them() {
         let own = super::addresses();

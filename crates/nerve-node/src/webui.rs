@@ -83,6 +83,11 @@ pub(crate) struct WebUi {
     /// Whether the node was locked when the sessions were last looked at:
     /// a panic ends them all.
     locked: AtomicBool,
+    /// How many times the node was locked. A command the web UI runs
+    /// watches it and stops when it changes: a session that was let in
+    /// before a panic must not finish its command after it (an unlock
+    /// would undo the panic).
+    locks: tokio::sync::watch::Sender<u64>,
     /// Wrong tokens since the last line about them, and when that was.
     wrong: Mutex<(u32, Option<Instant>)>,
     /// The connections at once, by who made them ([`PER_PEER`]).
@@ -118,6 +123,11 @@ impl WebUi {
         })
     }
 
+    /// How many times the node was locked so far.
+    pub(crate) fn lock_count(&self) -> u64 {
+        *self.locks.borrow()
+    }
+
     fn set_status(&self, s: impl Into<String>, bound: Option<SocketAddr>) {
         *lock(&self.status) = s.into();
         *lock(&self.bound) = bound;
@@ -125,13 +135,18 @@ impl WebUi {
 
     /// Ends the sessions the config no longer allows: those of a revoked
     /// token, and every one when the node was locked since the last look.
-    fn settle(&self, cfg: &NodeConfig) {
+    /// The daemon calls it with every change of the config (`Shared::bump`),
+    /// so a panic ends the sessions and stops their commands before its own
+    /// answer, and two changes that the UI task would see as one (a panic
+    /// and an unlock after it) cannot hide the panic.
+    pub(crate) fn settle(&self, cfg: &NodeConfig) {
         let was = self.locked.swap(cfg.locked, Ordering::SeqCst);
         if cfg.locked && !was {
             if !self.sessions.is_empty() {
                 tracing::info!("web UI: the node is locked, so every session ends");
             }
             self.sessions.end_all();
+            self.locks.send_modify(|n| *n += 1);
             return;
         }
         self.sessions.retain(|s| {
@@ -237,6 +252,25 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// What a signed-in request runs its commands with: the UI's context, and
+/// a watch on the node being locked, taken before the session was checked.
+struct Call<'a> {
+    ctx: &'a Ctx,
+    /// None for the one command that locks the node.
+    locks: Option<tokio::sync::watch::Receiver<u64>>,
+    /// How many times the node was locked when the request began; none for
+    /// the command that locks it.
+    epoch: Option<u64>,
+}
+
+impl std::ops::Deref for Call<'_> {
+    type Target = Ctx;
+
+    fn deref(&self) -> &Ctx {
+        self.ctx
+    }
+}
+
 /// Who the UI runs its commands for, and whose accounts it lets in.
 struct Ctx {
     shared: Arc<Shared>,
@@ -311,7 +345,7 @@ pub(crate) async fn run(shared: Arc<Shared>, endpoint: Endpoint) {
                 None
             }
             Some(at) => match listen(&shared, &cfg, &at).await {
-                Ok((listener, tls)) => {
+                Ok((listener, also, tls)) => {
                     failed_on = None;
                     let bound = listener.local_addr().ok();
                     let shown = bound.map_or_else(|| at.clone(), |a| a.to_string());
@@ -320,7 +354,15 @@ pub(crate) async fn run(shared: Arc<Shared>, endpoint: Endpoint) {
                         .webui
                         .set_status(format!("listening on {shown}"), bound);
                     let pin = cfg.ui.pin.clone();
-                    serve(&ctx, listener, tls, (&at, &pin), &mut changed, &mut stop).await;
+                    serve(
+                        &ctx,
+                        (listener, also),
+                        tls,
+                        (&at, &pin),
+                        &mut changed,
+                        &mut stop,
+                    )
+                    .await;
                     tracing::info!("web UI: stopped listening on {shown}");
                     shared.webui.sessions.end_all();
                     shared.webui.set_status("off", None);
@@ -362,11 +404,17 @@ pub(crate) async fn run(shared: Arc<Shared>, endpoint: Endpoint) {
 /// The listener for `at`, and its TLS beyond loopback: the certificate's
 /// key from where the node keeps its keys. Only loopback is served without
 /// TLS; without its key the UI does not listen beyond it at all.
+///
+/// On `127.0.0.1` (or `[::1]`) the other family's loopback address is held
+/// at the same port, too: `localhost` resolves to either, and an account
+/// that listened on the one the node does not would get the login that a
+/// browser meant for the node. A port that is taken there is as much an
+/// error as one taken here; a machine without IPv6 has nothing to hold.
 async fn listen(
     shared: &Arc<Shared>,
     cfg: &NodeConfig,
     at: &str,
-) -> Result<(TcpListener, Option<Acceptor>), String> {
+) -> Result<(TcpListener, Option<TcpListener>, Option<Acceptor>), String> {
     let addr: SocketAddr = at
         .parse()
         .map_err(|_| format!("{at:?} is not an address and a port"))?;
@@ -386,17 +434,42 @@ async fn listen(
         Some(Acceptor::new(&id)?)
     };
     let listener = TcpListener::bind(addr).await.map_err(|e| e.to_string())?;
-    Ok((listener, tls))
+    let also = match other_loopback(addr.ip()) {
+        None => None,
+        Some(ip) => {
+            let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+            match TcpListener::bind((ip, port)).await {
+                Ok(l) => Some(l),
+                // Asked for any port, the one given may be taken on the
+                // other address: no one has the UI's page there.
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && addr.port() != 0 => {
+                    return Err(format!("{ip}:{port}: {e} (`localhost` would reach it)"));
+                }
+                Err(_) => None,
+            }
+        }
+    };
+    Ok((listener, also, tls))
+}
+
+/// The loopback address of the other family, for `127.0.0.1` and `::1`.
+fn other_loopback(ip: std::net::IpAddr) -> Option<std::net::IpAddr> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    match ip {
+        std::net::IpAddr::V4(v4) if v4 == Ipv4Addr::LOCALHOST => Some(Ipv6Addr::LOCALHOST.into()),
+        std::net::IpAddr::V6(v6) if v6 == Ipv6Addr::LOCALHOST => Some(Ipv4Addr::LOCALHOST.into()),
+        _ => None,
+    }
 }
 
 /// Why the UI does not listen beyond loopback without its certificate.
 const NO_CERT: &str = "the web UI has no TLS certificate for an address beyond loopback, or not the one ui.pin names; `nerve-node ui on --listen <address> --new-cert` makes one";
 
-/// Takes connections on `listener` until the address changes or the daemon
+/// Takes connections on `listeners` until the address changes or the daemon
 /// stops; sessions the config no longer allows end on the way.
 async fn serve(
     ctx: &Arc<Ctx>,
-    listener: TcpListener,
+    (listener, also): (TcpListener, Option<TcpListener>),
     tls: Option<Acceptor>,
     (at, pin): (&str, &Option<String>),
     changed: &mut tokio::sync::watch::Receiver<u64>,
@@ -408,9 +481,13 @@ async fn serve(
     };
     let how = peer::Lookup::for_listener(local);
     tracing::debug!("web UI: peers are looked up by {how:?}");
+    let also = also.map(|l| {
+        let how = l.local_addr().map_or(how, peer::Lookup::for_listener);
+        (l, how)
+    });
     loop {
         tokio::select! {
-            got = listener.accept() => match got {
+            (got, how) = accept_on(&listener, how, &also) => match got {
                 Ok((io, peer)) => {
                     let Some((place, slot)) = admit(ctx, &io, peer, how, &slots) else {
                         continue;
@@ -439,6 +516,24 @@ async fn serve(
             }
             _ = stop.changed() => return,
         }
+    }
+}
+
+/// The next connection of `listener` or of the one of the other family,
+/// with the way its peers are looked up.
+async fn accept_on(
+    listener: &TcpListener,
+    how: peer::Lookup,
+    also: &Option<(TcpListener, peer::Lookup)>,
+) -> (std::io::Result<(TcpStream, SocketAddr)>, peer::Lookup) {
+    tokio::select! {
+        got = listener.accept() => (got, how),
+        (got, how) = async {
+            match also {
+                Some((l, how)) => (l.accept().await, *how),
+                None => std::future::pending().await,
+            }
+        } => (got, how),
     }
 }
 
@@ -574,6 +669,15 @@ async fn signed_in_request(ctx: &Ctx, req: &Request) -> Response {
     if !webui::is_api(&req.path) {
         return Response::text(404, "not found");
     }
+    // Watched before the session is checked: a panic after the check
+    // stops the commands, and one before it has ended the session.
+    let locks = ctx.shared.webui.locks.subscribe();
+    let epoch = *locks.borrow();
+    let call = Call {
+        ctx,
+        epoch: Some(epoch),
+        locks: Some(locks),
+    };
     let cfg = ctx.shared.config();
     let signed_in = ctx.shared.webui.sessions.of(req).is_some_and(|(_, s)| {
         s.via
@@ -594,7 +698,7 @@ async fn signed_in_request(ctx: &Ctx, req: &Request) -> Response {
             Err(e) => return Response::json(400, &json!({"error": format!("bad JSON: {e}")})),
         }
     };
-    match api(ctx, req, &body, &cfg).await {
+    match api(&call, req, &body, &cfg).await {
         Ok(v) => Response::json(200, &v),
         Err((status, e)) => Response::json(status, &json!({ "error": e })),
     }
@@ -640,10 +744,18 @@ type ApiResult = Result<Value, (u16, String)>;
 
 /// The API of a signed-in page. Each change is one command of the CLI, of
 /// a fixed shape, run as the owner (crate::owner::run_for_web).
-async fn api(ctx: &Ctx, req: &Request, b: &Value, cfg: &NodeConfig) -> ApiResult {
+async fn api(ctx: &Call<'_>, req: &Request, b: &Value, cfg: &NodeConfig) -> ApiResult {
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/api/overview") => Ok(overview(ctx, cfg)),
-        ("POST", "/api/panic") => command(ctx, &["panic"], None).await,
+        // The panic is the lock itself: it is not stopped by it.
+        ("POST", "/api/panic") => {
+            let own = Call {
+                ctx: ctx.ctx,
+                locks: None,
+                epoch: None,
+            };
+            command(&own, &["panic"], None).await
+        }
         ("POST", "/api/unlock") => command(ctx, &["unlock"], None).await,
         ("GET", "/api/ui") => Ok(ui_settings(ctx, cfg)),
         ("POST", "/api/ui/revoke") => {
@@ -685,12 +797,20 @@ fn text<'a>(b: &'a Value, key: &str) -> Result<&'a str, (u16, String)> {
 
 /// Runs `args` with `--json` for the owner, and gives what it said: its
 /// messages, or its error as a 400.
-async fn command(ctx: &Ctx, args: &[&str], input: Option<&str>) -> ApiResult {
+async fn command(ctx: &Call<'_>, args: &[&str], input: Option<&str>) -> ApiResult {
     let mut all: Vec<String> = args.iter().map(|a| a.to_string()).collect();
     all.insert(0, "--json".into());
-    let ran = crate::owner::run_for_web(&ctx.shared, &ctx.program, &ctx.who(), &all, input)
-        .await
-        .map_err(|e| (400, e))?;
+    let ran = crate::owner::run_for_web(
+        &ctx.shared,
+        &ctx.program,
+        &ctx.who(),
+        &all,
+        input,
+        ctx.locks.clone(),
+        ctx.epoch,
+    )
+    .await
+    .map_err(|e| (400, e))?;
     answer(ran)
 }
 
