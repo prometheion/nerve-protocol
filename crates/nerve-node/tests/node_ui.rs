@@ -683,3 +683,266 @@ fn a_command_from_the_web_may_not_change_the_web_ui() {
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("machine.shell decides"), "{out}");
 }
+
+/// A node with its UI on, and a session of it.
+async fn signed_in(root: &Path) -> (Daemon, PathBuf, SocketAddr, String) {
+    let (daemon, at) = node(root).await;
+    let (out, code) = cli(&at, &["ui", "on", "--listen", "127.0.0.1:0"]).await;
+    assert_eq!(code, 0, "{out}");
+    let addr = ui_address(&daemon).unwrap();
+    let session = login(addr, &token_in(&out)).await.unwrap();
+    (daemon, at, addr, session)
+}
+
+/// A change the page asks for, which must work: its answer.
+async fn change(addr: SocketAddr, session: &str, path: &str, body: Value) -> Value {
+    let a = post(addr, path, session, body).await;
+    assert_eq!(a.status, 200, "{path}: {}", a.body);
+    a.json()
+}
+
+/// The Centers page: a center is paired from a pasted link, which goes on
+/// the command's input, after a check; then paused, resumed, granted and
+/// removed, each one command the node runs for its owner.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_centers_page_pairs_and_manages_a_center() {
+    let _one = SERIAL.lock().await;
+    let d = tempfile::tempdir().unwrap();
+    let (daemon, _at, addr, s) = signed_in(d.path()).await;
+    let center = nerve_conformance::fake_center::FakeCenter::start(true)
+        .await
+        .unwrap();
+    let link = center.link().render();
+    let v = change(addr, &s, "/api/centers/preview", json!({ "link": link })).await;
+    assert_eq!(v["paired"], false, "{v}");
+    assert_eq!(v["check"]["ready"], true, "{v}");
+    assert!(daemon.config().centers.is_empty());
+    let v = change(
+        addr,
+        &s,
+        "/api/centers/pair",
+        json!({ "link": link, "name": "lab" }),
+    )
+    .await;
+    assert_eq!(v["paired"], true, "{v}");
+    assert_eq!(daemon.config().centers[0].name, "lab");
+    // The link was never in a command line: the log names only the words.
+    let log = std::fs::read_to_string(daemon.paths().log_file()).unwrap_or_default();
+    assert!(!log.contains(&center.code), "{log}");
+
+    change(addr, &s, "/api/centers/pause", json!({"center": "lab"})).await;
+    assert!(daemon.config().centers[0].paused);
+    change(addr, &s, "/api/centers/resume", json!({"center": "lab"})).await;
+    assert!(!daemon.config().centers[0].paused);
+    change(
+        addr,
+        &s,
+        "/api/centers/grant",
+        json!({"center": "lab", "what": "settings", "value": "write"}),
+    )
+    .await;
+    assert_eq!(
+        daemon.config().centers[0].settings,
+        nerve_policy::config::SettingsGrant::Write
+    );
+    // What the command refuses comes back as its error.
+    let a = post(
+        addr,
+        "/api/centers/grant",
+        &s,
+        json!({"center": "lab", "what": "all", "value": "write"}),
+    )
+    .await;
+    assert_eq!(a.status, 400, "{}", a.body);
+    let a = post(addr, "/api/centers/pause", &s, json!({"center": "-x"})).await;
+    assert_eq!(a.status, 400);
+    change(addr, &s, "/api/centers/remove", json!({"center": "lab"})).await;
+    assert!(daemon.config().centers.is_empty());
+    daemon.stop().await;
+}
+
+/// The Permissions, Audit and Log pages: mode, folders and rules change as
+/// the CLI changes them; the audit offers the rule an entry's button adds;
+/// the log is read in place.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_permissions_audit_and_log_pages_change_the_node() {
+    let _one = SERIAL.lock().await;
+    let d = tempfile::tempdir().unwrap();
+    let (daemon, _at, addr, s) = signed_in(d.path()).await;
+    let center = nerve_conformance::fake_center::FakeCenter::start(true)
+        .await
+        .unwrap();
+    change(
+        addr,
+        &s,
+        "/api/centers/pair",
+        json!({ "link": center.link().render(), "name": "lab" }),
+    )
+    .await;
+
+    change(
+        addr,
+        &s,
+        "/api/mode",
+        json!({"center": "lab", "mode": "allowlist", "as_owner": true}),
+    )
+    .await;
+    let policy = daemon.config().centers[0].policy.clone();
+    assert_eq!(policy.mode, nerve_policy::Mode::Allowlist);
+    assert!(policy.as_owner);
+    let dir = std::fs::canonicalize(d.path()).unwrap().join("work");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.display().to_string();
+    change(
+        addr,
+        &s,
+        "/api/folders/add",
+        json!({"center": "lab", "path": path, "read": true}),
+    )
+    .await;
+    change(
+        addr,
+        &s,
+        "/api/folders/set",
+        json!({"center": "lab", "path": path, "read": true, "write": true}),
+    )
+    .await;
+    let v = get(addr, "/api/perm?center=lab", &s).await;
+    assert_eq!(v.status, 200, "{}", v.body);
+    assert_eq!(
+        v.json()["folders"]["folders"][0]["rights"],
+        "rw-",
+        "{}",
+        v.body
+    );
+    let a = post(
+        addr,
+        "/api/folders/add",
+        &s,
+        json!({"center": "lab", "path": "work", "read": true}),
+    )
+    .await;
+    assert_eq!(a.status, 400, "a relative path is refused: {}", a.body);
+    change(
+        addr,
+        &s,
+        "/api/folders/remove",
+        json!({"center": "lab", "path": path}),
+    )
+    .await;
+    assert!(daemon.config().centers[0].policy.folders.is_empty());
+
+    change(
+        addr,
+        &s,
+        "/api/rules/add",
+        json!({"center": "lab", "list": "allow", "rule": "git status"}),
+    )
+    .await;
+    change(
+        addr,
+        &s,
+        "/api/rules/add",
+        json!({"center": "lab", "list": "deny", "rule": "fs.read:~/private/*"}),
+    )
+    .await;
+    let v = get(addr, "/api/perm?center=lab", &s).await.json();
+    assert!(
+        v["rules"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "exec.run:git status"),
+        "{v}"
+    );
+    assert!(
+        v["rules"]["deny"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "fs.read:~/private/*"),
+        "{v}"
+    );
+    change(
+        addr,
+        &s,
+        "/api/rules/remove",
+        json!({"center": "lab", "list": "allow", "rule": "git status"}),
+    )
+    .await;
+    let v = get(addr, "/api/perm?center=lab", &s).await.json();
+    assert!(
+        !v["rules"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "exec.run:git status"),
+        "{v}"
+    );
+
+    // An entry's button adds the rule its preview shows.
+    let v = get(addr, "/api/audit", &s).await;
+    assert_eq!(v.status, 200);
+    assert!(
+        !v.json()["entries"].as_array().unwrap().is_empty(),
+        "the changes are audited"
+    );
+    change(
+        addr,
+        &s,
+        "/api/audit/rule",
+        json!({"center": "lab", "cap": "exec", "action": "run", "target": "make test", "list": "allow"}),
+    )
+    .await;
+    let allow = daemon.config().centers[0].policy.allow.clone();
+    assert!(allow.iter().any(|r| r.contains("make test")), "{allow:?}");
+    change(addr, &s, "/api/audit/clear", json!({})).await;
+
+    let v = get(addr, "/api/log", &s).await;
+    assert_eq!(v.status, 200);
+    assert!(v.json()["entries"].as_array().is_some(), "{}", v.body);
+    let v = get(addr, "/api/log?problems=1", &s).await.json();
+    for e in v["entries"].as_array().unwrap() {
+        assert!(matches!(e["level"].as_str(), Some("error" | "warn")), "{e}");
+    }
+    change(addr, &s, "/api/log/clear", json!({})).await;
+    daemon.stop().await;
+}
+
+/// `center add --link-stdin` takes the link from the first line of its
+/// input, as the web UI passes it, and only then.
+#[test]
+fn the_pairing_link_comes_from_stdin_when_asked() {
+    use std::io::Write;
+    let d = tempfile::tempdir().unwrap();
+    let run = |args: &[&str], input: &str| {
+        let mut c = std::process::Command::new(program())
+            .arg("--config-dir")
+            .arg(d.path().join("config"))
+            .arg("--state-dir")
+            .arg(d.path().join("state"))
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        c.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        let o = c.wait_with_output().unwrap();
+        (
+            o.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr),
+        )
+    };
+    let (code, out) = run(&["center", "add", "--link-stdin", "--yes"], "\n");
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("first line of stdin is empty"), "{out}");
+    // The line is the link, read as one.
+    let (code, out) = run(&["center", "add", "--link-stdin", "--yes"], "not-a-link\n");
+    assert_eq!(code, 1, "{out}");
+    assert!(!out.contains("stdin is empty"), "{out}");
+    let (code, out) = run(&["center", "add"], "");
+    assert_eq!(code, 2, "a link or --link-stdin: {out}");
+    let (code, out) = run(&["center", "add", "nerve://pair?x", "--link-stdin"], "");
+    assert_eq!(code, 2, "not both: {out}");
+}

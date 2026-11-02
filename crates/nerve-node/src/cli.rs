@@ -191,7 +191,11 @@ pub enum CenterCmd {
     /// Pair this machine with a center, using the pairing link it showed.
     Add {
         /// The pairing link.
-        link: String,
+        #[arg(required_unless_present = "link_stdin")]
+        link: Option<String>,
+        /// Read the pairing link from the first line of stdin: it holds the pairing code, and never shows in the process list.
+        #[arg(long, conflicts_with = "link")]
+        link_stdin: bool,
         /// The name to use for the center here (the center's own name if left out).
         #[arg(long)]
         name: Option<String>,
@@ -2025,8 +2029,13 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             opts.exe = std::env::current_exe().ok();
             Daemon::run(opts).await
         }
-        Cmd::Center(CenterCmd::Add { link, name, yes }) => {
-            let link = PairLink::parse(&link)?;
+        Cmd::Center(CenterCmd::Add {
+            link,
+            link_stdin,
+            name,
+            yes,
+        }) => {
+            let link = PairLink::parse(&given_link(link, link_stdin)?)?;
             w(out, crate::pair::preview(&link, name.as_deref()));
             if !yes {
                 // Asked only when the pairing can work: the center answers,
@@ -3643,6 +3652,25 @@ fn read_password(out: &mut dyn Write, prompt: &str) -> Result<String, String> {
         return Err("no password given".into());
     }
     Ok(password)
+}
+
+/// The pairing link of `center add`: the one given, or the first line of
+/// stdin (`--link-stdin`).
+pub(crate) fn given_link(link: Option<String>, from_stdin: bool) -> Result<String, String> {
+    if let Some(l) = link {
+        return Ok(l);
+    }
+    debug_assert!(from_stdin);
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| format!("cannot read the pairing link: {e}"))?;
+    let line = line.trim();
+    if line.is_empty() {
+        return Err("--link-stdin: the first line of stdin is empty, not a pairing link".into());
+    }
+    Ok(line.to_string())
 }
 
 fn confirm(input: &mut dyn BufRead, out: &mut dyn Write) -> Result<bool, String> {

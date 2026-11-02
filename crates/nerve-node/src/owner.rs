@@ -446,7 +446,9 @@ pub fn reads_input(cmd: &Cmd) -> bool {
         Cmd::Cap(CapCmd::Add { spec, .. } | CapCmd::Edit { spec, .. }) => {
             spec.params_stdin || spec.result_stdin
         }
-        Cmd::Center(CenterCmd::Add { yes, .. }) => !yes,
+        Cmd::Center(CenterCmd::Add {
+            yes, link_stdin, ..
+        }) => !yes || *link_stdin,
         Cmd::Proxy(ProxyCmd::Set {
             password_stdin,
             headers_stdin,

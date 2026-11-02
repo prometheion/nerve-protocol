@@ -96,7 +96,13 @@ pub(super) async fn command(
             problems,
         } => return log_cmd(paths, follow, last, problems, true, out).await,
         Cmd::Center(CenterCmd::Ls) => centers(paths).await?,
-        Cmd::Center(CenterCmd::Add { link, name, yes }) => {
+        Cmd::Center(CenterCmd::Add {
+            link,
+            link_stdin,
+            name,
+            yes,
+        }) => {
+            let link = given_link(link, link_stdin)?;
             pair(paths, &link, name.as_deref(), yes).await?
         }
         Cmd::Folder(FolderCmd::Ls { center }) => {

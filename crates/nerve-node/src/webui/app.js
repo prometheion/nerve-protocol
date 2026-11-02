@@ -7,13 +7,19 @@
 
 const PAGES = {
   overview: { title: "Overview", view: pageOverview },
+  centers: { title: "Centers", view: pageCenters },
+  permissions: { title: "Permissions", view: pagePermissions },
+  audit: { title: "Audit", view: pageAudit },
+  log: { title: "Log", view: pageLog },
   settings: { title: "Settings", view: pageSettings },
 };
 
 let lastSig = null;
 let busy = false;
 let down = false;
-const state = { overview: null, ui: null };
+const state = { overview: null, ui: null, perm: null, permCenter: null, audit: null, log: null, preview: null };
+// The Audit and Log pages ask again every two seconds while Live is on.
+const filters = { auditDenied: false, auditLive: true, logProblems: false, logLive: true };
 
 // ---- Overview ----
 
@@ -64,6 +70,209 @@ async function unlock() {
   notify("The node works again.");
 }
 
+// ---- Centers ----
+
+function pageCenters() {
+  const o = state.overview;
+  if (!o) return [loading()];
+  return [
+    head("server", "Centers", "Pair this machine with a center, and decide what each one may change."),
+    section("Pair a center", "Paste the link the center's web UI shows under Pair a machine. It goes to the node as the command's input, never in a command line.", null,
+      pairForm()),
+    section("Paired centers", null, null,
+      o.centers.length ? el("div", { class: "stack" }, o.centers.map(centerManageCard)) : empty("No center is paired yet.", "server")),
+  ];
+}
+
+function pairForm() {
+  const link = el("input", { class: "input", type: "text", placeholder: "nerve://pair?…", autocomplete: "off", spellcheck: "false", "aria-label": "Pairing link" });
+  const name = el("input", { class: "input", type: "text", placeholder: "Name here (optional)", autocomplete: "off", spellcheck: "false", "aria-label": "Name for the center here" });
+  const p = state.preview;
+  return el("div", { class: "card" },
+    el("label", { class: "field" }, el("span", { class: "label" }, "Pairing link"), link),
+    el("label", { class: "field" }, el("span", { class: "label" }, "Name"), name),
+    p ? el("div", { class: "banner " + (p.check && p.check.ready ? "ok" : "warn") }, icon("info"),
+      el("span", {}, `${p.preview.center}${p.preview.tls ? "" : " (plain HTTP on loopback)"}: ${p.check ? p.check.said || "" : ""}`)) : null,
+    el("div", { class: "actions" },
+      btn("Check", "ghost", act(async () => {
+        state.preview = await api("POST", "/api/centers/preview", { link: link.value });
+        draw(true);
+      }), "check", "pair:check"),
+      btn("Pair", "primary", act(async () => {
+        const r = await api("POST", "/api/centers/pair", { link: link.value, name: name.value });
+        state.preview = null;
+        notify(`Paired with ${r.url || "the center"} as ${r.name || name.value}.`);
+      }), "link", "pair:go")));
+}
+
+function centerManageCard(c) {
+  const grant = c.settings === "write";
+  return el("div", { class: "card" },
+    el("div", { class: "card-top" }, itile("server", c.status === "connected" ? "ok" : "neutral"),
+      el("span", { class: "name" }, c.name), pill(c.status === "connected" ? "up" : "down", c.paused ? "paused" : c.status)),
+    el("p", { class: "meta" }, c.url),
+    el("p", { class: "meta" }, grant ? "It may change its own rights here (the settings grant)." : "It may not change its own rights here."),
+    el("div", { class: "actions" },
+      btn(c.paused ? "Resume" : "Pause", "ghost", act(() => api("POST", c.paused ? "/api/centers/resume" : "/api/centers/pause", { center: c.name })), c.paused ? "ok" : "wait", `center:${c.name}:pause`),
+      btn(grant ? "Take the grant away" : "Grant settings", "ghost", act(async () => {
+        if (!grant) {
+          const yes = await modal({ title: `Let ${c.name} change its rights?`, message: "It may then set everything this machine lets it do, up to user mode and sudo.", confirm: "Grant", danger: true });
+          if (!yes) return;
+        }
+        await api("POST", "/api/centers/grant", { center: c.name, what: "settings", value: grant ? "off" : "write" });
+      }), "key", `center:${c.name}:grant`),
+      btn("New key", "ghost", act(async () => {
+        await api("POST", "/api/centers/rotate", { center: c.name });
+        notify("This machine has a new key for the center.");
+      }), "refresh", `center:${c.name}:rotate`),
+      btn("Remove", "danger-soft", act(async () => {
+        const yes = await modal({ title: `Remove ${c.name}?`, message: "The node forgets the center and deletes its key. It has to be paired again to come back.", confirm: "Remove", danger: true });
+        if (yes) await api("POST", "/api/centers/remove", { center: c.name });
+      }), "trash", `center:${c.name}:remove`)));
+}
+
+// ---- Permissions ----
+
+const MODES = [
+  { value: "allowlist", text: "Allowlist: only what the allow rules name" },
+  { value: "folder", text: "Folder: what each folder allows, as nerve-run" },
+  { value: "user", text: "User: all you can do, as you" },
+];
+
+function permCenter() {
+  const o = state.overview;
+  if (!o || !o.centers.length) return null;
+  if (!o.centers.some((c) => c.name === state.permCenter)) state.permCenter = o.centers[0].name;
+  return state.permCenter;
+}
+
+async function loadPerm() {
+  const c = permCenter();
+  if (!c) return;
+  state.perm = await api("GET", `/api/perm?center=${encodeURIComponent(c)}`);
+  state.perm.center = c;
+}
+
+function pagePermissions() {
+  const o = state.overview;
+  if (!o) return [loading()];
+  const c = permCenter();
+  if (!c) return [head("shield", "Permissions"), empty("Pair a center first.", "server")];
+  const entry = o.centers.find((x) => x.name === c);
+  const p = state.perm && state.perm.center === c ? state.perm : null;
+  return [
+    head("shield", "Permissions", "How much each center may do on this machine."),
+    o.centers.length > 1 ? segmented("Center", o.centers.map((x) => x.name), o.centers.findIndex((x) => x.name === c), (i) => {
+      state.permCenter = o.centers[i].name; state.perm = null; draw(true); loadPerm().then(() => draw(true)).catch((e) => notify(e.message, "error"));
+    }) : null,
+    section("Mode", entry.until ? `Until ${when(entry.until)}` : null, null, modeForm(c, entry)),
+    p ? foldersSection(c, p.folders.folders || []) : loading(),
+    p ? rulesSection(c, p.rules) : null,
+    p ? section("Sudo", "Turning sudo on is done at the CLI: sudo nerve-node sudo on.", null,
+      el("div", { class: "card" }, el("div", { class: "card-top" }, icon("key"), el("span", { class: "name" }, `Sudo is ${p.sudo.sudo || "off"}`),
+        p.sudo.sudo === "on" ? btn("Turn off", "danger-soft", act(() => api("POST", "/api/sudo/off")), "ban", "sudo:off") : null))) : null,
+  ];
+}
+
+function modeForm(c, entry) {
+  let chosen = entry.mode;
+  const pick = segmented("Mode", MODES.map((m) => m.text), Math.max(0, MODES.findIndex((m) => m.value === entry.mode)), (i) => { chosen = MODES[i].value; });
+  const hours = el("input", { class: "input", type: "number", min: "1", placeholder: "Hours (optional)", "aria-label": "For hours" });
+  const owner = el("input", { type: "checkbox", checked: !!entry.as_owner });
+  return el("div", { class: "card" },
+    pick, hours,
+    el("label", { class: "check" }, owner, el("span", {}, "In allowlist mode, run as you (the owner)")),
+    el("div", { class: "actions" }, btn("Set the mode", "primary", act(() => api("POST", "/api/mode", {
+      center: c, mode: chosen, hours: Number(hours.value) || undefined, as_owner: owner.checked,
+    })), "check", `mode:${c}:set`)));
+}
+
+function foldersSection(c, folders) {
+  const path = el("input", { class: "input", type: "text", placeholder: "/home/you/project", autocomplete: "off", spellcheck: "false", "aria-label": "Folder" });
+  const box = (label) => { const b = el("input", { type: "checkbox", checked: label === "read" }); return [b, el("label", { class: "check" }, b, el("span", {}, label))]; };
+  const [r, rl] = box("read"), [w, wl] = box("write"), [x, xl] = box("execute");
+  return section("Folders", "What the center may do in each folder in folder mode. A whole path, starting at /.", null,
+    folders.length ? el("div", { class: "stack" }, folders.map((f) => el("div", { class: "card" },
+      el("div", { class: "card-top" }, icon("server"), el("span", { class: "name mono" }, f.path), el("span", { class: "meta push" }, f.rights),
+        btn("Remove", "danger-soft", act(() => api("POST", "/api/folders/remove", { center: c, path: f.path }).then(loadPerm)), "trash", `folder:${f.path}:remove`))))) : empty("No folder yet.", "info"),
+    el("div", { class: "card" }, path, el("div", { class: "actions" }, rl, wl, xl,
+      btn("Add", "primary", act(() => api("POST", "/api/folders/add", { center: c, path: path.value, read: r.checked, write: w.checked, execute: x.checked }).then(loadPerm)), "plus", "folder:add"))));
+}
+
+function rulesSection(c, rules) {
+  const lists = [["allow", "Allowed"], ["deny", "Forbidden"], ["sudo", "Run with sudo"]];
+  return section("Rules", "Commands and patterns a center may run, may not, or runs with sudo.", btn("Add the guard", "ghost", act(() => api("POST", "/api/rules/guard", { center: c }).then(loadPerm)), "shield", "rules:guard"),
+    lists.map(([list, title]) => {
+      const field = el("input", { class: "input", type: "text", placeholder: list === "sudo" ? "apt update" : "git status, or fs.read:~/notes/*", autocomplete: "off", spellcheck: "false", "aria-label": `${title}: a new rule` });
+      const wild = el("input", { type: "checkbox" });
+      return el("div", { class: "card" },
+        el("h4", {}, title),
+        (rules[list] || []).length
+          ? (rules[list] || []).map((rule) => el("div", { class: "card-top" }, el("code", { class: "mono" }, rule),
+            rules.stale && rules.stale[rule] ? pill("warn", rules.stale[rule]) : null,
+            btn("Remove", "danger-soft push", act(() => api("POST", "/api/rules/remove", { center: c, list, rule }).then(loadPerm)), "trash", `rule:${list}:${rule}:remove`)))
+          : el("p", { class: "meta" }, "None."),
+        el("div", { class: "actions" }, field, el("label", { class: "check" }, wild, el("span", {}, "Wildcard")),
+          btn("Add", "primary", act(() => api("POST", "/api/rules/add", { center: c, list, rule: field.value, wildcard: wild.checked }).then(loadPerm)), "plus", `rule:${list}:add`)));
+    }));
+}
+
+// ---- Audit ----
+
+function pageAudit() {
+  const a = state.audit;
+  return [
+    head("audit", "Audit", "What the node allowed and refused."),
+    el("div", { class: "actions" },
+      el("label", { class: "check" }, el("input", { type: "checkbox", checked: filters.auditDenied, onchange: (ev) => { filters.auditDenied = ev.target.checked; state.audit = null; tick(); } }), el("span", {}, "Refused only")),
+      el("label", { class: "check" }, el("input", { type: "checkbox", checked: filters.auditLive, onchange: (ev) => { filters.auditLive = ev.target.checked; } }), el("span", {}, "Live")),
+      btn("Clear", "danger-soft", act(async () => {
+        const yes = await modal({ title: "Clear the audit?", message: "The entries so far are kept in the audit's older file.", confirm: "Clear", danger: true });
+        if (yes) await api("POST", "/api/audit/clear");
+      }), "trash", "audit:clear")),
+    !a ? loading() : a.entries.length ? el("div", { class: "list" }, a.entries.slice().reverse().map(auditRow)) : empty("Nothing yet.", "audit"),
+  ];
+}
+
+function auditRow(e) {
+  const refused = e.decision === "forbidden" || e.event === "refused";
+  const what = [e.cap, e.action].filter(Boolean).join(".");
+  const add = (list, wildcard) => act(async () => {
+    const yes = await modal({ title: `Add to the ${list === "deny" ? "deny" : "allow"} list?`, message: `For ${e.center}, as it will be stored: ${e.rule_preview}${wildcard ? " (and anything after it)" : ""}`, confirm: "Add" });
+    if (yes) await api("POST", "/api/audit/rule", { center: e.center, cap: e.cap, action: e.action, target: e.target, list, wildcard });
+  });
+  return el("div", { class: "card" },
+    el("div", { class: "card-top" }, itile(refused ? "ban" : "ok", refused ? "warn" : "ok"),
+      el("span", { class: "name" }, what || e.event || "entry"), e.center ? pill("", e.center) : null,
+      el("span", { class: "meta push", title: e.ts ? when(e.ts) : "" }, e.ts ? ago(e.ts) : "")),
+    e.target ? el("p", { class: "mono" }, e.rule_preview || e.target) : null,
+    e.reason ? el("p", { class: "meta" }, e.reason) : null,
+    e.rule_preview && e.center ? el("div", { class: "actions" },
+      btn("Allow", "ghost", add("allow", false), "ok", `audit:${e.ts}:${e.seq}:allow`),
+      btn("Allow as wildcard", "ghost", add("allow", true), "ok", `audit:${e.ts}:${e.seq}:wild`),
+      btn("Deny", "danger-soft", add("deny", false), "ban", `audit:${e.ts}:${e.seq}:deny`)) : null);
+}
+
+// ---- Log ----
+
+function pageLog() {
+  const l = state.log;
+  return [
+    head("log", "Log", "The node's starts and stops, its links, and what went wrong."),
+    el("div", { class: "actions" },
+      el("label", { class: "check" }, el("input", { type: "checkbox", checked: filters.logProblems, onchange: (ev) => { filters.logProblems = ev.target.checked; state.log = null; tick(); } }), el("span", {}, "Problems only")),
+      el("label", { class: "check" }, el("input", { type: "checkbox", checked: filters.logLive, onchange: (ev) => { filters.logLive = ev.target.checked; } }), el("span", {}, "Live")),
+      btn("Clear", "danger-soft", act(async () => {
+        const yes = await modal({ title: "Clear the log?", message: "Its lines so far are deleted; one line says who cleared it.", confirm: "Clear", danger: true });
+        if (yes) await api("POST", "/api/log/clear");
+      }), "trash", "log:clear")),
+    !l ? loading() : l.entries.length ? el("div", { class: "list" }, l.entries.slice().reverse().map((e) => el("div", { class: "card" },
+      el("div", { class: "card-top" }, pill(e.level === "error" ? "down" : e.level === "warn" ? "warn" : "", e.level || ""),
+        el("span", { class: "meta push", title: e.ts ? when(e.ts) : "" }, e.ts ? ago(e.ts) : "")),
+      el("p", {}, e.msg || "")))) : empty("Nothing yet.", "log"),
+  ];
+}
+
 // ---- Settings ----
 
 function pageSettings() {
@@ -100,7 +309,8 @@ function current() {
 
 function draw(force) {
   const page = current();
-  const sig = JSON.stringify([page, state.overview, page === "settings" ? state.ui : null, Math.floor(Date.now() / 60000)]);
+  const extra = { settings: state.ui, permissions: state.perm, audit: state.audit, log: state.log, centers: state.preview }[page];
+  const sig = JSON.stringify([page, state.overview, extra === undefined ? null : extra, Math.floor(Date.now() / 60000)]);
   if (!force && sig === lastSig) return;
   lastSig = sig;
   replacePage(PAGES[page].view().flat().filter((p) => p != null));
@@ -113,9 +323,15 @@ async function tick() {
     const page = current();
     const jobs = [api("GET", "/api/overview")];
     if (page === "settings") jobs.push(api("GET", "/api/ui"));
+    // The audit and the log are read by the node itself, in place; nothing
+    // runs for them.
+    if (page === "audit" && (filters.auditLive || !state.audit)) jobs.push(api("GET", `/api/audit${filters.auditDenied ? "?denied=1" : ""}`));
+    if (page === "log" && (filters.logLive || !state.log)) jobs.push(api("GET", `/api/log${filters.logProblems ? "?problems=1" : ""}`));
     const [o, extra] = await Promise.all(jobs);
     state.overview = o;
     if (page === "settings") state.ui = extra;
+    if (page === "audit" && extra) state.audit = extra;
+    if (page === "log" && extra) state.log = extra;
     if (down) notify("Connected to the node again.");
     down = false;
     draw(false);
@@ -151,7 +367,10 @@ function go() {
   p.classList.add("enter");
   $("scroll").scrollTop = 0;
   draw(true);
-  tick();
+  // The Permissions page asks its lists once, when it opens: each is a
+  // command the node runs.
+  if (page === "permissions") tick().then(loadPerm).then(() => draw(true)).catch((e) => { if (!e.auth) notify(e.message, "error"); });
+  else tick();
 }
 
 $("nav-open").addEventListener("click", () => setNav(true));

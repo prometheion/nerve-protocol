@@ -40,6 +40,7 @@ use nerve_transport::webui::{self, Sessions, host_is_loopback, origin_matches};
 use crate::daemon::{Shared, lock};
 use crate::owner::{Endpoint, Owners};
 
+mod pages;
 pub(crate) mod peer;
 
 const INDEX: &str = include_str!("webui/index.html");
@@ -526,7 +527,9 @@ async fn api(ctx: &Ctx, req: &Request, b: &Value, cfg: &NodeConfig) -> ApiResult
             let label = text(b, "label")?;
             command(ctx, &["ui", "token", "rm", "--", label], None).await
         }
-        _ => Err((404, "not found".into())),
+        _ => pages::api(ctx, req, b)
+            .await
+            .unwrap_or_else(|| Err((404, "not found".into()))),
     }
 }
 
