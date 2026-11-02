@@ -4314,13 +4314,13 @@ fn rule_fields(nodes: &BTreeMap<String, NodeRecord>) -> Value {
 /// call. A rule whose action no machine publishes is [`unpublished_rules`]'.
 fn stale_checker_rules(cfg: &CheckerConfig, nodes: &BTreeMap<String, NodeRecord>) -> Value {
     let own = cfg.blocklist.iter().filter(|e| !e.builtin);
-    let rules = own.map(|e| (&e.rule, e.node_id.as_deref())).chain(
+    let rules = own.map(|e| (&e.rule, e.node_id.as_deref(), true)).chain(
         cfg.allow_rules
             .iter()
-            .map(|a| (&a.rule, a.node_id.as_deref())),
+            .map(|a| (&a.rule, a.node_id.as_deref(), false)),
     );
     let mut out = Map::new();
-    for (rule, node) in rules {
+    for (rule, node, blocks) in rules {
         if !nerve_policy::rules::has_conditions(rule) || out.contains_key(rule) {
             continue;
         }
@@ -4329,10 +4329,22 @@ fn stale_checker_rules(cfg: &CheckerConfig, nodes: &BTreeMap<String, NodeRecord>
         if found.is_empty() {
             continue;
         }
+        // A blocklist entry that types can still refuse every call: a `!=`
+        // from the home on a field that became a path after the entry was
+        // saved (the save checks only the schemas of its day).
         let misfit = found.iter().find_map(|(name, p)| {
-            nerve_policy::conditions::check(scope, pattern, p)
-                .err()
-                .map(|e| (name, e))
+            let err = nerve_policy::conditions::check(scope, pattern, p).err();
+            let err = err.or_else(|| {
+                blocks
+                    .then(|| nerve_policy::conditions::home_not_equal(pattern, p))
+                    .flatten()
+                    .map(|c| {
+                        format!(
+                            "the center cannot tell the home in {c}, so the entry refuses every call of {scope}; write the path in full (/home/…)"
+                        )
+                    })
+            });
+            err.map(|e| (name, e))
         });
         if let Some((name, e)) = misfit {
             let why = if node.is_some() {
@@ -5395,6 +5407,45 @@ pub(crate) mod tests {
         assert!(e.contains("cannot tell the home"), "{e}");
         add("notes.save:file!=/home/me/inbox.md").unwrap();
         add("notes.save:tag!=~/x").unwrap();
+    }
+
+    /// A blocklist entry saved while its field was plain text is flagged
+    /// once the field becomes a path, for it would refuse every call then.
+    #[test]
+    fn a_blocklist_entry_a_later_path_makes_blind_is_flagged() {
+        use crate::tools::tests::{cap, desc};
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let publish = |tag: Value| {
+            let params = json!({"type": "object", "properties": {"tag": tag}});
+            let notes = cap(
+                "notes",
+                "notes",
+                &[("save", nerve_proto::Effect::Write, params)],
+            );
+            c.update(|s| {
+                let mut n = node_record("n1", "linux");
+                n.set_descriptor(desc("n1", vec![notes]));
+                s.nodes.insert("n1".into(), n);
+            });
+        };
+        publish(json!({"type": "string"}));
+        let mut cfg = c.read(|s| s.checker.clone());
+        cfg.blocklist.push(checker::BlockEntry {
+            id: String::new(),
+            rule: "notes.save:tag!=~/drafts".into(),
+            on: true,
+            builtin: false,
+            note: String::new(),
+            node_id: None,
+            off_for: Vec::new(),
+        });
+        c.apply_checker_config(cfg).unwrap();
+        assert_eq!(c.checker_json()["stale"], json!({}));
+        publish(json!({"type": "string", "x-nerve-path": "write"}));
+        let stale = c.checker_json()["stale"].clone();
+        let why = stale["notes.save:tag!=~/drafts"].as_str().unwrap_or("");
+        assert!(why.contains("cannot tell the home"), "{stale:?}");
     }
 
     /// A checker rule with conditions is checked against the schema the

@@ -447,6 +447,9 @@ fn check_one(scope: &str, c: &Condition, params: &Value) -> Result<(), String> {
             .iter()
             .filter(|v| !v.is_null())
             .map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_string))
+            // Not a choice with a character a terminal acts on: the schema's
+            // own text reaches the owner here.
+            .filter(|v| !v.chars().any(crate::config::unseen))
             .collect();
         return Err(format!(
             "{scope} argument {} is one of {}, not {:?}",
@@ -1130,6 +1133,16 @@ pub(crate) mod tests {
             "x\u{1b}[2K\u{9b}": {"type": "string"}}});
         let e = check("lamp.set", "size=1", &params).unwrap_err();
         assert!(e.ends_with("it takes room"), "{e:?}");
+    }
+
+    /// The choices an enum lists reach the terminal as well.
+    #[test]
+    fn the_enum_text_lists_no_unseen_characters() {
+        let params = json!({"type": "object", "properties": {
+            "room": {"type": "string", "enum": ["office", "a\u{1b}[2A\u{9b}"]}}});
+        let e = check("lamp.set", "room=attic", &params).unwrap_err();
+        assert!(e.contains("is one of office,"), "{e:?}");
+        assert!(!e.contains('\u{1b}') && !e.contains('\u{9b}'), "{e:?}");
     }
 
     /// A `!=` with a value from the home on a path argument is the one the
