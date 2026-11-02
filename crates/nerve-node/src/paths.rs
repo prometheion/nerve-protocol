@@ -90,6 +90,12 @@ impl NodePaths {
         self.config_dir.join("keys").join("relay-tls.pem")
     }
 
+    /// The web UI's TLS certificate and key (crate::webui), beside the
+    /// relay's.
+    pub fn ui_tls_file(&self) -> PathBuf {
+        self.config_dir.join("keys").join("ui-tls.pem")
+    }
+
     /// The password of an `https://` proxy, a relay token above all.
     pub fn proxy_login_file(&self) -> PathBuf {
         self.config_dir.join("keys").join("proxy-login.secret")

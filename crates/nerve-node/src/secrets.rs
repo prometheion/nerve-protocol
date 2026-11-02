@@ -90,6 +90,13 @@ impl Entry {
         }
     }
 
+    /// The entry with the web UI's TLS certificate and key.
+    pub fn ui_tls(paths: &NodePaths) -> Entry {
+        Entry {
+            account: format!("ui-tls:{}", absolute(&paths.config_dir).display()),
+        }
+    }
+
     /// The entry with the password of an `https://` proxy.
     pub fn proxy_login(paths: &NodePaths) -> Entry {
         Entry {
@@ -203,6 +210,8 @@ pub(crate) enum Key<'a> {
     CenterNext(&'a str),
     /// The relay's TLS certificate and key, as PEM.
     RelayTls,
+    /// The web UI's TLS certificate and key, as PEM.
+    UiTls,
     /// The password of an `https://` proxy: the relay token.
     ProxyLogin,
 }
@@ -214,6 +223,7 @@ impl Key<'_> {
             Key::Center(c) => paths.key_file(c),
             Key::CenterNext(c) => paths.next_key_file(c),
             Key::RelayTls => paths.relay_tls_file(),
+            Key::UiTls => paths.ui_tls_file(),
             Key::ProxyLogin => paths.proxy_login_file(),
         }
     }
@@ -224,6 +234,7 @@ impl Key<'_> {
             Key::Center(c) => Entry::center_key(paths, c),
             Key::CenterNext(c) => Entry::center_next_key(paths, c),
             Key::RelayTls => Entry::relay_tls(paths),
+            Key::UiTls => Entry::ui_tls(paths),
             Key::ProxyLogin => Entry::proxy_login(paths),
         }
     }
@@ -235,14 +246,16 @@ impl Key<'_> {
             Key::Center(c) => format!("the node key for center {c}"),
             Key::CenterNext(c) => format!("the new node key for center {c}"),
             Key::RelayTls => "the relay's TLS key".into(),
+            Key::UiTls => "the web UI's TLS key".into(),
             Key::ProxyLogin => "the proxy's password (a relay token)".into(),
         }
     }
 }
 
 /// Every key of the node `cfg` describes: the config's, one per center and
-/// the new one of a rotation under way, the relay's TLS key once the relay
-/// has a pin, and the proxy's password while the config names its user.
+/// the new one of a rotation under way, the relay's and the web UI's TLS
+/// keys once they have a pin, and the proxy's password while the config
+/// names its user.
 /// A key that is not there is passed over.
 pub(crate) fn keys(cfg: &NodeConfig) -> Vec<Key<'_>> {
     std::iter::once(Key::Config)
@@ -252,6 +265,7 @@ pub(crate) fn keys(cfg: &NodeConfig) -> Vec<Key<'_>> {
                 .flat_map(|c| [Key::Center(&c.name), Key::CenterNext(&c.name)]),
         )
         .chain(cfg.relay.pin.is_some().then_some(Key::RelayTls))
+        .chain(cfg.ui.pin.is_some().then_some(Key::UiTls))
         .chain(cfg.connection.login.is_some().then_some(Key::ProxyLogin))
         .collect()
 }
@@ -639,6 +653,28 @@ pub fn store_relay_tls(
     id: &nerve_transport::tls::ServerIdentity,
 ) -> Result<(), String> {
     put(paths, storage, Key::RelayTls, id.to_pem().trim())
+}
+
+/// The web UI's TLS identity, if it has one.
+pub fn ui_tls(
+    paths: &NodePaths,
+    storage: SecretStorage,
+) -> Result<Option<nerve_transport::tls::ServerIdentity>, String> {
+    let Some(text) = read_secret(paths, storage, Key::UiTls)? else {
+        return Ok(None);
+    };
+    nerve_transport::tls::ServerIdentity::from_pem(&text)
+        .map(Some)
+        .map_err(|e| format!("bad web UI TLS key in {}: {e}", place(storage)))
+}
+
+/// Keeps the web UI's TLS identity where `storage` says.
+pub fn store_ui_tls(
+    paths: &NodePaths,
+    storage: SecretStorage,
+    id: &nerve_transport::tls::ServerIdentity,
+) -> Result<(), String> {
+    put(paths, storage, Key::UiTls, id.to_pem().trim())
 }
 
 /// The password of the `https://` proxy, the relay token. Missing is an

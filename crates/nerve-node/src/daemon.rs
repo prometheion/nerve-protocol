@@ -618,6 +618,9 @@ pub(crate) struct Shared {
     pub aside: Option<tokio::sync::mpsc::UnboundedSender<Aside>>,
     /// The relay for other nodes (crate::relay), and who is connected.
     pub relay: crate::relay::Relays,
+    /// Linux: the web UI's state and sessions (crate::webui).
+    #[cfg(target_os = "linux")]
+    pub(crate) webui: Arc<crate::webui::WebUi>,
     /// Linux: the installed node's owner ([`NodeOptions::owner`]).
     #[cfg_attr(windows, allow(dead_code))]
     pub owner: Option<String>,
@@ -1377,7 +1380,21 @@ impl Shared {
             "home_warning": self.home_warning(&cfg),
             "centers": centers,
             "relay": self.relay.status(&cfg),
+            "ui": self.ui_status(&cfg),
         })
+    }
+}
+
+impl Shared {
+    /// The web UI's state for `status`: none where there is no web UI.
+    fn ui_status(&self, cfg: &NodeConfig) -> Value {
+        #[cfg(target_os = "linux")]
+        return self.webui.status(cfg);
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = cfg;
+            Value::Null
+        }
     }
 }
 
@@ -1466,6 +1483,8 @@ pub struct Daemon {
     shared: Arc<Shared>,
     supervisor: JoinHandle<()>,
     relay: JoinHandle<()>,
+    /// The web UI's task, on a node that serves it (crate::webui).
+    webui: Option<JoinHandle<()>>,
     ctl: Option<JoinHandle<()>>,
     /// The owner endpoint's task and its socket (crate::owner).
     owner: Option<(JoinHandle<()>, PathBuf)>,
@@ -1641,6 +1660,8 @@ impl Daemon {
             #[cfg(target_os = "linux")]
             provider_socket: endpoint.as_ref().map(|e| e.provider_socket()),
             relay: Default::default(),
+            #[cfg(target_os = "linux")]
+            webui: Default::default(),
             aside: opts.aside,
             owner: opts.owner,
             own_user: crate::account::own_name(),
@@ -1676,6 +1697,14 @@ impl Daemon {
         };
         #[cfg(not(target_os = "linux"))]
         let providers = None;
+        // The web UI is the installed node's, for the owners of its
+        // endpoint; it listens only while the config says so.
+        #[cfg(target_os = "linux")]
+        let webui = endpoint
+            .clone()
+            .map(|e| tokio::spawn(crate::webui::run(shared.clone(), e)));
+        #[cfg(not(target_os = "linux"))]
+        let webui = None;
         // A node whose owner endpoint cannot be made runs on without it:
         // its owners then need root, as before there was one.
         let owner = match endpoint {
@@ -1718,6 +1747,7 @@ impl Daemon {
             shared,
             supervisor,
             relay,
+            webui,
             ctl,
             owner,
             providers,
@@ -1783,6 +1813,9 @@ impl Daemon {
         // Their connections outlive the socket's task otherwise.
         self.shared.providers.detach_all();
         let _ = tokio::time::timeout(Duration::from_secs(2), self.relay).await;
+        if let Some(w) = self.webui {
+            let _ = tokio::time::timeout(Duration::from_secs(2), w).await;
+        }
         if let Some(c) = self.ctl {
             c.abort();
             let socket = self.shared.paths.ctl_socket();
@@ -2419,6 +2452,7 @@ pub(crate) fn control(
 fn is_quiet_key(key: &str) -> bool {
     key.starts_with("connection")
         || key.starts_with("relay.node")
+        || key.starts_with("ui.token")
         || key.ends_with(".pin")
         || key.ends_with("_id")
 }
@@ -4174,6 +4208,23 @@ node_id = "n1"
             text,
             "settings changed by local (version 7): relay.listen: 0.0.0.0:7490 -> 0.0.0.0:7491; relay.node changed"
         );
+    }
+
+    /// The web UI's address is told; its tokens and their hashes only as
+    /// changed.
+    #[test]
+    fn a_web_ui_token_hash_is_never_shown() {
+        let hash = "c".repeat(64);
+        let a = "[ui]\nlisten = \"127.0.0.1:7470\"\n";
+        let b = format!(
+            "[ui]\nlisten = \"127.0.0.1:7471\"\n\n[[ui.token]]\nlabel = \"laptop\"\ntoken_sha256 = \"{hash}\"\n"
+        );
+        let text = told(a, &b);
+        assert_eq!(
+            text,
+            "settings changed by local (version 7): ui.listen: 127.0.0.1:7470 -> 127.0.0.1:7471; ui.token changed"
+        );
+        assert!(!text.contains("ccc") && !text.contains("laptop"), "{text}");
     }
 
     /// An older text of the guard holds tabs and line breaks; the log line

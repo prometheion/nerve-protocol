@@ -22,6 +22,9 @@ use crate::paths::NodePaths;
 use crate::service::{Host, Layout};
 
 mod json;
+pub mod ui;
+
+pub use ui::{UiCmd, UiTokenCmd};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -77,6 +80,12 @@ pub enum Cmd {
     /// Let nodes that cannot reach a center themselves reach this node's centers through it.
     #[command(subcommand)]
     Relay(RelayCmd),
+    /// Turn the node's web UI on or off, and make the tokens that log in to it (the installed node on Linux; off unless turned on).
+    #[command(args_conflicts_with_subcommands = true)]
+    Ui {
+        #[command(subcommand)]
+        cmd: Option<UiCmd>,
+    },
     /// Read or change any setting in node.toml by its name.
     #[command(subcommand)]
     Config(ConfigCmd),
@@ -655,7 +664,7 @@ const SECTIONS: &[(&str, &str, &[&[&str]])] = &[
     (
         "Pair and connect",
         "Link this machine to centers and choose how it reaches them.",
-        &[&["center"], &["proxy"], &["relay"]],
+        &[&["center"], &["proxy"], &["relay"], &["ui"]],
     ),
     (
         "What a center may do",
@@ -2557,6 +2566,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
         } => log_cmd(&paths, follow, last, problems, false, out).await,
         Cmd::Proxy(c) => proxy_cmd(&paths, c, out).await,
         Cmd::Relay(c) => relay_cmd(&paths, c, out).await,
+        Cmd::Ui { cmd } => ui::ui_cmd(&paths, cmd, out).await,
         Cmd::Sudo(c) => sudo_cmd(&paths, c, out).await,
         Cmd::Backup {
             file,
@@ -4468,6 +4478,11 @@ pub const NO_ACCOUNT_TO_CHOOSE: &str = "machine.user is Windows's: on Linux comm
 /// a `[[center]]` entry by its name.
 async fn config_cmd(paths: &NodePaths, c: ConfigCmd, out: &mut dyn Write) -> Result<(), String> {
     if let ConfigCmd::Accept = c {
+        // It takes a hand-edited node.toml whole, with no check of what
+        // changed: a terminal's job, never the web UI's.
+        if crate::owner::via_web() {
+            return Err(crate::owner::NOT_FROM_THE_WEB.into());
+        }
         let (v, notes) = accept(paths).await?;
         let _ = writeln!(out, "accepted node.toml as version {v}");
         for note in notes {
@@ -4482,6 +4497,16 @@ async fn config_cmd(paths: &NodePaths, c: ConfigCmd, out: &mut dyn Write) -> Res
             .ok_or_else(|| format!("{key} is not set"))?;
         let _ = writeln!(out, "{}", show(&v));
         return Ok(());
+    }
+    // The web UI's own settings change through `ui` at the CLI alone.
+    if crate::owner::via_web()
+        && let ConfigCmd::Set { key, .. }
+        | ConfigCmd::Unset { key }
+        | ConfigCmd::Add { key, .. }
+        | ConfigCmd::Remove { key, .. } = &c
+        && (key == "ui" || key.starts_with("ui."))
+    {
+        return Err(crate::owner::NOT_FROM_THE_WEB.into());
     }
     // Linux chooses no account for the commands: they run as nerve-run or
     // as the owner, the account that ran `install`.
