@@ -3,8 +3,8 @@
 //! the page sends. Options go as `--name=value`, and the values the owner
 //! typed go after `--`, so none can read as an option; a secret, and the
 //! pairing link, go on the command's input. Reads of the audit and the log
-//! come from the node's own files, in this process: the page asks them
-//! every two seconds.
+//! come from the node's own files, in this process, from their end and off
+//! the runtime's threads: the page asks them every two seconds.
 
 use std::path::Path;
 
@@ -132,14 +132,20 @@ pub(super) async fn api(ctx: &Ctx, req: &Request, b: &Value) -> Option<ApiResult
         ("POST", "/api/rules/guard") => on_center(ctx, b, &["rule", "guard"]).await,
         ("POST", "/api/sudo/off") => command(ctx, &["sudo", "off"], None).await,
         // ---- Audit ----
-        ("GET", "/api/audit") => audit(ctx, flag(query, "denied")),
+        ("GET", "/api/audit") => {
+            let (file, denied) = (ctx.shared.paths.audit_log(), flag(query, "denied"));
+            blocking(move || audit(&file, denied)).await
+        }
         ("POST", "/api/audit/rule") => match audit_rule(b) {
             Ok(a) => run(ctx, a, None).await,
             Err(e) => Err(e),
         },
         ("POST", "/api/audit/clear") => command(ctx, &["audit", "clear"], None).await,
         // ---- Log ----
-        ("GET", "/api/log") => log(&ctx.shared.paths.log_file(), flag(query, "problems")),
+        ("GET", "/api/log") => {
+            let (file, problems) = (ctx.shared.paths.log_file(), flag(query, "problems"));
+            blocking(move || log(&file, problems)).await
+        }
         ("POST", "/api/log/clear") => command(ctx, &["log", "clear"], None).await,
         // ---- Capabilities ----
         ("GET", "/api/caps") => match query.query_param("center").filter(|c| !c.is_empty()) {
@@ -491,25 +497,118 @@ async fn perm(ctx: &Ctx, q: &Request) -> ApiResult {
     Ok(json!({ "rules": rules, "folders": folders, "sudo": sudo }))
 }
 
+/// A read of files off the runtime's threads, which the node's links and
+/// sockets share.
+async fn blocking(f: impl FnOnce() -> ApiResult + Send + 'static) -> ApiResult {
+    tokio::task::spawn_blocking(f)
+        .await
+        .unwrap_or_else(|e| Err((500, format!("the read stopped: {e}"))))
+}
+
 /// The newest audit entries, each with the rules its buttons would add as
 /// they will be stored, control characters written out.
-fn audit(ctx: &Ctx, denied: bool) -> ApiResult {
-    let log = AuditLog::new(ctx.shared.paths.audit_log());
-    let lines = log
-        .lines()
-        .map_err(|e| (500, format!("cannot read the audit: {e}")))?;
-    let mut entries: Vec<Value> = lines
-        .iter()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(|v| !denied || v["decision"] == "forbidden" || v["event"] == "refused")
-        .collect();
-    entries.drain(..entries.len().saturating_sub(NEWEST));
+fn audit(file: &Path, denied: bool) -> ApiResult {
+    let log = AuditLog::new(file.to_path_buf());
+    let mut entries = newest(&log.old_path(), file, NEWEST, &mut |l| {
+        // Most lines are no refusal: those are passed over unparsed.
+        if denied && !(l.contains("forbidden") || l.contains("refused")) {
+            return None;
+        }
+        let v: Value = serde_json::from_str(l).ok()?;
+        (!denied || v["decision"] == "forbidden" || v["event"] == "refused").then_some(v)
+    })
+    .map_err(|e| (500, format!("cannot read the audit: {e}")))?;
     for e in &mut entries {
         if let Some(p) = rule_preview(e) {
             e["rule_preview"] = json!(p);
         }
     }
     Ok(json!({ "entries": entries }))
+}
+
+/// How much of a file [`newest`] reads at once.
+const PIECE: u64 = 64 * 1024;
+
+/// The newest `n` lines of `old` and then `file` that `take` makes an entry
+/// of, oldest first. The files are read from their end a piece at a time
+/// until there are `n`: a page asks every two seconds, so a read must cost
+/// about what it shows, not the size of the files (20 MiB for the audit).
+/// When `file` is moved to `old` meanwhile, the read would show lines twice
+/// or miss them, so it is made again.
+fn newest(
+    old: &Path,
+    file: &Path,
+    n: usize,
+    take: &mut dyn FnMut(&str) -> Option<Value>,
+) -> std::io::Result<Vec<Value>> {
+    use std::os::unix::fs::MetadataExt;
+    let id = |p: &Path| std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()));
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        let before = id(file);
+        let mut out = Vec::new();
+        let read =
+            from_end(file, n, take, &mut out).and_then(|()| from_end(old, n, take, &mut out));
+        match read {
+            // A file cut short (cleared) under the read is read again too.
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && tries < 3 => continue,
+            Err(e) => return Err(e),
+            Ok(()) if id(file) != before && tries < 3 => continue,
+            Ok(()) => {
+                out.reverse();
+                return Ok(out);
+            }
+        }
+    }
+}
+
+/// Adds to `out` the entries of the lines of `p`, newest first, until it
+/// holds `n`. A file that is not there has none.
+fn from_end(
+    p: &Path,
+    n: usize,
+    take: &mut dyn FnMut(&str) -> Option<Value>,
+    out: &mut Vec<Value>,
+) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = match std::fs::File::open(p) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let mut at = f.metadata()?.len();
+    // The start of a line whose end was in the piece read before.
+    let mut start: Vec<u8> = Vec::new();
+    let mut line = |l: &[u8], out: &mut Vec<Value>| {
+        if !l.is_empty()
+            && let Some(v) = take(&String::from_utf8_lossy(l))
+        {
+            out.push(v);
+        }
+    };
+    while at > 0 && out.len() < n {
+        let from = at.saturating_sub(PIECE);
+        let mut piece = vec![0u8; (at - from) as usize];
+        f.seek(SeekFrom::Start(from))?;
+        f.read_exact(&mut piece)?;
+        at = from;
+        piece.extend_from_slice(&start);
+        let mut lines = piece.split(|b| *b == b'\n');
+        // The first is whole only at the start of the file.
+        let first = lines.next().unwrap_or_default().to_vec();
+        for l in lines.rev() {
+            if out.len() >= n {
+                return Ok(());
+            }
+            line(l, out);
+        }
+        start = first;
+    }
+    if at == 0 && out.len() < n {
+        line(&start, out);
+    }
+    Ok(())
 }
 
 /// The rule an audit entry's buttons add, as `rule ls` will show it: none
@@ -592,21 +691,16 @@ fn audit_rule(b: &Value) -> Result<Vec<String>, (u16, String)> {
 /// The newest lines of the node's log, the moved-aside file's first:
 /// errors and warnings only with `problems`.
 fn log(file: &Path, problems: bool) -> ApiResult {
-    let read = |p: &Path| match std::fs::read(p) {
-        Ok(b) => Ok(b),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err((500, format!("cannot read the log: {e}"))),
-    };
     let mut old = file.as_os_str().to_owned();
     old.push(".1");
-    let mut bytes = read(Path::new(&old))?;
-    bytes.extend(read(file)?);
-    let mut lines: Vec<Value> = String::from_utf8_lossy(&bytes)
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(|v| !problems || matches!(v["level"].as_str(), Some("error" | "warn")))
-        .collect();
-    lines.drain(..lines.len().saturating_sub(NEWEST));
+    let lines = newest(Path::new(&old), file, NEWEST, &mut |l| {
+        if problems && !(l.contains("error") || l.contains("warn")) {
+            return None;
+        }
+        let v: Value = serde_json::from_str(l).ok()?;
+        (!problems || matches!(v["level"].as_str(), Some("error" | "warn"))).then_some(v)
+    })
+    .map_err(|e| (500, format!("cannot read the log: {e}")))?;
     Ok(json!({ "entries": lines }))
 }
 
@@ -722,6 +816,52 @@ mod tests {
         });
         let v = settings(&cfg);
         assert!(!v.to_string().contains(&"d".repeat(64)), "{v}");
+    }
+
+    #[test]
+    fn the_newest_entries_are_read_from_the_end_of_the_files() {
+        let d = tempfile::tempdir().unwrap();
+        let (old, file) = (d.path().join("a.jsonl.1"), d.path().join("a.jsonl"));
+        let lines = |r: std::ops::Range<u64>| -> String {
+            r.map(|i| {
+                format!(
+                    "{{\"n\":{i},\"pad\":\"{}\"}}\n",
+                    "x".repeat(i as usize % 50)
+                )
+            })
+            .collect()
+        };
+        std::fs::write(&old, lines(0..3000)).unwrap();
+        std::fs::write(&file, lines(3000..6000)).unwrap();
+        let ns = |v: &[Value]| {
+            v.iter()
+                .map(|e| e["n"].as_u64().unwrap())
+                .collect::<Vec<_>>()
+        };
+        // Only the lines it shows are looked at, not the 6000 of the files.
+        let mut seen = 0;
+        let got = newest(&old, &file, 500, &mut |l| {
+            seen += 1;
+            serde_json::from_str(l).ok()
+        })
+        .unwrap();
+        assert_eq!(ns(&got), (5500..6000).collect::<Vec<_>>());
+        assert_eq!(seen, 500);
+        // Across both files and many pieces, every line whole and in order.
+        let got = newest(&old, &file, 5000, &mut |l| serde_json::from_str(l).ok()).unwrap();
+        assert_eq!(ns(&got), (1000..6000).collect::<Vec<_>>());
+        let got = newest(&old, &file, 9000, &mut |l| serde_json::from_str(l).ok()).unwrap();
+        assert_eq!(ns(&got), (0..6000).collect::<Vec<_>>());
+        // With a filter it reads on until it has them.
+        let got = newest(&old, &file, 3, &mut |l| {
+            let v: Value = serde_json::from_str(l).ok()?;
+            (v["n"].as_u64()? % 1000 == 0).then_some(v)
+        })
+        .unwrap();
+        assert_eq!(ns(&got), [3000, 4000, 5000]);
+        // No files, no entries.
+        let none = d.path().join("none");
+        assert!(newest(&none, &none, 5, &mut |_| None).unwrap().is_empty());
     }
 
     #[test]
