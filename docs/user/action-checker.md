@@ -354,7 +354,9 @@ call it cannot judge in time.
   the model failed on it) is refused too. All three are refused with
   allow-and-log as well: with the local model, allow-and-log lets a call
   through only while the model is not running (not installed, starting, or
-  failed). The refusal says which; a longer timeout gets longer calls judged.
+  failed); a model that ended while it read a call counts as running until it
+  is up again, and the calls in between are refused as not judged. The
+  refusal says which; a longer timeout gets longer calls judged.
   On a desktop CPU d1-2B judges a 2 KB write in its 12 s.
 - **The question.** The instructions and the true/false criteria the model is
   asked. You can edit and reset them. The command text is never put into the

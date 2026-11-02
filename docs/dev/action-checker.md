@@ -644,7 +644,9 @@ timeout, since the server reads a call it took to the end; that whole read
 gives the call's speed. The timeout covers the wait for the slot and the read.
 A call that did not get the slot within it, or that got it with less time left
 than its estimate (one of up to 512 tokens too), is not sent and is refused as
-busy (`ModelError::Busy`). A call that was sent and got no answer in time, or
+busy (`ModelError::Busy`). A call that got the slot at once is held to the time
+left after `/tokenize` too, but only when it is over 512 tokens (refused as too
+long). A call that was sent and got no answer in time, or
 none that could be read (an HTTP error, a reset connection, no `noul`), is
 refused as not judged (`ModelError::NotJudged`). Both are refused with
 allow-and-log too, as `TooLong` is: before review T1 of #178 parallel calls
@@ -652,7 +654,14 @@ queued in the server, and every call behind them, of any session, timed out
 and was with allow-and-log let through unjudged ("model unreachable"), and so
 was a Kev-4B call of 430 to 512 tokens on 2 vCPUs. With the local model,
 allow-and-log covers only a server that does not answer `/tokenize` (not
-installed, starting, crashed). Each new process of the server starts with the
+installed, starting, failed to start). A server that ended while it read a call
+(its connection ended without an answer, not an HTTP error) sets
+`ReadBudget::died_on_call`; until the restarted process answers its readiness
+probe (`run_once` clears it), `resolved_endpoint` keeps the endpoint and
+`ask_local` refuses every call as not judged, so those seconds are not a
+model that is down. `/tokenize`'s answer is read up to eight bytes per byte of
+the text (at least 128 KiB), so a question over the cap is counted and refused
+as too long, and not reported as an unreachable model. Each new process of the server starts with the
 speeds forgotten (`ReadBudget::restart`, called by `supervise`), as it may read
 slower than the one before it: a Vulkan build that finds no usable GPU at its
 start runs on the CPU, and a machine may swap after an out-of-memory kill.
