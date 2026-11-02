@@ -956,7 +956,12 @@ mod tests {
             "{\"level\":\"warn\",\"msg\":\"old\"}\n",
         )
         .unwrap();
-        std::fs::write(&f, "{\"level\":\"info\",\"msg\":\"new\"}\nnot json\n").unwrap();
+        // The word "warn" in an info line's text does not make it a problem.
+        std::fs::write(
+            &f,
+            "{\"level\":\"info\",\"msg\":\"new\"}\n{\"level\":\"info\",\"msg\":\"warn\"}\nnot json\n",
+        )
+        .unwrap();
         let v = log(&f, false).unwrap();
         let msgs: Vec<&str> = v["entries"]
             .as_array()
@@ -964,7 +969,7 @@ mod tests {
             .iter()
             .map(|e| e["msg"].as_str().unwrap())
             .collect();
-        assert_eq!(msgs, ["old", "new"]);
+        assert_eq!(msgs, ["old", "new", "warn"]);
         let v = log(&f, true).unwrap();
         assert_eq!(v["entries"].as_array().unwrap().len(), 1);
     }
