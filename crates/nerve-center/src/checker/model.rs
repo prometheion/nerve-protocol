@@ -290,7 +290,16 @@ pub async fn ask(endpoint: &Endpoint, cfg: &ModelConfig, state: Value) -> Result
     let sent = Instant::now();
     let answer = tokio::time::timeout(
         timeout,
-        request(endpoint, "/v1/systemone", &body, timeout, MAX_BODY),
+        // The read's own limit sits past the outer one, so it is always the
+        // outer that ends a slow call: a read that gave up first would
+        // surface as an error and teach the budget nothing.
+        request(
+            endpoint,
+            "/v1/systemone",
+            &body,
+            timeout + Duration::from_secs(5),
+            MAX_BODY,
+        ),
     )
     .await;
     if let Some((flight, tokens)) = &flight {
