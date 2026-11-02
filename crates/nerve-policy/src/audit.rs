@@ -75,8 +75,11 @@ pub fn pinnable(args: &serde_json::Map<String, Value>) -> Option<serde_json::Map
         .filter(|(k, v)| {
             k.chars().count() <= ARG_KEY_MAX_CHARS
                 && crate::conditions::pin(k, v).is_ok()
-                && v.as_str()
-                    .is_none_or(|s| s.chars().count() <= ARG_MAX_CHARS)
+                && v.as_str().is_none_or(|s| {
+                    // An agent's text may hold a control or format character,
+                    // which would reach a terminal in the pinned rule.
+                    s.chars().count() <= ARG_MAX_CHARS && !s.chars().any(crate::config::unseen)
+                })
         })
         .take(ARGS_MAX)
         .map(|(k, v)| (k.clone(), v.clone()))
@@ -528,6 +531,18 @@ mod tests {
         let kept = pinnable(&args).unwrap();
         assert_eq!(kept.len(), 2, "{kept:?}");
         assert!(kept.keys().all(|k| k.len() <= ARG_KEY_MAX_CHARS));
+    }
+
+    /// A text with a control or format character is not offered as a pin:
+    /// it would reach the owner's terminal in the rule.
+    #[test]
+    fn pinnable_arguments_hold_no_unseen_characters() {
+        let mut args = serde_json::Map::new();
+        args.insert("room".into(), "office".into());
+        args.insert("a".into(), "x\u{1b}[2K".into());
+        args.insert("b".into(), "x\u{202e}y".into());
+        let kept = pinnable(&args).unwrap();
+        assert_eq!(kept.keys().collect::<Vec<_>>(), ["room"]);
     }
 
     #[test]

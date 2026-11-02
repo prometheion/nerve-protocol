@@ -327,6 +327,19 @@ pub fn fields(params: &Value) -> Vec<String> {
         .collect()
 }
 
+/// The first condition of `pattern` that the center cannot tell on a path
+/// argument of `params`: a `!=` with a value from the home (`~/…`), which
+/// [`PathStyle::AnyHome`] leaves open, so a blocklist entry with it refuses
+/// every call of the action. `None` where there is none.
+pub fn home_not_equal(pattern: &str, params: &Value) -> Option<String> {
+    let props = properties(params)?;
+    parse(pattern).ok()?.into_iter().find_map(|c| {
+        let path = props.get(&c.field)?.get("x-nerve-path").is_some();
+        (path && c.op == Op::Ne && c.value.starts_with('~'))
+            .then(|| format!("{}!={}", c.field, c.value))
+    })
+}
+
 /// Checks `pattern` against the arguments schema `params` of `scope`'s
 /// action, as the rule is written: each field must be one of its top-level
 /// properties, each value of that property's type, and an operator one its
@@ -345,6 +358,9 @@ fn check_one(scope: &str, c: &Condition, params: &Value) -> Result<(), String> {
             .into_iter()
             .flat_map(|p| p.keys())
             .map(String::as_str)
+            // Only names a rule can write: a schema's own text reaches the
+            // owner's terminal here, and a name may hold anything.
+            .filter(|n| n.chars().all(field_char))
             .collect();
         return Err(if takes.is_empty() {
             format!("{scope} takes no arguments, so it has no {}", c.field)
@@ -1103,6 +1119,31 @@ pub(crate) mod tests {
         // Where both read it alike nothing is lost.
         assert!(!any("file!=/srv/in.txt", "/srv/in.txt"));
         assert!(any("file!=/srv/in.txt", "/srv/other.txt"));
+    }
+
+    /// A schema's own argument names reach the terminal in the "it takes"
+    /// text, so a name a rule cannot write is left out of it.
+    #[test]
+    fn the_takes_text_names_only_what_a_rule_can_write() {
+        let params = json!({"type": "object", "properties": {
+            "room": {"type": "string"},
+            "x\u{1b}[2K\u{9b}": {"type": "string"}}});
+        let e = check("lamp.set", "size=1", &params).unwrap_err();
+        assert!(e.ends_with("it takes room"), "{e:?}");
+    }
+
+    /// A `!=` with a value from the home on a path argument is the one the
+    /// center cannot tell.
+    #[test]
+    fn a_home_not_equal_on_a_path_is_found() {
+        let params = lamp();
+        assert_eq!(
+            home_not_equal("file!=~/inbox.md", &params).as_deref(),
+            Some("file!=~/inbox.md")
+        );
+        assert!(home_not_equal("file!=/srv/in.md", &params).is_none());
+        assert!(home_not_equal("file~~/in*", &params).is_none());
+        assert!(home_not_equal("room!=~/x", &params).is_none());
     }
 
     /// The audit keeps the arguments the schema names, and a path only once

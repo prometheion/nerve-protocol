@@ -3091,6 +3091,7 @@ impl Center {
                     &detail,
                     args,
                     &seen.marked,
+                    &seen.params,
                 );
                 return Err(RpcError::forbidden(message).into());
             }
@@ -3109,6 +3110,7 @@ impl Center {
                     &detail,
                     args,
                     &seen.marked,
+                    &seen.params,
                 );
             }
             Decision::Pass => {}
@@ -3760,6 +3762,7 @@ impl Center {
                 .any(|o| o.rule == e.rule && o.node_id == e.node_id)
             {
                 checker_typed(&e.rule, e.node_id.as_deref(), &nodes)?;
+                blocklist_typed(&e.rule, e.node_id.as_deref(), &nodes)?;
             }
         }
         for a in &cfg.allow_rules {
@@ -4049,6 +4052,7 @@ impl Center {
         detail: &str,
         args: &Map<String, Value>,
         marked: &[(String, PathMark)],
+        params: &Value,
     ) {
         let node = self.node_name(&route.node_id);
         let mut e = Map::new();
@@ -4070,7 +4074,14 @@ impl Center {
         );
         // What its allow buttons may pin, as a node's entry has it, a path
         // argument as the checker matched it.
-        let args = checker::blocklist::as_matched(args, marked);
+        // Only the arguments the schema names, as the node's entries have
+        // them: an open schema lets junk keys through, and they would push
+        // the real ones out of the choices.
+        let args = nerve_policy::conditions::declared(
+            params,
+            &checker::blocklist::as_matched(args, marked),
+            true,
+        );
         if let Some(args) = nerve_policy::audit::pinnable_args(&route.cap, &route.action, &args) {
             e.insert("args".into(), Value::Object(args));
         }
@@ -4245,6 +4256,31 @@ fn checker_typed(
     })
 }
 
+/// Refuses a blocklist entry with a `!=` on a path from the home
+/// (`notes.save:file!=~/inbox.md`): the center cannot tell a home, so the
+/// entry would refuse every call of the action, the inbox's too. An absolute
+/// path works.
+fn blocklist_typed(
+    rule: &str,
+    node: Option<&str>,
+    nodes: &BTreeMap<String, NodeRecord>,
+) -> Result<(), String> {
+    if !nerve_policy::rules::has_conditions(rule) {
+        return Ok(());
+    }
+    let Some((scope, pattern)) = rule.split_once(':') else {
+        return Ok(());
+    };
+    for (_, params) in published_params(nodes, node, scope) {
+        if let Some(c) = nerve_policy::conditions::home_not_equal(pattern, &params) {
+            return Err(format!(
+                "rule {rule:?}: the center cannot tell the home in {c}, so the entry would refuse every call of {scope}; write the path in full (/home/…)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The arguments a rule may name for each action the machines publish
 /// (`lamp.set` → `room (a string)`, …), for the checker page's forms: the
 /// first machine's that has the action. An `fs` action and `exec.run` take
@@ -4319,6 +4355,9 @@ struct CheckerUnit {
     description: String,
     /// The arguments the unit's schema marks as paths.
     marked: Vec<(String, PathMark)>,
+    /// The unit's arguments schema, which tells the audit what a rule can
+    /// name.
+    params: Value,
 }
 
 impl CheckerUnit {
@@ -4342,6 +4381,7 @@ impl CheckerUnit {
         CheckerUnit {
             description,
             marked: nerve_proto::schema::path_args(&u.params),
+            params: u.params.clone(),
         }
     }
 
@@ -4999,6 +5039,10 @@ pub(crate) mod tests {
             let mut m = Map::new();
             m.insert("path".into(), json!(path));
             m.insert("text".into(), json!("hello"));
+            // Keys the schema does not name, which an open schema lets by.
+            for i in 0..16 {
+                m.insert(format!("a{i:02}"), json!(i));
+            }
             m
         };
         // Into an ordinary file: the allow rule lets it go to the node, and
@@ -5011,6 +5055,9 @@ pub(crate) mod tests {
         let last = c.audit().pop().unwrap();
         assert_eq!(last["checker"]["layer"], "allow rule");
         assert_eq!(last["target"], "/home/me/notes/today.md");
+        // Its pin choices are the schema's arguments, not the junk keys.
+        let kept: Vec<&String> = last["args"].as_object().unwrap().keys().collect();
+        assert_eq!(kept, ["path", "text"]);
         // Into the SSH keys: the `fs.write` entry refuses it, under the path.
         let CallError::Rpc(e) = c
             .call(&sess, &route, save("/home/me/.ssh/authorized_keys"))
@@ -5307,6 +5354,47 @@ pub(crate) mod tests {
         assert_eq!(rejected.as_array().unwrap().len(), 1, "{rejected}");
         assert!(rejected[0].as_str().unwrap().contains("lamp.set:office"));
         assert!(c.checker().rejected[0].contains("lamp.set:office"));
+    }
+
+    /// A blocklist entry `!=` a path from the home is refused when it is
+    /// written: the center cannot tell a home, so it would refuse every call
+    /// of the action. An absolute path is taken, and so is the same on a
+    /// plain string argument.
+    #[test]
+    fn a_blocklist_entry_the_center_cannot_tell_is_refused_on_save() {
+        use crate::tools::tests::{cap, desc};
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let params = json!({"type": "object",
+            "properties": {"file": {"type": "string", "x-nerve-path": "write"},
+                           "tag": {"type": "string"}}});
+        let notes = cap(
+            "notes",
+            "notes",
+            &[("save", nerve_proto::Effect::Write, params)],
+        );
+        c.update(|s| {
+            let mut n = node_record("n1", "linux");
+            n.set_descriptor(desc("n1", vec![notes]));
+            s.nodes.insert("n1".into(), n);
+        });
+        let add = |rule: &str| {
+            let mut cfg = c.read(|s| s.checker.clone());
+            cfg.blocklist.push(checker::BlockEntry {
+                id: String::new(),
+                rule: rule.into(),
+                on: true,
+                builtin: false,
+                note: String::new(),
+                node_id: None,
+                off_for: Vec::new(),
+            });
+            c.apply_checker_config(cfg)
+        };
+        let e = add("notes.save:file!=~/inbox.md").unwrap_err();
+        assert!(e.contains("cannot tell the home"), "{e}");
+        add("notes.save:file!=/home/me/inbox.md").unwrap();
+        add("notes.save:tag!=~/x").unwrap();
     }
 
     /// A checker rule with conditions is checked against the schema the
