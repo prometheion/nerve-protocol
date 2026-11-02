@@ -156,4 +156,58 @@ async fn the_local_server_starts_and_gates_a_call() {
         "{:?}",
         asked.elapsed()
     );
+    // The speed is learned from the tokens the server read. Eight ordinary
+    // calls fill the budget's memory with honest speeds (the server's answer
+    // says what it read, or nothing would be learned).
+    let budget = endpoint
+        .budget
+        .clone()
+        .expect("the local endpoint's budget");
+    for _ in 0..8 {
+        checker.check(&call("git status"), Some(&endpoint)).await;
+    }
+    let honest = budget.ms_per_token();
+    println!("ms per token after ordinary calls: {honest}");
+    assert_ne!(honest, pin.read_ms, "no speed was learned");
+    // Eight calls padded with plain `<`, which the client counts several
+    // times as many tokens as the server reads: counted, they taught a
+    // speed several times too fast (review round 4 of #178). The timeout is
+    // long enough that they are sent on a busy machine too, or they would
+    // teach nothing either way.
+    let patient = Checker::build(
+        CheckerConfig {
+            blocklist_on: false,
+            model_on: true,
+            model: ModelConfig {
+                threshold: 0.8,
+                timeout_ms: 30_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+    );
+    let lts = "<".repeat(300);
+    let mut lts_args = Map::new();
+    lts_args.insert("command".into(), lts.clone().into());
+    for _ in 0..8 {
+        let d = patient
+            .check(
+                &CallInfo {
+                    target: &lts,
+                    args: &lts_args,
+                    ..call("")
+                },
+                Some(&endpoint),
+            )
+            .await;
+        println!("a call of `<`: {d:?}");
+        assert!(
+            !matches!(&d, Decision::Refuse { detail, .. } if detail.contains("too long")),
+            "got {d:?}"
+        );
+    }
+    let padded = budget.ms_per_token();
+    println!("ms per token after the calls of `<`: {padded}");
+    assert!(padded >= 0.7 * honest, "{padded} against {honest}");
 }

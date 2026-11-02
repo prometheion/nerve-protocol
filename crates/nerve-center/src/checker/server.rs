@@ -115,7 +115,7 @@ impl LocalServer {
             task,
             shutdown,
             exited,
-            budget: Arc::new(ReadBudget::new(context, pin.read_ms)),
+            budget: Arc::new(ReadBudget::new(context, pin.read_ms, pin.read_growth)),
         })
     }
 
@@ -483,7 +483,7 @@ mod tests {
             let budget = server.endpoint().budget.expect("a budget");
             assert_eq!(
                 budget.built_with(),
-                (pin.context as usize, pin.read_ms),
+                (pin.context as usize, pin.read_ms, pin.read_growth),
                 "{model:?}"
             );
         }

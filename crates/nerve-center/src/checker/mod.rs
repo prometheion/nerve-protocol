@@ -816,7 +816,9 @@ mod tests {
         let checker = Checker::build(cfg, None);
         let (ep, asked) = model::fake::server(5000, std::time::Duration::ZERO);
         let ep = Endpoint {
-            budget: Some(std::sync::Arc::new(model::ReadBudget::new(12_288, 20.0))),
+            budget: Some(std::sync::Arc::new(model::ReadBudget::new(
+                12_288, 20.0, 12_000.0,
+            ))),
             ..ep
         };
         let args = Map::new();

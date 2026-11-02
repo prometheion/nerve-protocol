@@ -615,21 +615,38 @@ before. A longer one is sent only when it is read within the timeout at the
 slowest speed of the last eight calls that ran alone (a call that overlapped
 another one would count its wait; a timed-out one counts as taking at least the
 timeout), or, before the server's first answer, at the pin's 2-vCPU speed
-(`ModelPin::read_ms`: d1-2B 20 ms, Kev-4B 65 ms per token). A request whose
-tokens with 64 for the prompt template exceed the context is never sent. Either
+(`ModelPin::read_ms`: d1-2B 20 ms, Kev-4B 65 ms per token). A call's speed
+is taken from the tokens the server says it read (`usage.input_tokens` of its
+answer), not from the count it was let through with: that count only bounds
+them, and a call padded with plain `<` counts about four times what d1-2B
+reads, so calls of `<` taught a speed four times too fast, after which a call
+that held the server for a minute was let through (review round 4). An answer
+that does not say teaches nothing; a timed-out call has none, and counts as
+the timeout for the tokens counted, which for a call over 512 tokens is never
+faster than the speed that let it through. A token of a long prompt also takes longer than one of a short
+prompt: d1-2B took 5.7 ms per token for 376 tokens and 7.4 ms for 8,070, and
+in review round 4 1.53 times a 240-token call's time per token for 8,500;
+Kev-4B 19 to 20 ms for 455 to 1,191 and 30.8 ms for 4,386. So the time of a
+call of n tokens (with 64 for the template) is estimated as n · (1 + n / g)
+tokens at a short call's speed, and a speed is taken back the same way, with
+g per model below the steepest measurement (`ModelPin::read_growth`: d1-2B
+12,000, Kev-4B 5,000); without it a call of 8,500 tokens was estimated at
+45 s and took 62. A request whose tokens with 64 for the prompt template
+exceed the context is never sent. Either
 is refused as too long (`ModelError::TooLong`), also with allow-and-log: the
 length is the agent's choice, and padding a call must not get it past the
 model. The refusal names the tokens and the time and says that a longer timeout
-gets longer calls judged. On a desktop CPU d1-2B reads about 1,700 to 2,000
-tokens within its 12 s, so a 2 KB write of code is judged; on 2 vCPUs about 550
-to 650. Kev-4B on a desktop CPU reads 400 to 750 tokens within its 15 s, which
+gets longer calls judged. On a desktop CPU d1-2B reads about 1,500 to 1,800
+tokens within its 12 s, so a 2 KB write of code is judged; on 2 vCPUs about 500
+to 600. Kev-4B on a desktop CPU reads 350 to 700 tokens within its 15 s, which
 keeps its memory under 7 GB; a GPU reads much faster, so there a long call can
 still take it up to 13 GB. A call of up to 512 tokens can still hold a slow
 server past the timeout, by what that call takes (about 10 s for d1-2B on
 2 vCPUs, 30 s for Kev-4B). `model::tests` covers the budget against a loopback
 fake, `checker::tests` the refusal with allow-and-log, and
 `tests/local_model.rs` (ignored, a real server) a 2,000-character command and
-one of special-token spellings, both refused at once.
+one of special-token spellings, both refused at once, and that calls of `<`
+do not make the learned speed faster.
 
 **The default is LiquidAI d1-2B** (Q4_K_M) at a threshold of **0.75**: it
 catches what d1-3B caught (55.4 % against 54.5 %, 73 % of injections, the same

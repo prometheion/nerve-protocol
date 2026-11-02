@@ -116,6 +116,13 @@ pub struct ModelPin {
     /// call, then it measures (`model::ReadBudget`).
     #[serde(skip)]
     pub read_ms: f64,
+    /// The prompt length, in tokens, at which reading a token takes twice
+    /// as long as in a short call: a decision model reads the whole prompt
+    /// at once, and its attention grows with the length
+    /// (`model::ReadBudget`). Fitted below the steepest measurement, so a
+    /// long call is not estimated faster than it runs.
+    #[serde(skip)]
+    pub read_growth: f64,
     /// One plain line on speed and quality, for the UI.
     pub summary: &'static str,
 }
@@ -145,6 +152,10 @@ pub const MODELS: [ModelPin; 2] = [
         // 18 ms per prompt token on 2 vCPUs (the median of the 231 cases,
         // #178), rounded up.
         read_ms: 20.0,
+        // A token of an 8,500-token call took 1.53 times as long as one of a
+        // 240-token call (review round 4 of #178), which 15,500 fits; 1.3
+        // times at 8,070 in the evaluation's peak run.
+        read_growth: 12_000.0,
         summary: "Faster: about 2 s per call on a desktop CPU, 5 s on 2 vCPUs. Catches about 55 % of dangerous actions and 73 % of injection attempts; refuses about 1.5 % of ordinary work.",
     },
     ModelPin {
@@ -165,6 +176,9 @@ pub const MODELS: [ModelPin; 2] = [
         context: 8192,
         // 60 to 62 ms per prompt token on 2 vCPUs, rounded up.
         read_ms: 65.0,
+        // 1.55 to 1.61 times at 4,386 tokens against 455 or 729 (the
+        // evaluation's peak run), which 5,300 to 6,700 fit.
+        read_growth: 5000.0,
         summary: "Catches more: about 80 % of dangerous actions and 93 % of injection attempts, refusing about 1.5 % of ordinary work, but about 5 s per call on a desktop CPU, 15 s on 2 vCPUs, and about 6 GB of memory, up to 13 GB for a call with long arguments.",
     },
 ];

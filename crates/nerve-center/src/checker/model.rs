@@ -71,13 +71,23 @@ const TEMPLATE_TOKENS: usize = 64;
 /// and does not send one it cannot read in time; that call is refused as
 /// too long, also with allow-and-log, so padding a call does not get it past
 /// the model.
+///
+/// A token of a long prompt takes longer to read than one of a short prompt
+/// (attention reads the whole prompt): d1-2B read 8,500 tokens at 1.5 times
+/// a short call's time per token (review round 4). So the time is estimated
+/// as a short call's time per token for `n * (1 + n / growth)` tokens, and a
+/// call's speed is taken the same way.
 #[derive(Debug)]
 pub struct ReadBudget {
     /// The server's context, in tokens.
     context: usize,
-    /// The milliseconds per token assumed until the server answered a call:
-    /// the model's speed on 2 vCPUs (`install::ModelPin::read_ms`).
+    /// The milliseconds per token of a short call assumed until the server
+    /// answered one: the model's speed on 2 vCPUs
+    /// (`install::ModelPin::read_ms`).
     assumed: f64,
+    /// The prompt length at which a token takes twice as long to read as in
+    /// a short call (`install::ModelPin::read_growth`).
+    growth: f64,
     state: Mutex<Flights>,
 }
 
@@ -87,7 +97,8 @@ const SPEEDS_KEPT: usize = 8;
 
 #[derive(Debug, Default)]
 struct Flights {
-    /// Milliseconds per token of the last calls that ran alone.
+    /// Milliseconds per token of a short call, of the last calls that ran
+    /// alone.
     speeds: VecDeque<f64>,
     in_flight: usize,
     /// Calls started so far, so a call can tell another one overlapped it.
@@ -95,23 +106,30 @@ struct Flights {
 }
 
 impl ReadBudget {
-    pub fn new(context: u32, assumed_ms_per_token: f64) -> ReadBudget {
+    pub fn new(context: u32, assumed_ms_per_token: f64, growth: f64) -> ReadBudget {
         ReadBudget {
             context: context as usize,
             assumed: assumed_ms_per_token,
+            growth,
             state: Mutex::default(),
         }
     }
 
-    /// The context and the assumed speed it was built with.
+    /// The context, the assumed speed and the growth it was built with.
     #[cfg(test)]
-    pub(super) fn built_with(&self) -> (usize, f64) {
-        (self.context, self.assumed)
+    pub(super) fn built_with(&self) -> (usize, f64, f64) {
+        (self.context, self.assumed, self.growth)
     }
 
-    /// Milliseconds per token: the slowest recent call's, or the assumed
-    /// speed before the first.
-    fn ms_per_token(&self) -> f64 {
+    /// A prompt of `tokens`, in tokens of a short call's speed.
+    fn work(&self, tokens: usize) -> f64 {
+        let n = tokens as f64;
+        n * (1.0 + n / self.growth)
+    }
+
+    /// Milliseconds per token of a short call: the slowest recent call's,
+    /// or the assumed speed before the first.
+    pub fn ms_per_token(&self) -> f64 {
         let s = self.state.lock().unwrap();
         s.speeds
             .iter()
@@ -131,7 +149,8 @@ impl ReadBudget {
         if tokens <= ALWAYS_SENT_TOKENS {
             return Ok(());
         }
-        let ms = tokens as f64 * self.ms_per_token();
+        // The server reads the prompt template too.
+        let ms = self.work(tokens + TEMPLATE_TOKENS) * self.ms_per_token();
         if ms <= timeout_ms as f64 {
             return Ok(());
         }
@@ -165,15 +184,16 @@ struct Flight<'a> {
 }
 
 impl Flight<'_> {
-    /// Takes the speed of a call of `tokens` that took `ms` (or, timed out,
-    /// at least that long).
+    /// Takes the speed of a call whose prompt of `tokens` took `ms` (or,
+    /// timed out, at least that long).
     fn land(&self, tokens: usize, ms: f64) {
+        let work = self.budget.work(tokens);
         let mut s = self.budget.state.lock().unwrap();
         if self.alone && s.started == self.number && tokens > 0 {
             if s.speeds.len() == SPEEDS_KEPT {
                 s.speeds.pop_front();
             }
-            s.speeds.push_back(ms / tokens as f64);
+            s.speeds.push_back(ms / work);
         }
     }
 }
@@ -255,10 +275,24 @@ pub async fn ask(endpoint: &Endpoint, cfg: &ModelConfig, state: Value) -> Result
     )
     .await;
     if let Some((flight, tokens)) = &flight {
-        // A timed-out call took at least the timeout; that is its speed's
-        // lower bound, so a machine slower than assumed is learned from it.
-        if matches!(answer, Ok(Ok(_)) | Err(_)) {
-            flight.land(*tokens, sent.elapsed().as_secs_f64() * 1000.0);
+        let ms = sent.elapsed().as_secs_f64() * 1000.0;
+        match &answer {
+            // The speed comes from the tokens the server says it read, not
+            // from the count above: that count is only an upper bound, and
+            // a call padded so that it is counted several times what the
+            // server reads (a run of `<`) would teach a speed several times
+            // too fast, which lets a long call through afterwards (review
+            // round 4 of #178). An answer that does not say teaches nothing.
+            Ok(Ok(value)) => {
+                if let Some(read) = read_tokens(value) {
+                    flight.land(read, ms);
+                }
+            }
+            // A timed-out call took at least the timeout for at most the
+            // tokens counted (and the template); that is its speed's lower
+            // bound, so a machine slower than assumed is learned from it.
+            Err(_) => flight.land(*tokens + TEMPLATE_TOKENS, ms),
+            Ok(Err(_)) => {}
         }
     }
     let value = answer
@@ -359,6 +393,14 @@ fn request_bytes(host: &str, path: &str, token: Option<&str>, body: &Value) -> S
     )
 }
 
+/// The tokens the server read for an answer (`usage.input_tokens`).
+fn read_tokens(v: &Value) -> Option<usize> {
+    v.get("usage")
+        .and_then(|u| u.get("input_tokens"))
+        .and_then(Value::as_u64)
+        .map(|n| n as usize)
+}
+
 /// Pulls `answers.danger.noul` out of a System One response.
 fn parse_noul(v: &Value) -> Result<f64, ModelError> {
     v.get("answers")
@@ -409,7 +451,8 @@ pub async fn is_decision_model(endpoint: &Endpoint) -> Result<bool, ModelError> 
 }
 
 /// A loopback stand-in for the local server, for tests: `/tokenize` counts
-/// `tokens` for every plain text, `/v1/systemone` answers 0.01 after `delay`.
+/// `tokens` for every plain text, `/v1/systemone` answers 0.01 after `delay`,
+/// having read as many.
 #[cfg(test)]
 pub(crate) mod fake {
     use super::*;
@@ -418,6 +461,16 @@ pub(crate) mod fake {
     /// The server's endpoint (without a budget) and how many decision
     /// requests it was sent.
     pub(crate) fn server(tokens: usize, delay: Duration) -> (Endpoint, Arc<AtomicUsize>) {
+        server_reading(tokens, Some(tokens), delay)
+    }
+
+    /// The same, but its answers say it read `read` tokens (`None`: they do
+    /// not say).
+    pub(crate) fn server_reading(
+        tokens: usize,
+        read: Option<usize>,
+        delay: Duration,
+    ) -> (Endpoint, Arc<AtomicUsize>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -452,7 +505,11 @@ pub(crate) mod fake {
                 } else {
                     counter.fetch_add(1, Ordering::SeqCst);
                     std::thread::sleep(delay);
-                    r#"{"answers":{"danger":{"type":"noul","noul":0.01}}}"#.to_string()
+                    let mut answer = json!({"answers": {"danger": {"type": "noul", "noul": 0.01}}});
+                    if let Some(read) = read {
+                        answer["usage"] = json!({ "input_tokens": read, "output_tokens": 0 });
+                    }
+                    answer.to_string()
                 };
                 let _ = write!(
                     c,
@@ -478,13 +535,19 @@ mod tests {
         }
     }
 
+    /// A budget whose calls take as long per token at any length, so the
+    /// tests of everything else can count in plain sums.
+    fn linear(context: u32, ms_per_token: f64) -> ReadBudget {
+        ReadBudget::new(context, ms_per_token, f64::INFINITY)
+    }
+
     /// The local server is not sent a call it cannot read within the
     /// timeout (#178): before its first answer at the assumed speed, then at
     /// the slowest speed it measured. A call of up to 512 tokens is sent
     /// whatever the speed, and one over the context never.
     #[tokio::test]
     async fn a_call_the_local_model_cannot_read_in_time_is_not_sent() {
-        let budget = Arc::new(ReadBudget::new(4096, 20.0));
+        let budget = Arc::new(linear(4096, 20.0));
         let local = |tokens| {
             let (ep, asked) = fake::server(tokens, Duration::ZERO);
             let ep = Endpoint {
@@ -493,13 +556,14 @@ mod tests {
             };
             (ep, asked)
         };
-        // 1,000 tokens at 20 ms each is 20 s, over the 12 s timeout.
+        // 1,000 tokens and the template's 64 at 20 ms each are 21 s, over
+        // the 12 s timeout.
         let (ep, asked) = local(1000);
         let e = ask(&ep, &with_timeout(12_000), json!({}))
             .await
             .unwrap_err();
         assert!(
-            matches!(&e, ModelError::TooLong(why) if why.contains("about 20 s")),
+            matches!(&e, ModelError::TooLong(why) if why.contains("about 21 s")),
             "{e}"
         );
         assert_eq!(asked.load(Ordering::SeqCst), 0);
@@ -545,14 +609,15 @@ mod tests {
     /// round 3 of #178).
     #[tokio::test]
     async fn a_call_padded_with_special_spellings_is_counted_as_plain_text() {
-        let budget = Arc::new(ReadBudget::new(4096, 20.0));
+        let budget = Arc::new(linear(4096, 20.0));
         let (ep, asked) = fake::server(300, Duration::ZERO);
         let ep = Endpoint {
             budget: Some(budget),
             ..ep
         };
         // 300 plain tokens and 300 spellings, one more token each for the
-        // break: 600 at 20 ms are 12 s, over the 8 s timeout.
+        // break: 600 (and the template) at 20 ms are 13 s, over the 8 s
+        // timeout.
         let padded = "<|img_row_10_col_10|>".repeat(300);
         let e = ask(&ep, &with_timeout(8000), json!({ "target": padded }))
             .await
@@ -569,7 +634,7 @@ mod tests {
     /// one gives none (it may have waited for the server's one slot).
     #[test]
     fn the_budget_keeps_the_slowest_speed_of_the_calls_that_ran_alone() {
-        let b = ReadBudget::new(8192, 20.0);
+        let b = linear(8192, 20.0);
         assert_eq!(b.ms_per_token(), 20.0);
         b.take_off().land(1000, 5000.0);
         b.take_off().land(1000, 2000.0);
@@ -603,8 +668,9 @@ mod tests {
     /// not sent at the speed assumed before (#178).
     #[tokio::test]
     async fn a_timed_out_call_slows_the_budget_down() {
-        // 1,000 tokens at the assumed 0.5 ms are 500 ms, inside 600.
-        let budget = Arc::new(ReadBudget::new(8192, 0.5));
+        // 1,000 tokens and the template at the assumed 0.5 ms are 532 ms,
+        // inside 600.
+        let budget = Arc::new(linear(8192, 0.5));
         assert!(budget.admit(1000, 600).is_ok());
         let (ep, asked) = fake::server(1000, Duration::from_millis(1500));
         let ep = Endpoint {
@@ -614,8 +680,76 @@ mod tests {
         let e = ask(&ep, &with_timeout(600), json!({})).await.unwrap_err();
         assert!(matches!(e, ModelError::Unreachable(_)), "{e}");
         assert_eq!(asked.load(Ordering::SeqCst), 1);
-        assert!(budget.ms_per_token() >= 0.6, "{}", budget.ms_per_token());
+        assert!(budget.ms_per_token() >= 0.56, "{}", budget.ms_per_token());
         assert!(budget.admit(1000, 600).is_err());
+    }
+
+    /// The speed is learned from the tokens the server read, not from the
+    /// count the call was let through with, which only bounds them: a call
+    /// padded with plain `<` counts about four times what d1-2B reads, and
+    /// such calls taught a speed fast enough to let a call through that held
+    /// the server for a minute (review round 4 of #178). An answer that does
+    /// not say what it read teaches nothing.
+    #[tokio::test]
+    async fn the_budget_learns_its_speed_from_the_tokens_the_server_read() {
+        let budget = Arc::new(linear(100_000, 1.0));
+        // Counted 2,000 tokens, read 500, in 250 ms: 0.5 ms per token read.
+        let (ep, asked) = fake::server_reading(2000, Some(500), Duration::from_millis(250));
+        let ep = Endpoint {
+            budget: Some(budget.clone()),
+            ..ep
+        };
+        ask(&ep, &with_timeout(5000), json!({})).await.unwrap();
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        assert!(budget.ms_per_token() >= 0.5, "{}", budget.ms_per_token());
+        // 12,000 tokens at 0.5 ms are 6 s, over 5 s; at the 0.13 ms per
+        // counted token they would have been 1.5 s.
+        assert!(budget.admit(12_000, 5000).is_err());
+
+        // An answer without the tokens read: the speed assumed stays.
+        let budget = Arc::new(linear(100_000, 1.0));
+        let (ep, asked) = fake::server_reading(2000, None, Duration::ZERO);
+        let ep = Endpoint {
+            budget: Some(budget.clone()),
+            ..ep
+        };
+        ask(&ep, &with_timeout(5000), json!({})).await.unwrap();
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        assert_eq!(budget.ms_per_token(), 1.0);
+    }
+
+    /// A long call takes longer per token than the short calls the speed is
+    /// learned from. With each model's pin, the measured long calls are
+    /// refused at a timeout as long as they took, after the short call they
+    /// followed (review round 4 of #178).
+    #[test]
+    fn a_long_call_is_held_to_the_slower_speed_of_its_length() {
+        use crate::checker::config::LocalModel;
+        use crate::checker::install::model_pin;
+        // The model; the short call's tokens read and milliseconds; the long
+        // call's tokens counted and milliseconds.
+        let measured = [
+            // Review round 4, 6 threads, the machine quiet: 240 tokens in
+            // 1.15 s, then a call of control characters, the largest kind
+            // of state, in 62.1 s.
+            (LocalModel::D1_2b, 240, 1149.0, 8475, 62_100.0),
+            // The evaluation's peak run (`raw/peak-d1-2b-c12288.server.log`),
+            // 4 threads: 376 in 2.16 s, 8,070 read (about 8,045 counted) in
+            // 59.9 s.
+            (LocalModel::D1_2b, 376, 2159.0, 8045, 59_877.0),
+            // Kev-4B's (`raw/peak-kev-4b-c8192.server.log`): 455 in 9.0 s,
+            // 4,386 read in 134.9 s.
+            (LocalModel::Kev4b, 455, 9043.0, 4361, 134_916.0),
+        ];
+        for (model, short, short_ms, long, long_ms) in measured {
+            let pin = model_pin(model);
+            let b = ReadBudget::new(pin.context, pin.read_ms, pin.read_growth);
+            b.take_off().land(short, short_ms);
+            assert!(
+                b.admit(long, long_ms as u64).is_err(),
+                "{model:?}: {long} tokens admitted in {long_ms} ms"
+            );
+        }
     }
 
     /// A model that thinks longer than the transport's usual 15 s head
