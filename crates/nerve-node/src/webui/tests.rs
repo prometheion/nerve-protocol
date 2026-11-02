@@ -56,24 +56,67 @@ fn wrong_tokens_are_told_once_a_minute() {
 }
 
 #[test]
-fn a_peer_waits_with_four_connections_at_most() {
+fn a_peer_has_sixteen_connections_at_most() {
     let ui = Arc::new(WebUi::default());
-    let owner = Waiter::Uid(1000);
-    let held: Vec<Waiting> = (0..WAITING_PER_PEER)
-        .map(|_| ui.wait_for(owner).unwrap())
+    let owner = Who::Uid(1000);
+    let held: Vec<Place> = (0..PER_PEER)
+        .map(|_| ui.place_for(owner).unwrap())
         .collect();
-    assert!(ui.wait_for(owner).is_none());
+    assert!(ui.place_for(owner).is_none());
     // Another account, or another machine, has its own places.
-    assert!(ui.wait_for(Waiter::Uid(0)).is_some());
-    let far = Waiter::Address([192, 0, 2, 1].into());
-    let far_held: Vec<Waiting> = (0..WAITING_PER_PEER)
-        .map(|_| ui.wait_for(far).unwrap())
-        .collect();
-    assert!(ui.wait_for(far).is_none());
+    assert!(ui.place_for(Who::Uid(0)).is_some());
+    let far = Who::remote([192, 0, 2, 1].into());
+    let far_held: Vec<Place> = (0..PER_PEER).map(|_| ui.place_for(far).unwrap()).collect();
+    assert!(ui.place_for(far).is_none());
+    // An IPv4 address that IPv6 carries is that address; the addresses of
+    // one IPv6 /64 are one machine.
+    let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+    assert_eq!(Who::remote(ip("::ffff:192.0.2.1")), far);
+    assert_eq!(
+        Who::remote(ip("2001:db8:1:2::1")),
+        Who::remote(ip("2001:db8:1:2::ffff"))
+    );
+    assert_ne!(
+        Who::remote(ip("2001:db8:1:2::1")),
+        Who::remote(ip("2001:db8:1:3::1"))
+    );
     drop(held);
     drop(far_held);
-    assert!(ui.wait_for(owner).is_some());
-    assert!(lock(&ui.waiting).is_empty());
+    assert!(ui.place_for(owner).is_some());
+    assert!(lock(&ui.places).is_empty());
+}
+
+/// A wrong token's answer waits; past [`LATE`] waiting, the one that waited
+/// longest goes at once, so the waits hold a bounded number of connections.
+#[tokio::test]
+async fn a_wrong_token_waits_and_past_the_limit_the_oldest_goes_first() {
+    let ui = Arc::new(WebUi::default());
+    let start = Instant::now();
+    ui.wait_late().await;
+    assert!(start.elapsed() >= webui::WRONG_SECRET_DELAY);
+    assert!(lock(&ui.late).is_empty());
+    let waits: Vec<_> = (0..LATE)
+        .map(|_| {
+            let ui = ui.clone();
+            tokio::spawn(async move { ui.wait_late().await })
+        })
+        .collect();
+    while lock(&ui.late).len() < LATE {
+        tokio::task::yield_now().await;
+    }
+    let extra = {
+        let ui = ui.clone();
+        tokio::spawn(async move { ui.wait_late().await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(waits[0].is_finished(), "the oldest still waits");
+    assert_eq!(waits.iter().filter(|w| w.is_finished()).count(), 1);
+    assert_eq!(lock(&ui.late).len(), LATE);
+    for w in waits {
+        w.await.unwrap();
+    }
+    extra.await.unwrap();
+    assert!(lock(&ui.late).is_empty());
 }
 
 #[test]

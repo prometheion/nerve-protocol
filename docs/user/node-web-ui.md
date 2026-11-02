@@ -138,12 +138,14 @@ nerve-node ui on --listen 0.0.0.0:7470
   asks again.
 - Without its certificate the UI does not listen beyond loopback at all;
   `ui status` says why.
-- At most 4 connections of one address (or of one account of this machine)
-  may wait at once.
+- One address has at most 16 connections at once (an IPv6 /64 counts as one
+  address, and on this machine each account counts as one). A browser opens
+  six to load a page. A wrong token's 300 ms hold none of them.
 
 The UI's certificate is its own, not the relay's. Its key is kept with the
-node's other keys (`machine.secret_storage`). It is not in a backup: after a
-restore, `ui on --new-cert` makes a new one.
+node's other keys (`machine.secret_storage`). It is not in a backup: a restore
+says when the restored config turns the UI on, and when it needs a new
+certificate, which `ui on --new-cert` makes.
 
 ## node.toml
 

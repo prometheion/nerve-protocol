@@ -21,15 +21,16 @@
 
 #![deny(unsafe_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Notify, OwnedSemaphorePermit};
 
 use nerve_policy::NodeConfig;
 use nerve_transport::http::{self, Request, Response};
@@ -48,13 +49,21 @@ const APP_JS: &str = include_str!("webui/app.js");
 
 /// The largest request body: the biggest form of the UI is far smaller.
 const BODY_MAX: usize = 256 * 1024;
-/// Connections at once.
+/// Connections at once, but for the wrong tokens that wait ([`LATE`]).
 const SLOTS: usize = 64;
-/// Connections of one local account, or of one other machine's address, at
-/// once that have not sent their request yet: on loopback every peer has
-/// the same address, so this keeps one command of the owner's from holding
-/// every slot; beyond it, one machine (as the relay's limit per address).
-const WAITING_PER_PEER: usize = 4;
+/// Connections at once of one local account, or of one other machine (an
+/// IPv6 /64 counts as one), from the check of the peer to the answer. A
+/// browser opens six at once to load a page, and every answer closes its
+/// connection, so a page in two tabs fits; and no peer holds every slot.
+/// On loopback every peer has the same address, so the account is what
+/// tells them apart.
+const PER_PEER: usize = 16;
+/// Wrong tokens whose answer waits [`webui::WRONG_SECRET_DELAY`], at once.
+/// They hold no slot and no place of their peer while they wait: a command
+/// of the owner's account that posts wrong tokens as fast as it can would
+/// fill both, and keep the owner's own login out. Past this many, the one
+/// that waited longest is answered at once.
+const LATE: usize = 128;
 /// How long a TLS handshake may take.
 const HANDSHAKE: Duration = Duration::from_secs(10);
 /// How soon a listener that could not bind tries again.
@@ -76,17 +85,25 @@ pub(crate) struct WebUi {
     locked: AtomicBool,
     /// Wrong tokens since the last line about them, and when that was.
     wrong: Mutex<(u32, Option<Instant>)>,
-    /// The connections that wait for their request, by who made them.
-    waiting: Mutex<HashMap<Waiter, usize>>,
+    /// The connections at once, by who made them ([`PER_PEER`]).
+    places: Mutex<HashMap<Who, usize>>,
+    /// The wrong tokens whose answer waits, the oldest first ([`LATE`]).
+    late: Mutex<VecDeque<Arc<Notify>>>,
 }
 
-/// Who a waiting connection is counted for.
+/// Who a connection is counted for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Waiter {
+enum Who {
     /// A local account.
     Uid(u32),
-    /// Another machine.
+    /// Another machine: its address, or its /64.
     Address(std::net::IpAddr),
+}
+
+impl Who {
+    fn remote(ip: std::net::IpAddr) -> Who {
+        Who::Address(crate::relay::prefix_of(ip).unwrap_or(ip.to_canonical()))
+    }
 }
 
 impl WebUi {
@@ -139,36 +156,71 @@ impl WebUi {
         }
     }
 
-    /// Takes a waiting place for `who`, if it has one left.
-    fn wait_for(self: &Arc<Self>, who: Waiter) -> Option<Waiting> {
-        let mut w = lock(&self.waiting);
+    /// Takes a place for a connection of `who`, if it has one left.
+    fn place_for(self: &Arc<Self>, who: Who) -> Option<Place> {
+        let mut w = lock(&self.places);
         let n = w.entry(who).or_insert(0);
-        if *n >= WAITING_PER_PEER {
+        if *n >= PER_PEER {
             return None;
         }
         *n += 1;
-        Some(Waiting {
+        Some(Place {
             ui: self.clone(),
             who,
         })
     }
+
+    /// Waits [`webui::WRONG_SECRET_DELAY`] before a wrong token is answered,
+    /// or less when [`LATE`] others wait and this one waited longest.
+    async fn wait_late(&self) {
+        let me = Arc::new(Notify::new());
+        {
+            let mut late = lock(&self.late);
+            if late.len() >= LATE
+                && let Some(oldest) = late.pop_front()
+            {
+                oldest.notify_one();
+            }
+            late.push_back(me.clone());
+        }
+        let _gone = Late {
+            late: &self.late,
+            me: me.clone(),
+        };
+        tokio::select! {
+            _ = tokio::time::sleep(webui::WRONG_SECRET_DELAY) => {}
+            _ = me.notified() => {}
+        }
+    }
 }
 
-/// A connection that has not sent its request yet.
-struct Waiting {
+/// A connection's place among those of its peer.
+struct Place {
     ui: Arc<WebUi>,
-    who: Waiter,
+    who: Who,
 }
 
-impl Drop for Waiting {
+impl Drop for Place {
     fn drop(&mut self) {
-        let mut w = lock(&self.ui.waiting);
+        let mut w = lock(&self.ui.places);
         if let Some(n) = w.get_mut(&self.who) {
             *n -= 1;
             if *n == 0 {
                 w.remove(&self.who);
             }
         }
+    }
+}
+
+/// A wrong token's wait, which leaves the line when it ends.
+struct Late<'a> {
+    late: &'a Mutex<VecDeque<Arc<Notify>>>,
+    me: Arc<Notify>,
+}
+
+impl Drop for Late<'_> {
+    fn drop(&mut self) {
+        lock(self.late).retain(|n| !Arc::ptr_eq(n, &self.me));
     }
 }
 
@@ -190,6 +242,9 @@ struct Ctx {
     shared: Arc<Shared>,
     program: PathBuf,
     owners: Owners,
+    /// The uid of an owner given by name, once it was found: not looked up
+    /// again for every connection.
+    named_uid: OnceLock<u32>,
 }
 
 impl Ctx {
@@ -210,9 +265,11 @@ impl Ctx {
         let mut uids = vec![0];
         match &self.owners {
             Owners::Named(n) => {
-                if let Ok(Some(a)) = crate::account::lookup(n) {
-                    uids.push(a.uid);
-                }
+                let found = self.named_uid.get().copied().or_else(|| {
+                    let uid = crate::account::lookup(n).ok().flatten()?.uid;
+                    Some(*self.named_uid.get_or_init(|| uid))
+                });
+                uids.extend(found);
             }
             Owners::Uids(u) => uids.extend(u),
             Owners::Sids(_) => {}
@@ -229,6 +286,7 @@ pub(crate) async fn run(shared: Arc<Shared>, endpoint: Endpoint) {
         shared: shared.clone(),
         program: endpoint.program,
         owners: endpoint.owners,
+        named_uid: OnceLock::new(),
     });
     let mut changed = shared.changed.subscribe();
     let mut stop = shared.stop.subscribe();
@@ -345,18 +403,21 @@ async fn serve(
     stop: &mut tokio::sync::watch::Receiver<bool>,
 ) {
     let slots = Arc::new(tokio::sync::Semaphore::new(SLOTS));
+    let Ok(local) = listener.local_addr() else {
+        return;
+    };
+    let how = peer::Lookup::for_listener(local);
+    tracing::debug!("web UI: peers are looked up by {how:?}");
     loop {
         tokio::select! {
             got = listener.accept() => match got {
                 Ok((io, peer)) => {
-                    let Ok(slot) = slots.clone().try_acquire_owned() else {
-                        tracing::debug!("web UI: every connection slot is taken; closed one from {peer}");
+                    let Some((place, slot)) = admit(ctx, &io, peer, how, &slots) else {
                         continue;
                     };
                     let (ctx, tls) = (ctx.clone(), tls.clone());
                     tokio::spawn(async move {
-                        connection(&ctx, io, peer, tls).await;
-                        drop(slot);
+                        connection(&ctx, io, place, slot, tls).await;
                     });
                 }
                 Err(e) => {
@@ -381,24 +442,48 @@ async fn serve(
     }
 }
 
-/// One connection: the peer is judged before a byte is read, then one
-/// request is answered.
-async fn connection(ctx: &Arc<Ctx>, tcp: TcpStream, peer: SocketAddr, tls: Option<Acceptor>) {
-    let Ok(local) = tcp.local_addr() else { return };
-    let who = match peer::judge_now(peer, local, &ctx.owner_uids()) {
+/// Whether a connection from `peer` goes on, with its place and its slot.
+/// The peer is judged here, before a byte is read and before it takes
+/// anything: a peer that is closed costs one lookup.
+fn admit(
+    ctx: &Ctx,
+    io: &TcpStream,
+    peer: SocketAddr,
+    how: peer::Lookup,
+    slots: &Arc<tokio::sync::Semaphore>,
+) -> Option<(Place, OwnedSemaphorePermit)> {
+    let local = io.local_addr().ok()?;
+    let who = match peer::judge_now(peer, local, &ctx.owner_uids(), how) {
         peer::Verdict::Closed => {
             tracing::debug!(
                 "web UI: closed a connection from {peer}, a local account that is not the owner's"
             );
-            return;
+            return None;
         }
-        peer::Verdict::Local(uid) => Waiter::Uid(uid),
-        peer::Verdict::Remote => Waiter::Address(peer.ip()),
+        peer::Verdict::Local(uid) => Who::Uid(uid),
+        peer::Verdict::Remote => Who::remote(peer.ip()),
     };
-    let Some(waiting) = ctx.shared.webui.wait_for(who) else {
-        tracing::debug!("web UI: too many connections of {peer} wait; closed one");
-        return;
+    let Some(place) = ctx.shared.webui.place_for(who) else {
+        tracing::debug!("web UI: {peer} has {PER_PEER} connections at once; closed one");
+        return None;
     };
+    let Ok(slot) = slots.clone().try_acquire_owned() else {
+        tracing::debug!("web UI: every connection slot is taken; closed one from {peer}");
+        return None;
+    };
+    Some((place, slot))
+}
+
+/// One connection, of a peer let in: one request is answered. A wrong
+/// token's answer waits, with neither its place nor its slot.
+async fn connection(
+    ctx: &Arc<Ctx>,
+    tcp: TcpStream,
+    place: Place,
+    slot: OwnedSemaphorePermit,
+    tls: Option<Acceptor>,
+) {
+    let Ok(local) = tcp.local_addr() else { return };
     let mut io: BoxIo = match tls {
         None => Box::new(tcp),
         Some(a) => match tokio::time::timeout(HANDSHAKE, a.accept(tcp)).await {
@@ -406,33 +491,54 @@ async fn connection(ctx: &Arc<Ctx>, tcp: TcpStream, peer: SocketAddr, tls: Optio
             _ => return,
         },
     };
-    let (resp, api) = match http::read_request(&mut io, BODY_MAX).await {
+    let (resp, api, late) = match http::read_request(&mut io, BODY_MAX).await {
         Ok(req) => {
-            drop(waiting);
             let api = webui::is_api(&req.path);
-            (request(ctx, req, local).await, api)
+            let (resp, late) = request(ctx, req, local).await;
+            (resp, api, late)
         }
-        Err(_) => (Response::text(400, "bad request"), false),
+        Err(_) => (Response::text(400, "bad request"), false, false),
     };
+    if late {
+        drop(place);
+        drop(slot);
+        ctx.shared.webui.wait_late().await;
+    }
     let _ = webui::with_security_headers(resp, api).write(&mut io).await;
 }
 
-/// Answers one request.
-async fn request(ctx: &Ctx, req: Request, local: SocketAddr) -> Response {
+/// Answers one request, and says whether the answer is a wrong token's,
+/// which waits before it goes.
+async fn request(ctx: &Ctx, req: Request, local: SocketAddr) -> (Response, bool) {
     if !host_allowed(req.header("host"), local) {
-        return Response::text(403, "this UI answers only to a loopback host name");
+        return (
+            Response::text(403, "this UI answers only to a loopback host name"),
+            false,
+        );
     }
     if req.method == "GET" {
         if let Some(r) = webui::asset(&req.path) {
-            return r;
+            return (r, false);
         }
         match req.path.as_str() {
-            "/" | "/index.html" => return Response::new(200, "text/html; charset=utf-8", INDEX),
-            "/app.js" => return Response::new(200, "text/javascript; charset=utf-8", APP_JS),
+            "/" | "/index.html" => {
+                return (Response::new(200, "text/html; charset=utf-8", INDEX), false);
+            }
+            "/app.js" => {
+                return (
+                    Response::new(200, "text/javascript; charset=utf-8", APP_JS),
+                    false,
+                );
+            }
             // No Clear-Site-Data here: a browser clears the storage of
             // every tab of the origin with it, and a tab that opens the
             // login would sign the others out.
-            "/login" => return webui::login_page("Web UI token", "This machine's node."),
+            "/login" => {
+                return (
+                    webui::login_page("Web UI token", "This machine's node."),
+                    false,
+                );
+            }
             _ => {}
         }
     }
@@ -442,26 +548,33 @@ async fn request(ctx: &Ctx, req: Request, local: SocketAddr) -> Response {
             .header("origin")
             .is_some_and(|o| origin_matches(o, req.header("host")))
     {
-        return Response::text(403, "cross-origin requests are refused");
+        return (
+            Response::text(403, "cross-origin requests are refused"),
+            false,
+        );
     }
-    match (req.method.as_str(), req.path.as_str()) {
-        ("POST", "/login") => return login(ctx, &req).await,
-        ("POST", "/logout") => {
-            if let Some((t, _)) = ctx.shared.webui.sessions.of(&req) {
-                ctx.shared.webui.sessions.end(&t);
-            }
-            // What a page that held this port before left at this origin
-            // goes with Sign out: its storage and its workers (and the
-            // sessions of this browser's other tabs).
-            return Response::json(200, &json!({})).with_header("Clear-Site-Data", "\"storage\"");
+    if req.method == "POST" && req.path == "/login" {
+        return login(ctx, &req);
+    }
+    (signed_in_request(ctx, &req).await, false)
+}
+
+/// Answers a request of the page but a login: Sign out, and the API.
+async fn signed_in_request(ctx: &Ctx, req: &Request) -> Response {
+    if req.method == "POST" && req.path == "/logout" {
+        if let Some((t, _)) = ctx.shared.webui.sessions.of(req) {
+            ctx.shared.webui.sessions.end(&t);
         }
-        _ => {}
+        // What a page that held this port before left at this origin
+        // goes with Sign out: its storage and its workers (and the
+        // sessions of this browser's other tabs).
+        return Response::json(200, &json!({})).with_header("Clear-Site-Data", "\"storage\"");
     }
     if !webui::is_api(&req.path) {
         return Response::text(404, "not found");
     }
     let cfg = ctx.shared.config();
-    let signed_in = ctx.shared.webui.sessions.of(&req).is_some_and(|(_, s)| {
+    let signed_in = ctx.shared.webui.sessions.of(req).is_some_and(|(_, s)| {
         s.via
             .as_deref()
             .is_some_and(|h| token_label(&cfg, h).is_some())
@@ -480,7 +593,7 @@ async fn request(ctx: &Ctx, req: Request, local: SocketAddr) -> Response {
             Err(e) => return Response::json(400, &json!({"error": format!("bad JSON: {e}")})),
         }
     };
-    match api(ctx, &req, &body, &cfg).await {
+    match api(ctx, req, &body, &cfg).await {
         Ok(v) => Response::json(200, &v),
         Err((status, e)) => Response::json(status, &json!({ "error": e })),
     }
@@ -496,9 +609,9 @@ fn host_allowed(host: Option<&str>, local: SocketAddr) -> bool {
 }
 
 /// Checks the token a login posted. The answer is the session for the page
-/// to keep, or the reason it was refused; the token never appears in a URL
-/// or a log.
-async fn login(ctx: &Ctx, req: &Request) -> Response {
+/// to keep, or the reason it was refused, which waits before it goes
+/// (`true`); the token never appears in a URL or a log.
+fn login(ctx: &Ctx, req: &Request) -> (Response, bool) {
     let given = webui::posted_secret(req);
     let hash = crate::relay::token_hash(&given);
     let cfg = ctx.shared.config();
@@ -513,12 +626,11 @@ async fn login(ctx: &Ctx, req: &Request) -> Response {
                 tracing::warn!("web UI: {n} sign-ins were refused in the last minute: wrong token");
             }
         }
-        tokio::time::sleep(webui::WRONG_SECRET_DELAY).await;
-        return Response::json(401, &json!({"error": WRONG_TOKEN}));
+        return (Response::json(401, &json!({"error": WRONG_TOKEN})), true);
     };
     let token = ctx.shared.webui.sessions.start(Some(hash));
     tracing::info!("web UI: signed in (token `{label}`)");
-    Response::json(200, &json!({"session": token}))
+    (Response::json(200, &json!({"session": token})), false)
 }
 
 type ApiResult = Result<Value, (u16, String)>;

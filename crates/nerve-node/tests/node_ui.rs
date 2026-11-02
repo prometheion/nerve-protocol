@@ -360,6 +360,84 @@ async fn a_token_logs_in_and_the_session_is_the_header() {
     daemon.stop().await;
 }
 
+/// A browser loads a page on several connections at once (every answer
+/// closes its own), and each may send its request a moment after it
+/// connects, as through `ssh -L` or after a TLS handshake: every one is
+/// answered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_page_loads_on_many_connections_at_once() {
+    let _one = SERIAL.lock().await;
+    let d = tempfile::tempdir().unwrap();
+    let (daemon, at) = node(d.path()).await;
+    let (out, _) = cli(&at, &["ui", "on", "--listen", "127.0.0.1:0"]).await;
+    let addr = ui_address(&daemon).unwrap();
+    assert!(out.contains("token "), "{out}");
+    let paths = ["/", "/app.js", "/kit.js", "/app.css", "/login", "/login.js"];
+    let loads = paths.iter().chain(paths.iter()).map(|path| async move {
+        let mut io = TcpStream::connect(addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+        let _ = io.write_all(req.as_bytes()).await;
+        let mut raw = Vec::new();
+        let _ = io.read_to_end(&mut raw).await;
+        (
+            path,
+            String::from_utf8_lossy(&raw)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string(),
+        )
+    });
+    for (path, status) in futures_util::future::join_all(loads).await {
+        assert_eq!(status, "HTTP/1.1 200 OK", "{path}");
+    }
+    daemon.stop().await;
+}
+
+/// A command of the owner's account that posts wrong tokens on many
+/// connections at once does not keep the owner's own login or the page out
+/// while it goes on: a wrong token's answer waits holding no slot.
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_tokens_on_many_connections_do_not_keep_the_owner_out() {
+    let _one = SERIAL.lock().await;
+    let d = tempfile::tempdir().unwrap();
+    let (daemon, at) = node(d.path()).await;
+    let (out, _) = cli(&at, &["ui", "on", "--listen", "127.0.0.1:0"]).await;
+    let token = token_in(&out);
+    let addr = ui_address(&daemon).unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flood: Vec<_> = (0..100)
+        .map(|_| {
+            let stop = stop.clone();
+            tokio::spawn(async move {
+                let mut tries = 0u32;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = login(addr, "not-the-token").await;
+                    tries += 1;
+                }
+                tries
+            })
+        })
+        .collect();
+    // The flood holds its connections by now.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    for i in 0..8 {
+        let session = login(addr, &token)
+            .await
+            .unwrap_or_else(|a| panic!("login {i} during the flood: {a:?}"));
+        assert_eq!(get(addr, "/api/overview", &session).await.status, 200);
+        assert_eq!(get(addr, "/app.css", "").await.status, 200);
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut tries = 0;
+    for f in flood {
+        tries += f.await.unwrap();
+    }
+    assert!(tries >= 100, "the flood made {tries} tries");
+    daemon.stop().await;
+}
+
 /// Panic ends every web session, and the login still answers to unlock;
 /// a revoked token's sessions end, and a restart ends them all.
 #[tokio::test(flavor = "multi_thread")]

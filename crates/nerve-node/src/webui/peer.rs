@@ -1,9 +1,11 @@
 //! Who is at the other end of a web UI connection, before a byte of it is
 //! read. A peer on this machine has a socket in the kernel's table of TCP
-//! sockets (`/proc/self/net/tcp` and `tcp6`, in the node's network
-//! namespace), with the account that made it. Only the owner's and root's
-//! may go on to the login: a command of a center, which runs as `nerve-run`
-//! (or as the node's own account), is closed at once.
+//! sockets, in the node's network namespace, with the account that made it:
+//! the kernel looks the one socket up ([`Lookup::Kernel`]), or, where it
+//! cannot, the whole table is read (`/proc/self/net/tcp` and `tcp6`). Only
+//! the owner's and root's may go on to the login: a command of a center,
+//! which runs as `nerve-run` (or as the node's own account), is closed at
+//! once.
 //!
 //! The check fails closed. A local peer whose entry is missing, or is no
 //! longer a live socket of a process (it closed already, so the kernel
@@ -137,30 +139,104 @@ pub(crate) fn judge(
     }
 }
 
-/// [`judge`] with the tables and the addresses of this machine as they are
-/// now.
-pub(crate) fn judge_now(peer: SocketAddr, local: SocketAddr, allowed: &[u32]) -> Verdict {
+/// How the check finds a peer's socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Lookup {
+    /// The kernel looks the one socket up (crate::localnet::tcp_socket): the
+    /// cost does not grow with the sockets of the machine, which a command
+    /// that is closed at once can make many of, nor with how often it tries.
+    Kernel,
+    /// The whole tables of /proc are read, where the kernel does not answer
+    /// that (no socket diagnostics for TCP in it).
+    Tables,
+}
+
+impl Lookup {
+    /// The way that works here, tried on the listener at `at` itself: the
+    /// kernel says "no such entry" also when it cannot look sockets up, and
+    /// a check that took that for a peer that left would close every one.
+    pub(crate) fn for_listener(at: SocketAddr) -> Lookup {
+        let any = SocketAddr::new(
+            if at.is_ipv4() {
+                Ipv4Addr::UNSPECIFIED.into()
+            } else {
+                Ipv6Addr::UNSPECIFIED.into()
+            },
+            0,
+        );
+        match crate::localnet::tcp_socket(at, any) {
+            Ok(Some(e)) if e.local.port() == at.port() => Lookup::Kernel,
+            _ => Lookup::Tables,
+        }
+    }
+}
+
+/// [`judge`] with the peer's socket and the addresses of this machine as
+/// they are now.
+pub(crate) fn judge_now(
+    peer: SocketAddr,
+    local: SocketAddr,
+    allowed: &[u32],
+    how: Lookup,
+) -> Verdict {
+    let entries = match how {
+        Lookup::Kernel => match crate::localnet::tcp_socket(plain(peer), plain(local)) {
+            Ok(found) => found.into_iter().collect(),
+            Err(e) => {
+                tracing::debug!(
+                    "web UI: the kernel did not look the peer up ({e}); reading the tables"
+                );
+                tables()
+            }
+        },
+        Lookup::Tables => tables(),
+    };
+    // A local peer is placed by its entry; the machine's addresses are
+    // only needed for a peer that may be another machine.
+    let found = entries
+        .iter()
+        .any(|e| plain(e.local) == plain(peer) && plain(e.remote) == plain(local));
+    let ip = plain(peer).ip();
+    let own = if found || ip.is_loopback() || ip.is_unspecified() || ip == plain(local).ip() {
+        Vec::new()
+    } else {
+        own_addresses()
+    };
+    judge(peer, local, &entries, allowed, &own)
+}
+
+/// Both tables of /proc, in the node's network namespace.
+fn tables() -> Vec<Entry> {
+    #[cfg(test)]
+    TABLE_READS.with(|n| n.set(n.get() + 1));
     let mut entries = Vec::new();
     for table in ["/proc/self/net/tcp", "/proc/self/net/tcp6"] {
         if let Ok(text) = std::fs::read_to_string(table) {
             entries.extend(parse(&text));
         }
     }
-    // A local peer is placed by its entry; the machine's addresses are
-    // only needed when none is found.
-    if entries
-        .iter()
-        .any(|e| plain(e.local) == plain(peer) && plain(e.remote) == plain(local))
-    {
-        return judge(peer, local, &entries, allowed, &[]);
+    entries
+}
+
+#[cfg(test)]
+thread_local! {
+    static TABLE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// This machine's addresses, read at most once a second: another machine
+/// that connects again and again must not make each connection read them.
+fn own_addresses() -> Vec<IpAddr> {
+    static READ: std::sync::Mutex<Option<(std::time::Instant, Vec<IpAddr>)>> =
+        std::sync::Mutex::new(None);
+    let mut read = READ.lock().unwrap_or_else(|e| e.into_inner());
+    match &*read {
+        Some((at, own)) if at.elapsed() < std::time::Duration::from_secs(1) => own.clone(),
+        _ => {
+            let own = crate::localnet::addresses();
+            *read = Some((std::time::Instant::now(), own.clone()));
+            own
+        }
     }
-    judge(
-        peer,
-        local,
-        &entries,
-        allowed,
-        &crate::localnet::addresses(),
-    )
 }
 
 #[cfg(test)]
@@ -306,6 +382,48 @@ mod tests {
             ),
             Verdict::Closed
         );
+    }
+
+    /// The kernel names the account of a real peer's socket at once, and
+    /// the tables are not read for it.
+    #[test]
+    fn the_kernel_names_the_account_of_a_peer_without_the_tables() {
+        use std::os::unix::fs::MetadataExt;
+        let me = std::fs::metadata("/proc/self").unwrap().uid();
+        let other = me.wrapping_add(1);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = listener.local_addr().unwrap();
+        assert_eq!(Lookup::for_listener(at), Lookup::Kernel);
+        let client = std::net::TcpStream::connect(at).unwrap();
+        let (_server, peer) = listener.accept().unwrap();
+        let reads = TABLE_READS.with(|n| n.get());
+        assert_eq!(
+            judge_now(peer, at, &[me], Lookup::Kernel),
+            Verdict::Local(me)
+        );
+        assert_eq!(
+            judge_now(peer, at, &[other], Lookup::Kernel),
+            Verdict::Closed
+        );
+        assert_eq!(TABLE_READS.with(|n| n.get()), reads);
+        // The tables say the same.
+        assert_eq!(
+            judge_now(peer, at, &[me], Lookup::Tables),
+            Verdict::Local(me)
+        );
+        // A peer that closed is closed.
+        drop(client);
+        let start = std::time::Instant::now();
+        while judge_now(peer, at, &[me], Lookup::Kernel) != Verdict::Closed {
+            assert!(
+                start.elapsed().as_secs() < 5,
+                "the closed peer is still let in"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // No socket at all on loopback: closed.
+        let gone = SocketAddr::new(at.ip(), 1);
+        assert_eq!(judge_now(gone, at, &[me], Lookup::Kernel), Verdict::Closed);
     }
 
     #[test]

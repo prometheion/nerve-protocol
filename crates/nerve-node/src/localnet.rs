@@ -1,7 +1,10 @@
-//! This machine's own addresses, for the web UI's check of who connects
-//! (crate::webui::peer).
+//! This machine's own addresses, and the kernel's answer for one TCP
+//! socket, for the web UI's check of who connects (crate::webui::peer).
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+use crate::webui::peer::Entry;
 
 /// The addresses of every interface of this machine, in the node's network
 /// namespace; none when they cannot be read.
@@ -35,6 +38,149 @@ pub(crate) fn addresses() -> Vec<IpAddr> {
         libc::freeifaddrs(list);
     }
     out
+}
+
+// Netlink's socket diagnostics (linux/sock_diag.h, linux/inet_diag.h).
+const NETLINK_SOCK_DIAG: libc::c_int = 4;
+const SOCK_DIAG_BY_FAMILY: u16 = 20;
+const NLM_F_REQUEST: u16 = 1;
+const NLMSG_ERROR: u16 = 2;
+/// A netlink header, then `inet_diag_req_v2`.
+const REQUEST_LEN: usize = 16 + 56;
+/// A netlink header, then `inet_diag_msg`.
+const ANSWER_LEN: usize = 16 + 72;
+
+/// The TCP socket of this machine whose own end is `local` and whose other
+/// end is `remote`, as the kernel finds it for a packet (netlink's socket
+/// diagnostics, which `ss` asks): one lookup, however many sockets the
+/// machine has. Both addresses are of one family. `Ok(None)` when there is
+/// none, or when the kernel cannot answer such questions at all (both say
+/// "no such entry"); an error when the question could not be asked.
+pub(crate) fn tcp_socket(local: SocketAddr, remote: SocketAddr) -> Result<Option<Entry>, String> {
+    let family = if local.is_ipv4() {
+        libc::AF_INET
+    } else {
+        libc::AF_INET6
+    };
+    let words = |ip: IpAddr| -> [u8; 16] {
+        let mut b = [0u8; 16];
+        match ip {
+            IpAddr::V4(v4) => b[..4].copy_from_slice(&v4.octets()),
+            IpAddr::V6(v6) => b = v6.octets(),
+        }
+        b
+    };
+    let mut req = Vec::with_capacity(REQUEST_LEN);
+    req.extend((REQUEST_LEN as u32).to_ne_bytes());
+    req.extend(SOCK_DIAG_BY_FAMILY.to_ne_bytes());
+    req.extend(NLM_F_REQUEST.to_ne_bytes());
+    req.extend(1u32.to_ne_bytes());
+    req.extend(0u32.to_ne_bytes());
+    req.extend([family as u8, libc::IPPROTO_TCP as u8, 0, 0]);
+    // Every state: the caller judges the state itself.
+    req.extend(u32::MAX.to_ne_bytes());
+    req.extend(local.port().to_be_bytes());
+    req.extend(remote.port().to_be_bytes());
+    req.extend(words(local.ip()));
+    req.extend(words(remote.ip()));
+    // No interface, and no cookie to match.
+    req.extend(0u32.to_ne_bytes());
+    req.extend(u32::MAX.to_ne_bytes());
+    req.extend(u32::MAX.to_ne_bytes());
+    let mut answer = [0u8; 512];
+    let got = {
+        // SAFETY: a socket call with constant arguments; the descriptor it
+        // gives is owned by `fd` at once and closed with it.
+        let raw = unsafe {
+            libc::socket(
+                libc::AF_NETLINK,
+                libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
+                NETLINK_SOCK_DIAG,
+            )
+        };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        // SAFETY: `raw` is a descriptor just opened and owned by nothing else.
+        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        // SAFETY: an all-zero sockaddr_nl is valid; the kernel is pid 0.
+        let mut kernel: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+        kernel.nl_family = libc::AF_NETLINK as libc::sa_family_t;
+        // SAFETY: `req` and `kernel` live across the call, with the lengths
+        // given.
+        let sent = unsafe {
+            libc::sendto(
+                fd.as_raw_fd(),
+                req.as_ptr().cast(),
+                req.len(),
+                0,
+                (&kernel as *const libc::sockaddr_nl).cast(),
+                std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t,
+            )
+        };
+        if sent < 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        // The kernel answers within the send, so the answer waits already.
+        // SAFETY: `answer` is writable for its length.
+        let n = unsafe {
+            libc::recv(
+                fd.as_raw_fd(),
+                answer.as_mut_ptr().cast(),
+                answer.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if n < 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        n as usize
+    };
+    parse_answer(&answer[..got])
+}
+
+/// The socket in an answer of the socket diagnostics, or none for "no such
+/// entry".
+fn parse_answer(a: &[u8]) -> Result<Option<Entry>, String> {
+    let u16_at = |i: usize| u16::from_ne_bytes([a[i], a[i + 1]]);
+    let u32_at = |i: usize| u32::from_ne_bytes([a[i], a[i + 1], a[i + 2], a[i + 3]]);
+    if a.len() < 20 {
+        return Err("a short answer".into());
+    }
+    match u16_at(4) {
+        NLMSG_ERROR => {
+            let e = -(u32_at(16) as i32);
+            if e == libc::ENOENT {
+                Ok(None)
+            } else {
+                Err(std::io::Error::from_raw_os_error(e).to_string())
+            }
+        }
+        SOCK_DIAG_BY_FAMILY if a.len() >= ANSWER_LEN => {
+            let m = &a[16..];
+            let ip = |b: &[u8]| -> Option<IpAddr> {
+                match i32::from(m[0]) {
+                    libc::AF_INET => Some(Ipv4Addr::new(b[0], b[1], b[2], b[3]).into()),
+                    libc::AF_INET6 => {
+                        Some(Ipv6Addr::from(<[u8; 16]>::try_from(&b[..16]).ok()?).into())
+                    }
+                    _ => None,
+                }
+            };
+            let port = |i: usize| u16::from_be_bytes([m[i], m[i + 1]]);
+            let (Some(src), Some(dst)) = (ip(&m[8..24]), ip(&m[24..40])) else {
+                return Err("an answer of another family".into());
+            };
+            Ok(Some(Entry {
+                local: SocketAddr::new(src, port(4)),
+                remote: SocketAddr::new(dst, port(6)),
+                state: m[1],
+                uid: u32_at(16 + 64),
+                inode: u64::from(u32_at(16 + 68)),
+            }))
+        }
+        t => Err(format!("an answer of type {t}")),
+    }
 }
 
 #[cfg(test)]
