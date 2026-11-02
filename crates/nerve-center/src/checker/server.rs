@@ -71,6 +71,7 @@ pub struct LocalServer {
 
 impl Drop for LocalServer {
     fn drop(&mut self) {
+        self.budget.stopped();
         self.shutdown.notify_waiters();
         self.task.abort();
     }
@@ -336,6 +337,7 @@ async fn run_once(
     loop {
         tokio::select! {
             _ = shutdown.notified() => {
+                budget.stopped();
                 kill_and_wait(&mut child).await;
                 return RunEnd::Stopped;
             }
@@ -369,6 +371,7 @@ async fn run_once(
                         // Stay here until the child exits or we are stopped.
                         tokio::select! {
                             _ = shutdown.notified() => {
+                                budget.stopped();
                                 kill_and_wait(&mut child).await;
                                 return RunEnd::Stopped;
                             }
@@ -821,6 +824,22 @@ mod tests {
         until(&server, "ready", &|| server.ready()).await;
         assert!(!server.died_on_call());
         server.stop().await;
+    }
+
+    /// A server stopped on purpose, or dropped, is not up: a count it cut off
+    /// meets a model that is down, not one that failed (review T6 of #178).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stopped_or_dropped_server_is_not_counted_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = ready_fake(dir.path()).await;
+        server.stop().await;
+        assert!(!server.budget.count_failed(false), "stopped");
+        let dir = tempfile::tempdir().unwrap();
+        let server = ready_fake(dir.path()).await;
+        let budget = server.budget.clone();
+        drop(server);
+        assert!(!budget.count_failed(false), "dropped");
     }
 
     /// The usual order of a real end: the call's own task sees its connection

@@ -678,7 +678,13 @@ process (`marked_in < process`): a call may have ended the process between
 its answer to the probe and that step, and the end is not seen again. A
 `/tokenize` that fails while the supervisor counts the process ready is not a
 model that is down: the server is running and failed on the call's text, or
-has just ended, and the call is refused as not judged. `/tokenize`'s answer is read up to eight bytes per byte of
+has just ended, and the call is refused as not counted (it was not sent).
+A count is a request like a read: one in flight when the process ends marks
+it (`Flights::counting`), and a count that loses its connection marks the
+process itself, so the restart window is refused as lost whichever of the
+count and the supervisor sees the end first. A stop on purpose clears `ready`
+(`ReadBudget::stopped`), and a count it cuts off meets a model that is down.
+`/tokenize`'s answer is read up to eight bytes per byte of
 the text (at least 128 KiB), so a question over the cap is counted and refused
 as too long, and not reported as an unreachable model. Each new process of the server starts with the
 speeds forgotten (`ReadBudget::restart`, called by `supervise`), as it may read

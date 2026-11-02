@@ -429,6 +429,18 @@ impl Checker {
                     "the center's action checker refused this call: its decision model was running and took the call, but did not judge it ({why}), and such a call is refused also when the owner chose allow-and-log for a model that cannot be reached. A call with shorter arguments is judged as usual; if calls keep ending this way, the timeout is too short for the model on this machine. The owner can raise the timeout or switch the model off in the center's web UI (Action checker); {switch}."
                 ),
             },
+            // Not sent: the running local model failed to count the call's
+            // tokens. Refused with allow-and-log too (review T5 and T6 of
+            // #178). The text says the call was not taken, and that a longer
+            // timeout does not help.
+            Err(model::ModelError::NotCounted(why)) => Decision::Refuse {
+                layer: Layer::Model,
+                scope,
+                detail: format!("not counted: {why}"),
+                message: format!(
+                    "the center's action checker refused this call without asking its decision model: the running model failed to count the call's tokens ({why}), and a call is refused then also when the owner chose allow-and-log for a model that cannot be reached. A call with shorter arguments may be judged; a longer timeout does not change that. The owner can switch the model off in the center's web UI (Action checker); {switch}."
+                ),
+            },
             // Not sent: the local model could not be reached while an earlier
             // call was in it, which is most likely its end on that call. It
             // is refused with allow-and-log too (review T3 of #178). The
@@ -936,7 +948,7 @@ mod tests {
         // not allowed as a model that is down is (review T5 of #178).
         let (counting, asked) = local(model::fake::server_failing_to_count(500));
         counting.budget.as_ref().unwrap().became_ready();
-        refused(checker.check(&c, Some(&counting)).await, "not judged");
+        refused(checker.check(&c, Some(&counting)).await, "not counted");
         assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
         // Sent, and the server answers with a probability it cannot read.
         let (unreadable, asked) =

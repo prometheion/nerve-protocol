@@ -101,6 +101,15 @@ pub struct ReadBudget {
     slot: Arc<tokio::sync::Semaphore>,
 }
 
+/// A count in flight ([`ReadBudget::counting`]).
+struct Counting<'a>(&'a ReadBudget);
+
+impl Drop for Counting<'_> {
+    fn drop(&mut self) {
+        self.0.state.lock().unwrap().counting -= 1;
+    }
+}
+
 /// How many recent speeds are kept: the slowest of them counts, so one fast
 /// call on a quiet machine does not raise the budget for a busy one.
 const SPEEDS_KEPT: usize = 8;
@@ -126,6 +135,10 @@ struct Flights {
     /// The supervisor counts the process as ready. Set and cleared with its
     /// phase, under the phase's lock.
     ready: bool,
+    /// Counts (`/tokenize`) in flight. A count is a request to the server
+    /// too: one that ends the process has the same effect as a read that
+    /// does (review T6 of #178).
+    counting: usize,
 }
 
 impl Flights {
@@ -188,7 +201,7 @@ impl ReadBudget {
     pub(super) fn ended(&self) {
         let mut s = self.state.lock().unwrap();
         s.ready = false;
-        if self.reading() {
+        if self.reading() || s.counting > 0 {
             s.mark();
         }
     }
@@ -201,7 +214,7 @@ impl ReadBudget {
     /// (review T3 and T4 of #178).
     pub(super) fn ended_before_ready(&self) {
         let mut s = self.state.lock().unwrap();
-        if self.reading() {
+        if self.reading() || s.counting > 0 {
             s.mark();
         } else if s.marked_in < s.process {
             s.died_on_call = false;
@@ -221,9 +234,36 @@ impl ReadBudget {
         }
     }
 
-    /// Whether the supervisor counts the process as ready.
-    fn is_ready(&self) -> bool {
-        self.state.lock().unwrap().ready
+    /// The process was stopped on purpose (an install's swap, Remove, a
+    /// model or device switch). It is not up any more, and a count it cut
+    /// off meets a model that is down, not one that failed (review T6 of
+    /// #178). A call in it marks itself.
+    pub(super) fn stopped(&self) {
+        self.state.lock().unwrap().ready = false;
+    }
+
+    /// A count is in flight until the returned guard drops.
+    fn counting(&self) -> Counting<'_> {
+        self.state.lock().unwrap().counting += 1;
+        Counting(self)
+    }
+
+    /// A count failed. If the supervisor counts the process ready it is
+    /// running and failed on the count, or has just ended on it: the call is
+    /// refused (`true`), and when the connection was lost the process is
+    /// marked, as an end on a read is, since the supervisor may have missed
+    /// the end that this count's guard would have marked (review T5 and T6
+    /// of #178). Decided under one lock, so a stop or an end in between is
+    /// seen.
+    pub(super) fn count_failed(&self, connection_lost: bool) -> bool {
+        let mut s = self.state.lock().unwrap();
+        if !s.ready {
+            return false;
+        }
+        if connection_lost {
+            s.mark();
+        }
+        true
     }
 
     /// The mark no longer stands: there is no process, and the model is
@@ -473,6 +513,10 @@ pub enum ModelError {
     /// call's tokens), so the call itself may be why: its read took longer
     /// than the timeout, or the server failed on it (review T1 of #178).
     NotJudged(String),
+    /// The call was not sent: the running local model failed to count its
+    /// tokens. Refused whatever the owner chose, as the call may be why. A
+    /// longer timeout does not change that (review T6 of #178).
+    NotCounted(String),
     /// The call was not sent: the local model could not be reached while an
     /// earlier call was in it, so it most likely ended on that call and is
     /// starting again (or it stopped answering). Refused whatever the owner
@@ -490,6 +534,7 @@ impl ModelError {
             | ModelError::TooLong(e)
             | ModelError::Busy(e)
             | ModelError::NotJudged(e)
+            | ModelError::NotCounted(e)
             | ModelError::Lost(e) => e,
         }
     }
@@ -517,6 +562,12 @@ impl std::fmt::Display for ModelError {
                 write!(
                     f,
                     "the action checker's model took the call but did not judge it: {e}"
+                )
+            }
+            ModelError::NotCounted(e) => {
+                write!(
+                    f,
+                    "the action checker's model failed to count the call: {e}"
                 )
             }
             ModelError::Lost(e) => {
@@ -605,7 +656,11 @@ async fn ask_local(
     // center keeps the endpoint for the window, so the call does not meet
     // "not running" and its allow-and-log (review T2 and T3 of #178).
     let marks = budget.marks();
-    let tokens = match tokenize(endpoint, &body.to_string(), timeout).await {
+    let counting = budget.counting();
+    let counted = tokenize(endpoint, &body.to_string(), timeout).await;
+    // The guard lives through the arms below, so an end the supervisor sees
+    // meanwhile marks the process (review T6 of #178).
+    let tokens = match counted {
         Ok(tokens) => {
             budget.counted(marks);
             tokens
@@ -620,14 +675,15 @@ async fn ask_local(
         // on this call's text, or has just ended: either way the call is not
         // judged, and a model that is down is another case (review T5 of
         // #178).
-        Err(e) if budget.is_ready() => {
-            return Err(ModelError::NotJudged(format!(
+        Err(e) if budget.count_failed(matches!(e, ModelError::Unreachable(_))) => {
+            return Err(ModelError::NotCounted(format!(
                 "the model, which is running, did not count the call's tokens ({})",
                 e.reason()
             )));
         }
         Err(e) => return Err(e),
     };
+    drop(counting);
     budget.admit(tokens, timeout_ms)?;
     let slot = match budget.slot.clone().try_acquire_owned() {
         Ok(slot) => {
@@ -1006,6 +1062,21 @@ pub(crate) mod fake {
         serve_counting(Count::HangUp, 100)
     }
 
+    /// The same, but it ends the connection only after `delay`, so the
+    /// process can be reported ended while the count is in flight.
+    pub(crate) fn server_hanging_up_on_count_after(
+        delay: Duration,
+    ) -> (Endpoint, Arc<AtomicUsize>) {
+        serve_with(
+            100,
+            Some(100),
+            Duration::ZERO,
+            Reply::Noul(json!(0.01)),
+            delay,
+            Count::HangUp,
+        )
+    }
+
     fn serve_counting(count: Count, tokens: usize) -> (Endpoint, Arc<AtomicUsize>) {
         serve_with(
             tokens,
@@ -1077,7 +1148,10 @@ pub(crate) mod fake {
             let text = String::from_utf8_lossy(&got);
             let (status, body) = if text.starts_with("POST /tokenize ") {
                 match count {
-                    Count::HangUp => return,
+                    Count::HangUp => {
+                        std::thread::sleep(count_delay);
+                        return;
+                    }
                     Count::Status(status) => {
                         let _ = write!(
                             c,
@@ -1587,7 +1661,7 @@ mod tests {
 
     /// A server counted ready that fails the count is not down: it failed on
     /// the call's text, or has just ended. The call is refused as not
-    /// judged, whatever the owner chose for an unreachable model. A server
+    /// counted (it was not sent), whatever the owner chose for an unreachable model. A server
     /// not counted ready is down, and that case goes on as it was (review T5
     /// of #178).
     #[tokio::test]
@@ -1609,9 +1683,63 @@ mod tests {
             );
             budget.became_ready();
             let e = ask(&ep, &cfg, json!({})).await.unwrap_err();
-            assert!(matches!(e, ModelError::NotJudged(_)), "{name}: {e}");
+            assert!(matches!(e, ModelError::NotCounted(_)), "{name}: {e}");
             assert_eq!(asked.load(Ordering::SeqCst), 0, "{name}: nothing is sent");
+            // A lost connection may be an end, and marks the process; an
+            // error status is a server that went on running (review T6).
+            assert_eq!(budget.died_on_call(), name == "a hang-up", "{name}");
         }
+    }
+
+    /// A count that ends the process is a request that ended it, whoever
+    /// sees the end first (review T6 of #178). The supervisor first: the
+    /// guard of the count in flight marks, and the call is lost.
+    #[tokio::test]
+    async fn a_count_the_supervisor_saw_end_the_server_marks_the_process() {
+        let budget = Arc::new(linear(12_288, 0.1));
+        budget.became_ready();
+        let (ep, _) = fake::server_hanging_up_on_count_after(Duration::from_millis(300));
+        let ep = Endpoint {
+            budget: Some(budget.clone()),
+            ..ep
+        };
+        let cfg = with_timeout(2000);
+        let call = tokio::spawn({
+            let ep = ep.clone();
+            async move { ask(&ep, &cfg, json!({})).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        budget.ended();
+        budget.restart();
+        let e = call.await.unwrap().unwrap_err();
+        assert!(matches!(e, ModelError::Lost(_)), "{e}");
+        assert!(
+            budget.died_on_call(),
+            "the restart window is refused as lost"
+        );
+    }
+
+    /// A stop is not an end on a call: a count it cuts off meets a model
+    /// that is down (review T6 of #178).
+    #[tokio::test]
+    async fn a_count_cut_off_by_a_stop_meets_a_model_that_is_down() {
+        let budget = Arc::new(linear(12_288, 0.1));
+        budget.became_ready();
+        let (ep, _) = fake::server_hanging_up_on_count_after(Duration::from_millis(300));
+        let ep = Endpoint {
+            budget: Some(budget.clone()),
+            ..ep
+        };
+        let cfg = with_timeout(2000);
+        let call = tokio::spawn({
+            let ep = ep.clone();
+            async move { ask(&ep, &cfg, json!({})).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        budget.stopped();
+        let e = call.await.unwrap().unwrap_err();
+        assert!(matches!(e, ModelError::Unreachable(_)), "{e}");
+        assert!(!budget.died_on_call());
     }
 
     /// The speed is learned from the tokens the server read, not from the
