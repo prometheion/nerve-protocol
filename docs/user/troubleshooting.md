@@ -197,6 +197,7 @@ from the source `nerve-node` under **Windows Logs > Application**, and
 | `the web UI at … is beyond loopback and logs in with a harness token, but there is none` | `--ui` is not on loopback | Set `--harness-token`, or use `--ui 127.0.0.1:7480` |
 | `… always needs a login; drop --ui-no-login …` | `--ui-no-login` with a UI beyond loopback | Drop `--ui-no-login` |
 | The MCP endpoint refuses every client | No harness token yet | Set `--harness-token`, or make one in the web UI |
+| ``…/state.json is not valid: unknown variant `d1-3b` …`` | The center was last run before d1-2B replaced d1-3B as the local model | In `state.json` change `"d1-3b"` to `"d1-2b"`; with the local model also set `"threshold"` to 0.75 and `"timeout_ms"` to 12000. Then start the center and install the model again on the Action checker page |
 
 ## Output is cut
 
