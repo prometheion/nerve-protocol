@@ -557,13 +557,36 @@ fn glob(pattern: &str, case_insensitive: bool) -> Result<GlobMatcher, globset::E
 /// The glob of `~` over a string. A `\` escapes in it on every system, as
 /// the docs say (`\,` is a `,`); globset leaves that off on Windows, where
 /// a path glob takes `\` for a separator.
+///
+/// globset also turns a `\` of the matched text into `/` on Windows, so a
+/// literal `\` could never match there. Both sides therefore carry a `\` as
+/// one private character (`\\` in the pattern, `\` in the text), on every system.
 fn string_glob(pattern: &str) -> Result<GlobMatcher, globset::Error> {
-    GlobBuilder::new(pattern)
+    let mut mapped = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, chars.peek()) {
+            ('\\', Some('\\')) => {
+                chars.next();
+                mapped.push(BACKSLASH);
+            }
+            ('\\', Some(&next)) => {
+                chars.next();
+                mapped.push('\\');
+                mapped.push(next);
+            }
+            _ => mapped.push(c),
+        }
+    }
+    GlobBuilder::new(&mapped)
         .backslash_escape(true)
         .empty_alternates(true)
         .build()
         .map(|g| g.compile_matcher())
 }
+
+/// Stands for a `\` in a string glob and in the text it is matched with.
+const BACKSLASH: char = '\u{E000}';
 
 /// What a call gives for one field.
 #[derive(Debug, Clone, PartialEq)]
@@ -754,7 +777,11 @@ impl Compiled {
             Arg::Value(Value::String(s)) => match self.op {
                 Op::Eq => Some(*s == self.value),
                 Op::Ne => Some(*s != self.value),
-                Op::Like => Some(self.text.as_ref()?.is_match(s)),
+                Op::Like => Some(
+                    self.text
+                        .as_ref()?
+                        .is_match(s.replace('\\', &BACKSLASH.to_string())),
+                ),
                 _ => None,
             },
             Arg::Value(Value::Number(n)) if self.op != Op::Like => {
