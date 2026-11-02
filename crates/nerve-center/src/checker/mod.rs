@@ -418,15 +418,15 @@ impl Checker {
                     "the center's action checker refused this call without asking its decision model: the model was still reading the calls sent before it and would not have read this one within the checker's timeout ({why}). The same call is judged as usual once fewer calls are checked at once. The owner can raise the timeout or switch the model off in the center's web UI (Action checker); {switch}."
                 ),
             },
-            // The running local model took the call and did not judge it: the
-            // call's length or the calls ahead of it may be why, so it is
-            // refused with allow-and-log too (review T1 of #178).
+            // The running local model took the call and did not judge it: its
+            // own read took longer than the timeout, or the server failed on
+            // it, so it is refused with allow-and-log too (review T1 of #178).
             Err(model::ModelError::NotJudged(why)) => Decision::Refuse {
                 layer: Layer::Model,
                 scope,
                 detail: format!("not judged: {why}"),
                 message: format!(
-                    "the center's action checker refused this call: its decision model was running and took the call, but did not judge it ({why}), and such a call is refused also when the owner chose allow-and-log for a model that cannot be reached. A call with shorter arguments, or with fewer calls checked at once, is judged as usual. The owner can raise the timeout or switch the model off in the center's web UI (Action checker); {switch}."
+                    "the center's action checker refused this call: its decision model was running and took the call, but did not judge it ({why}), and such a call is refused also when the owner chose allow-and-log for a model that cannot be reached. A call with shorter arguments is judged as usual; if calls keep ending this way, the timeout is too short for the model on this machine. The owner can raise the timeout or switch the model off in the center's web UI (Action checker); {switch}."
                 ),
             },
             Err(e) => fail(e.to_string()),
@@ -894,7 +894,12 @@ mod tests {
         };
         // Sent, and the server takes longer than the timeout.
         let (slow, asked) = local(model::fake::server(100, Duration::from_millis(1500)));
-        refused(checker.check(&c, Some(&slow)).await, "not judged");
+        let Decision::Refuse { message, .. } = checker.check(&c, Some(&slow)).await else {
+            panic!("should be refused");
+        };
+        // Its own read was too slow; checking fewer calls at once changes
+        // nothing about that (review T2 of #178).
+        assert!(!message.contains("at once"), "{message}");
         assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
         // Two at once: the second waits for the first, then is refused as
         // busy, not sent.
@@ -914,6 +919,17 @@ mod tests {
         let (failing, asked) = local(model::fake::server_failing(100));
         refused(checker.check(&c, Some(&failing)).await, "not judged");
         assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Sent, and the server answers with a probability it cannot read.
+        let (unreadable, asked) =
+            local(model::fake::server_answering(100, serde_json::Value::Null));
+        refused(checker.check(&c, Some(&unreadable)).await, "not judged");
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // The server ended on an earlier call and is starting again: not
+        // sent.
+        let (restarting, asked) = local(model::fake::server(100, Duration::ZERO));
+        restarting.budget.as_ref().unwrap().die_on_call();
+        refused(checker.check(&c, Some(&restarting)).await, "not judged");
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
         // No server listening: allowed and logged, as the owner chose.
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()

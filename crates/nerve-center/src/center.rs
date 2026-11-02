@@ -3703,7 +3703,12 @@ impl Center {
             ModelSource::Endpoint => checker.endpoint().cloned(),
             ModelSource::Local => {
                 let srv = self.local_model.lock().unwrap().clone()?;
-                srv.ready().then(|| srv.endpoint())
+                // A server that ended while it read a call keeps its
+                // endpoint while it starts again, so the client refuses the
+                // calls of that window as not judged, and allow-and-log
+                // does not let them through as it does for a model that is
+                // down (review T2 of #178).
+                (srv.ready() || srv.died_on_call()).then(|| srv.endpoint())
             }
         }
     }
@@ -6171,6 +6176,38 @@ pub(crate) mod tests {
         c.rebuild_checker();
         until("the model to be ready", || local_ready(&c)).await;
         c
+    }
+
+    /// A local model that ended on a call keeps its endpoint while it starts
+    /// again, so the client refuses the calls of that window; one that is
+    /// merely down has none, and allow-and-log applies (review T2 of #178).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_local_model_that_ended_on_a_call_keeps_its_endpoint_while_it_starts_again() {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let dir = tempfile::tempdir().unwrap();
+            let c = center_with_a_running_model(dir.path()).await;
+            let checker = c.checker();
+            assert!(c.resolved_endpoint(&checker).is_some());
+            let pid =
+                std::fs::read_to_string(checker::install::llama_dir(dir.path()).join("bin/pid"))
+                    .unwrap();
+            let killed = std::process::Command::new("kill")
+                .args(["-9", pid.trim()])
+                .status()
+                .unwrap();
+            assert!(killed.success());
+            until("the model to end", || !local_ready(&c)).await;
+            // Down, with no call lost: no endpoint.
+            assert!(c.resolved_endpoint(&checker).is_none());
+            let srv = c.local_model.lock().unwrap().clone().unwrap();
+            srv.endpoint().budget.unwrap().die_on_call();
+            assert!(c.resolved_endpoint(&checker).is_some());
+            until("the model to be ready again", || local_ready(&c)).await;
+            assert!(!srv.died_on_call());
+        })
+        .await
+        .expect("the test did not finish within 60 s");
     }
 
     /// The local model runs when only a node has the model on, and Remove

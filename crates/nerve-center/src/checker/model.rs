@@ -113,6 +113,10 @@ struct Flights {
     in_flight: usize,
     /// Calls started so far, so a call can tell another one overlapped it.
     started: u64,
+    /// The server went away while it read a call (the connection ended
+    /// without an answer), and the process that replaced it has not come up
+    /// yet.
+    died_on_call: bool,
 }
 
 impl ReadBudget {
@@ -135,6 +139,26 @@ impl ReadBudget {
         let mut s = self.state.lock().unwrap();
         s.speeds.clear();
         s.started += 1;
+    }
+
+    /// Whether the server went away while it read a call, and its
+    /// replacement is not up yet. The calls in that window are refused as
+    /// not judged: the server is not just down, it ended on a call, and
+    /// that call may be why (review T2 of #178).
+    pub(crate) fn died_on_call(&self) -> bool {
+        self.state.lock().unwrap().died_on_call
+    }
+
+    /// The restarted server answers: calls are sent to it again.
+    pub(super) fn recovered(&self) {
+        self.state.lock().unwrap().died_on_call = false;
+    }
+
+    /// Marks the server as gone with a call, as a call that lost its
+    /// connection does.
+    #[cfg(test)]
+    pub(crate) fn die_on_call(&self) {
+        self.state.lock().unwrap().died_on_call = true;
     }
 
     /// Lands a call of `tokens` that took `ms`, as an answered one does.
@@ -200,6 +224,24 @@ impl ReadBudget {
         )))
     }
 
+    /// Whether a request of `tokens` that got the slot at once is read in
+    /// the `left` of its timeout (counting its tokens took the rest). A call
+    /// of up to 512 tokens is sent whatever the speed, as with [`admit`].
+    fn admit_in(&self, tokens: usize, left: Duration) -> Result<(), ModelError> {
+        if tokens <= ALWAYS_SENT_TOKENS {
+            return Ok(());
+        }
+        let ms = self.read_ms(tokens);
+        if ms <= left.as_millis() as f64 {
+            return Ok(());
+        }
+        Err(ModelError::TooLong(format!(
+            "about {tokens} tokens, which the model reads here in about {:.1} s, more than the {} ms left of the timeout after counting them",
+            ms / 1000.0,
+            left.as_millis()
+        )))
+    }
+
     /// Whether a request of `tokens` that waited `waited` for the slot is
     /// read in the `left` of its timeout. Unlike a call sent at once, one of
     /// up to 512 tokens is held to it too: it would only time out in the
@@ -262,6 +304,15 @@ impl Flight<'_> {
         self.take(tokens, ms, true);
     }
 
+    /// The server went away while it read this call. A call that a restart
+    /// came between does not say anything about the new process.
+    fn died(&self) {
+        let mut s = self.budget.state.lock().unwrap();
+        if s.started == self.number {
+            s.died_on_call = true;
+        }
+    }
+
     fn take(&self, tokens: usize, ms: f64, timed_out: bool) {
         let work = self.budget.work(tokens);
         let mut s = self.budget.state.lock().unwrap();
@@ -307,8 +358,8 @@ pub enum ModelError {
     /// The local model took the call and gave no answer within the timeout,
     /// or none that could be read. Refused whatever the owner chose for an
     /// unreachable model: the server was running (it had just counted the
-    /// call's tokens), so the call itself, its length or the calls ahead of
-    /// it, may be why (review T1 of #178).
+    /// call's tokens), so the call itself may be why: its read took longer
+    /// than the timeout, or the server failed on it (review T1 of #178).
     NotJudged(String),
 }
 
@@ -356,9 +407,18 @@ impl std::fmt::Display for ModelError {
 /// The largest answer body the client reads.
 const MAX_BODY: usize = 64 * 1024;
 
-/// The largest `/tokenize` answer: a token id per byte of the longest
-/// request at most, each a few digits.
-const MAX_TOKENS_BODY: usize = 512 * 1024;
+/// The largest `/tokenize` answer for `text`: a token covers at least one
+/// byte, and an id of the models' vocabularies is at most six digits and a
+/// comma. A fixed limit would let a long enough question (one kept from an
+/// endpoint source has no cap) make the answer unreadable, which is an
+/// unreachable model, and allow-and-log lets that through unjudged while the
+/// model runs (review T2 of #178).
+fn tokens_body_limit(text: &str) -> usize {
+    (8 * text.len() + 1024).max(MIN_TOKENS_BODY)
+}
+
+/// Room for the answer of a short text, which is mostly its framing.
+const MIN_TOKENS_BODY: usize = 128 * 1024;
 
 /// Asks the model whether the call described by `state` is dangerous, with the
 /// question built from `cfg`. Returns the `noul` probability (0..=1).
@@ -412,10 +472,23 @@ async fn ask_local(
 ) -> Result<f64, ModelError> {
     // The timeout covers the wait for the slot as well as the read.
     let deadline = tokio::time::Instant::now() + timeout;
+    // The server ended on a call and is starting again: refused, not sent
+    // (the center keeps this endpoint for the window, so the call does not
+    // meet "not running" and its allow-and-log).
+    if budget.died_on_call() {
+        return Err(ModelError::NotJudged(
+            "the model ended while it read an earlier call, and is starting again".into(),
+        ));
+    }
     let tokens = tokenize(endpoint, &body.to_string(), timeout).await?;
     budget.admit(tokens, timeout_ms)?;
     let slot = match budget.slot.clone().try_acquire_owned() {
-        Ok(slot) => slot,
+        Ok(slot) => {
+            // Counting the tokens took part of the timeout.
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            budget.admit_in(tokens, left)?;
+            slot
+        }
         Err(_) => {
             let waiting = Instant::now();
             let slot = match tokio::time::timeout_at(deadline, budget.slot.clone().acquire_owned())
@@ -445,7 +518,8 @@ async fn ask_local(
     ));
     // From here on the server has the call, so whatever keeps it from
     // judging the call is refused, also with allow-and-log: the call's own
-    // length, or the calls ahead of it, may be why (review T1 of #178).
+    // read took longer than the timeout, or the server failed on it (review
+    // T1 of #178).
     let value = match tokio::time::timeout_at(deadline, answer).await {
         Ok(Ok(Ok(value))) => value,
         Ok(Ok(Err(e))) => return Err(ModelError::NotJudged(e.reason().into())),
@@ -508,7 +582,14 @@ async fn read_alone(
             }
             Ok(value)
         }
-        Ok(Err(e)) => Err(e),
+        Ok(Err(e)) => {
+            // A refused connection or one that ended without an answer is
+            // the server gone (an HTTP error status is not).
+            if matches!(e, ModelError::Unreachable(_)) {
+                flight.died();
+            }
+            Err(e)
+        }
         // A stuck call took at least this long for at most the tokens
         // counted (and the template); that is its speed's lower bound, so
         // a machine slower than assumed is learned from it.
@@ -543,7 +624,7 @@ async fn tokenize(endpoint: &Endpoint, text: &str, wait: Duration) -> Result<usi
     let body = json!({ "content": text, "parse_special": false });
     let value = tokio::time::timeout(
         wait,
-        request(endpoint, "/tokenize", &body, wait, MAX_TOKENS_BODY),
+        request(endpoint, "/tokenize", &body, wait, tokens_body_limit(text)),
     )
     .await
     .map_err(|_| ModelError::Unreachable("counting the tokens timed out".into()))??;
@@ -698,20 +779,82 @@ pub(crate) mod fake {
         read: Option<usize>,
         delay: Duration,
     ) -> (Endpoint, Arc<AtomicUsize>) {
-        serve(tokens, read, delay, 200)
+        serve(
+            tokens,
+            read,
+            delay,
+            Reply::Noul(json!(0.01)),
+            Duration::ZERO,
+        )
+    }
+
+    /// The same, but `/tokenize` answers only after `count_delay`, as it does
+    /// on a loaded machine.
+    pub(crate) fn server_counting_slowly(
+        tokens: usize,
+        count_delay: Duration,
+    ) -> (Endpoint, Arc<AtomicUsize>) {
+        serve(
+            tokens,
+            Some(tokens),
+            Duration::ZERO,
+            Reply::Noul(json!(0.01)),
+            count_delay,
+        )
     }
 
     /// The same, but it answers every decision request with an HTTP 500,
     /// as a server that failed on the call does.
     pub(crate) fn server_failing(tokens: usize) -> (Endpoint, Arc<AtomicUsize>) {
-        serve(tokens, Some(tokens), Duration::ZERO, 500)
+        serve(
+            tokens,
+            Some(tokens),
+            Duration::ZERO,
+            Reply::Status(500),
+            Duration::ZERO,
+        )
+    }
+
+    /// The same, but its decision answers hold `noul` as the probability.
+    pub(crate) fn server_answering(tokens: usize, noul: Value) -> (Endpoint, Arc<AtomicUsize>) {
+        serve(
+            tokens,
+            Some(tokens),
+            Duration::ZERO,
+            Reply::Noul(noul),
+            Duration::ZERO,
+        )
+    }
+
+    /// The same, but it ends the connection of every decision request
+    /// without an answer, as a server that was killed does.
+    pub(crate) fn server_hanging_up(tokens: usize) -> (Endpoint, Arc<AtomicUsize>) {
+        serve(
+            tokens,
+            Some(tokens),
+            Duration::ZERO,
+            Reply::HangUp,
+            Duration::ZERO,
+        )
+    }
+
+    /// How the fake answers a decision request.
+    #[derive(Clone)]
+    enum Reply {
+        /// A 200 answer with this `noul`.
+        Noul(Value),
+        /// This HTTP status, with the same body.
+        Status(u16),
+        /// No answer: the connection ends.
+        HangUp,
     }
 
     fn serve(
         tokens: usize,
         read: Option<usize>,
         delay: Duration,
-        status: u16,
+        reply: Reply,
+        count_delay: Duration,
     ) -> (Endpoint, Arc<AtomicUsize>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -720,7 +863,7 @@ pub(crate) mod fake {
         let counter = asked.clone();
         // Each connection in a thread of its own, as llama-server answers
         // `/tokenize` while it reads a call.
-        let answer = move |mut c: std::net::TcpStream, counter: Arc<AtomicUsize>| {
+        let answer = move |mut c: std::net::TcpStream, counter: Arc<AtomicUsize>, reply: Reply| {
             let mut got = Vec::new();
             let mut buf = [0u8; 8192];
             // The request is small; read until its body is in.
@@ -744,12 +887,19 @@ pub(crate) mod fake {
                 // token each unless asked not to; here as one for the
                 // whole text.
                 let plain = text.contains(r#""parse_special":false"#);
-                let tokens = vec![1; if plain { tokens } else { 1 }];
+                // An id of six digits, as the models' vocabularies have.
+                let tokens = vec![100_000; if plain { tokens } else { 1 }];
+                std::thread::sleep(count_delay);
                 (200, json!({ "tokens": tokens }).to_string())
             } else {
                 counter.fetch_add(1, Ordering::SeqCst);
                 std::thread::sleep(delay);
-                let mut answer = json!({"answers": {"danger": {"type": "noul", "noul": 0.01}}});
+                let (status, noul) = match reply {
+                    Reply::Noul(noul) => (200, noul),
+                    Reply::Status(status) => (status, json!(0.01)),
+                    Reply::HangUp => return,
+                };
+                let mut answer = json!({"answers": {"danger": {"type": "noul", "noul": noul}}});
                 if let Some(read) = read {
                     answer["usage"] = json!({ "input_tokens": read, "output_tokens": 0 });
                 }
@@ -764,7 +914,8 @@ pub(crate) mod fake {
         std::thread::spawn(move || {
             for c in listener.incoming().flatten() {
                 let counter = counter.clone();
-                std::thread::spawn(move || answer(c, counter));
+                let reply = reply.clone();
+                std::thread::spawn(move || answer(c, counter, reply));
             }
         });
         let ep = Endpoint::parse(&format!("http://127.0.0.1:{port}"), None, None).unwrap();
@@ -1022,6 +1173,91 @@ mod tests {
             .count();
         assert_eq!((judged, busy), (2, 1), "{results:?}");
         assert_eq!(asked.load(Ordering::SeqCst), 2);
+    }
+
+    /// A call that gets the slot at once is held to what is left of its
+    /// timeout after `/tokenize` answered, as one that waited is (review T2
+    /// of #178).
+    #[tokio::test]
+    async fn a_call_is_held_to_the_time_left_after_counting_its_tokens() {
+        // 1,000 tokens and the template at 1 ms are about 1.06 s, inside the
+        // 1.5 s timeout, but counting them took 0.6 s of it.
+        let budget = Arc::new(linear(8192, 1.0));
+        let (ep, asked) = fake::server_counting_slowly(1000, Duration::from_millis(600));
+        let ep = Endpoint {
+            budget: Some(budget),
+            ..ep
+        };
+        let e = ask(&ep, &with_timeout(1500), json!({"command": "a"}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, ModelError::TooLong(why) if why.contains("left of the timeout")),
+            "{e}"
+        );
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+    }
+
+    /// A question far over the cap makes `/tokenize` answer with more than
+    /// a fixed limit: it is still counted, and the call refused as too long
+    /// (not as an unreachable model, which allow-and-log lets through) (review
+    /// T2 of #178).
+    #[tokio::test]
+    async fn a_long_question_is_counted_and_refused_as_too_long() {
+        let budget = Arc::new(linear(12_288, 0.1));
+        // 80,000 tokens of a six-digit id are over half a megabyte.
+        let (ep, asked) = fake::server(80_000, Duration::ZERO);
+        let ep = Endpoint {
+            budget: Some(budget),
+            ..ep
+        };
+        let e = ask(
+            &ep,
+            &with_timeout(12_000),
+            json!({"command": "a".repeat(80_000)}),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(e, ModelError::TooLong(_)), "{e}");
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+    }
+
+    /// A server that ended without answering a call it took is gone, not
+    /// slow: the calls after it are refused as not judged, not sent, until
+    /// the restarted server is up (review T2 of #178). An HTTP error is not
+    /// that.
+    #[tokio::test]
+    async fn a_server_that_ended_on_a_call_gets_no_calls_until_it_is_back() {
+        let budget = Arc::new(linear(12_288, 0.1));
+        let (ep, asked) = fake::server_hanging_up(100);
+        let ep = Endpoint {
+            budget: Some(budget.clone()),
+            ..ep
+        };
+        let cfg = with_timeout(2000);
+        let e = ask(&ep, &cfg, json!({})).await.unwrap_err();
+        assert!(matches!(e, ModelError::NotJudged(_)), "{e}");
+        assert!(budget.died_on_call());
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        let e = ask(&ep, &cfg, json!({})).await.unwrap_err();
+        assert!(
+            matches!(&e, ModelError::NotJudged(why) if why.contains("ended")),
+            "{e}"
+        );
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        budget.recovered();
+        let _ = ask(&ep, &cfg, json!({})).await;
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
+
+        let budget = Arc::new(linear(12_288, 0.1));
+        let (ep, _) = fake::server_failing(100);
+        let ep = Endpoint {
+            budget: Some(budget.clone()),
+            ..ep
+        };
+        let e = ask(&ep, &cfg, json!({})).await.unwrap_err();
+        assert!(matches!(e, ModelError::NotJudged(_)), "{e}");
+        assert!(!budget.died_on_call());
     }
 
     /// The speed is learned from the tokens the server read, not from the

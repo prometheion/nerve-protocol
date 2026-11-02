@@ -149,6 +149,12 @@ impl LocalServer {
         }
     }
 
+    /// Whether the server ended while it read a call and has not come up
+    /// again ([`ReadBudget::died_on_call`]).
+    pub fn died_on_call(&self) -> bool {
+        self.budget.died_on_call()
+    }
+
     pub fn ready(&self) -> bool {
         self.inner.lock().unwrap().phase == Some(Phase::Ready)
     }
@@ -225,7 +231,7 @@ async fn supervise(
             i.url = None;
         });
         budget.restart();
-        match run_once(&program, &args, port, timeout, &inner, &shutdown).await {
+        match run_once(&program, &args, port, timeout, &inner, &shutdown, &budget).await {
             RunEnd::NotDecision => {
                 // A clear, final failure: do not restart.
                 exited.notify_waiters();
@@ -281,6 +287,7 @@ async fn run_once(
     timeout: Duration,
     inner: &Arc<Mutex<Inner>>,
     shutdown: &Arc<tokio::sync::Notify>,
+    budget: &ReadBudget,
 ) -> RunEnd {
     let mut cmd = Command::new(program);
     cmd.args(args)
@@ -332,6 +339,8 @@ async fn run_once(
             _ = tokio::time::sleep(Duration::from_millis(500)) => {
                 match tokio::time::timeout(timeout, model::is_decision_model(&endpoint)).await {
                     Ok(Ok(true)) => {
+                        // Calls are sent to the server again.
+                        budget.recovered();
                         set(inner, |i| {
                             i.phase = Some(Phase::Ready);
                             i.url = Some(url.clone());
@@ -585,8 +594,14 @@ mod tests {
             .status()
             .unwrap();
         assert!(killed.success());
+        // A call was on its way when the server ended.
+        server.budget.die_on_call();
         until("ended", &|| !server.ready()).await;
+        // Until the new process is up, the center keeps the endpoint so the
+        // client refuses calls (review T2 of #178).
+        assert!(server.died_on_call());
         until("ready again", &|| server.ready()).await;
+        assert!(!server.died_on_call());
         assert_eq!(server.budget.ms_per_token(), pin.read_ms);
         server.stop().await;
     }
