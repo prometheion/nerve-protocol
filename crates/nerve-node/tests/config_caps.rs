@@ -422,6 +422,49 @@ params = '{"type": "object", "properties": {"path": {"type": "string", "x-nerve-
     daemon.stop().await;
 }
 
+/// The audit keeps, for the buttons that pin one, only the arguments the
+/// schema names (a call cannot fill the log with names of its own, nor push
+/// the real ones out), and no path before it is resolved: a call refused as
+/// off would pin the spelling the agent gave, not the place.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_audit_keeps_only_the_arguments_the_schema_names() {
+    let dir = scratch();
+    let root = dir.path().canonicalize().unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let say = cap(r#"name = "lamp.set"
+effect = "read"
+command = ["echo", "{label}"]
+params = '{"type": "object", "properties": {"label": {"type": "string"}}, "required": ["label"]}'"#);
+    let show = cap(r#"name = "files.show"
+effect = "read"
+command = ["cat", "--", "{path}"]
+params = '{"type": "object", "properties": {"path": {"type": "string", "x-nerve-path": "read"}}, "required": ["path"]}'"#);
+    let daemon = node(&root, &center, vec![say, show], |p| {
+        user_mode(p);
+        p.caps.insert("files.show".into(), CapSetting::Off);
+    })
+    .await;
+    let mut conn = linked(&mut center).await;
+    let mut args = json!({"label": "hello"});
+    for i in 0..20 {
+        args[format!("a{i:02}")] = json!(i);
+    }
+    args["b".repeat(300)] = json!("long name");
+    invoke(&mut conn, "lamp.set", args).await.expect("allowed");
+    let given = format!("{}/home/../x", root.display());
+    let e = invoke(&mut conn, "files.show", json!({"path": given}))
+        .await
+        .unwrap_err();
+    assert_eq!(code_of(&e), "disabled", "{}", e.message);
+    let lamp = audited(daemon.paths(), "lamp");
+    assert_eq!(lamp.len(), 1, "{lamp:?}");
+    assert_eq!(lamp[0]["args"], json!({"label": "hello"}), "{}", lamp[0]);
+    let files = audited(daemon.paths(), "files");
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].get("args").is_none(), "{}", files[0]);
+    daemon.stop().await;
+}
+
 /// Whether a process runs `sleep` with the argument `arg`.
 fn sleeping(arg: &str) -> bool {
     std::fs::read_dir("/proc").unwrap().flatten().any(|e| {

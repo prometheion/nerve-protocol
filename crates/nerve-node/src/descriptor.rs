@@ -1030,8 +1030,22 @@ mod tests {
     /// stream's parameters alike: the gate reads both as the call's.
     #[test]
     fn a_rule_names_an_actions_arguments_or_a_streams_params() {
-        let params = arg_schemas(built_in(&NodeConfig::default()));
-        for (cap, unit, field) in [("exec", "signal", "signal"), ("exec", "output", "call")] {
+        let mut caps = built_in(&NodeConfig::default());
+        let mut feed = cap("sensors", "", Exposure::On, "Sensors.");
+        feed.streams.insert(
+            "feed".into(),
+            StreamDecl {
+                kind: StreamKind::Reliable,
+                direction: Direction::Up,
+                effect: Effect::Read,
+                summary: String::new(),
+                params: obj(json!({"room": {"type": "string"}}), &[]),
+                exposure: None,
+            },
+        );
+        caps.push(feed);
+        let params = arg_schemas(caps);
+        for (cap, unit, field) in [("exec", "signal", "signal"), ("sensors", "feed", "room")] {
             let p = params(cap, unit).unwrap_or_else(|| panic!("{cap}.{unit}"));
             assert!(p["properties"].get(field).is_some(), "{cap}.{unit}: {p}");
         }

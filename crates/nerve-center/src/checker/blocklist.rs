@@ -810,6 +810,56 @@ mod tests {
         }
     }
 
+    /// On a path the checker reads `~` as any home and ignores case, which
+    /// is wider than the node. That must not let a call through that the
+    /// node's own deny refuses: a `!=` is the rule that turns a wider glob
+    /// into fewer refusals.
+    #[test]
+    fn the_checker_refuses_every_path_the_nodes_deny_refuses() {
+        use nerve_policy::conditions::Arg;
+        use nerve_policy::rules::RuleSet;
+        let marked = [("file".to_string(), PathMark::Write)];
+        let rules = [
+            "notes.save:file!=~/inbox.md",
+            "notes.save:file!=/srv/drop/in.txt",
+            "notes.save:file=~/inbox.md",
+            "notes.save:file=/srv/drop/in.txt",
+            "notes.save:file~~/proj/*",
+        ];
+        let paths = [
+            "/h/inbox.md",
+            "/h/proj/inbox.md",
+            "/h/INBOX.md",
+            "/etc/x/inbox.md",
+            "/srv/drop/in.txt",
+            "/srv/drop/IN.TXT",
+        ];
+        for text in rules {
+            let node = RuleSet::new(&[text.to_string()], std::path::Path::new("/h"));
+            let checker = Rule::parse(text).unwrap();
+            for path in paths {
+                let args = json!({"file": path});
+                let at_node = |f: &str| match f {
+                    "file" => Arg::Path(path.to_string()),
+                    _ => Arg::Missing,
+                };
+                let call = Call {
+                    cap: "notes",
+                    action: "save",
+                    target: path,
+                    args: args.as_object(),
+                    marked: &marked,
+                };
+                let n = node.find_args("notes", "save", &at_node, true).is_some();
+                let c = checker.blocks_with(&call, None);
+                assert!(
+                    c || !n,
+                    "{text} {path}: the node refuses it, the checker not"
+                );
+            }
+        }
+    }
+
     /// `exec:<pattern>` reads like a command rule but is not one: it is
     /// refused, naming the `exec.run:` form.
     #[test]

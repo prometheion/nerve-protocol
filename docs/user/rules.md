@@ -239,9 +239,10 @@ nerve-node rule add deny  'notes.save:path~~/private/*'
   handed a folder above that place, such as `~`, since the program works
   below it. A path condition starts with `/` or `~` (a `~` glob also with a
   wildcard, such as `path~**/.env`), as the paths the node resolves do. A
-  plain string's value does not start with `~/`, which is a path's home: so
-  a rule written for a path argument no longer fits once the program takes a
-  plain string there, and is flagged (see below).
+  plain string has no home: a `~` glob that starts at the home (`~/…`) on
+  one is flagged (see below), since the rule was written for a path argument
+  that is a plain string now. An exact string, such as an audit pins, may
+  start with `~/` like any text.
 - Conditions name the arguments of one action: `lamp.set:…`, not `lamp:…`.
   A rule without a pattern (`lamp.set`, `lamp`) still covers every call.
 
@@ -276,7 +277,13 @@ characters, numbers and booleans, at most 16) on each entry of such an
 action. The audit pages of the desktop app and the web UI offer each of them:
 pick one, then **Allow with this value** or **Deny with this value**. A path
 argument is kept as the node resolved it, so the rule names the place the call
-reached, however the agent spelt it.
+reached, however the agent spelt it; a call refused before its path was
+resolved (an action that is off, a path that does not resolve) keeps none, and
+neither does one for an argument the schema does not name. A value is compared
+as written, so a deny on a free string covers that exact value only
+(`mail.send:to=boss@example.com` does not refuse `Boss@Example.com`, which a
+program may read as the same person). Where a program reads values more
+loosely, let its schema list the allowed ones (`enum`), or use the allow list.
 
 ## Rule syntax
 

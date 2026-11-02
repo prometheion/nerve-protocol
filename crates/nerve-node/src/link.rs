@@ -2680,7 +2680,7 @@ impl Link {
                     }))
                 },
                 |decision, code, reason| {
-                    self.audit_ran(inv, audited, &target, ran, decision, code, reason)
+                    self.audit_ran(inv, audited, true, &target, ran, decision, code, reason)
                 },
             )
             .await;
@@ -2689,7 +2689,7 @@ impl Link {
             decision
         };
         let audit = |decision: &str, code: Option<&str>, reason: Option<&str>| {
-            self.audit_ran(inv, audited, &target, ran, decision, code, reason)
+            self.audit_ran(inv, audited, true, &target, ran, decision, code, reason)
         };
         match decision {
             Decision::Allow => {
@@ -2733,17 +2733,19 @@ impl Link {
         code: Option<&str>,
         reason: Option<&str>,
     ) {
-        self.audit_ran(inv, &inv.args, target, None, decision, code, reason)
+        self.audit_ran(inv, &inv.args, false, target, None, decision, code, reason)
     }
 
     /// [`Link::audit`], with the command a capability of `node.toml` runs
     /// for the call (`ran`), which only the node's own log keeps, and the
-    /// call's arguments as the policy judged them (`args`).
+    /// call's arguments as the policy judged them (`args`), their paths
+    /// resolved (`resolved`) or as the agent gave them.
     #[allow(clippy::too_many_arguments)]
     fn audit_ran(
         &self,
         inv: &Invoke,
         args: &Map<String, Value>,
+        resolved: bool,
         target: &str,
         ran: Option<&str>,
         decision: &str,
@@ -2761,8 +2763,35 @@ impl Link {
             session: inv.ctx.session.clone(),
             reason: reason.map(Into::into),
             command: ran.map(Into::into),
-            args: nerve_policy::audit::pinnable_args(&inv.cap, &inv.action, args),
+            args: self.audited_args(inv, args, resolved),
         })
+    }
+
+    /// The arguments an audit entry keeps for the buttons that pin one
+    /// (nerve_policy::audit::pinnable_args): only those the action's schema
+    /// names, so a call cannot fill the log with names of its own, and not
+    /// a path before it is resolved.
+    fn audited_args(
+        &self,
+        inv: &Invoke,
+        args: &Map<String, Value>,
+        resolved: bool,
+    ) -> Option<Map<String, Value>> {
+        if !nerve_policy::conditions::takes_conditions(&format!("{}.{}", inv.cap, inv.action)) {
+            return None;
+        }
+        let view = self.view().ok()?;
+        let cap = view.capability(&inv.cap)?;
+        let params = cap
+            .actions
+            .get(&inv.action)
+            .map(|a| &a.params)
+            .or_else(|| cap.streams.get(&inv.action).map(|s| &s.params))?;
+        nerve_policy::audit::pinnable_args(
+            &inv.cap,
+            &inv.action,
+            &nerve_policy::conditions::declared(params, args, resolved),
+        )
     }
 
     /// Whether the node reads this center's files as its command account,
@@ -2803,6 +2832,12 @@ impl Link {
         // node offers, or would offer as it is set: its own, the config's,
         // the programs' and what this center added.
         let mut offered = crate::descriptor::built_in(store.config());
+        // Only a program's stream is decided by rules; the node's own
+        // (`exec.output`) goes by the call that started its command, so a
+        // rule on its parameters would hold for nothing.
+        for c in &mut offered {
+            c.streams.clear();
+        }
         offered.extend(crate::config_cap::declared(store.config()));
         offered.extend(attached.iter().cloned());
         let mut known = crate::config_cap::declared(store.config());

@@ -278,6 +278,25 @@ fn properties(params: &Value) -> Option<&Map<String, Value>> {
     params.get("properties").and_then(Value::as_object)
 }
 
+/// The arguments `args` of a call that the schema `params` names, for the
+/// audit: one it leaves out is no argument of the action, and a rule cannot
+/// name it. A path argument is kept only where `resolved`, the call's paths
+/// having been resolved as the rules match them; before that, a pin of one
+/// would name the spelling the agent gave, not the place.
+pub fn declared(params: &Value, args: &Map<String, Value>, resolved: bool) -> Map<String, Value> {
+    let Some(props) = properties(params) else {
+        return Map::new();
+    };
+    args.iter()
+        .filter(|(k, _)| {
+            props
+                .get(*k)
+                .is_some_and(|s| resolved || s.get("x-nerve-path").is_none())
+        })
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
 /// The arguments of `params` a rule can name, with their kind, for the
 /// forms that offer them: `room (a string: office, kitchen)`.
 pub fn fields(params: &Value) -> Vec<String> {
@@ -362,7 +381,9 @@ fn check_one(scope: &str, c: &Condition, params: &Value) -> Result<(), String> {
     // absolute: a path, one from the home (`~`), or for `~` a glob that
     // starts with a wildcard. A string's `~/` is no home. So a rule written
     // for a path argument that is a plain string now, or the other way
-    // round, no longer fits, and is flagged.
+    // round, no longer fits, and is flagged. An exact value (`=`, `!=`) of a
+    // string may start with `~/` like any text, and a pin from the audit
+    // writes one; only a glob (`~`) that starts at the home is a lost mark.
     match kind {
         Kind::Path if !path_form(&c.value, c.op == Op::Like) => {
             return Err(format!(
@@ -376,7 +397,7 @@ fn check_one(scope: &str, c: &Condition, params: &Value) -> Result<(), String> {
                 }
             ));
         }
-        Kind::String if from_home(&c.value) => {
+        Kind::String if c.op == Op::Like && from_home(&c.value) => {
             return Err(format!(
                 "{scope} argument {} is a string, not a path, so {:?} does not start at the home",
                 c.field, c.value
@@ -392,7 +413,10 @@ fn check_one(scope: &str, c: &Condition, params: &Value) -> Result<(), String> {
         Kind::Boolean if !matches!(c.value.as_str(), "true" | "false") => {
             return Err(not_a("a boolean (true or false)"));
         }
-        Kind::String | Kind::Path if c.op == Op::Like => {
+        Kind::String if c.op == Op::Like => {
+            string_glob(&c.value).map_err(|e| format!("condition {}~: {e}", c.field))?;
+        }
+        Kind::Path if c.op == Op::Like => {
             glob(&c.value, false).map_err(|e| format!("condition {}~: {e}", c.field))?;
         }
         _ => {}
@@ -511,6 +535,17 @@ fn glob(pattern: &str, case_insensitive: bool) -> Result<GlobMatcher, globset::E
         .map(|g| g.compile_matcher())
 }
 
+/// The glob of `~` over a string. A `\` escapes in it on every system, as
+/// the docs say (`\,` is a `,`); globset leaves that off on Windows, where
+/// a path glob takes `\` for a separator.
+fn string_glob(pattern: &str) -> Result<GlobMatcher, globset::Error> {
+    GlobBuilder::new(pattern)
+        .backslash_escape(true)
+        .empty_alternates(true)
+        .build()
+        .map(|g| g.compile_matcher())
+}
+
 /// What a call gives for one field.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Arg<'a> {
@@ -531,7 +566,9 @@ pub enum PathStyle<'a> {
     Home(&'a str),
     /// The center's: it does not know the node's home, so `~` stands for
     /// any (`*`), and a path ignores case everywhere (the node is the
-    /// authority; this only errs wide).
+    /// authority; this errs wide). A `!=` errs narrow instead, as a wider
+    /// glob would let calls through that the node refuses: it compares
+    /// with case, and a value from the home is one it cannot tell.
     AnyHome,
 }
 
@@ -560,13 +597,20 @@ pub struct Conditions {
 impl Conditions {
     /// Compiles `pattern`, its paths read by `style`.
     pub fn compile(pattern: &str, style: PathStyle) -> Result<Conditions, String> {
-        let fold = match style {
-            PathStyle::Home(_) => cfg!(windows),
-            PathStyle::AnyHome => true,
-        };
         let conds = parse(pattern)?
             .into_iter()
             .map(|c| {
+                // Where the center errs wide, a `!=` must err narrow: a
+                // wider glob has more hits, so it would refuse fewer calls.
+                // It compares with case, and a value from the home is one it
+                // cannot tell (the node does).
+                let fold = match style {
+                    PathStyle::Home(_) => cfg!(windows),
+                    PathStyle::AnyHome => c.op != Op::Ne,
+                };
+                let blind = matches!(style, PathStyle::AnyHome)
+                    && c.op == Op::Ne
+                    && c.value.starts_with('~');
                 let as_path = match c.op {
                     Op::Like => c.value.clone(),
                     _ => crate::rules::escape(&c.value),
@@ -581,10 +625,10 @@ impl Conditions {
                 let bad =
                     |e: globset::Error| format!("condition {}{}: {e}", c.field, c.op.as_str());
                 let text = (c.op == Op::Like)
-                    .then(|| glob(&c.value, false))
+                    .then(|| string_glob(&c.value))
                     .transpose()
                     .map_err(bad)?;
-                let path = matches!(c.op, Op::Eq | Op::Ne | Op::Like)
+                let path = (matches!(c.op, Op::Eq | Op::Ne | Op::Like) && !blind)
                     .then(|| glob(&path_win(&path_pattern), fold))
                     .transpose()
                     .map_err(bad)?;
@@ -880,12 +924,15 @@ pub(crate) mod tests {
             ("file=notes/a", "is a path, and \"notes/a\" is none"),
             ("file~notes/*", "or a wildcard"),
             ("file=", "is a path"),
-            ("label=~/a", "is a string, not a path"),
             ("label~~/notes/*", "is a string, not a path"),
         ] {
             let e = check("lamp.set", bad, &p).unwrap_err();
             assert!(e.contains(why), "{bad}: {e}");
         }
+        // An exact string may start with `~/` like any text: an audit's pin
+        // of one has to be writable.
+        assert!(check("lamp.set", "label=~/a", &p).is_ok());
+        assert!(check("lamp.set", "label!=~/a", &p).is_ok());
         let e = check("lamp.off", "room=x", &json!({"type": "object"})).unwrap_err();
         assert_eq!(e, "lamp.off takes no arguments, so it has no room");
         // A rule whose field is gone says so, and one whose action is gone.
@@ -1021,6 +1068,55 @@ pub(crate) mod tests {
             !compile("file=/h/data/key.pem").below("file", "/h/data/key.pem", |_| Arg::Missing)
         );
         assert!(!compile("file!=/h/x").below("file", "/h", |_| Arg::Missing));
+    }
+
+    /// A `\` escapes in a `~` over a string on every system, so `\,` is a
+    /// `,` and a `\\` a `\`; globset alone leaves that off on Windows.
+    #[test]
+    fn a_string_glob_reads_its_escapes_everywhere() {
+        let args = json!({"label": "draft,v2", "level": 1});
+        assert!(compile("label~draft\\,*").met(by(&args)));
+        assert!(!compile("label~draft\\,*").met(by(&json!({"label": "draft;v2"}))));
+        let slash = json!({"label": "a\\b"});
+        assert!(compile("label~a\\\\b").met(by(&slash)));
+        assert!(check("lamp.set", "label~draft\\,*", &lamp()).is_ok());
+    }
+
+    /// The center cannot tell a node's home and its case, and errs wide; a
+    /// `!=` on a path has to err narrow there, or it refuses less than the
+    /// node does.
+    #[test]
+    fn a_path_not_equal_errs_narrow_at_the_center() {
+        let any = |pattern: &str, p: &str| {
+            Conditions::compile(pattern, PathStyle::AnyHome)
+                .unwrap()
+                .may_hold(|_| Arg::Path(p.into()))
+        };
+        for (pattern, p) in [
+            ("file!=~/inbox.md", "/h/proj/inbox.md"),
+            ("file!=~/inbox.md", "/etc/inbox.md"),
+            ("file!=/srv/in.txt", "/srv/IN.TXT"),
+        ] {
+            // The node refuses these, so the center has to as well.
+            assert!(any(pattern, p), "{pattern} {p}");
+        }
+        // Where both read it alike nothing is lost.
+        assert!(!any("file!=/srv/in.txt", "/srv/in.txt"));
+        assert!(any("file!=/srv/in.txt", "/srv/other.txt"));
+    }
+
+    /// The audit keeps the arguments the schema names, and a path only once
+    /// it is resolved.
+    #[test]
+    fn the_audit_keeps_what_the_schema_names() {
+        let args = json!({"room": "office", "file": "/x/../y", "junk": 1, "brightness": 5});
+        let args = args.as_object().unwrap();
+        let keys = |resolved: bool| -> Vec<String> {
+            declared(&lamp(), args, resolved).keys().cloned().collect()
+        };
+        assert_eq!(keys(true), ["brightness", "file", "room"]);
+        assert_eq!(keys(false), ["brightness", "room"]);
+        assert!(declared(&json!({"type": "object"}), args, true).is_empty());
     }
 
     /// A pinned string reads back as the value it was made of, whatever it

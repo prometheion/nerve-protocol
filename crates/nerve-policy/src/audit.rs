@@ -43,6 +43,9 @@ pub struct Entry {
 
 /// The most arguments an audit entry keeps for the buttons that pin one.
 pub const ARGS_MAX: usize = 16;
+/// The most characters of an argument's name an audit entry keeps; a field's
+/// name in a schema is far shorter, and the entry stays small.
+pub const ARG_KEY_MAX_CHARS: usize = 64;
 /// The most characters of a string argument an audit entry keeps; a longer
 /// one is left out, as a rule could not pin it from a cut value.
 pub const ARG_MAX_CHARS: usize = 200;
@@ -51,7 +54,8 @@ pub const ARG_MAX_CHARS: usize = 200;
 /// ([`crate::rules::rule_for`]): for any action but the `fs` ones and
 /// `exec.run`, which name a path and a command line, each top-level
 /// string, number and boolean, up to [`ARGS_MAX`] of them, a string only
-/// up to [`ARG_MAX_CHARS`] characters. `None` where there is none.
+/// up to [`ARG_MAX_CHARS`] characters, a name only up to
+/// [`ARG_KEY_MAX_CHARS`]. `None` where there is none.
 pub fn pinnable_args(
     cap: &str,
     action: &str,
@@ -69,7 +73,8 @@ pub fn pinnable(args: &serde_json::Map<String, Value>) -> Option<serde_json::Map
     let kept: serde_json::Map<String, Value> = args
         .iter()
         .filter(|(k, v)| {
-            crate::conditions::pin(k, v).is_ok()
+            k.chars().count() <= ARG_KEY_MAX_CHARS
+                && crate::conditions::pin(k, v).is_ok()
                 && v.as_str()
                     .is_none_or(|s| s.chars().count() <= ARG_MAX_CHARS)
         })
@@ -511,6 +516,19 @@ fn walk(prefix: &str, old: &Value, new: &Value, out: &mut Vec<Change>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An entry keeps a name only up to a bound, so a call cannot make one
+    /// large with names of its own.
+    #[test]
+    fn pinnable_arguments_have_short_names() {
+        let mut args = serde_json::Map::new();
+        args.insert("room".into(), "office".into());
+        args.insert("r".repeat(ARG_KEY_MAX_CHARS), 1.into());
+        args.insert("r".repeat(ARG_KEY_MAX_CHARS + 1), 2.into());
+        let kept = pinnable(&args).unwrap();
+        assert_eq!(kept.len(), 2, "{kept:?}");
+        assert!(kept.keys().all(|k| k.len() <= ARG_KEY_MAX_CHARS));
+    }
 
     #[test]
     fn appends_and_reads_back() {

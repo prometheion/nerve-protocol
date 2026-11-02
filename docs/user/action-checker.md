@@ -103,13 +103,15 @@ Entries are in the machine's own rule syntax, `<scope>:<pattern>`:
   that meets them all, and also one that gives such an argument a value of
   another type or leaves it out, since the checker cannot tell; an allow rule
   covers only a call that meets them all. A path argument is matched as a path,
-  `~` any user's home, in any letter case. The center checks the conditions
+  `~` any user's home, in any letter case. For `!=` on a path the checker
+  reads more narrowly: with case, and a value that starts at the home (`~/…`)
+  it cannot tell, so an entry refuses the call and a rule does not cover it. The center checks the conditions
   against the schema the machines publish when you add the entry: an argument
   the action does not take, a value not of its type, or an action no machine
   (for an entry of one machine, not that one) offers is refused. Under
   **Add a rule** the page names the arguments of the action you typed. The
   machine reads the same conditions with the same code, so a rule refuses or
-  allows the same calls there.
+  allows the same calls there (the checker never refuses fewer).
   Conditions name one action (`lamp:room=x` is refused), and `exec:rm *` is
   refused too; a command pattern goes on `exec.run`
   (`exec.run:rm *`). The page warns about your own entries and allow rules
