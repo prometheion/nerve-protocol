@@ -127,14 +127,16 @@ pub const MODELS: [ModelPin; 2] = [
         sha256: "adca5789ad30ae6027e8e936749bb9f19673097492ab26fa1c5b69643ca50b4b",
         licence: "LFM Open License v1.0",
         threshold: 0.75,
-        // For now d1-3B's: the 2-vCPU measurement of #178 sets its own.
-        timeout_ms: 6000,
+        // p95 was 5.8 s on 2 vCPUs (one core's two hardware threads, #178):
+        // twice that, rounded up, for a busy machine. A desktop CPU answers
+        // in about 2 s.
+        timeout_ms: 12_000,
         // The largest state the checker sends is 8,103 tokens for it (every
         // field at its clip, made of control characters, which the state
         // carries escaped); about 4,000 more leave room for a longer
         // question.
         context: 12_288,
-        summary: "Faster: about 2 s per call on a desktop CPU. Catches about 55 % of dangerous actions and 73 % of injection attempts; refuses about 1.5 % of ordinary work.",
+        summary: "Faster: about 2 s per call on a desktop CPU, 5 s on 2 vCPUs. Catches about 55 % of dangerous actions and 73 % of injection attempts; refuses about 1.5 % of ordinary work.",
     },
     ModelPin {
         id: LocalModel::Kev4b,
@@ -152,7 +154,7 @@ pub const MODELS: [ModelPin; 2] = [
         // outside the basic plane); about 3,800 more leave room for a longer
         // question.
         context: 8192,
-        summary: "Catches more: about 83 % of dangerous actions and 93 % of injection attempts, refusing about 1.7 % of ordinary work, but about 5 s per call on a desktop CPU.",
+        summary: "Catches more: about 80 % of dangerous actions and 93 % of injection attempts, refusing about 1.5 % of ordinary work, but about 5 s per call on a desktop CPU, 15 s on 2 vCPUs, and 6 GB of memory.",
     },
 ];
 
@@ -918,7 +920,7 @@ mod tests {
         let kev = model_pin(LocalModel::Kev4b);
         assert_eq!((d1.threshold, kev.threshold), (0.75, 0.25));
         assert!(kev.timeout_ms >= 10_000, "{}", kev.timeout_ms);
-        assert!(d1.timeout_ms >= 4_000, "{}", d1.timeout_ms);
+        assert!(d1.timeout_ms >= 10_000, "{}", d1.timeout_ms);
         assert_ne!(d1.file, kev.file);
         assert_eq!(
             (d1.repo, d1.file, d1.bytes),
