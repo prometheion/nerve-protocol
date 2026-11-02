@@ -1075,6 +1075,16 @@ grant or not.
   it is answered and never locks the login. A session ends with sign out, its
   token's removal, `ui off`, a restart of the node and `panic`. Every POST
   needs an `Origin` that names the page's own host.
+- `panic` ends every session and counts a lock (`WebUi::settle_panic`, under
+  the store's lock in `config.write`, which `Cmd::Panic` marks with
+  `panic: true`) also when the node is locked already, so a session that
+  logged in during the lock is ended by the next panic; `commit` and
+  `config.write` must not skip this as a no-op. A command a session started
+  before a lock is stopped (`run_for_web` watches the count), and
+  `config.write` and `folder.add` carry the count the command began with
+  (`web_locks`) and are refused when it differs, so it changes no setting
+  after the lock. A `log clear` or `audit clear` already running may still
+  land. A token is not a session: a leaked one is revoked first, then `panic`.
 - On loopback the request's `Host` must be a loopback name, or the address the
   UI listens on as a number; over TLS any name is taken, since the machine's
   own name often resolves to a loopback address on that machine and a page of

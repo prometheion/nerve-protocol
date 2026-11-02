@@ -92,8 +92,11 @@ already.
 
 A panic stops a leaked session, not a leaked token: whoever holds the token can
 log in again and unlock. If a browser or a machine that kept the token (a
-password manager fills it) is lost, also run `nerve-node ui token rm LABEL`
-(its sessions end at once), or `nerve-node ui off`, and make a new token.
+password manager fills it) is lost, first run `nerve-node ui token rm LABEL`
+(its sessions end at once), or `nerve-node ui off`, and make a new token. Then
+run `nerve-node panic` (again, if you ran it already), and check
+`nerve-node status`: between a panic and the revoke the token's holder can
+still log in and unlock.
 
 ## Who can reach it
 

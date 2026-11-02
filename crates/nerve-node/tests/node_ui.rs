@@ -891,19 +891,15 @@ async fn a_new_try_to_listen_does_not_keep_the_last_failure_in_the_status() {
         .status()
         .unwrap();
     assert!(made.success());
-    // Also when the test fails: a read that waits for ever would keep the
-    // runtime from ending.
-    struct Opener(std::path::PathBuf);
-    impl Drop for Opener {
-        fn drop(&mut self) {
-            use std::os::unix::fs::OpenOptionsExt;
-            let _ = std::fs::OpenOptions::new()
-                .write(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(&self.0);
-        }
-    }
-    let opener = Opener(key);
+    // Held open for reading and writing from the start: the node's open then
+    // never waits for a writer, whenever it gets there, and its read ends
+    // (empty) when this is dropped. Also when the test fails: a read that
+    // waits for ever would keep the runtime from ending.
+    let opener = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&key)
+        .unwrap();
     let (out, code) = cli(&at, &["config", "set", "ui.listen", "\"0.0.0.0:1\""]).await;
     assert_eq!(code, 0, "{out}");
     wait_until("the new try says it started", || {
