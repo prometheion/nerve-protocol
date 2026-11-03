@@ -52,7 +52,8 @@ workflow from" too: GitHub takes the workflow file from there, not from
    `NERVE_CENTER_BIN` and `NERVE_NODE_BIN` set to them. `x86_64` runs on an
    x86_64 runner and `aarch64` on an arm64 runner. The Windows binaries are
    built but not run by the workflow.
-4. Publishes a GitHub Release with the eight binaries and `SHA256SUMS`. The
+4. Publishes a GitHub Release with the seven binaries and `SHA256SUMS`
+   (Windows has no `nerve-node` of its own: the desktop app is the node there). The
    desktop app's update takes `nerve-node-desktop-x86_64-linux` or
    `nerve-node-desktop-x86_64-windows.exe` from there, as `nerve-node update`
    takes `nerve-node-*`. A release

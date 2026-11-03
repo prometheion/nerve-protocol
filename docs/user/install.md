@@ -3,22 +3,24 @@
 Put `nerve-center` on the machine where your agent harness runs. Put a node
 on every machine the agent may use: `nerve-node`, or on a machine with a
 desktop `nerve-node-desktop`, the node with an app
-([desktop app](desktop.md)). A center and a node can share a machine.
+([desktop app](desktop.md)). On Windows the node is always the desktop app.
+A center and a node can share a machine.
 
 ## Download
 
 Get the programs from
 [Releases](https://github.com/prometheion/nerve-protocol/releases). Each
-release has eight programs and a `SHA256SUMS` file.
+release has seven programs and a `SHA256SUMS` file.
 
 | System | Files |
 |---|---|
 | Linux, x86_64 | `nerve-center-x86_64-linux`, `nerve-node-x86_64-linux`, `nerve-node-desktop-x86_64-linux` |
 | Linux, ARM 64-bit | `nerve-center-aarch64-linux`, `nerve-node-aarch64-linux` |
-| Windows, x86_64 | `nerve-center-x86_64-windows.exe`, `nerve-node-x86_64-windows.exe`, `nerve-node-desktop-x86_64-windows.exe` |
+| Windows, x86_64 | `nerve-center-x86_64-windows.exe`, `nerve-node-desktop-x86_64-windows.exe` |
 
 `nerve-node-desktop` is the node with a desktop app, which installs itself
-when you open it ([desktop app](desktop.md)).
+when you open it ([desktop app](desktop.md)). Windows has no `nerve-node` of
+its own: there the app is the only way to the node.
 
 The Linux programs except the desktop app are static and need no libraries. The Windows programs
 need no Visual C++ runtime. The programs are not signed, so check them
@@ -67,21 +69,18 @@ sudo ./nerve-center-x86_64-linux install
 In PowerShell, compare each hash with its line in `SHA256SUMS`:
 
 ```powershell
-(Get-FileHash .\nerve-node-x86_64-windows.exe).Hash
+(Get-FileHash .\nerve-node-desktop-x86_64-windows.exe).Hash
 ```
 
-Then rename the files to `nerve-center.exe` and `nerve-node.exe` and put them
-in a folder on your `PATH`.
+Then double-click `nerve-node-desktop-x86_64-windows.exe`. Its installer
+installs the node as a service that starts with the machine, and the app with
+**Nerve** in the Start menu ([desktop app](desktop.md#install)). The app does
+everything for the node from then on: pairing, settings, folders, rules,
+sudo, backups, update and uninstall. No terminal command is needed or
+offered.
 
-To run the node as a service that starts with the machine, let it install
-itself instead, in a terminal opened with "Run as administrator"
-([service](service.md#windows)):
-
-```powershell
-.\nerve-node-x86_64-windows.exe install
-```
-
-`install` puts the program at `C:\Program Files\Nerve\nerve-node.exe`.
+For the center, rename `nerve-center-x86_64-windows.exe` to `nerve-center.exe`
+and put it in a folder on your `PATH`.
 
 ## Build from source
 
@@ -91,14 +90,15 @@ See [building](../dev/building.md).
 
 | What | Linux | Windows | Change with |
 |---|---|---|---|
-| Node: `node.toml`, one key per center | `~/.config/nerve` | `%USERPROFILE%\.config\nerve` | `--config-dir`, `NERVE_CONFIG_DIR` |
-| Node: audit log, [log](logs.md), control socket and its token (Linux), config key, the last version of `node.toml`, the record of the folder grants (Windows) | `~/.local/state/nerve` | `%USERPROFILE%\.local\state\nerve` | `--state-dir`, `NERVE_STATE_DIR` |
+| Node: `node.toml`, one key per center | `~/.config/nerve` | `C:\ProgramData\Nerve\config` | `--config-dir`, `NERVE_CONFIG_DIR` (Linux) |
+| Node: audit log, [log](logs.md), control socket and its token (Linux), config key, the last version of `node.toml`, the record of the folder grants (Windows) | `~/.local/state/nerve` | `C:\ProgramData\Nerve\state` | `--state-dir`, `NERVE_STATE_DIR` (Linux) |
 | Center: identity, paired machines, statistics, [log](logs.md), the [action checker](action-checker.md)'s settings and local model | `$XDG_STATE_HOME/nerve-center`, else `~/.local/state/nerve-center` | `%LOCALAPPDATA%\nerve-center` | `--state-dir`, `NERVE_STATE_DIR` |
 
 A node [installed as a service](service.md) keeps its files in `/etc/nerve`
-and `/var/lib/nerve/state`, on Windows in `C:\ProgramData\Nerve\config` and
-`C:\ProgramData\Nerve\state`. Without `--config-dir` and `--state-dir` the
-commands use those folders. A center installed as a service keeps its state
+and `/var/lib/nerve/state`; without `--config-dir` and `--state-dir` the
+commands use those folders. On Windows the node is always the installed
+service, with its files in `C:\ProgramData\Nerve\config` and
+`C:\ProgramData\Nerve\state`. A center installed as a service keeps its state
 in `/var/lib/nerve-center` and its settings in `/etc/nerve-center`
 ([center](center.md#run-it-as-a-service)).
 
