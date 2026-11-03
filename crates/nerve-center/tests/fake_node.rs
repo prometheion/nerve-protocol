@@ -1492,6 +1492,134 @@ async fn http_sessions_end_with_their_token_and_when_idle() {
     r.stop().await;
 }
 
+/// An HTTP session answers only the token that opened it: another
+/// harness's token can neither use it nor end it, though it knows the id.
+/// And one token keeps a bounded number open: past it, its longest idle
+/// session ends for the new one.
+#[tokio::test]
+async fn http_sessions_are_their_tokens_and_bounded_per_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(dir.path()).await;
+    let hash = |t: &str| nerve_center::util::sha256_hex(t.as_bytes());
+    r.center.update(|s| {
+        for id in ["a", "b"] {
+            s.harness_tokens.push(nerve_center::store::TokenRecord {
+                id: id.into(),
+                label: id.into(),
+                hash: hash(&format!("nrv_token-{id}")),
+                created_ms: 1,
+            });
+        }
+    });
+    let h = nerve_center::mcp::HttpMcp::new(&r.center, None);
+    let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}});
+    let open = |id: &'static str| {
+        let h = h.clone();
+        let init = init.clone();
+        async move {
+            let bearer = format!("Bearer nrv_token-{id}");
+            let resp = h
+                .request(http("POST", &[("authorization", &bearer)], init))
+                .await;
+            assert_eq!(resp.status, 200);
+            resp.headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("mcp-session-id"))
+                .map(|(_, v)| v.clone())
+                .expect("a session id")
+        }
+    };
+    let list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
+    let a = open("a").await;
+    for (method, body) in [("POST", list.clone()), ("DELETE", Value::Null)] {
+        let resp = h
+            .request(http(
+                method,
+                &[
+                    ("authorization", "Bearer nrv_token-b"),
+                    ("mcp-session-id", &a),
+                ],
+                body,
+            ))
+            .await;
+        assert_eq!(resp.status, 404, "{method} with another token");
+    }
+    let used = h
+        .request(http(
+            "POST",
+            &[
+                ("authorization", "Bearer nrv_token-a"),
+                ("mcp-session-id", &a),
+            ],
+            list.clone(),
+        ))
+        .await;
+    assert_eq!(used.status, 200);
+    assert_eq!(h.session_count(), 1);
+
+    // Token b fills its share; token a's session stays, b's first goes.
+    let mut b = Vec::new();
+    for _ in 0..nerve_center::mcp::HTTP_SESSIONS_PER_TOKEN {
+        b.push(open("b").await);
+    }
+    let before = r.center.session_count();
+    assert_eq!(
+        h.session_count(),
+        1 + nerve_center::mcp::HTTP_SESSIONS_PER_TOKEN
+    );
+    open("b").await;
+    assert_eq!(
+        h.session_count(),
+        1 + nerve_center::mcp::HTTP_SESSIONS_PER_TOKEN,
+        "a token opened sessions past its share"
+    );
+    assert_eq!(r.center.session_count(), before);
+    for (sid, token, want) in [(&b[0], "b", 404), (&b[1], "b", 200), (&a, "a", 200)] {
+        let bearer = format!("Bearer nrv_token-{token}");
+        let resp = h
+            .request(http(
+                "POST",
+                &[("authorization", &bearer), ("mcp-session-id", sid)],
+                list.clone(),
+            ))
+            .await;
+        assert_eq!(resp.status, want, "{sid}");
+    }
+    r.stop().await;
+}
+
+/// Idle connections to the HTTP MCP port, without a token, hold only their
+/// peer's places: past them a new one is closed unread. Before, the port
+/// gave each connection's place back before its request was read, so one
+/// peer held as many open as it liked.
+#[tokio::test]
+async fn idle_connections_hold_only_their_peers_places_on_the_mcp_port() {
+    use tokio::io::AsyncReadExt;
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(dir.path()).await;
+    let h = nerve_center::mcp::HttpMcp::new(&r.center, Some("t".into()));
+    let server = nerve_center::listen::Server::bind("127.0.0.1:0", &r.center, true)
+        .await
+        .unwrap();
+    let addr = server.local_addr();
+    let task = tokio::spawn(h.serve(server));
+    let mut idle = Vec::new();
+    for _ in 0..nerve_center::listen::PER_PEER {
+        idle.push(tokio::net::TcpStream::connect(addr).await.unwrap());
+    }
+    let mut extra = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut buf = [0u8; 1];
+    let n = tokio::time::timeout(Duration::from_secs(5), extra.read(&mut buf))
+        .await
+        .expect("the extra connection was held open")
+        .unwrap_or(0);
+    assert_eq!(n, 0);
+    drop(idle);
+    task.abort();
+    r.stop().await;
+}
+
 /// A disabled node stays paired and connected; `list` marks it and offers
 /// none of its capabilities, and `execute` on it never reaches it.
 #[tokio::test]

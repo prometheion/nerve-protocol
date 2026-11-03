@@ -1207,14 +1207,16 @@ pub async fn serve_stdio(center: Center) {
 }
 
 /// Whether `given` is a harness token: the one from the environment or a flag,
-/// or one made in the web UI (stored hashed). The HTTP MCP endpoint and the
-/// web UI's login both ask this, so one secret opens both.
+/// or one made in the web UI (stored hashed). Only the HTTP MCP endpoint
+/// asks this: the web UI's login takes the owner token alone
+/// ([`crate::owner`]), never a harness token.
 pub(crate) fn token_ok(center: &Center, env_token: Option<&str>, given: &str) -> bool {
     token_hash_ok(center, env_token, &util::sha256_hex(given.as_bytes()))
 }
 
 /// [`token_ok`] for a token that is only known by its SHA-256 (hex), which is
-/// what a web UI session keeps to notice that its token was deleted.
+/// what an HTTP MCP session keeps, so the sweep ends it once its token is
+/// deleted.
 pub(crate) fn token_hash_ok(center: &Center, env_token: Option<&str>, hash: &str) -> bool {
     if let Some(t) = env_token.filter(|t| !t.is_empty())
         && util::ct_eq(util::sha256_hex(t.as_bytes()).as_bytes(), hash.as_bytes())
@@ -1233,6 +1235,9 @@ pub(crate) fn token_hash_ok(center: &Center, env_token: Option<&str>, hash: &str
 /// would keep its jobs running, and its streams and subscriptions open on
 /// the nodes. A job's caller polls `job.status` far more often than this.
 pub const HTTP_IDLE: Duration = Duration::from_secs(30 * 60);
+/// The HTTP sessions one harness token keeps open at most. A harness opens
+/// one per agent it runs.
+pub const HTTP_SESSIONS_PER_TOKEN: usize = 32;
 /// How often the HTTP sessions are looked over for one to end.
 const HTTP_SWEEP: Duration = Duration::from_secs(30);
 
@@ -1241,7 +1246,9 @@ const HTTP_SWEEP: Duration = Duration::from_secs(30);
 ///
 /// A session ends with `DELETE /mcp`, after [`HTTP_IDLE`] without a request,
 /// and at once when the harness token that opened it is deleted: the agent
-/// that held a token which leaked must not go on with what it started.
+/// that held a token which leaked must not go on with what it started. A
+/// session answers only the token that opened it, and one token keeps
+/// [`HTTP_SESSIONS_PER_TOKEN`] open at most.
 pub struct HttpMcp {
     center: Center,
     env_token: Option<String>,
@@ -1359,54 +1366,93 @@ impl HttpMcp {
         });
         let _sweeper = Sweeper(sweeper);
         server
-            .run(move |io, _admitted| {
+            .run(move |io, admitted| {
                 let me = self.clone();
-                async move { me.conn(io).await }
+                async move { me.conn(io, admitted).await }
             })
             .await
     }
 
-    async fn conn(&self, mut io: BoxIo) {
+    /// One connection: it holds its peer's place until its request is read
+    /// and its token checked, so idle connections without a token fill only
+    /// their own peer's places. A harness's call may then wait long for its
+    /// node (`--call-wait`), and does so without holding a place.
+    async fn conn(&self, mut io: BoxIo, mut admitted: crate::listen::Admitted) {
         let resp = match http::read_request(&mut io, MESSAGE_BYTES).await {
-            Ok(req) => self.request(req).await,
+            Ok(req) => match self.refused(&req) {
+                Some(no) => no,
+                None => {
+                    admitted.decided();
+                    self.answer(req).await
+                }
+            },
             Err(_) => Response::text(400, "bad request"),
         };
         let _ = resp.write(&mut io).await;
     }
 
     pub async fn request(&self, req: Request) -> Response {
+        match self.refused(&req) {
+            Some(no) => no,
+            None => self.answer(req).await,
+        }
+    }
+
+    /// The answer to a request that is not for `/mcp`, comes from a browser
+    /// page, or has no harness token; none for one that may go on.
+    fn refused(&self, req: &Request) -> Option<Response> {
         if req.path != "/mcp" {
-            return Response::text(404, "not found");
+            return Some(Response::text(404, "not found"));
         }
         // A browser page must not drive the harness endpoint (DNS rebinding).
         if let Some(origin) = req.header("origin")
             && !origin_matches(origin, req.header("host"))
         {
-            return Response::text(403, "cross-origin requests are refused");
+            return Some(Response::text(403, "cross-origin requests are refused"));
         }
         let ok = req
             .bearer()
             .is_some_and(|t| token_ok(&self.center, self.env_token.as_deref(), t));
         if !ok {
-            return Response::text(401, "a harness token is needed")
-                .with_header("WWW-Authenticate", "Bearer");
+            return Some(
+                Response::text(401, "a harness token is needed")
+                    .with_header("WWW-Authenticate", "Bearer"),
+            );
         }
+        None
+    }
+
+    /// The answer to a request [`HttpMcp::refused`] let through.
+    async fn answer(&self, req: Request) -> Response {
         let sid = req.header("mcp-session-id").map(str::to_string);
+        // The token was checked for this request, so it is there. A session
+        // answers only the token that opened it: its id is no secret (the
+        // nodes it calls and the Overview see it).
+        let via = util::sha256_hex(req.bearer().unwrap_or_default().as_bytes());
         match req.method.as_str() {
-            "POST" => self.post(req, sid).await,
-            "DELETE" => match sid.and_then(|s| self.sessions.lock().unwrap().remove(&s)) {
-                Some(h) => {
-                    h.engine.close().await;
-                    Response::new(204, "text/plain", Vec::new())
+            "POST" => self.post(req, sid, via).await,
+            "DELETE" => {
+                let held = sid.and_then(|s| {
+                    let mut map = self.sessions.lock().unwrap();
+                    match map.get(&s) {
+                        Some(h) if util::ct_eq(h.via.as_bytes(), via.as_bytes()) => map.remove(&s),
+                        _ => None,
+                    }
+                });
+                match held {
+                    Some(h) => {
+                        h.engine.close().await;
+                        Response::new(204, "text/plain", Vec::new())
+                    }
+                    None => Response::text(404, "no such session"),
                 }
-                None => Response::text(404, "no such session"),
-            },
+            }
             _ => Response::text(405, "this endpoint takes POST and DELETE")
                 .with_header("Allow", "POST, DELETE"),
         }
     }
 
-    async fn post(&self, req: Request, sid: Option<String>) -> Response {
+    async fn post(&self, req: Request, sid: Option<String>, via: String) -> Response {
         let msg: Value = match serde_json::from_slice(&req.body) {
             Ok(v) => v,
             Err(e) => {
@@ -1420,33 +1466,66 @@ impl HttpMcp {
         let (engine, new_id) = if is_init && sid.is_none() {
             let e = Arc::new(Engine::new(&self.center, "http"));
             let id = e.session().id.clone();
-            // The token was checked for this request, so it is there.
-            let via = util::sha256_hex(req.bearer().unwrap_or_default().as_bytes());
-            self.sessions.lock().unwrap().insert(
-                id.clone(),
-                Held {
-                    engine: e.clone(),
-                    via,
-                    last: Instant::now(),
-                },
-            );
+            let oldest = {
+                let mut map = self.sessions.lock().unwrap();
+                // Past its share, a token's longest idle session ends for
+                // the new one: a harness that starts a session per request
+                // goes on working, and no token holds the center's engines
+                // without bound.
+                let mine: Vec<(&String, &Held)> = map
+                    .iter()
+                    .filter(|(_, h)| util::ct_eq(h.via.as_bytes(), via.as_bytes()))
+                    .collect();
+                let oldest = (mine.len() >= HTTP_SESSIONS_PER_TOKEN)
+                    .then(|| {
+                        mine.iter()
+                            .min_by_key(|(_, h)| h.last)
+                            .map(|(k, _)| (*k).clone())
+                    })
+                    .flatten()
+                    .and_then(|k| map.remove(&k));
+                map.insert(
+                    id.clone(),
+                    Held {
+                        engine: e.clone(),
+                        via,
+                        last: Instant::now(),
+                    },
+                );
+                oldest
+            };
+            if let Some(h) = oldest {
+                self.center.log().record(
+                    nerve_transport::log::Level::Info,
+                    None,
+                    &format!(
+                        "the HTTP harness session {} ended: its token opened {HTTP_SESSIONS_PER_TOKEN} newer ones",
+                        h.engine.session().id
+                    ),
+                );
+                h.engine.close().await;
+            }
             (e, Some(id))
         } else {
             let Some(sid) = sid else {
                 return Response::text(400, "Mcp-Session-Id is missing");
             };
-            let e = self.sessions.lock().unwrap().get_mut(&sid).map(|h| {
+            let e = self.sessions.lock().unwrap().get_mut(&sid).and_then(|h| {
+                if !util::ct_eq(h.via.as_bytes(), via.as_bytes()) {
+                    return None;
+                }
                 h.last = Instant::now();
-                h.engine.clone()
+                Some(h.engine.clone())
             });
             match e {
                 // A session ended in the web UI is gone for HTTP clients; they
                 // start a new one.
                 Some(e) if !e.session().ended() => (e, None),
-                _ => {
+                Some(_) => {
                     self.sessions.lock().unwrap().remove(&sid);
                     return Response::text(404, "no such session");
                 }
+                None => return Response::text(404, "no such session"),
             }
         };
         let resp = match engine.handle(msg).await {
