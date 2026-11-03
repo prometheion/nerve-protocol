@@ -651,6 +651,13 @@ pub async fn update(
         });
     }
     did(out, format!("restarted the service {UNIT_NAME}"));
+    // A center installed before the owner token got one at this start, and
+    // its web UI no longer takes the harness token.
+    let _ = writeln!(
+        out,
+        "The web UI logs in with the owner token kept in {} (`sudo cat` it).",
+        crate::owner::path(&layout.state).display()
+    );
     Ok(())
 }
 
@@ -1191,6 +1198,8 @@ mod tests {
             out.contains("replaced nerve-center 1.0.0 with 1.2.0"),
             "{out}"
         );
+        let token = crate::owner::path(&l.state).display().to_string();
+        assert!(out.contains(&format!("owner token kept in {token}")), "{out}");
         assert_eq!(std::fs::read(&l.bin).unwrap(), b"nerve-center 1.2.0\n");
         assert_eq!(mode(&l.bin), 0o755);
         assert_eq!(
