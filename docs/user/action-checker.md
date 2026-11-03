@@ -269,19 +269,32 @@ An `exec.run` rule covers a command line only when **every** command in it
 meets the rule, and nothing in the line runs inside another command:
 
 - `exec.run:make *` covers `make test`, `sudo make test` (the checker reads
-  past `sudo` and the like) and `make test && make lint`, but not
-  `make test && ./deploy.sh` or `ls && make test`: the model judges those.
+  past a bare `sudo`, `env`, `nohup` and the like) and
+  `make test && make lint`, but not `make test && ./deploy.sh` or
+  `ls && make test`: the model judges those.
 - A pattern without a bare `*` covers no flag or operand it does not name:
   `exec.run:git status` covers `git status`, not `git status --porcelain` or
-  `git -c core.fsmonitor=… status`.
+  `git -c core.fsmonitor=… status`. A long flag written `--name=value` in
+  the pattern covers that value only (`--namespace=dev` does not cover
+  `--namespace=prod`).
+- A wrapper with words of its own is covered by no pattern, with or without
+  `*`: `env NAME=value …`, `env -S '…'`, `sudo -u other …`, `nice -n 5 …`.
+  What it adds (another environment, another account, a whole command line)
+  is nothing the rule names. Nor is `xargs …` or `npx …`, which give the
+  command words or a program the line does not show.
 - A line with `$( )`, backticks, `<( )`, a shell's `-c` body (`sh -c`,
   `cmd /c`, PowerShell's `-Command`) or a program `Start-Process` starts is
   covered by no pattern, only by an exact rule.
 - `exec.run:exact:<line>` covers that one line and nothing else (blanks at
   either end aside).
-- A rule matches the commands the checker's own splitter finds in a line, not
-  those only the guard's parser sees behind `timeout`, `eval` and the like, so
-  `exec.run:make *` does not cover `timeout 600 make test` either.
+- A rule matches the commands the checker's own splitter finds in a line. A
+  line in which the guard's parser finds more (behind `timeout`, `eval` and
+  the like) is covered by no pattern: `exec.run:make *` does not cover
+  `timeout 600 make test`, and `exec.run:timeout *` does not cover
+  `timeout 5 bash -c …`.
+- An `exec.run:re:` rule matches the whole line, so as an allow rule it
+  covers a line of one command only, with nothing run inside it:
+  `exec.run:re:^git status` covers `git status`, not `git status; …`.
 
 The Audit page has **Allow** and **Allow as wildcard** buttons on a model
 refusal, which save an allow rule for that machine for you. **Allow** saves

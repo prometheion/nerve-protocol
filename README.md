@@ -73,7 +73,10 @@ Get the programs from
 
    It is the one secret of the web UI. The harness's own token never logs
    in there. `nerve-center owner-token --new` makes a new one
-   ([web UI](docs/user/web-ui.md#log-in)).
+   ([web UI](docs/user/web-ui.md#log-in)). This center runs as you, so an
+   agent with file or shell tools can read the file too; to keep the agent
+   out of the web UI, run the center as the
+   [service](docs/user/center.md#run-it-as-a-service).
 
 3. Press **Pair a machine**, and run the command it shows on the machine:
 

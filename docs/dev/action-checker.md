@@ -155,11 +155,17 @@ An allow rule is matched the other way round from a blocklist entry
 `cmd-re:` covers a line only when every command of `Parsed::for_allow` meets
 it, and there is at least one. `for_allow` is empty when the walk found a
 command inside another (`Parsed::nested`: a substitution, a `-c` body, a
-started program), so such a line is covered only by `exec.run:exact:<line>`
-(the whole trimmed line, which the Audit page's **Allow** saves) or by a `re:`
-the owner wrote over the whole line. As an allow rule a structured pattern
-also takes no flag or operand it does not name (`CmdPattern::covers`), unless
-it has a bare `*`. The node's allowlist draws the same line
+started program), when a wrapper did more than run its command
+(`Parsed::wrapped`: words of its own such as `env A=B`, `env -S '…'`,
+`sudo -u x`, or `xargs`/`npx`, which add to it at run time), and when the
+parser found a command the splitter did not (`commands.len() > walked`: a
+runner such as `timeout` or `eval`, or a wrapper's flags the splitter reads
+otherwise). Such a line is covered only by `exec.run:exact:<line>` (the
+whole trimmed line, which the Audit page's **Allow** saves). A `re:` allow
+rule matches the whole line but covers only a line whose `for_allow` holds
+exactly one command. As an allow rule a structured pattern also takes no
+flag or operand it does not name (`CmdPattern::covers`), unless it has a
+bare `*`; a long flag it spells `--name=value` takes that value only. The node's allowlist draws the same line
 (`nerve-policy/src/decide.rs`: a wildcard never covers a chained line).
 
 The splitter splits on separators and subshell parentheses, pulls `$( )`,
@@ -303,7 +309,8 @@ progress show in the UI. It listens on `<state>/checker-model.sock` (`--host
 after a crash; on Windows, or where that path is over 100 bytes, on a free
 port of `127.0.0.1`, where the supervisor first checks that the server
 answers `/v1/models` with 401 to a key it was not given (a process that took
-the port answers anyone, and is not trusted). Either way it gets a random key
+the port answers anyone, and is not trusted). That check comes before any
+probe with the real key, so such a process never sees it. Either way it gets a random key
 per start in `LLAMA_API_KEY` (its environment, not its command line, which
 every account can read in `/proc`), and every call and probe carries it
 (`Endpoint::token`); `/health` is the only path llama-server leaves open. A

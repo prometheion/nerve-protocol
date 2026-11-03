@@ -163,7 +163,8 @@ log; the audit log has it.
 - A call that worked. That is in the node's audit log. The action checker's
   line for a call it let through names the rule or the score, not the call.
 - File contents and command output.
-- The sudo password, a harness token, the token typed into a wrong sign-in, a
+- The sudo password, a harness token, the owner token of the center's web UI,
+  the token typed into a wrong sign-in, a
   pairing code, the node's key, a proxy's header values, the token of the
   action checker's model endpoint.
 
@@ -178,7 +179,8 @@ checked before it is kept. These are replaced by `[redacted]`:
 - the user and password in a URL, the `code` of a pairing link and a harness
   token (`nrv_…`).
 
-The center also holds back the harness token it was started with, and the node
+The center also holds back the harness token it was started with and its
+owner token, and the node
 the sudo password while sudo is on. A secret of fewer than 8 characters is
 replaced only where it stands as a word of its own, so it does not cut other
 words.

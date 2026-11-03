@@ -69,7 +69,10 @@ Over HTTP the endpoint is `POST /mcp` with `Authorization: Bearer <token>`.
 also ends after 30 minutes without a request (looked over every 30 seconds),
 and at once when the harness token that opened it is deleted (the center keeps
 the token's SHA-256 with the session); both end it as `DELETE` does, with
-`session.end` to the nodes. Replies are JSON; the server opens no SSE stream.
+`session.end` to the nodes. A session answers only the token that opened it:
+a request or `DELETE` with another valid token gets 404 for it. One token
+keeps 32 sessions at most; an `initialize` past that ends the token's session
+with the oldest last request. Replies are JSON; the server opens no SSE stream.
 Requests with an `Origin` that does not match `Host` are refused (403).
 
 ## 4. Tools

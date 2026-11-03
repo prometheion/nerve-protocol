@@ -72,11 +72,20 @@ off for nodes too, but only for a loopback `--listen`.
 
 Each port of the center (nodes, web UI, HTTP MCP) takes at most 256
 connections at once that are not settled yet: a request being read or
-answered, a TLS handshake, a node's link before its signed hello. Of those,
-one address may hold 16, and one IPv6 /64 64. A connection past that is
-closed at once, so a peer that opens many and sends nothing keeps nobody
-else out. A node's link counts no more once its hello is checked, so many
-nodes behind one router link as usual. These numbers are fixed.
+answered, a TLS handshake, a node's link before its signed hello, an HTTP
+MCP request before its harness token is checked. Of those, one peer may
+hold 16, and one IPv6 /64 64. A connection past that is closed at once, so
+a peer that opens many and sends nothing keeps nobody else out. A node's
+link counts no more once its hello is checked, so many nodes behind one
+router link as usual, and a harness's call counts no more once its token is
+checked. These numbers are fixed.
+
+A peer is its address. On loopback every local program has the same one
+(or any address of 127.0.0.0/8 it picks), so there a peer is the account
+the connection comes from, which Linux names: another account on the
+machine cannot fill your browser's places. Elsewhere, and where Linux cannot
+name the account, all loopback connections count as one peer. Your own
+account is one peer too: an agent running as you shares your places.
 
 A pairing is only answered as done once the center has written it to
 `state.json`. When it cannot (a full disk, a read-only state folder) the
@@ -270,7 +279,10 @@ yourself.
 
 The state folder and the settings are not touched. `update` refuses a file
 that is not `nerve-center` and a program older than the installed one. If the
-new program does not start, the old one is put back and started again.
+new program does not start, the old one is put back and started again. Its
+last line says where the owner token is: a center installed before there
+was one makes it at this start, and its web UI no longer takes the harness
+token (`sudo cat /var/lib/nerve-center/owner-token`).
 
 ### Uninstall
 

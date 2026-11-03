@@ -18,11 +18,29 @@ allow, so a harness token never logs in here.
   `~/.local/state/nerve-center/owner-token` for a center you run yourself,
   `/var/lib/nerve-center/owner-token` for the [service](center.md#run-it-as-a-service),
   whose `install` prints it. The log says where it is, never the token.
+  Under systemd stderr goes to the journal, so there the token is not
+  printed at all.
 - `nerve-center owner-token` prints it again. `nerve-center owner-token --new`
   makes a new one: the old one stops at once, also on a running center, and
   the sessions it opened end. Run it as the center's user (`--state-dir` for
   another state folder), or with `sudo` for the service.
+- You may write a token of your own into the file: one word of 20 to 200
+  characters. A shorter one, or a file without a token, stops the center
+  when its web UI is on (`--ui off` only warns), and the file is left as it
+  is.
+- The owner token keeps an agent out of this UI only when the agent cannot
+  read the center's state folder. That holds for the
+  [service](center.md#run-it-as-a-service), which runs as its own account.
+  A center your harness starts runs as you, and an agent with file or shell
+  tools runs as you too: it can read the token file as easily as the
+  harness's settings. When the harness gives the agent such tools, run the
+  center as the service.
 - Beyond loopback (`--ui 0.0.0.0:7480`) the UI uses TLS.
+- On loopback the UI answers only to a loopback host name (`127.0.0.1`,
+  `localhost`, `[::1]`), so a web page cannot reach it through a name it
+  points at this machine. A reverse proxy that passes its own `Host` on
+  (Caddy and Traefik do by default) is refused with 403: let the proxy send
+  the loopback host, or serve the UI beyond loopback with its TLS.
 - A browser without a session goes to `/login` and posts the token once.
 - The session lasts 12 hours. **Sign out** ends it.
 - The session belongs to the browser tab. A new tab, or the browser opened
@@ -271,7 +289,11 @@ Built like the desktop app's Help: two parts that open and close on their own.
 - **Harness tokens.** Make a token with a label. It is shown once. Delete one
   to stop it: the harness sessions it opened over HTTP end at once, with
   their jobs. A token is only shown once the center has written it to its
-  state file; when it cannot, the page says so and no token is made. The token of the center's settings (`NERVE_HARNESS_TOKEN` or
+  state file; when it cannot, the page says so and no token is made. A
+  token deleted while the state file cannot be written stops at once, but
+  the page says the delete is not kept yet: unless the file can be written
+  before the center stops, the token works again at the next start. The
+  same holds for a removed machine. The token of the center's settings (`NERVE_HARNESS_TOKEN` or
   `--harness-token`) is listed too, without **Delete**: remove it from the
   settings. A harness token does not log in to this UI.
 - **Machines.** For each online machine that gave the center the settings

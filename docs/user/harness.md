@@ -33,7 +33,12 @@ then uses TLS with the center's self-signed certificate.
 A harness token is the bearer token of the HTTP endpoint, and nothing more:
 it does not log in to the [web UI](web-ui.md), which asks for the
 [owner token](web-ui.md#log-in). An agent may read its harness's settings,
-token included; with it, it reaches `/mcp` and no further.
+token included; with it, it reaches `/mcp` and no further, as long as it
+cannot read the center's state folder either. A center your harness starts
+runs as you, and so does an agent with file or shell tools: it can read the
+owner token there too. When the harness gives the agent such tools, run the
+center as the [service](center.md#run-it-as-a-service), which keeps its
+folder to its own account.
 
 - Give one with `--harness-token` or `NERVE_HARNESS_TOKEN`.
 - Or make more in the web UI: Settings, Harness tokens. The token is shown
@@ -334,3 +339,8 @@ without a request, and at once when the harness token that opened it is
 deleted: what an agent with a leaked token started stops with it. A harness
 that comes back after 30 minutes gets `404` and opens a new session; a job
 it polls with `job.status` keeps its session going.
+
+An HTTP session answers only the token that opened it: another token gets
+`404` for it, though the id is no secret. One token keeps 32 sessions open
+at most; the 33rd ends that token's session that had no request for the
+longest.
