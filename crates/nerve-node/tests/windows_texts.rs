@@ -112,3 +112,18 @@ fn a_node_without_its_privilege_says_where_in_the_app_to_start_it() {
         }
     }
 }
+
+/// The advice for a profile folder Windows kept names the folder to delete
+/// in Explorer first: the User Profiles dialog lists every deleted account's
+/// profile as Account Unknown, so it says how to tell this one by its date.
+#[test]
+fn a_kept_profile_is_found_by_its_folder_or_its_date() {
+    let lines: Vec<_> = texts(include_str!("../src/win_host.rs"))
+        .into_iter()
+        .filter(|(_, t)| t.contains("Account Unknown"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let text = &lines[0].1;
+    assert!(text.contains("in Explorer"), "{text}");
+    assert!(text.contains("date of this uninstall"), "{text}");
+}

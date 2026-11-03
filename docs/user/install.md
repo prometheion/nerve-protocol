@@ -90,15 +90,17 @@ See [building](../dev/building.md).
 
 | What | Linux | Windows | Change with |
 |---|---|---|---|
-| Node: `node.toml`, one key per center | `~/.config/nerve` | `C:\ProgramData\Nerve\config` | `--config-dir`, `NERVE_CONFIG_DIR` (Linux) |
-| Node: audit log, [log](logs.md), control socket and its token (Linux), config key, the last version of `node.toml`, the record of the folder grants (Windows) | `~/.local/state/nerve` | `C:\ProgramData\Nerve\state` | `--state-dir`, `NERVE_STATE_DIR` (Linux) |
+| Node: `node.toml`, one key per center | `~/.config/nerve` | `C:\ProgramData\Nerve\config` | `--config-dir`, `NERVE_CONFIG_DIR` |
+| Node: audit log, [log](logs.md), control socket and its token (Linux), config key, the last version of `node.toml`, the record of the folder grants (Windows) | `~/.local/state/nerve` | `C:\ProgramData\Nerve\state` | `--state-dir`, `NERVE_STATE_DIR` |
 | Center: identity, paired machines, statistics, [log](logs.md), the [action checker](action-checker.md)'s settings and local model | `$XDG_STATE_HOME/nerve-center`, else `~/.local/state/nerve-center` | `%LOCALAPPDATA%\nerve-center` | `--state-dir`, `NERVE_STATE_DIR` |
 
 A node [installed as a service](service.md) keeps its files in `/etc/nerve`
 and `/var/lib/nerve/state`; without `--config-dir` and `--state-dir` the
 commands use those folders. On Windows the node is always the installed
 service, with its files in `C:\ProgramData\Nerve\config` and
-`C:\ProgramData\Nerve\state`. A center installed as a service keeps its state
+`C:\ProgramData\Nerve\state`; the app works on those folders unless
+`NERVE_CONFIG_DIR` or `NERVE_STATE_DIR` is set for the account, which points it
+at other folders and so away from the service. A center installed as a service keeps its state
 in `/var/lib/nerve-center` and its settings in `/etc/nerve-center`
 ([center](center.md#run-it-as-a-service)).
 

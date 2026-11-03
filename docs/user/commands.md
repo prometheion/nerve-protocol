@@ -62,7 +62,7 @@ center is paired.
 
 | Command | Does | Page |
 |---|---|---|
-| `run` | Run the node in the foreground | [pairing](pairing.md) |
+| `run` | Run the node in the foreground (Linux; on Windows the node runs only as the installed service, and `run` is refused) | [pairing](pairing.md) |
 | `status` | Show whether it runs, the links, the confinement and the [limits per command](limits.md) | [troubleshooting](troubleshooting.md) |
 | `audit [--denied] [--last N] [--follow]` | Show what was allowed and refused | [audit](audit.md) |
 | `audit clear` | Start the audit log afresh; the entries so far stay in its older file | [audit](audit.md#clear-it) |

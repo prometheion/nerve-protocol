@@ -32,7 +32,9 @@ pub fn answer(r: Result<Value, String>, windows: bool) -> Result<Value, String> 
 /// A line of the node's own, as the app shows it: in the app's words on
 /// Windows.
 pub fn text(line: &str, windows: bool) -> String {
-    if windows {
+    // The node's record of an owner's change names the exact command, with
+    // its subcommand and key; a place in the app would lose which change it was.
+    if windows && !line.contains("` as an owner") {
         reword(line)
     } else {
         line.to_string()
@@ -62,7 +64,7 @@ const ONE_WORD: &[&str] = &["install", "uninstall", "update", "setup", "restore"
 pub fn reword(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(start) = rest.find('`') {
+    while let Some(start) = backquote_outside_quotes(rest) {
         let Some(len) = rest[start + 1..].find('`') else {
             break;
         };
@@ -79,6 +81,25 @@ pub fn reword(text: &str) -> String {
         out = out.replace(option, words);
     }
     out
+}
+
+/// The first backquote of `text` that is not inside double quotes: the node
+/// shows a rule or a command it quotes with `{:?}`, and a backquote in that
+/// is the rule's own (PowerShell's escape), not a command of the node's.
+fn backquote_outside_quotes(text: &str) -> Option<usize> {
+    let mut quoted = false;
+    let mut chars = text.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\\' if quoted => {
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            '`' if !quoted => return Some(i),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Where in the app the command `span` is done, in words that stand where
@@ -171,11 +192,32 @@ mod tests {
                 "machine.user is `alice` in `folder` mode",
             ),
             ("a lone ` stays", "a lone ` stays"),
+            // A rule the node quotes keeps its own backquotes.
+            (
+                "both \"echo `nerve-node status`\" and x: `nerve-node unlock`",
+                "both \"echo `nerve-node status`\" and x: the app's Overview › Unlock",
+            ),
         ] {
             let got = reword(said);
             assert_eq!(got, shown, "{said}");
-            assert!(!got.contains("nerve-node"), "{got}");
+            assert!(
+                !got.contains("nerve-node") || got.contains("\"echo `nerve-node"),
+                "{got}"
+            );
         }
+    }
+
+    /// The node's record of an owner's change keeps its command on the Log
+    /// page; its advice is reworded.
+    #[test]
+    fn a_record_of_an_owner_change_keeps_its_command() {
+        let record =
+            "alice runs `nerve-node-desktop config set center.lab.policy.allow x` as an owner";
+        assert_eq!(text(record, true), record);
+        assert_eq!(
+            text("`nerve-node unlock` first", true),
+            "the app's Overview › Unlock first"
+        );
     }
 
     /// Only Windows gets the app's words, and only the messages, the check's

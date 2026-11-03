@@ -510,8 +510,14 @@ enum Undo<'a> {
 pub fn restore(paths: &NodePaths, b: &Parsed, opts: &RestoreOpts) -> Result<RestoreReport, String> {
     let _lock = KeysLock::try_take_soon(paths)?.ok_or_else(|| {
         format!(
-            "a nerve-node runs on these folders (it holds {}), or a command of nerve-node is moving its keys. A restore never goes under a running node: stop it (`nerve-node` is a service: stop the service; otherwise end `nerve-node run`), then restore",
-            paths.keys_lock().display()
+            "a nerve-node runs on these folders (it holds {}), or a command of nerve-node is moving its keys. A restore never goes under a running node: stop it ({}), then restore",
+            paths.keys_lock().display(),
+            // Windows has no node run by hand: only the service, which the app stops.
+            if cfg!(windows) {
+                "Stop on the app's Overview"
+            } else {
+                "`nerve-node` is a service: stop the service; otherwise end `nerve-node run`"
+            }
         )
     })?;
 
@@ -1518,6 +1524,13 @@ mod tests {
         .err()
         .unwrap();
         assert!(err.contains("runs on these folders"), "{err}");
+        // Windows has no node run by hand to end: its advice is the app's Stop.
+        assert_eq!(err.contains("nerve-node run"), !cfg!(windows), "{err}");
+        assert_eq!(
+            err.contains("Stop on the app's Overview"),
+            cfg!(windows),
+            "{err}"
+        );
         assert_eq!(std::fs::read(to.config_file()).unwrap(), before);
         assert!(to.key_file("other").exists() && !to.key_file("home").exists());
         drop(lock);

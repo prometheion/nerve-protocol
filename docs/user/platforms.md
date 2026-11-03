@@ -19,7 +19,7 @@ Fedora 36 and later) and fontconfig.
 | [Capabilities of `node.toml`](config-capabilities.md) | Yes: the installed node, as `nerve-run`; a node you run yourself offers none | Kept in `node.toml`, offered not yet |
 | Install as a service | Yes, with systemd, the node and the [center](center.md#run-it-as-a-service) | The node |
 | The center's [action checker](action-checker.md) | Yes. Its local model on x86_64 and aarch64, on the CPU or a Vulkan GPU; the installed center service runs it on the CPU only | Yes. Its local model on x86_64, on the CPU or a Vulkan GPU |
-| Config folder | `~/.config/nerve` | `%USERPROFILE%\.config\nerve` |
+| Config folder | `~/.config/nerve` | `C:\ProgramData\Nerve\config` (the installed service) |
 
 ## Linux
 

@@ -72,6 +72,7 @@ fn the_docs_send_nobody_to_a_terminal_on_windows() {
                 "Run as administrator",
                 "administrator's terminal",
                 "CLI edition",
+                "Windows node you run yourself",
             ] {
                 if line.contains(word) {
                     found.push(format!("{}:{}: {word}", path.display(), i + 1));
@@ -80,4 +81,17 @@ fn the_docs_send_nobody_to_a_terminal_on_windows() {
         }
     }
     assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
+/// The commands page says that `run` is refused on Windows (#176): the table
+/// row of a command Windows refuses carries the note, since the scan above
+/// can only look for words.
+#[test]
+fn the_run_row_says_windows_refuses_it() {
+    let page = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/user/commands.md"),
+    )
+    .unwrap();
+    let row = page.lines().find(|l| l.starts_with("| `run` |")).unwrap();
+    assert!(row.contains("Windows") && row.contains("refused"), "{row}");
 }
