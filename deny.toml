@@ -17,23 +17,13 @@ targets = [
 [advisories]
 # Every advisory of the RustSec database fails the check, an unmaintained or
 # unsound crate too, also for a crate only the tests use. One is ignored
-# below only by its id and with the reason. The first nine fix themselves by
-# a newer patch release in Cargo.lock (`cargo update -p <crate>`); that
-# change waits for the owner, and each says why Nerve is not reached
-# meanwhile. Take an entry out once Cargo.lock has the fixed version: the
-# check then says the entry is not needed.
+# below only by its id and with the reason, when no fixed release exists
+# yet; one that a newer patch release fixes is fixed in Cargo.lock
+# (`cargo update -p <crate>`). Take an entry out once Cargo.lock has the fixed
+# version: the check then says the entry is not needed.
 unmaintained = "all"
 yanked = "deny"
 ignore = [
-    { id = "RUSTSEC-2026-0346", reason = "rustls 0.23.45: Debug of a TLS 1.2 client session value shows its secrets; Nerve prints no session value. Fixed in 0.23.46" },
-    { id = "RUSTSEC-2026-0347", reason = "rustls 0.23.45: data after a rejected Encrypted Client Hello; Nerve uses no ECH. Fixed in 0.23.46" },
-    { id = "RUSTSEC-2026-0348", reason = "rustls 0.23.45: Brotli certificate decompression; the feature is off in Nerve (no default features). Fixed in 0.23.46" },
-    { id = "RUSTSEC-2026-0349", reason = "rustls 0.23.45: a post-quantum key exchange downgraded to a classical one; Nerve's ring provider offers only classical ones. Fixed in 0.23.46" },
-    { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.103.15: distrusted emSign intermediates; links are pinned and skip the web PKI, which only update's download from GitHub uses. Fixed in 0.103.16" },
-    { id = "RUSTSEC-2026-0386", reason = "tokio 1.53.2: AsyncFd's constructors take a descriptor they do not own; Nerve makes no AsyncFd, and zbus runs on async-io. Fixed in 1.53.3" },
-    { id = "RUSTSEC-2026-0385", reason = "ctutils 0.4.3: comparisons not in constant time, in secret-service's session with the keyring on the local bus. Fixed in 0.4.4" },
-    { id = "RUSTSEC-2026-0414", reason = "pulldown-cmark 0.13.4: only with wikilinks on; Slint's styled text turns on strikethrough alone. Fixed in 0.13.6" },
-    { id = "RUSTSEC-2026-0433", reason = "pulldown-cmark 0.13.4: wikilinks, as RUSTSEC-2026-0414. Fixed in 0.13.6" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained: Slint's winit decorations (sctk-adwaita) take it; no maintained version to move to" },
     { id = "RUSTSEC-2026-0370", reason = "zvariant is now part of zbus: the keyring's and Slint's accessibility D-Bus take it; no release of theirs without it yet" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names is now part of zbus, as RUSTSEC-2026-0370" },

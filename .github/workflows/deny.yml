@@ -68,6 +68,8 @@ jobs:
       - name: Licences, duplicates and sources
         run: cargo deny --locked check licenses bans sources
       # Apart, so the log shows at once whether a new advisory or the change
-      # itself failed the job.
+      # itself failed the job. On a pull request a new advisory only warns;
+      # the weekly run and a push to main still fail on it.
       - name: Advisories
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
         run: cargo deny --locked check advisories

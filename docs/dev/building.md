@@ -144,7 +144,8 @@ out for a crate nobody changed. It fails on:
   License 2.0); Slint's Royalty-free licence is allowed for Slint's crates and
   the desktop app only, and Slint may be linked by the desktop app alone;
 - an advisory of the RustSec database, an unmaintained or unsound crate too,
-  that `deny.toml` does not name with its reason;
+  that `deny.toml` does not name with its reason (on a pull request this step
+  only warns; on `main` and the weekly run it fails);
 - a second version of a crate that `deny.toml` does not name with its reason;
 - a crate from anywhere but crates.io, a wildcard version, OpenSSL.
 
