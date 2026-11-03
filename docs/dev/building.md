@@ -46,11 +46,21 @@ by `Cargo.lock` (a change to the lock file builds once from scratch). Its jobs:
 
 | Job | Runs |
 |---|---|
-| `linux` | fmt, clippy and `cargo test --workspace` on Ubuntu 24.04, as the runner's account with a systemd user session; then the tests that need root, as root: root's backup file (`tests/backup_caller.rs`), root's start (`tests/root_start.rs`) and four ACL tests of uninstall and revoked grants |
+| `linux` | fmt, that every script of the web UIs parses (`node --check`), clippy and `cargo test --workspace` on Ubuntu 24.04, as the runner's account with a systemd user session; then the tests that need root, as root: root's backup file (`tests/backup_caller.rs`), root's start (`tests/root_start.rs`) and four ACL tests of uninstall and revoked grants |
 | `musl` | on x86_64 and arm64: the folder walk of install and uninstall (`service::tests::chown`) on musl, the C library of the released Linux programs; then `nerve-node` and `nerve-center` built as the release builds them, and the real tests' programs |
-| `installed` | those static programs installed on Ubuntu 22.04 and 24.04 (x86_64, and arm64 on 24.04) and Debian 12, a container with systemd on an Ubuntu runner (`.github/workflows/installed.yml`): `.github/scripts/keyring-end-to-end.sh` runs the real tests below, `setup` with the keys moved into GNOME Keyring, the keyring test as `nerve`, restarts of the keyring's session and of the node, the web UI, `uninstall --purge`; then `.github/scripts/center-service-end-to-end.sh` installs the center as a service, drives it over MCP, updates and uninstalls it. The release runs the same on the binaries it publishes |
+| `installed` | those static programs installed on Ubuntu 22.04 and 24.04 (x86_64, and arm64 on 24.04) and Debian 12, a container with systemd on an Ubuntu runner (`.github/workflows/installed.yml`): `.github/scripts/keyring-end-to-end.sh` runs the real tests below, `setup` with the keys moved into GNOME Keyring, the keyring test as `nerve`, restarts of the keyring's session and of the node, the web UI, `uninstall --purge`; then `.github/scripts/center-service-end-to-end.sh` installs the center as a service, drives it over MCP, updates and uninstalls it. On the x86_64 Ubuntu runners both scripts also open every page of the node's and the center's web UI in headless Chrome. The release runs the same on the binaries it publishes |
 | `desktop-real` | the desktop app's own install, control, update and uninstall on Ubuntu 24.04, as root (`crates/nerve-node-desktop/tests/real.rs`) |
 | `windows` | fmt, clippy and `cargo test --workspace` on Windows, so the tests compiled only there run (grants, the integrity level, the service steps, the job object, the AppContainer, Windows paths) |
+
+The web UIs' smoke test (`.github/scripts/web-ui-smoke.mjs`) needs only
+Chrome and Node.js 22 or newer: it signs in with a token on the login page,
+opens every page of the sidebar, and fails on a script error, an error in the
+console, an answer of 500 or more, or an empty page. To run it against a
+center or node of your own:
+
+```sh
+node .github/scripts/web-ui-smoke.mjs "$(command -v google-chrome)" http://127.0.0.1:7480/ <token>
+```
 
 A test that cannot run on a machine returns early and prints why
 (`skipped: needs root`). The `linux` and `windows` jobs run the tests with

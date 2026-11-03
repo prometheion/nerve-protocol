@@ -78,6 +78,13 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
       # Before the cache, so a badly formatted pull request fails in seconds.
       - run: cargo fmt --check
+      # The web UIs' JavaScript is served as it is, with no build step, and the
+      # Rust tests only look for words in it: a syntax error would keep a
+      # whole UI from starting. node checks every script parses.
+      - name: The web UIs' JavaScript parses
+        run: |
+          node --version
+          git ls-files -z '*.js' '*.mjs' | xargs -0 -n 1 node --check
       # The key holds the lock file and no restore key follows it: a changed
       # lock file builds once from scratch, and the cache never collects the
       # dependencies it once had.

@@ -10,10 +10,15 @@
 # root on a machine that may be changed and broken (a CI runner, a test VM).
 #
 #   NERVE_CENTER_REAL=<the nerve-center to install>
+#   [NERVE_UI_SMOKE_NODE=<node.js> NERVE_UI_SMOKE_CHROME=<chrome>]
 #   .github/scripts/center-service-end-to-end.sh
+#
+# With a browser named, the web UI opens every page in it, signed in with
+# the harness token (web-ui-smoke.mjs).
 set -euo pipefail
 
 CENTER=${NERVE_CENTER_REAL:?the nerve-center to install}
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BIN=/usr/local/bin/nerve-center
 UNIT=/etc/systemd/system/nerve-center.service
 ENV_FILE=/etc/nerve-center/center.env
@@ -29,6 +34,19 @@ cd /
 step() { printf '\n==== %s\n' "$*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 summary() { [ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY" || true; }
+# The web UI in a real browser (web-ui-smoke.mjs): signs in with the token
+# and opens every page. Only where the job names a browser; elsewhere the
+# run says that it did not run.
+ui_smoke() {
+  if [ -z "${NERVE_UI_SMOKE_CHROME:-}" ]; then
+    echo "the web UI smoke test does not run here: no browser named (NERVE_UI_SMOKE_CHROME)"
+    summary "- web UI smoke test of $1: not run on this machine (no browser)"
+    return 0
+  fi
+  "${NERVE_UI_SMOKE_NODE:?the node.js for the web UI smoke test}" "$HERE/web-ui-smoke.mjs" \
+    "$NERVE_UI_SMOKE_CHROME" "$1" "$2" || fail "the web UI smoke test of $1 failed"
+  summary "- web UI smoke test of $1: passed"
+}
 
 cleanup() {
   code=$?
@@ -112,6 +130,8 @@ grep -qx '127.0.0.1:7480' "$OUT/listen" || fail "no web UI on 127.0.0.1:7480"
 grep -qx '127.0.0.1:7481' "$OUT/listen" || fail "no MCP endpoint on 127.0.0.1:7481"
 [ "$(grep -vcxE '(0\.0\.0\.0|\*|\[::\]):7443|127\.0\.0\.1:748[01]' "$OUT/listen")" = 0 ] \
   || fail "the center listens where the defaults do not say"
+
+ui_smoke http://127.0.0.1:7480/ "$TOKEN"
 
 step "3. The unit holds the center"
 systemctl show nerve-center -p User -p NoNewPrivileges -p ProtectHome -p PrivateDevices \

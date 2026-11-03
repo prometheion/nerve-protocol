@@ -18,7 +18,10 @@
 # The kernels are GitHub's, not the ones the distributions ship (6.8 on
 # ubuntu-22.04, 7.0 on ubuntu-24.04 at the time of writing). `landlock` is the
 # least Landlock ABI each must have: a runner that loses it fails the job
-# instead of testing less.
+# instead of testing less. `browser` marks the runners whose image has Google
+# Chrome and a Node.js with WebSocket: there the web UIs of the node and the
+# center open every page in it (.github/scripts/web-ui-smoke.mjs); the other
+# machines say in their summary that the smoke test did not run there.
 name: Installed
 
 on:
@@ -57,10 +60,12 @@ jobs:
             runner: ubuntu-22.04
             arch: x86_64
             landlock: 4
+            browser: true
           - name: Ubuntu 24.04 x86_64
             runner: ubuntu-24.04
             arch: x86_64
             landlock: 6
+            browser: true
           - name: Ubuntu 24.04 arm64
             runner: ubuntu-24.04-arm
             arch: aarch64
@@ -102,6 +107,15 @@ jobs:
       - name: Tools of the test
         if: ${{ !matrix.image }}
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends acl
+      - name: A browser for the web UI smoke test
+        if: ${{ matrix.browser }}
+        run: |
+          chrome=$(command -v google-chrome)
+          node=$(command -v node)
+          "$chrome" --version
+          "$node" -e 'if (typeof WebSocket !== "function") { console.error("this Node.js " + process.version + " has no WebSocket"); process.exit(1); }'
+          echo "UI_CHROME=$chrome" >> "$GITHUB_ENV"
+          echo "UI_NODE=$node" >> "$GITHUB_ENV"
       - name: The machine
         run: |
           name=$(.github/scripts/as-root.sh cat /etc/os-release | sed -n 's/^PRETTY_NAME=//p' | tr -d '"')
@@ -119,6 +133,8 @@ jobs:
           REAL_ACCOUNT_TEST="$PWD/dist/tests/real_account"
           REAL_ROOT_OWNER_TEST="$PWD/dist/tests/real_root_owner"
           KEYRING_TEST="$PWD/dist/tests/keyring"
+          NERVE_UI_SMOKE_NODE="${UI_NODE:-}"
+          NERVE_UI_SMOKE_CHROME="${UI_CHROME:-}"
           "$PWD/.github/scripts/keyring-end-to-end.sh"
       # After the node's run, which left nothing behind.
       - name: The center as a service
@@ -126,6 +142,8 @@ jobs:
           .github/scripts/as-root.sh
           GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY"
           NERVE_CENTER_REAL="$PWD/dist/nerve-center-$SUFFIX"
+          NERVE_UI_SMOKE_NODE="${UI_NODE:-}"
+          NERVE_UI_SMOKE_CHROME="${UI_CHROME:-}"
           "$PWD/.github/scripts/center-service-end-to-end.sh"
       - name: The container's log
         if: ${{ failure() && matrix.image }}

@@ -17,6 +17,7 @@
 #   REAL_ROOT_OWNER_TEST=<the real_root_owner test program>
 #   KEYRING_TEST=<the keyring test program>
 #   [LANDLOCK_ABI_MIN=<the least Landlock ABI this kernel must have>]
+#   [NERVE_UI_SMOKE_NODE=<node.js> NERVE_UI_SMOKE_CHROME=<chrome>]
 #   .github/scripts/keyring-end-to-end.sh
 #
 # LANDLOCK_ABI_MIN makes the run fail on a kernel with less (or no) Landlock,
@@ -45,7 +46,8 @@
 #    pairs a center, restarts the node and runs a folder mode command as
 #    nerve-run, which cannot reach the node's bus or keyring folder;
 #    then the web UI (#161): off until `ui on`, the owner logs in with its
-#    token and changes a setting, nerve-run is closed unanswered, `ui off`;
+#    token and changes a setting, nerve-run is closed unanswered, every page
+#    opens in a browser where the job has one, `ui off`;
 #    `uninstall --purge` takes it all away.
 # The system-wide /etc/environment of the machine is given another user's
 # runtime folder, bus and XDG folders first, as a runner image has: the
@@ -95,6 +97,19 @@ as_owner() { runuser -u "$OWNER" -- "$BIN" "$@"; }
 # Root through the owner's sudo, as a person installs and uninstalls.
 owners_sudo() { printf '%s\n' "$PASS" | runuser -u "$OWNER" -- sudo -S -p '' "$@"; }
 summary() { [ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY" || true; }
+# The web UI in a real browser (web-ui-smoke.mjs): signs in with the token
+# and opens every page. Only where the job names a browser; elsewhere the
+# run says that it did not run.
+ui_smoke() {
+  if [ -z "${NERVE_UI_SMOKE_CHROME:-}" ]; then
+    echo "the web UI smoke test does not run here: no browser named (NERVE_UI_SMOKE_CHROME)"
+    summary "- web UI smoke test of $1: not run on this machine (no browser)"
+    return 0
+  fi
+  "${NERVE_UI_SMOKE_NODE:?the node.js for the web UI smoke test}" "$HERE/web-ui-smoke.mjs" \
+    "$NERVE_UI_SMOKE_CHROME" "$1" "$2" || fail "the web UI smoke test of $1 failed"
+  summary "- web UI smoke test of $1: passed"
+}
 
 diagnostics() {
   echo "---- diagnostics"
@@ -401,6 +416,7 @@ case $rc in
   52|56) ;;
   *) fail "nerve-run's connection to the web UI was not closed unanswered (curl exit $rc)" ;;
 esac
+ui_smoke "$UI/" "$UI_TOKEN"
 as_owner ui off | tee "$OUT/ui-off"
 for _ in $(seq 1 50); do [ -z "$(ui_listeners)" ] && break; sleep 0.1; done
 [ -z "$(ui_listeners)" ] || fail "the web UI still listens after ui off"
