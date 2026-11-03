@@ -75,6 +75,12 @@ mod winsudo;
 mod winsvc;
 
 pub use daemon::{Daemon, Event, NodeOptions};
+/// Who is at the other end of a local TCP connection: the node's web UI
+/// asks it, and the center counts its local peers' connections by it.
+#[cfg(target_os = "linux")]
+pub mod local_peer {
+    pub use crate::webui::peer::{Lookup, account_of};
+}
 pub use paths::NodePaths;
 
 /// Milliseconds since the Unix epoch.

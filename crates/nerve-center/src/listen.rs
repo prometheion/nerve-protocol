@@ -8,6 +8,12 @@
 //! connections and sends nothing so fills only its own places, not the
 //! port. A node's link gives both back once its hello is verified, so the
 //! links of the paired nodes never count against a peer.
+//!
+//! A peer is its address, but on loopback every local process has one (or
+//! any of 127.0.0.0/8 it binds): there a peer is the account whose socket it
+//! is, so another account's connections never take the owner's places. On
+//! Linux the kernel names the account ([`nerve_node::local_peer`]); where it
+//! cannot, all loopback peers are one.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -53,12 +59,69 @@ pub struct Server {
     tls: Option<Center>,
     /// Undecided connections at most ([`UNDECIDED`]).
     slots: usize,
+    /// How a loopback peer's account is found.
+    accounts: Accounts,
 }
 
-/// The places taken now, by address and by /64.
+/// How [`Server::run`] tells loopback peers apart.
+#[derive(Debug, Clone, Copy)]
+enum Accounts {
+    /// By the account the kernel names.
+    #[cfg(target_os = "linux")]
+    Kernel(nerve_node::local_peer::Lookup),
+    /// Not at all: every loopback peer is one.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    None,
+    /// By address, as any other peer: a test's second address is another
+    /// peer.
+    #[cfg(test)]
+    ByAddress,
+}
+
+/// Whom a place is counted for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Peer {
+    /// Another machine (or a local peer that is not on loopback).
+    Addr(IpAddr),
+    /// A loopback peer of this account.
+    Account(u32),
+    /// A loopback peer whose account is not known.
+    Local,
+}
+
+impl Peer {
+    /// The peer a connection from `peer` to `local` is counted as.
+    fn of(peer: SocketAddr, local: SocketAddr, accounts: Accounts) -> Peer {
+        let ip = peer.ip().to_canonical();
+        if !ip.is_loopback() {
+            return Peer::Addr(ip);
+        }
+        match accounts {
+            #[cfg(target_os = "linux")]
+            Accounts::Kernel(how) => nerve_node::local_peer::account_of(peer, local, how)
+                .map_or(Peer::Local, Peer::Account),
+            #[cfg(test)]
+            Accounts::ByAddress => Peer::Addr(ip),
+            Accounts::None => {
+                let _ = local;
+                Peer::Local
+            }
+        }
+    }
+
+    /// The /64 it is counted in besides itself.
+    fn prefix(self) -> Option<IpAddr> {
+        match self {
+            Peer::Addr(ip) => prefix_of(ip),
+            _ => None,
+        }
+    }
+}
+
+/// The places taken now, by peer and by /64.
 #[derive(Default)]
 struct Places {
-    peers: HashMap<IpAddr, usize>,
+    peers: HashMap<Peer, usize>,
     prefixes: HashMap<IpAddr, usize>,
 }
 
@@ -67,7 +130,7 @@ struct Places {
 pub struct Admitted {
     /// The peer's address.
     pub peer: SocketAddr,
-    held: Option<(OwnedSemaphorePermit, Arc<Mutex<Places>>)>,
+    held: Option<(OwnedSemaphorePermit, Arc<Mutex<Places>>, Peer)>,
 }
 
 impl Admitted {
@@ -78,21 +141,20 @@ impl Admitted {
     }
 
     fn give_back(&mut self) {
-        let Some((_permit, places)) = self.held.take() else {
+        let Some((_permit, places, who)) = self.held.take() else {
             return;
         };
-        let ip = self.peer.ip().to_canonical();
         let mut p = places.lock().unwrap_or_else(|e| e.into_inner());
-        let give = |map: &mut HashMap<IpAddr, usize>, key| {
+        fn give<K: std::hash::Hash + Eq>(map: &mut HashMap<K, usize>, key: K) {
             if let Some(n) = map.get_mut(&key) {
                 *n -= 1;
                 if *n == 0 {
                     map.remove(&key);
                 }
             }
-        };
-        give(&mut p.peers, ip);
-        if let Some(prefix) = prefix_of(ip) {
+        }
+        give(&mut p.peers, who);
+        if let Some(prefix) = who.prefix() {
             give(&mut p.prefixes, prefix);
         }
     }
@@ -124,28 +186,29 @@ fn prefix_of(ip: IpAddr) -> Option<IpAddr> {
     }
 }
 
-/// A slot and a place for a connection of `peer`, if both are free.
+/// A slot and a place for a connection of `peer`, counted as `who`, if
+/// both are free.
 fn admit(
     slots: &Arc<Semaphore>,
     places: &Arc<Mutex<Places>>,
     peer: SocketAddr,
+    who: Peer,
 ) -> Option<Admitted> {
-    let ip = peer.ip().to_canonical();
-    let prefix = prefix_of(ip);
+    let prefix = who.prefix();
     let mut p = places.lock().unwrap_or_else(|e| e.into_inner());
-    if p.peers.get(&ip).copied().unwrap_or(0) >= PER_PEER
+    if p.peers.get(&who).copied().unwrap_or(0) >= PER_PEER
         || prefix.is_some_and(|x| p.prefixes.get(&x).copied().unwrap_or(0) >= PER_PREFIX)
     {
         return None;
     }
     let permit = slots.clone().try_acquire_owned().ok()?;
-    *p.peers.entry(ip).or_insert(0) += 1;
+    *p.peers.entry(who).or_insert(0) += 1;
     if let Some(x) = prefix {
         *p.prefixes.entry(x).or_insert(0) += 1;
     }
     Some(Admitted {
         peer,
-        held: Some((permit, places.clone())),
+        held: Some((permit, places.clone(), who)),
     })
 }
 
@@ -170,10 +233,15 @@ impl Server {
             ));
         }
         let tls = (!plain).then(|| center.clone());
+        #[cfg(target_os = "linux")]
+        let accounts = Accounts::Kernel(nerve_node::local_peer::Lookup::for_listener(local));
+        #[cfg(not(target_os = "linux"))]
+        let accounts = Accounts::None;
         Ok(Server {
             listener,
             tls,
             slots: UNDECIDED,
+            accounts,
         })
     }
 
@@ -181,6 +249,14 @@ impl Server {
     #[cfg(test)]
     fn with_slots(mut self, n: usize) -> Server {
         self.slots = n;
+        self
+    }
+
+    /// Loopback peers by address, so a test's second address is another
+    /// peer.
+    #[cfg(test)]
+    fn by_address(mut self) -> Server {
+        self.accounts = Accounts::ByAddress;
         self
     }
 
@@ -201,6 +277,7 @@ impl Server {
         let handler = Arc::new(handler);
         let slots = Arc::new(Semaphore::new(self.slots));
         let places = Arc::new(Mutex::new(Places::default()));
+        let local = self.local_addr();
         loop {
             let (tcp, peer) = match self.listener.accept().await {
                 Ok(c) => c,
@@ -210,7 +287,8 @@ impl Server {
                     continue;
                 }
             };
-            let Some(admitted) = admit(&slots, &places, peer) else {
+            let who = Peer::of(peer, local, self.accounts);
+            let Some(admitted) = admit(&slots, &places, peer, who) else {
                 tracing::debug!("closed a connection from {peer}: no free place for it");
                 continue;
             };
@@ -328,7 +406,10 @@ mod tests {
     async fn one_peer_cannot_hold_the_node_port_shut() {
         let dir = tempfile::tempdir().unwrap();
         let c = center(dir.path());
-        let server = Server::bind("127.0.0.1:0", &c, true).await.unwrap();
+        let server = Server::bind("127.0.0.1:0", &c, true)
+            .await
+            .unwrap()
+            .by_address();
         let addr = server.local_addr();
         let task = tokio::spawn(serve_nodes(c.clone(), server));
         let mut idle = Vec::new();
@@ -373,6 +454,10 @@ mod tests {
         let slots = Arc::new(Semaphore::new(UNDECIDED));
         let places = Arc::new(Mutex::new(Places::default()));
         let at = |s: &str| -> SocketAddr { s.parse().unwrap() };
+        let local = at("192.0.2.9:7443");
+        let admit = |slots: &Arc<Semaphore>, places: &Arc<Mutex<Places>>, peer: SocketAddr| {
+            admit(slots, places, peer, Peer::of(peer, local, Accounts::None))
+        };
         let held: Vec<Admitted> = (0..PER_PEER)
             .map(|_| admit(&slots, &places, at("192.0.2.1:1")).unwrap())
             .collect();
@@ -401,6 +486,61 @@ mod tests {
         drop((held, prefix, one));
         let p = places.lock().unwrap();
         assert!(p.peers.is_empty() && p.prefixes.is_empty());
+    }
+
+    /// On loopback a peer is its account: another account that fills its
+    /// places takes none of the owner's, and one account's connections from
+    /// many loopback addresses are counted together. Where the account is
+    /// not known, every loopback peer is one, whatever address it binds.
+    #[test]
+    fn loopback_peers_are_counted_by_account() {
+        let slots = Arc::new(Semaphore::new(UNDECIDED));
+        let places = Arc::new(Mutex::new(Places::default()));
+        let at = |s: &str| -> SocketAddr { s.parse().unwrap() };
+        let other: Vec<Admitted> = (0..PER_PEER)
+            .map(|i| {
+                let peer = at(&format!("127.0.0.{}:1", i + 2));
+                admit(&slots, &places, peer, Peer::Account(990)).unwrap()
+            })
+            .collect();
+        assert!(admit(&slots, &places, at("127.0.9.9:1"), Peer::Account(990)).is_none());
+        assert!(admit(&slots, &places, at("127.0.0.1:1"), Peer::Account(1000)).is_some());
+        let unknown = at("127.0.0.1:7443");
+        for ip in ["127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.3"] {
+            let peer = SocketAddr::new(ip.parse().unwrap(), 1);
+            assert_eq!(Peer::of(peer, unknown, Accounts::None), Peer::Local, "{ip}");
+        }
+        drop(other);
+    }
+
+    /// The kernel names the account of a real loopback peer, so this
+    /// test's connections from two loopback addresses share its places.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn one_account_is_one_peer_whatever_loopback_address_it_binds() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = center(dir.path());
+        let server = Server::bind("127.0.0.1:0", &c, true).await.unwrap();
+        let addr = server.local_addr();
+        let task = tokio::spawn(serve_nodes(c.clone(), server));
+        let from = |ip: &str| {
+            let s = tokio::net::TcpSocket::new_v4().unwrap();
+            s.bind(format!("{ip}:0").parse().unwrap()).unwrap();
+            s.connect(addr)
+        };
+        let mut idle = Vec::new();
+        for i in 0..PER_PEER {
+            idle.push(from(&format!("127.0.0.{}", i + 2)).await.unwrap());
+        }
+        let mut extra = from("127.0.1.1").await.unwrap();
+        let mut buf = [0u8; 1];
+        let n = tokio::time::timeout(Duration::from_secs(5), extra.read(&mut buf))
+            .await
+            .expect("another loopback address got more places")
+            .unwrap_or(0);
+        assert_eq!(n, 0);
+        drop(idle);
+        task.abort();
     }
 
     /// A peer that asks for an answer and reads none of it gives its
