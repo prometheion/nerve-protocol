@@ -135,6 +135,20 @@ async fn a_harness_token_from_a_flag_does_not_log_in() {
     assert_eq!(login(&r, &owner_token(d.path())).await, 200);
 }
 
+/// A wrong token over a real connection waits before its 401 goes out, and
+/// the right token right after it is answered at once.
+#[tokio::test]
+async fn a_wrong_token_over_the_socket_waits() {
+    let d = tempfile::tempdir().unwrap();
+    let r = start(d.path(), &["--ui", "127.0.0.1:0"]).await.unwrap();
+    let t = std::time::Instant::now();
+    assert_eq!(login(&r, "nrv_not-the-owner-token").await, 401);
+    assert!(t.elapsed() >= nerve_transport::webui::WRONG_SECRET_DELAY);
+    let t = std::time::Instant::now();
+    assert_eq!(login(&r, &owner_token(d.path())).await, 200);
+    assert!(t.elapsed() < nerve_transport::webui::WRONG_SECRET_DELAY);
+}
+
 /// The HTTP MCP endpoint takes harness tokens only: the owner token is not
 /// one.
 #[tokio::test]
