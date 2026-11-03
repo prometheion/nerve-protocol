@@ -1051,12 +1051,27 @@ async fn a_second_link_while_the_first_answers_is_a_duplicate() {
     r.stop().await;
 }
 
+/// The web UI's login with the owner token of `r`'s center.
+fn owner_login(r: &Running) -> nerve_transport::http::Request {
+    let token = nerve_center::owner::read(r.center.dir())
+        .unwrap()
+        .expect("an owner token");
+    let mut req = http(
+        "POST",
+        &[
+            ("host", "127.0.0.1:1"),
+            ("content-type", "application/json"),
+        ],
+        json!({ "token": token }),
+    );
+    req.path = "/login".into();
+    req
+}
+
 /// `/api/overview` as the web UI's page reads it.
 async fn overview(r: &Running) -> Value {
-    let ui = nerve_center::ui::Ui::new(&r.center, None, false);
-    let mut req = http("GET", &[("host", "127.0.0.1:1")], Value::Null);
-    req.path = "/api/session".into();
-    let resp = ui.request(req).await;
+    let ui = nerve_center::ui::Ui::new(&r.center, false, true);
+    let resp = ui.request(owner_login(r)).await;
     let v: Value = serde_json::from_slice(&resp.body).unwrap();
     let session = v["session"].as_str().expect("a session");
     let mut req = http(
@@ -2073,11 +2088,8 @@ async fn audit_targets_are_cut_and_the_audit_feed_is_bounded() {
         "{}",
         feed.len()
     );
-    // The UI without a login hands out a session to the page.
-    let ui = nerve_center::ui::Ui::new(&r.center, None, false);
-    let mut req = http("GET", &[("host", "127.0.0.1:1")], Value::Null);
-    req.path = "/api/session".into();
-    let resp = ui.request(req).await;
+    let ui = nerve_center::ui::Ui::new(&r.center, false, true);
+    let resp = ui.request(owner_login(&r)).await;
     let v: Value = serde_json::from_slice(&resp.body).unwrap();
     let session = v["session"].as_str().expect("a session");
     let mut req = http(

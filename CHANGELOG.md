@@ -99,6 +99,13 @@
 - The user docs name no terminal command for the node on Windows: installing, the service, sudo, the relay, the proxy, backups, logs and troubleshooting say where in the app each is done.
 - The app no longer takes over a node installed with the plain `nerve-node.exe`, and no `nerve-node.exe uninstall` hands over to the app. A Windows machine with such a node: uninstall it with that `nerve-node.exe` (`uninstall`, from an administrator's PowerShell) before you install the app, or delete the `nerve-node.exe` the app's install leaves in `C:\Program Files\Nerve`.
 
+### The center's sign-in and limits
+
+- The center's web UI always asks for a login, on loopback too, with an **owner token** of its own: the center makes it at its first start, prints it on stderr, keeps it in `owner-token` in its state folder (mode 0600) and logs where it is; `nerve-center install` prints it with its path, and `nerve-center owner-token` prints it again (`--new` makes a new one, which a running center takes at once, ending the old one's sessions). Before, a center without a harness token gave its whole API to every process on the machine. See `docs/user/web-ui.md`.
+- Harness tokens open `/mcp` only and no longer log in to the web UI, and the owner token does not open `/mcp`: an agent can read its harness's token, and the web UI switches the action checker off and changes what the machines allow. The Tokens page lists the harness token of the settings (`NERVE_HARNESS_TOKEN`) too.
+- A wrong token at the center's login waits 300 ms and never locks the login, as the node's web UI does (the waiting answers are shared code now); before, five wrong tokens from anyone shut the login for a minute, the owner's right one included.
+- Breaks: `--ui-no-login` (`NERVE_UI_NO_LOGIN`) is gone, and the harness token no longer logs in to the web UI; log in with the owner token from `nerve-center owner-token`.
+
 ## 0.0.6
 
 ### The desktop app

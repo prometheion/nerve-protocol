@@ -197,10 +197,16 @@ from the source `nerve-node` under **Windows Logs > Application**, and
 | Message | Cause | Fix |
 |---|---|---|
 | `another nerve-center already runs the center in …` | Another center uses this state folder, and this one is not `--mcp stdio` | Use another `--state-dir`, or stop the other center |
-| `the web UI at … is beyond loopback and logs in with a harness token, but there is none` | `--ui` is not on loopback | Set `--harness-token`, or use `--ui 127.0.0.1:7480` |
-| `… always needs a login; drop --ui-no-login …` | `--ui-no-login` with a UI beyond loopback | Drop `--ui-no-login` |
 | The MCP endpoint refuses every client | No harness token yet | Set `--harness-token`, or make one in the web UI |
 | ``…/state.json is not valid: unknown variant `d1-3b` …`` | The center was last run before d1-2B replaced d1-3B as the local model | In `state.json` change `"d1-3b"` to `"d1-2b"`; with the local model also set `"threshold"` to 0.75 and `"timeout_ms"` to 12000. Then start the center and install the model again on the Action checker page |
+
+## The center's web UI does not let you in
+
+| Message | Cause | Fix |
+|---|---|---|
+| `Wrong owner token.` | The token is not the one in `owner-token` in the center's state folder. A harness token never logs in | `nerve-center owner-token` prints it (`sudo nerve-center --state-dir /var/lib/nerve-center owner-token` for the service) |
+| `… holds no owner token; …` | The file `owner-token` is empty or holds more than one word | `nerve-center owner-token --new` writes a new one |
+| `no center has run in … yet …` | `owner-token` was run on a state folder without a center, often without `--state-dir` | Give the center's `--state-dir` |
 
 ## The node's web UI does not answer
 

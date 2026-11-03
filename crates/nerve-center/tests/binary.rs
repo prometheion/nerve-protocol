@@ -109,22 +109,32 @@ fn stdio_and_a_second_instance_that_attaches() {
     assert!(owner.wait().unwrap().success());
 }
 
+/// The first start says the owner token on stderr at once, whatever the
+/// level, and where it is kept; a later start says nothing of it.
 #[test]
-fn a_ui_beyond_loopback_without_a_harness_token_does_not_start() {
+fn the_first_start_says_the_owner_token_on_stderr() {
     let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_nerve-center"))
-        .env_clear()
-        .env("NERVE_STATE_DIR", dir.path())
-        .env("NERVE_LISTEN", "127.0.0.1:0")
-        .env("NERVE_PLAIN_LOOPBACK", "true")
-        .env("NERVE_UI", "0.0.0.0:0")
-        .env("NERVE_LOG", "warn")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("NERVE_HARNESS_TOKEN"), "{err}");
+    let run = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_nerve-center"))
+            .env_clear()
+            .env("NERVE_STATE_DIR", dir.path())
+            .env("NERVE_LISTEN", "127.0.0.1:0")
+            .env("NERVE_PLAIN_LOOPBACK", "true")
+            .env("NERVE_UI", "127.0.0.1:0")
+            .env("NERVE_LOG", "warn")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let err = run();
+    let token = nerve_center::owner::read(dir.path()).unwrap().unwrap();
+    assert!(err.contains(&format!("\n{token}\n")), "{err}");
+    let file = nerve_center::owner::path(dir.path());
+    assert!(err.contains(&file.display().to_string()), "{err}");
+    let err = run();
+    assert!(!err.contains(&token), "{err}");
 }
 
 /// Starts a center with the level in `NERVE_LOG`, lets one harness session
@@ -170,7 +180,9 @@ fn the_log_goes_to_stderr_and_the_state_folder_and_follows_the_level() {
     let err = one_session(dir.path(), "info");
     let file = lines(dir.path());
     let msgs: Vec<&str> = file.iter().map(|e| e["msg"].as_str().unwrap()).collect();
-    assert!(msgs[0].starts_with("nerve-center "), "{msgs:?}");
+    // The first start makes the owner token and says where it is.
+    assert!(msgs[0].starts_with("made the owner token"), "{msgs:?}");
+    assert!(msgs[1].starts_with("nerve-center "), "{msgs:?}");
     assert!(
         msgs.iter()
             .any(|m| m.starts_with("a harness session started over stdio"))

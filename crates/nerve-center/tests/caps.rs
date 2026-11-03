@@ -43,8 +43,8 @@ async fn center(dir: &std::path::Path) -> Running {
     server::start(&args, lock).await.unwrap()
 }
 
-/// The open loopback web UI, as the page calls it: a session from
-/// `/api/session`, sent as a header with every call.
+/// The loopback web UI, as the page calls it: a session from the login
+/// with the owner token, sent as a header with every call.
 struct Ui {
     addr: std::net::SocketAddr,
     session: String,
@@ -82,7 +82,11 @@ async fn http(
 impl Ui {
     async fn open(r: &Running) -> Ui {
         let addr = r.ui.expect("a UI");
-        let (status, _, body) = http(addr, "GET", "/api/session", &[], "").await;
+        let token = nerve_center::owner::read(r.center.dir())
+            .unwrap()
+            .expect("an owner token");
+        let login = serde_json::json!({ "token": token }).to_string();
+        let (status, _, body) = http(addr, "POST", "/login", &[], &login).await;
         assert_eq!(status, 200, "{body}");
         let v: Value = serde_json::from_str(&body).unwrap();
         let session = v["session"].as_str().expect("a session").to_string();

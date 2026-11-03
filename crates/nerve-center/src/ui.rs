@@ -1,21 +1,22 @@
 //! The center web UI: a small page (vanilla HTML/JS/CSS built into the
 //! binary) over a JSON API.
 //!
-//! Access: the login is a harness token, the same secret the HTTP MCP
-//! endpoint takes (one from the environment or a flag, or one made here and
-//! kept hashed). Without a login the page is open to this machine only, and
-//! the `Host` header must name loopback so a DNS-rebound page cannot reach
-//! it. Beyond loopback a login is required and the UI is served over TLS (the
-//! caller sees to both). The page and its assets are public: a navigation
-//! carries no session, and nothing secret is in them. The login form posts
-//! the token once and gets a session, which the page keeps in its tab and
-//! sends as a header with every API call (nerve_transport::webui, no cookie);
-//! `POST /logout` ends it. A session ends with its token: when the token is
-//! deleted, the session stops working. A post must carry a matching
-//! `Origin` when the browser sends one.
+//! Access: the login is the owner token ([`crate::owner`]), on loopback
+//! too, and never a harness token: an agent can read its harness's token,
+//! and this API switches the action checker off and changes what the
+//! machines allow. On loopback the `Host` header must name loopback, so a
+//! DNS-rebound page cannot reach the login; beyond loopback the UI is served
+//! over TLS (the caller sees to it). The page and its assets are public: a
+//! navigation carries no session, and nothing secret is in them. The login
+//! form posts the token once and gets a session, which the page keeps in its
+//! tab and sends as a header with every API call (nerve_transport::webui, no
+//! cookie); `POST /logout` ends it. A session ends with its token: when a
+//! new owner token is made, the sessions of the old one stop working. A
+//! wrong token costs a delay and never locks the login
+//! ([`webui::WrongSecrets`]). A post must carry a matching `Origin` when the
+//! browser sends one.
 
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 
@@ -23,22 +24,20 @@ use nerve_proto::RpcError;
 use nerve_transport::http::{self, Request, Response};
 use nerve_transport::log::{Level, Query};
 use nerve_transport::net::BoxIo;
-use nerve_transport::webui::{self, Sessions, host_is_loopback, origin_matches, see_other};
+use nerve_transport::webui::{self, Sessions, host_is_loopback, origin_matches};
 
 use crate::center::{Center, Change, audit_rule};
 use crate::listen::Server;
+use crate::owner::OwnerToken;
 use crate::store::{PAIR_CODE_MAX_MINUTES, TokenRecord};
 use crate::util::{self, now_ms};
 
 const INDEX: &str = include_str!("ui/index.html");
 const APP_JS: &str = include_str!("ui/app.js");
 
-const WRONG_TOKEN: &str = "Wrong token.";
-const TOO_MANY: &str = "Too many wrong tokens. Wait a minute and try again.";
+const WRONG_TOKEN: &str = "Wrong owner token.";
 
 const API_BODY: usize = 1024 * 1024;
-/// Wrong tokens allowed per minute before logins pause.
-const LOGIN_TRIES: u32 = 5;
 /// How many log entries a view gets unless it asks for another number, and
 /// the most it may ask for.
 const LOG_PAGE: usize = 500;
@@ -46,24 +45,28 @@ const LOG_PAGE_MAX: usize = 1000;
 
 pub struct Ui {
     center: Center,
-    /// The token from the environment or a flag, besides the stored ones.
-    env_token: Option<String>,
-    login: bool,
+    /// Whether a harness token comes from the environment or a flag: the
+    /// Tokens page names it, though it cannot delete it.
+    env_token: bool,
+    /// Whether the UI listens on loopback, where the `Host` must name it.
+    loopback: bool,
+    owner: OwnerToken,
     sessions: Sessions,
-    failures: Mutex<(u32, Instant)>,
+    wrong: webui::WrongSecrets,
 }
 
 impl Ui {
-    /// `login` is required unless the UI only listens on loopback.
-    /// `env_token` is the harness token from the environment or a flag, if
-    /// any.
-    pub fn new(center: &Center, env_token: Option<String>, login: bool) -> Arc<Ui> {
+    /// `env_token` says whether a harness token comes from the environment
+    /// or a flag; `loopback` whether the UI listens on loopback. The owner
+    /// token is the one in the center's state folder.
+    pub fn new(center: &Center, env_token: bool, loopback: bool) -> Arc<Ui> {
         Arc::new(Ui {
             center: center.clone(),
-            env_token: env_token.filter(|t| !t.is_empty()),
-            login,
+            env_token,
+            loopback,
+            owner: OwnerToken::new(center.dir()),
             sessions: Sessions::new(),
-            failures: Mutex::new((0, Instant::now())),
+            wrong: webui::WrongSecrets::default(),
         })
     }
 
@@ -89,7 +92,7 @@ impl Ui {
 
     /// Answers one request.
     pub async fn request(&self, req: Request) -> Response {
-        if !self.login && !host_is_loopback(req.header("host")) {
+        if self.loopback && !host_is_loopback(req.header("host")) {
             return Response::text(403, "this UI answers only to a loopback host name");
         }
         // The page and what it loads are public: a navigation carries no
@@ -142,87 +145,55 @@ impl Ui {
         }
     }
 
-    /// The session `req`'s header names, while the token that opened it is
-    /// still one.
+    /// The session `req`'s header names, while the owner token that opened
+    /// it is still the one.
     fn session_of(&self, req: &Request) -> Option<String> {
         let (token, session) = self.sessions.of(req)?;
-        // Checked with the sessions unlocked: the check reads the center's
-        // state, and a request that waits for it holds up no other.
-        if let Some(h) = session.via
-            && !crate::mcp::token_hash_ok(&self.center, self.env_token.as_deref(), &h)
-        {
+        // Checked with the sessions unlocked: the check may read the token's
+        // file, and a request that waits for it holds up no other.
+        if !session.via.is_some_and(|h| self.owner.hash_ok(&h)) {
             self.sessions.end(&token);
             return None;
         }
         Some(token)
     }
 
+    /// Whether this tab is signed in. A session is only ever handed out by
+    /// the login.
     fn session_info(&self, req: &Request) -> Response {
-        if self.session_of(req).is_some() {
-            return Response::json(200, &json!({"login": self.login, "logged_in": true}));
-        }
-        if self.login {
-            return Response::json(200, &json!({"login": true, "logged_in": false}));
-        }
-        // Open on loopback: a session is handed out, so that every API call
-        // still comes from a page that asked here.
-        let token = self.sessions.start(None);
-        Response::json(
-            200,
-            &json!({"login": false, "logged_in": true, "session": token}),
-        )
+        let signed_in = self.session_of(req).is_some();
+        Response::json(200, &json!({"login": true, "logged_in": signed_in}))
     }
 
-    /// The login form, or the page itself when there is nothing to log in to.
     fn login_page(&self) -> Response {
-        if !self.login {
-            return see_other("/");
-        }
-        webui::login_page("Harness token", "One center for all your machines.")
+        webui::login_page("Owner token", "One center for all your machines.")
     }
 
     /// Checks the token the login form posted. The answer is the session for
     /// the page to keep, or the reason it was refused; the token never
     /// appears in a URL or a log.
     async fn login(&self, req: &Request) -> Response {
-        if !self.login {
-            return see_other("/");
-        }
-        {
-            let mut f = self.failures.lock().unwrap();
-            if f.1.elapsed() > Duration::from_secs(60) {
-                *f = (0, Instant::now());
-            }
-            if f.0 >= LOGIN_TRIES {
-                return Response::json(429, &json!({"error": TOO_MANY}))
-                    .with_header("Retry-After", "60");
-            }
-        }
         let log = self.center.log();
         let given = webui::posted_secret(req);
-        if given.is_empty()
-            || !crate::mcp::token_ok(&self.center, self.env_token.as_deref(), &given)
-        {
-            let tries = {
-                let mut f = self.failures.lock().unwrap();
-                f.0 += 1;
-                f.0
-            };
+        if given.is_empty() || !self.owner.ok(&given) {
             // The token that was tried is not logged: a typo of a good one is
             // as good as the token.
-            log.record(
-                Level::Warn,
-                None,
-                "a web UI sign-in was refused: wrong token",
-            );
-            if tries >= LOGIN_TRIES {
-                log.record(
+            match self.wrong.note() {
+                Some(1) => log.record(
                     Level::Warn,
                     None,
-                    "the web UI sign-in is locked for a minute after too many wrong tokens",
-                );
+                    "a web UI sign-in was refused: wrong owner token",
+                ),
+                Some(n) => log.record(
+                    Level::Warn,
+                    None,
+                    &format!(
+                        "{n} web UI sign-ins were refused in the last minute: wrong owner token"
+                    ),
+                ),
+                None => {}
             }
-            tokio::time::sleep(webui::WRONG_SECRET_DELAY).await;
+            self.wrong.wait().await;
             return Response::json(401, &json!({"error": WRONG_TOKEN}));
         }
         let token = self
@@ -404,11 +375,17 @@ impl Ui {
                     .map(|rule| json!({"rule": rule}))
                     .map_err(bad)
             }
+            // The tokens made here, and the one of the settings, which only
+            // a change of the settings removes.
             ("GET", "/api/tokens") => Ok(c.read(|st| {
+                let env = self
+                    .env_token
+                    .then(|| json!({"id": "", "label": "NERVE_HARNESS_TOKEN", "settings": true}));
                 json!(
-                    st.harness_tokens
-                        .iter()
-                        .map(|t| json!({"id": t.id, "label": t.label, "created_ms": t.created_ms}))
+                    env.into_iter()
+                        .chain(st.harness_tokens.iter().map(
+                            |t| json!({"id": t.id, "label": t.label, "created_ms": t.created_ms}),
+                        ))
                         .collect::<Vec<_>>()
                 )
             })),
@@ -657,10 +634,23 @@ mod tests {
     /// The header a page sends its session in.
     const SESSION: &str = "X-Nerve-Session";
 
-    /// The session an answer of `/api/session` or `/login` hands out.
+    /// The session an answer of `/login` hands out.
     fn session_token(r: &Response) -> String {
         let v: Value = serde_json::from_slice(&r.body).unwrap();
         v["session"].as_str().expect("a session").to_string()
+    }
+
+    /// Signs in with the owner token of `ui`'s center, as its owner does;
+    /// `host` is the request's `Host`.
+    async fn owner_login(ui: &Ui, host: (&str, &str)) -> Response {
+        let (token, _) = crate::owner::ensure(ui.center.dir()).unwrap();
+        ui.request(req(
+            "POST",
+            "/login",
+            &[host, ("Content-Type", "application/json")],
+            &json!({ "token": token }).to_string(),
+        ))
+        .await
     }
 
     /// Every command and sub-command of the node CLI, by the words after
@@ -680,9 +670,9 @@ mod tests {
     #[tokio::test]
     async fn the_pairing_card_offers_the_command_and_the_bare_link() {
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), None, false);
+        let ui = Ui::new(&center(d.path()), false, true);
         let h = ("Host", "127.0.0.1:7480");
-        let session = ui.request(req("GET", "/api/session", &[h], "")).await;
+        let session = owner_login(&ui, h).await;
         let ck = session_token(&session);
         let js = ui
             .request(req("GET", "/app.js", &[h, (SESSION, &ck)], ""))
@@ -703,9 +693,9 @@ mod tests {
     async fn the_help_page_lists_every_node_command() {
         use clap::CommandFactory;
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), None, false);
+        let ui = Ui::new(&center(d.path()), false, true);
         let h = ("Host", "127.0.0.1:7480");
-        let session = ui.request(req("GET", "/api/session", &[h], "")).await;
+        let session = owner_login(&ui, h).await;
         let ck = session_token(&session);
         // The page: a tab in the menu, drawn from /api/help.
         let index = ui.request(req("GET", "/", &[h, (SESSION, &ck)], "")).await;
@@ -757,7 +747,7 @@ mod tests {
         }
         assert_eq!(listed.len(), cli.len());
         // The help is for a signed-in browser like every other API.
-        let ui = Ui::new(&center(d.path()), Some("nrv_x".into()), true);
+        let ui = Ui::new(&center(d.path()), true, true);
         let r = ui.request(req("GET", "/api/help", &[h], "")).await;
         assert_eq!(r.status, 401);
     }
@@ -792,7 +782,7 @@ mod tests {
     async fn the_pairing_status_says_when_a_code_is_used_up() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, None, false);
+        let ui = Ui::new(&c, false, true);
         let code = new_code(&ui).await;
         assert_eq!(pair_status(&ui, &code).await["open"], true);
         // Asking, even with wrong codes, uses up nothing.
@@ -812,7 +802,7 @@ mod tests {
     async fn a_code_names_only_the_machine_it_paired() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, None, false);
+        let ui = Ui::new(&c, false, true);
         // Two cards open (two tabs): another code pairs a machine.
         let mine = new_code(&ui).await;
         let other = new_code(&ui).await;
@@ -839,7 +829,7 @@ mod tests {
     async fn a_pairing_that_is_refused_leaves_its_code_open() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, None, false);
+        let ui = Ui::new(&c, false, true);
         let first = new_code(&ui).await;
         assert_eq!(c.pair(&pair_body(&first, "box-1", 7)).0, 200);
         // The same key again with a new code: refused with 409. The page
@@ -865,9 +855,9 @@ mod tests {
     #[tokio::test]
     async fn the_page_closes_the_pairing_card_when_the_code_is_used() {
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), None, false);
+        let ui = Ui::new(&center(d.path()), false, true);
         let h = ("Host", "127.0.0.1:7480");
-        let session = ui.request(req("GET", "/api/session", &[h], "")).await;
+        let session = owner_login(&ui, h).await;
         let ck = session_token(&session);
         let js = ui
             .request(req("GET", "/app.js", &[h, (SESSION, &ck)], ""))
@@ -921,9 +911,9 @@ mod tests {
             );
         }
         store.save(d.path()).unwrap();
-        let ui = Ui::new(&center(d.path()), None, false);
+        let ui = Ui::new(&center(d.path()), false, true);
         let h = ("Host", "127.0.0.1:7480");
-        let session = ui.request(req("GET", "/api/session", &[h], "")).await;
+        let session = owner_login(&ui, h).await;
         let ck = session_token(&session);
         // The page draws overall numbers, and one machine's from a searchable
         // list of its own: a button and a search field, not a <select>.
@@ -960,7 +950,7 @@ mod tests {
     async fn the_pairing_code_lifetime_is_a_setting_of_1_to_1440_minutes() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, None, false);
+        let ui = Ui::new(&c, false, true);
         // Ten minutes unless the owner changes it.
         let got = center_settings(&ui, None).await.unwrap();
         assert_eq!(got["pair_code_minutes"], 10);
@@ -999,7 +989,7 @@ mod tests {
             .unwrap();
         drop(ui);
         drop(c);
-        let ui = Ui::new(&center(d.path()), None, false);
+        let ui = Ui::new(&center(d.path()), false, true);
         let got = center_settings(&ui, None).await.unwrap();
         assert_eq!(got["pair_code_minutes"], 1440);
         assert_eq!(got["retention_days"], 5);
@@ -1181,7 +1171,7 @@ mod tests {
     #[tokio::test]
     async fn the_capabilities_tab_checks_its_form_before_the_node_does() {
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), None, false);
+        let ui = Ui::new(&center(d.path()), false, true);
         let good = json!({"name": "say.back", "summary": "Says it back.", "effect": "read",
                           "command": "echo {word}",
                           "params": r#"{"type": "object", "properties": {"word": {"type": "string"}}, "required": ["word"]}"#,
@@ -1299,7 +1289,7 @@ mod tests {
             n.set_descriptor(desc("n1", vec![lamp]));
             s.nodes.insert("n1".into(), n);
         });
-        let ui = Ui::new(&c, None, false);
+        let ui = Ui::new(&c, false, true);
         let allow = async |body: Value| {
             ui.api(&req("POST", "/api/checker/allow", &[], ""), &body)
                 .await
@@ -1838,16 +1828,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_ui_needs_a_loopback_host_and_its_session() {
+    async fn a_loopback_ui_needs_a_loopback_host_and_a_session() {
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), None, false);
+        let ui = Ui::new(&center(d.path()), false, true);
         let h = ("Host", "127.0.0.1:7480");
-        // A rebound name is refused.
+        // A rebound name is refused, the login too.
         let r = ui
             .request(req("GET", "/api/session", &[("Host", "evil.example")], ""))
             .await;
         assert_eq!(r.status, 403);
-        let r = ui.request(req("GET", "/api/session", &[h], "")).await;
+        let r = owner_login(&ui, ("Host", "evil.example")).await;
+        assert_eq!(r.status, 403);
+        let r = owner_login(&ui, h).await;
         assert_eq!(r.status, 200);
         let ck = session_token(&r);
         // No session, no API; a cookie with the session is no session.
@@ -1888,11 +1880,15 @@ mod tests {
         assert!(v["link"].as_str().unwrap().starts_with("nerve://pair?"));
     }
 
-    const TOKEN: &str = "nrv_test-token-long";
+    /// The owner token of [`locked`]'s center.
+    const TOKEN: &str = "nrv_owner_test-token-long";
     const HOST: (&str, &str) = ("Host", "center.example:7480");
 
+    /// A UI beyond loopback whose center's owner token is [`TOKEN`].
     fn locked(dir: &std::path::Path) -> Arc<Ui> {
-        Ui::new(&center(dir), Some(TOKEN.into()), true)
+        let c = center(dir);
+        std::fs::write(crate::owner::path(dir), TOKEN).unwrap();
+        Ui::new(&c, false, false)
     }
 
     fn header<'a>(r: &'a Response, name: &str) -> Option<&'a str> {
@@ -1968,7 +1964,7 @@ mod tests {
         assert!(v.get("session").is_none(), "no session without a login");
         let r = ui.request(req("GET", "/login", &[HOST], "")).await;
         assert_eq!(r.status, 200);
-        assert!(body(&r).contains("Harness token"));
+        assert!(body(&r).contains("Owner token"));
         assert!(body(&r).contains(r#"src="/login.js""#));
     }
 
@@ -2021,7 +2017,9 @@ mod tests {
     #[tokio::test]
     async fn the_token_is_read_from_the_form_encoding_too() {
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), Some("p&w=d x%".into()), true);
+        let c = center(d.path());
+        std::fs::write(crate::owner::path(d.path()), "p&w=d%").unwrap();
+        let ui = Ui::new(&c, false, false);
         let form = |t: &str| {
             req(
                 "POST",
@@ -2030,12 +2028,12 @@ mod tests {
                 &format!("token={t}"),
             )
         };
-        let r = ui.request(form("p%26w%3Dd+x%25")).await;
+        let r = ui.request(form("p%26w%3Dd%25")).await;
         assert_eq!(r.status, 200);
         session_token(&r);
         // The raw text is not the token.
-        assert_eq!(ui.request(form("p&w=d x%")).await.status, 401);
-        assert_eq!(sign_in(&ui, "p&w=d x%").await.status, 200);
+        assert_eq!(ui.request(form("p&w=d%")).await.status, 401);
+        assert_eq!(sign_in(&ui, "p&w=d%").await.status, 200);
     }
 
     #[tokio::test]
@@ -2124,148 +2122,133 @@ mod tests {
         serde_json::from_slice(&r.body).unwrap_or(Value::Null)
     }
 
+    /// Wrong tokens never lock the login: each one only waits. With a
+    /// lock that counts every caller's tries, any process that reaches the
+    /// port kept the owner out.
     #[tokio::test]
-    async fn repeated_wrong_tokens_are_throttled() {
+    async fn wrong_tokens_wait_but_never_lock_the_login() {
         let d = tempfile::tempdir().unwrap();
         let ui = locked(d.path());
-        for _ in 0..LOGIN_TRIES {
+        for _ in 0..8 {
+            let t = std::time::Instant::now();
             assert_eq!(sign_in(&ui, "nope").await.status, 401);
+            assert!(t.elapsed() >= webui::WRONG_SECRET_DELAY);
         }
-        // Even the right token waits until the minute is over.
         let r = sign_in(&ui, TOKEN).await;
-        assert_eq!(r.status, 429);
-        assert_eq!(header(&r, "Retry-After"), Some("60"));
-        assert_eq!(json(&r)["error"], TOO_MANY);
-        assert!(json(&r).get("session").is_none());
+        assert_eq!(r.status, 200);
+        session_token(&r);
+        // The log tells the first at once, the rest a minute later.
+        let told = ui.center.log_json(&Query {
+            text: Some("sign-in".into()),
+            limit: 100,
+            ..Default::default()
+        });
+        assert_eq!(told["entries"].as_array().unwrap().len(), 1, "{told}");
     }
 
+    /// No session without the owner token: the page that asks gets none,
+    /// on loopback too, and the API refuses a caller without one.
     #[tokio::test]
-    async fn an_open_ui_has_no_login() {
+    async fn a_loopback_ui_hands_out_no_session_without_a_login() {
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), None, false);
+        let ui = Ui::new(&center(d.path()), false, true);
         let h = ("Host", "127.0.0.1:7480");
-        let r = ui.request(req("GET", "/", &[h], "")).await;
-        assert_eq!(r.status, 200);
+        let r = ui.request(req("GET", "/api/session", &[h], "")).await;
+        let v = json(&r);
+        assert_eq!(
+            (v["login"].clone(), v["logged_in"].clone()),
+            (true.into(), false.into())
+        );
+        assert!(v.get("session").is_none(), "{v}");
         let r = ui.request(req("GET", "/login", &[h], "")).await;
-        assert_eq!((r.status, header(&r, "Location")), (303, Some("/")));
-        let r = ui.request(req("POST", "/login", &[h], "token=x")).await;
-        assert_eq!((r.status, header(&r, "Location")), (303, Some("/")));
-        let r = ui.request(req("POST", "/logout", &[h], "")).await;
         assert_eq!(r.status, 200);
-        // Each tab that asks gets a session of its own.
-        let a = session_token(&ui.request(req("GET", "/api/session", &[h], "")).await);
-        let b = session_token(&ui.request(req("GET", "/api/session", &[h], "")).await);
-        assert_ne!(a, b);
+        assert!(body(&r).contains("Owner token"));
+        let r = ui
+            .request(req("POST", "/api/checker", &[h], r#"{"config":{}}"#))
+            .await;
+        assert_eq!(r.status, 401);
+        let r = ui
+            .request(req("POST", "/api/tokens/create", &[h], "{}"))
+            .await;
+        assert_eq!(r.status, 401);
     }
 
+    /// A harness token opens `/mcp` only: one made in the UI, or the one
+    /// of the settings, never logs in.
     #[tokio::test]
-    async fn a_token_made_in_the_ui_logs_in_and_a_session_ends_with_its_deletion() {
+    async fn a_harness_token_never_logs_in() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        // The token is made in the open UI, as on a fresh center.
-        let open = Ui::new(&c, None, false);
+        let ui = Ui::new(&c, false, true);
         let h = ("Host", "127.0.0.1:7480");
-        let r = open.request(req("GET", "/api/session", &[h], "")).await;
-        let ck = session_token(&r);
-        let made = |label: &str| {
-            req(
+        let ck = session_token(&owner_login(&ui, h).await);
+        let r = ui
+            .request(req(
                 "POST",
                 "/api/tokens/create",
                 &[h, (SESSION, &ck)],
-                &format!(r#"{{"label":"{label}"}}"#),
+                r#"{"label":"a"}"#,
+            ))
+            .await;
+        let harness = json(&r)["token"].as_str().unwrap().to_string();
+        let posted = |t: &str| {
+            req(
+                "POST",
+                "/login",
+                &[h, ("Content-Type", "application/json")],
+                &json!({ "token": t }).to_string(),
             )
         };
-        let first = serde_json::from_slice::<Value>(&open.request(made("a")).await.body).unwrap();
-        let (token, id) = (
-            first["token"].as_str().unwrap().to_string(),
-            first["id"].as_str().unwrap().to_string(),
-        );
-        let other = serde_json::from_slice::<Value>(&open.request(made("b")).await.body).unwrap();
+        assert_eq!(ui.request(posted(&harness)).await.status, 401);
+        // The Tokens page names the one of the settings, which no button
+        // deletes.
+        let ui = Ui::new(&c, true, true);
+        let ck = session_token(&owner_login(&ui, h).await);
+        let r = ui
+            .request(req("GET", "/api/tokens", &[h, (SESSION, &ck)], ""))
+            .await;
+        let listed = json(&r);
+        assert_eq!(listed[0]["settings"], true, "{listed}");
+        assert_eq!(listed[0]["label"], "NERVE_HARNESS_TOKEN");
+        assert_eq!(listed[1]["label"], "a");
+    }
 
-        // Later, with the login on, that same token is the login.
-        let ui = Ui::new(&c, None, true);
-        assert_eq!(sign_in(&ui, "nrv_not-made-here").await.status, 401);
-        let r = sign_in(&ui, &format!("  {token}\r\n")).await;
+    /// A new owner token works at once and ends the sessions of the old
+    /// one, on a running center; only the whole token logs in.
+    #[tokio::test]
+    async fn a_new_owner_token_ends_the_old_sessions() {
+        let d = tempfile::tempdir().unwrap();
+        let ui = locked(d.path());
+        assert_eq!(sign_in(&ui, &TOKEN[..TOKEN.len() - 1]).await.status, 401);
+        assert_eq!(sign_in(&ui, &format!("{TOKEN}x")).await.status, 401);
+        let r = sign_in(&ui, &format!("  {TOKEN}\r\n")).await;
         assert_eq!(r.status, 200);
-        let session = session_token(&r);
-        let with = [HOST, (SESSION, session.as_str())];
+        let old = session_token(&r);
+        let with = [HOST, (SESSION, old.as_str())];
         assert_eq!(
             ui.request(req("GET", "/api/overview", &with, ""))
                 .await
                 .status,
             200
         );
-
-        // The other token's session survives deleting this one; this one's does not.
-        let ck2 = session_token(&sign_in(&ui, other["token"].as_str().unwrap()).await);
-        let del = req(
-            "POST",
-            "/api/tokens/delete",
-            &[HOST, (SESSION, &session)],
-            &format!(r#"{{"id":"{id}"}}"#),
-        );
-        assert_eq!(ui.request(del).await.status, 200);
-        let r = ui.request(req("GET", "/api/overview", &with, "")).await;
-        assert_eq!(r.status, 401);
-        let still = [HOST, (SESSION, ck2.as_str())];
+        let new = crate::owner::renew(d.path()).unwrap();
         assert_eq!(
-            ui.request(req("GET", "/api/overview", &still, ""))
+            ui.request(req("GET", "/api/overview", &with, ""))
                 .await
                 .status,
-            200
+            401
         );
-        // The deleted token no longer logs in.
-        assert_eq!(sign_in(&ui, &token).await.status, 401);
-    }
-
-    #[tokio::test]
-    async fn the_flag_token_logs_in_whole_and_only_whole() {
-        let d = tempfile::tempdir().unwrap();
-        let c = center(d.path());
-        let ui = Ui::new(&c, Some("from-the-flag".into()), true);
-        let r = sign_in(&ui, "from-the-flag").await;
-        assert_eq!(r.status, 200);
-        // Its session lives although no stored token backs it.
-        let ck = session_token(&r);
-        let r = ui
-            .request(req("GET", "/api/overview", &[HOST, (SESSION, &ck)], ""))
-            .await;
-        assert_eq!(r.status, 200);
-        assert_eq!(sign_in(&ui, "from-the-fla").await.status, 401);
-        assert_eq!(sign_in(&ui, "from-the-flag-and-more").await.status, 401);
-    }
-
-    #[tokio::test]
-    async fn with_the_login_off_a_token_changes_nothing() {
-        let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), Some(TOKEN.into()), false);
-        let h = ("Host", "127.0.0.1:7480");
-        let r = ui.request(req("GET", "/login", &[h], "")).await;
-        assert_eq!((r.status, header(&r, "Location")), (303, Some("/")));
-        let r = ui
-            .request(req("POST", "/login", &[h], &format!("token={TOKEN}")))
-            .await;
-        assert_eq!((r.status, header(&r, "Location")), (303, Some("/")));
-        let r = ui.request(req("GET", "/api/session", &[h], "")).await;
-        let v: Value = serde_json::from_slice(&r.body).unwrap();
-        assert_eq!(
-            (v["login"].clone(), v["logged_in"].clone()),
-            (false.into(), true.into())
-        );
-        // Still only for this machine.
-        let r = ui
-            .request(req("GET", "/api/session", &[("Host", "evil.example")], ""))
-            .await;
-        assert_eq!(r.status, 403);
+        assert_eq!(sign_in(&ui, TOKEN).await.status, 401);
+        assert_eq!(sign_in(&ui, &new).await.status, 200);
     }
 
     #[tokio::test]
     async fn tokens_are_shown_once_and_kept_hashed() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, None, false);
+        let ui = Ui::new(&c, false, true);
         let h = ("Host", "localhost:7480");
-        let r = ui.request(req("GET", "/api/session", &[h], "")).await;
+        let r = owner_login(&ui, h).await;
         let ck = session_token(&r);
         let r = ui
             .request(req(
@@ -2293,20 +2276,14 @@ mod tests {
         r
     }
 
-    /// A center with a UI that needs no login, a session for it, and a log
+    /// A center with a UI on loopback, a session for it, and a log
     /// with a few nodes' entries in it.
     async fn with_a_log(dir: &std::path::Path) -> (Center, Arc<Ui>, String) {
         let c = center(dir);
-        let ui = Ui::new(&c, None, false);
-        let session = ui
-            .request(req(
-                "GET",
-                "/api/session",
-                &[("Host", "127.0.0.1:7480")],
-                "",
-            ))
-            .await;
-        let cookie = session_token(&session);
+        let ui = Ui::new(&c, false, true);
+        // A session as the login hands it out, without the login's own line.
+        crate::owner::ensure(c.dir()).unwrap();
+        let cookie = ui.sessions.start(ui.owner.hash());
         let log = c.log();
         log.set_level(Level::Debug);
         log.record(Level::Info, None, "nerve-center started");
@@ -2531,7 +2508,7 @@ mod tests {
     async fn the_log_level_is_set_in_the_center_settings() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, None, false);
+        let ui = Ui::new(&c, false, true);
         let got = center_settings(&ui, None).await.unwrap();
         assert_eq!(got["log_level"], "info");
         assert_eq!(got["log_level_pinned"], false);
@@ -2623,7 +2600,7 @@ mod tests {
             log_level: Some(Level::Warn),
         })
         .unwrap();
-        let ui = Ui::new(&c, None, false);
+        let ui = Ui::new(&c, false, true);
         let got = center_settings(&ui, None).await.unwrap();
         assert_eq!(got["log_level"], "debug");
         assert_eq!(got["log_level_now"], "warn");
@@ -2645,10 +2622,10 @@ mod tests {
     #[tokio::test]
     async fn the_ui_logs_who_gets_in_and_leaves_every_secret_out() {
         let d = tempfile::tempdir().unwrap();
-        let c = center(d.path());
-        let ui = Ui::new(&c, Some(TOKEN.into()), true);
+        let ui = locked(d.path());
+        let c = ui.center.clone();
         // A wrong token is told, and what was typed is not.
-        let r = sign_in(&ui, "typo-of-nrv_test-token-lon").await;
+        let r = sign_in(&ui, "typo-of-nrv_owner_test-token-lon").await;
         assert_eq!(r.status, 401);
         let r = sign_in(&ui, TOKEN).await;
         assert_eq!(r.status, 200);
@@ -2678,7 +2655,7 @@ mod tests {
                 "the harness token labelled \"ci\" was deleted",
                 "a harness token was made, labelled \"ci\"",
                 "signed in to the web UI",
-                "a web UI sign-in was refused: wrong token",
+                "a web UI sign-in was refused: wrong owner token",
             ]
         );
         let file = std::fs::read_to_string(d.path().join("log.jsonl")).unwrap();
@@ -2686,19 +2663,6 @@ mod tests {
             assert!(!file.contains(secret), "{secret} is in the file");
             assert!(!v.to_string().contains(secret), "{secret} is in the view");
         }
-        // Five wrong tokens lock the sign-in; the log says so once.
-        for _ in 0..LOGIN_TRIES {
-            sign_in(&ui, "wrong").await;
-        }
-        let v = c.log_json(&Query {
-            limit: 100,
-            ..Query::default()
-        });
-        let locked = texts(&v)
-            .into_iter()
-            .filter(|t| t.contains("locked for a minute"))
-            .count();
-        assert_eq!(locked, 1);
     }
 
     #[tokio::test]
@@ -2725,9 +2689,9 @@ mod tests {
                 },
             );
         });
-        let ui = Ui::new(&c, None, false);
+        let ui = Ui::new(&c, false, true);
         let h = ("Host", "127.0.0.1:7480");
-        let r = ui.request(req("GET", "/api/session", &[h], "")).await;
+        let r = owner_login(&ui, h).await;
         let ck = session_token(&r);
         let post = |body: &'static str| {
             ui.request(req(

@@ -7,25 +7,32 @@ host. The installed node on Linux has a web UI of its own:
 
 ## Log in
 
-The UI logs in with a [harness token](harness.md#tokens), the same secret the
-HTTP endpoint takes.
+The UI always asks for the **owner token**, on loopback too. It is not a
+[harness token](harness.md#tokens): those open the HTTP MCP endpoint only.
+A harness keeps its token in its own settings, where the agent may read it,
+and this UI can switch the action checker off and change what the machines
+allow, so a harness token never logs in here.
 
-| Where the UI listens | Login |
-|---|---|
-| Loopback, no token yet | None. This lets you make the first token |
-| Loopback, a token exists | On. `--ui-no-login` turns it off |
-| Any other address (`--ui 0.0.0.0:7480`) | Always on, and the UI uses TLS. The center refuses to start without a token or with `--ui-no-login` |
-
+- The center makes the owner token at its first start. It prints it on
+  stderr, and keeps it in `owner-token` in the state folder (mode 0600):
+  `~/.local/state/nerve-center/owner-token` for a center you run yourself,
+  `/var/lib/nerve-center/owner-token` for the [service](center.md#run-it-as-a-service),
+  whose `install` prints it. The log says where it is, never the token.
+- `nerve-center owner-token` prints it again. `nerve-center owner-token --new`
+  makes a new one: the old one stops at once, also on a running center, and
+  the sessions it opened end. Run it as the center's user (`--state-dir` for
+  another state folder), or with `sudo` for the service.
+- Beyond loopback (`--ui 0.0.0.0:7480`) the UI uses TLS.
 - A browser without a session goes to `/login` and posts the token once.
 - The session lasts 12 hours. **Sign out** ends it.
 - The session belongs to the browser tab. A new tab, or the browser opened
   again, logs in again (a password manager can fill the token). No cookie is
   kept: a cookie would also go to every other program that listens on a port
   of the same host in your browser.
-- Five wrong tokens in a minute lock the login for the rest of that minute.
-- Deleting a token ends the sessions that used it.
-- Lost the token? Start the center once with `--ui-no-login` on loopback and
-  make a new one.
+- A wrong token is answered after a short wait. It never locks the login, so
+  nobody can keep you out by trying wrong tokens.
+- A [backup](backup.md) does not hold the owner token. A restored center
+  makes a new one at its next start.
 
 To reach a UI that listens on loopback from another machine, use an SSH tunnel:
 
@@ -256,7 +263,9 @@ Built like the desktop app's Help: two parts that open and close on their own.
   a new key and shows its pin once; **Serve the new key now** ends the 7 days
   in which the old key is still served ([center](center.md#rotate-the-key)).
 - **Harness tokens.** Make a token with a label. It is shown once. Delete one
-  to stop it.
+  to stop it. The token of the center's settings (`NERVE_HARNESS_TOKEN` or
+  `--harness-token`) is listed too, without **Delete**: remove it from the
+  settings. A harness token does not log in to this UI.
 - **Machines.** For each online machine that gave the center the settings
   grant: its settings as JSON, with **Reload** and **Save**, and the sudo
   switch. The capabilities the center adds are on the Capabilities page, not

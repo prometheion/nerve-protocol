@@ -2,9 +2,10 @@
 
 The harness starts `nerve-center` itself, like any MCP server. Every setting is
 a flag or an environment variable. The only subcommands are `backup` and
-`restore`, which you run by hand ([backup](backup.md)), and `install`,
-`update` and `uninstall`: on Linux the center can also
-[run as a service](#run-it-as-a-service) that starts with the machine.
+`restore`, which you run by hand ([backup](backup.md)), `owner-token`
+([web UI](web-ui.md#log-in)), and `install`, `update` and `uninstall`: on
+Linux the center can also [run as a service](#run-it-as-a-service) that
+starts with the machine.
 
 ## Add it to the harness
 
@@ -28,7 +29,13 @@ The center then listens on:
 | 7443 | nodes | `--listen` |
 | 7480 | the [web UI](web-ui.md), on this machine only | `--ui` |
 
-Open `http://127.0.0.1:7480` to [pair a machine](pairing.md).
+Open `http://127.0.0.1:7480` to [pair a machine](pairing.md). It asks for
+the [owner token](web-ui.md#log-in), which the center made at its first
+start and keeps in `~/.local/state/nerve-center/owner-token`:
+
+```sh
+cat ~/.local/state/nerve-center/owner-token
+```
 
 ## Settings
 
@@ -40,10 +47,9 @@ Open `http://127.0.0.1:7480` to [pair a machine](pairing.md).
 | `--public-url` | `NERVE_PUBLIC_URL` | `https://<host name>:<port>` | The address written into pairing links |
 | `--plain-loopback` | `NERVE_PLAIN_LOOPBACK` | off | Plain HTTP for nodes; only with a loopback `--listen` |
 | `--ui` | `NERVE_UI` | `127.0.0.1:7480` | Web UI address, or `off` |
-| `--ui-no-login` | `NERVE_UI_NO_LOGIN` | off | No login for the web UI; refused beyond loopback |
 | `--mcp` | `NERVE_MCP` | `stdio` | `stdio`, `http` or `none` |
 | `--mcp-listen` | `NERVE_MCP_LISTEN` | `127.0.0.1:7481` | Address of the HTTP MCP endpoint |
-| `--harness-token` | `NERVE_HARNESS_TOKEN` | none | A [harness token](harness.md#tokens) |
+| `--harness-token` | `NERVE_HARNESS_TOKEN` | none | A [harness token](harness.md#tokens) for the HTTP MCP endpoint; it does not log in to the web UI |
 | `--call-wait` | `NERVE_CALL_WAIT` | `20s` | How long a call may run before `execute` answers with a job instead ([long calls](harness.md#long-calls-become-jobs)): `20`, `20s` or `500ms`, 10 ms to 600 s. Keep it below the time your harness gives a tool call |
 | `--log` | `NERVE_LOG` | the level set in the web UI, `info` at first | `error`, `warn`, `info` or `debug`; wins over the stored level for this run. The [log](logs.md) goes to stderr and to `log.jsonl` |
 
@@ -119,13 +125,14 @@ In the state folder:
 | `tls.pem` | The center's key and certificate |
 | `tls.next.pem` | The new key, during the 7 days after a [key rotation](#rotate-the-key) |
 | `state.json` | Center id and name, paired machines with their public keys and last descriptions, hashed harness tokens, daily statistics, the settings of the [action checker](action-checker.md) |
+| `owner-token` | The [owner token](web-ui.md#log-in), which logs in to the web UI (mode 0600). Not in a backup |
 | `log.jsonl` | The [log](logs.md): links, pairing, changes, refused and failed calls, the action checker's decisions, errors. `log.jsonl.1` is the older half |
 | `checker-model.token` | The bearer token of the action checker's model endpoint, when you set one (mode 0600) |
 | `checker/` | The action checker's local model, when you installed it: the llama.cpp build and the model file, 1.1 or 3.0 GB |
 
-It never stores file contents, command output or arguments. The one secret is
-the endpoint token, which is in a file of its own and not in a
-[backup](backup.md#the-center).
+It never stores file contents, command output or arguments. The secrets are
+the owner token and the endpoint token, each in a file of its own and not in
+a [backup](backup.md#the-center).
 
 ## Run it as a service
 
@@ -157,27 +164,31 @@ sudo ./nerve-center-x86_64-linux install
 2. Makes the state folder `/var/lib/nerve-center`, private to that user
    (mode 0700). A folder an earlier install left behind is given to the new
    user.
-3. Writes the settings file `/etc/nerve-center/center.env`, which belongs to
-   root (mode 0600), with a new harness token. A settings file that is there
-   already is kept as it is.
-4. Copies the program to `/usr/local/bin/nerve-center`.
-5. Writes the unit `/etc/systemd/system/nerve-center.service`, enables it
+3. Makes the [owner token](web-ui.md#log-in) in
+   `/var/lib/nerve-center/owner-token` (mode 0600), unless one is there.
+4. Writes the settings file `/etc/nerve-center/center.env`, which belongs to
+   root (mode 0600), with a new harness token for the HTTP MCP endpoint. A
+   settings file that is there already is kept as it is.
+5. Copies the program to `/usr/local/bin/nerve-center`.
+6. Writes the unit `/etc/systemd/system/nerve-center.service`, enables it
    and starts it. It waits until the center answers.
 
 Running `install` again repairs what is missing and restarts the service.
 
-Then open the web UI, `http://127.0.0.1:7480`, and log in with the harness
-token:
+Last it prints the owner token. Open the web UI, `http://127.0.0.1:7480`,
+and log in with it. To see it again, or to make a new one:
 
 ```sh
-sudo grep NERVE_HARNESS_TOKEN /etc/nerve-center/center.env
+sudo cat /var/lib/nerve-center/owner-token
+sudo nerve-center --state-dir /var/lib/nerve-center owner-token --new
 ```
 
-The web UI asks for it from the start, so no other user of the machine gets
-in before you. Harnesses on this machine use the HTTP MCP endpoint,
-`http://127.0.0.1:7481/mcp`, with that token or one made in the web UI
-([harness](harness.md)). A harness cannot start its own `nerve-center` on
-this machine while the service runs: the node port is taken.
+Harnesses on this machine use the HTTP MCP endpoint,
+`http://127.0.0.1:7481/mcp`, with the harness token of the settings file
+(`sudo grep NERVE_HARNESS_TOKEN /etc/nerve-center/center.env`) or one made
+in the web UI ([harness](harness.md)). A harness cannot start its own
+`nerve-center` on this machine while the service runs: the node port is
+taken.
 
 | What | Where |
 |---|---|
@@ -257,7 +268,7 @@ sudo nerve-center uninstall --purge   # deletes them too
 `/var/lib/nerve-center` and `/etc/nerve-center` stay and belong to root from
 then on, so no later user with the old uid gets the center's key. A later
 `install` takes them up again: the center comes back with its pairings and
-its harness token. `--purge` deletes them.
+its harness token and its owner token. `--purge` deletes them.
 
 `install`, `update` and `uninstall` are refused from a command that the node
 installed on the same machine runs for a center, as the node's own are

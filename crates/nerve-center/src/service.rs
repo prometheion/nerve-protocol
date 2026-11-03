@@ -136,8 +136,8 @@ WantedBy=multi-user.target
     }
 
     /// The settings file `install` writes when there is none: the harness
-    /// token, which the web UI asks for from the start, and the other
-    /// settings as comments with their defaults.
+    /// token of the HTTP MCP endpoint, and the other settings as comments
+    /// with their defaults.
     pub fn settings_text(token: &str) -> String {
         format!(
             "# The settings of the installed center, read by the service at its start:
@@ -145,8 +145,9 @@ WantedBy=multi-user.target
 # wrote this file once and keeps it. Each variable is a flag of
 # `nerve-center --help`.
 #
-# The harness token: the web UI logs in with it, and harnesses send it to the
-# HTTP MCP endpoint. More can be made in the web UI.
+# The harness token: harnesses send it to the HTTP MCP endpoint. It does not
+# log in to the web UI, which asks for the owner token in
+# /var/lib/nerve-center/owner-token. More can be made in the web UI.
 NERVE_HARNESS_TOKEN={token}
 #NERVE_NAME=nerve-center
 #NERVE_LISTEN=0.0.0.0:7443
@@ -327,9 +328,9 @@ async fn execute_on(
         Cmd::Install => "install",
         Cmd::Update { .. } => "update",
         Cmd::Uninstall { .. } => "uninstall",
-        // `main` gives these to crate::backup.
-        Cmd::Backup { .. } | Cmd::Restore { .. } => {
-            return Err("backup and restore are not service commands".into());
+        // `main` gives these to crate::backup and crate::owner.
+        Cmd::Backup { .. } | Cmd::Restore { .. } | Cmd::OwnerToken { .. } => {
+            return Err("backup, restore and owner-token are not service commands".into());
         }
     };
     if !given.is_empty() {
@@ -352,7 +353,9 @@ async fn execute_on(
         }
         Cmd::Update { from } => update(layout, sys, from.as_deref(), out).await,
         Cmd::Uninstall { purge } => uninstall(layout, sys, purge, out),
-        Cmd::Backup { .. } | Cmd::Restore { .. } => unreachable!("refused above"),
+        Cmd::Backup { .. } | Cmd::Restore { .. } | Cmd::OwnerToken { .. } => {
+            unreachable!("refused above")
+        }
     }
 }
 
@@ -388,12 +391,16 @@ pub fn install(
     let state = &layout.state;
     nerve_transport::files::create_private_dir(state)
         .map_err(|e| format!("{}: {e}", state.display()))?;
-    {
+    // The owner token is made here, before the service first starts, so
+    // that install can say it; one an earlier install made is kept.
+    let owner_token = {
         // An earlier install's folder may hold what its user put there; it
-        // is changed as that user, and a link in its place is refused.
+        // is changed and read as that user, and a link in its place is
+        // refused.
         let _owner = as_owner_of(state)?;
         set_mode(state, 0o700)?;
-    }
+        crate::owner::ensure(state)?.0
+    };
     // The folder may be left from an earlier install, whose user had
     // another uid: everything in it is given to this one.
     sys.give(state, account.uid, account.gid)?;
@@ -425,8 +432,10 @@ pub fn install(
     );
     let _ = writeln!(
         out,
-        "Next: open the web UI (http://127.0.0.1:7480 unless {} says otherwise) and log in with its harness token: `sudo grep NERVE_HARNESS_TOKEN {}`.",
+        "Next: open the web UI (http://127.0.0.1:7480 unless {} says otherwise) and log in with the owner token:\n\n    {owner_token}\n\nIt is kept in {} (`sudo cat` it, or `sudo nerve-center --state-dir {} owner-token --new` makes a new one). Harnesses use the HTTP MCP endpoint with the harness token in that settings file: `sudo grep NERVE_HARNESS_TOKEN {}`.",
         layout.settings().display(),
+        crate::owner::path(state).display(),
+        state.display(),
         layout.settings().display()
     );
     Ok(())
@@ -841,6 +850,17 @@ mod tests {
         assert!(out.contains("made the user nerve-center"), "{out}");
         assert!(out.contains("with a new harness token"), "{out}");
         assert!(out.contains("sudo grep NERVE_HARNESS_TOKEN"), "{out}");
+        // The owner token is made before the service starts, kept private in
+        // the state folder, and said with where it is.
+        let owner = crate::owner::read(&l.state)
+            .unwrap()
+            .expect("an owner token");
+        assert!(owner.starts_with(crate::owner::PREFIX), "{owner}");
+        let owner_file = crate::owner::path(&l.state);
+        assert_eq!(mode(&owner_file), 0o600);
+        assert!(out.contains(&format!("\n    {owner}\n")), "{out}");
+        assert!(out.contains(&owner_file.display().to_string()), "{out}");
+        assert!(out.contains("owner-token --new"), "{out}");
         // The user, made once with the state folder as its home.
         assert_eq!(
             sys.calls(),
@@ -911,6 +931,8 @@ mod tests {
         assert!(out.contains("kept the settings"), "{out}");
         assert_eq!(std::fs::read(&l.bin).unwrap(), b"nerve-center 1.0.1\n");
         assert_eq!(token(&l), first);
+        assert_eq!(crate::owner::read(&l.state).unwrap(), Some(owner.clone()));
+        assert!(out.contains(&owner), "{out}");
         assert_eq!(
             sys.calls()
                 .iter()
@@ -925,7 +947,7 @@ mod tests {
     }
 
     /// The settings file the unit reads gives the center a harness token
-    /// that its flags take, so the web UI asks for it from the start.
+    /// that its flags take, for the HTTP MCP endpoint.
     #[test]
     fn the_settings_hold_a_token_the_center_takes() {
         use clap::Parser;

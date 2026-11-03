@@ -30,12 +30,15 @@ then uses TLS with the center's self-signed certificate.
 
 ## Tokens
 
-A harness token is the bearer token of the HTTP endpoint. The same secret logs
-in to the [web UI](web-ui.md).
+A harness token is the bearer token of the HTTP endpoint, and nothing more:
+it does not log in to the [web UI](web-ui.md), which asks for the
+[owner token](web-ui.md#log-in). An agent may read its harness's settings,
+token included; with it, it reaches `/mcp` and no further.
 
 - Give one with `--harness-token` or `NERVE_HARNESS_TOKEN`.
 - Or make more in the web UI: Settings, Harness tokens. The token is shown
-  once. Delete it there to stop it.
+  once. Delete it there to stop it. The one of the settings is listed there
+  too; remove it from the settings.
 
 ## The tools the model gets
 

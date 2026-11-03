@@ -1,6 +1,6 @@
 //! What the web UIs of the center and the node share: the security headers,
 //! the `Host` and `Origin` checks, the session a page holds in its tab, the
-//! delay on a wrong secret, the login page, and the assets both pages load
+//! delay on a wrong secret ([`WrongSecrets`]), the login page, and the assets both pages load
 //! (the stylesheet, the theme script, the icon and `kit.js`, the helpers of
 //! both pages' scripts).
 //!
@@ -13,9 +13,11 @@
 //! neither read the token nor send the header without a CORS preflight,
 //! which these servers do not answer; so no CSRF token is needed either.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use tokio::sync::Notify;
 
 use crate::http::{Request, Response};
 
@@ -34,6 +36,92 @@ pub const SESSION_TTL: Duration = Duration::from_secs(12 * 3600);
 /// What a wrong secret at the login costs: a guess takes this long, and the
 /// log and the CPU stay small.
 pub const WRONG_SECRET_DELAY: Duration = Duration::from_millis(300);
+/// Wrong secrets whose answer waits [`WRONG_SECRET_DELAY`], at once. Past
+/// this many, the one that waited longest is answered at once.
+pub const LATE: usize = 128;
+
+/// The wrong secrets of a login: each one's answer waits, and they are told
+/// in the log once a minute. A wrong secret never locks the login: a lock
+/// that counts every caller's tries could be kept shut by any process that
+/// reaches the port, the owner's login included. A waiting answer should
+/// hold no connection slot and no place of its peer (the caller gives them
+/// back first): a peer that posts wrong secrets as fast as it can would fill
+/// both. The line of waiting answers is bounded by [`LATE`] instead.
+#[derive(Debug, Default)]
+pub struct WrongSecrets {
+    /// Wrong secrets since the last line about them, and when that was.
+    told: Mutex<(u32, Option<Instant>)>,
+    /// The answers that wait, the oldest first.
+    late: Mutex<VecDeque<Arc<Notify>>>,
+}
+
+impl WrongSecrets {
+    /// Counts a wrong secret, and says how many to tell in the log: the
+    /// first of a minute at once, the rest when the next comes after it.
+    pub fn note(&self) -> Option<u32> {
+        let mut w = self.told.lock().unwrap_or_else(|e| e.into_inner());
+        w.0 += 1;
+        match w.1 {
+            Some(t) if t.elapsed() < Duration::from_secs(60) => None,
+            _ => {
+                let n = w.0;
+                *w = (0, Some(Instant::now()));
+                Some(n)
+            }
+        }
+    }
+
+    /// Waits [`WRONG_SECRET_DELAY`] before a wrong secret is answered, or
+    /// less when [`LATE`] others wait and this one waited longest.
+    pub async fn wait(&self) {
+        let me = Arc::new(Notify::new());
+        {
+            let mut late = self.late_line();
+            if late.len() >= LATE
+                && let Some(oldest) = late.pop_front()
+            {
+                oldest.notify_one();
+            }
+            late.push_back(me.clone());
+        }
+        let _gone = Late {
+            of: self,
+            me: me.clone(),
+        };
+        tokio::select! {
+            _ = tokio::time::sleep(WRONG_SECRET_DELAY) => {}
+            _ = me.notified() => {}
+        }
+    }
+
+    /// How many answers wait now.
+    pub fn waiting(&self) -> usize {
+        self.late_line().len()
+    }
+
+    /// Makes the last line about wrong secrets older, for a test.
+    #[doc(hidden)]
+    pub fn age(&self, by: Duration) {
+        let mut w = self.told.lock().unwrap_or_else(|e| e.into_inner());
+        w.1 = w.1.and_then(|t| t.checked_sub(by));
+    }
+
+    fn late_line(&self) -> std::sync::MutexGuard<'_, VecDeque<Arc<Notify>>> {
+        self.late.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// A wrong secret's wait, which leaves the line when it ends.
+struct Late<'a> {
+    of: &'a WrongSecrets,
+    me: Arc<Notify>,
+}
+
+impl Drop for Late<'_> {
+    fn drop(&mut self) {
+        self.of.late_line().retain(|n| !Arc::ptr_eq(n, &self.me));
+    }
+}
 
 /// One page's session.
 #[derive(Debug, Clone)]
@@ -365,5 +453,51 @@ mod tests {
             vec!["  s.innerHTML = ICONS[name] || \"\";"]
         );
         assert_eq!(html_sinks(LOGIN_JS), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn wrong_secrets_are_told_once_a_minute() {
+        let w = WrongSecrets::default();
+        assert_eq!(w.note(), Some(1));
+        for _ in 0..50 {
+            assert_eq!(w.note(), None);
+        }
+        // A minute later the count of what came meanwhile is told.
+        w.age(Duration::from_secs(61));
+        assert_eq!(w.note(), Some(51));
+    }
+
+    /// A wrong secret's answer waits; past [`LATE`] waiting, the one that
+    /// waited longest goes at once, so the waits hold a bounded number of
+    /// connections.
+    #[tokio::test]
+    async fn a_wrong_secret_waits_and_past_the_limit_the_oldest_goes_first() {
+        let w = Arc::new(WrongSecrets::default());
+        let start = Instant::now();
+        w.wait().await;
+        assert!(start.elapsed() >= WRONG_SECRET_DELAY);
+        assert_eq!(w.waiting(), 0);
+        let waits: Vec<_> = (0..LATE)
+            .map(|_| {
+                let w = w.clone();
+                tokio::spawn(async move { w.wait().await })
+            })
+            .collect();
+        while w.waiting() < LATE {
+            tokio::task::yield_now().await;
+        }
+        let extra = {
+            let w = w.clone();
+            tokio::spawn(async move { w.wait().await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(waits[0].is_finished(), "the oldest still waits");
+        assert_eq!(waits.iter().filter(|w| w.is_finished()).count(), 1);
+        assert_eq!(w.waiting(), LATE);
+        for t in waits {
+            t.await.unwrap();
+        }
+        extra.await.unwrap();
+        assert_eq!(w.waiting(), 0);
     }
 }

@@ -25,10 +25,9 @@ and `uninstall`, which run the center as a systemd service on Linux
 | `--public-url` | `NERVE_PUBLIC_URL` | `https://<host name>:<port>` | the URL put in pairing links |
 | `--plain-loopback` | `NERVE_PLAIN_LOOPBACK` | off | plain HTTP for nodes, only on a loopback `--listen` |
 | `--ui` | `NERVE_UI` | `127.0.0.1:7480` | web UI address, or `off` |
-| `--ui-no-login` | `NERVE_UI_NO_LOGIN` | off | let the UI in without a login; refused when the UI listens beyond loopback |
 | `--mcp` | `NERVE_MCP` | `stdio` | `stdio`, `http`, or `none` (center only) |
 | `--mcp-listen` | `NERVE_MCP_LISTEN` | `127.0.0.1:7481` | HTTP MCP address |
-| `--harness-token` | `NERVE_HARNESS_TOKEN` | none | the harness token: bearer token for HTTP MCP and the secret that logs in to the UI (more can be made in the UI) |
+| `--harness-token` | `NERVE_HARNESS_TOKEN` | none | a harness token: a bearer token for HTTP MCP (more can be made in the UI); it does not log in to the UI |
 | `--call-wait` | `NERVE_CALL_WAIT` | `20s` | how long `execute` waits for a result before the call becomes a job (§4.4): `20` or `20s`, or `500ms`; 10 ms to 600 s |
 | `--log` | `NERVE_LOG` | the stored level, `info` at first | log level; wins over the stored one for this run. The log goes to stderr and `log.jsonl`, never to stdout |
 
@@ -691,19 +690,24 @@ signature against the paired node key, relays the sealed box
 scripts and styles are built into the binary; nothing is loaded from another
 host.
 
-The UI logs in with a harness token, the same secret the HTTP endpoint
-takes (§3): the one from `--harness-token`, or one made in the settings tab.
-Nothing else is kept for the UI, so the token is set once, in the MCP entry.
-Whether there is a login is settled at start:
+The UI always logs in, on loopback too, with the **owner token**, never with
+a harness token: a harness keeps its token where its agent may read it, and
+this API switches the action checker off and changes the nodes' settings.
+Harness tokens open `/mcp` only (§3); the owner token does not open `/mcp`.
 
+- The center makes the owner token (`nrv_owner_` and 40 characters of
+  `a-z0-9`) at its first start, writes it to `<state>/owner-token` (mode
+  0600), prints it on stderr, and logs where it is (never the token: the log
+  redacts `nrv_` tokens). `nerve-center install` makes it before the service
+  starts and prints it with its path.
+- `nerve-center owner-token` prints it; `--new` writes a new one. The running
+  center checks the file's hash and reads the file again when its size,
+  modification time or inode changed, so a new token works at once and the
+  sessions of the old one end at their next request.
 - Beyond loopback (`--ui 0.0.0.0:7480` or any address that is not loopback)
-  a token must exist, from the flag or made earlier in the UI, and the login
-  cannot be switched off. The center refuses to start otherwise, and also with
-  `--ui-no-login`. The UI is then served over TLS.
-- On loopback the login is on as soon as a token exists, unless
-  `--ui-no-login` is given. A center without any token yet has no login, so
-  that the first token can be made in the UI; it then answers only for
-  loopback host names.
+  the UI is served over TLS. On loopback it answers only for loopback host
+  names.
+- A backup does not hold the owner token.
 
 The page and its assets are public; every API call needs a session. The
 page asks `/api/session` first and goes to `/login` without one, where the
@@ -713,13 +717,11 @@ answers with a session (12 hours), which the page keeps in its tab's
 call; there is no cookie and no CSRF token (another origin can neither read
 the session nor send the header without a CORS preflight, which is not
 answered). `POST /logout` ends the session. Tokens are compared in constant
-time, a wrong one is answered after 300 ms, and five wrong tokens in a minute
-lock the login for the rest of that minute (429). A session ends with its
-token: deleting the token in the UI ends the sessions that logged in with it.
-A token that is lost is replaced by starting once with `--ui-no-login` on
-loopback and making a new one. Without a login, `/api/session` hands each tab
-a session of its own. A post must carry a matching `Origin` when the browser
-sends one. Pairing shows the link and the code; a QR code is
+time. A wrong one is answered after 300 ms and never locks the login; at most
+128 such answers wait at once, and past that the one that waited longest is
+answered at once (`nerve_transport::webui::WrongSecrets`, which the node's UI
+shares). `/api/session` never hands out a session. A post must carry a
+matching `Origin` when the browser sends one. Pairing shows the link and the code; a QR code is
 not offered.
 
 ## 8. What the center keeps

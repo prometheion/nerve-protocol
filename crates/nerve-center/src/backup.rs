@@ -585,9 +585,12 @@ pub fn run(
             let r = restore(state, &parsed, *replace)?;
             print_restore(&r, &parsed, out);
         }
-        // `main` gives these to the service (crate::service::execute).
-        Cmd::Install | Cmd::Update { .. } | Cmd::Uninstall { .. } => {
-            return Err("install, update and uninstall are not backup commands".into());
+        // `main` gives these to the service (crate::service::execute) and
+        // to crate::owner.
+        Cmd::Install | Cmd::Update { .. } | Cmd::Uninstall { .. } | Cmd::OwnerToken { .. } => {
+            return Err(
+                "install, update, uninstall and owner-token are not backup commands".into(),
+            );
         }
     }
     Ok(())
