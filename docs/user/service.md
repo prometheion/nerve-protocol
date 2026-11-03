@@ -1,16 +1,16 @@
 # Run the node as a service
 
-On Linux with systemd and on Windows, `nerve-node` installs itself as a
-service. The service starts with the machine and runs under a user of its own,
-`nerve`, which owns the node's config and state folders. `install`, `update`
-and `uninstall` need root, on Windows an administrator. On Linux without
-systemd, run `nerve-node run` under your own service manager
-([pairing](pairing.md#keep-it-running)). A node you start yourself as root, or
-elevated on Windows, is refused unless `machine.allow_root` is set, and warns
-at start when it runs
-([root and administrator](platforms.md#root-and-administrator)). Windows
-differs in a few places; see [Windows](#windows). The center installs
-itself the same way on Linux ([center](center.md#run-it-as-a-service)).
+On Linux with systemd, `nerve-node` installs itself as a service. The
+service starts with the machine and runs under a user of its own, `nerve`,
+which owns the node's config and state folders. `install`, `update` and
+`uninstall` need root. On Linux without systemd, run `nerve-node run` under
+your own service manager ([pairing](pairing.md#keep-it-running)). A node you
+start yourself as root is refused unless `machine.allow_root` is set, and
+warns at start when it runs
+([root and administrator](platforms.md#root-and-administrator)). On Windows
+the node is always the service, and the [desktop app](desktop.md) installs
+and runs it; see [Windows](#windows). The center installs itself the same
+way on Linux ([center](center.md#run-it-as-a-service)).
 
 ## Install
 
@@ -262,9 +262,9 @@ nerve-node service restart   # takes every change in node.toml
 nerve-node service status    # anyone may ask
 ```
 
-`service` does what `systemctl stop|start|restart nerve-node` does (on
-Windows, the service control manager), and waits until a node that starts
-answers. The owner needs no `sudo` for it at the machine. `install` writes a
+`service` does what `systemctl stop|start|restart nerve-node` does, and
+waits until a node that starts answers. On Windows the app's **Overview**
+does it ([start and stop](desktop.md#start-and-stop)). The owner needs no `sudo` for it at the machine. `install` writes a
 helper, `/usr/local/lib/nerve-node/service-control`, that starts, stops or
 restarts `nerve-node.service` and does nothing else, with a polkit action of
 its own (`/usr/share/polkit-1/actions/org.nerve-protocol.node.service-control.policy`).
@@ -316,34 +316,33 @@ takes them up again: the node comes back with its pairings, rules and audit
 log. `--purge` deletes them, keys and audit log included. The
 [desktop app](desktop.md)'s uninstall also removes its menu entry, its link
 handler and the `nerve-node` link it made. Where the app took over the node,
-`nerve-node uninstall` of the downloaded CLI edition hands over to the app's
+`nerve-node uninstall` of a `nerve-node` downloaded on its own hands over to the app's
 (`nerve-node-desktop uninstall`, with `--purge` if given), so the app goes
 with the node.
 
 ## Windows
 
-Run these commands in a terminal opened with "Run as administrator":
+On Windows the node is the [desktop app](desktop.md). Open the downloaded
+`nerve-node-desktop-x86_64-windows.exe`: its installer installs the node as a
+service, and the app does everything else for it
+([install](desktop.md#install)). There is no `nerve-node` for a terminal on
+Windows, and the node runs only as the service: started any other way, it
+says so and does not run.
 
-```powershell
-.\nerve-node-x86_64-windows.exe install
-& "C:\Program Files\Nerve\nerve-node.exe" setup
-Restart-Service nerve-node
-```
-
-`install` does this, and says each step:
+The install does this, and the installer shows each step:
 
 1. Makes the local user `nerve`, with a long random password that nobody
    types; the service manager keeps it. `nerve` may log on as a service and
    in no other way, and does not show on the sign-in screen. A `nerve` user
-   that `install` did not make is refused.
+   that the install did not make is refused.
 2. Makes the folders and gives them an access list of their own: `nerve`,
    SYSTEM and the administrators, nothing inherited from the folders above.
-3. Sets the account that commands run as: the account that runs `install`.
-   An account chosen before stays. It asks once for that account's password
-   and stores it with DPAPI in the config folder, so only what can open that
-   folder can read it. A stored password that still works is not asked for
-   again.
-4. Copies the program to `C:\Program Files\Nerve\nerve-node.exe`.
+3. Sets the account that commands run as: the account that installs. An
+   account chosen before stays. The installer asks for that account's
+   password (**Your Windows password**) and stores it with DPAPI in the
+   config folder, so only what can open that folder can read it. A stored
+   password that still works is not asked for again.
+4. Copies the program to `C:\Program Files\Nerve\nerve-node-desktop.exe`.
 5. Registers the service `nerve-node`, which runs as `nerve`, starts with the
    machine and starts again after a failure.
 6. Registers the source `nerve-node` in the Windows Event Log, then starts
@@ -353,60 +352,56 @@ Restart-Service nerve-node
 |---|---|
 | `node.toml`, one key per center, the stored password of the account commands run as, the sudo password while sudo is on | `C:\ProgramData\Nerve\config` |
 | Audit log, [log](logs.md), config key, the last version of `node.toml`, the record of the folder grants (`grants.json`) | `C:\ProgramData\Nerve\state` |
-| The program | `C:\Program Files\Nerve\nerve-node.exe` |
+| The program | `C:\Program Files\Nerve\nerve-node-desktop.exe` |
 | Start, stop, a start that fails, a crash | The Windows Event Log, Application, source `nerve-node` ([logs](logs.md#the-windows-event-log)) |
 
-The service writes its log to `C:\ProgramData\Nerve\state\log.jsonl`. When
-it does not start, the Event Viewer says why, and the log has the rest.
+The service writes its log to `C:\ProgramData\Nerve\state\log.jsonl`, which
+the app's **Log** page shows. When it does not start, the Event Viewer says
+why, and the log has the rest.
 
-`install` also makes the user who ran it an owner of the node: its SID goes
+The install also makes the user who ran it an owner of the node: its SID goes
 into the service's registry key
 (`HKLM\SYSTEM\CurrentControlSet\Services\nerve-node\Parameters`, value
-`Owners`), and the service lets it start, stop and restart the service. An
-owner runs the other commands in an ordinary terminal; the service runs them
-as `nerve` over a pipe open to the owners only, and audits them with the
-owner's name ([who may change the node](desktop.md#administrator-rights)).
-`install`, `update`, `uninstall`, `setup`, `sudo on` and the `machine.*`
-settings that pick the account (also a `restore` that would change them)
-still need an administrator's terminal. `uninstall` removes the service, and
-the owners and their rights with it.
+`Owners`), and the service lets it start, stop and restart the service. The
+owner changes the node in the app without administrator rights; the service
+runs the app's commands as `nerve` over a pipe open to the owners only, and
+audits them with the owner's name
+([who may change the node](desktop.md#administrator-rights)). For update,
+uninstall, turning sudo on and the `machine.*` settings that pick the
+account (also a restore that would change them), the app asks Windows for an
+administrator's rights, with the UAC prompt. Uninstalling removes the
+service, and the owners and their rights with it.
 
-The other commands work on the installed node from an administrator's
-terminal, or an owner's. The service takes `folder add`, `folder set` and
-`folder rm` at once over its [control pipe](platforms.md#the-control-pipe),
-and every other change at its next start: `Restart-Service nerve-node`, or
-`nerve-node service restart`.
+The service takes folder changes at once over its
+[control pipe](platforms.md#the-control-pipe), and every other change at its
+next start, for which the app restarts it
+([start and stop](desktop.md#start-and-stop)).
 
 The installed node on Windows keeps its keys in files. The service runs as
-`nerve`, and the Credential Manager is one per account: keys that `setup` or
-`config set` put in the keyring would be in the Credential Manager of the
-administrator who ran them, where the service does not find them. So `setup`
-does not ask where the keys go, and takes keys it finds in the keyring into
-files; `config set machine.secret_storage keyring` is refused and changes
-nothing. A `node.toml` that keeps the keys in the keyring is refused by
-`install`, before it changes anything, and the service does not start with
-one. Move the keys into files first, as the account that put them in the
-keyring, in a terminal opened with "Run as administrator". Name the folders:
-without a registered service the commands work on your own folders, not on
-the node's. Run it with the program you have, the downloaded one before a
-first install:
-
-```powershell
-.\nerve-node-x86_64-windows.exe --config-dir "C:\ProgramData\Nerve\config" --state-dir "C:\ProgramData\Nerve\state" config set machine.secret_storage file
-```
+`nerve`, and the Credential Manager is one per account: keys put in the
+keyring would be in the Credential Manager of the account that put them
+there, where the service does not find them. So the app's first-run steps
+do not ask where the keys go, and take keys they find in the keyring into
+files; the keyring under **Settings**, **Keys** is refused and changes
+nothing. A `node.toml` that keeps the keys in the keyring is refused by the
+install, before it changes anything, and the service does not start with
+one: those keys are out of the service's reach. If the keys are still in
+files in `config\keys` (the line in `node.toml` was changed), set the line
+back to `"file"` and nothing is lost. Otherwise delete the node's folders
+(with **Settings**, **App**, **Uninstall** and **Delete the data**, where
+Nerve is installed; that deletes the audit log too, so copy
+`state\audit.jsonl` aside first) and pair the centers again.
 
 The same account problem keeps the proxy's values out of reach: the installed
 node on Windows takes a proxy only if it needs no header and no password.
-`proxy set` with either is refused and changes nothing
+A proxy with either is refused and changes nothing
 ([proxy](proxy.md#on-the-node-installed-as-a-service-on-windows)).
 
-To run the commands as another account, an ordinary one, name it and run
-`install` again; it asks for that account's password:
-
-```powershell
-& "C:\Program Files\Nerve\nerve-node.exe" config set machine.user bob
-.\nerve-node-x86_64-windows.exe install
-```
+To run the commands as another account, an ordinary one, set `machine.user`
+to its name under **Settings**, **Advanced**, **Any setting** (the app asks
+for an administrator's rights), then save that account's password under
+**Settings**, **General**, **Account for commands**, which installs the
+service again with it.
 
 ### The account commands run as on Windows
 
@@ -421,21 +416,22 @@ but not the variables the account set itself. An
 administrator's command runs as UAC gives it to a sign-in: the
 Administrators group only denies. Before a command starts, the node checks
 that the account can open neither the node's folders nor a file in them, and
-refuses it if it can. `install` checks the same.
+refuses it if it can. The install checks the same.
 
 `folder` mode runs no command on the service yet: its AppContainer is not
 started as another account ([modes](modes.md#what-a-command-can-reach-in-folder-mode-windows)).
 Use `allowlist` or `user` mode for its centers.
 
 UAC is no security boundary: a command of an administrator can get the
-group's rights back and read the keys. `install` warns about an account in
+group's rights back and read the keys. The install warns about an account in
 Administrators or Backup Operators. Choose an ordinary account as above.
 [Sudo on Windows](sudo.md#sudo-on-windows) needs an administrator: its
 commands run with the account's administrator rights on purpose.
 
-If the account's password changes, commands fail until `install` runs again
-and asks for the new one. A Microsoft account works with its Microsoft
-password, which can change outside the machine.
+If the account's password changes, commands fail until you save the new one
+under **Settings**, **General**, **Account for commands**. A Microsoft
+account works with its Microsoft password, which can change outside the
+machine.
 
 To start a process as that account, the service keeps two privileges,
 `SeAssignPrimaryTokenPrivilege` and `SeIncreaseQuotaPrivilege`. Windows
@@ -444,46 +440,38 @@ command gets them.
 
 ### Update and uninstall on Windows
 
-`update` downloads `nerve-node-x86_64-windows.exe` and checks it as above.
-It stops the service, moves the old program aside, puts the new one in its
-place and starts the service; if the new one does not start, the old one
-goes back. The old program goes once nothing holds it, or at the next
-restart of Windows when Windows still holds it: when `update` ran from it, or
-when the Event Log read the text of the node's entries from it. `install`
-over an installed node moves the old program aside the same way.
+**Settings**, **App**, **Update** downloads
+`nerve-node-desktop-x86_64-windows.exe` and checks it as above, or takes a
+file you downloaded. It stops the service, moves the old program aside, puts
+the new one in its place and starts the service; if the new one does not
+start, the old one goes back. The old program goes once nothing holds it, or
+at the next restart of Windows when Windows still holds it: when the update
+ran from it, or when the Event Log read the text of the node's entries from
+it. An install over an installed node moves the old program aside the same
+way.
 
-When the [desktop app](desktop.md) takes over a node installed with
-`nerve-node.exe`, its `install` removes `C:\Program Files\Nerve\nerve-node.exe`
-once the service and the Event Log source name the app's program, or moves it
-aside when the Event Log still holds it, as above. The app's program has no
-console; the CLI edition, downloaded on its own, is the one for a terminal.
-
-`uninstall` stops and removes the service, the source `nerve-node` of the
-Event Log (its entries stay), the user `nerve` and its profile, and the
-program. It also takes off the folder grants of `folder` mode that a node
-you ran yourself put on, and removes the profiles of its AppContainers
-([modes](modes.md#what-a-command-can-reach-in-folder-mode-windows)); the
-service puts none on. It names the profiles it removed, and those it left
-because that node runs. Without `--purge` the folders and the stored password stay,
-open to the administrators only; the [sudo](sudo.md#sudo-on-windows)
-password goes, so sudo is off after a later `install`. A later `install`
-takes them up again.
-`--purge` deletes them. Run from the installed program, `uninstall` cannot
-delete that file at once: it moves it aside, and Windows deletes it at its
-next start. Where the [desktop app](desktop.md) took over the node,
-`nerve-node.exe uninstall` hands over to the app's uninstall, which also
-removes the app, its Start menu entry, its link handler and its entry in Apps
-& features. Where Windows
-still holds the profile of `nerve` (Windows Search can), `uninstall` says how
-to remove it after a restart.
+**Settings**, **App**, **Uninstall** (or **Nerve** in Apps & features) stops
+and removes the service, the source `nerve-node` of the Event Log (its
+entries stay), the user `nerve` and its profile, the program, the app's
+Start menu entry, its link handler and its entry in Apps & features. It also
+takes off the folder grants of `folder` mode left on your folders and removes
+the profiles of their AppContainers
+([modes](modes.md#what-a-command-can-reach-in-folder-mode-windows)). With
+**Keep the data** the folders and the stored password stay, open to the
+administrators only; the [sudo](sudo.md#sudo-on-windows) password goes, so
+sudo is off after a later install. A later install takes them up again.
+**Delete the data** deletes them. The installed program cannot delete its
+own file at once: it moves it aside, and Windows deletes it at its next
+start. Where Windows still holds the profile of `nerve` (Windows Search
+can), the uninstall says where to remove it after a restart.
 
 ## The rules for these commands
 
 - `install`, `setup`, `update` and `uninstall` are refused from a command the
   node runs for a center, as every other change of the node's settings is.
   An agent cannot install, update or remove the node. On Windows the control
-  pipe does not take this check yet; there these commands need an
-  administrator, which a command gets only through an account in
+  pipe does not take this check yet; there install, update and uninstall need
+  an administrator, which a command gets only through an account in
   Administrators (the UAC warning above).
 - Each is written to the [audit log](audit.md) with the steps it did, and the
   error that stopped it, if any. `uninstall --purge` deletes the log with the

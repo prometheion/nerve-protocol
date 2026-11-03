@@ -2,11 +2,13 @@
 // by topic or from A to Z, to filter, each one opening on its arguments, an
 // example and the place in the app that does the same (src/reference.rs).
 // Each action in the app runs one of these commands. Every part opens and
-// closes on its own: opening one leaves the others as they are.
+// closes on its own: opening one leaves the others as they are. Windows
+// has no reference: there the app is the only way to the node, and a list
+// of commands to type would send the owner to a terminal that is not there.
 
 import { Theme, Type, Space, Radius, Tone } from "theme.slint";
 import { Page, RefRow } from "data.slint";
-import { Manual, Store, Prefs } from "store.slint";
+import { Manual, Store, Prefs, Install } from "store.slint";
 import {
     Button, ButtonKind, Card, PageHeader, PageFrame, Divider, Code, Fit, Reveal, Expander,
     TextField, Segmented, Icon, Pill, FocusRing,
@@ -351,76 +353,80 @@ export component HelpPage inherits PageFrame {
             does: "Choose in a row of choices or tabs";
         }
     }
-    Expander {
-        title: "Command reference";
-        open: Manual.commands-open;
-        toggled => {
-            Manual.commands-open = !Manual.commands-open;
-        }
-        icon: @image-url("icons/terminal.svg");
-        Answer {
-            text: "Every action here runs one of these nerve-node commands, with the same checks and audit records.";
-        }
-        HorizontalLayout {
-            spacing: Space.md;
-            padding-top: Space.xs;
-            TextField {
-                horizontal-stretch: 1;
-                text <=> Manual.ref-filter;
-                placeholder: "Filter: pair, folder, sudo…";
-                label: "Filter the commands";
-                edited => {
-                    Manual.ref-update();
-                }
+    // Wrapping text that comes and goes sits in a Reveal (widgets.slint).
+    Reveal {
+        shown: !Install.windows;
+        Expander {
+            title: "Command reference";
+            open: Manual.commands-open;
+            toggled => {
+                Manual.commands-open = !Manual.commands-open;
             }
-            VerticalLayout {
-                alignment: center;
-                Segmented {
-                    options: ["By topic", "A to Z"];
-                    current: Manual.ref-by-name ? 1 : 0;
-                    chosen(i) => {
-                        Manual.ref-by-name = i == 1;
+            icon: @image-url("icons/terminal.svg");
+            Answer {
+                text: "Every action here runs one of these nerve-node commands, with the same checks and audit records.";
+            }
+            HorizontalLayout {
+                spacing: Space.md;
+                padding-top: Space.xs;
+                TextField {
+                    horizontal-stretch: 1;
+                    text <=> Manual.ref-filter;
+                    placeholder: "Filter: pair, folder, sudo…";
+                    label: "Filter the commands";
+                    edited => {
                         Manual.ref-update();
                     }
                 }
-            }
-        }
-        Text {
-            text: "A command about one center takes --center <CENTER> when more than one is paired.";
-            color: Theme.text-muted;
-            font-size: Type.caption;
-            wrap: word-wrap;
-        }
-        Reveal {
-            shown: Manual.ref-groups.length == 0;
-            Text {
-                text: "No command matches.";
-                color: Theme.text-muted;
-                font-size: Type.small;
-            }
-        }
-        for g in Manual.ref-groups: Fit {
-            VerticalLayout {
-                padding-top: Space.sm;
-                Reveal {
-                    shown: g.name != "";
-                    GroupHead {
-                        name: g.name;
-                        count: g.rows.length;
-                        open: g.open;
-                        toggled => {
-                            Manual.ref-group-toggle(g.name);
+                VerticalLayout {
+                    alignment: center;
+                    Segmented {
+                        options: ["By topic", "A to Z"];
+                        current: Manual.ref-by-name ? 1 : 0;
+                        chosen(i) => {
+                            Manual.ref-by-name = i == 1;
+                            Manual.ref-update();
                         }
                     }
                 }
-                Reveal {
-                    shown: g.open;
-                    gap: g.name != "" ? 6px : 0px;
-                    VerticalLayout {
-                        spacing: 6px;
-                        for r in g.rows: CommandRow {
-                            item: r;
-                            topic: g.name == "";
+            }
+            Text {
+                text: "A command about one center takes --center <CENTER> when more than one is paired.";
+                color: Theme.text-muted;
+                font-size: Type.caption;
+                wrap: word-wrap;
+            }
+            Reveal {
+                shown: Manual.ref-groups.length == 0;
+                Text {
+                    text: "No command matches.";
+                    color: Theme.text-muted;
+                    font-size: Type.small;
+                }
+            }
+            for g in Manual.ref-groups: Fit {
+                VerticalLayout {
+                    padding-top: Space.sm;
+                    Reveal {
+                        shown: g.name != "";
+                        GroupHead {
+                            name: g.name;
+                            count: g.rows.length;
+                            open: g.open;
+                            toggled => {
+                                Manual.ref-group-toggle(g.name);
+                            }
+                        }
+                    }
+                    Reveal {
+                        shown: g.open;
+                        gap: g.name != "" ? 6px : 0px;
+                        VerticalLayout {
+                            spacing: 6px;
+                            for r in g.rows: CommandRow {
+                                item: r;
+                                topic: g.name == "";
+                            }
                         }
                     }
                 }

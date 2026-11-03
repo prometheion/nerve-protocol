@@ -30,9 +30,8 @@ nerve-proto.workspace = true
 rfd.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# The CLI takes the console of the terminal it was started from
-# (src/console.rs); the broker is started with the UAC prompt and talks over
-# a named pipe that only the app's user may open (src/broker.rs); the Start
+# The broker is started with the UAC prompt and talks over a named pipe
+# that only the app's user may open (src/broker.rs); the Start
 # menu shortcut and the nerve:// handler (src/parts.rs); DLLs from System32
 # only (src/main.rs).
 windows-sys = { workspace = true, features = [
@@ -42,7 +41,6 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Com",
     "Win32_System_Registry",
     "Win32_Storage_FileSystem",
-    "Win32_System_Console",
     "Win32_System_IO",
     "Win32_System_LibraryLoader",
     "Win32_System_Pipes",

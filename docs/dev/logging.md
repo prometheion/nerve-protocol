@@ -93,7 +93,9 @@ log.
 The Event Viewer takes an entry's text from the source's message file.
 `build.rs` writes a `.res` file with one message table (`%1` for each id,
 `eventlog::resource`) and links it into every program of the crate on
-windows-msvc; `install` registers `nerve-node.exe` as the message file under
+windows-msvc, and the desktop app's `build.rs` links the same table into
+`nerve-node-desktop`, the node's program on Windows; `install` registers the
+installed program (`nerve-node-desktop.exe`) as the message file under
 `HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\nerve-node`,
 and `uninstall` removes the key. A windows-gnu build has no table, and the
 Event Viewer then shows the text with a note that the description is missing.

@@ -31,9 +31,8 @@ nerve-node folder add ~/project +r +w +x
 service under a user of its own ([service](docs/user/service.md)), with you
 as its owner. A new pairing is in `folder` mode: its commands run as
 `nerve-run`, an account of their own that reaches only the folders you give
-it ([modes](docs/user/modes.md#the-account-nerve-run-linux)). On Windows, install
-from a terminal opened as administrator
-([Windows](docs/user/service.md#windows)). The center is
+it ([modes](docs/user/modes.md#the-account-nerve-run-linux)). On Windows the
+node is the desktop app ([below](#install-the-desktop-app)). The center is
 `nerve-center-x86_64-linux` (or `-aarch64-linux`, `-x86_64-windows.exe`)
 from the same release.
 

@@ -25,14 +25,14 @@ use nerve_policy::settings::SettingsStore;
 
 use crate::paths::NodePaths;
 use crate::service::{Account, write_file};
-use crate::winsvc::{SERVICE_NAME, WinSystem, parse_secret, secret};
+use crate::winsvc::{WinSystem, parse_secret, secret};
 
 /// The file in the config folder that holds the sudo password, encrypted
 /// with DPAPI, while the switch is on.
 pub const SUDO_FILE: &str = "sudo.dpapi";
 
 /// Why a node that is not the installed service has no sudo switch.
-pub const INSTALLED_ONLY: &str = "on Windows the sudo switch works on the node installed as a service (`nerve-node install`): only the service may start a command with the administrator token of the account commands run as";
+pub const INSTALLED_ONLY: &str = "on Windows the sudo switch works on the node installed as a service (Nerve's installer installs it): only the service may start a command with the administrator token of the account commands run as";
 
 /// Why `name`, not an administrator, cannot have the switch.
 pub fn not_admin(name: &str) -> String {
@@ -150,7 +150,7 @@ pub async fn on(
 ) -> Result<(), String> {
     if !sys.is_admin() {
         return Err(
-            "sudo on needs an administrator: run `nerve-node sudo on` in a terminal opened with \"Run as administrator\"".into(),
+            "sudo on needs an administrator: the switch under Permissions › Sudo in the app asks Windows for the rights".into(),
         );
     }
     if !installed {
@@ -158,7 +158,7 @@ pub async fn on(
     }
     let cfg = read(paths)?;
     let name = cfg.machine.user.ok_or(
-        "no account is chosen for commands; `nerve-node install`, run again as administrator, takes the one that runs it",
+        "no account is chosen for commands; choose it under Settings › General › Account for commands in the app",
     )?;
     let a = sys
         .account(&name)?
@@ -194,7 +194,7 @@ pub async fn on(
 /// The last line of `sudo on`: the running service takes it at its start.
 pub(crate) fn next_start_line() -> String {
     format!(
-        "the change {}: `Restart-Service {SERVICE_NAME}` lets the running service take it.",
+        "the change {}: Restart on the app's Overview lets the running service take it.",
         crate::cli::NEXT_START
     )
 }
@@ -208,7 +208,7 @@ pub async fn off(
 ) -> Result<(), String> {
     if !sys.is_admin() {
         return Err(
-            "sudo off needs an administrator: run `nerve-node sudo off` in a terminal opened with \"Run as administrator\"".into(),
+            "sudo off needs an administrator: the switch under Permissions › Sudo in the app asks Windows for the rights".into(),
         );
     }
     forget(paths)?;
@@ -334,7 +334,7 @@ mod tests {
                 && out.contains("not only the commands on the sudo list"),
             "{out}"
         );
-        assert!(out.contains("Restart-Service nerve-node"), "{out}");
+        assert!(out.contains("Restart on the app's Overview"), "{out}");
         // A program learns it as data (`"next_start": true` with --json).
         assert!(out.lines().any(crate::cli::takes_at_next_start), "{out}");
         assert!(!out.contains("bob's"), "{out}");

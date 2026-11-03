@@ -4185,7 +4185,7 @@ mod tests {
         assert!(status.starts_with("bad proxy: "), "{status}");
         assert!(
             status.contains("not to that of nerve")
-                && status.contains("`nerve-node proxy set <url>`"),
+                && status.contains("Settings › Network › Proxy"),
             "{status}"
         );
         assert!(!status.contains("s3cret"), "{status}");

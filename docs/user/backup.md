@@ -54,7 +54,9 @@ pairings without keys (below).
 Stop the node first. A restore never goes under a running node: it refuses
 when a node holds the folders (`keys.lock`), and holds the lock itself while
 it works. On the [installed service](service.md) stop the service
-(`sudo systemctl stop nerve-node`, on Windows `Stop-Service nerve-node`).
+(`sudo systemctl stop nerve-node`). On Windows the
+[desktop app](desktop.md#settings)'s restore under **Settings**, **Backup**
+stops the node and starts it again itself.
 
 ```sh
 nerve-node restore ~/nerve-node.bak
@@ -268,8 +270,8 @@ too, or reads `--passphrase-file` as you. A backup is put in place once it is
 complete. For a restore the node stops, restores and starts again by itself,
 so it must run when you start it. A backup that would change
 `machine.user`, `machine.allow_root`, `machine.sudo_path` or `machine.shell`
-is refused to the owner: restore it with `sudo` (on Windows from an
-administrator's terminal).
+is refused to the owner: restore it with `sudo` (on Windows the app asks
+Windows for an administrator's rights for it).
 
 The desktop app does this for the owner without a question; it asks for the
 administrator only for such a backup. For someone who is not the owner it works

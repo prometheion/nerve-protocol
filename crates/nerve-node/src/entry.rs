@@ -54,26 +54,34 @@ pub fn main() -> i32 {
         return code;
     }
     // The installed node on Windows runs under the service control manager,
-    // which takes the main thread.
+    // which takes the main thread; no other node runs there (crate::cli::BY_HAND).
     #[cfg(windows)]
-    if let Some(log) = crate::cli::service_log(&cli) {
-        return crate::win_service::serve(Box::new(move || run(cli)), log);
+    match crate::cli::service_log(&cli) {
+        Some(Ok(log)) => {
+            let json = cli.json;
+            return crate::win_service::serve(Box::new(move || run(cli)), log, json);
+        }
+        Some(Err(e)) => return failed(cli.json, &e),
+        None => {}
     }
     let json = cli.json;
     match run(cli) {
         Ok(()) => 0,
-        Err(e) => {
-            // A program that asked for JSON reads the error from stdout too:
-            // stderr also carries the log's events.
-            // A closed stdout leaves only stderr to say it.
-            if json {
-                use std::io::Write;
-                let _ = writeln!(std::io::stdout(), "{}", serde_json::json!({ "error": e }));
-            }
-            eprintln!("nerve-node: {e}");
-            1
-        }
+        Err(e) => failed(json, &e),
     }
+}
+
+/// Says the error `e` of a command; its exit code.
+pub(crate) fn failed(json: bool, e: &str) -> i32 {
+    // A program that asked for JSON reads the error from stdout too:
+    // stderr also carries the log's events.
+    // A closed stdout leaves only stderr to say it.
+    if json {
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout(), "{}", serde_json::json!({ "error": e }));
+    }
+    eprintln!("nerve-node: {e}");
+    1
 }
 
 fn run(cli: crate::cli::Cli) -> Result<(), String> {

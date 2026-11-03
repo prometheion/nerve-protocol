@@ -13,7 +13,7 @@ use crate::{HelpArg, Page, RefGroup, RefRow};
 /// Where in the app a command's work is done: the page, the tab of
 /// Settings (-1 for none), and its name in words; no page when the app
 /// does not do it.
-type Place = (Option<Page>, i32, &'static str);
+pub type Place = (Option<Page>, i32, &'static str);
 
 const NOT_HERE: Place = (None, -1, "");
 
@@ -397,6 +397,16 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         (Some(Page::Overview), -1, "Overview › Unlock"),
     ),
 ];
+
+/// The command that `words` (what follows `nerve-node`) begin with, the
+/// longest one, and where the app does it.
+pub fn command_of(words: &str) -> Option<(&'static str, Place)> {
+    COMMANDS
+        .iter()
+        .filter(|(n, _, _)| words == *n || words.starts_with(&format!("{n} ")))
+        .max_by_key(|(n, _, _)| n.len())
+        .map(|(n, _, p)| (*n, *p))
+}
 
 /// The topic of a part of the CLI's help, in the app's words: its pages'
 /// names where they have one.

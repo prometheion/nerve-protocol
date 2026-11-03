@@ -53,13 +53,15 @@ pub fn built_in(home: &Path) -> Vec<Folder> {
 #[cfg(not(windows))]
 pub const NO_OWNER: &str = "this node has no owner, as `install` ran as root and not through sudo: commands of user mode, and of allowlist mode as the owner, run as the owner, so none runs; run `sudo nerve-node install` again from the owner's own account, or `nerve-node install` as root with a yes to its question (or `--owner=root --accept-root-owner`) to make root the owner";
 /// What a command of the installed node gets while it has no owner: on
-/// Windows `install` takes it, with its password.
+/// Windows the app's Settings take the account, with its password.
 #[cfg(windows)]
-pub const NO_OWNER: &str = "this node runs commands as its owner's account, and has none: `nerve-node install`, run again as administrator by that account, sets it (machine.user)";
+pub const NO_OWNER: &str = "this node runs commands as its owner's account, and has none: choose it under Settings › General › Account for commands in the app (machine.user)";
 
 /// How `install` ends the line saying that it set no account for the
-/// commands on Windows; the desktop app says it in its own words.
-pub const NO_ACCOUNT_INSTALL: &str = "`nerve-node install` asks again";
+/// commands on Windows, and what a command says while its password is not
+/// stored: where the app takes it.
+pub const NO_ACCOUNT_INSTALL: &str =
+    "enter its password under Settings › General › Account for commands in the app";
 
 /// The mode of `home` when other accounts may list or enter it (`o+r` or
 /// `o+x`): `nerve-run` is another account, and reads there what anyone may.
@@ -365,7 +367,7 @@ pub fn for_commands(
     if !can_switch {
         // Started by hand, or by a systemd without AmbientCapabilities=.
         return Err(if cfg!(windows) {
-            "this installed node runs without SeAssignPrimaryTokenPrivilege and cannot start a command as another account; start it as the service: `Start-Service nerve-node`".into()
+            "this installed node runs without SeAssignPrimaryTokenPrivilege and cannot start a command as another account; start it as the service (Start on the app's Overview)".into()
         } else {
             format!(
                 "this installed node runs as uid {own_uid} without CAP_SETUID and CAP_SETGID and cannot start a command as another account; start it as the service: `sudo systemctl start nerve-node`"
@@ -960,7 +962,7 @@ mod tests {
         for as_owner in [false, true] {
             let e = for_commands(as_owner, Some("alice"), 990, true, false, db).unwrap_err();
             let start = if cfg!(windows) {
-                "Start-Service nerve-node"
+                "Start on the app's Overview"
             } else {
                 "systemctl start"
             };

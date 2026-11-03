@@ -1,11 +1,11 @@
 //! Help's parts open each on their own: opening the command reference
-//! leaves the keyboard's shortcuts open. One test: Slint takes one platform
-//! per process.
+//! leaves the keyboard's shortcuts open; on Windows there is no reference
+//! (#176). One test: Slint takes one platform per process.
 
 use nerve_node_desktop::app::{Ctl, Exec};
 use nerve_node_desktop::headless::Screen;
 use nerve_node_desktop::runner::Runner;
-use nerve_node_desktop::{AppWindow, Manual, Page, Store};
+use nerve_node_desktop::{AppWindow, Install, Manual, Page, Store};
 use slint::platform::{PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition};
 
@@ -22,6 +22,8 @@ fn opening_one_part_leaves_the_other_open() {
     );
     let window = AppWindow::new().unwrap();
     let _ctl = Ctl::attach(&window, runner, Exec::Inline);
+    // Linux's page first, wherever the test runs.
+    window.global::<Install>().set_windows(false);
     window.show().unwrap();
     window.global::<Store>().invoke_show(Page::Help);
     screen.draw();
@@ -66,4 +68,19 @@ fn opening_one_part_leaves_the_other_open() {
         manual.get_keys_open(),
         "opening the commands closed the keys"
     );
+
+    // Windows' page: the keys, and no reference to open anywhere on it.
+    manual.set_commands_open(false);
+    manual.set_keys_open(false);
+    window.global::<Install>().set_windows(true);
+    screen.draw();
+    let mut y = 90.0;
+    let mut keys = false;
+    while y < SIZE.1 as f32 {
+        click(x, y);
+        keys |= manual.get_keys_open();
+        assert!(!manual.get_commands_open(), "a reference opened at y {y}");
+        y += 6.0;
+    }
+    assert!(keys, "the keys did not open on Windows' page");
 }

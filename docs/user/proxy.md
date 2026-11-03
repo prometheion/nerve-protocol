@@ -72,27 +72,24 @@ header. Do not give that header yourself in the same call.
 ## On the node installed as a service on Windows
 
 The installed node on Windows runs as the account `nerve`, and the Credential
-Manager is one per account. `proxy set` runs as an administrator, so a header
-value or a password would go to the administrator's Credential Manager, where
-the service does not find it. The node keeps them nowhere else (not in a
-file), so the installed node on Windows takes a proxy that needs neither:
+Manager is one per account. A header value or a password would go to the
+Credential Manager of the account that sets the proxy, where the service does
+not find it. The node keeps them nowhere else (not in a file), so the
+installed node on Windows takes a proxy that needs neither: set it in the
+[desktop app](desktop.md) under **Settings**, **Network**, **Proxy**, as
+`http://proxy.example:3128`.
 
-```powershell
-nerve-node proxy set http://proxy.example:3128
-```
-
-`proxy set` with `--header`, or with a user name and password in the URL, is
+A proxy with a header, or with a user name and password in the URL, is
 refused there and changes nothing. If the proxy needs a login, the installed
 node on Windows cannot use it.
 
-A header set before the node was installed is not read by the service: the link
-stays down. `proxy ls` says so under the header's name, with the reason.
-`nerve-node status` shows it as `bad proxy:` with the reason: it asks the
+A header in `node.toml` is not read by the service: the link stays down. The
+app's **Overview** shows it as `bad proxy:` with the reason, which it asks the
 running node over its [control pipe](platforms.md#the-control-pipe). The
 service's [log](logs.md) has the reason as an `error` line with `bad proxy:`, in
 `C:\ProgramData\Nerve\state\log.jsonl`. Set the proxy again without the header,
-or remove it with `proxy rm`; either deletes the old entry from the Credential
-Manager of the account that runs it.
+or remove it; either deletes the old entry from the Credential Manager of the
+account that does it.
 
 ## Environment variables
 
@@ -103,8 +100,9 @@ password in `HTTPS_PROXY` is refused. Use `proxy set` for those.
 
 The node does not fall back to a direct connection. If the proxy is down, the
 link stays down. If a keyring entry is missing or unreadable, the link stays
-down and `nerve-node status` shows `bad proxy:` with the reason (on Windows it asks
-the node over its [control pipe](platforms.md#the-control-pipe)). `proxy ls` and
+down and `nerve-node status` shows `bad proxy:` with the reason (on Windows the
+app's **Overview**, which asks the node over its
+[control pipe](platforms.md#the-control-pipe)). `proxy ls` and
 the node's [log](logs.md) have the reason too.
 
 On a Linux machine with no Secret Service (no desktop session), `proxy set`

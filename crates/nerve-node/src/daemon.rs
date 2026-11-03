@@ -1546,11 +1546,7 @@ impl Daemon {
         if crate::secrets::stated_storage(&paths) == SecretStorage::Keyring
             && let Some(n) = crate::secrets::no_keyring(&paths)
         {
-            let then = match n {
-                crate::secrets::NoKeyring::WindowsService => {
-                    "`Restart-Service nerve-node` starts it"
-                }
-            };
+            let then = n.then_at_start();
             return Err(crate::secrets::keyring_refused(
                 &paths,
                 n,
@@ -1636,7 +1632,7 @@ impl Daemon {
             crate::win_user::init(&paths.config_dir);
             if service && crate::account::own_uid() != 0 && !crate::account::can_switch() {
                 tracing::warn!(
-                    "this is the installed node, started without SeAssignPrimaryTokenPrivilege: it runs no command; start it as the service: `Start-Service nerve-node`"
+                    "this is the installed node, started without SeAssignPrimaryTokenPrivilege: it runs no command; start it as the service (Start on the app's Overview)"
                 );
             }
         }
@@ -2072,15 +2068,26 @@ pub struct AddedFolder {
 /// The message of a refused `folder add`, for the CLI and the node alike.
 pub fn refusal(path: &str, why: &str) -> String {
     format!(
-        "{path}: {why}. A command may have put a link there: look at it (`ls -l`, `dir /AL`), add the place you mean by its own path, or remove the link"
+        "{path}: {why}. A command may have put a link there: look at it ({}), add the place you mean by its own path, or remove the link",
+        look_at_link(cfg!(windows))
     )
+}
+
+/// How the owner looks at what is at a path: on Windows in Explorer, where
+/// the app is the only way to the node and no terminal is asked for.
+fn look_at_link(windows: bool) -> &'static str {
+    if windows {
+        "in Explorer, a link shows an arrow on its icon and its target under Properties"
+    } else {
+        "`ls -l`"
+    }
 }
 
 /// Why the pipe refuses a folder change while `node.toml` (version
 /// `on_disk`) holds changes the node (version `in_force`) has not taken.
 fn file_ahead(on_disk: u64, in_force: u64) -> String {
     format!(
-        "node.toml holds changes the running node takes at its next start (version {on_disk} there, {in_force} in force), and this change would undo them; nothing was changed. Restart the node (`Restart-Service nerve-node` for the installed node), then change the folder again"
+        "node.toml holds changes the running node takes at its next start (version {on_disk} there, {in_force} in force), and this change would undo them; nothing was changed. Restart the node (Restart on the app's Overview), then change the folder again"
     )
 }
 
@@ -2755,6 +2762,16 @@ mod every_platform {
 mod tests {
     use super::*;
 
+    /// A refused folder says how to look at a link there: in Explorer on
+    /// Windows, where no terminal is named (#176), with `ls -l` elsewhere.
+    #[test]
+    fn a_refused_folder_says_where_to_look_at_a_link() {
+        assert!(look_at_link(true).contains("Explorer"));
+        assert!(!look_at_link(true).contains('`'));
+        assert_eq!(look_at_link(false), "`ls -l`");
+        assert!(refusal("/srv/x", "no such folder").contains(look_at_link(cfg!(windows))));
+    }
+
     /// With the keys in the keyring, folder mode runs commands only where they
     /// cannot reach the session bus it answers on: Landlock ABI 9, or an
     /// account other than root and the node's own.
@@ -2958,8 +2975,9 @@ mod tests {
         };
         assert!(e.contains("the node does not start"), "{e}");
         assert!(e.contains("Credential Manager"), "{e}");
-        assert!(e.contains("config set machine.secret_storage file`"), "{e}");
-        assert!(e.contains("Restart-Service nerve-node"), "{e}");
+        assert!(e.contains("Settings › App › Uninstall"), "{e}");
+        assert!(e.contains("install Nerve again with the installer"), "{e}");
+        assert!(!e.contains("Restart-Service"), "{e}");
     }
 
     fn options(d: &tempfile::TempDir, log: &Arc<Log>) -> NodeOptions {

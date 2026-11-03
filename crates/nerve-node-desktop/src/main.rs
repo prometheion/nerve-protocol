@@ -2,10 +2,10 @@
 //! with arguments it is `nerve-node`, which the app runs for every action;
 //! started without any it opens the window.
 
-// No console window behind the app on Windows; the CLI attaches to the
-// console it was started from (nerve_node_desktop::console). A shell does not wait
-// for a GUI program, though: in a terminal, `nerve-node.exe` is the CLI, or
-// `start /wait` runs this one.
+// No console window behind the app on Windows. Started with arguments it is
+// the app's interface to the node (src/runner.rs, src/broker.rs), which
+// reads its pipes, and not a command line for a person: it takes no
+// terminal's console, and on Windows the app is the only way to the node.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use nerve_node_desktop::instance::Asked;
@@ -63,8 +63,6 @@ fn main() {
         _ => None,
     };
     let Some(start) = start else {
-        #[cfg(windows)]
-        nerve_node_desktop::console::attach();
         std::process::exit(nerve_node::entry::main());
     };
     use nerve_node_desktop::app::Failed;

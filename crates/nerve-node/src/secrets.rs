@@ -124,7 +124,7 @@ fn absolute(p: &Path) -> std::path::PathBuf {
 /// for its proxy. They are kept in the keyring, and the keyring the service
 /// reads is its own account's, not that of the administrator who runs
 /// `proxy set`. The node keeps them nowhere else.
-pub const PROXY_WINDOWS_SERVICE: &str = "the installed node on Windows is the service nerve-node, which runs as the account nerve, and the Credential Manager is one per account: the header values and the password that `proxy set` puts in the system keyring go to the Credential Manager of the account that runs it, not to that of nerve, and the service does not find them. The node keeps them nowhere else";
+pub const PROXY_WINDOWS_SERVICE: &str = "the installed node on Windows is the service nerve-node, which runs as the account nerve, and the Credential Manager is one per account: a proxy's header values and password in the system keyring go to the Credential Manager of the account that put them there, not to that of nerve, and the service does not find them. The node keeps them nowhere else";
 
 /// Puts the proxy's header values into the node's keyring entry, replacing
 /// what it held. The installed node on Windows refuses, before it asks the
@@ -132,7 +132,7 @@ pub const PROXY_WINDOWS_SERVICE: &str = "the installed node on Windows is the se
 pub fn store_proxy_headers(paths: &NodePaths, headers: &[(String, String)]) -> Result<(), String> {
     if windows_service(paths) {
         return Err(format!(
-            "this proxy needs a header value or a password, but {PROXY_WINDOWS_SERVICE}. So nothing was changed: the installed node on Windows can use only a proxy that needs neither, `nerve-node proxy set <url>` without `--header` and without a user name and password in the URL"
+            "this proxy needs a header value or a password, but {PROXY_WINDOWS_SERVICE}. So nothing was changed: the installed node on Windows can use only a proxy that needs neither: set one under Settings › Network › Proxy in the app, without headers and without a user name and password in the URL"
         ));
     }
     let entry = Entry::proxy(paths);
@@ -160,7 +160,7 @@ pub fn proxy_headers(paths: &NodePaths, names: &[String]) -> Result<Vec<(String,
     }
     if windows_service(paths) {
         return Err(format!(
-            "node.toml names header values for the proxy, but {PROXY_WINDOWS_SERVICE}. Set a proxy that needs no header and no password with `nerve-node proxy set <url>`, or remove it with `nerve-node proxy rm`"
+            "node.toml names header values for the proxy, but {PROXY_WINDOWS_SERVICE}. Under Settings › Network › Proxy in the app, set a proxy that needs no header and no password, or remove it"
         ));
     }
     let entry = Entry::proxy(paths);
@@ -391,7 +391,7 @@ pub fn stated_storage(paths: &NodePaths) -> SecretStorage {
 /// account: `setup` and `config set` run as an administrator, so whatever
 /// they put in the keyring would be in that administrator's, where the
 /// service never finds it.
-pub const KEYRING_WINDOWS_SERVICE: &str = "the installed node on Windows is the service nerve-node, which runs as the account nerve, and the Credential Manager is one per account: keys that `setup` or `config set` put in the system keyring go to the Credential Manager of the account that runs them, not to that of nerve, and the service does not find them. The installed node on Windows keeps its keys in files (machine.secret_storage = \"file\"), which only nerve and the administrators can open";
+pub const KEYRING_WINDOWS_SERVICE: &str = "the installed node on Windows is the service nerve-node, which runs as the account nerve, and the Credential Manager is one per account: keys put in the system keyring go to the Credential Manager of the account that put them there, not to that of nerve, and the service does not find them. The installed node on Windows keeps its keys in files (machine.secret_storage = \"file\"), which only nerve and the administrators can open";
 
 /// Why the node at `paths` keeps its keys in files, whatever asks for the
 /// keyring.
@@ -408,12 +408,21 @@ impl NoKeyring {
         }
     }
 
-    /// Who runs the command that takes the keys out of the keyring: the
-    /// keyring that holds them is that account's.
-    fn who(self) -> &'static str {
+    /// What to do after deleting the folders, when the node's start refused:
+    /// the folders are gone with the install, so it is installed again first.
+    pub fn then_at_start(self) -> &'static str {
         match self {
             NoKeyring::WindowsService => {
-                "as the account that put them in the keyring, in a terminal opened with \"Run as administrator\""
+                "install Nerve again with the installer, and pair the centers again"
+            }
+        }
+    }
+
+    /// What becomes of the keys in the keyring.
+    fn unreachable(self) -> &'static str {
+        match self {
+            NoKeyring::WindowsService => {
+                "Those keys are in the Credential Manager of another account, out of the service's reach"
             }
         }
     }
@@ -488,18 +497,22 @@ pub(crate) mod for_tests {
 
 /// The refusal of a node whose `node.toml` keeps the keys in the keyring
 /// where [`no_keyring`] says `n`: at its start, at install, at `config
-/// accept`. The command it names moves them into files on these folders,
-/// whether or not they are the installed node's yet.
+/// accept`. The service never reaches those keys, and on Windows only the
+/// app is there to move them, as the service: what it names deletes them
+/// with the node's data, whether or not the folders are the installed
+/// node's yet.
 ///
-/// `what` says what does not happen, `then` what to do after the move.
+/// `what` says what does not happen, `then` what to do after.
 pub fn keyring_refused(paths: &NodePaths, n: NoKeyring, what: &str, then: &str) -> String {
     format!(
-        "{} keeps the node's keys in the system keyring (machine.secret_storage = \"keyring\"), but {}. So {what}. Move the keys into files {}: `nerve-node --config-dir \"{}\" --state-dir \"{}\" config set machine.secret_storage file`; then {then}",
+        "{} keeps the node's keys in the system keyring (machine.secret_storage = \"keyring\"), but {}. So {what}. If the keys are still in files in {} (a line in node.toml that someone changed), set that line back to \"file\" and nothing is lost. {}: delete {} and {} (where Nerve is installed, Settings › App › Uninstall in the app, with Delete the data, does it; that deletes the audit log {} too, so copy it aside first); then {then}",
         paths.config_file().display(),
         n.why(),
-        n.who(),
+        paths.config_dir.join("keys").display(),
+        n.unreachable(),
         paths.config_dir.display(),
         paths.state_dir.display(),
+        paths.audit_log().display(),
     )
 }
 
@@ -1308,6 +1321,38 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let paths = NodePaths::new(d.path().join("config"), d.path().join("state"));
         (d, paths)
+    }
+
+    /// The refusal at the node's start puts the install before the pairing:
+    /// after Uninstall there is nothing to Start, and no center to pair.
+    #[test]
+    fn the_keyring_refusal_at_start_installs_before_it_pairs() {
+        let (_d, paths) = node();
+        let n = NoKeyring::WindowsService;
+        let said = keyring_refused(&paths, n, "the node does not start", n.then_at_start());
+        let (delete, then) = said.split_once("; then ").unwrap();
+        assert!(!delete.contains("pair"), "{said}");
+        let (install, pair) = then.split_once("pair").unwrap();
+        assert!(install.contains("install"), "{said}");
+        assert!(pair.contains("centers"), "{said}");
+        assert!(!said.contains("Start on the app"), "{said}");
+    }
+
+    /// The refusal does not send the owner to delete keys that may still be
+    /// in their files, or the audit log, without saying so.
+    #[test]
+    fn the_keyring_refusal_keeps_good_keys_and_warns_about_the_audit_log() {
+        let (_d, paths) = node();
+        let n = NoKeyring::WindowsService;
+        let said = keyring_refused(&paths, n, "the node does not start", n.then_at_start());
+        let (before, delete) = said.split_once("delete ").unwrap();
+        assert!(before.contains("still in files"), "{said}");
+        assert!(before.contains("nothing is lost"), "{said}");
+        assert!(
+            delete.contains(&paths.audit_log().display().to_string()),
+            "{said}"
+        );
+        assert!(delete.contains("copy it aside"), "{said}");
     }
 
     fn in_keyring(paths: &NodePaths, key: Key) -> Option<String> {

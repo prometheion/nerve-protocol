@@ -149,6 +149,7 @@ a moved node needs no new pairing ([backup](backup.md)).
 
 `nerve-node run` runs in the foreground. On Linux with systemd,
 `sudo nerve-node install` makes it a service that starts with the machine,
-under a user of its own ([service](service.md)); on Windows `install` does
-the same from a terminal opened with "Run as administrator". Elsewhere, run
-`nerve-node run` under your own service manager.
+under a user of its own ([service](service.md)). Elsewhere, run
+`nerve-node run` under your own service manager. On Windows the node is
+always the service, which the [desktop app](desktop.md)'s installer installs;
+the app pairs it under **Centers**, **Pair a center**.

@@ -7,11 +7,10 @@ slint::include_modules!();
 
 pub mod app;
 pub mod broker;
-#[cfg(windows)]
-pub mod console;
 pub mod deps;
 pub mod dialog;
 pub mod headless;
+pub mod in_app;
 pub mod instance;
 pub mod motion;
 pub mod parts;

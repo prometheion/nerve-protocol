@@ -69,20 +69,15 @@ Application**, source `nerve-node`:
 | 3 | Error | The node did not start: it refused to (for example `refusing to run as root`, or a `node.toml` whose MAC does not match) or could not. The entry says why |
 | 4 | Error | The node crashed: a panic in its main thread ended it. The service's recovery settings start it again, three times a day at most; after that it stays stopped. Or a part of the node panicked and the node runs on; the entry says which. Or the node stopped with an error after it ran |
 
-The log file has the details. In PowerShell (Windows PowerShell or
-PowerShell 7):
+The log file has the details, and the app's **Log** page shows it. In the
+Event Viewer, **Filter Current Log…** with the event source `nerve-node`
+lists the node's entries alone.
 
-```powershell
-Get-WinEvent -LogName Application -FilterXPath "*[System[Provider[@Name='nerve-node']]]" -MaxEvents 20 | Format-List TimeCreated, Id, Message
-```
-
-After `uninstall` the entries stay, but Windows no longer shows their text:
-`Message` is empty. Their text is still in them; replace `Format-List …`
-with `ForEach-Object { "$($_.TimeCreated) $($_.Id) $($_.Properties.Value)" }`.
+After an uninstall the entries stay, but Windows no longer shows their text
+in the description. Their text is still in them, under **Details**.
 
 Every user of the machine can read the Application log, so these entries are
-redacted like the log ([below](#what-is-never-in-it)). A node you start
-yourself with `nerve-node run` writes no events. On Linux the journal has the
+redacted like the log ([below](#what-is-never-in-it)). On Linux the journal has the
 service's output (`journalctl -u nerve-node`, `journalctl -u nerve-center`).
 
 ## Levels

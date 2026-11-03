@@ -270,3 +270,30 @@ fn center_add_checks_the_link_before_it_asks() {
     assert_eq!(v["check"]["reach"], "unreachable", "{v}");
     assert_eq!(v["check"]["ready"], false, "{v}");
 }
+
+/// On Windows the node runs only as its service (#176): `run` from a
+/// terminal or a script is refused, on the installed node's folders as on
+/// any others, before it touches a folder, and the error says where the app
+/// starts the node.
+#[cfg(windows)]
+#[test]
+fn run_is_refused_outside_the_service_on_windows() {
+    let d = tempfile::tempdir().unwrap();
+    let (ok, v) = node(d.path(), &["run"]);
+    assert!(!ok, "{v}");
+    assert_eq!(v["error"], nerve_node::cli::BY_HAND, "{v}");
+    assert!(!d.path().join("state").exists());
+    let sys = nerve_node::service::Layout::system().paths;
+    let out = Command::new(env!("CARGO_BIN_EXE_nerve-node"))
+        .arg("--config-dir")
+        .arg(&sys.config_dir)
+        .arg("--state-dir")
+        .arg(&sys.state_dir)
+        .args(["--json", "run"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(!out.status.success(), "{text}");
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["error"], nerve_node::cli::BY_HAND, "{v}");
+}

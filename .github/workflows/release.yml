@@ -330,20 +330,22 @@ jobs:
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "$TARGET"
           rustup default "$RUST_TOOLCHAIN"
       # The static C runtime: a fresh Windows has no vcruntime140.dll.
+      # No nerve-node on its own: on Windows the desktop app is the only way
+      # to the node (docs/user/install.md).
       - name: Build
         env:
           CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-C target-feature=+crt-static"
         run: |
-          cargo build --release --locked --target "$TARGET" -p nerve-center -p nerve-node -p nerve-node-desktop
+          cargo build --release --locked --target "$TARGET" -p nerve-center -p nerve-node-desktop
           mkdir dist
-          for b in nerve-center nerve-node nerve-node-desktop; do
+          for b in nerve-center nerve-node-desktop; do
             cp "target/$TARGET/release/$b.exe" "dist/$b-$SUFFIX.exe"
           done
       # The desktop app is a program without a console; run from bash, it
       # writes to the pipe it is given all the same.
       - name: No Visual C++ runtime, and the version the tag names
         run: |
-          for b in nerve-center nerve-node nerve-node-desktop; do
+          for b in nerve-center nerve-node-desktop; do
             if grep -aqi 'vcruntime140' "dist/$b-$SUFFIX.exe"; then
               echo "$b-$SUFFIX.exe imports the Visual C++ runtime" >&2
               exit 1
@@ -389,10 +391,11 @@ jobs:
       - name: The checksums
         run: |
           cd dist
-          # nerve-node-* takes the desktop app's two as well.
+          # nerve-node-* takes the desktop app's two as well; Windows has no
+          # nerve-node of its own.
           files=(nerve-center-* nerve-node-*)
-          if [ "${#files[@]}" != 8 ]; then
-            echo "expected 8 binaries, got: ${files[*]}" >&2
+          if [ "${#files[@]}" != 7 ]; then
+            echo "expected 7 binaries, got: ${files[*]}" >&2
             exit 1
           fi
           sha256sum "${files[@]}" > SHA256SUMS
@@ -409,7 +412,7 @@ jobs:
               prerelease=true
               ;;
           esac
-          footer="Static Linux binaries (x86_64, aarch64) and Windows x86_64 programs of \`nerve-center\` and \`nerve-node\`, and the desktop app \`nerve-node-desktop\` for Linux x86_64 (glibc 2.35 or newer) and Windows x86_64, built from $SHA. SHA256SUMS lists their checksums. They are not signed; \`nerve-node update\` and the desktop app's update check the one they download against SHA256SUMS (docs/user/service.md, docs/user/desktop.md)."
+          footer="Static Linux binaries (x86_64, aarch64) of \`nerve-center\` and \`nerve-node\`, the desktop app \`nerve-node-desktop\` for Linux x86_64 (glibc 2.35 or newer) and Windows x86_64, and \`nerve-center\` for Windows x86_64, built from $SHA. On Windows the desktop app is the node: there is no \`nerve-node\` for Windows. SHA256SUMS lists their checksums. They are not signed; \`nerve-node update\` and the desktop app's update check the one they download against SHA256SUMS (docs/user/service.md, docs/user/desktop.md)."
           # A pre-release's body is the footer alone.
           if [ "$KIND" = release ]; then
             { cat notes/changelog.md; echo; echo "$footer"; } > release-notes.md

@@ -22,11 +22,11 @@ names its reason. One the machine gave reads
 | `… chains commands or holds an expression …` | A wildcard rule does not cover commands with `;`, `&`, `\|`, `$`, quotes and the like | Add an exact rule for the whole line, or use `folder` mode |
 | `outside the folders that allow reading` or `… writing` | `folder` mode, and no folder grants `r` or `w` there | `nerve-node folder add <path> +r +w` |
 | `the working directory is not in a folder that allows running` | `folder` mode, and no folder with `x` holds the working directory | `nerve-node folder set <path> +x` |
-| `commands cannot be confined on this machine` | `folder` mode on a node you run yourself on a machine without Landlock, or on the installed Windows service. The installed Linux node runs `folder` mode as `nerve-run` without Landlock (`status`: `as nerve-run, without Landlock`) | Install the node as a service (`sudo nerve-node install`), or use `allowlist` or `user` mode. See [platforms](platforms.md) |
+| `commands cannot be confined on this machine` | `folder` mode on a node you run yourself on a machine without Landlock, or on the installed Windows service. The installed Linux node runs `folder` mode as `nerve-run` without Landlock (`status`: `as nerve-run, without Landlock`) | On Linux, install the node as a service (`sudo nerve-node install`). On Windows, or instead, use `allowlist` or `user` mode (the app's Permissions › Mode). See [platforms](platforms.md) |
 | `warning: Without Landlock, nerve-run can read every file in your home …` (`status`, `install`), **nerve-run can read more of your home** (app) | The kernel has no Landlock, and your home is open to others (mode 755 or 711) or a folder you gave lies in your home, which `nerve-run` passes through: it reads there what every account may | Give folders outside your home, `chmod 750 ~` where it is open, `umask 027`, or a kernel with Landlock. `umask 027` narrows what it reads, but the warning stays while a folder in your home is given. See [modes](modes.md#your-home-and-other-accounts) |
 | `nerve-run did not get every folder` (app, `status`, `folder add`) | The installed Linux node could not give `nerve-run` a folder: a file system without POSIX ACLs, or a folder of another account's on its way | Give a folder on another file system, or open the folder on the way. See [modes](modes.md#the-account-nerve-run-linux) |
 | `the command was not run: the access of nerve-run to … could not be taken off`, `nerve-run keeps its access to …, which it should have lost` (`status`, `folder rm`), **nerve-run keeps access it should have lost** (app) | The node could not take `nerve-run`'s ACL entry off a folder you removed, or could not read its record of them, so no command of `nerve-run` runs, for any pairing, and `uninstall` stops | See the reason in `status`; fix it (`getfacl`, `setfacl -x u:nerve-run <path>`), the node tries again before each command |
-| `commands cannot be confined on this machine while the node's keys are in the system keyring: …` | `folder` mode with `machine.secret_storage = "keyring"`, where a command could reach the keyring: a Linux node you run yourself (commands run as you), and the Windows node you run yourself. The node logs `folder mode runs no command: …` and `status` says so | `nerve-node config set machine.secret_storage file`, as the message says. See [keys](config.md#where-the-node-keeps-its-keys) |
+| `commands cannot be confined on this machine while the node's keys are in the system keyring: …` | `folder` mode with `machine.secret_storage = "keyring"`, where a command could reach the keyring: a Linux node you run yourself (commands run as you). The node logs `folder mode runs no command: …` and `status` says so | `nerve-node config set machine.secret_storage file`, as the message says (Linux; the Windows service keeps its keys in files). See [keys](config.md#where-the-node-keeps-its-keys) |
 | `... keeps a grant for this center's commands that its folders no longer give` | Windows: the node could not take a removed folder's grant off, or a granted folder was moved or renamed and the node could not take its entry off where it is now (the message names its old path) | Check that you may change that folder's permissions. For a moved or renamed folder, the node's log names the reason, often hard links: see the row on hard links below (a built Rust project needs `cargo clean`). The node tries again before each command |
 | `the node cannot tell which folders carry grants for the commands` | Windows: the record of the folder grants (`grants.json` in the state folder) cannot be read, so no `folder` command runs | See the reason. If the file is damaged: `icacls <folder>` lists a folder's grants as `S-1-15-2-…` entries, `icacls <folder> /remove *S-1-15-2-…` takes one off. Once none is left, delete the file |
 | `the node puts no grant on it, since …` | Windows: a folder granted inside another folder with `w` is now a junction or link to elsewhere, a file with a second name, or has permissions that do not inherit ([modes](modes.md#what-a-command-can-reach-in-folder-mode-windows)) | Put a plain folder there again (remove the junction; `icacls <path> /reset` makes its permissions inherit), or take the folder off the pairing. The node grants it at its next sync |
@@ -158,31 +158,32 @@ Through a [relay](relay.md), `status` names what the relay answered:
 |---|---|---|
 | `the proxy refused the tunnel to …: 400 …` | The node speaks plain HTTP to the relay, which speaks TLS only | `proxy set 'https://…' --pin=<pin>`, the line `relay add` showed |
 | `TLS with the proxy …: its certificate does not carry the pinned key` | The pin in `proxy set` is not the relay's, or the relay made a new certificate | On the relay, `nerve-node relay ls` shows the pin |
-| `the proxy refused the tunnel to …: 407 …` | The relay does not know the name and token in `proxy set` | On the relay, `nerve-node relay ls`; give the node a new token with `relay token <name>`; on Windows the relay knows a new token only after `Restart-Service nerve-node` |
+| `the proxy refused the tunnel to …: 407 …` | The relay does not know the name and token in `proxy set` | On the relay, `nerve-node relay ls`; give the node a new token with `relay token <name>`; a relay on Windows knows a new token only after **Restart** on its app's **Overview** |
 | `the proxy refused the tunnel to …: 403 …` | The center's address is not one the relay is paired with over https, or not one the relay's owner picked for this node | Pair with the URL the relay uses for that center; on the relay, `relay ls` shows the node's centers |
 | `the proxy refused the tunnel to …: 503 …` | The relay is off, locked, carries as many tunnels as it may (all of them, or this node's), or this node opened as many as it may in a minute | On the relay, `nerve-node relay ls` and `status`, and its log: the node sees only `503`, the relay's log says which limit |
 | `the proxy refused the tunnel to …: 502 …` | The relay cannot reach the center, or the relay's own proxy or relay refused it (in a chain, the outer relay's limits for the inner one) | Check the relay's own link and its log; in a chain, give the inner relay limits of its own on the outer relay with `relay set-limits` ([relay](relay.md#limits)) |
 
-If `status` says `daemon: not running`, start `nerve-node run`. On Windows
-`status` asks the node over its [control pipe](platforms.md#the-control-pipe).
-There a running node takes only folder changes at once; the others count from
-its next start. On a node
+If `status` says `daemon: not running`, start `nerve-node run`. On a node
 [installed as a service](service.md), start the service instead:
-`sudo systemctl start nerve-node`, on Windows `Start-Service nerve-node`. A
-node started there by hand lacks the privileges the service has, so it
-cannot switch to the account commands run as and runs no command at all.
+`sudo systemctl start nerve-node`. A node started there by hand lacks the
+privileges the service has, so it cannot switch to the account commands run
+as and runs no command at all. On Windows the node is always the service:
+**Start** on the app's **Overview** starts it. The app asks the running node
+over its [control pipe](platforms.md#the-control-pipe); there a running node
+takes only folder changes at once, the others from its next start, for which
+the app restarts it.
 
 ## The node will not start
 
 | Message | Fix |
 |---|---|
-| `refusing to run as root; set machine.allow_root = true to allow it` | Run as a normal user (on Windows: not elevated), or set `machine.allow_root` |
+| `refusing to run as root; set machine.allow_root = true to allow it` | Run as a normal user, or set `machine.allow_root` (Linux; on Windows the node runs only as its service) |
 | `node.toml is refused: its MAC does not match …` | Look at the file, then `nerve-node config accept`. See [config](config.md) |
 | `node.toml is refused: its version … is older than the last this node accepted …` | An earlier `node.toml` is back, from a backup or a sync tool. Look at it, then `nerve-node config accept`. See [config](config.md#an-older-file-put-back) |
 | `… config.version holds no version number` | The record of the last version in the state folder is damaged. Delete it, or take the file with `nerve-node config accept`. See [config](config.md#an-older-file-put-back) |
 | `machine.secret_storage is "keyring", but the system keyring cannot be reached …` | The keys are in a keyring that does not answer. Start it, or run `nerve-node setup`, which offers to install one on a Linux without a desktop. See [keys](config.md#where-the-node-keeps-its-keys) |
 | `… this running node found no keyring and does not look again until it is restarted …` | The node asked for a keyring before one answered. Restart the node (`nerve-node service restart`), then change the setting again. `setup` run without sudo stops here and asks for that restart, then for `nerve-node setup` again; `sudo nerve-node setup` restarts the installed node itself |
-| `… keeps the node's keys in the system keyring (machine.secret_storage = "keyring"), but … So the node does not start` (also from `install`) | The keys may not be in the keyring here: the installed node on Windows. Run the `config set machine.secret_storage file` command the message names, as it says, then start the node. See [Windows](service.md#windows) |
+| `… keeps the node's keys in the system keyring (machine.secret_storage = "keyring"), but … So the node does not start` (also from `install`) | The keys may not be in the keyring here: the installed node on Windows, whose service cannot reach them. If the keys are still in files in `config\keys`, set the line in `node.toml` back to `"file"`. Otherwise copy `state\audit.jsonl` aside, delete the folders the message names (with **Settings**, **App**, **Uninstall** and **Delete the data**, where Nerve is installed), install, and pair the centers again. See [Windows](service.md#windows) |
 | `machine.secret_storage cannot be "keyring" here: …` (from `config set`) | The same reasons. Keep the keys in files |
 
 A node installed as a service says why in its [log](logs.md):
@@ -228,7 +229,7 @@ agent's call.
 |---|---|---|
 | `refused: this request comes from a command the node runs for a center` | The request came from below a command the node started for a center, for example from a command that ran `nerve-node` itself. The node refuses every request from there, the reading ones too | Run the command in your own terminal, not through an agent |
 | `refused: this request does not carry the control socket's token …` | Linux: the request has no token: the CLI cannot read `run/ctl.token` in the node's state folder (it runs as an account that may not) | Run it as the account that owns the node's state (the node's own user for the [installed node](service.md)). See [platforms](platforms.md) |
-| `<path>: … A command may have put a link there: look at it …` | `folder add` refused the path: it crosses a link inside a folder with `w`, a link to nothing,, a place that changed while it was looked at, or a path that is not absolute (on Windows, not on a drive). The text before the link advice says which | Look at the link (`ls -l`, `dir /AL`), add the place you mean by its own path, or remove the link ([modes](modes.md#a-folder-keeps-the-place-you-added)) |
+| `<path>: … A command may have put a link there: look at it …` | `folder add` refused the path: it crosses a link inside a folder with `w`, a link to nothing,, a place that changed while it was looked at, or a path that is not absolute (on Windows, not on a drive). The text before the link advice says which | Look at the link (`ls -l` on Linux; in Explorer on Windows, a link shows an arrow on its icon and its target under Properties), add the place you mean by its own path, or remove the link ([modes](modes.md#a-folder-keeps-the-place-you-added)) |
 | `<path> is not a folder of this center; this account cannot look into it, so if it is a link, use the path … folder ls shows for the folder` | `folder rm` or `folder set` was given a path the CLI cannot look into (the installed node's CLI and your home), and the folder was stored where a link led | Give the path `nerve-node folder ls` shows; the message names the folders that could be it |
 | `note: … is stored as given and not recorded …` (from `folder add`, not an error) | The folder was stored, but neither the CLI nor a running node could tell where its path leads, so the place is not recorded | Start the node and `folder add` the folder again ([modes](modes.md#a-folder-keeps-the-place-you-added)) |
 | `the node does not take connections now; try again` | Linux: the node runs, but its control socket is busy or its queue is full | Try again. For `panic` see [stop](stop.md) |
@@ -256,23 +257,25 @@ says `a provider was not attached: …` with the same text.
 ## A change did not apply
 
 If a command says `takes effect at the next start of the node`, no node was
-running to take it. Start `nerve-node run`. On Windows a running node takes
-only folder changes at once; every other change it takes at its next start.
+running to take it. Start `nerve-node run`, or the service; on Windows
+**Start** on the app's **Overview**. On Windows a running node takes only
+folder changes at once; every other change it takes at its next start, for
+which the app restarts it.
 
 ### Restart the node, then change the folder again (Windows)
 
-`folder add`, `set` or `rm` says `node.toml holds changes the running node
-takes at its next start`: an earlier command changed something else, which
+A folder change on **Permissions** says `node.toml holds changes the running
+node takes at its next start`: an earlier change was of something else, which
 waits in the file for the next start. The node saves its whole config with a
 folder change and would undo that change, so it refuses. Restart the node
-(`Restart-Service nerve-node` for the installed node) and run the folder
-command again.
+(**Restart** on the app's **Overview**) and change the folder again.
 
 ### The control pipe is not the node's (Windows)
 
-`folder add`, `set` or `rm` says `the control pipe is not the node's`: another
-process made a pipe of the node's name before the node started, and the node
-runs without its pipe (its log says `the control pipe … is taken`). The CLI
-sends that pipe nothing. Find the process with Sysinternals
-`handle.exe -a nerve-node-`, end it, and restart the node. With the node
+A folder change says `the control pipe is not the node's`: another process
+made a pipe of the node's name before the node started, and the node runs
+without its pipe (its log says `the control pipe … is taken`). The node's
+commands send that pipe nothing. Find the process with Sysinternals Process
+Explorer (**Find**, **Find Handle or DLL**, `nerve-node-`), end it, and
+restart the node (**Restart** on the app's **Overview**). With the node
 stopped, folder changes go to `node.toml` as every other change does.

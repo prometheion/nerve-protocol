@@ -2575,7 +2575,8 @@ mod tests {
         if cfg!(windows) {
             assert!(
                 out.contains("a removed or replaced token still opens new tunnels")
-                    && out.contains("Restart-Service nerve-node"),
+                    && out.contains("Restart on the app's Overview")
+                    && !out.contains("Restart-Service"),
                 "{out}"
             );
             assert!(!out.contains("no longer works"), "{out}");
@@ -2601,7 +2602,7 @@ mod tests {
         }
         let rm = cli(&["relay", "rm", "lab"]).await;
         if cfg!(windows) {
-            assert!(rm.contains("Restart-Service nerve-node"), "{rm}");
+            assert!(rm.contains("Restart on the app's Overview"), "{rm}");
             assert!(!rm.contains("end now"), "{rm}");
         } else {
             assert_eq!(

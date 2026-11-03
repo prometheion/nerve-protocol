@@ -225,13 +225,18 @@ fn admin() -> &'static str {
     }
 }
 
-/// How to run `command` with the rights it needs.
+/// How to run `command` with the rights it needs: on Windows in the app,
+/// which asks Windows for them, since there the app is the only way to the
+/// node.
 fn with_rights(command: &str) -> String {
-    let program = crate::edition::get().program;
-    if cfg!(windows) {
-        format!("run `{program} {command}` in a terminal opened with \"Run as administrator\"")
+    rights_for(command, cfg!(windows))
+}
+
+fn rights_for(command: &str, windows: bool) -> String {
+    if windows {
+        "do it in the app, which asks Windows for an administrator's rights for it".into()
     } else {
-        format!("run `sudo {program} {command}`")
+        format!("run `sudo {} {command}`", crate::edition::get().program)
     }
 }
 
@@ -2059,6 +2064,21 @@ mod win {
 
 #[cfg(test)]
 mod tests {
+    /// What needs more rights than an owner's: on Windows the app asks for
+    /// them, and no terminal is named; elsewhere `sudo` (#176).
+    #[test]
+    fn the_rights_are_asked_for_in_the_app_on_windows() {
+        let windows = super::rights_for("restore …", true);
+        assert!(windows.contains("in the app"), "{windows}");
+        for word in ["terminal", "Run as administrator", "nerve-node"] {
+            assert!(!windows.contains(word), "{windows}");
+        }
+        assert_eq!(
+            super::rights_for("restore …", false),
+            "run `sudo nerve-node restore …`"
+        );
+    }
+
     /// The owner's program tells the node of a terminal only for its own
     /// input at one; a command run for the owner believes only that (#142).
     #[test]
