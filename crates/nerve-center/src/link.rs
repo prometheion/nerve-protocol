@@ -1023,7 +1023,12 @@ async fn next_text(ws: &mut WebSocketStream<BoxIo>, wait: Duration) -> Option<St
 
 /// Runs a link from the upgraded WebSocket until it ends. `node_id` is the
 /// `Nerve-Node` header, already known to belong to a paired node.
-pub async fn run(center: Center, mut ws: WebSocketStream<BoxIo>, node_id: String) {
+pub async fn run(
+    center: Center,
+    mut ws: WebSocketStream<BoxIo>,
+    node_id: String,
+    mut admitted: crate::listen::Admitted,
+) {
     let Some((public_key, old_key)) = center.node_keys(&node_id) else {
         return refuse(ws, ByeReason::Revoked).await;
     };
@@ -1095,6 +1100,9 @@ pub async fn run(center: Center, mut ws: WebSocketStream<BoxIo>, node_id: String
         );
         return refuse(ws, ByeReason::ProtocolError).await;
     };
+    // The hello is the node's: from here on the link no longer counts
+    // against the peer it came from, so many nodes behind one address link.
+    admitted.decided();
     if !hello.versions.iter().any(|v| v == PROTOCOL_VERSION) {
         center.note(
             Level::Warn,

@@ -327,3 +327,10 @@ Each MCP connection is one session. The center tells the machines a session
 used when it ends, and they stop that session's commands; its jobs stop
 and its streams go too.
 End a session by hand in the web UI, Overview, Sessions.
+
+Over stdio a session ends with the harness. Over HTTP it ends when the
+harness sends `DELETE /mcp`, which many harnesses never do, after 30 minutes
+without a request, and at once when the harness token that opened it is
+deleted: what an agent with a leaked token started stops with it. A harness
+that comes back after 30 minutes gets `404` and opens a new session; a job
+it polls with `job.status` keeps its session going.

@@ -72,26 +72,52 @@ impl Ui {
 
     pub async fn serve(self: Arc<Self>, server: Server) {
         server
-            .run(move |io, _| {
+            .run(move |io, admitted| {
                 let me = self.clone();
-                async move { me.conn(io).await }
+                async move { me.conn(io, admitted).await }
             })
             .await
     }
 
-    async fn conn(&self, mut io: BoxIo) {
-        let (resp, api) = match http::read_request(&mut io, API_BODY).await {
+    /// One connection: one request is answered. A wrong token's answer
+    /// waits with neither the connection's slot nor its peer's place, so a
+    /// peer that posts wrong tokens as fast as it can keeps nobody out.
+    async fn conn(&self, mut io: BoxIo, admitted: crate::listen::Admitted) {
+        let (resp, api, late) = match http::read_request(&mut io, API_BODY).await {
             Ok(req) => {
                 let api = webui::is_api(&req.path);
-                (self.request(req).await, api)
+                let (resp, late) = self.answer(req).await;
+                (resp, api, late)
             }
-            Err(_) => (Response::text(400, "bad request"), false),
+            Err(_) => (Response::text(400, "bad request"), false, false),
         };
+        if late {
+            drop(admitted);
+            self.wrong.wait().await;
+        }
         let _ = webui::with_security_headers(resp, api).write(&mut io).await;
     }
 
-    /// Answers one request.
+    /// Answers one request, a wrong token's after its wait.
     pub async fn request(&self, req: Request) -> Response {
+        let (resp, late) = self.answer(req).await;
+        if late {
+            self.wrong.wait().await;
+        }
+        resp
+    }
+
+    /// Answers one request, and says whether the answer is a wrong token's,
+    /// which waits before it goes.
+    async fn answer(&self, req: Request) -> (Response, bool) {
+        let login = req.method == "POST" && req.path == "/login";
+        let resp = self.route(req).await;
+        // The login's only 401 is a wrong token.
+        let late = login && resp.status == 401;
+        (resp, late)
+    }
+
+    async fn route(&self, req: Request) -> Response {
         if self.loopback && !host_is_loopback(req.header("host")) {
             return Response::text(403, "this UI answers only to a loopback host name");
         }
@@ -117,7 +143,7 @@ impl Ui {
         }
         match (req.method.as_str(), req.path.as_str()) {
             ("GET", "/login") => return self.login_page(),
-            ("POST", "/login") => return self.login(&req).await,
+            ("POST", "/login") => return self.login(&req),
             ("POST", "/logout") => return self.logout(&req),
             ("GET", "/api/session") => return self.session_info(&req),
             _ => {}
@@ -170,9 +196,9 @@ impl Ui {
     }
 
     /// Checks the token the login form posted. The answer is the session for
-    /// the page to keep, or the reason it was refused; the token never
-    /// appears in a URL or a log.
-    async fn login(&self, req: &Request) -> Response {
+    /// the page to keep, or the reason it was refused, which waits before it
+    /// goes ([`Ui::answer`]); the token never appears in a URL or a log.
+    fn login(&self, req: &Request) -> Response {
         let log = self.center.log();
         let given = webui::posted_secret(req);
         if given.is_empty() || !self.owner.ok(&given) {
@@ -193,7 +219,6 @@ impl Ui {
                 ),
                 None => {}
             }
-            self.wrong.wait().await;
             return Response::json(401, &json!({"error": WRONG_TOKEN}));
         }
         let token = self
@@ -403,7 +428,14 @@ impl Ui {
                     created_ms: now_ms(),
                 };
                 let (id, label) = (rec.id.clone(), rec.label.clone());
-                c.update(|st| st.harness_tokens.push(rec));
+                // Kept before it is shown: a token shown and lost at the next
+                // start would stop the harness that took it.
+                c.update_saved(|st| {
+                    st.harness_tokens.push(rec);
+                    Ok(())
+                })
+                .map_err(|e| (500, json!({ "error": e })))?;
+                c.changed(Change::Tokens);
                 c.log().record(
                     Level::Info,
                     None,
@@ -423,6 +455,8 @@ impl Ui {
                     st.harness_tokens.retain(|t| t.id != id);
                     label
                 });
+                // The HTTP sessions it opened end now (crate::mcp::HttpMcp).
+                c.changed(Change::Tokens);
                 if let Some(label) = gone {
                     c.log().record(
                         Level::Info,
@@ -2240,6 +2274,49 @@ mod tests {
         );
         assert_eq!(sign_in(&ui, TOKEN).await.status, 401);
         assert_eq!(sign_in(&ui, &new).await.status, 200);
+    }
+
+    /// A token the center cannot keep is not shown: the harness that took
+    /// it would stop at the next start. Deleting one tells the HTTP
+    /// endpoint, whose sessions of it end.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_token_that_cannot_be_written_is_not_made() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let c = center(d.path());
+        let ui = Ui::new(&c, false, true);
+        let h = ("Host", "127.0.0.1:7480");
+        let ck = session_token(&owner_login(&ui, h).await);
+        let mut changes = c.subscribe();
+        let create = || req("POST", "/api/tokens/create", &[h, (SESSION, &ck)], "{}");
+        let mode = |m| std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(m));
+        mode(0o500).unwrap();
+        let r = ui.request(create()).await;
+        mode(0o700).unwrap();
+        assert_eq!(r.status, 500, "{}", body(&r));
+        assert!(json(&r).get("token").is_none());
+        assert!(c.read(|s| s.harness_tokens.is_empty()));
+        let r = ui.request(create()).await;
+        assert_eq!(r.status, 200);
+        let id = json(&r)["id"].as_str().unwrap().to_string();
+        let r = ui
+            .request(req(
+                "POST",
+                "/api/tokens/delete",
+                &[h, (SESSION, &ck)],
+                &json!({ "id": id }).to_string(),
+            ))
+            .await;
+        assert_eq!(r.status, 200);
+        let mut tokens = 0;
+        while let Ok(c) = changes.try_recv() {
+            tokens += usize::from(c == Change::Tokens);
+        }
+        assert_eq!(
+            tokens, 2,
+            "one for the token made, one for the token deleted"
+        );
     }
 
     #[tokio::test]

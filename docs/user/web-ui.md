@@ -263,7 +263,9 @@ Built like the desktop app's Help: two parts that open and close on their own.
   a new key and shows its pin once; **Serve the new key now** ends the 7 days
   in which the old key is still served ([center](center.md#rotate-the-key)).
 - **Harness tokens.** Make a token with a label. It is shown once. Delete one
-  to stop it. The token of the center's settings (`NERVE_HARNESS_TOKEN` or
+  to stop it: the harness sessions it opened over HTTP end at once, with
+  their jobs. A token is only shown once the center has written it to its
+  state file; when it cannot, the page says so and no token is made. The token of the center's settings (`NERVE_HARNESS_TOKEN` or
   `--harness-token`) is listed too, without **Delete**: remove it from the
   settings. A harness token does not log in to this UI.
 - **Machines.** For each online machine that gave the center the settings

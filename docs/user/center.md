@@ -68,6 +68,21 @@ The web UI and the HTTP MCP endpoint use plain HTTP on loopback. On any other
 address they use TLS with the same certificate. `--plain-loopback` turns TLS
 off for nodes too, but only for a loopback `--listen`.
 
+## Connections
+
+Each port of the center (nodes, web UI, HTTP MCP) takes at most 256
+connections at once that are not settled yet: a request being read or
+answered, a TLS handshake, a node's link before its signed hello. Of those,
+one address may hold 16, and one IPv6 /64 64. A connection past that is
+closed at once, so a peer that opens many and sends nothing keeps nobody
+else out. A node's link counts no more once its hello is checked, so many
+nodes behind one router link as usual. These numbers are fixed.
+
+A pairing is only answered as done once the center has written it to
+`state.json`. When it cannot (a full disk, a read-only state folder) the
+node is told the center cannot write its state file, and the code stays
+valid for another try.
+
 ## Rotate the key
 
 In the web UI, Settings, **Center key**, press **Rotate key**. The center makes

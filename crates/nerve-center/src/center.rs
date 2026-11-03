@@ -42,12 +42,19 @@ pub const NEXT_IDENTITY_FILE: &str = "tls.next.pem";
 pub use crate::audit::{AUDIT_KEEP, AUDIT_MAX_BYTES};
 const ALERTS_KEEP: usize = 50;
 
+/// How the error of a save through [`Center::update_saved`] that could not
+/// be written begins.
+pub(crate) const UNWRITABLE: &str = "the center cannot write its state file";
+
 /// What changed, for whoever subscribed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
     Nodes,
     Audit,
     Sessions,
+    /// A harness token was made or deleted: the HTTP sessions it opened
+    /// end with it.
+    Tokens,
 }
 
 /// Everything the center needs to start.
@@ -814,6 +821,9 @@ impl Center {
             (out, self.snapshot(&s))
         };
         if let Err(e) = self.write_snapshot(snap) {
+            // The next flush tries again, so the change is not lost once the
+            // disk takes it.
+            self.dirty.store(true, Ordering::SeqCst);
             self.log.record(
                 Level::Error,
                 None,
@@ -884,8 +894,9 @@ impl Center {
 
     /// Runs `f` on the stored state and saves it, all or nothing: when `f`
     /// fails or the save does, the state stays as it was and the error is
-    /// returned. For a change the center may not tell before it is kept.
-    fn update_saved<T>(
+    /// returned (a failed save's starts with [`UNWRITABLE`]). For a change
+    /// the center may not tell before it is kept.
+    pub(crate) fn update_saved<T>(
         &self,
         f: impl FnOnce(&mut Store) -> Result<T, String>,
     ) -> Result<T, String> {
@@ -901,7 +912,7 @@ impl Center {
         // Written under the lock: nobody sees the change before it is kept.
         if let Err(e) = self.write_snapshot(self.snapshot(&s)) {
             *s = before;
-            return Err(format!("the center cannot write its state file: {e}"));
+            return Err(format!("{UNWRITABLE}: {e}"));
         }
         self.dirty.store(false, Ordering::SeqCst);
         Ok(out)
@@ -951,6 +962,7 @@ impl Center {
                 self.snapshot(&s)
             };
             if let Err(e) = self.write_snapshot(snap) {
+                self.dirty.store(true, Ordering::SeqCst);
                 self.log.record(
                     Level::Error,
                     None,
@@ -1131,20 +1143,23 @@ impl Center {
             );
         };
         let node_id = nerve_transport::keys::node_id(&pk);
-        let out = self.update(|s| {
+        // Kept before it is told: a node told it is paired stores the center
+        // and dials it, and a pairing that is only in memory is gone at the
+        // next start.
+        let out = self.update_saved(|s| {
             if s.nodes.contains_key(&node_id) || s.node_by_key(&req.public_key).is_some() {
-                return Err("this key is already paired");
+                return Err("this key is already paired".to_string());
             }
             if s.node_by_name(&req.name).is_some() {
-                return Err("another node already has this name");
+                return Err("another node already has this name".to_string());
             }
             // `list` and `execute` find a node by its id or its name, so a
             // name is never a node's id: it would point at that node.
             if s.nodes.contains_key(&req.name) || req.name == node_id {
-                return Err("this name is a node's id");
+                return Err("this name is a node's id".to_string());
             }
             if s.node_by_name(&node_id).is_some() {
-                return Err("another node is named like this node's id");
+                return Err("another node is named like this node's id".to_string());
             }
             s.nodes.insert(
                 node_id.clone(),
@@ -1189,12 +1204,17 @@ impl Center {
             }
             Err(why) => {
                 self.codes.lock().unwrap().fail(taken);
+                let unwritable = why.starts_with(UNWRITABLE);
                 self.log.record(
-                    Level::Warn,
+                    if unwritable {
+                        Level::Error
+                    } else {
+                        Level::Warn
+                    },
                     None,
                     &format!("pairing refused for the name {}: {why}", req.name),
                 );
-                (409, json!({ "error": why }))
+                (if unwritable { 500 } else { 409 }, json!({ "error": why }))
             }
         }
     }
@@ -4884,6 +4904,57 @@ pub(crate) mod tests {
         assert!(
             r.is_err() || on_disk == "four",
             "the save of four returned Ok, but the file holds {on_disk:?}"
+        );
+    }
+
+    /// A pairing the center cannot keep is refused, and nothing in memory
+    /// says it was made: the code stays open, and pairing works once the
+    /// disk takes it.
+    #[cfg(unix)]
+    #[test]
+    fn a_pairing_that_cannot_be_written_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let code = c.new_pairing()["code"].as_str().unwrap().to_string();
+        let body = json!({
+            "code": code, "name": "box-1", "platform": "linux", "arch": "x86_64",
+            "public_key": msg::hex(&[7; 32]),
+        })
+        .to_string();
+        let mode = |m| std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(m));
+        mode(0o500).unwrap();
+        let (status, v) = c.pair(body.as_bytes());
+        mode(0o700).unwrap();
+        assert_eq!(status, 500, "{v}");
+        assert!(v["error"].as_str().unwrap().starts_with(UNWRITABLE), "{v}");
+        assert!(c.read(|s| s.nodes.is_empty()));
+        assert_eq!(c.pairing_status(&code)["open"], true);
+        assert_eq!(c.pair(body.as_bytes()).0, 200);
+        assert_eq!(Store::load(dir.path()).unwrap().unwrap().nodes.len(), 1);
+    }
+
+    /// A change whose write failed is written by the next flush: it is not
+    /// only in memory until a later change happens to write the file.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_write_is_tried_again_by_the_next_flush() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let mode = |m| std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(m));
+        mode(0o500).unwrap();
+        c.update(|s| s.center_name = "kept".into());
+        c.flush();
+        mode(0o700).unwrap();
+        assert_ne!(
+            Store::load(dir.path()).unwrap().unwrap().center_name,
+            "kept"
+        );
+        c.flush();
+        assert_eq!(
+            Store::load(dir.path()).unwrap().unwrap().center_name,
+            "kept"
         );
     }
 

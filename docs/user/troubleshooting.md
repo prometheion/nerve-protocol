@@ -135,6 +135,7 @@ calls.
 | `another node already has this name` | Two machines have the same name | `nerve-node config set node.name <other>`, then pair again |
 | `this name is a node's id` | The machine's name is a paired machine's id (or its own), which the agent could mistake for that machine | `nerve-node config set node.name <other>`, then pair again |
 | `another node is named like this node's id` | A paired machine's name is this machine's id | Rename that machine in the web UI, then pair again |
+| `the center cannot write its state file: …` | The center's disk is full, or its state folder is read-only | Free the disk or fix the folder, then pair again with the same link: the code is still valid |
 | `this center is paired already as …` | The machine already has a pairing with this center | Use it, or `nerve-node center rm` it first |
 | `a center named … is paired already` | You already use this local name | Pass `--name <other>` |
 | A link or TLS error | The address in the link does not reach the center, or the center's certificate changed | Check `--public-url` and the port. Make a new link |

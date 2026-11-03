@@ -1387,6 +1387,111 @@ async fn http_mcp_needs_a_token_and_a_session() {
     r.stop().await;
 }
 
+/// The links of many nodes behind one address do not hold that address's
+/// places on the node port: once a link's hello is checked it no longer
+/// counts, so the next node from there still pairs.
+#[tokio::test]
+async fn links_do_not_hold_their_peers_places() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(dir.path()).await;
+    let mut links = Vec::new();
+    for i in 0..nerve_center::listen::PER_PEER {
+        let key = NodeKey::generate().unwrap();
+        assert_eq!(pair(&r, &key, &format!("box-{i}")).await.0, 200);
+        let (ws, _) = handshake(&r, &key).await;
+        links.push(ws);
+    }
+    let key = NodeKey::generate().unwrap();
+    let (status, body) = tokio::time::timeout(Duration::from_secs(10), pair(&r, &key, "one-more"))
+        .await
+        .expect("the pairing was not answered");
+    assert_eq!(status, 200, "{body}");
+    drop(links);
+    r.stop().await;
+}
+
+/// An HTTP session ends when the harness token that opened it is deleted,
+/// at once and without a request of its own, and after a while without a
+/// request. Its center session ends with it: its jobs and streams stop.
+#[tokio::test]
+async fn http_sessions_end_with_their_token_and_when_idle() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(dir.path()).await;
+    let hash = |t: &str| nerve_center::util::sha256_hex(t.as_bytes());
+    r.center.update(|s| {
+        for id in ["a", "b"] {
+            s.harness_tokens.push(nerve_center::store::TokenRecord {
+                id: id.into(),
+                label: id.into(),
+                hash: hash(&format!("nrv_token-{id}")),
+                created_ms: 1,
+            });
+        }
+    });
+    let h = nerve_center::mcp::HttpMcp::new(&r.center, None);
+    let server = nerve_center::listen::Server::bind("127.0.0.1:0", &r.center, true)
+        .await
+        .unwrap();
+    let task = tokio::spawn(h.clone().serve(server));
+    let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}});
+    let mut sid = String::new();
+    for id in ["a", "b"] {
+        let bearer = format!("Bearer nrv_token-{id}");
+        let resp = h
+            .request(http("POST", &[("authorization", &bearer)], init.clone()))
+            .await;
+        assert_eq!(resp.status, 200);
+        sid = resp
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("mcp-session-id"))
+            .map(|(_, v)| v.clone())
+            .expect("a session id");
+    }
+    assert_eq!(h.session_count(), 2);
+    let before = r.center.session_count();
+    // Token a is deleted, as the web UI deletes it.
+    r.center
+        .update(|s| s.harness_tokens.retain(|t| t.id != "a"));
+    r.center.changed(nerve_center::center::Change::Tokens);
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while h.session_count() != 1 && std::time::Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        h.session_count(),
+        1,
+        "the session of the deleted token stays"
+    );
+    assert_eq!(r.center.session_count(), before - 1);
+    // The other one ends once it has been idle for the idle time; a
+    // request keeps it going.
+    h.set_idle(Duration::from_millis(400));
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
+    let used = h
+        .request(http(
+            "POST",
+            &[
+                ("authorization", "Bearer nrv_token-b"),
+                ("mcp-session-id", &sid),
+            ],
+            list,
+        ))
+        .await;
+    assert_eq!(used.status, 200);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    h.sweep().await;
+    assert_eq!(h.session_count(), 1);
+    h.set_idle(Duration::ZERO);
+    h.sweep().await;
+    assert_eq!(h.session_count(), 0);
+    assert_eq!(r.center.session_count(), before - 2);
+    task.abort();
+    r.stop().await;
+}
+
 /// A disabled node stays paired and connected; `list` marks it and offers
 /// none of its capabilities, and `execute` on it never reaches it.
 #[tokio::test]

@@ -3,7 +3,6 @@
 //! an attached process's socket, and over Streamable HTTP.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -1229,12 +1228,45 @@ pub(crate) fn token_hash_ok(center: &Center, env_token: Option<&str>, hash: &str
     })
 }
 
+/// How long an HTTP session may go without a request before it ends. Most
+/// clients never send `DELETE /mcp` when they exit; a session that stayed
+/// would keep its jobs running, and its streams and subscriptions open on
+/// the nodes. A job's caller polls `job.status` far more often than this.
+pub const HTTP_IDLE: Duration = Duration::from_secs(30 * 60);
+/// How often the HTTP sessions are looked over for one to end.
+const HTTP_SWEEP: Duration = Duration::from_secs(30);
+
 /// The Streamable HTTP endpoint at `/mcp`. Replies are plain JSON; the
 /// server opens no SSE stream, and needs none: the tools never change.
+///
+/// A session ends with `DELETE /mcp`, after [`HTTP_IDLE`] without a request,
+/// and at once when the harness token that opened it is deleted: the agent
+/// that held a token which leaked must not go on with what it started.
 pub struct HttpMcp {
     center: Center,
     env_token: Option<String>,
-    sessions: Mutex<HashMap<String, Arc<Engine>>>,
+    sessions: Mutex<HashMap<String, Held>>,
+    idle: Mutex<Duration>,
+    /// The center's changes, from the endpoint's making on: a token deleted
+    /// before [`HttpMcp::serve`] first runs is not missed.
+    changes: Mutex<Option<tokio::sync::broadcast::Receiver<Change>>>,
+}
+
+/// The task that ends HTTP sessions, stopped with the endpoint.
+struct Sweeper(tokio::task::JoinHandle<()>);
+
+impl Drop for Sweeper {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// An HTTP session: its engine, the SHA-256 (hex) of the token that opened
+/// it, and its last request.
+struct Held {
+    engine: Arc<Engine>,
+    via: String,
+    last: Instant,
 }
 
 impl HttpMcp {
@@ -1243,19 +1275,98 @@ impl HttpMcp {
             center: center.clone(),
             env_token,
             sessions: Mutex::new(HashMap::new()),
+            idle: Mutex::new(HTTP_IDLE),
+            changes: Mutex::new(Some(center.subscribe())),
         })
     }
 
+    /// Another idle time, for a test.
+    #[doc(hidden)]
+    pub fn set_idle(&self, d: Duration) {
+        *self.idle.lock().unwrap() = d;
+    }
+
+    /// How many HTTP sessions are open.
+    pub fn session_count(&self) -> usize {
+        self.sessions.lock().unwrap().len()
+    }
+
+    /// Ends the sessions that went idle, whose token is gone, or that the
+    /// web UI ended.
+    pub async fn sweep(&self) {
+        let idle = *self.idle.lock().unwrap();
+        let gone: Vec<(Arc<Engine>, &str)> = {
+            let mut map = self.sessions.lock().unwrap();
+            let mut gone = Vec::new();
+            map.retain(|_, h| {
+                let why = if h.engine.session().ended() {
+                    Some("")
+                } else if !token_hash_ok(&self.center, self.env_token.as_deref(), &h.via) {
+                    Some("its harness token was deleted")
+                } else if h.last.elapsed() >= idle {
+                    Some("it had no request for a while")
+                } else {
+                    None
+                };
+                match why {
+                    Some(why) => {
+                        gone.push((h.engine.clone(), why));
+                        false
+                    }
+                    None => true,
+                }
+            });
+            gone
+        };
+        for (e, why) in gone {
+            if !why.is_empty() {
+                self.center.log().record(
+                    nerve_transport::log::Level::Info,
+                    None,
+                    &format!("the HTTP harness session {} ended: {why}", e.session().id),
+                );
+            }
+            e.close().await;
+        }
+    }
+
+    /// Serves `/mcp` on `server`, and ends sessions on the way: now and then,
+    /// and whenever the harness tokens change.
     pub async fn serve(self: Arc<Self>, server: crate::listen::Server) {
+        let me = self.clone();
+        let mut changes = self
+            .changes
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| self.center.subscribe());
+        let sweeper = tokio::spawn(async move {
+            // No session is open yet at the start, so the first look is
+            // after one period.
+            let start = tokio::time::Instant::now() + HTTP_SWEEP;
+            let mut tick = tokio::time::interval_at(start, HTTP_SWEEP);
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    c = changes.recv() => match c {
+                        Ok(Change::Tokens) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Ok(_) => continue,
+                        Err(_) => return,
+                    },
+                }
+                me.sweep().await;
+            }
+        });
+        let _sweeper = Sweeper(sweeper);
         server
-            .run(move |io, peer| {
+            .run(move |io, _admitted| {
                 let me = self.clone();
-                async move { me.conn(io, peer).await }
+                async move { me.conn(io).await }
             })
             .await
     }
 
-    async fn conn(&self, mut io: BoxIo, _peer: SocketAddr) {
+    async fn conn(&self, mut io: BoxIo) {
         let resp = match http::read_request(&mut io, MESSAGE_BYTES).await {
             Ok(req) => self.request(req).await,
             Err(_) => Response::text(400, "bad request"),
@@ -1284,8 +1395,8 @@ impl HttpMcp {
         match req.method.as_str() {
             "POST" => self.post(req, sid).await,
             "DELETE" => match sid.and_then(|s| self.sessions.lock().unwrap().remove(&s)) {
-                Some(e) => {
-                    e.close().await;
+                Some(h) => {
+                    h.engine.close().await;
                     Response::new(204, "text/plain", Vec::new())
                 }
                 None => Response::text(404, "no such session"),
@@ -1309,13 +1420,25 @@ impl HttpMcp {
         let (engine, new_id) = if is_init && sid.is_none() {
             let e = Arc::new(Engine::new(&self.center, "http"));
             let id = e.session().id.clone();
-            self.sessions.lock().unwrap().insert(id.clone(), e.clone());
+            // The token was checked for this request, so it is there.
+            let via = util::sha256_hex(req.bearer().unwrap_or_default().as_bytes());
+            self.sessions.lock().unwrap().insert(
+                id.clone(),
+                Held {
+                    engine: e.clone(),
+                    via,
+                    last: Instant::now(),
+                },
+            );
             (e, Some(id))
         } else {
             let Some(sid) = sid else {
                 return Response::text(400, "Mcp-Session-Id is missing");
             };
-            let e = self.sessions.lock().unwrap().get(&sid).cloned();
+            let e = self.sessions.lock().unwrap().get_mut(&sid).map(|h| {
+                h.last = Instant::now();
+                h.engine.clone()
+            });
             match e {
                 // A session ended in the web UI is gone for HTTP clients; they
                 // start a new one.

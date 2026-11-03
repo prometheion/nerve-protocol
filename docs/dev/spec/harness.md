@@ -65,9 +65,12 @@ and every change of it, comes from the `list` tool when the model asks.
 Over HTTP the endpoint is `POST /mcp` with `Authorization: Bearer <token>`.
 `initialize` without `Mcp-Session-Id` opens a session and returns its id in
 `Mcp-Session-Id`; later requests carry it (missing: 400, unknown or ended:
-404). Notifications get 202, `DELETE /mcp` ends the session (204). Replies are
-JSON; the server opens no SSE stream. Requests with an `Origin` that does not
-match `Host` are refused (403).
+404). Notifications get 202, `DELETE /mcp` ends the session (204). A session
+also ends after 30 minutes without a request (looked over every 30 seconds),
+and at once when the harness token that opened it is deleted (the center keeps
+the token's SHA-256 with the session); both end it as `DELETE` does, with
+`session.end` to the nodes. Replies are JSON; the server opens no SSE stream.
+Requests with an `Origin` that does not match `Host` are refused (403).
 
 ## 4. Tools
 
