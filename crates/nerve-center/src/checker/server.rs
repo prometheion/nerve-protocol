@@ -450,8 +450,11 @@ async fn run_once(
                 return RunEnd::Exited;
             }
             _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                match tokio::time::timeout(timeout, model::is_decision_model(endpoint)).await {
-                    Ok(Ok(true)) if !ours(listen, endpoint, timeout).await => {
+                // Who answers is checked before the real key is sent: a
+                // process that took the port must not learn it.
+                match ours(listen, endpoint, timeout).await {
+                    Some(true) => {}
+                    Some(false) => {
                         set(inner, |i| {
                             i.phase = Some(Phase::Failed);
                             i.message = format!("another process answers at {url} for the local model, and takes keys it was not given; the checker does not trust it");
@@ -459,6 +462,10 @@ async fn run_once(
                         kill_and_wait(&mut child).await;
                         return RunEnd::Exited;
                     }
+                    // Not up yet.
+                    None => continue,
+                }
+                match tokio::time::timeout(timeout, model::is_decision_model(endpoint)).await {
                     Ok(Ok(true)) => {
                         set(inner, |i| {
                             i.phase = Some(Phase::Ready);
@@ -507,16 +514,19 @@ async fn run_once(
     }
 }
 
-/// Whether the server that answered is the one this run started: on a
-/// socket in the state folder it is, as no other account can listen there;
-/// on a port it must refuse a key it was not given.
-async fn ours(listen: &Listen, endpoint: &Endpoint, timeout: Duration) -> bool {
+/// Whether the server that answers is the one this run started, or none
+/// while nothing answers yet: on a socket in the state folder it is, as no
+/// other account can listen there; on a port it must refuse a key it was
+/// not given.
+async fn ours(listen: &Listen, endpoint: &Endpoint, timeout: Duration) -> Option<bool> {
     match listen {
-        Listen::Socket(_) => true,
-        Listen::Port(_) => matches!(
-            tokio::time::timeout(timeout, model::refuses_other_keys(endpoint)).await,
-            Ok(Ok(true))
-        ),
+        Listen::Socket(_) => Some(true),
+        Listen::Port(_) => {
+            match tokio::time::timeout(timeout, model::refuses_other_keys(endpoint)).await {
+                Ok(Ok(refuses)) => Some(refuses),
+                _ => None,
+            }
+        }
     }
 }
 
@@ -852,7 +862,10 @@ mod tests {
         let listen = Listen::Port(port);
         let ep = endpoint_of(&listen, "the-key", None);
         assert!(model::is_decision_model(&ep).await.unwrap());
-        assert!(!ours(&listen, &ep, Duration::from_secs(5)).await);
+        assert_eq!(
+            ours(&listen, &ep, Duration::from_secs(5)).await,
+            Some(false)
+        );
         // The fake server on a port of its own refuses other keys, and so is
         // the one this run started.
         let dir = tempfile::tempdir().unwrap();
@@ -863,6 +876,64 @@ mod tests {
         let at = Listen::Port(free_port().unwrap());
         let server = LocalServer::start_at(bin, model, at, false, 5000, pin).expect("start");
         until(&server, "ready", &|| server.ready()).await;
+        server.stop().await;
+    }
+
+    /// A process that took the port never sees the real key: who answers
+    /// is checked with a key of no use first, and the run fails there.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_process_that_took_the_port_never_sees_the_key() {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let squatter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = squatter.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(String::new()));
+        let heard = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut io, _)) = squatter.accept().await {
+                let heard = heard.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = io.read(&mut buf).await.unwrap_or(0);
+                    heard
+                        .lock()
+                        .unwrap()
+                        .push_str(&String::from_utf8_lossy(&buf[..n]));
+                    let body = r#"{"data":[{"architecture":{"output_modalities":["decisions"]}}]}"#;
+                    let _ = io
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                });
+            }
+        });
+        // A server that starts and never listens, while the squatter
+        // answers on its port.
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("llama-server");
+        std::fs::write(&bin, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let model = dir.path().join("model.gguf");
+        std::fs::write(&model, b"x").unwrap();
+        let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
+        let server =
+            LocalServer::start_at(bin, model, Listen::Port(port), false, 5000, pin).expect("start");
+        until(&server, "failed", &|| {
+            server.status().phase == Phase::Failed
+        })
+        .await;
+        let heard = seen.lock().unwrap().clone();
+        assert!(heard.contains("Bearer "), "{heard}");
+        assert!(
+            !heard.contains(&server.key),
+            "the squatter saw the key: {heard}"
+        );
         server.stop().await;
     }
 

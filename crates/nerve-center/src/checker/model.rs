@@ -940,10 +940,15 @@ async fn get_models(
 /// Whether the server at `endpoint` refuses `/v1/models` to a token it was
 /// not given: the center's own server, started with a key of its own, does.
 /// One that answers anyone is not that server, but a process that took its
-/// port.
+/// port. A server that is still loading (503) says neither yet.
 pub async fn refuses_other_keys(endpoint: &Endpoint) -> Result<bool, ModelError> {
     let other = nerve_transport::keys::random_token(32);
     let resp = get_models(endpoint, Some(&other)).await?;
+    if resp.status == 503 {
+        return Err(ModelError::Unreachable(
+            "the server is still loading".into(),
+        ));
+    }
     Ok(resp.status == 401)
 }
 
