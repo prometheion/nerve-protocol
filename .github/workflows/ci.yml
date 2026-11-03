@@ -296,14 +296,15 @@ jobs:
           test -x target/debug/nerve-node-desktop
       # As root, as the app's install runs once a person said yes; the
       # runner's account is the owner (SUDO_USER).
-      # A test that returns early says so on a line that starts with
-      # `skipped`; here that fails the step.
+      # A test that returns early says so with `skipped` at the start of a
+      # line, or behind `test <name> ... ` with one test thread; here that fails
+      # the step.
       - name: Install, control, update and uninstall
         run: |
           sudo NERVE_DESKTOP_REAL="$PWD/target/debug/nerve-node-desktop" "$(cat "$RUNNER_TEMP/real.path")" \
             --ignored --exact --nocapture install_control_update_and_uninstall_on_this_machine 2>&1 \
             | tee "$RUNNER_TEMP/real.log"
-          if grep '^skipped' "$RUNNER_TEMP/real.log"; then exit 1; fi
+          if grep -E '(^|\.\.\. )skipped' "$RUNNER_TEMP/real.log"; then exit 1; fi
 
   # Linux never compiles the Windows branches, so clippy and the tests must run
   # here too: nerve-node, nerve-sandbox and nerve-policy have Windows-only code

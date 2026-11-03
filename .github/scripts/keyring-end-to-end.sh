@@ -86,11 +86,12 @@ cd /
 step() { printf '\n==== %s\n' "$*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 # A real test, which fails here when it skips: one that returns early says
-# why on a line of its own that starts with `skipped`.
+# why in a line with `skipped` at its start, or after `test <name> ... ` when
+# one test thread prints the name first and the test's own line goes behind it.
 real() {
   "$@" 2>&1 | tee "$OUT/real.log"
-  if grep -q '^skipped' "$OUT/real.log"; then
-    fail "a real test skipped: $(grep '^skipped' "$OUT/real.log" | head -n 1)"
+  if grep -qE '(^|\.\.\. )skipped' "$OUT/real.log"; then
+    fail "a real test skipped: $(grep -E '(^|\.\.\. )skipped' "$OUT/real.log" | head -n 1)"
   fi
 }
 as_owner() { runuser -u "$OWNER" -- "$BIN" "$@"; }

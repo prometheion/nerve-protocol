@@ -27,8 +27,10 @@ docker run --detach --name "$NAME" --hostname "$NAME" \
     apt-get update
     apt-get install -y --no-install-recommends \
       systemd systemd-sysv dbus dbus-user-session libpam-systemd polkitd pkexec \
-      sudo acl python3 curl ca-certificates iproute2 file
-    # A server has it, and the keyring test changes it.
+      sudo acl python3 curl ca-certificates iproute2 file procps
+    # procps (pgrep, pkill): a server has it, the minimal image does not, and
+    # the real tests look for their commands with it before the node installs it.
+    # /etc/environment: a server has it, and the keyring test changes it.
     touch /etc/environment
     exec /sbin/init'
 

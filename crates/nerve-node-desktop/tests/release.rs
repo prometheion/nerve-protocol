@@ -211,3 +211,44 @@ fn the_security_policy_names_a_way_in_without_the_reporting_button() {
     assert!(guide.contains("(SECURITY.md)"), "{guide}");
     assert!(readme.contains("(CONTRIBUTING.md)"), "{readme}");
 }
+
+/// The Debian 12 machine is a minimal image: the real tests call `pgrep`
+/// (step 1c, before the node's setup brings procps in as a dependency).
+#[test]
+fn the_debian_machine_has_the_tools_the_real_tests_call() {
+    let script = include_str!("../../../.github/scripts/systemd-container.sh");
+    let list = script
+        .split("apt-get install")
+        .nth(1)
+        .and_then(|rest| rest.split("# ").next())
+        .expect("the package list");
+    assert!(list.split_whitespace().any(|p| p == "procps"), "{list}");
+}
+
+/// `real()` of the end-to-end script must see a skip in the output of a run
+/// with one test thread too, where the test's line follows `test <name> ... `.
+#[cfg(unix)]
+#[test]
+fn a_real_test_that_skips_fails_the_script_with_one_test_thread_too() {
+    let script = include_str!("../../../.github/scripts/keyring-end-to-end.sh");
+    let start = script.find("\nreal() {").expect("real()") + 1;
+    let real = &script[start..start + script[start..].find("\n}\n").expect("end of real()") + 2];
+    let dir = std::env::temp_dir().join(format!("nerve-real-fn-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (printed, fails) in [
+        ("skipped: not set", true),
+        ("test a_test ... skipped: not set", true),
+        ("test a_test ... ok", false),
+    ] {
+        let run = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "OUT={}; fail() {{ echo \"FAIL: $*\"; exit 1; }}\n{real}\nreal echo '{printed}'",
+                dir.display()
+            ))
+            .output()
+            .expect("bash");
+        assert_eq!(!run.status.success(), fails, "{printed}: {run:?}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
