@@ -217,9 +217,9 @@ impl Rule {
         if !self.covers(call.cap, call.action) {
             return false;
         }
-        // An allow rule covers a line when every command in it meets the
-        // rule, and there is at least one.
-        let all = |covers: &dyn Fn(&Command) -> bool| {
+        // The commands an allow rule reads (none for a line it cannot see
+        // whole).
+        let allowed = |f: &dyn Fn(&[Command]) -> bool| {
             let parsed;
             let c = match commands {
                 Some(c) => c,
@@ -228,11 +228,22 @@ impl Rule {
                     parsed.for_allow()
                 }
             };
-            !c.is_empty() && c.iter().all(covers)
+            f(c)
+        };
+        // An allow rule covers a line when every command in it meets the
+        // rule, and there is at least one.
+        let all = |covers: &dyn Fn(&Command) -> bool| {
+            allowed(&|c: &[Command]| !c.is_empty() && c.iter().all(covers))
         };
         match &self.matcher {
             Matcher::Command(p) if !deny => all(&|c| p.covers(c)),
             Matcher::CmdRegex(re) if !deny => all(&|c| re.is_match(&c.line())),
+            // A regex over the whole line cannot tell which command it
+            // matched, so as an allow rule it covers a line of one command
+            // only, with nothing run inside it.
+            Matcher::Regex(re) if !deny => {
+                allowed(&|c: &[Command]| c.len() == 1) && re.is_match(&collapse_ws(call.target))
+            }
             Matcher::Exact(line) => call.target.trim() == line,
             Matcher::Command(p) => match commands {
                 Some(c) => c.iter().any(|c| p.matches(c)),
@@ -267,6 +278,9 @@ struct CmdPattern {
     program: GlobMatcher,
     short: Vec<char>,
     long: Vec<String>,
+    /// The long flags as the pattern spells them, with the value of a
+    /// `--name=value`: as an allow rule, the value must be the same.
+    long_words: Vec<(String, Option<String>)>,
     operands: Vec<GlobMatcher>,
     /// A bare `*` word: as an allow rule, anything may follow.
     rest: bool,
@@ -285,13 +299,16 @@ impl CmdPattern {
             .compile_matcher();
         let mut short = Vec::new();
         let mut long = Vec::new();
+        let mut long_words = Vec::new();
         let mut operands = Vec::new();
         let mut rest = false;
         for w in words {
             rest |= w == "*";
             if let Some(l) = w.strip_prefix("--") {
                 if !l.is_empty() {
-                    long.push(l.split('=').next().unwrap_or(l).to_ascii_lowercase());
+                    let (name, value) = long_word(l);
+                    long.push(name.clone());
+                    long_words.push((name, value.map(str::to_string)));
                 }
             } else if let Some(flags) = w
                 .strip_prefix('-')
@@ -316,6 +333,7 @@ impl CmdPattern {
             program,
             short,
             long,
+            long_words,
             operands,
             rest,
         })
@@ -324,7 +342,9 @@ impl CmdPattern {
     /// Whether `c` meets this pattern as an allow rule: it [`matches`], and
     /// carries no flag or operand the pattern does not name, unless the
     /// pattern has a bare `*`. So `git status` covers `git status` and not
-    /// `git -c core.fsmonitor=… status`; `make *` covers any `make`.
+    /// `git -c core.fsmonitor=… status`; `make *` covers any `make`. A long
+    /// flag the pattern spells `--name=value` is covered with that value
+    /// only, and one it spells `--name` only without a value.
     ///
     /// [`matches`]: CmdPattern::matches
     fn covers(&self, c: &Command) -> bool {
@@ -336,12 +356,15 @@ impl CmdPattern {
         }
         c.args.iter().all(|a| {
             if let Some(l) = a.strip_prefix("--").filter(|l| !l.is_empty()) {
-                let l = l.split('=').next().unwrap_or(l).to_ascii_lowercase();
-                self.long.contains(&l)
-                    || self
-                        .short
-                        .iter()
-                        .any(|s| long_for(*s).contains(&l.as_str()))
+                let (name, value) = long_word(l);
+                self.long_words
+                    .iter()
+                    .any(|(n, v)| *n == name && v.as_deref() == value)
+                    || (value.is_none()
+                        && self
+                            .short
+                            .iter()
+                            .any(|s| long_for(*s).contains(&name.as_str())))
             } else if a.len() == 2 && a.starts_with('-') && a.as_bytes()[1].is_ascii_alphanumeric()
             {
                 let f = a.as_bytes()[1] as char;
@@ -378,6 +401,15 @@ impl CmdPattern {
         self.operands
             .iter()
             .all(|g| have_ops.iter().any(|o| g.is_match(norm_operand(o))))
+    }
+}
+
+/// A long flag's word without its `--`: the name, lower-cased, and the
+/// value of a `name=value`.
+fn long_word(l: &str) -> (String, Option<&str>) {
+    match l.split_once('=') {
+        Some((name, value)) => (name.to_ascii_lowercase(), Some(value)),
+        None => (l.to_ascii_lowercase(), None),
     }
 }
 

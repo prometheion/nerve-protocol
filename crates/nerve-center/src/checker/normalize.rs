@@ -146,15 +146,26 @@ pub struct Parsed {
     /// backticks, `<( )`), a shell's `-c` body (`cmd /c`, PowerShell's
     /// `-Command`), or a program `Start-Process` starts.
     pub nested: bool,
+    /// A wrapper before a command does more than run it: it carries words
+    /// of its own (`env A=B`, `env -S '…'`, `sudo -u user`, `nice -n 5`), or
+    /// gives the command words it reads at run time (`xargs`) or a program
+    /// it fetches (`npx`). A bare `sudo`, `env`, `nohup`, … does not.
+    pub wrapped: bool,
 }
 
 impl Parsed {
     /// The commands a saved allow rule is matched against: the text
-    /// splitter's, and none for a line that runs a command inside another,
-    /// since what a substitution or a `-c` body runs is no command the rule
-    /// names, however the outer one reads.
+    /// splitter's, and none for a line whose commands the rule cannot see
+    /// whole. That is a line that runs a command inside another (what a
+    /// substitution or a `-c` body runs is no command the rule names,
+    /// however the outer one reads), a line with a wrapper that does more
+    /// than run its command ([`Parsed::wrapped`]: `env -S` is a `-c` body by
+    /// another name, `env GIT_CONFIG_…=…` changes what the command does),
+    /// and a line in which the parser found a command the splitter did not
+    /// (a runner the splitter does not know, such as `timeout` or `eval`,
+    /// or a wrapper's flags it reads otherwise).
     pub fn for_allow(&self) -> &[Command] {
-        if self.nested {
+        if self.nested || self.wrapped || self.commands.len() > self.walked {
             &[]
         } else {
             &self.commands[..self.walked]
@@ -183,6 +194,10 @@ const WRAPPERS: &[&str] = &[
     "nocorrect",
     "noglob",
 ];
+
+/// Wrappers that give the program more than the line names, even bare:
+/// `xargs` its operands read at run time, `npx` a package it may fetch.
+const RUN_TIME_WRAPPERS: &[&str] = &["xargs", "npx", "pnpx"];
 
 /// Shell words that may stand before a command and are not the program
 /// (`if rm …`, `then rm …`, `! rm …`, `{ rm …; }`).
@@ -317,6 +332,7 @@ fn walk(line: &str, shell: Shell) -> Parsed {
         commands: Vec::new(),
         overflow: None,
         nested: false,
+        wrapped: false,
     };
     w.collect(line, shell, 0);
     Parsed {
@@ -324,6 +340,7 @@ fn walk(line: &str, shell: Shell) -> Parsed {
         commands: w.commands,
         overflow: w.overflow,
         nested: w.nested,
+        wrapped: w.wrapped,
     }
 }
 
@@ -334,6 +351,8 @@ struct Walk {
     overflow: Option<Overflow>,
     /// A command was found inside another ([`Parsed::nested`]).
     nested: bool,
+    /// A wrapper did more than run its command ([`Parsed::wrapped`]).
+    wrapped: bool,
 }
 
 impl Walk {
@@ -380,9 +399,10 @@ impl Walk {
             self.overflow = Some(Overflow::Commands);
             return;
         }
-        let Some(i) = program_index(words) else {
+        let Some((i, bare)) = program_at(words) else {
             return;
         };
+        self.wrapped |= !bare;
         let program = base_name(&words[i]);
         let rest = &words[i + 1..];
 
@@ -429,7 +449,15 @@ impl Walk {
 /// keywords and wrappers (with a wrapper's own arguments: `env A=B`,
 /// `nice -n 5`, `sudo -u user`, `xargs -0`).
 fn program_index(words: &[String]) -> Option<usize> {
+    program_at(words).map(|(i, _)| i)
+}
+
+/// [`program_index`], and whether every wrapper before the program stood
+/// bare: no word of its own, and none that adds to what the program is
+/// given ([`Parsed::wrapped`]).
+fn program_at(words: &[String]) -> Option<(usize, bool)> {
     let mut i = 0;
+    let mut bare = true;
     while i < words.len() {
         let w = base_name(&words[i]);
         if KEYWORDS.contains(&words[i].as_str()) {
@@ -439,7 +467,9 @@ fn program_index(words: &[String]) -> Option<usize> {
         if !WRAPPERS.contains(&w.as_str()) {
             break;
         }
+        bare &= !RUN_TIME_WRAPPERS.contains(&w.as_str());
         i += 1;
+        let first = i;
         while i < words.len() {
             let a = &words[i];
             if a.contains('=') && !a.starts_with('-') {
@@ -454,8 +484,9 @@ fn program_index(words: &[String]) -> Option<usize> {
                 break;
             }
         }
+        bare &= i == first;
     }
-    (i < words.len()).then_some(i)
+    (i < words.len()).then_some((i, bare))
 }
 
 /// The program a segment runs, for telling whether a here-string is fed to a
@@ -1565,5 +1596,36 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(parse(&script, Shell::Posix).overflow, None);
+    }
+
+    /// A program `Start-Process` starts is a command inside another: no
+    /// allow rule covers the line, whatever it names.
+    #[test]
+    fn a_started_program_is_nested() {
+        let p = parse("Start-Process notepad.exe -Verb RunAs", Shell::PowerShell);
+        assert!(p.nested);
+        assert!(p.for_allow().is_empty());
+        assert!(p.commands.iter().any(|c| c.program == "notepad"));
+    }
+
+    /// A wrapper with words of its own, or one that adds to its command at
+    /// run time, marks the line; a bare one does not.
+    #[test]
+    fn a_wrapper_that_does_more_than_run_its_command_is_marked() {
+        for line in [
+            "env A=B git status",
+            "env -S 'x y' git status",
+            "sudo -u other git status",
+            "nice git -n 5 status && nice -n 5 git status",
+            "xargs git status",
+            "npx git status",
+        ] {
+            assert!(parse(line, Shell::Posix).wrapped, "{line}");
+        }
+        for line in ["sudo git status", "env git status", "nohup nice git status"] {
+            let p = parse(line, Shell::Posix);
+            assert!(!p.wrapped, "{line}");
+            assert_eq!(p.for_allow().len(), 1, "{line}");
+        }
     }
 }

@@ -1412,6 +1412,92 @@ mod tests {
         ));
     }
 
+    /// What a wrapper adds to a command is no word an allow rule names: a
+    /// split string (`env -S`, a `-c` body by another name), assignments
+    /// that change what the command does, another account or directory,
+    /// operands read at run time. Nor does a rule for a runner the splitter
+    /// does not know cover what that runner runs. A bare wrapper is read
+    /// past, as before.
+    #[tokio::test]
+    async fn an_allow_rule_does_not_cover_what_a_wrapper_adds() {
+        let args = Map::new();
+        let checker_with = |rule: &str| {
+            let mut cfg = CheckerConfig::default();
+            cfg.allow_rules.push(AllowRule {
+                rule: rule.into(),
+                node_id: None,
+            });
+            Checker::build(cfg, None)
+        };
+        let covered = async |checker: &Checker, line: &str| {
+            matches!(
+                checker
+                    .check(&call("exec", "run", Effect::Execute, line, &args), None)
+                    .await,
+                Decision::Allowed {
+                    layer: Layer::AllowRule,
+                    ..
+                }
+            )
+        };
+        for rule in ["exec.run:git status", "exec.run:git *"] {
+            let checker = checker_with(rule);
+            for line in [
+                "env -S 'bash -c id' git status",
+                "env --split-string='bash -c id' git status",
+                "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0='echo hi' git status",
+                "sudo -u other git status",
+                "nice -n 5 git status",
+                "xargs git status",
+                "npx git status",
+            ] {
+                assert!(!covered(&checker, line).await, "{rule} covers {line}");
+            }
+            for line in [
+                "git status",
+                "sudo git status",
+                "env git status",
+                "nohup git status",
+            ] {
+                assert!(
+                    covered(&checker, line).await,
+                    "{rule} does not cover {line}"
+                );
+            }
+        }
+        // A runner the splitter reads as a plain program: its rule covers
+        // what it runs no more than a shell's covers its `-c` body.
+        for (rule, line) in [
+            ("exec.run:timeout *", "timeout 5 bash -c id"),
+            ("exec.run:eval *", "eval 'id'"),
+        ] {
+            assert!(
+                !covered(&checker_with(rule), line).await,
+                "{rule} covers {line}"
+            );
+        }
+        // A regex over the line covers a line of one command, nothing run
+        // inside it.
+        let checker = checker_with("exec.run:re:^git status");
+        assert!(covered(&checker, "git status").await);
+        for line in [
+            "git status; cat ~/.ssh/id_ed25519",
+            "git status $(cat ~/.ssh/id_ed25519)",
+            "git status && rm -rf ~/x",
+        ] {
+            assert!(!covered(&checker, line).await, "re: covers {line}");
+        }
+        // A long flag's value is part of the rule.
+        let checker = checker_with("exec.run:kubectl get pods --namespace=dev");
+        assert!(covered(&checker, "kubectl get pods --namespace=dev").await);
+        for line in [
+            "kubectl get pods --namespace=prod",
+            "kubectl get pods --namespace",
+        ] {
+            assert!(!covered(&checker, line).await, "covers {line}");
+        }
+    }
+
     /// The model is told the call's effect and what the node says the
     /// capability does, cut to a few sentences, beside the call itself.
     #[test]
