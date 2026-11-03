@@ -8,9 +8,9 @@
 //! The edition is the running program's own: each program's `main` sets it
 //! before anything else, and nothing reads the name it was started by
 //! (argv[0]). Through a link named `nerve-node`, as a node installed alone
-//! becomes when the desktop app takes it over
-//! ([`crate::service::node_beside`]), the app is still the app, so `update`
-//! there updates the app.
+//! becomes on Linux when the desktop app takes it over
+//! (`crate::service::node_beside`), the app is still the app, so `update`
+//! there updates the app. Windows has only the app's edition in the release.
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -41,8 +41,8 @@ pub const NODE: Edition = Edition {
 };
 
 /// The desktop app's name. The node alone knows it to find the app beside
-/// it: a node the app took over is the app's to uninstall
-/// ([`crate::service::app_beside`]).
+/// it on Linux: a node the app took over is the app's to uninstall
+/// (`crate::service::app_beside`).
 pub const DESKTOP_PROGRAM: &str = "nerve-node-desktop";
 
 static EDITION: OnceLock<&'static Edition> = OnceLock::new();

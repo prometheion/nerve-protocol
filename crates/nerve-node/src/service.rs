@@ -1853,12 +1853,14 @@ pub(crate) fn put_parts(layout: &Layout, steps: &mut Steps) -> Result<(), String
     Ok(())
 }
 
-/// [`put_parts`], and the node alone that was installed before the program
-/// becomes a link to it ([`link_node`]); Linux. On Windows that program goes
-/// instead (crate::winsvc).
+/// [`put_parts`], and on Linux the node alone that was installed before the
+/// program becomes a link to it ([`link_node`]). Windows has no node alone
+/// to take over: the desktop app is the only way to the node there.
 pub(crate) fn install_parts(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
     put_parts(layout, steps)?;
-    link_node(layout, steps)
+    #[cfg(not(windows))]
+    link_node(layout, steps)?;
+    Ok(())
 }
 
 /// Removes them again, and on Linux that link, before the program goes.
@@ -1875,7 +1877,9 @@ pub(crate) fn uninstall_parts(layout: &Layout, steps: &mut Steps) -> Result<(), 
 }
 
 /// Where `install` of the node alone put its program, beside `layout`'s
-/// when that is another edition's: `nerve-node` (`nerve-node.exe`).
+/// when that is another edition's: `nerve-node`. Not on Windows, where the
+/// node alone is not released or installed.
+#[cfg(not(windows))]
 pub fn node_beside(layout: &Layout) -> Option<PathBuf> {
     let node = crate::edition::NODE.program;
     if layout.edition.program == node {
@@ -1885,6 +1889,7 @@ pub fn node_beside(layout: &Layout) -> Option<PathBuf> {
 }
 
 /// The program `program` in `layout`'s folder, with its extension.
+#[cfg(not(windows))]
 fn beside(layout: &Layout, program: &str) -> PathBuf {
     let mut p = layout.bin.with_file_name(program);
     if let Some(ext) = layout.bin.extension() {
@@ -1896,7 +1901,9 @@ fn beside(layout: &Layout, program: &str) -> PathBuf {
 /// The desktop app's program beside `layout`'s, when the app is installed
 /// there and `layout` is the node alone's: the app took the node over, so
 /// the service, the parts and the program are the app's, and only its own
-/// uninstall removes them all ([`hand_over_uninstall`]).
+/// uninstall removes them all ([`hand_over_uninstall`]). Not on Windows,
+/// where no node alone is installed beside the app.
+#[cfg(not(windows))]
 pub fn app_beside(layout: &Layout) -> Option<PathBuf> {
     if layout.edition.program != crate::edition::NODE.program {
         return None;
@@ -1908,6 +1915,7 @@ pub fn app_beside(layout: &Layout) -> Option<PathBuf> {
 /// the app's program at `app` runs its own `uninstall`, which removes the
 /// service, the app's parts and both programs, and what it says is passed
 /// on. Its log and errors go to stderr as they come.
+#[cfg(not(windows))]
 pub fn hand_over_uninstall(app: &Path, purge: bool, out: &mut dyn Write) -> Result<(), String> {
     use std::io::BufReader;
     use std::process::{Command, Stdio};
@@ -1921,8 +1929,6 @@ pub fn hand_over_uninstall(app: &Path, purge: bool, out: &mut dyn Write) -> Resu
     if purge {
         cmd.arg("--purge");
     }
-    // Pipes, not this console: on Windows the app is a GUI program, which
-    // keeps what it is given (nerve-node-desktop's console.rs).
     let mut child = cmd
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
@@ -1961,6 +1967,7 @@ pub fn hand_over_uninstall(app: &Path, purge: bool, out: &mut dyn Write) -> Resu
 /// stays and it is never an older one. The edition comes from the program
 /// the link leads to (crate::edition), so `nerve-node update` through it
 /// updates the app. Nothing is made where no node alone was installed.
+#[cfg(not(windows))]
 fn link_node(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
     let Some(node) = node_beside(layout) else {
         return Ok(());
@@ -1997,8 +2004,7 @@ fn symlink(target: &Path, at: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, at)
 }
 
-// Windows removes the node alone's program instead (crate::winsvc).
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn symlink(_: &Path, _: &Path) -> std::io::Result<()> {
     Err(std::io::Error::other("the link is made on Linux only"))
 }

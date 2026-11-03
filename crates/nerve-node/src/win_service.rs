@@ -60,9 +60,11 @@ fn stop_bell() -> &'static tokio::sync::Notify {
 }
 
 /// Runs `body` as the service when the service control manager started
-/// this program, else as it is; its exit code. `log` is the node's log
-/// file, where a start that fails is said.
-pub fn serve(body: Body, log: std::path::PathBuf) -> i32 {
+/// this program; its exit code. Started any other way, as from a terminal,
+/// the node does not run (crate::cli::BY_HAND). `log` is the node's log
+/// file, where a start that fails is said; `json` whether the error is said
+/// as JSON too.
+pub fn serve(body: Body, log: std::path::PathBuf, json: bool) -> i32 {
     let _ = LOG.set(log);
     *crate::daemon::lock(&BODY) = Some(body);
     let mut name = wide(SERVICE_NAME);
@@ -82,19 +84,13 @@ pub fn serve(body: Body, log: std::path::PathBuf) -> i32 {
         return 0;
     }
     let e = std::io::Error::last_os_error();
-    let body = crate::daemon::lock(&BODY).take();
+    crate::daemon::lock(&BODY).take();
     if e.raw_os_error() != Some(ERROR_FAILED_SERVICE_CONTROLLER_CONNECT as i32) {
-        eprintln!("nerve-node: cannot run as a service: {e}");
-        return 1;
+        return crate::entry::failed(json, &format!("cannot run as a service: {e}"));
     }
-    // Started from a terminal: the node runs there.
-    match body.map(|b| b()) {
-        Some(Err(e)) => {
-            eprintln!("nerve-node: {e}");
-            1
-        }
-        _ => 0,
-    }
+    // Not started by the manager, as from a terminal: the installed node
+    // runs as its service only, which the desktop app starts.
+    crate::entry::failed(json, crate::cli::BY_HAND)
 }
 
 /// Whether this program runs as the service.

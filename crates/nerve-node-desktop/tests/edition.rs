@@ -1,19 +1,16 @@
 //! The desktop app started through a link named `nerve-node`, as the node
 //! installed alone becomes when the app takes it over
 //! (nerve_node::service::node_beside): it is still the app's program, so
-//! `nerve-node update` and `install` in a terminal work on the app.
+//! `nerve-node update` and `install` in a terminal work on the app. Linux
+//! only: Windows has no node alone for the app to take over.
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn link(program: &Path, dir: &Path, name: &str) -> PathBuf {
-    let at = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    #[cfg(unix)]
+    let at = dir.join(name);
     std::os::unix::fs::symlink(program, &at).unwrap();
-    #[cfg(windows)]
-    if std::os::windows::fs::symlink_file(program, &at).is_err() {
-        std::fs::hard_link(program, &at).unwrap();
-    }
     at
 }
 

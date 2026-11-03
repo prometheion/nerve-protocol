@@ -1898,16 +1898,27 @@ fn invoker_of(
         .unwrap_or_else(|| "root".into())
 }
 
-/// On Windows, `run` on the installed node's folders runs under the service
-/// control manager (crate::win_service): the node's log file, where a start
-/// that fails is said. `None` for any other command.
-pub fn service_log(cli: &Cli) -> Option<PathBuf> {
+/// On Windows, `run` runs only under the service control manager
+/// (crate::win_service), on the installed node's folders: `Some(Ok(log))`
+/// with the node's log file, where a start that fails is said, and
+/// `Some(Err(why))` on any other folders, where nothing starts a node
+/// (crate::win_service::BY_HAND). `None` for any other command.
+pub fn service_log(cli: &Cli) -> Option<Result<PathBuf, String>> {
     if !matches!(cli.cmd, Cmd::Run) {
         return None;
     }
     let paths = NodePaths::from_args(cli.config_dir.clone(), cli.state_dir.clone());
-    crate::service::is_service_node(&paths).then(|| paths.log_file())
+    Some(if crate::service::is_service_node(&paths) {
+        Ok(paths.log_file())
+    } else {
+        Err(BY_HAND.into())
+    })
 }
+
+/// Why `run` does not start a node outside the service on Windows: there
+/// the desktop app is the only way to the node, and the node runs only as
+/// the service the app installs and starts.
+pub const BY_HAND: &str = "on Windows the node runs only as its service: the desktop app's installer installs it, and Start on the app's Overview starts it";
 
 /// `service status` as JSON (crate::service::service_status): the
 /// installed service's state as this machine's service manager says it.
@@ -2780,7 +2791,9 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             let layout = Layout::system();
             // The desktop app took this node over: its service, parts and
             // program are the app's, so the app's own uninstall removes it
-            // all, and its checks are its own.
+            // all, and its checks are its own. Not on Windows, where the app
+            // is the only node.
+            #[cfg(not(windows))]
             if let Some(app) = crate::service::app_beside(&layout) {
                 return crate::service::hand_over_uninstall(&app, purge, out);
             }
@@ -7022,6 +7035,35 @@ mod tests {
         let said = crate::service::NO_QUESTION;
         assert!(said.contains("--owner=root --accept-root-owner"), "{said}");
         assert!(said.contains("the answer is no"), "{said}");
+    }
+
+    /// `run` runs the node only on the installed node's folders, where the
+    /// service manager starts it on Windows; on others it is refused there
+    /// (#176). Other commands are left to themselves.
+    #[test]
+    fn run_runs_only_the_service_node() {
+        let d = tempfile::tempdir().unwrap();
+        let config = format!("--config-dir={}", d.path().join("config").display());
+        let state = format!("--state-dir={}", d.path().join("state").display());
+        let cli = |args: &[&str]| {
+            let mut argv = vec!["nerve-node", &config, &state];
+            argv.extend(args);
+            Cli::try_parse_from(argv).unwrap()
+        };
+        assert_eq!(service_log(&cli(&["run"])), Some(Err(BY_HAND.to_string())));
+        assert_eq!(service_log(&cli(&["status"])), None);
+        let sys = Layout::system().paths;
+        let cli = Cli::try_parse_from([
+            "nerve-node".to_string(),
+            format!("--config-dir={}", sys.config_dir.display()),
+            format!("--state-dir={}", sys.state_dir.display()),
+            "run".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(service_log(&cli), Some(Ok(sys.log_file())));
+        // It says where the app does it, and sends nobody to a terminal.
+        assert!(BY_HAND.contains("Overview"), "{BY_HAND}");
+        assert!(!BY_HAND.contains("nerve-node "), "{BY_HAND}");
     }
 
     /// Setup chooses no account: it has no flags, and asks for none.
