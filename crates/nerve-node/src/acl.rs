@@ -961,6 +961,29 @@ pub fn sync(
     who: Who,
     act_as: &dyn Fn() -> Result<Option<crate::account::FsAs>, String>,
 ) -> Report {
+    sync_with(file, want, who, act_as, false)
+}
+
+/// [`sync`] that walks every grant, also one that did not change: a file or
+/// folder moved into a granted folder keeps the ACL it had, and only a walk
+/// gives it the grant's entries. It costs a pass over every granted tree.
+pub fn sync_all(
+    file: &Path,
+    want: &[Granted],
+    who: Who,
+    act_as: &dyn Fn() -> Result<Option<crate::account::FsAs>, String>,
+) -> Report {
+    sync_with(file, want, who, act_as, true)
+}
+
+/// [`sync`], walking every grant of `want` when `every`.
+fn sync_with(
+    file: &Path,
+    want: &[Granted],
+    who: Who,
+    act_as: &dyn Fn() -> Result<Option<crate::account::FsAs>, String>,
+    every: bool,
+) -> Report {
     let mut report = Report::default();
     let before = match read_record(file) {
         Ok(r) => r.unwrap_or_default(),
@@ -1030,11 +1053,11 @@ pub fn sync(
         let had = if old_uid { &[][..] } else { &before.grants[..] };
         let retry = if old_uid { &[][..] } else { &before.failed[..] };
         // A grant is walked when it is new, changed, failed last time or
-        // gone.
+        // gone, or when every one is.
         let mut roots: Vec<&Path> = Vec::new();
         for g in want
             .iter()
-            .filter(|g| !had.contains(g) || retry.contains(&g.path))
+            .filter(|g| every || !had.contains(g) || retry.contains(&g.path))
         {
             roots.push(&g.path);
         }
@@ -1377,6 +1400,36 @@ mod tests {
         assert_eq!(file_perm(a("rwx"), 0o644), R | W);
         assert_eq!(file_perm(a("rx"), 0o755), R | X);
         assert_eq!(file_perm(a("w"), 0o755), W);
+    }
+
+    /// A file and a folder moved into a granted folder keep the ACL they
+    /// had: a sync of the unchanged grants passes them over, a walk of every
+    /// grant gives them the grant's entries.
+    #[test]
+    fn a_walk_of_every_grant_gives_what_was_moved_in_its_entries() {
+        let Some(d) = tree() else { return };
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let work = root.join("work");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(outside.join("tree")).unwrap();
+        std::fs::write(outside.join("moved.txt"), "m").unwrap();
+        std::fs::write(outside.join("tree/deep.txt"), "d").unwrap();
+        let file = root.join("acl.json");
+        let want = [grant(&work, "rw")];
+        assert!(sync(&file, &want, who(), &none).errors.is_empty());
+        std::fs::rename(outside.join("moved.txt"), work.join("moved.txt")).unwrap();
+        std::fs::rename(outside.join("tree"), work.join("tree")).unwrap();
+        assert!(sync(&file, &want, who(), &none).errors.is_empty());
+        assert_eq!(rights(&work.join("moved.txt"), RUN), None);
+        let r = sync_all(&file, &want, who(), &none);
+        assert_eq!(r.errors, Vec::<String>::new());
+        assert_eq!(rights(&work.join("moved.txt"), RUN), Some(R | W));
+        assert_eq!(rights(&work.join("tree"), RUN), Some(R | W | X));
+        assert_eq!(rights(&work.join("tree/deep.txt"), RUN), Some(R | W));
+        // The walk changed nothing of the record: the next sync has nothing
+        // to do.
+        assert!(!behind(&file, &want, who(), true));
     }
 
     /// A grant puts the entries on the folder and everything below, and the

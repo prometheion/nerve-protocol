@@ -216,11 +216,45 @@ pub fn shim_main() -> i32 {
     }
 }
 
+/// The lowest Landlock ABI the node confines commands with. Below it the
+/// kernel does not handle `truncate(2)` (ABI 3, Linux 6.2), so a command
+/// held to its folders could still cut any file its account may write
+/// outside them to nothing: the node takes such a Landlock as none.
+pub const LANDLOCK_FLOOR: i32 = 3;
+
+/// The Landlock ABI the node asks for (Linux 6.12): from it every guard the
+/// node sets is held, and the commands of the installed node's pairings, all
+/// of one account, are kept apart from each other.
+pub const LANDLOCK_WANTED: i32 = 6;
+
+/// What Landlock at `abi` does not guard of what the node asks for
+/// ([`LANDLOCK_WANTED`]): empty from that ABI on.
+pub fn landlock_gaps(abi: i32) -> Vec<&'static str> {
+    let mut gaps = Vec::new();
+    if abi < 3 {
+        gaps.push("truncating files");
+    }
+    if abi < 5 {
+        gaps.push("device ioctls");
+    }
+    if abi < 6 {
+        gaps.push("signals to other processes of the account");
+        gaps.push("abstract unix sockets");
+    }
+    gaps
+}
+
+/// The kernel's Landlock ABI, also one below [`LANDLOCK_FLOOR`]; `None`
+/// when Landlock is missing or off.
+pub fn kernel_landlock_abi() -> Option<i32> {
+    landlock_abi()
+}
+
 /// How this machine can confine commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Confinement {
-    /// The kernel's Landlock ABI version; `None` when Landlock is missing or
-    /// off.
+    /// The kernel's Landlock ABI version; `None` when Landlock is missing,
+    /// off, or below [`LANDLOCK_FLOOR`].
     pub landlock_abi: Option<i32>,
     /// Windows: commands run in an AppContainer. Every Windows the node
     /// runs on (10 and later) has them.
@@ -228,9 +262,15 @@ pub struct Confinement {
 }
 
 impl Confinement {
+    /// Landlock below [`LANDLOCK_FLOOR`] counts as none.
     pub fn detect() -> Confinement {
+        Confinement::of_kernel(landlock_abi())
+    }
+
+    /// [`Confinement::detect`] on a kernel whose Landlock ABI is `abi`.
+    fn of_kernel(abi: Option<i32>) -> Confinement {
         Confinement {
-            landlock_abi: landlock_abi(),
+            landlock_abi: abi.filter(|v| *v >= LANDLOCK_FLOOR),
             appcontainer: cfg!(windows),
         }
     }
@@ -273,10 +313,11 @@ pub fn system_dirs() -> Vec<PathBuf> {
     .collect()
 }
 
-/// Files every confined command may write: the null and terminal devices,
-/// nothing else outside its folders.
+/// Files every confined command may write: the null devices, nothing else
+/// outside its folders. Not `/dev/tty`: a confined command has no
+/// controlling terminal, and the one it had would be the owner's.
 pub fn system_writable() -> Vec<PathBuf> {
-    ["/dev/null", "/dev/zero", "/dev/tty", "/dev/full"]
+    ["/dev/null", "/dev/zero", "/dev/full"]
         .iter()
         .map(PathBuf::from)
         .filter(|p| p.exists())
@@ -2642,6 +2683,33 @@ pub mod appcontainer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A confined command may not write a terminal: it has none of its own,
+    /// and the one it could reach would be the owner's.
+    #[test]
+    fn no_terminal_is_writable() {
+        assert!(!system_writable().iter().any(|p| p.starts_with("/dev/tty")));
+        assert!(system_writable().contains(&PathBuf::from("/dev/null")));
+    }
+
+    /// Landlock below ABI 3 does not guard truncate(2): the node takes it as
+    /// none. From ABI 6 on nothing the node asks for is missing.
+    #[test]
+    fn landlock_below_the_floor_counts_as_none() {
+        assert_eq!(Confinement::of_kernel(Some(2)).landlock_abi, None);
+        assert_eq!(Confinement::of_kernel(Some(3)).landlock_abi, Some(3));
+        assert_eq!(Confinement::of_kernel(None).landlock_abi, None);
+        assert!(landlock_gaps(2).contains(&"truncating files"));
+        assert!(!landlock_gaps(3).contains(&"truncating files"));
+        assert_eq!(
+            landlock_gaps(5),
+            [
+                "signals to other processes of the account",
+                "abstract unix sockets"
+            ]
+        );
+        assert!(landlock_gaps(6).is_empty());
+    }
 
     #[test]
     fn spec_round_trips_strictly() {

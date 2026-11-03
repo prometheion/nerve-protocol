@@ -625,6 +625,21 @@ except OSError as e:
     assert!(ok, "{said}");
     let r = run(&mut conn, &proj, "cat given.txt").await.unwrap();
     assert_eq!(out(&r), "given\n", "{r}");
+    // A file moved in from outside keeps its own ACL; `folder sync` walks
+    // the grants again and gives it the folder's entry.
+    let moved = base.join("moved.txt");
+    std::fs::write(&moved, "moved\n").unwrap();
+    chown(&moved);
+    chmod(&moved, "600");
+    assert!(sh(Command::new("mv").arg(&moved).arg(proj.join("moved.txt"))).0);
+    assert!(!getfacl(&proj.join("moved.txt")).contains(&format!("user:{run_uid}:")));
+    let (ok, said) = as_owner(&owner, &["folder", "sync"]);
+    assert!(
+        ok && said.contains("nerve-run has its access to everything"),
+        "{said}"
+    );
+    let r = run(&mut conn, &proj, "cat moved.txt").await.unwrap();
+    assert_eq!(out(&r), "moved\n", "{r}");
     // Allowlist mode as nerve-run: its folders count, and say nothing; as
     // the owner they do not, and nerve-run loses their entries.
     let other = base.join("other");
@@ -657,6 +672,16 @@ except OSError as e:
     let r = run(&mut conn, &proj, "cat given.txt").await.unwrap();
     assert_eq!(out(&r), "given\n", "{r}");
     drop(conn);
+    // The node walks every grant when it starts: what was moved in while it
+    // ran gets its entry.
+    let later = base.join("later.txt");
+    std::fs::write(&later, "later\n").unwrap();
+    chown(&later);
+    assert!(sh(Command::new("mv").arg(&later).arg(proj.join("later.txt"))).0);
+    assert!(sh(Command::new("systemctl").args(["restart", "nerve-node"])).0);
+    until("the moved file gets its entry", || {
+        getfacl(&proj.join("later.txt")).contains(&format!("user:{run_uid}:"))
+    });
 
     // What nerve-run made is its own until it goes.
     let user_of = |p: &Path| {

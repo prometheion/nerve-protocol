@@ -500,6 +500,10 @@ pub enum FolderCmd {
         #[command(flatten)]
         center: CenterArg,
     },
+    /// Give nerve-run its access to everything in the folders of every
+    /// center again, also what was moved into them (the installed node on
+    /// Linux): a pass over every granted folder.
+    Sync,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2286,7 +2290,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                         .into(),
                 );
             }
-            tell_grants(&paths, out).await;
+            tell_grants(&paths, true, out).await;
             Ok(())
         }
         Cmd::Folder(FolderCmd::Rm { path, center }) => {
@@ -2296,9 +2300,10 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             })
             .await?;
             w(out, format!("{}: removed {}", a.center, a.path));
-            tell_grants(&paths, out).await;
+            tell_grants(&paths, false, out).await;
             Ok(())
         }
+        Cmd::Folder(FolderCmd::Sync) => sync_folders(&paths, out).await,
         Cmd::Folder(FolderCmd::Ls { center }) => {
             let (cfg, _) = read_config(&paths).await?;
             let name = pick_center(&cfg, &center)?;
@@ -2926,6 +2931,9 @@ fn status_lines(v: &Value) -> Vec<String> {
     if let Some(h) = v["home_warning"]["warning"].as_str() {
         lines.push(format!("warning: {h}"));
     }
+    if let Some(l) = v["landlock_warning"].as_str() {
+        lines.push(format!("warning: {l}"));
+    }
     lines.extend(
         grant_lines(&v["folder_grants"])
             .into_iter()
@@ -3467,23 +3475,72 @@ async fn add_folder(
             ),
         );
     }
-    tell_grants(paths, out).await;
+    tell_grants(paths, false, out).await;
     Ok(())
 }
 
 /// Tells what the running installed Linux node did not manage after a
 /// change of the folders: a grant `nerve-run` did not get, or an entry that
 /// did not come off (crate::acl). The node brings them in line before it
-/// answers. Nothing without such a node.
-async fn tell_grants(paths: &NodePaths, out: &mut dyn Write) {
+/// answers, with `every` walking every grant. Nothing without such a node.
+async fn tell_grants(paths: &NodePaths, every: bool, out: &mut dyn Write) {
     #[cfg(target_os = "linux")]
-    if let Ok(v) = nerve_transport::ctl::call(&paths.ctl_socket(), "folder.grants", json!({})).await
+    if let Ok(v) = nerve_transport::ctl::call(
+        &paths.ctl_socket(),
+        "folder.grants",
+        json!({ "every": every }),
+    )
+    .await
     {
         tell_grants_of(&v, out);
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = (paths, out);
+    let _ = (paths, every, out);
 }
+
+/// `folder sync`: the running installed Linux node walks every grant now,
+/// as it does at its start, and says what that left.
+async fn sync_folders(paths: &NodePaths, out: &mut dyn Write) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let v = nerve_transport::ctl::call(
+            &paths.ctl_socket(),
+            "folder.grants",
+            json!({ "every": true }),
+        )
+        .await
+        .map_err(|e| match e.as_str() {
+            nerve_transport::ctl::NOT_RUNNING => {
+                "the node does not run; it walks the folders when it starts".to_string()
+            }
+            _ => e,
+        })?;
+        if v["service"] != true {
+            let _ = writeln!(out, "{FOLDERS_WITHOUT_ACL}");
+            return Ok(());
+        }
+        let warned = !grant_lines(&v).is_empty();
+        tell_grants_of(&v, out);
+        if !warned {
+            let _ = writeln!(
+                out,
+                "nerve-run has its access to everything in the folders given to it"
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = paths;
+        let _ = writeln!(out, "{FOLDERS_WITHOUT_ACL}");
+        Ok(())
+    }
+}
+
+/// What `folder sync` says where no ACL gives the folders: a node run by
+/// hand runs its commands as its own user, and Windows gives them otherwise.
+const FOLDERS_WITHOUT_ACL: &str =
+    "nothing to sync: only the installed node on Linux gives nerve-run its folders by their ACLs";
 
 /// What [`tell_grants`] says of the node's answer `v`, and adds to `--json`:
 /// `grant_errors` and `grant_stale`.
@@ -6791,6 +6848,7 @@ mod tests {
             "confinement": "landlock abi 6",
             "owner": "alice",
             "home_warning": {"warning": "Without Landlock, nerve-run can read every file in your home /home/alice"},
+            "landlock_warning": "this kernel's Landlock is ABI 4, which does not guard device ioctls",
             "folder_grants": {
                 "stale": ["/home/alice/gone", "/var/lib/nerve/state/acl.json"],
                 "errors": [
@@ -6813,6 +6871,10 @@ mod tests {
             has(
                 "warning: Without Landlock, nerve-run can read every file in your home /home/alice"
             ),
+            "{lines:#?}"
+        );
+        assert!(
+            has("warning: this kernel's Landlock is ABI 4, which does not guard device ioctls"),
             "{lines:#?}"
         );
         assert!(

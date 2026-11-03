@@ -545,6 +545,19 @@ fn confinement_for(detected: Confinement, service: bool) -> Confinement {
     }
 }
 
+/// How far [`Shared::sync_acls`] goes.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AclWalk {
+    /// Only where the record is behind the config: the grants that changed.
+    IfBehind,
+    /// Now, the grants that changed.
+    Now,
+    /// Now, every grant: what was moved into a granted folder gets its
+    /// entries.
+    Every,
+}
+
 /// Everything the daemon's tasks share.
 /// How long a looked-up account is used before it is looked up again.
 const ACCOUNT_FRESH: std::time::Duration = std::time::Duration::from_secs(5);
@@ -830,11 +843,11 @@ impl Shared {
     }
 
     /// Brings the folders' ACLs in line with `cfg` (crate::acl), when the
-    /// record is behind it, a grant failed and was not tried for
-    /// [`ACL_RETRY`], or `always`; blocks while it walks. What it left is
+    /// record is behind it or a grant failed and was not tried for
+    /// [`ACL_RETRY`], or at once as `walk` says; blocks while it walks. What it left is
     /// logged and kept for the commands and `status`.
     #[cfg(target_os = "linux")]
-    pub fn sync_acls(&self, cfg: &NodeConfig, always: bool) {
+    pub fn sync_acls(&self, cfg: &NodeConfig, walk: AclWalk) {
         let Some((who, owner)) = self.acl_accounts(cfg) else {
             return;
         };
@@ -851,7 +864,7 @@ impl Shared {
         let mut last = lock(&self.acl);
         let mut tried = lock(&self.acl_tried);
         let retry = tried.is_none_or(|t| t.elapsed() >= ACL_RETRY);
-        if !always && !crate::acl::behind(&file, &want, who, retry) {
+        if walk == AclWalk::IfBehind && !crate::acl::behind(&file, &want, who, retry) {
             return;
         }
         *tried = Some(std::time::Instant::now());
@@ -860,7 +873,10 @@ impl Shared {
                 .map(Some)
                 .map_err(|e| format!("cannot act as {}: {e}", owner.name))
         };
-        let report = crate::acl::sync(&file, &want, who, &act_as);
+        let report = match walk {
+            AclWalk::Every => crate::acl::sync_all(&file, &want, who, &act_as),
+            AclWalk::IfBehind | AclWalk::Now => crate::acl::sync(&file, &want, who, &act_as),
+        };
         for e in &report.errors {
             tracing::warn!("folder grants: {e}");
         }
@@ -873,7 +889,7 @@ impl Shared {
     /// behind. Blocks.
     #[cfg(target_os = "linux")]
     pub fn acls_refusal(&self, cfg: &NodeConfig) -> Option<String> {
-        self.sync_acls(cfg, false);
+        self.sync_acls(cfg, AclWalk::IfBehind);
         lock(&self.acl).refusal()
     }
 
@@ -1093,6 +1109,21 @@ impl Shared {
             && self.exe.is_some()
             && (policy.mode_at(crate::now_ms()) == nerve_policy::Mode::Folder
                 || self.separate(policy))
+    }
+
+    /// What this kernel's Landlock does not guard of what the node asks for,
+    /// on the installed node, whose pairings' commands all run as
+    /// `nerve-run` (crate::account::landlock_warning): one below the floor
+    /// is told too, as the node takes it as none.
+    fn landlock_warning(&self) -> Option<String> {
+        #[cfg(unix)]
+        if self.service {
+            let abi = self.confinement.landlock_abi.or_else(|| {
+                nerve_sandbox::kernel_landlock_abi().filter(|v| *v < nerve_sandbox::LANDLOCK_FLOOR)
+            });
+            return crate::account::landlock_warning(abi);
+        }
+        None
     }
 
     /// What `nerve-run` may read of the owner's home beyond its folders on
@@ -1393,6 +1424,8 @@ impl Shared {
             "folder_grants": grants,
             // What nerve-run may read of the owner's home without Landlock.
             "home_warning": self.home_warning(&cfg),
+            // What this kernel's Landlock does not guard.
+            "landlock_warning": self.landlock_warning(),
             "centers": centers,
             "relay": self.relay.status(&cfg),
             "ui": self.ui_status(&cfg),
@@ -1955,11 +1988,17 @@ async fn supervise(shared: Arc<Shared>) {
         // On the installed Linux node the folders' ACLs follow it so
         // (crate::acl); a command of `nerve-run` syncs them as well before
         // it runs.
+        // At the start every grant is walked: what was moved into a granted
+        // folder meanwhile gets its entries.
         #[cfg(target_os = "linux")]
         if shared.service && acl_synced != Some(cfg.version) {
+            let walk = match acl_synced {
+                None => AclWalk::Every,
+                Some(_) => AclWalk::IfBehind,
+            };
             acl_synced = Some(cfg.version);
             let (s, c) = (shared.clone(), cfg.clone());
-            tokio::task::spawn_blocking(move || s.sync_acls(&c, false));
+            tokio::task::spawn_blocking(move || s.sync_acls(&c, walk));
         }
         // The level follows the config, whoever changed it and however.
         if let Some(log) = &shared.log {
@@ -2231,16 +2270,28 @@ async fn answer(
         }
         // The folders' ACLs brought in line with the config now, also a
         // grant that failed before, and what that left: the CLI tells the
-        // owner after a change of the folders (crate::acl).
+        // owner after a change of the folders (crate::acl). With `every`
+        // (`folder set`, `folder sync`) every grant is walked, also what was
+        // moved into a granted folder.
         "folder.grants" => {
             if shared.below_command(peer.pid) {
                 return nerve_transport::ctl::Reply::Err(FROM_A_COMMAND.into());
             }
             let s = shared.clone();
+            let every = req.params["every"] == true;
             let r = tokio::task::spawn_blocking(move || {
                 #[cfg(target_os = "linux")]
-                s.sync_acls(&s.config(), true);
-                s.folder_grants()
+                s.sync_acls(
+                    &s.config(),
+                    if every { AclWalk::Every } else { AclWalk::Now },
+                );
+                #[cfg(not(target_os = "linux"))]
+                let _ = every;
+                let mut v = s.folder_grants();
+                if let Some(m) = v.as_object_mut() {
+                    m.insert("service".into(), json!(s.service));
+                }
+                v
             })
             .await;
             match r {
@@ -3413,6 +3464,35 @@ mod tests {
             };
             let r = s.reach(&s.config(), &entry);
             assert_eq!(r.held_by_account, held, "landlock {landlock:?}");
+            daemon.stop().await;
+        }
+    }
+
+    /// The installed node's status names what a Landlock below ABI 6 does
+    /// not guard; a node run by hand, and one with ABI 6, say nothing of it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_status_names_the_guards_an_older_landlock_lacks() {
+        for (service, abi, told) in [(true, 4, true), (false, 4, false), (true, 6, false)] {
+            let log = Log::new(Level::Info);
+            let d = tempfile::tempdir().unwrap();
+            let mut o = options(&d, &log);
+            o.full_rights = Some(false);
+            o.exe = Some("/bin/true".into());
+            o.service = Some(service);
+            o.owner = Some("alice".into());
+            o.confinement = Some(Confinement {
+                landlock_abi: Some(abi),
+                appcontainer: false,
+            });
+            let daemon = Daemon::start(o).await.unwrap();
+            let st = daemon.status();
+            let w = st["landlock_warning"].as_str().unwrap_or_default();
+            assert_eq!(
+                w.contains(&format!("ABI {abi}, which does not guard device ioctls")),
+                told,
+                "service {service}, ABI {abi}: {st}"
+            );
             daemon.stop().await;
         }
     }

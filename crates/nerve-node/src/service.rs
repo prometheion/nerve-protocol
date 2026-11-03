@@ -455,6 +455,10 @@ pub trait System {
     fn landlock(&self) -> bool {
         nerve_sandbox::Confinement::detect().landlock_abi.is_some()
     }
+    /// The kernel's Landlock ABI, also one the node takes as none.
+    fn landlock_abi(&self) -> Option<i32> {
+        nerve_sandbox::kernel_landlock_abi()
+    }
     /// What polkit takes here; the rules go to `rule`'s folder.
     fn polkit(&self, _rule: &Path) -> Polkit {
         Polkit::Missing
@@ -1392,6 +1396,12 @@ fn owner_of_install(
         if let Some(w) = crate::account::home_warning(&account.home, open, &[]) {
             steps.did(format!("Warning: {w}"));
         }
+    }
+    // A Landlock that does not hold all the node asks for is named, with
+    // what it leaves.
+    #[cfg(unix)]
+    if let Some(w) = crate::account::landlock_warning(sys.landlock_abi()) {
+        steps.did(format!("Warning: {w}"));
     }
     #[cfg(not(unix))]
     let _ = account;
@@ -2711,6 +2721,8 @@ pub(crate) mod tests {
         pub(crate) pkexec_here: std::cell::Cell<bool>,
         /// Whether the kernel has Landlock.
         pub(crate) landlock: std::cell::Cell<bool>,
+        /// The kernel's Landlock ABI, for what `install` says of it.
+        pub(crate) landlock_abi: std::cell::Cell<Option<i32>>,
     }
 
     impl Fake {
@@ -2726,6 +2738,7 @@ pub(crate) mod tests {
                 root: std::cell::Cell::new(true),
                 pkexec_here: std::cell::Cell::new(true),
                 landlock: std::cell::Cell::new(true),
+                landlock_abi: std::cell::Cell::new(None),
             }
         }
 
@@ -2765,6 +2778,9 @@ pub(crate) mod tests {
         }
         fn landlock(&self) -> bool {
             self.landlock.get()
+        }
+        fn landlock_abi(&self) -> Option<i32> {
+            self.landlock_abi.get()
         }
         fn has_pkexec(&self) -> bool {
             self.pkexec_here.get()
@@ -2958,6 +2974,46 @@ pub(crate) mod tests {
                 "{out}"
             );
             assert!(landlock || out.contains("umask 027"), "{out}");
+        }
+    }
+
+    /// `install` names what a Landlock below ABI 6 does not guard, and says
+    /// one below ABI 3 counts as none; from ABI 6 on it says nothing of it.
+    #[test]
+    fn install_names_the_guards_an_older_landlock_lacks() {
+        for (abi, landlock, said) in [
+            (
+                Some(4),
+                true,
+                Some("Landlock is ABI 4, which does not guard device ioctls"),
+            ),
+            (
+                Some(2),
+                false,
+                Some("Landlock is ABI 2, which does not guard truncating files"),
+            ),
+            (Some(6), true, None),
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            let sys = Fake::new();
+            sys.landlock.set(landlock);
+            sys.landlock_abi.set(abi);
+            let home = d.path().join("alice");
+            std::fs::create_dir(&home).unwrap();
+            sys.others.borrow_mut()[0].home = home;
+            let l = layout(d.path());
+            let exe = d.path().join("nerve-node");
+            std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+            let mut out = Vec::new();
+            install(&l, &sys, &exe, "alice", &mut out).unwrap();
+            let out = String::from_utf8(out).unwrap();
+            match said {
+                Some(s) => assert!(
+                    out.contains(&format!("Warning: this kernel's {s}")),
+                    "{out}"
+                ),
+                None => assert!(!out.contains("this kernel's Landlock"), "{out}"),
+            }
         }
     }
 
@@ -4125,7 +4181,10 @@ pub(crate) mod tests {
         std::fs::create_dir_all(t.join("dir")).unwrap();
         std::fs::write(t.join("dir/f"), "x").unwrap();
         // Not the test's account: nothing goes.
-        assert_eq!(remove_files_of(me().uid + 1, std::slice::from_ref(&t)).unwrap(), 0);
+        assert_eq!(
+            remove_files_of(me().uid + 1, std::slice::from_ref(&t)).unwrap(),
+            0
+        );
         assert!(t.join("dir/f").exists());
         // A folder missing is no error.
         assert_eq!(

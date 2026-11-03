@@ -1736,6 +1736,13 @@ pub async fn run(
         })?),
         None => None,
     };
+    // A confined command gets a session of its own, so it has no
+    // controlling terminal: on a node run by hand in a terminal, that is the
+    // owner's, which it could write to and, on older kernels, type into
+    // (TIOCSTI). The new session is a new process group as well, which a
+    // stop ends as it ends any command's.
+    #[cfg(unix)]
+    let own_session = cfg!(target_os = "linux") && shim.is_some();
     // A command of another account takes its ids, drops the service's
     // capabilities and enters its folder in the child (crate::account);
     // any other drops the capabilities.
@@ -1762,6 +1769,9 @@ pub async fn run(
         // SAFETY: plain system calls on memory moved into the closure.
         unsafe {
             cmd.pre_exec(move || {
+                if own_session && libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 if let Some(fd) = join {
                     crate::cgroup::join(fd)?;
                 }
@@ -1812,8 +1822,11 @@ pub async fn run(
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // setsid makes the group itself, and fails in a process that leads one.
     #[cfg(unix)]
-    cmd.process_group(0);
+    if !own_session {
+        cmd.process_group(0);
+    }
     // The shell starts suspended and runs only once it is in its job, so
     // nothing it starts escapes the job. No console is needed for this, so
     // a node that runs as a service does the same. It gets a console of its

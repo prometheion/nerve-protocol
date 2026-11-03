@@ -1403,6 +1403,106 @@ async fn folder_mode_gives_no_rule_where_a_command_linked_a_nested_folder() {
     node.stop().await;
 }
 
+/// A folder mode command gets no controlling terminal. On a node run by hand
+/// in a terminal that is the owner's, which the command must neither read
+/// nor write. The test runs itself again in a session of its own whose
+/// controlling terminal is a new pty, as a node started in a terminal has.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_command_does_not_get_the_nodes_terminal() {
+    const NAME: &str = "a_folder_command_does_not_get_the_nodes_terminal";
+    if nerve_sandbox::Confinement::detect().landlock_abi.is_none() {
+        eprintln!("skipped: Landlock is not available here");
+        return;
+    }
+    if std::env::var_os("NERVE_TEST_IN_TTY").is_some() {
+        assert!(
+            std::fs::File::open("/dev/tty").is_ok(),
+            "the test has no terminal"
+        );
+        let dir = tempdir();
+        let mut center = FakeCenter::start(false).await.unwrap();
+        let work = dir.path().join("home").join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let work = std::fs::canonicalize(&work).unwrap();
+        let node = paired_node_with(dir.path(), &center, |p| {
+            p.mode = nerve_policy::Mode::Folder;
+            p.folders.push(nerve_policy::config::Folder {
+                path: work.display().to_string(),
+                access: nerve_policy::config::Access::ALL,
+            });
+        })
+        .await;
+        let mut conn = linked(&mut center).await;
+        let r = run_in(
+            &mut conn,
+            &work,
+            "if (exec 3</dev/tty) 2>/dev/null; then echo reads; else echo none; fi; \
+             if (exec 3>/dev/tty) 2>/dev/null; then echo writes; fi",
+        )
+        .await;
+        let said = r["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .trim()
+            .replace('\n', ",");
+        println!("tty-result:{said}");
+        node.stop().await;
+        return;
+    }
+    // SAFETY: plain calls on a descriptor this test owns; the slave's name
+    // is copied out before anything else opens a pty.
+    let (master, slave) = unsafe {
+        let fd = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
+        assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+        assert_eq!(libc::grantpt(fd), 0);
+        assert_eq!(libc::unlockpt(fd), 0);
+        let mut name = [0 as libc::c_char; 128];
+        assert_eq!(libc::ptsname_r(fd, name.as_mut_ptr(), name.len()), 0);
+        let name = std::ffi::CStr::from_ptr(name.as_ptr()).to_owned();
+        (
+            <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd),
+            name,
+        )
+    };
+    let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+    c.args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+        .env("NERVE_TEST_IN_TTY", "1")
+        .stdin(std::process::Stdio::null());
+    // SAFETY: async-signal-safe calls only, on memory made before the fork.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        c.pre_exec(move || {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // Opened by a session leader without a terminal, the pty
+            // becomes its controlling terminal; the ioctl says so outright.
+            let fd = libc::open(slave.as_ptr(), libc::O_RDWR);
+            if fd < 0 || libc::ioctl(fd, libc::TIOCSCTTY, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            libc::close(fd);
+            Ok(())
+        });
+    }
+    let o = c.output().unwrap();
+    drop(master);
+    let out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(o.status.success(), "{out}");
+    // The line follows the test's name on the harness's line.
+    let got = out
+        .split("tty-result:")
+        .nth(1)
+        .and_then(|r| r.lines().next())
+        .unwrap_or_else(|| panic!("{out}"));
+    assert_eq!(got, "none", "{out}");
+}
+
 /// A folder mode command that started with the keys in files is counted for as
 /// long as its `exec.run` runs: a move of the keys into the keyring is refused
 /// meanwhile and nothing moves, and the count is 0 again once the call
