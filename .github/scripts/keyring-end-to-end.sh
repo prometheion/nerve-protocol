@@ -11,7 +11,14 @@
 #
 #   NERVE_NODE_REAL=<the nerve-node to install>
 #   REAL_ACCOUNT_TEST=<the real_account test program>
+#   REAL_ROOT_OWNER_TEST=<the real_root_owner test program>
+#   KEYRING_TEST=<the keyring test program>
+#   [LANDLOCK_ABI_MIN=<the least Landlock ABI this kernel must have>]
 #   .github/scripts/keyring-end-to-end.sh
+#
+# LANDLOCK_ABI_MIN makes the run fail on a kernel with less (or no) Landlock,
+# so a runner image that loses it does not go on passing with less tested; 0
+# says the machine is expected to have none.
 #
 # 1. crates/nerve-node/tests/real_account.rs, its first test: install, the
 #    account nerve-run, folder grants as ACLs, uninstall. Then its provider
@@ -20,12 +27,17 @@
 #    folder nerve-run may not look into refuses its call, another account's
 #    program is refused; uninstall. Then its test of the capabilities of
 #    node.toml: they run as nerve-run, their arguments as data, held by
-#    Landlock to the folders and the account's own; uninstall.
+#    Landlock to the folders and the account's own; uninstall. Then its test
+#    of rules on a capability's arguments, and its test of the limits per
+#    command against the installed service's cgroup. Then
+#    crates/nerve-node/tests/real_root_owner.rs: root as the owner, and a
+#    program of root as a provider; each installs and uninstalls.
 # 2. The keyring path as an owner takes it: install the node (with the
 #    owner's sudo), run `setup` in a terminal and answer yes to the keyring,
 #    which installs GNOME Keyring, a session for `nerve` and a login keyring
 #    (crates/nerve-node/src/keyring_setup.rs); check that the keys moved out of
-#    their files; restart the session of nerve, as a reboot does, and check
+#    their files; crates/nerve-node/tests/keyring.rs as nerve, against
+#    nerve's own keyring; restart the session of nerve, as a reboot does, and check
 #    the node starts again with its keys; the second test of real_account.rs
 #    pairs a center, restarts the node and runs a folder mode command as
 #    nerve-run, which cannot reach the node's bus or keyring folder;
@@ -47,6 +59,8 @@ set -euo pipefail
 
 NODE=${NERVE_NODE_REAL:?the nerve-node to install}
 TESTS=${REAL_ACCOUNT_TEST:?the real_account test program}
+ROOT_TESTS=${REAL_ROOT_OWNER_TEST:?the real_root_owner test program}
+KEYRING_TESTS=${KEYRING_TEST:?the keyring test program}
 OWNER=${NERVE_REAL_OWNER:-nrvown}
 PASS=ci-owner-pass
 BIN=/usr/local/bin/nerve-node
@@ -58,11 +72,22 @@ INSTALL_FROM=$(mktemp -d)
 chmod 755 "$INSTALL_FROM"
 install -m 755 "$NODE" "$INSTALL_FROM/nerve-node"
 NODE=$INSTALL_FROM/nerve-node
+# nerve runs the keyring test in step 4b.
+install -m 755 "$KEYRING_TESTS" "$INSTALL_FROM/keyring-test"
+KEYRING_TESTS=$INSTALL_FROM/keyring-test
 # A folder every account can enter, and none the owner's.
 cd /
 
 step() { printf '\n==== %s\n' "$*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
+# A real test, which fails here when it skips: one that returns early says
+# why on a line of its own that starts with `skipped`.
+real() {
+  "$@" 2>&1 | tee "$OUT/real.log"
+  if grep -q '^skipped' "$OUT/real.log"; then
+    fail "a real test skipped: $(grep '^skipped' "$OUT/real.log" | head -n 1)"
+  fi
+}
 as_owner() { runuser -u "$OWNER" -- "$BIN" "$@"; }
 # Root through the owner's sudo, as a person installs and uninstalls.
 owners_sudo() { printf '%s\n' "$PASS" | runuser -u "$OWNER" -- sudo -S -p '' "$@"; }
@@ -109,6 +134,8 @@ echo "LSMs:     $LSM"
 echo "Landlock: $LANDLOCK"
 grep -E '^(PRETTY_NAME)=' /etc/os-release || true
 summary "- kernel \`$KERNEL\`, Landlock: $LANDLOCK (\`$LSM\`)"
+# The ABI as the node asks it, and the least the job expects.
+python3 "$HERE/landlock-abi.py" ${LANDLOCK_ABI_MIN:+"$LANDLOCK_ABI_MIN"} || fail "not the Landlock this job expects"
 # Below 7.1 the keyring used to be refused; from 7.1 on this run no longer
 # shows that it works there. The runner image has moved on: say so, loudly.
 KMAJOR=${KERNEL%%.*}
@@ -131,7 +158,7 @@ printf '%s:%s\n' "$OWNER" "$PASS" | chpasswd
 
 step "1. real_account.rs: install, nerve-run, folder grants, uninstall"
 NERVE_NODE_REAL=$NODE NERVE_REAL_OWNER=$OWNER \
-  "$TESTS" --ignored --exact --nocapture folder_mode_runs_as_nerve_run_on_this_machine
+  real "$TESTS" --ignored --exact --nocapture folder_mode_runs_as_nerve_run_on_this_machine
 # The test changes the owner's password.
 printf '%s:%s\n' "$OWNER" "$PASS" | chpasswd
 [ ! -e "$BIN" ] || fail "the test left the node installed"
@@ -142,14 +169,31 @@ OTHER=nrvother
 id "$OTHER" >/dev/null 2>&1 && userdel -r "$OTHER" >/dev/null 2>&1 || true
 useradd --create-home --shell /bin/bash "$OTHER"
 NERVE_NODE_REAL=$NODE NERVE_REAL_OWNER=$OWNER NERVE_REAL_OTHER=$OTHER \
-  "$TESTS" --ignored --exact --nocapture the_owners_program_attaches_and_is_held_to_the_folders
+  real "$TESTS" --ignored --exact --nocapture the_owners_program_attaches_and_is_held_to_the_folders
 userdel -r "$OTHER" >/dev/null 2>&1 || true
 [ ! -e "$BIN" ] || fail "the test left the node installed"
 
 step "1c. real_account.rs: capabilities of node.toml, run as nerve-run under Landlock"
 NERVE_NODE_REAL=$NODE NERVE_REAL_OWNER=$OWNER \
-  "$TESTS" --ignored --exact --nocapture a_config_capability_runs_as_nerve_run_in_a_folder_pairing
+  real "$TESTS" --ignored --exact --nocapture a_config_capability_runs_as_nerve_run_in_a_folder_pairing
 [ ! -e "$BIN" ] || fail "the test left the node installed"
+
+step "1d. real_account.rs: rules on a capability's arguments"
+NERVE_NODE_REAL=$NODE NERVE_REAL_OWNER=$OWNER \
+  real "$TESTS" --ignored --exact --nocapture argument_rules_decide_a_config_capability_on_the_installed_node
+[ ! -e "$BIN" ] || fail "the test left the node installed"
+
+step "1e. real_account.rs: the limits per command in the service's cgroup"
+NERVE_NODE_REAL=$NODE NERVE_REAL_OWNER=$OWNER \
+  real "$TESTS" --ignored --exact --nocapture a_command_is_held_to_its_limits_on_the_installed_node
+[ ! -e "$BIN" ] || fail "the test left the node installed"
+
+step "1f. real_root_owner.rs: root as the owner, a program of root as a provider"
+NERVE_NODE_REAL=$NODE real "$ROOT_TESTS" --ignored --exact --nocapture root_is_the_owner_only_when_it_says_so
+[ ! -e "$BIN" ] || fail "the test left the node installed"
+NERVE_NODE_REAL=$NODE real "$ROOT_TESTS" --ignored --exact --nocapture a_program_of_root_attaches_as_a_provider
+[ ! -e "$BIN" ] || fail "the test left the node installed"
+printf '%s:%s\n' "$OWNER" "$PASS" | chpasswd
 
 step "2. Install the node as the owner"
 owners_sudo "$NODE" install
@@ -212,6 +256,10 @@ grep -qx "XDG_DATA_HOME=/var/lib/nerve/.local/share" "$OUT/session-env" || fail 
 printf 'a secret' | nerve_env secret-tool store --label=nerve-ci nerve-ci probe || fail "secret-tool cannot store in the keyring of nerve"
 [ "$(nerve_env secret-tool lookup nerve-ci probe)" = "a secret" ] || fail "secret-tool does not find what it stored"
 nerve_env secret-tool clear nerve-ci probe
+
+step "4b. keyring.rs as nerve: keys of a node of its own into nerve's keyring and back"
+real nerve_env TMPDIR=/tmp PATH=/usr/sbin:/usr/bin:/sbin:/bin "$KEYRING_TESTS" --ignored --exact --nocapture --test-threads 1 \
+  the_keys_move_into_the_system_keyring_and_back
 
 step "5. The node starts again with the keys from the keyring"
 systemctl restart nerve-node
@@ -306,7 +354,7 @@ install -m 755 "$OUT/generator" "$GENERATOR"
 
 step "6. real_account.rs: a center, a restart, a folder mode command as nerve-run"
 NERVE_REAL_KEYRING=1 NERVE_REAL_OWNER=$OWNER \
-  "$TESTS" --ignored --exact --nocapture the_installed_node_with_its_keys_in_the_keyring_runs_folder_commands_as_nerve_run
+  real "$TESTS" --ignored --exact --nocapture the_installed_node_with_its_keys_in_the_keyring_runs_folder_commands_as_nerve_run
 
 step "6b. The web UI: off until ui on, the owner's account only, a token to log in"
 # On the installed node with a real owner and nerve-run (issue #161): off,

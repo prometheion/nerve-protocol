@@ -41,29 +41,52 @@ The release workflow runs the same three with `--locked --workspace` before it
 builds anything ([releasing](releasing.md)).
 
 The `CI` workflow (`.github/workflows/ci.yml`) runs on every pull request and on
-every push to `main`. Its Linux job and its Windows job each run fmt, clippy and
-`cargo test --workspace`, so the tests that are compiled only on Windows (grants,
-the integrity level, the service steps, the job object, Windows paths) run on
-a Windows runner. Most of the AppContainer and grant end-to-end tests are
-skipped there for now, because they fail on the hosted runner (issues
-[#105](https://github.com/prometheion/nerve-protocol/issues/105) and
-[#106](https://github.com/prometheion/nerve-protocol/issues/106)): run them by
-hand on the Windows test machine. The same job skips
-`a_cancel_ends_a_chain_of_processes_that_hand_over_and_exit`, a timing flake
-([#107](https://github.com/prometheion/nerve-protocol/issues/107)). Both use the toolchain of the release
-and a cargo cache keyed by `Cargo.lock`, so a change to the lock file builds
-once from scratch.
+every push to `main`, with the toolchain of the release and a cargo cache keyed
+by `Cargo.lock` (a change to the lock file builds once from scratch). Its jobs:
+
+| Job | Runs |
+|---|---|
+| `linux` | fmt, clippy and `cargo test --workspace` on Ubuntu 24.04, as the runner's account with a systemd user session; then the tests that need root, as root: root's backup file (`tests/backup_caller.rs`), root's start (`tests/root_start.rs`) and four ACL tests of uninstall and revoked grants |
+| `musl` | the folder walk of install and uninstall (`service::tests::chown`) on musl, the C library of the released Linux programs |
+| `keyring` | the node installed on Ubuntu 22.04 and 24.04 (`.github/scripts/keyring-end-to-end.sh`): the real tests below, `setup` with the keys moved into GNOME Keyring, the keyring test as `nerve`, restarts of the keyring's session and of the node, the web UI, `uninstall --purge`; then the center as a service (`.github/scripts/center-service-end-to-end.sh`) |
+| `desktop-real` | the desktop app's own install, control, update and uninstall on Ubuntu 24.04, as root (`crates/nerve-node-desktop/tests/real.rs`) |
+| `windows` | fmt, clippy and `cargo test --workspace` on Windows, so the tests compiled only there run (grants, the integrity level, the service steps, the job object, the AppContainer, Windows paths) |
+
+A test that cannot run on a machine returns early and prints why
+(`skipped: needs root`). The `linux` and `windows` jobs run the tests with
+`--show-output`, and `.github/scripts/skips.py` fails the job on a skip that
+`.github/test-skips.txt` does not let that job have: a runner that loses
+Landlock, user namespaces or its user session turns the job red instead of
+passing with less tested. The `linux` and `keyring` jobs also fail when the
+kernel has less Landlock than they expect (`.github/scripts/landlock-abi.py`).
 
 A test that needs more than a hosted runner has (the node installed as a
 service, an administrator account, a virtual disk, the system keyring) is
-`#[ignore = "<reason>"]`: every run lists it as ignored with its reason, and it
-is run by hand on a test machine with `cargo test -- --ignored`. The `keyring`
-job runs two of them, in `crates/nerve-node/tests/real_account.rs`, as root on
-hosted Ubuntu 22.04 and 24.04 runners (`.github/scripts/keyring-end-to-end.sh`):
-the installed node with its keys in the keyring, and `folder` mode as
-`nerve-run`. The Windows job also skips by name the tests that fail on Windows
-today; the comment in the workflow says which and why, and the skip goes when
-the test is fixed.
+`#[ignore = "<reason>"]`: every run lists it as ignored with its reason. The
+`keyring` and `desktop-real` jobs run these of them:
+
+| Test | Does |
+|---|---|
+| `real_account.rs` `folder_mode_runs_as_nerve_run_on_this_machine` | install, `nerve-run`, folder grants as ACLs, uninstall |
+| `real_account.rs` `the_owners_program_attaches_and_is_held_to_the_folders` | a provider of the owner's, held to the folders |
+| `real_account.rs` `a_config_capability_runs_as_nerve_run_in_a_folder_pairing` | capabilities of `node.toml` as `nerve-run` |
+| `real_account.rs` `argument_rules_decide_a_config_capability_on_the_installed_node` | rules on a capability's arguments |
+| `real_account.rs` `a_command_is_held_to_its_limits_on_the_installed_node` | the limits per command in the service's cgroup |
+| `real_account.rs` `the_installed_node_with_its_keys_in_the_keyring_runs_folder_commands_as_nerve_run` | the keys in the keyring, and folder mode |
+| `real_root_owner.rs` (both) | root as the owner, a program of root as a provider |
+| `keyring.rs` `the_keys_move_into_the_system_keyring_and_back` | a node's keys into the keyring of `nerve` and back |
+| `nerve-node-desktop` `real.rs` | the desktop app's install on Linux |
+
+Not run by CI, by hand on a test machine:
+
+- every test on a kernel without Landlock (a container or LXC guest), and on
+  a distribution's own older kernel (CI's runners have GitHub's newer ones);
+- the Windows tests marked `#[ignore]` (the installed service, an
+  administrator, a virtual disk, Credential Manager), the desktop app's
+  `real.rs` on Windows, and the Windows tests the `windows` job skips by
+  name: they fail on the hosted runner today, and the comment in the workflow
+  says which and why; each skip goes when its test is fixed;
+- the action checker's tests with a real model (below).
 
 The action checker's tests that need a real model or download are
 `#[ignore]` too, and name what they need

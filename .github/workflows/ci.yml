@@ -1,8 +1,11 @@
 # The checks on every pull request, and on main after a merge: fmt, clippy and
 # the whole test suite, on Linux and on Windows, the tests that differ on
-# musl, the C library of the released Linux programs, and the installed node
-# with its keys in the system keyring on the Ubuntu 22.04 and 24.04 runners,
-# whose kernels are older than 7.1 (6.8 and 7.0). The release workflow runs
+# musl, the C library of the released Linux programs, the installed node
+# with its keys in the system keyring and the real-machine tests on the
+# Ubuntu 22.04 and 24.04 runners, whose kernels are older than 7.1 (6.8 and
+# 7.0), the center as a service, and the desktop app's own install. A test
+# that skips says why, and a job fails on a skip that .github/test-skips.txt
+# does not give it (docs/dev/building.md). The release workflow runs
 # the same fmt, clippy and tests on Linux before it builds anything
 # (docs/dev/releasing.md), but nothing there runs the Windows tests: its
 # Windows job only builds.
@@ -90,18 +93,59 @@ jobs:
       - name: Build dependencies of the desktop app
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfontconfig1-dev
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # The limits test of a node run by hand
+      # (exec::tests::a_command_is_held_to_its_limits_in_a_cgroup_of_its_own)
+      # runs its commands in a scope of the runner's own systemd user manager.
+      # Lingering starts that manager; its bus is named for the tests.
+      - name: A systemd user session for the runner
+        run: |
+          sudo loginctl enable-linger "$USER"
+          uid=$(id -u)
+          for _ in $(seq 1 30); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
+          [ -S "/run/user/$uid/bus" ]
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+      # The Landlock tests skip where the kernel has none: the job fails
+      # instead when the runner's kernel has less than it had (7.0, ABI 8, at
+      # the time of writing; ABI 6 is what folder mode asks for).
+      - name: Landlock
+        run: python3 .github/scripts/landlock-abi.py 6
+      - name: The skip check's own test
+        run: python3 .github/scripts/skips.py --self-test
       # The whole workspace, with the end-to-end tests that start the real
-      # programs (Unix only). `--no-fail-fast` shows every failing test at once.
-      - run: cargo test --locked --workspace --no-fail-fast
-      # Root's backup and restore on a node of another user open the file as
-      # the user who asked (crates/nerve-node/src/caller_file.rs). That test
-      # needs root, and the run above skips it where the runner gives no user
-      # namespace whose root may change owners (ubuntu-24.04 restricts them
-      # with AppArmor); here only the test program runs as root, not cargo.
-      - name: Root's backup file, as root
+      # programs (Unix only). `--no-fail-fast` shows every failing test at once;
+      # `--show-output` prints what each test printed, so the next step sees
+      # the tests that skipped.
+      - name: Tests
+        run: cargo test --locked --workspace --no-fail-fast -- --show-output 2>&1 | tee "$RUNNER_TEMP/tests.log"
+      # A test that cannot run here returns early and says why ("skipped: ...").
+      # The job fails on one that .github/test-skips.txt does not let it skip.
+      - name: Skipped tests
+        if: success() || failure()
+        run: python3 .github/scripts/skips.py --job linux "$RUNNER_TEMP/tests.log"
+      # The tests that need root, which the run above skips: root's backup and
+      # restore on a node of another user open the file as the user who asked
+      # (crates/nerve-node/src/caller_file.rs), root starts in a folder only
+      # its owner may enter, and the ACL walk of uninstall and of revoked
+      # grants on files of other uids and on another file system. They run as
+      # root of a user namespace where the machine gives one that may change
+      # owners and mount; ubuntu-24.04 restricts those with AppArmor. Here
+      # only the test programs run as root, not cargo.
+      - name: Tests that need root, as root
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
-        run: cargo test --locked -p nerve-node --test backup_caller
+        run: |
+          {
+            cargo test --locked -p nerve-node --test backup_caller --test root_start -- --show-output
+            cargo test --locked -p nerve-node --lib -- --show-output --exact \
+              acl::tests::remove_all_gives_what_nerve_run_made_to_the_owner \
+              acl::tests::remove_all_gives_no_file_with_a_second_name \
+              acl::tests::a_revoked_inner_grant_on_another_file_system_stays_stale \
+              acl::tests::a_revoked_inner_grant_the_owner_cannot_reach_stays_stale
+          } 2>&1 | tee "$RUNNER_TEMP/root.log"
+      - name: Skipped tests, as root
+        if: success() || failure()
+        run: python3 .github/scripts/skips.py --job linux-root "$RUNNER_TEMP/root.log"
 
   # The released Linux programs are static, built against musl
   # (release.yml), and the standard library differs there: it drops O_PATH
@@ -140,11 +184,15 @@ jobs:
   # The node keeps its keys in the system keyring on every Linux kernel, and
   # folder mode runs as the account `nerve-run` (issue #135). That used to be
   # refused below Linux 7.1, so this job installs the node on the two Ubuntu
-  # runners and takes the whole path an owner takes: the real-account tests
-  # (folder grants, and an owner's program as a provider held to the folders),
-  # then `setup` in a terminal answering yes to the keyring, the keys moving
-  # out of their files, a restart of the keyring's session and of the node,
-  # `status`, a folder mode command as `nerve-run`, and `uninstall --purge`.
+  # runners and takes the whole path an owner takes: the real-machine tests
+  # (folder grants, an owner's program as a provider held to the folders,
+  # capabilities of node.toml, rules on their arguments, the limits per
+  # command in the service's cgroup, root as the owner), then `setup` in a
+  # terminal answering yes to the keyring, the keys moving out of their files,
+  # the keyring test as `nerve`, a restart of the keyring's session and of the
+  # node, `status`, a folder mode command as `nerve-run`, the web UI, and
+  # `uninstall --purge`; then the center installed as a service, driven over
+  # MCP, updated, uninstalled. A real test that skips fails the job.
   # The kernels are GitHub's Azure kernels, not the ones the distributions
   # ship: 6.8 on ubuntu-22.04 and 7.0 on ubuntu-24.04 at the time of writing,
   # both with Landlock. So the 5.15 kernel of a 22.04 install, and a kernel
@@ -165,7 +213,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04]
+        include:
+          # The least Landlock ABI of each runner's kernel (6.8 has 4, 7.0
+          # has 8 at the time of writing).
+          - os: ubuntu-22.04
+            landlock: 4
+          - os: ubuntu-24.04
+            landlock: 6
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -186,15 +240,19 @@ jobs:
       # getfacl for the test, which reads the access lists the node wrote.
       - name: Tools of the test
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends acl
-      # One build: the test program, and with it the node's own program, which
-      # cargo builds for the package's integration tests.
-      - name: Build the node and the test program
+      # One build: the test programs, and with them the node's own program,
+      # which cargo builds for the package's integration tests; and the center.
+      - name: Build the node, the center and the test programs
         run: |
-          cargo test --locked -p nerve-node --test real_account --no-run --message-format=json \
-            | python3 -c 'import json,sys; print(*[m["executable"] for m in map(json.loads, sys.stdin) if m.get("executable") and m["target"]["name"] == "real_account"])' \
-            > "$RUNNER_TEMP/real_account.path"
-          cat "$RUNNER_TEMP/real_account.path"
+          cargo test --locked -p nerve-node --test real_account --test real_root_owner --test keyring \
+            --no-run --message-format=json \
+            | python3 -c 'import json,sys; [print(m["target"]["name"], m["executable"]) for m in map(json.loads, sys.stdin) if m.get("executable") and m["target"]["kind"] == ["test"]]' \
+            > "$RUNNER_TEMP/tests.path"
+          cat "$RUNNER_TEMP/tests.path"
+          test "$(wc -l < "$RUNNER_TEMP/tests.path")" = 3
+          cargo build --locked -p nerve-center
           test -x target/debug/nerve-node
+          test -x target/debug/nerve-center
       # As root, as a person with sudo would run the installer; cargo is not
       # run as root. The script prints the kernel and whether it has Landlock.
       # Not `sudo -E`: the runner's session (XDG_RUNTIME_DIR, the session bus
@@ -204,9 +262,66 @@ jobs:
         run: >-
           sudo
           GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY"
+          LANDLOCK_ABI_MIN=${{ matrix.landlock }}
           NERVE_NODE_REAL="$PWD/target/debug/nerve-node"
-          REAL_ACCOUNT_TEST="$(cat "$RUNNER_TEMP/real_account.path")"
+          REAL_ACCOUNT_TEST="$(awk '$1 == "real_account" {print $2}' "$RUNNER_TEMP/tests.path")"
+          REAL_ROOT_OWNER_TEST="$(awk '$1 == "real_root_owner" {print $2}' "$RUNNER_TEMP/tests.path")"
+          KEYRING_TEST="$(awk '$1 == "keyring" {print $2}' "$RUNNER_TEMP/tests.path")"
           .github/scripts/keyring-end-to-end.sh
+      # The center as a service (docs/user/center.md), after the node's run
+      # left nothing behind.
+      - name: The center as a service
+        run: >-
+          sudo
+          GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY"
+          NERVE_CENTER_REAL="$PWD/target/debug/nerve-center"
+          .github/scripts/center-service-end-to-end.sh
+
+  # The desktop app's own install on Linux (crates/nerve-node-desktop/tests/real.rs):
+  # through the code its buttons run, as root, it installs the node as a
+  # service with the app's menu entry and link handler, stops, starts and
+  # restarts the service, updates the program from a file and uninstalls it
+  # all. The window is drawn headless, in software.
+  desktop-real:
+    name: Desktop app install on Linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Cargo cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-desktop-real-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+      - name: Build dependencies of the desktop app
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfontconfig1-dev
+      - name: Build the app and the test program
+        run: |
+          cargo test --locked -p nerve-node-desktop --test real --no-run --message-format=json \
+            | python3 -c 'import json,sys; print(*[m["executable"] for m in map(json.loads, sys.stdin) if m.get("executable") and m["target"]["name"] == "real"])' \
+            > "$RUNNER_TEMP/real.path"
+          cat "$RUNNER_TEMP/real.path"
+          test -x target/debug/nerve-node-desktop
+      # As root, as the app's install runs once a person said yes; the
+      # runner's account is the owner (SUDO_USER).
+      # A test that returns early says so on a line that starts with
+      # `skipped`; here that fails the step.
+      - name: Install, control, update and uninstall
+        run: |
+          sudo NERVE_DESKTOP_REAL="$PWD/target/debug/nerve-node-desktop" "$(cat "$RUNNER_TEMP/real.path")" \
+            --ignored --exact --nocapture install_control_update_and_uninstall_on_this_machine 2>&1 \
+            | tee "$RUNNER_TEMP/real.log"
+          if grep '^skipped' "$RUNNER_TEMP/real.log"; then exit 1; fi
 
   # Linux never compiles the Windows branches, so clippy and the tests must run
   # here too: nerve-node, nerve-sandbox and nerve-policy have Windows-only code
@@ -288,3 +403,7 @@ jobs:
           --skip an_appcontainer_moves_only_what_it_reads_and_writes
           --skip a_cancel_ends_a_chain_of_processes_that_hand_over_and_exit
           --skip a_timeout_ends_a_grandchild_whose_parent_exited
+          --show-output 2>&1 | tee "$RUNNER_TEMP/tests.log"
+      - name: Skipped tests
+        if: success() || failure()
+        run: python .github/scripts/skips.py --job windows "$RUNNER_TEMP/tests.log"
