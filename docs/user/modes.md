@@ -805,7 +805,10 @@ choice of mode. The center's [blocklist and action checker](action-checker.md)
 and the node's [guard](rules.md#the-guard-against-changing-the-node) catch
 such a command when an agent tries it by mistake, and the node refuses a
 process it sees below one of its commands, but none of that is a boundary.
-The same holds for `allowlist` mode with `--as-owner`.
+The same holds for `allowlist` mode with `--as-owner`. The node's
+[web UI](node-web-ui.md), when you turn it on, adds no way for such a command:
+it reaches only the login, and a token is what lets one in; a command as
+`nerve-run` is closed before it can try one.
 
 Where root is the owner (an install that root ran itself and confirmed,
 [service](service.md#root-as-the-owner)), `user` mode and `allowlist` mode

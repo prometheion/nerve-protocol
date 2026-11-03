@@ -770,7 +770,7 @@ async fn refuse<W: tokio::io::AsyncWrite + Unpin>(io: &mut W, r: &Refusal) {
 /// The /64 an IPv6 peer address is counted in besides itself, for the
 /// undecided limit; none for IPv4, loopback and link-local addresses (their
 /// scope is not in the address, so one /64 there would be every link).
-fn prefix_of(ip: std::net::IpAddr) -> Option<std::net::IpAddr> {
+pub(crate) fn prefix_of(ip: std::net::IpAddr) -> Option<std::net::IpAddr> {
     match ip.to_canonical() {
         std::net::IpAddr::V6(v6) if !v6.is_loopback() && (v6.segments()[0] & 0xffc0) != 0xfe80 => {
             let mut o = v6.octets();

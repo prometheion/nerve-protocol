@@ -46,6 +46,11 @@ node itself. `rule ls deny` shows them; remove any you do not want.
 | `guard:node-service` | A command that stops, restarts, disables or kills the node's service or process, as the node's own `service stop` would |
 | `fs.write:…` (five rules) | A write into those folders |
 
+`nerve-node ui …` is such a command too, so a center's command cannot turn
+on the [web UI](node-web-ui.md) or make a token for it. Its port is not a
+rule's matter: the node closes a connection from a command's account itself
+([who can reach it](node-web-ui.md#who-can-reach-it)).
+
 The three `guard:` rules read the command line as the node's shell does
 (`/bin/sh` or `machine.shell` on Linux, PowerShell or cmd on Windows) and
 look at each command in it. The whole line is refused when any one of them

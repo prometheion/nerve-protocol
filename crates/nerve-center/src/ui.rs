@@ -6,15 +6,14 @@
 //! kept hashed). Without a login the page is open to this machine only, and
 //! the `Host` header must name loopback so a DNS-rebound page cannot reach
 //! it. Beyond loopback a login is required and the UI is served over TLS (the
-//! caller sees to both). With a login every page but the login form and its
-//! assets answers an unknown browser with a redirect to `/login`; the form
-//! posts the token once and gets the session cookie (HttpOnly,
-//! SameSite=Strict, Secure over TLS), and `POST /logout` ends it. A session
-//! ends with its token: when the token is deleted, the cookie stops working.
-//! Every state change needs that cookie, the `X-Nerve-CSRF` header from
-//! `GET /api/session`, and a matching `Origin` when the browser sends one.
+//! caller sees to both). The page and its assets are public: a navigation
+//! carries no session, and nothing secret is in them. The login form posts
+//! the token once and gets a session, which the page keeps in its tab and
+//! sends as a header with every API call (nerve_transport::webui, no cookie);
+//! `POST /logout` ends it. A session ends with its token: when the token is
+//! deleted, the session stops working. A post must carry a matching
+//! `Origin` when the browser sends one.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,6 +23,7 @@ use nerve_proto::RpcError;
 use nerve_transport::http::{self, Request, Response};
 use nerve_transport::log::{Level, Query};
 use nerve_transport::net::BoxIo;
+use nerve_transport::webui::{self, Sessions, host_is_loopback, origin_matches, see_other};
 
 use crate::center::{Center, Change, audit_rule};
 use crate::listen::Server;
@@ -32,18 +32,10 @@ use crate::util::{self, now_ms};
 
 const INDEX: &str = include_str!("ui/index.html");
 const APP_JS: &str = include_str!("ui/app.js");
-const APP_CSS: &str = include_str!("ui/app.css");
-const LOGIN: &str = include_str!("ui/login.html");
-const LOGIN_JS: &str = include_str!("ui/login.js");
-const THEME_JS: &str = include_str!("ui/theme-init.js");
-const ICON: &str = include_str!("ui/icon.svg");
 
 const WRONG_TOKEN: &str = "Wrong token.";
 const TOO_MANY: &str = "Too many wrong tokens. Wait a minute and try again.";
 
-pub const COOKIE: &str = "nerve_ui";
-pub const CSRF_HEADER: &str = "x-nerve-csrf";
-const SESSION_TTL: Duration = Duration::from_secs(12 * 3600);
 const API_BODY: usize = 1024 * 1024;
 /// Wrong tokens allowed per minute before logins pause.
 const LOGIN_TRIES: u32 = 5;
@@ -52,34 +44,25 @@ const LOGIN_TRIES: u32 = 5;
 const LOG_PAGE: usize = 500;
 const LOG_PAGE_MAX: usize = 1000;
 
-struct UiSession {
-    csrf: String,
-    created: Instant,
-    /// SHA-256 (hex) of the token that logged in; none without a login.
-    via: Option<String>,
-}
-
 pub struct Ui {
     center: Center,
     /// The token from the environment or a flag, besides the stored ones.
     env_token: Option<String>,
     login: bool,
-    secure: bool,
-    sessions: Mutex<HashMap<String, UiSession>>,
+    sessions: Sessions,
     failures: Mutex<(u32, Instant)>,
 }
 
 impl Ui {
-    /// `login` is required unless the UI only listens on loopback; `secure`
-    /// is whether it is served over TLS. `env_token` is the harness token
-    /// from the environment or a flag, if any.
-    pub fn new(center: &Center, env_token: Option<String>, login: bool, secure: bool) -> Arc<Ui> {
+    /// `login` is required unless the UI only listens on loopback.
+    /// `env_token` is the harness token from the environment or a flag, if
+    /// any.
+    pub fn new(center: &Center, env_token: Option<String>, login: bool) -> Arc<Ui> {
         Arc::new(Ui {
             center: center.clone(),
             env_token: env_token.filter(|t| !t.is_empty()),
             login,
-            secure,
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Sessions::new(),
             failures: Mutex::new((0, Instant::now())),
         })
     }
@@ -94,11 +77,14 @@ impl Ui {
     }
 
     async fn conn(&self, mut io: BoxIo) {
-        let resp = match http::read_request(&mut io, API_BODY).await {
-            Ok(req) => self.request(req).await,
-            Err(_) => Response::text(400, "bad request"),
+        let (resp, api) = match http::read_request(&mut io, API_BODY).await {
+            Ok(req) => {
+                let api = webui::is_api(&req.path);
+                (self.request(req).await, api)
+            }
+            Err(_) => (Response::text(400, "bad request"), false),
         };
-        let _ = with_security_headers(resp).write(&mut io).await;
+        let _ = webui::with_security_headers(resp, api).write(&mut io).await;
     }
 
     /// Answers one request.
@@ -106,63 +92,38 @@ impl Ui {
         if !self.login && !host_is_loopback(req.header("host")) {
             return Response::text(403, "this UI answers only to a loopback host name");
         }
-        // What the login form needs to draw itself is public.
-        match (req.method.as_str(), req.path.as_str()) {
-            ("GET", "/app.css") => return Response::new(200, "text/css; charset=utf-8", APP_CSS),
-            ("GET", "/theme-init.js") => {
-                return Response::new(200, "text/javascript; charset=utf-8", THEME_JS);
+        // The page and what it loads are public: a navigation carries no
+        // session, and the page asks /api/session first.
+        if req.method == "GET" {
+            if let Some(r) = webui::asset(&req.path) {
+                return r;
             }
-            ("GET", "/login.js") => {
-                return Response::new(200, "text/javascript; charset=utf-8", LOGIN_JS);
+            match req.path.as_str() {
+                "/" | "/index.html" => {
+                    return Response::new(200, "text/html; charset=utf-8", INDEX);
+                }
+                "/app.js" => return Response::new(200, "text/javascript; charset=utf-8", APP_JS),
+                _ => {}
             }
-            ("GET", "/icon.svg") => return Response::new(200, "image/svg+xml", ICON),
-            _ => {}
         }
         if req.method == "POST"
             && let Some(o) = req.header("origin")
-            && !crate::mcp::origin_matches(o, req.header("host"))
+            && !origin_matches(o, req.header("host"))
         {
             return Response::text(403, "cross-origin requests are refused");
         }
         match (req.method.as_str(), req.path.as_str()) {
-            ("GET", "/login") => return self.login_page(&req),
+            ("GET", "/login") => return self.login_page(),
             ("POST", "/login") => return self.login(&req).await,
             ("POST", "/logout") => return self.logout(&req),
             ("GET", "/api/session") => return self.session_info(&req),
             _ => {}
         }
-        let session = self.session_of(&req);
-        if !req.path.starts_with("/api/") {
-            if req.method != "GET" {
-                return Response::text(404, "not found");
-            }
-            // Not signed in: whatever was asked for, the answer is the login.
-            if self.login && session.is_none() {
-                return see_other("/login");
-            }
-            return match req.path.as_str() {
-                "/" | "/index.html" => Response::new(200, "text/html; charset=utf-8", INDEX),
-                "/app.js" => Response::new(200, "text/javascript; charset=utf-8", APP_JS),
-                _ => Response::text(404, "not found"),
-            };
+        if !webui::is_api(&req.path) {
+            return Response::text(404, "not found");
         }
-        let Some(token) = session else {
+        if self.session_of(&req).is_none() {
             return Response::json(401, &json!({"error": "log in first"}));
-        };
-        if req.method == "POST" {
-            let csrf = self
-                .sessions
-                .lock()
-                .unwrap()
-                .get(&token)
-                .map(|s| s.csrf.clone());
-            let given = req.header(CSRF_HEADER).unwrap_or("");
-            if !csrf.is_some_and(|c| util::ct_eq(c.as_bytes(), given.as_bytes())) {
-                return Response::json(
-                    403,
-                    &json!({"error": "the CSRF header is missing or wrong"}),
-                );
-            }
         }
         if req.method == "GET" && req.path == "/api/log/download" {
             return self.log_download();
@@ -181,92 +142,48 @@ impl Ui {
         }
     }
 
+    /// The session `req`'s header names, while the token that opened it is
+    /// still one.
     fn session_of(&self, req: &Request) -> Option<String> {
-        let token = cookie(req, COOKIE)?;
-        let via = {
-            let mut s = self.sessions.lock().unwrap();
-            s.retain(|_, v| v.created.elapsed() < SESSION_TTL);
-            s.get(&token)?.via.clone()
-        };
+        let (token, session) = self.sessions.of(req)?;
         // Checked with the sessions unlocked: the check reads the center's
         // state, and a request that waits for it holds up no other.
-        if let Some(h) = via
+        if let Some(h) = session.via
             && !crate::mcp::token_hash_ok(&self.center, self.env_token.as_deref(), &h)
         {
-            self.sessions.lock().unwrap().remove(&token);
+            self.sessions.end(&token);
             return None;
         }
         Some(token)
     }
 
-    /// Starts a session; `via` is the SHA-256 (hex) of the token that logged in.
-    fn new_session(&self, via: Option<String>) -> (String, String) {
-        let token = nerve_transport::keys::random_token(32);
-        let csrf = nerve_transport::keys::random_token(32);
-        self.sessions.lock().unwrap().insert(
-            token.clone(),
-            UiSession {
-                csrf: csrf.clone(),
-                created: Instant::now(),
-                via,
-            },
-        );
-        (token, csrf)
-    }
-
-    fn set_cookie(&self, token: &str) -> String {
-        format!(
-            "{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
-            SESSION_TTL.as_secs(),
-            if self.secure { "; Secure" } else { "" }
-        )
-    }
-
-    fn clear_cookie(&self) -> String {
-        format!(
-            "{COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{}",
-            if self.secure { "; Secure" } else { "" }
-        )
-    }
-
     fn session_info(&self, req: &Request) -> Response {
-        if let Some(t) = self.session_of(req) {
-            let csrf = self
-                .sessions
-                .lock()
-                .unwrap()
-                .get(&t)
-                .map(|s| s.csrf.clone());
-            return Response::json(
-                200,
-                &json!({"login": self.login, "logged_in": true, "csrf": csrf}),
-            );
+        if self.session_of(req).is_some() {
+            return Response::json(200, &json!({"login": self.login, "logged_in": true}));
         }
         if self.login {
             return Response::json(200, &json!({"login": true, "logged_in": false}));
         }
-        // Open on loopback: a session is handed out so the CSRF check still
-        // ties every change to this page.
-        let (token, csrf) = self.new_session(None);
+        // Open on loopback: a session is handed out, so that every API call
+        // still comes from a page that asked here.
+        let token = self.sessions.start(None);
         Response::json(
             200,
-            &json!({"login": false, "logged_in": true, "csrf": csrf}),
+            &json!({"login": false, "logged_in": true, "session": token}),
         )
-        .with_header("Set-Cookie", &self.set_cookie(&token))
     }
 
-    /// The login form, or the page itself when there is nothing to log in to
-    /// or the browser is in already.
-    fn login_page(&self, req: &Request) -> Response {
-        if !self.login || self.session_of(req).is_some() {
+    /// The login form, or the page itself when there is nothing to log in to.
+    fn login_page(&self) -> Response {
+        if !self.login {
             return see_other("/");
         }
-        login_form(200, None)
+        webui::login_page("Harness token", "One center for all your machines.")
     }
 
-    /// Checks the token the login form posted. The form is a plain browser
-    /// post, so the answer is a redirect with the cookie, or the form again
-    /// with the reason; the token never appears in a URL or a log.
+    /// Checks the token the login form posted. The answer is the session for
+    /// the page to keep, or the reason it was refused; the token never
+    /// appears in a URL or a log.
     async fn login(&self, req: &Request) -> Response {
         if !self.login {
             return see_other("/");
@@ -277,14 +194,14 @@ impl Ui {
                 *f = (0, Instant::now());
             }
             if f.0 >= LOGIN_TRIES {
-                return login_form(429, Some(TOO_MANY)).with_header("Retry-After", "60");
+                return Response::json(429, &json!({"error": TOO_MANY}))
+                    .with_header("Retry-After", "60");
             }
         }
         let log = self.center.log();
-        // A pasted token often carries a trailing newline or space.
-        let given = req.form_param("token").unwrap_or_default();
-        let given = given.trim();
-        if given.is_empty() || !crate::mcp::token_ok(&self.center, self.env_token.as_deref(), given)
+        let given = webui::posted_secret(req);
+        if given.is_empty()
+            || !crate::mcp::token_ok(&self.center, self.env_token.as_deref(), &given)
         {
             let tries = {
                 let mut f = self.failures.lock().unwrap();
@@ -305,12 +222,14 @@ impl Ui {
                     "the web UI sign-in is locked for a minute after too many wrong tokens",
                 );
             }
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            return login_form(401, Some(WRONG_TOKEN));
+            tokio::time::sleep(webui::WRONG_SECRET_DELAY).await;
+            return Response::json(401, &json!({"error": WRONG_TOKEN}));
         }
-        let (token, _) = self.new_session(Some(util::sha256_hex(given.as_bytes())));
+        let token = self
+            .sessions
+            .start(Some(util::sha256_hex(given.as_bytes())));
         log.record(Level::Info, None, "signed in to the web UI");
-        see_other("/").with_header("Set-Cookie", &self.set_cookie(&token))
+        Response::json(200, &json!({"session": token}))
     }
 
     /// The log file for the owner to keep: both files, the older first, one
@@ -329,14 +248,12 @@ impl Ui {
         }
     }
 
-    /// Ends the browser's session and clears its cookie.
+    /// Ends the session the request names; the page forgets it.
     fn logout(&self, req: &Request) -> Response {
         if let Some(t) = self.session_of(req) {
-            self.sessions.lock().unwrap().remove(&t);
+            self.sessions.end(&t);
         }
-        // Without a login the UI has none to go back to.
-        let back = if self.login { "/login" } else { "/" };
-        see_other(back).with_header("Set-Cookie", &self.clear_cookie())
+        Response::json(200, &json!({}))
     }
 
     async fn api(&self, req: &Request, b: &Value) -> Result<Value, (u16, Value)> {
@@ -705,62 +622,10 @@ fn refused(e: RpcError) -> (u16, Value) {
     )
 }
 
-fn see_other(to: &str) -> Response {
-    Response::new(303, "text/plain; charset=utf-8", Vec::new()).with_header("Location", to)
-}
-
-/// The login page, with the reason for a refusal when there is one.
-fn login_form(status: u16, error: Option<&str>) -> Response {
-    let (invalid, error) = match error {
-        Some(e) => (
-            " aria-invalid=\"true\" aria-describedby=\"login-error\"",
-            format!("<p id=\"login-error\" class=\"login-error\" role=\"alert\">{e}</p>"),
-        ),
-        None => ("", String::new()),
-    };
-    let page = LOGIN
-        .replace("{{INVALID}}", invalid)
-        .replace("{{ERROR}}", &error);
-    Response::new(status, "text/html; charset=utf-8", page)
-}
-
-fn cookie(req: &Request, name: &str) -> Option<String> {
-    req.header("cookie")?.split(';').find_map(|p| {
-        let (k, v) = p.trim().split_once('=')?;
-        (k == name).then(|| v.to_string())
-    })
-}
-
-/// Whether a `Host` header names loopback.
-pub fn host_is_loopback(host: Option<&str>) -> bool {
-    let Some(h) = host else { return false };
-    let name = if let Some(rest) = h.strip_prefix('[') {
-        rest.split(']').next().unwrap_or("")
-    } else {
-        h.rsplit_once(':').map(|(n, _)| n).unwrap_or(h)
-    };
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "127.0.0.1" | "localhost" | "::1"
-    )
-}
-
-/// `Referrer-Policy: no-referrer` would make a browser send `Origin: null`
-/// with the login form (and any other post), which the origin check refuses.
-/// `same-origin` sends the real origin to this server and nothing elsewhere.
-fn with_security_headers(r: Response) -> Response {
-    r.with_header("X-Frame-Options", "DENY")
-        .with_header("X-Content-Type-Options", "nosniff")
-        .with_header("Referrer-Policy", "same-origin")
-        .with_header(
-            "Content-Security-Policy",
-            "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-        )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nerve_transport::webui::{APP_CSS, KIT_JS};
     use std::collections::BTreeMap;
 
     fn req(method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> Request {
@@ -789,9 +654,13 @@ mod tests {
         .unwrap()
     }
 
-    fn set_cookie(r: &Response) -> String {
-        let v = &r.headers.iter().find(|(k, _)| k == "Set-Cookie").unwrap().1;
-        v.split(';').next().unwrap().to_string()
+    /// The header a page sends its session in.
+    const SESSION: &str = "X-Nerve-Session";
+
+    /// The session an answer of `/api/session` or `/login` hands out.
+    fn session_token(r: &Response) -> String {
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        v["session"].as_str().expect("a session").to_string()
     }
 
     /// Every command and sub-command of the node CLI, by the words after
@@ -811,12 +680,12 @@ mod tests {
     #[tokio::test]
     async fn the_pairing_card_offers_the_command_and_the_bare_link() {
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), None, false, false);
+        let ui = Ui::new(&center(d.path()), None, false);
         let h = ("Host", "127.0.0.1:7480");
         let session = ui.request(req("GET", "/api/session", &[h], "")).await;
-        let ck = set_cookie(&session);
+        let ck = session_token(&session);
         let js = ui
-            .request(req("GET", "/app.js", &[h, ("Cookie", &ck)], ""))
+            .request(req("GET", "/app.js", &[h, (SESSION, &ck)], ""))
             .await;
         let js = String::from_utf8(js.body).unwrap();
         let card = &js[js.find("function pairingCard").unwrap()..];
@@ -834,23 +703,23 @@ mod tests {
     async fn the_help_page_lists_every_node_command() {
         use clap::CommandFactory;
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), None, false, false);
+        let ui = Ui::new(&center(d.path()), None, false);
         let h = ("Host", "127.0.0.1:7480");
         let session = ui.request(req("GET", "/api/session", &[h], "")).await;
-        let ck = set_cookie(&session);
+        let ck = session_token(&session);
         // The page: a tab in the menu, drawn from /api/help.
-        let index = ui.request(req("GET", "/", &[h, ("Cookie", &ck)], "")).await;
+        let index = ui.request(req("GET", "/", &[h, (SESSION, &ck)], "")).await;
         let index = String::from_utf8(index.body).unwrap();
         assert!(index.contains("href=\"#help\""), "no Help tab in the menu");
         let js = ui
-            .request(req("GET", "/app.js", &[h, ("Cookie", &ck)], ""))
+            .request(req("GET", "/app.js", &[h, (SESSION, &ck)], ""))
             .await;
         let js = String::from_utf8(js.body).unwrap();
         assert!(js.contains("\"/api/help\"") && js.contains("pageHelp"));
         // The data: every command of the CLI definition, with its words, on
         // cards in sections. A noun's own command is in its card's `holds`.
         let r = ui
-            .request(req("GET", "/api/help", &[h, ("Cookie", &ck)], ""))
+            .request(req("GET", "/api/help", &[h, (SESSION, &ck)], ""))
             .await;
         assert_eq!(r.status, 200);
         let body: Value = serde_json::from_slice(&r.body).unwrap();
@@ -888,7 +757,7 @@ mod tests {
         }
         assert_eq!(listed.len(), cli.len());
         // The help is for a signed-in browser like every other API.
-        let ui = Ui::new(&center(d.path()), Some("nrv_x".into()), true, false);
+        let ui = Ui::new(&center(d.path()), Some("nrv_x".into()), true);
         let r = ui.request(req("GET", "/api/help", &[h], "")).await;
         assert_eq!(r.status, 401);
     }
@@ -923,7 +792,7 @@ mod tests {
     async fn the_pairing_status_says_when_a_code_is_used_up() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, None, false, false);
+        let ui = Ui::new(&c, None, false);
         let code = new_code(&ui).await;
         assert_eq!(pair_status(&ui, &code).await["open"], true);
         // Asking, even with wrong codes, uses up nothing.
@@ -943,7 +812,7 @@ mod tests {
     async fn a_code_names_only_the_machine_it_paired() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, None, false, false);
+        let ui = Ui::new(&c, None, false);
         // Two cards open (two tabs): another code pairs a machine.
         let mine = new_code(&ui).await;
         let other = new_code(&ui).await;
@@ -970,7 +839,7 @@ mod tests {
     async fn a_pairing_that_is_refused_leaves_its_code_open() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, None, false, false);
+        let ui = Ui::new(&c, None, false);
         let first = new_code(&ui).await;
         assert_eq!(c.pair(&pair_body(&first, "box-1", 7)).0, 200);
         // The same key again with a new code: refused with 409. The page
@@ -996,12 +865,12 @@ mod tests {
     #[tokio::test]
     async fn the_page_closes_the_pairing_card_when_the_code_is_used() {
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), None, false, false);
+        let ui = Ui::new(&center(d.path()), None, false);
         let h = ("Host", "127.0.0.1:7480");
         let session = ui.request(req("GET", "/api/session", &[h], "")).await;
-        let ck = set_cookie(&session);
+        let ck = session_token(&session);
         let js = ui
-            .request(req("GET", "/app.js", &[h, ("Cookie", &ck)], ""))
+            .request(req("GET", "/app.js", &[h, (SESSION, &ck)], ""))
             .await;
         let js = String::from_utf8(js.body).unwrap();
         // The poll asks the center about the code on screen and drops the
@@ -1052,14 +921,14 @@ mod tests {
             );
         }
         store.save(d.path()).unwrap();
-        let ui = Ui::new(&center(d.path()), None, false, false);
+        let ui = Ui::new(&center(d.path()), None, false);
         let h = ("Host", "127.0.0.1:7480");
         let session = ui.request(req("GET", "/api/session", &[h], "")).await;
-        let ck = set_cookie(&session);
+        let ck = session_token(&session);
         // The page draws overall numbers, and one machine's from a searchable
         // list of its own: a button and a search field, not a <select>.
         let js = ui
-            .request(req("GET", "/app.js", &[h, ("Cookie", &ck)], ""))
+            .request(req("GET", "/app.js", &[h, (SESSION, &ck)], ""))
             .await;
         let js = String::from_utf8(js.body).unwrap();
         for part in ["statsPicker", "role: \"combobox\"", "\"All machines\""] {
@@ -1068,7 +937,7 @@ mod tests {
         assert!(!js.contains("createElement(\"select\")") && !js.contains("el(\"select\""));
         // The data: the total, and each paired machine's own numbers by name.
         let r = ui
-            .request(req("GET", "/api/stats", &[h, ("Cookie", &ck)], ""))
+            .request(req("GET", "/api/stats", &[h, (SESSION, &ck)], ""))
             .await;
         assert_eq!(r.status, 200);
         let v: Value = serde_json::from_slice(&r.body).unwrap();
@@ -1091,7 +960,7 @@ mod tests {
     async fn the_pairing_code_lifetime_is_a_setting_of_1_to_1440_minutes() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, None, false, false);
+        let ui = Ui::new(&c, None, false);
         // Ten minutes unless the owner changes it.
         let got = center_settings(&ui, None).await.unwrap();
         assert_eq!(got["pair_code_minutes"], 10);
@@ -1130,7 +999,7 @@ mod tests {
             .unwrap();
         drop(ui);
         drop(c);
-        let ui = Ui::new(&center(d.path()), None, false, false);
+        let ui = Ui::new(&center(d.path()), None, false);
         let got = center_settings(&ui, None).await.unwrap();
         assert_eq!(got["pair_code_minutes"], 1440);
         assert_eq!(got["retention_days"], 5);
@@ -1252,7 +1121,7 @@ mod tests {
     /// or from A to Z and filtered.
     #[test]
     fn help_is_built_as_the_desktop_apps() {
-        let help = &APP_JS[APP_JS.find("function buildHelp").unwrap()..];
+        let help = &KIT_JS[KIT_JS.find("function buildHelp").unwrap()..];
         let help = &help[..help.find("\n}\n").unwrap()];
         for part in [
             "expander(\"Keyboard shortcuts\"",
@@ -1312,7 +1181,7 @@ mod tests {
     #[tokio::test]
     async fn the_capabilities_tab_checks_its_form_before_the_node_does() {
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), None, false, false);
+        let ui = Ui::new(&center(d.path()), None, false);
         let good = json!({"name": "say.back", "summary": "Says it back.", "effect": "read",
                           "command": "echo {word}",
                           "params": r#"{"type": "object", "properties": {"word": {"type": "string"}}, "required": ["word"]}"#,
@@ -1430,7 +1299,7 @@ mod tests {
             n.set_descriptor(desc("n1", vec![lamp]));
             s.nodes.insert("n1".into(), n);
         });
-        let ui = Ui::new(&c, None, false, false);
+        let ui = Ui::new(&c, None, false);
         let allow = async |body: Value| {
             ui.api(&req("POST", "/api/checker/allow", &[], ""), &body)
                 .await
@@ -1567,7 +1436,7 @@ mod tests {
         ] {
             assert!(pick.contains(part), "{part}: {pick}");
         }
-        assert!(APP_JS.contains("err.status = r.status;"));
+        assert!(KIT_JS.contains("err.status = r.status;"));
         let row = &APP_JS[APP_JS.find("function capUnitRow(").unwrap()..];
         let row = &row[..row.find("\n}\n").unwrap()];
         assert!(row.contains("u.source") && row.contains("effectPill(u.effect)"));
@@ -1616,7 +1485,7 @@ mod tests {
                 "{f}"
             );
         }
-        assert!(APP_JS.contains("err.body = v;"));
+        assert!(KIT_JS.contains("err.body = v;"));
         assert!(!APP_JS.contains("el(\"select\""));
     }
 
@@ -1644,7 +1513,7 @@ mod tests {
     /// before they saved anything.
     #[test]
     fn a_button_action_gets_the_event() {
-        let act = &APP_JS[APP_JS.find("function act(").unwrap()..];
+        let act = &KIT_JS[KIT_JS.find("function act(").unwrap()..];
         let act = &act[..act.find("\n}\n").unwrap()];
         assert!(act.contains("await fn(ev)"), "{act}");
         assert!(!act.contains("await fn()"), "{act}");
@@ -1693,11 +1562,11 @@ mod tests {
     /// does not start at the top of the page again.
     #[test]
     fn a_page_drawn_anew_keeps_the_focus() {
-        let replace = &APP_JS[APP_JS.find("function replacePage(").unwrap()..];
+        let replace = &KIT_JS[KIT_JS.find("function replacePage(").unwrap()..];
         let replace = &replace[..replace.find("\n}\n").unwrap()];
         assert!(replace.contains("restoreFocus(spot)"), "{replace}");
         assert!(replace.contains("focusSpot(active)"), "{replace}");
-        let act = &APP_JS[APP_JS.find("function act(").unwrap()..];
+        let act = &KIT_JS[KIT_JS.find("function act(").unwrap()..];
         let act = &act[..act.find("\n}\n").unwrap()];
         // Taken before the control is made busy: a disabled control may
         // already have lost the focus.
@@ -1706,7 +1575,8 @@ mod tests {
             "{act}"
         );
         // The pages that are redrawn on a save go through replacePage.
-        assert_eq!(APP_JS.matches("replacePage(").count(), 3);
+        assert_eq!(APP_JS.matches("replacePage(").count(), 2);
+        assert_eq!(KIT_JS.matches("replacePage(").count(), 1);
     }
 
     /// The focus goes back to the control by what it is, never by where it
@@ -1718,15 +1588,15 @@ mod tests {
     /// Enter. (The browser check is `focus-identity.js` in the review tools.)
     #[test]
     fn the_focus_is_restored_by_identity_not_by_position() {
-        let spot = &APP_JS[APP_JS.find("function focusSpot(").unwrap()..];
+        let spot = &KIT_JS[KIT_JS.find("function focusSpot(").unwrap()..];
         let spot = &spot[..spot.find("\n}\n").unwrap()];
         assert!(!spot.contains("indexOf"), "{spot}");
         assert!(!spot.contains("path"), "{spot}");
         assert!(spot.contains("node.dataset.focus"), "{spot}");
-        let target = &APP_JS[APP_JS.find("function focusTarget(").unwrap()..];
+        let target = &KIT_JS[KIT_JS.find("function focusTarget(").unwrap()..];
         let target = &target[..target.find("\n}\n").unwrap()];
         assert!(target.contains("found.length === 1"), "{target}");
-        let restore = &APP_JS[APP_JS.find("function restoreFocus(").unwrap()..];
+        let restore = &KIT_JS[KIT_JS.find("function restoreFocus(").unwrap()..];
         let restore = &restore[..restore.find("\n}\n").unwrap()];
         assert!(!restore.contains(".children["), "{restore}");
         // No early return for a spot without a key: it reaches the
@@ -1738,7 +1608,7 @@ mod tests {
         );
         assert!(restore.contains("querySelector(\"h3\")"), "{restore}");
         // The heading takes the focus but is not a stop for Tab.
-        assert!(APP_JS.contains("el(\"h3\", { tabindex: \"-1\""));
+        assert!(KIT_JS.contains("el(\"h3\", { tabindex: \"-1\""));
         // Every control that acts on one item, without asking, has a key
         // that names the item.
         for (label, kind) in [
@@ -1791,12 +1661,12 @@ mod tests {
     /// check is part 5 of `focus-identity.js` in the review tools.)
     #[test]
     fn a_text_field_gets_back_what_was_typed_with_the_focus() {
-        let spot = &APP_JS[APP_JS.find("function focusSpot(").unwrap()..];
+        let spot = &KIT_JS[KIT_JS.find("function focusSpot(").unwrap()..];
         let spot = &spot[..spot.find("\n}\n").unwrap()];
         assert!(spot.contains("isTextField(node)"), "{spot}");
         assert!(spot.contains("node.value"), "{spot}");
         assert!(spot.contains("node.selectionStart"), "{spot}");
-        let restore = &APP_JS[APP_JS.find("function restoreFocus(").unwrap()..];
+        let restore = &KIT_JS[KIT_JS.find("function restoreFocus(").unwrap()..];
         let restore = &restore[..restore.find("\n}\n").unwrap()];
         assert!(restore.contains("same.value = t.value"), "{restore}");
         assert!(restore.contains("same.setSelectionRange("), "{restore}");
@@ -1805,7 +1675,7 @@ mod tests {
             "{restore}"
         );
         // Buttons and switches are not text fields.
-        let kinds = &APP_JS[APP_JS.find("function isTextField(").unwrap()..];
+        let kinds = &KIT_JS[KIT_JS.find("function isTextField(").unwrap()..];
         let kinds = &kinds[..kinds.find("\n}\n").unwrap()];
         assert!(kinds.contains("\"checkbox\""), "{kinds}");
     }
@@ -1852,7 +1722,7 @@ mod tests {
     /// (review round 3, finding 2).
     #[test]
     fn a_save_in_flight_does_not_pull_the_focus_back() {
-        let replace = &APP_JS[APP_JS.find("function replacePage(").unwrap()..];
+        let replace = &KIT_JS[KIT_JS.find("function replacePage(").unwrap()..];
         let replace = &replace[..replace.find("\n}\n").unwrap()];
         assert!(replace.contains("p.page === current()"), "{replace}");
         assert!(replace.contains("active === p.node"), "{replace}");
@@ -1967,19 +1837,10 @@ mod tests {
         assert!(css_block(&css, ".switch input").contains("background: var(--switch-off);"));
     }
 
-    #[test]
-    fn loopback_hosts() {
-        assert!(host_is_loopback(Some("127.0.0.1:7480")));
-        assert!(host_is_loopback(Some("localhost")));
-        assert!(host_is_loopback(Some("[::1]:7480")));
-        assert!(!host_is_loopback(Some("evil.example:7480")));
-        assert!(!host_is_loopback(None));
-    }
-
     #[tokio::test]
-    async fn open_ui_needs_loopback_host_cookie_and_csrf() {
+    async fn open_ui_needs_a_loopback_host_and_its_session() {
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), None, false, false);
+        let ui = Ui::new(&center(d.path()), None, false);
         let h = ("Host", "127.0.0.1:7480");
         // A rebound name is refused.
         let r = ui
@@ -1988,52 +1849,39 @@ mod tests {
         assert_eq!(r.status, 403);
         let r = ui.request(req("GET", "/api/session", &[h], "")).await;
         assert_eq!(r.status, 200);
-        let ck = set_cookie(&r);
-        let csrf = serde_json::from_slice::<Value>(&r.body).unwrap()["csrf"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        // No cookie, no API.
+        let ck = session_token(&r);
+        // No session, no API; a cookie with the session is no session.
         assert_eq!(
             ui.request(req("GET", "/api/overview", &[h], ""))
                 .await
                 .status,
             401
         );
+        let cookie = format!("nerve_ui={ck}");
         assert_eq!(
-            ui.request(req("GET", "/api/overview", &[h, ("Cookie", &ck)], ""))
+            ui.request(req("GET", "/api/overview", &[h, ("Cookie", &cookie)], ""))
+                .await
+                .status,
+            401
+        );
+        assert_eq!(
+            ui.request(req("GET", "/api/overview", &[h, (SESSION, &ck)], ""))
                 .await
                 .status,
             200
         );
-        // A change without the CSRF header, or from another origin, is refused.
-        assert_eq!(
-            ui.request(req("POST", "/api/pair", &[h, ("Cookie", &ck)], ""))
-                .await
-                .status,
-            403
-        );
+        // A change from another origin is refused.
         let r = ui
             .request(req(
                 "POST",
                 "/api/pair",
-                &[
-                    h,
-                    ("Cookie", &ck),
-                    ("X-Nerve-CSRF", &csrf),
-                    ("Origin", "http://evil.example"),
-                ],
+                &[h, (SESSION, &ck), ("Origin", "http://evil.example")],
                 "",
             ))
             .await;
         assert_eq!(r.status, 403);
         let r = ui
-            .request(req(
-                "POST",
-                "/api/pair",
-                &[h, ("Cookie", &ck), ("X-Nerve-CSRF", &csrf)],
-                "",
-            ))
+            .request(req("POST", "/api/pair", &[h, (SESSION, &ck)], ""))
             .await;
         assert_eq!(r.status, 200);
         let v: Value = serde_json::from_slice(&r.body).unwrap();
@@ -2043,8 +1891,8 @@ mod tests {
     const TOKEN: &str = "nrv_test-token-long";
     const HOST: (&str, &str) = ("Host", "center.example:7480");
 
-    fn locked(dir: &std::path::Path, tls: bool) -> Arc<Ui> {
-        Ui::new(&center(dir), Some(TOKEN.into()), true, tls)
+    fn locked(dir: &std::path::Path) -> Arc<Ui> {
+        Ui::new(&center(dir), Some(TOKEN.into()), true)
     }
 
     fn header<'a>(r: &'a Response, name: &str) -> Option<&'a str> {
@@ -2062,46 +1910,42 @@ mod tests {
         serde_json::from_slice(&r.body).unwrap()
     }
 
-    /// Posts the login form and returns the answer.
+    /// Posts the token as the login page does, and returns the answer.
     async fn sign_in(ui: &Ui, token: &str) -> Response {
         ui.request(req(
             "POST",
             "/login",
-            &[HOST, ("Content-Type", "application/x-www-form-urlencoded")],
-            &format!("token={token}"),
+            &[HOST, ("Content-Type", "application/json")],
+            &json!({ "token": token }).to_string(),
         ))
         .await
     }
 
+    /// The API routes a session is needed for, with a request of each.
+    const API: [(&str, &str); 6] = [
+        ("GET", "/api/overview"),
+        ("GET", "/api/stats"),
+        ("GET", "/api/audit"),
+        ("GET", "/api/tokens"),
+        ("GET", "/api/log/download"),
+        ("POST", "/api/pair"),
+    ];
+
     #[tokio::test]
-    async fn without_a_session_every_page_leads_to_the_login() {
+    async fn without_a_session_every_api_call_is_refused_and_the_page_is_public() {
         let d = tempfile::tempdir().unwrap();
-        let ui = locked(d.path(), true);
-        for path in ["/", "/index.html", "/app.js", "/missing"] {
-            let r = ui.request(req("GET", path, &[HOST], "")).await;
-            assert_eq!(r.status, 303, "{path}");
-            assert_eq!(header(&r, "Location"), Some("/login"), "{path}");
-            assert!(r.body.is_empty());
-        }
-        for path in ["/api/overview", "/api/stats", "/api/audit", "/api/tokens"] {
-            let r = ui.request(req("GET", path, &[HOST], "")).await;
+        let ui = locked(d.path());
+        for (method, path) in API {
+            let r = ui.request(req(method, path, &[HOST], "")).await;
             assert_eq!(r.status, 401, "{path}");
         }
-        let r = ui.request(req("POST", "/api/pair", &[HOST], "")).await;
-        assert_eq!(r.status, 401);
-        let r = ui.request(req("GET", "/api/session", &[HOST], "")).await;
-        let v: Value = serde_json::from_slice(&r.body).unwrap();
-        assert_eq!(
-            (v["login"].clone(), v["logged_in"].clone()),
-            (true.into(), false.into())
-        );
-        assert!(header(&r, "Set-Cookie").is_none());
-        // The login form and what it is drawn with stay reachable.
-        let r = ui.request(req("GET", "/login", &[HOST], "")).await;
-        assert_eq!(r.status, 200);
-        assert!(body(&r).contains(r#"action="/login""#));
-        assert!(!body(&r).contains("login-error"));
+        // The page and what it loads hold nothing secret: a navigation
+        // carries no session, and the page asks /api/session first.
         for (path, kind) in [
+            ("/", "text/html"),
+            ("/index.html", "text/html"),
+            ("/app.js", "text/javascript"),
+            ("/kit.js", "text/javascript"),
             ("/app.css", "text/css"),
             ("/login.js", "text/javascript"),
             ("/theme-init.js", "text/javascript"),
@@ -2111,128 +1955,110 @@ mod tests {
             assert_eq!(r.status, 200, "{path}");
             assert!(header(&r, "Content-Type").unwrap().starts_with(kind));
         }
+        assert_eq!(
+            ui.request(req("GET", "/missing", &[HOST], "")).await.status,
+            404
+        );
+        let r = ui.request(req("GET", "/api/session", &[HOST], "")).await;
+        let v = json(&r);
+        assert_eq!(
+            (v["login"].clone(), v["logged_in"].clone()),
+            (true.into(), false.into())
+        );
+        assert!(v.get("session").is_none(), "no session without a login");
+        let r = ui.request(req("GET", "/login", &[HOST], "")).await;
+        assert_eq!(r.status, 200);
+        assert!(body(&r).contains("Harness token"));
+        assert!(body(&r).contains(r#"src="/login.js""#));
     }
 
     #[tokio::test]
     async fn wrong_token_is_refused_without_echoing_it() {
         let d = tempfile::tempdir().unwrap();
-        let ui = locked(d.path(), true);
+        let ui = locked(d.path());
         let r = sign_in(&ui, "not-the-secret").await;
         assert_eq!(r.status, 401);
-        assert!(header(&r, "Set-Cookie").is_none());
-        assert!(header(&r, "Location").is_none());
-        let page = body(&r);
-        assert!(page.contains(WRONG_TOKEN));
-        assert!(page.contains(r#"aria-invalid="true""#));
-        assert!(!page.contains("not-the-secret"));
+        assert!(json(&r).get("session").is_none());
+        assert_eq!(json(&r)["error"], WRONG_TOKEN);
+        assert!(!body(&r).contains("not-the-secret"));
         // An empty post is no better.
-        let r = sign_in(&ui, "").await;
-        assert_eq!(r.status, 401);
-        assert!(header(&r, "Set-Cookie").is_none());
+        assert_eq!(sign_in(&ui, "").await.status, 401);
         let r = ui.request(req("POST", "/login", &[HOST], "")).await;
         assert_eq!(r.status, 401);
-        // The token is not accepted in a URL or as JSON either.
+        // The token is not accepted in a URL.
         let mut q = req("POST", "/login", &[HOST], "");
         q.query = format!("token={TOKEN}");
         assert_eq!(ui.request(q).await.status, 401);
-        let r = ui
-            .request(req(
-                "POST",
-                "/login",
-                &[HOST],
-                &format!(r#"{{"token":"{TOKEN}"}}"#),
-            ))
-            .await;
-        assert_eq!(r.status, 401);
     }
 
     #[tokio::test]
-    async fn correct_token_sets_the_session_cookie() {
+    async fn correct_token_hands_out_a_session_for_the_header() {
         let d = tempfile::tempdir().unwrap();
-        let ui = locked(d.path(), true);
+        let ui = locked(d.path());
         let r = sign_in(&ui, TOKEN).await;
-        assert_eq!(r.status, 303);
-        assert_eq!(header(&r, "Location"), Some("/"));
-        let cookie = header(&r, "Set-Cookie").unwrap().to_string();
-        for part in [
-            "HttpOnly",
-            "SameSite=Strict",
-            "Max-Age=43200",
-            "Secure",
-            "Path=/",
-        ] {
-            assert!(cookie.contains(part), "{part} missing in {cookie}");
+        assert_eq!(r.status, 200);
+        assert!(header(&r, "Set-Cookie").is_none(), "no cookie");
+        assert!(!body(&r).contains(TOKEN));
+        let ck = session_token(&r);
+        let with = [HOST, (SESSION, ck.as_str())];
+        for (method, path) in API {
+            let r = ui.request(req(method, path, &with, "")).await;
+            assert_ne!(r.status, 401, "{path}");
         }
-        assert!(!cookie.contains(TOKEN));
-        let ck = set_cookie(&r);
-        let with = [HOST, ("Cookie", ck.as_str())];
-        for path in ["/", "/app.js"] {
-            assert_eq!(ui.request(req("GET", path, &with, "")).await.status, 200);
-        }
-        assert_eq!(
-            ui.request(req("GET", "/api/overview", &with, ""))
-                .await
-                .status,
-            200
-        );
         let r = ui.request(req("GET", "/api/session", &with, "")).await;
-        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        let v = json(&r);
         assert_eq!(v["logged_in"], true);
-        assert!(v["csrf"].as_str().is_some_and(|c| !c.is_empty()));
-        // Signed in, the login form has nothing left to do.
-        let r = ui.request(req("GET", "/login", &with, "")).await;
-        assert_eq!((r.status, header(&r, "Location")), (303, Some("/")));
-        // Over plain HTTP (loopback) the cookie is not marked Secure.
-        let plain = locked(d.path(), false);
-        let r = sign_in(&plain, TOKEN).await;
-        assert!(!header(&r, "Set-Cookie").unwrap().contains("Secure"));
-    }
-
-    #[tokio::test]
-    async fn the_token_is_read_from_the_form_encoding() {
-        let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), Some("p&w=d x%".into()), true, true);
-        let r = sign_in(&ui, "p%26w%3Dd+x%25").await;
-        assert_eq!(r.status, 303);
-        assert!(header(&r, "Set-Cookie").is_some());
-        // The raw text is not the token.
-        assert_eq!(sign_in(&ui, "p&w=d x%").await.status, 401);
-    }
-
-    #[tokio::test]
-    async fn logout_clears_the_cookie_and_ends_the_session() {
-        let d = tempfile::tempdir().unwrap();
-        let ui = locked(d.path(), true);
-        let ck = set_cookie(&sign_in(&ui, TOKEN).await);
-        let with = [HOST, ("Cookie", ck.as_str())];
-        let r = ui.request(req("POST", "/logout", &with, "")).await;
-        assert_eq!(r.status, 303);
-        assert_eq!(header(&r, "Location"), Some("/login"));
-        let cleared = header(&r, "Set-Cookie").unwrap();
-        for part in [
-            "nerve_ui=;",
-            "Max-Age=0",
-            "HttpOnly",
-            "SameSite=Strict",
-            "Secure",
-        ] {
-            assert!(cleared.contains(part), "{part} missing in {cleared}");
-        }
-        // The old cookie is dead on the server too, not just in the browser.
+        // The session lasts 12 hours.
+        ui.sessions.age(&ck, webui::SESSION_TTL);
         assert_eq!(
             ui.request(req("GET", "/api/overview", &with, ""))
                 .await
                 .status,
             401
         );
-        let r = ui.request(req("GET", "/", &with, "")).await;
-        assert_eq!((r.status, header(&r, "Location")), (303, Some("/login")));
-        // Logging out twice, or without a cookie, is harmless.
+    }
+
+    #[tokio::test]
+    async fn the_token_is_read_from_the_form_encoding_too() {
+        let d = tempfile::tempdir().unwrap();
+        let ui = Ui::new(&center(d.path()), Some("p&w=d x%".into()), true);
+        let form = |t: &str| {
+            req(
+                "POST",
+                "/login",
+                &[HOST, ("Content-Type", "application/x-www-form-urlencoded")],
+                &format!("token={t}"),
+            )
+        };
+        let r = ui.request(form("p%26w%3Dd+x%25")).await;
+        assert_eq!(r.status, 200);
+        session_token(&r);
+        // The raw text is not the token.
+        assert_eq!(ui.request(form("p&w=d x%")).await.status, 401);
+        assert_eq!(sign_in(&ui, "p&w=d x%").await.status, 200);
+    }
+
+    #[tokio::test]
+    async fn logout_ends_the_session() {
+        let d = tempfile::tempdir().unwrap();
+        let ui = locked(d.path());
+        let ck = session_token(&sign_in(&ui, TOKEN).await);
+        let with = [HOST, (SESSION, ck.as_str())];
+        let r = ui.request(req("POST", "/logout", &with, "")).await;
+        assert_eq!(r.status, 200);
+        // The old session is dead on the server too, not just in the tab.
+        assert_eq!(
+            ui.request(req("GET", "/api/overview", &with, ""))
+                .await
+                .status,
+            401
+        );
+        // Logging out twice, or without a session, is harmless.
         let r = ui.request(req("POST", "/logout", &[HOST], "")).await;
-        assert_eq!(r.status, 303);
+        assert_eq!(r.status, 200);
         // Only a post logs out: a link someone else planted does not.
-        let ck = set_cookie(&sign_in(&ui, TOKEN).await);
-        let with = [HOST, ("Cookie", ck.as_str())];
+        let ck = session_token(&sign_in(&ui, TOKEN).await);
+        let with = [HOST, (SESSION, ck.as_str())];
         assert_eq!(
             ui.request(req("GET", "/logout", &with, "")).await.status,
             404
@@ -2248,50 +2074,60 @@ mod tests {
     #[tokio::test]
     async fn login_and_logout_refuse_other_origins() {
         let d = tempfile::tempdir().unwrap();
-        let ui = locked(d.path(), true);
+        let ui = locked(d.path());
         let own = format!("https://{}", HOST.1);
+        let body = json!({ "token": TOKEN }).to_string();
         for origin in ["https://evil.example", "null", "http://center.example:1"] {
             let r = ui
                 .request(req(
                     "POST",
                     "/login",
-                    &[HOST, ("Origin", origin)],
-                    &format!("token={TOKEN}"),
+                    &[
+                        HOST,
+                        ("Origin", origin),
+                        ("Content-Type", "application/json"),
+                    ],
+                    &body,
                 ))
                 .await;
             assert_eq!(r.status, 403, "{origin}");
-            assert!(header(&r, "Set-Cookie").is_none());
+            assert!(json_or_null(&r).get("session").is_none());
         }
         // The browser's own post names this host.
         let r = ui
             .request(req(
                 "POST",
                 "/login",
-                &[HOST, ("Origin", &own)],
-                &format!("token={TOKEN}"),
+                &[HOST, ("Origin", &own), ("Content-Type", "application/json")],
+                &body,
             ))
             .await;
-        assert_eq!(r.status, 303);
-        let ck = set_cookie(&r);
+        assert_eq!(r.status, 200);
+        let ck = session_token(&r);
         let r = ui
             .request(req(
                 "POST",
                 "/logout",
-                &[HOST, ("Cookie", &ck), ("Origin", "https://evil.example")],
+                &[HOST, (SESSION, &ck), ("Origin", "https://evil.example")],
                 "",
             ))
             .await;
         assert_eq!(r.status, 403);
         let r = ui
-            .request(req("GET", "/api/overview", &[HOST, ("Cookie", &ck)], ""))
+            .request(req("GET", "/api/overview", &[HOST, (SESSION, &ck)], ""))
             .await;
         assert_eq!(r.status, 200);
+    }
+
+    /// An answer's JSON, or null for a plain-text one.
+    fn json_or_null(r: &Response) -> Value {
+        serde_json::from_slice(&r.body).unwrap_or(Value::Null)
     }
 
     #[tokio::test]
     async fn repeated_wrong_tokens_are_throttled() {
         let d = tempfile::tempdir().unwrap();
-        let ui = locked(d.path(), true);
+        let ui = locked(d.path());
         for _ in 0..LOGIN_TRIES {
             assert_eq!(sign_in(&ui, "nope").await.status, 401);
         }
@@ -2299,14 +2135,14 @@ mod tests {
         let r = sign_in(&ui, TOKEN).await;
         assert_eq!(r.status, 429);
         assert_eq!(header(&r, "Retry-After"), Some("60"));
-        assert!(header(&r, "Set-Cookie").is_none());
-        assert!(body(&r).contains(TOO_MANY));
+        assert_eq!(json(&r)["error"], TOO_MANY);
+        assert!(json(&r).get("session").is_none());
     }
 
     #[tokio::test]
     async fn an_open_ui_has_no_login() {
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), None, false, false);
+        let ui = Ui::new(&center(d.path()), None, false);
         let h = ("Host", "127.0.0.1:7480");
         let r = ui.request(req("GET", "/", &[h], "")).await;
         assert_eq!(r.status, 200);
@@ -2314,9 +2150,12 @@ mod tests {
         assert_eq!((r.status, header(&r, "Location")), (303, Some("/")));
         let r = ui.request(req("POST", "/login", &[h], "token=x")).await;
         assert_eq!((r.status, header(&r, "Location")), (303, Some("/")));
-        assert!(header(&r, "Set-Cookie").is_none());
         let r = ui.request(req("POST", "/logout", &[h], "")).await;
-        assert_eq!((r.status, header(&r, "Location")), (303, Some("/")));
+        assert_eq!(r.status, 200);
+        // Each tab that asks gets a session of its own.
+        let a = session_token(&ui.request(req("GET", "/api/session", &[h], "")).await);
+        let b = session_token(&ui.request(req("GET", "/api/session", &[h], "")).await);
+        assert_ne!(a, b);
     }
 
     #[tokio::test]
@@ -2324,21 +2163,15 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
         // The token is made in the open UI, as on a fresh center.
-        let open = Ui::new(&c, None, false, false);
+        let open = Ui::new(&c, None, false);
         let h = ("Host", "127.0.0.1:7480");
         let r = open.request(req("GET", "/api/session", &[h], "")).await;
-        let (ck, csrf) = (
-            set_cookie(&r),
-            serde_json::from_slice::<Value>(&r.body).unwrap()["csrf"]
-                .as_str()
-                .unwrap()
-                .to_string(),
-        );
+        let ck = session_token(&r);
         let made = |label: &str| {
             req(
                 "POST",
                 "/api/tokens/create",
-                &[h, ("Cookie", &ck), ("X-Nerve-CSRF", &csrf)],
+                &[h, (SESSION, &ck)],
                 &format!(r#"{{"label":"{label}"}}"#),
             )
         };
@@ -2350,38 +2183,31 @@ mod tests {
         let other = serde_json::from_slice::<Value>(&open.request(made("b")).await.body).unwrap();
 
         // Later, with the login on, that same token is the login.
-        let ui = Ui::new(&c, None, true, true);
+        let ui = Ui::new(&c, None, true);
         assert_eq!(sign_in(&ui, "nrv_not-made-here").await.status, 401);
         let r = sign_in(&ui, &format!("  {token}\r\n")).await;
-        assert_eq!(r.status, 303);
-        let session = set_cookie(&r);
-        let with = [HOST, ("Cookie", session.as_str())];
+        assert_eq!(r.status, 200);
+        let session = session_token(&r);
+        let with = [HOST, (SESSION, session.as_str())];
         assert_eq!(
             ui.request(req("GET", "/api/overview", &with, ""))
                 .await
                 .status,
             200
         );
-        let csrf = serde_json::from_slice::<Value>(
-            &ui.request(req("GET", "/api/session", &with, "")).await.body,
-        )
-        .unwrap()["csrf"]
-            .as_str()
-            .unwrap()
-            .to_string();
 
         // The other token's session survives deleting this one; this one's does not.
-        let ck2 = set_cookie(&sign_in(&ui, other["token"].as_str().unwrap()).await);
+        let ck2 = session_token(&sign_in(&ui, other["token"].as_str().unwrap()).await);
         let del = req(
             "POST",
             "/api/tokens/delete",
-            &[HOST, ("Cookie", &session), ("X-Nerve-CSRF", &csrf)],
+            &[HOST, (SESSION, &session)],
             &format!(r#"{{"id":"{id}"}}"#),
         );
         assert_eq!(ui.request(del).await.status, 200);
         let r = ui.request(req("GET", "/api/overview", &with, "")).await;
         assert_eq!(r.status, 401);
-        let still = [HOST, ("Cookie", ck2.as_str())];
+        let still = [HOST, (SESSION, ck2.as_str())];
         assert_eq!(
             ui.request(req("GET", "/api/overview", &still, ""))
                 .await
@@ -2396,13 +2222,13 @@ mod tests {
     async fn the_flag_token_logs_in_whole_and_only_whole() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, Some("from-the-flag".into()), true, true);
+        let ui = Ui::new(&c, Some("from-the-flag".into()), true);
         let r = sign_in(&ui, "from-the-flag").await;
-        assert_eq!(r.status, 303);
+        assert_eq!(r.status, 200);
         // Its session lives although no stored token backs it.
-        let ck = set_cookie(&r);
+        let ck = session_token(&r);
         let r = ui
-            .request(req("GET", "/api/overview", &[HOST, ("Cookie", &ck)], ""))
+            .request(req("GET", "/api/overview", &[HOST, (SESSION, &ck)], ""))
             .await;
         assert_eq!(r.status, 200);
         assert_eq!(sign_in(&ui, "from-the-fla").await.status, 401);
@@ -2412,7 +2238,7 @@ mod tests {
     #[tokio::test]
     async fn with_the_login_off_a_token_changes_nothing() {
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), Some(TOKEN.into()), false, false);
+        let ui = Ui::new(&center(d.path()), Some(TOKEN.into()), false);
         let h = ("Host", "127.0.0.1:7480");
         let r = ui.request(req("GET", "/login", &[h], "")).await;
         assert_eq!((r.status, header(&r, "Location")), (303, Some("/")));
@@ -2420,7 +2246,6 @@ mod tests {
             .request(req("POST", "/login", &[h], &format!("token={TOKEN}")))
             .await;
         assert_eq!((r.status, header(&r, "Location")), (303, Some("/")));
-        assert!(header(&r, "Set-Cookie").is_none());
         let r = ui.request(req("GET", "/api/session", &[h], "")).await;
         let v: Value = serde_json::from_slice(&r.body).unwrap();
         assert_eq!(
@@ -2434,29 +2259,19 @@ mod tests {
         assert_eq!(r.status, 403);
     }
 
-    #[test]
-    fn same_origin_posts_carry_their_origin() {
-        let r = with_security_headers(Response::text(200, ""));
-        assert_eq!(header(&r, "Referrer-Policy"), Some("same-origin"));
-    }
-
     #[tokio::test]
     async fn tokens_are_shown_once_and_kept_hashed() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, None, false, false);
+        let ui = Ui::new(&c, None, false);
         let h = ("Host", "localhost:7480");
         let r = ui.request(req("GET", "/api/session", &[h], "")).await;
-        let ck = set_cookie(&r);
-        let csrf = serde_json::from_slice::<Value>(&r.body).unwrap()["csrf"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let ck = session_token(&r);
         let r = ui
             .request(req(
                 "POST",
                 "/api/tokens/create",
-                &[h, ("Cookie", &ck), ("X-Nerve-CSRF", &csrf)],
+                &[h, (SESSION, &ck)],
                 r#"{"label":"ci"}"#,
             ))
             .await;
@@ -2482,7 +2297,7 @@ mod tests {
     /// with a few nodes' entries in it.
     async fn with_a_log(dir: &std::path::Path) -> (Center, Arc<Ui>, String) {
         let c = center(dir);
-        let ui = Ui::new(&c, None, false, false);
+        let ui = Ui::new(&c, None, false);
         let session = ui
             .request(req(
                 "GET",
@@ -2491,7 +2306,7 @@ mod tests {
                 "",
             ))
             .await;
-        let cookie = set_cookie(&session);
+        let cookie = session_token(&session);
         let log = c.log();
         log.set_level(Level::Debug);
         log.record(Level::Info, None, "nerve-center started");
@@ -2524,7 +2339,7 @@ mod tests {
             .request(get(
                 "/api/log",
                 query,
-                &[("Host", "127.0.0.1:7480"), ("Cookie", cookie)],
+                &[("Host", "127.0.0.1:7480"), (SESSION, cookie)],
             ))
             .await;
         assert_eq!(r.status, 200, "{query}: {}", body(&r));
@@ -2545,11 +2360,11 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let (_c, ui, ck) = with_a_log(d.path()).await;
         let h = ("Host", "127.0.0.1:7480");
-        let index = ui.request(req("GET", "/", &[h, ("Cookie", &ck)], "")).await;
+        let index = ui.request(req("GET", "/", &[h, (SESSION, &ck)], "")).await;
         let index = body(&index);
         assert!(index.contains("href=\"#log\""), "no Log tab in the menu");
         let js = ui
-            .request(req("GET", "/app.js", &[h, ("Cookie", &ck)], ""))
+            .request(req("GET", "/app.js", &[h, (SESSION, &ck)], ""))
             .await;
         let js = body(&js);
         // The level and the machine are picked from lists of the page's own, a
@@ -2668,14 +2483,14 @@ mod tests {
                 .request(get(
                     "/api/log",
                     q,
-                    &[("Host", "127.0.0.1:7480"), ("Cookie", &ck)],
+                    &[("Host", "127.0.0.1:7480"), (SESSION, &ck)],
                 ))
                 .await;
             assert_eq!(r.status, 400, "{q}");
             assert!(json(&r)["error"].as_str().unwrap().len() > 5);
         }
         // Like every other API, the log is for a signed-in browser.
-        let locked = locked(d.path(), false);
+        let locked = locked(d.path());
         for path in ["/api/log", "/api/log/download"] {
             let r = locked.request(get(path, "", &[HOST])).await;
             assert_eq!(r.status, 401, "{path}");
@@ -2690,7 +2505,7 @@ mod tests {
             .request(get(
                 "/api/log/download",
                 "",
-                &[("Host", "127.0.0.1:7480"), ("Cookie", &ck)],
+                &[("Host", "127.0.0.1:7480"), (SESSION, &ck)],
             ))
             .await;
         assert_eq!(r.status, 200);
@@ -2716,7 +2531,7 @@ mod tests {
     async fn the_log_level_is_set_in_the_center_settings() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, None, false, false);
+        let ui = Ui::new(&c, None, false);
         let got = center_settings(&ui, None).await.unwrap();
         assert_eq!(got["log_level"], "info");
         assert_eq!(got["log_level_pinned"], false);
@@ -2808,7 +2623,7 @@ mod tests {
             log_level: Some(Level::Warn),
         })
         .unwrap();
-        let ui = Ui::new(&c, None, false, false);
+        let ui = Ui::new(&c, None, false);
         let got = center_settings(&ui, None).await.unwrap();
         assert_eq!(got["log_level"], "debug");
         assert_eq!(got["log_level_now"], "warn");
@@ -2831,31 +2646,17 @@ mod tests {
     async fn the_ui_logs_who_gets_in_and_leaves_every_secret_out() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, Some(TOKEN.into()), true, false);
+        let ui = Ui::new(&c, Some(TOKEN.into()), true);
         // A wrong token is told, and what was typed is not.
         let r = sign_in(&ui, "typo-of-nrv_test-token-lon").await;
         assert_eq!(r.status, 401);
         let r = sign_in(&ui, TOKEN).await;
-        assert_eq!(r.status, 303);
-        let ck = set_cookie(&r);
-        let csrf = serde_json::from_slice::<Value>(
-            &ui.request(req("GET", "/api/session", &[HOST, ("Cookie", &ck)], ""))
-                .await
-                .body,
-        )
-        .unwrap()["csrf"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        assert_eq!(r.status, 200);
+        let ck = session_token(&r);
         // A token made in the UI is shown to the browser once; it and its
         // label's neighbours are not in the log, its label is.
         let post = |path: &'static str, b: &'static str| {
-            ui.request(req(
-                "POST",
-                path,
-                &[HOST, ("Cookie", &ck), ("X-Nerve-CSRF", &csrf)],
-                b,
-            ))
+            ui.request(req("POST", path, &[HOST, (SESSION, &ck)], b))
         };
         let made = json(&post("/api/tokens/create", r#"{"label":"ci"}"#).await);
         let (id, token) = (
@@ -2924,19 +2725,15 @@ mod tests {
                 },
             );
         });
-        let ui = Ui::new(&c, None, false, false);
+        let ui = Ui::new(&c, None, false);
         let h = ("Host", "127.0.0.1:7480");
         let r = ui.request(req("GET", "/api/session", &[h], "")).await;
-        let ck = set_cookie(&r);
-        let csrf = serde_json::from_slice::<Value>(&r.body).unwrap()["csrf"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let ck = session_token(&r);
         let post = |body: &'static str| {
             ui.request(req(
                 "POST",
                 "/api/nodes/disable",
-                &[h, ("Cookie", &ck), ("X-Nerve-CSRF", &csrf)],
+                &[h, (SESSION, &ck)],
                 body,
             ))
         };
@@ -2972,5 +2769,23 @@ mod tests {
         let r = post(r#"{"id":"n1","disabled":false}"#).await;
         assert_eq!(json(&r), json!({"disabled": false}));
         assert_eq!(c.nodes_json()[0]["disabled"], false);
+    }
+
+    /// No script of the center's page builds HTML from text: what a node
+    /// wrote goes into text nodes only, and the page's session is readable
+    /// by its scripts. The page has no inline script.
+    #[test]
+    fn the_page_builds_no_html_from_text() {
+        assert_eq!(
+            nerve_transport::webui::html_sinks(APP_JS),
+            Vec::<&str>::new()
+        );
+        for line in INDEX.lines().filter(|l| l.contains("<script")) {
+            assert!(line.contains(" src=\""), "an inline script: {line}");
+        }
+        let handler = INDEX
+            .split_whitespace()
+            .find(|w| w.starts_with("on") && w.contains('='));
+        assert_eq!(handler, None, "an inline handler");
     }
 }

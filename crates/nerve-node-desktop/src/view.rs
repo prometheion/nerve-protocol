@@ -159,6 +159,20 @@ fn limits_line(why: &str) -> (String, bool) {
     )
 }
 
+/// The command of a pairing, and what goes on its input: the link holds the
+/// pairing code, so it is read from the input (`--link-stdin`) and is not in
+/// the list of processes. Without `yes` the command only previews.
+pub fn pair_command(link: &str, name: &str, yes: bool) -> (Vec<String>, String) {
+    let mut args = vec!["center".to_string(), "add".into(), "--link-stdin".into()];
+    if !name.trim().is_empty() {
+        args.push(format!("--name={}", name.trim()));
+    }
+    if yes {
+        args.push("--yes".into());
+    }
+    (args, link.trim().to_string())
+}
+
 /// The check before a pairing (`center add --json` without `--yes`), in the
 /// app's words: whether Pair can work, and why not.
 pub fn pair_preview(v: &Value) -> PairPreview {
@@ -902,40 +916,11 @@ pub fn max_timeout(answer: &Result<Value, String>, default: u64) -> Option<u64> 
     }
 }
 
-/// The arguments of `cap add` (`adding`) or `cap edit` for `form`, and what
-/// goes on its stdin: the arguments' schema, which is no secret but may be
-/// long. An edit gives every field, so an emptied one is cleared.
+/// The `cap add` or `cap edit` a form saves, and the input it reads: the
+/// shared builder, as the node's web UI uses it too
+/// (nerve_policy::config::form::cli_args).
 pub fn cap_form_args(form: &CapForm, adding: bool) -> (Vec<String>, Option<String>) {
-    let verb = if adding { "add" } else { "edit" };
-    let mut args = vec!["cap".to_string(), verb.into(), form.name.trim().to_string()];
-    args.push(format!("--effect={}", form.effect));
-    let summary = form.summary.trim();
-    if !adding || !summary.is_empty() {
-        args.push(format!("--summary={summary}"));
-    }
-    let mut input = None;
-    if !form.params.trim().is_empty() {
-        args.push("--params-stdin".into());
-        input = Some(form.params.trim().to_string());
-    } else if !adding {
-        args.push("--params=none".into());
-    }
-    match serde_json::from_str::<Value>(&form.result) {
-        Ok(v) => args.push(format!("--result={v}")),
-        Err(_) if !adding => args.push("--result=text".into()),
-        Err(_) => {}
-    }
-    match form.timeout.trim() {
-        "" if !adding => args.push("--timeout=default".into()),
-        "" => {}
-        t => args.push(format!("--timeout={t}")),
-    }
-    if !adding || form.platform != "any" {
-        args.push(format!("--platform={}", form.platform));
-    }
-    args.push("--".into());
-    args.extend(command_words(&form.command).unwrap_or_default());
-    (args, input)
+    nerve_policy::config::form::cli_args(form, adding)
 }
 
 /// The capabilities of node.toml the owner declared, from `cap ls
@@ -1677,6 +1662,20 @@ pub fn rule_args(e: &Value, list: &str, wildcard: bool) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_pairing_link_goes_on_the_input_and_not_in_the_arguments() {
+        let link = "nerve://pair?center=https%3A%2F%2Fc.example&code=SECRETCODE&pin=x";
+        let (args, input) = super::pair_command(&format!("  {link}\n"), " lab ", true);
+        assert_eq!(
+            args,
+            ["center", "add", "--link-stdin", "--name=lab", "--yes"]
+        );
+        assert_eq!(input, link);
+        assert!(!args.iter().any(|a| a.contains("SECRETCODE")), "{args:?}");
+        let (args, _) = super::pair_command(link, "", false);
+        assert_eq!(args, ["center", "add", "--link-stdin"]);
+    }
+
     /// A pairing from before the guard read commands is told its guard is of
     /// the older kind, not that it has none.
     #[test]

@@ -28,27 +28,24 @@ async fn start(dir: &std::path::Path, extra: &[&str]) -> Result<Running, String>
     server::start(&args, lock).await
 }
 
-/// `GET /` on the UI as a browser on this machine without a cookie: the
-/// status line and the `Location` header, if any.
-async fn get_root(r: &Running) -> (u16, Option<String>) {
+/// Whether the UI asks for a login, as its page learns it: `GET
+/// /api/session` without a session.
+async fn login_on(r: &Running) -> bool {
     let mut io = tokio::net::TcpStream::connect(r.ui.expect("a UI"))
         .await
         .unwrap();
-    io.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+    io.write_all(b"GET /api/session HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await
         .unwrap();
     let mut buf = Vec::new();
     io.read_to_end(&mut buf).await.unwrap();
     let text = String::from_utf8_lossy(&buf);
-    let status = text.split(' ').nth(1).unwrap().parse().unwrap();
-    let location = text
-        .lines()
-        .find_map(|l| {
-            l.strip_prefix("Location: ")
-                .or(l.strip_prefix("location: "))
-        })
-        .map(str::to_string);
-    (status, location)
+    let (head, body) = text.split_once("\r\n\r\n").unwrap();
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    // Without a login every tab is handed a session; with one, none.
+    assert_eq!(v["session"].is_string(), v["login"] == false, "{v}");
+    v["login"] == true
 }
 
 fn store_with_a_token(dir: &std::path::Path) {
@@ -67,7 +64,7 @@ fn store_with_a_token(dir: &std::path::Path) {
 async fn a_fresh_center_is_open_on_loopback_so_the_first_token_can_be_made() {
     let d = tempfile::tempdir().unwrap();
     let r = start(d.path(), &["--ui", "127.0.0.1:0"]).await.unwrap();
-    assert_eq!(get_root(&r).await, (200, None));
+    assert!(!login_on(&r).await);
 }
 
 #[tokio::test]
@@ -79,7 +76,7 @@ async fn a_token_from_a_flag_turns_the_login_on() {
     )
     .await
     .unwrap();
-    assert_eq!(get_root(&r).await, (303, Some("/login".into())));
+    assert!(login_on(&r).await);
 }
 
 #[tokio::test]
@@ -87,7 +84,7 @@ async fn a_token_made_in_an_earlier_run_turns_the_login_on() {
     let d = tempfile::tempdir().unwrap();
     store_with_a_token(d.path());
     let r = start(d.path(), &["--ui", "127.0.0.1:0"]).await.unwrap();
-    assert_eq!(get_root(&r).await, (303, Some("/login".into())));
+    assert!(login_on(&r).await);
 }
 
 #[tokio::test]
@@ -105,7 +102,7 @@ async fn the_login_can_be_switched_off_on_loopback() {
     )
     .await
     .unwrap();
-    assert_eq!(get_root(&r).await, (200, None));
+    assert!(!login_on(&r).await);
 }
 
 #[tokio::test]

@@ -45,6 +45,9 @@ pub struct NodeConfig {
     /// default.
     #[serde(default, skip_serializing_if = "Relay::is_default")]
     pub relay: Relay,
+    /// The node's web UI (docs/user/node-web-ui.md); off by default.
+    #[serde(default, skip_serializing_if = "Ui::is_default")]
+    pub ui: Ui,
     #[serde(default)]
     pub log: LogSection,
     /// The local programs that may add capabilities to the node over its
@@ -607,6 +610,93 @@ impl RelayNode {
     pub fn may_reach(&self, center: &str) -> bool {
         self.centers.is_empty() || self.centers.iter().any(|c| c == center)
     }
+}
+
+/// The node's web UI: the installed node serves it while `listen` is set.
+/// Only the owner sets it, at the CLI: it is a machine setting, not part of
+/// what a center reads or changes, and the web UI itself may not change it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ui {
+    /// The address the UI listens on, `ip:port`. The UI is off without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<String>,
+    /// The pin of the UI's TLS certificate, whose key is kept with the
+    /// node's own keys; set when `nerve-node ui on` makes it for an address
+    /// beyond loopback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
+    /// The tokens that log in, each by its label and hash.
+    #[serde(default, rename = "token", skip_serializing_if = "Vec::is_empty")]
+    pub tokens: Vec<UiToken>,
+}
+
+impl Ui {
+    fn is_default(&self) -> bool {
+        *self == Ui::default()
+    }
+
+    pub fn token(&self, label: &str) -> Option<&UiToken> {
+        self.tokens.iter().find(|t| t.label == label)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if let Some(p) = &self.pin {
+            nerve_transport::tls::decode_pin(p).map_err(|e| format!("ui.pin: {e}"))?;
+        }
+        if let Some(l) = &self.listen {
+            l.parse::<std::net::SocketAddr>().map_err(|_| {
+                format!("ui.listen {l:?}: an address and a port, like 127.0.0.1:7470")
+            })?;
+        }
+        let mut labels = std::collections::BTreeSet::new();
+        for t in &self.tokens {
+            if !valid_ui_label(&t.label) {
+                return Err(format!(
+                    "ui.token label {:?}: 1 to 32 characters of a-z, 0-9 and -, not starting with -",
+                    t.label
+                ));
+            }
+            if !labels.insert(t.label.as_str()) {
+                return Err(format!("ui.token labels {:?} twice", t.label));
+            }
+            let hex = t
+                .token_sha256
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+            if t.token_sha256.len() != 64 || !hex {
+                return Err(format!(
+                    "ui.token {}: token_sha256 is 64 characters of lowercase hex",
+                    t.label
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether `label` names a web UI token: 1 to 32 of `a-z`, `0-9` and `-`,
+/// not starting with `-` (it would read as an option at the CLI and is
+/// refused as one in the web UI).
+pub fn valid_ui_label(label: &str) -> bool {
+    (1..=32).contains(&label.len())
+        && !label.starts_with('-')
+        && label
+            .bytes()
+            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'))
+}
+
+/// A token that logs in to the web UI. Only its SHA-256 is kept, so whoever
+/// reads `node.toml` cannot log in with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UiToken {
+    pub label: String,
+    /// The lowercase hex SHA-256 of the token.
+    pub token_sha256: String,
+    /// When it was made, as RFC 3339 in UTC.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub made: String,
 }
 
 /// Why a `node.toml` that keeps proxy secrets in the file is refused.
@@ -1198,6 +1288,7 @@ impl NodeConfig {
         }
         validate_all(&self.capabilities, self.limits.max_timeout_secs)?;
         self.relay.validate()?;
+        self.ui.validate()?;
         let mut names = std::collections::BTreeSet::new();
         for c in &mut self.centers {
             if !valid_center_name(&c.name) {
@@ -1726,6 +1817,58 @@ sudo_allow = ["sudo apt update"]
         }
         // A center reads and changes its policy and `paused`, nothing of this.
         let doc = serde_json::json!({"relay": {"listen": "0.0.0.0:1"}});
+        assert!(serde_json::from_value::<CenterDocument>(doc).is_err());
+    }
+
+    /// The web UI is off and out of the file unless the owner turns it on;
+    /// its tokens are kept by label and hash, and a center cannot reach it.
+    #[test]
+    fn the_web_ui_is_off_until_set_and_keeps_only_token_hashes() {
+        let c = NodeConfig::parse("").unwrap();
+        assert_eq!(c.ui, Ui::default());
+        assert!(!c.to_toml().contains("ui"), "{}", c.to_toml());
+        let hash = "b".repeat(64);
+        let text = format!(
+            "[ui]\nlisten = \"127.0.0.1:7470\"\n\n[[ui.token]]\nlabel = \"laptop\"\ntoken_sha256 = \"{hash}\"\nmade = \"2026-11-02T10:00:00Z\"\n"
+        );
+        let c = NodeConfig::parse(&text).unwrap();
+        assert_eq!(c.ui.listen.as_deref(), Some("127.0.0.1:7470"));
+        assert_eq!(c.ui.token("laptop").unwrap().token_sha256, hash);
+        assert_eq!(NodeConfig::parse(&c.to_toml()).unwrap(), c);
+        let token = |label: &str, h: &str| {
+            format!("[[ui.token]]\nlabel = \"{label}\"\ntoken_sha256 = \"{h}\"\n")
+        };
+        for (bad, why) in [
+            (
+                "[ui]\nlisten = \"localhost:7470\"\n".to_string(),
+                "ui.listen",
+            ),
+            ("[ui]\nlisten = \"127.0.0.1\"\n".to_string(), "ui.listen"),
+            ("[ui]\npin = \"x\"\n".to_string(), "ui.pin"),
+            ("[ui]\ntoken = \"x\"\n".to_string(), "invalid type"),
+            ("[ui]\nlogin = false\n".to_string(), "unknown field"),
+            (token("Laptop", &hash), "ui.token label"),
+            (token("", &hash), "ui.token label"),
+            (token("-old", &hash), "ui.token label"),
+            (token(&"a".repeat(33), &hash), "ui.token label"),
+            (token("lab", &"B".repeat(64)), "token_sha256"),
+            (token("lab", "abc"), "token_sha256"),
+            (
+                format!("{}{}", token("lab", &hash), token("lab", &hash)),
+                "twice",
+            ),
+            (
+                format!(
+                    "[[ui.token]]\nlabel = \"lab\"\ntoken_sha256 = \"{hash}\"\ntoken = \"t\"\n"
+                ),
+                "unknown field",
+            ),
+        ] {
+            let e = NodeConfig::parse(&bad).unwrap_err();
+            assert!(e.contains(why), "{bad}: {e}");
+        }
+        // A center reads and changes its policy and `paused`, nothing of this.
+        let doc = serde_json::json!({"ui": {"listen": "0.0.0.0:1"}});
         assert!(serde_json::from_value::<CenterDocument>(doc).is_err());
     }
 

@@ -1,6 +1,7 @@
 Nerve Protocol includes icons from Lucide (https://lucide.dev): the icons of
-the center's web UI (crates/nerve-center/src/ui/app.js) and of the node's
-desktop app (crates/nerve-node-desktop/ui/icons/). Their licence:
+the web UIs of the center and the node (crates/nerve-transport/src/webui/kit.js)
+and of the node's desktop app (crates/nerve-node-desktop/ui/icons/). Their
+licence:
 
 ISC License
 

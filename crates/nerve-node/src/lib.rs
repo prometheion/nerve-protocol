@@ -3,8 +3,8 @@
 //!
 //! The daemon ([`daemon::Daemon`]) keeps one link per paired center, runs the
 //! `fs`, `exec`, `settings` and `audit` capabilities, serves
-//! the control socket the CLI ([`cli`]) talks to, and the relay for other
-//! nodes when the owner turns it on. Tests start a daemon in
+//! the control socket the CLI ([`cli`]) talks to, the relay for other
+//! nodes and the web UI (Linux) when the owner turns them on. Tests start a daemon in
 //! process with [`daemon::Daemon::start`] and pair with [`pair::pair`].
 
 pub mod account;
@@ -32,6 +32,8 @@ pub mod grants;
 mod job;
 pub mod keyring_setup;
 mod link;
+#[cfg(target_os = "linux")]
+mod localnet;
 pub mod owner;
 pub mod pair;
 pub mod paths;
@@ -50,6 +52,8 @@ mod secrets;
 pub mod service;
 mod sudo;
 pub mod tap;
+#[cfg(target_os = "linux")]
+mod webui;
 // The walk is Windows-only in use, tested everywhere.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod tree;

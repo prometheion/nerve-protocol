@@ -22,6 +22,9 @@ use crate::paths::NodePaths;
 use crate::service::{Host, Layout};
 
 mod json;
+pub mod ui;
+
+pub use ui::{UiCmd, UiTokenCmd};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -77,6 +80,12 @@ pub enum Cmd {
     /// Let nodes that cannot reach a center themselves reach this node's centers through it.
     #[command(subcommand)]
     Relay(RelayCmd),
+    /// Turn the node's web UI on or off, and make the tokens that log in to it (the installed node on Linux; off unless turned on).
+    #[command(args_conflicts_with_subcommands = true)]
+    Ui {
+        #[command(subcommand)]
+        cmd: Option<UiCmd>,
+    },
     /// Read or change any setting in node.toml by its name.
     #[command(subcommand)]
     Config(ConfigCmd),
@@ -182,7 +191,11 @@ pub enum CenterCmd {
     /// Pair this machine with a center, using the pairing link it showed.
     Add {
         /// The pairing link.
-        link: String,
+        #[arg(required_unless_present = "link_stdin")]
+        link: Option<String>,
+        /// Read the pairing link from the first line of stdin: it holds the pairing code, and never shows in the process list.
+        #[arg(long, conflicts_with = "link")]
+        link_stdin: bool,
         /// The name to use for the center here (the center's own name if left out).
         #[arg(long)]
         name: Option<String>,
@@ -655,7 +668,7 @@ const SECTIONS: &[(&str, &str, &[&[&str]])] = &[
     (
         "Pair and connect",
         "Link this machine to centers and choose how it reaches them.",
-        &[&["center"], &["proxy"], &["relay"]],
+        &[&["center"], &["proxy"], &["relay"], &["ui"]],
     ),
     (
         "What a center may do",
@@ -988,6 +1001,19 @@ pub async fn edit_saved(
     paths: &NodePaths,
     f: impl Fn(&mut NodeConfig) -> Result<(), String>,
 ) -> Result<Saved, String> {
+    edit_saved_as(paths, false, f).await
+}
+
+/// [`edit_saved`] for `panic` when `panic` is set: the node then ends the web
+/// UI's sessions also when the config does not change (it was locked).
+async fn edit_saved_as(
+    paths: &NodePaths,
+    panic: bool,
+    f: impl Fn(&mut NodeConfig) -> Result<(), String>,
+) -> Result<Saved, String> {
+    // Windows has no node to ask: the file is the node's.
+    #[cfg(not(unix))]
+    let _ = panic;
     #[cfg(unix)]
     {
         let sock = paths.ctl_socket();
@@ -1008,11 +1034,18 @@ pub async fn edit_saved(
             if !added_conditions(&old, &cfg).is_empty() {
                 check_conditions(&cap_listing(paths, &old).await?, &old, &cfg)?;
             }
-            let params = json!({
+            let mut params = json!({
                 "config": cfg.to_toml(),
                 "if_version": read["version"],
                 "user": changed_by(),
             });
+            // A page's request that a panic overtook writes nothing.
+            if let Some(n) = crate::owner::web_epoch() {
+                params["web_locks"] = json!(n);
+            }
+            if panic {
+                params["panic"] = json!(true);
+            }
             match nerve_transport::ctl::call(&sock, "config.write", params).await {
                 Ok(_) => {
                     return Ok(Saved {
@@ -1370,7 +1403,7 @@ impl List {
     /// The rule of an audit entry of `action` (`fs.read`) with `target`, as
     /// the audit buttons of the desktop app and of the center make it
     /// ([`rules::rule_for`]). The sudo list takes sudo commands only.
-    fn action_rule(
+    pub(crate) fn action_rule(
         self,
         action: &str,
         target: &str,
@@ -2016,8 +2049,13 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             opts.exe = std::env::current_exe().ok();
             Daemon::run(opts).await
         }
-        Cmd::Center(CenterCmd::Add { link, name, yes }) => {
-            let link = PairLink::parse(&link)?;
+        Cmd::Center(CenterCmd::Add {
+            link,
+            link_stdin,
+            name,
+            yes,
+        }) => {
+            let link = PairLink::parse(&given_link(link, link_stdin)?)?;
             w(out, crate::pair::preview(&link, name.as_deref()));
             if !yes {
                 // Asked only when the pairing can work: the center answers,
@@ -2494,11 +2532,14 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
         Cmd::Config(c) => config_cmd(&paths, c, out).await,
         Cmd::Rule(c) => rule_cmd(&paths, c, out).await,
         Cmd::Panic => {
-            edit(&paths, |c| {
+            let saved = edit_saved_as(&paths, true, |c| {
                 c.locked = true;
                 Ok(())
             })
             .await?;
+            if let Some(e) = grants_failed(&saved.grants) {
+                return Err(e);
+            }
             w(
                 out,
                 "locked: every link ends and nothing runs until `nerve-node unlock`".into(),
@@ -2557,6 +2598,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
         } => log_cmd(&paths, follow, last, problems, false, out).await,
         Cmd::Proxy(c) => proxy_cmd(&paths, c, out).await,
         Cmd::Relay(c) => relay_cmd(&paths, c, out).await,
+        Cmd::Ui { cmd } => ui::ui_cmd(&paths, cmd, out).await,
         Cmd::Sudo(c) => sudo_cmd(&paths, c, out).await,
         Cmd::Backup {
             file,
@@ -3307,6 +3349,17 @@ async fn set_mode(
 }
 
 /// `folder add`, and the folder step of `setup`.
+/// What `folder.add` is asked: a page's request that a panic overtook (its
+/// count of locks is no longer the node's) adds nothing.
+#[cfg(unix)]
+fn folder_add_params(center: &str, path: &str, access: Access, web_locks: Option<u64>) -> Value {
+    let mut params = json!({"center": center, "path": path, "access": access.to_string()});
+    if let Some(n) = web_locks {
+        params["web_locks"] = json!(n);
+    }
+    params
+}
+
 async fn add_folder(
     paths: &NodePaths,
     path: &Path,
@@ -3336,7 +3389,7 @@ async fn add_folder(
     // records the real place, all in one step.
     #[cfg(unix)]
     let asked = {
-        let params = json!({"center": name, "path": given, "access": access.to_string()});
+        let params = folder_add_params(&name, &given, access, crate::owner::web_epoch());
         match nerve_transport::ctl::call(&paths.ctl_socket(), "folder.add", params).await {
             Ok(v) => Some((
                 v["stored"].as_str().unwrap_or(&given).to_string(),
@@ -3633,6 +3686,25 @@ fn read_password(out: &mut dyn Write, prompt: &str) -> Result<String, String> {
         return Err("no password given".into());
     }
     Ok(password)
+}
+
+/// The pairing link of `center add`: the one given, or the first line of
+/// stdin (`--link-stdin`).
+pub(crate) fn given_link(link: Option<String>, from_stdin: bool) -> Result<String, String> {
+    if let Some(l) = link {
+        return Ok(l);
+    }
+    debug_assert!(from_stdin);
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| format!("cannot read the pairing link: {e}"))?;
+    let line = line.trim();
+    if line.is_empty() {
+        return Err("--link-stdin: the first line of stdin is empty, not a pairing link".into());
+    }
+    Ok(line.to_string())
 }
 
 fn confirm(input: &mut dyn BufRead, out: &mut dyn Write) -> Result<bool, String> {
@@ -4468,6 +4540,11 @@ pub const NO_ACCOUNT_TO_CHOOSE: &str = "machine.user is Windows's: on Linux comm
 /// a `[[center]]` entry by its name.
 async fn config_cmd(paths: &NodePaths, c: ConfigCmd, out: &mut dyn Write) -> Result<(), String> {
     if let ConfigCmd::Accept = c {
+        // It takes a hand-edited node.toml whole, with no check of what
+        // changed: a terminal's job, never the web UI's.
+        if crate::owner::via_web() {
+            return Err(crate::owner::NOT_FROM_THE_WEB.into());
+        }
         let (v, notes) = accept(paths).await?;
         let _ = writeln!(out, "accepted node.toml as version {v}");
         for note in notes {
@@ -4482,6 +4559,16 @@ async fn config_cmd(paths: &NodePaths, c: ConfigCmd, out: &mut dyn Write) -> Res
             .ok_or_else(|| format!("{key} is not set"))?;
         let _ = writeln!(out, "{}", show(&v));
         return Ok(());
+    }
+    // The web UI's own settings change through `ui` at the CLI alone.
+    if crate::owner::via_web()
+        && let ConfigCmd::Set { key, .. }
+        | ConfigCmd::Unset { key }
+        | ConfigCmd::Add { key, .. }
+        | ConfigCmd::Remove { key, .. } = &c
+        && (key == "ui" || key.starts_with("ui."))
+    {
+        return Err(crate::owner::NOT_FROM_THE_WEB.into());
     }
     // Linux chooses no account for the commands: they run as nerve-run or
     // as the owner, the account that ran `install`.
@@ -5622,6 +5709,21 @@ fn table_at<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder the web UI adds carries the count of locks its request began
+    /// with, so a panic that overtook it adds nothing (the node compares it
+    /// under the store's lock); the CLI of a person carries none.
+    #[cfg(unix)]
+    #[test]
+    fn a_web_folder_add_names_the_locks_it_began_with() {
+        let access = Access::parse("r").unwrap();
+        let by_hand = folder_add_params("home", "/srv/docs", access, None);
+        assert_eq!(by_hand.get("web_locks"), None, "{by_hand}");
+        let from_web = folder_add_params("home", "/srv/docs", access, Some(3));
+        assert_eq!(from_web["web_locks"], 3, "{from_web}");
+        assert_eq!(from_web["center"], "home");
+        assert_eq!(from_web["access"], "r");
+    }
 
     #[test]
     fn proxy_secrets_come_from_stdin() {

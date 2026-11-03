@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f4f5f9">
+<meta name="robots" content="noindex">
+<title>Nerve node</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<script src="/theme-init.js"></script>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="shell" id="shell">
+  <aside class="side" id="side" aria-label="Menu">
+    <div class="side-head">
+      <img class="mark" src="/icon.svg" alt="" width="32" height="32">
+      <div class="side-name">
+        <h1>Nerve</h1>
+        <span class="tag">node</span>
+      </div>
+      <button type="button" class="btn ghost icon sm side-close" id="nav-close" aria-label="Close menu"><svg class="ico" data-icon="x"></svg></button>
+    </div>
+    <nav class="nav" aria-label="Pages">
+      <a href="#overview" data-page="overview"><svg class="ico" data-icon="overview"></svg><span>Overview</span></a>
+      <a href="#centers" data-page="centers"><svg class="ico" data-icon="server"></svg><span>Centers</span></a>
+      <a href="#permissions" data-page="permissions"><svg class="ico" data-icon="shield"></svg><span>Permissions</span></a>
+      <a href="#audit" data-page="audit"><svg class="ico" data-icon="audit"></svg><span>Audit</span></a>
+      <a href="#capabilities" data-page="capabilities"><svg class="ico" data-icon="plug"></svg><span>Capabilities</span></a>
+      <a href="#relay" data-page="relay"><svg class="ico" data-icon="link"></svg><span>Relay</span></a>
+      <a href="#log" data-page="log"><svg class="ico" data-icon="log"></svg><span>Log</span></a>
+    </nav>
+    <div class="side-foot">
+      <a href="#settings" data-page="settings"><svg class="ico" data-icon="settings"></svg><span>Settings</span></a>
+      <a href="#help" data-page="help"><svg class="ico" data-icon="help"></svg><span>Help</span></a>
+      <div class="foot-row">
+        <div class="theme" id="theme" role="radiogroup" aria-label="Theme">
+          <button type="button" role="radio" aria-checked="false" data-theme-choice="system"><svg class="ico" data-icon="monitor"></svg>System</button>
+          <button type="button" role="radio" aria-checked="false" data-theme-choice="light"><svg class="ico" data-icon="sun"></svg>Light</button>
+          <button type="button" role="radio" aria-checked="false" data-theme-choice="dark"><svg class="ico" data-icon="moon"></svg>Dark</button>
+        </div>
+        <form id="signout" method="post" action="/logout">
+          <button type="submit" class="btn ghost"><svg class="ico" data-icon="logout"></svg>Sign out</button>
+        </form>
+      </div>
+    </div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+  <div class="content">
+    <header class="topbar">
+      <button type="button" class="btn ghost icon" id="nav-open" aria-label="Open menu" aria-controls="side" aria-expanded="false"><svg class="ico lg" data-icon="menu"></svg></button>
+      <h2 id="top-title">Overview</h2>
+    </header>
+    <main class="scroll" id="scroll"><div class="page" id="page"></div></main>
+  </div>
+</div>
+<dialog class="dlg" id="dlg"></dialog>
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+<script src="/kit.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

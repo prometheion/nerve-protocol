@@ -44,11 +44,10 @@ async fn center(dir: &std::path::Path) -> Running {
 }
 
 /// The open loopback web UI, as the page calls it: a session from
-/// `/api/session`, its CSRF token on every change.
+/// `/api/session`, sent as a header with every call.
 struct Ui {
     addr: std::net::SocketAddr,
-    cookie: String,
-    csrf: String,
+    session: String,
 }
 
 async fn http(
@@ -83,19 +82,11 @@ async fn http(
 impl Ui {
     async fn open(r: &Running) -> Ui {
         let addr = r.ui.expect("a UI");
-        let (status, head, body) = http(addr, "GET", "/api/session", &[], "").await;
+        let (status, _, body) = http(addr, "GET", "/api/session", &[], "").await;
         assert_eq!(status, 200, "{body}");
-        let cookie = head
-            .lines()
-            .find_map(|l| {
-                let (k, v) = l.split_once(':')?;
-                k.eq_ignore_ascii_case("set-cookie")
-                    .then(|| v.trim().split(';').next().unwrap().to_string())
-            })
-            .expect("a session cookie");
         let v: Value = serde_json::from_str(&body).unwrap();
-        let csrf = v["csrf"].as_str().unwrap().to_string();
-        Ui { addr, cookie, csrf }
+        let session = v["session"].as_str().expect("a session").to_string();
+        Ui { addr, session }
     }
 
     async fn api(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
@@ -104,10 +95,7 @@ impl Ui {
         } else {
             body.to_string()
         };
-        let headers = [
-            ("Cookie", self.cookie.as_str()),
-            ("x-nerve-csrf", self.csrf.as_str()),
-        ];
+        let headers = [("X-Nerve-Session", self.session.as_str())];
         let (status, _, text) = http(self.addr, method, path, &headers, &body).await;
         (
             status,

@@ -232,6 +232,42 @@ pub fn check(form: &CapForm, max_timeout_secs: u64) -> CapFormErrors {
         .unwrap_or_default()
 }
 
+/// The arguments of `cap add` (`adding`) or `cap edit` for `form`, and what
+/// goes on its stdin: the arguments' schema, which is no secret but may be
+/// long. An edit gives every field, so an emptied one is cleared.
+pub fn cli_args(form: &CapForm, adding: bool) -> (Vec<String>, Option<String>) {
+    let verb = if adding { "add" } else { "edit" };
+    let mut args = vec!["cap".to_string(), verb.into(), form.name.trim().to_string()];
+    args.push(format!("--effect={}", form.effect));
+    let summary = form.summary.trim();
+    if !adding || !summary.is_empty() {
+        args.push(format!("--summary={summary}"));
+    }
+    let mut input = None;
+    if !form.params.trim().is_empty() {
+        args.push("--params-stdin".into());
+        input = Some(form.params.trim().to_string());
+    } else if !adding {
+        args.push("--params=none".into());
+    }
+    match serde_json::from_str::<Value>(&form.result) {
+        Ok(v) => args.push(format!("--result={v}")),
+        Err(_) if !adding => args.push("--result=text".into()),
+        Err(_) => {}
+    }
+    match form.timeout.trim() {
+        "" if !adding => args.push("--timeout=default".into()),
+        "" => {}
+        t => args.push(format!("--timeout={t}")),
+    }
+    if !adding || form.platform != "any" {
+        args.push(format!("--platform={}", form.platform));
+    }
+    args.push("--".into());
+    args.extend(command_words(&form.command).unwrap_or_default());
+    (args, input)
+}
+
 /// A form's fields for a capability as `cap ls --json` (its `config`) and
 /// `settings.get` give it ([`ConfigCapability::entry`]): what was declared,
 /// the command as `cap ls` writes it.

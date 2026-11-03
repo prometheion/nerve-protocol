@@ -449,6 +449,13 @@ pipe to be waited for: `"C:\Program Files\Nerve\nerve-node-desktop.exe" status |
 in cmd, `& "C:\Program Files\Nerve\nerve-node-desktop.exe" status | Out-Default`
 in PowerShell. A batch file waits for it as it is.
 
+## The web UI (Linux)
+
+On Linux the app's node has the [node web UI](node-web-ui.md) too, off unless
+you turn it on: `nerve-node-desktop ui on` (or `nerve-node ui on`). It works as
+for the plain `nerve-node`, and the app does not switch it. On Windows there is
+none: the app is the node's UI there.
+
 ## Keyboard
 
 | Keys | Do |

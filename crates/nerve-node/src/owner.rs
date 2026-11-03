@@ -55,6 +55,36 @@ pub const OWNER_ENV: &str = "NERVE_OWNER";
 /// that `setup` installs as root, crate::keyring_setup).
 pub const TERMINAL_ENV: &str = "NERVE_OWNER_TERMINAL";
 
+/// Set to `web` by the node for a command it runs for an owner from the web
+/// UI (crate::webui): such a command may not change the web UI's own
+/// settings, but revoke a token ([`check_change`]), nor take node.toml whole
+/// (`config accept`). So a browser session can neither widen the UI's
+/// address, nor make itself a token, nor outlive its revocation.
+pub const VIA_ENV: &str = "NERVE_OWNER_VIA";
+
+/// Whether this command runs for an owner from the web UI ([`VIA_ENV`]).
+pub fn via_web() -> bool {
+    owner_running().is_some() && std::env::var(VIA_ENV).is_ok_and(|v| v == "web")
+}
+
+/// Set by the node, for a command from the web UI, to how many times the
+/// node was locked when the page's request began. The node refuses the
+/// command's write of the config when that has changed since: a request
+/// that a panic overtook must not write after it (an unlock would undo it).
+pub const EPOCH_ENV: &str = "NERVE_OWNER_LOCKS";
+
+/// The count [`EPOCH_ENV`] names, for a command from the web UI.
+pub fn web_epoch() -> Option<u64> {
+    if !via_web() {
+        return None;
+    }
+    std::env::var(EPOCH_ENV).ok()?.parse().ok()
+}
+
+/// Why a command from the web UI may not change the web UI.
+pub const NOT_FROM_THE_WEB: &str =
+    "the web UI's own settings change only at the CLI: run `nerve-node ui …` in a terminal";
+
 /// The installed unit's runtime folder (`RuntimeDirectory=`), where the
 /// owner socket is.
 pub const RUNTIME_DIR: &str = "/run/nerve-node";
@@ -151,6 +181,9 @@ pub fn check_change(
     if owner_running().is_none() {
         return Ok(());
     }
+    if via_web() && !ui_only_narrowed(&old.ui, &new.ui) {
+        return Err(NOT_FROM_THE_WEB.into());
+    }
     match root_only_change(old, new) {
         Some(key) => Err(format!(
             "{key} decides which account or program commands run as, so only {} changes it: {}",
@@ -159,6 +192,14 @@ pub fn check_change(
         )),
         None => Ok(()),
     }
+}
+
+/// Whether `new` is `old` with tokens taken away at most: revoking only
+/// narrows who gets in, so the web UI may do it.
+pub fn ui_only_narrowed(old: &nerve_policy::config::Ui, new: &nerve_policy::config::Ui) -> bool {
+    new.listen == old.listen
+        && new.pin == old.pin
+        && new.tokens.iter().all(|t| old.tokens.contains(t))
 }
 
 /// What the refusal of an owner's restore that would change a setting of
@@ -419,7 +460,9 @@ pub fn reads_input(cmd: &Cmd) -> bool {
         Cmd::Cap(CapCmd::Add { spec, .. } | CapCmd::Edit { spec, .. }) => {
             spec.params_stdin || spec.result_stdin
         }
-        Cmd::Center(CenterCmd::Add { yes, .. }) => !yes,
+        Cmd::Center(CenterCmd::Add {
+            yes, link_stdin, ..
+        }) => !yes || *link_stdin,
         Cmd::Proxy(ProxyCmd::Set {
             password_stdin,
             headers_stdin,
@@ -1139,7 +1182,7 @@ pub(crate) async fn answer(
             if from_command {
                 return Reply::Err(FROM_A_COMMAND.into());
             }
-            run_for(shared, program, &who, &req.params, handed).await
+            run_for(shared, program, &who, &req.params, handed, false).await
         }
         other => Reply::Err(format!("unknown method {other}")),
     }
@@ -1168,13 +1211,15 @@ fn takes_a_file(cmd: &Cmd) -> bool {
 /// Runs the command `params` names (`args`, `cwd`) for the owner `who`: the
 /// node's own program, as the node's user, on the node's folders. A
 /// `restore` runs while the node is stopped, which then starts again
-/// ([`crate::daemon::NodeOptions::aside`]).
+/// ([`crate::daemon::NodeOptions::aside`]). `web` says the owner asked in
+/// the web UI ([`VIA_ENV`]).
 async fn run_for(
     shared: &std::sync::Arc<crate::daemon::Shared>,
     program: &Path,
     who: &str,
     params: &Value,
     handed: Handed,
+    web: bool,
 ) -> nerve_transport::ctl::Reply {
     use clap::Parser;
     use nerve_transport::ctl::Reply;
@@ -1228,7 +1273,11 @@ async fn run_for(
     };
     // A change is the owner's to find in the log; the reads the app makes
     // all the time would only bury it, so they are detail.
-    let line = format!("{who} runs `{name} {}` as an owner", words(&args));
+    let line = format!(
+        "{who} runs `{name} {}` as an owner{}",
+        words(&args),
+        if web { " from the web UI" } else { "" }
+    );
     if reads {
         tracing::debug!("{line}");
     } else {
@@ -1243,6 +1292,8 @@ async fn run_for(
         args,
         cwd: params["cwd"].as_str().map(PathBuf::from),
         terminal: params["terminal"] == true,
+        web,
+        epoch: params["locks"].as_u64().filter(|_| web),
         handed,
         backup,
         out: out_tx,
@@ -1265,6 +1316,93 @@ async fn run_for(
     }
 }
 
+/// What a command the web UI ran gave: its exit code, its output and its
+/// error output.
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct Ran {
+    pub code: i32,
+    pub out: String,
+    pub err: String,
+}
+
+/// The output the web UI keeps of one command: far more than any listing
+/// of the node's, and no more than a page shows.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const WEB_OUTPUT_MAX: usize = 4 * 1024 * 1024;
+
+/// Runs `args` for the owner `who` as the owner socket does, asked in the
+/// web UI: with every check of [`run_for`], no working folder, and no
+/// terminal. `input` is the command's whole input (a secret goes there,
+/// never in `args`). The command is stopped, and this gives an error, when
+/// `locked` changes: the node was locked meanwhile (`panic` itself runs
+/// with none). The web UI is Linux's
+/// alone.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) async fn run_for_web(
+    shared: &std::sync::Arc<crate::daemon::Shared>,
+    program: &Path,
+    who: &str,
+    args: &[String],
+    input: Option<&str>,
+    mut locked: Option<tokio::sync::watch::Receiver<u64>>,
+    locks: Option<u64>,
+) -> Result<Ran, String> {
+    use nerve_transport::ctl::Reply;
+    let params = json!({ "args": args, "locks": locks });
+    match run_for(shared, program, who, &params, Handed::None, true).await {
+        Reply::Session {
+            mut out, inbound, ..
+        } => {
+            if let Some(text) = input {
+                let _ = inbound.send(json!({ "in": text })).await;
+            }
+            let _ = inbound.send(json!({ "eof": true })).await;
+            let mut ran = Ran::default();
+            loop {
+                // Dropping the command's input ends it, and the program
+                // with it.
+                let next = tokio::select! {
+                    v = out.recv() => v,
+                    () = locked_meanwhile(&mut locked) => {
+                        return Err("the node was locked while the command ran, so it was stopped".into());
+                    }
+                };
+                let Some(v) = next else { break };
+                let room = |s: &String| s.len() < WEB_OUTPUT_MAX;
+                if let Some(t) = v["out"].as_str() {
+                    if room(&ran.out) {
+                        ran.out.push_str(t);
+                    }
+                } else if let Some(t) = v["err"].as_str() {
+                    if room(&ran.err) {
+                        ran.err.push_str(t);
+                    }
+                } else if let Some(c) = v["exit"].as_i64() {
+                    ran.code = c as i32;
+                    // The command's input ends with it.
+                    drop(inbound);
+                    return Ok(ran);
+                }
+            }
+            Err("the command ended without an exit code".into())
+        }
+        Reply::Err(e) => Err(e),
+        _ => Err("the node answered no command".into()),
+    }
+}
+
+/// Resolves when `locked` changes; never when there is none.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+async fn locked_meanwhile(locked: &mut Option<tokio::sync::watch::Receiver<u64>>) {
+    if let Some(w) = locked
+        && w.changed().await.is_ok()
+    {
+        return;
+    }
+    std::future::pending().await
+}
+
 /// Whether `cmd` only reads: it changes nothing of the node.
 fn only_reads(cmd: &Cmd) -> bool {
     use crate::cli::{
@@ -1284,7 +1422,7 @@ fn only_reads(cmd: &Cmd) -> bool {
             | Cmd::Relay(RelayCmd::Ls)
             | Cmd::Sudo(SudoCmd::Status)
             | Cmd::Service(ServiceCmd::Status)
-    )
+    ) || matches!(cmd, Cmd::Ui { cmd } if crate::cli::ui::only_reads(cmd))
 }
 
 /// What the log says an owner ran: the command's words, and for `config`
@@ -1313,6 +1451,11 @@ struct Job {
     cwd: Option<PathBuf>,
     /// The caller's input is a terminal's ([`TERMINAL_ENV`]).
     terminal: bool,
+    /// The owner asked in the web UI ([`VIA_ENV`]).
+    web: bool,
+    /// How many times the node was locked when the web UI's request began
+    /// ([`EPOCH_ENV`]).
+    epoch: Option<u64>,
     handed: Handed,
     /// A backup, whose streamed file goes back to the caller.
     backup: bool,
@@ -1331,6 +1474,8 @@ async fn command(job: Job) {
         args,
         cwd,
         terminal,
+        web,
+        epoch,
         handed,
         backup,
         out,
@@ -1372,6 +1517,12 @@ async fn command(job: Job) {
     }
     if terminal {
         env.push((TERMINAL_ENV, "1".into()));
+    }
+    if web {
+        env.push((VIA_ENV, "web".into()));
+    }
+    if let Some(n) = epoch {
+        env.push((EPOCH_ENV, n.to_string()));
     }
     #[cfg(unix)]
     let fd = match handed {
@@ -1494,6 +1645,8 @@ fn spawn<F: HandedFd>(
             .env_remove("NERVE_STATE_DIR")
             .env_remove(crate::caller_file::OWNER_FILE_ENV)
             .env_remove(TERMINAL_ENV)
+            .env_remove(VIA_ENV)
+            .env_remove(EPOCH_ENV)
             .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -1968,6 +2121,37 @@ mod tests {
     }
 
     use super::*;
+
+    /// The web UI may take tokens away and nothing else of its own
+    /// settings: a session may not widen the address, swap the certificate
+    /// or give itself a token.
+    #[test]
+    fn the_web_ui_only_narrows_its_own_settings() {
+        use nerve_policy::config::{Ui, UiToken};
+        let token = |l: &str| UiToken {
+            label: l.into(),
+            token_sha256: "e".repeat(64),
+            made: String::new(),
+        };
+        let old = Ui {
+            listen: Some("127.0.0.1:7470".into()),
+            pin: None,
+            tokens: vec![token("a"), token("b")],
+        };
+        let mut new = old.clone();
+        new.tokens.retain(|t| t.label == "a");
+        assert!(ui_only_narrowed(&old, &new));
+        assert!(ui_only_narrowed(&old, &old));
+        let mut more = old.clone();
+        more.tokens.push(token("c"));
+        assert!(!ui_only_narrowed(&old, &more));
+        let mut wider = old.clone();
+        wider.listen = Some("0.0.0.0:7470".into());
+        assert!(!ui_only_narrowed(&old, &wider));
+        let mut pinned = old.clone();
+        pinned.pin = Some("p".into());
+        assert!(!ui_only_narrowed(&old, &pinned));
+    }
     use clap::Parser;
 
     fn cli(args: &[&str]) -> Cli {

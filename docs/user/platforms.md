@@ -142,6 +142,11 @@ you are responsible for
 what they do. On Windows, in `folder` mode, their AppContainer still holds
 them to their folders.
 
+### The node's web UI
+
+The installed node on Linux can serve a [web UI](node-web-ui.md). On Windows
+there is none: the desktop app is the node's UI there.
+
 ### The control pipe
 
 A running node on Windows answers `nerve-node status` and `relay ls` (with the

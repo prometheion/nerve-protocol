@@ -9,7 +9,7 @@ Three programs make it work:
 | Program | Runs on | Job |
 |---|---|---|
 | `nerve-center` | the machine where the harness runs | Pairs machines, keeps their links, gives the harness two MCP tools, `list` and `execute`, for what they offer, serves the web UI |
-| `nerve-node` | each machine the agent may use, without a desktop or run from a terminal | Links to a center and decides each call by the rules you set; its CLI sets them |
+| `nerve-node` | each machine the agent may use, without a desktop or run from a terminal | Links to a center and decides each call by the rules you set; its CLI sets them, and on Linux a [web UI](node-web-ui.md) you turn on |
 | `nerve-node-desktop` | each machine the agent may use that has a desktop (Linux x86_64 with GNOME or KDE Plasma, Windows x86_64) | The same node, with an app that installs itself and does what the CLI does in a window ([desktop app](desktop.md)) |
 
 A machine runs one node: `nerve-node` or `nerve-node-desktop`.
@@ -57,6 +57,7 @@ open port.
 | [providers.md](providers.md) | Let a program on the machine add capabilities |
 | [config-capabilities.md](config-capabilities.md) | Add a capability of your own that runs a fixed command |
 | [web-ui.md](web-ui.md) | The center's web UI |
+| [node-web-ui.md](node-web-ui.md) | The node's web UI: turn it on, its tokens, beyond loopback |
 | [platforms.md](platforms.md) | What differs on Linux and Windows |
 | [troubleshooting.md](troubleshooting.md) | Messages and what to do |
 | [commands.md](commands.md) | Every `nerve-node` command in one table |
