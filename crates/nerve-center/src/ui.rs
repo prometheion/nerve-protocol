@@ -2065,7 +2065,7 @@ mod tests {
     async fn the_token_is_read_from_the_form_encoding_too() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        std::fs::write(crate::owner::path(d.path()), "p&w=d%").unwrap();
+        std::fs::write(crate::owner::path(d.path()), "p&w=d%-of-twenty-chars").unwrap();
         let ui = Ui::new(&c, false, false);
         let form = |t: &str| {
             req(
@@ -2075,12 +2075,12 @@ mod tests {
                 &format!("token={t}"),
             )
         };
-        let r = ui.request(form("p%26w%3Dd%25")).await;
+        let r = ui.request(form("p%26w%3Dd%25-of-twenty-chars")).await;
         assert_eq!(r.status, 200);
         session_token(&r);
         // The raw text is not the token.
-        assert_eq!(ui.request(form("p&w=d%")).await.status, 401);
-        assert_eq!(sign_in(&ui, "p&w=d%").await.status, 200);
+        assert_eq!(ui.request(form("p&w=d%-of-twenty-chars")).await.status, 401);
+        assert_eq!(sign_in(&ui, "p&w=d%-of-twenty-chars").await.status, 200);
     }
 
     #[tokio::test]

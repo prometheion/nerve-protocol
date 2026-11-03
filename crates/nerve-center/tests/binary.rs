@@ -137,6 +137,60 @@ fn the_first_start_says_the_owner_token_on_stderr() {
     assert!(!err.contains(&token), "{err}");
 }
 
+/// Under systemd stderr goes to the journal, which more accounts read than
+/// the token file: there the first start keeps the token off stderr.
+#[test]
+fn under_systemd_the_owner_token_stays_off_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_nerve-center"))
+        .env_clear()
+        .env("NERVE_STATE_DIR", dir.path())
+        .env("NERVE_LISTEN", "127.0.0.1:0")
+        .env("NERVE_PLAIN_LOOPBACK", "true")
+        .env("NERVE_UI", "127.0.0.1:0")
+        .env("NERVE_LOG", "info")
+        .env("JOURNAL_STREAM", "8:12345")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    let token = nerve_center::owner::read(dir.path()).unwrap().unwrap();
+    assert!(!err.contains(&token), "{err}");
+}
+
+/// A token file that holds no token stops a center with a web UI, and only
+/// warns one without.
+#[test]
+fn a_broken_owner_token_stops_only_a_center_with_a_web_ui() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(nerve_center::owner::path(dir.path()), "short").unwrap();
+    let run = |ui: &str| {
+        Command::new(env!("CARGO_BIN_EXE_nerve-center"))
+            .env_clear()
+            .env("NERVE_STATE_DIR", dir.path())
+            .env("NERVE_LISTEN", "127.0.0.1:0")
+            .env("NERVE_PLAIN_LOOPBACK", "true")
+            .env("NERVE_UI", ui)
+            .env("NERVE_LOG", "warn")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let off = run("off");
+    assert!(
+        off.status.success(),
+        "{}",
+        String::from_utf8_lossy(&off.stderr)
+    );
+    assert!(String::from_utf8_lossy(&off.stderr).contains("owner-token --new"));
+    assert!(!run("127.0.0.1:0").status.success());
+    assert_eq!(
+        std::fs::read_to_string(nerve_center::owner::path(dir.path())).unwrap(),
+        "short"
+    );
+}
+
 /// Starts a center with the level in `NERVE_LOG`, lets one harness session
 /// come and go, and gives back what the center put on stderr.
 fn one_session(state: &std::path::Path, level: &str) -> String {

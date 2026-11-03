@@ -76,7 +76,7 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
     center.set_call_wait(args.call_wait);
     // Whatever else a message carries, this token is never in the log.
     center.log().set_secret("harness-token", token.as_deref());
-    owner_token(&center)?;
+    owner_token(&center, ui_addr.is_some())?;
 
     let mut tasks = Vec::new();
 
@@ -165,16 +165,36 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
 /// Makes the owner token at the center's first start, and says so at once:
 /// the token on stderr, where it is kept in the log too. The log keeps no
 /// token (it is shown in the web UI and downloaded from it), so the token
-/// itself is only on stderr and in its file.
-fn owner_token(center: &Center) -> Result<(), String> {
-    let (token, made) = crate::owner::ensure(center.dir())?;
+/// itself is only on stderr and in its file. Under systemd stderr goes to
+/// the journal, which more accounts may read than the token file, so there
+/// the log line alone says where it is.
+///
+/// A token file the owner broke stops a center with a web UI, which nobody
+/// could log in to; without one it is only told.
+fn owner_token(center: &Center, ui: bool) -> Result<(), String> {
+    let (token, made) = match crate::owner::ensure(center.dir()) {
+        Ok(t) => t,
+        Err(e) if !ui => {
+            center.log().record(
+                Level::Warn,
+                None,
+                &format!("{e}; the web UI is off, so nothing needs it now"),
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
     let file = crate::owner::path(center.dir());
     center.log().set_secret("owner-token", Some(&token));
+    let journal =
+        std::env::var_os("JOURNAL_STREAM").is_some() || std::env::var_os("INVOCATION_ID").is_some();
     if made {
-        eprintln!(
-            "nerve-center: the web UI logs in with this owner token, kept in {}:\n{token}",
-            file.display()
-        );
+        if !journal {
+            eprintln!(
+                "nerve-center: the web UI logs in with this owner token, kept in {}:\n{token}",
+                file.display()
+            );
+        }
         center.log().record(
             Level::Info,
             None,

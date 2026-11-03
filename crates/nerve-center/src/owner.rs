@@ -28,6 +28,9 @@ pub const PREFIX: &str = "nrv_owner_";
 /// The longest token the file may hold: the center's own are 50
 /// characters, and an owner may write one of their own.
 const MAX_LEN: usize = 200;
+/// The shortest one: a wrong token's answer waits, but that does not bound
+/// how fast a short one is guessed.
+pub const MIN_LEN: usize = 20;
 
 pub fn path(state: &Path) -> PathBuf {
     state.join(FILE)
@@ -39,9 +42,9 @@ pub fn generate() -> String {
 }
 
 /// The token the file holds, or none when there is no file. A file that
-/// holds no token (empty, more than one line, too long) is an error, not a
-/// missing token: the center must not make a new one over what the owner
-/// wrote there.
+/// holds no token (empty, more than one line, too short or too long) is an
+/// error, not a missing token: the center must not make a new one over what
+/// the owner wrote there.
 pub fn read(state: &Path) -> Result<Option<String>, String> {
     let p = path(state);
     let text = match std::fs::read_to_string(&p) {
@@ -50,6 +53,12 @@ pub fn read(state: &Path) -> Result<Option<String>, String> {
         Err(e) => return Err(format!("cannot read {}: {e}", p.display())),
     };
     let token = text.trim();
+    if !token.is_empty() && token.chars().count() < MIN_LEN {
+        return Err(format!(
+            "{} holds an owner token shorter than {MIN_LEN} characters, which is too easy to guess; `nerve-center owner-token --new` writes a new one",
+            p.display()
+        ));
+    }
     if token.is_empty()
         || token.len() > MAX_LEN
         || token.chars().any(|c| c.is_whitespace() || c.is_control())
@@ -209,15 +218,24 @@ mod tests {
     #[test]
     fn a_file_without_a_token_is_not_replaced() {
         let d = tempfile::tempdir().unwrap();
-        for bad in ["", "\n", "two words", &"x".repeat(MAX_LEN + 1)] {
+        for bad in [
+            "",
+            "\n",
+            "two words but long enough",
+            &"x".repeat(MAX_LEN + 1),
+            &"x".repeat(MIN_LEN - 1),
+        ] {
             std::fs::write(path(d.path()), bad).unwrap();
             let e = ensure(d.path()).unwrap_err();
             assert!(e.contains("owner-token --new"), "{e}");
             assert_eq!(std::fs::read_to_string(path(d.path())).unwrap(), bad);
         }
         // One of the owner's own, with a line break after it, is taken.
-        std::fs::write(path(d.path()), "my-own-secret\n").unwrap();
-        assert_eq!(read(d.path()).unwrap().as_deref(), Some("my-own-secret"));
+        std::fs::write(path(d.path()), "my-own-secret-of-20-chars\n").unwrap();
+        assert_eq!(
+            read(d.path()).unwrap().as_deref(),
+            Some("my-own-secret-of-20-chars")
+        );
     }
 
     /// A new token works at once and the old one stops, with no restart;
