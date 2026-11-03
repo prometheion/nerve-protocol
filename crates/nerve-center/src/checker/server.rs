@@ -937,6 +937,37 @@ mod tests {
         server.stop().await;
     }
 
+    /// A server that is still loading its model (503) says neither that it
+    /// refuses other keys nor that it takes them: the check waits for it,
+    /// instead of failing the start.
+    #[tokio::test]
+    async fn a_server_still_loading_is_not_judged_yet() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let loading = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = loading.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut io, _)) = loading.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = io.read(&mut buf).await;
+                    let body = r#"{"error":{"code":503,"message":"Loading model"}}"#;
+                    let _ = io
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                });
+            }
+        });
+        let listen = Listen::Port(port);
+        let ep = endpoint_of(&listen, "the-key", None);
+        assert_eq!(ours(&listen, &ep, Duration::from_secs(5)).await, None);
+    }
+
     /// Starts the fake server and waits until it is ready.
     #[cfg(unix)]
     async fn ready_fake(dir: &std::path::Path) -> LocalServer {

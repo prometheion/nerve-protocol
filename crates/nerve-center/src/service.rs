@@ -1199,7 +1199,10 @@ mod tests {
             "{out}"
         );
         let token = crate::owner::path(&l.state).display().to_string();
-        assert!(out.contains(&format!("owner token kept in {token}")), "{out}");
+        assert!(
+            out.contains(&format!("owner token kept in {token}")),
+            "{out}"
+        );
         assert_eq!(std::fs::read(&l.bin).unwrap(), b"nerve-center 1.2.0\n");
         assert_eq!(mode(&l.bin), 0o755);
         assert_eq!(
