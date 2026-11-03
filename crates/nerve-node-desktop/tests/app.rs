@@ -682,7 +682,10 @@ fn the_app_drives_the_cli_end_to_end() {
     perm.invoke_rule_add(1);
     assert_eq!(config(&paths).centers[0].policy.deny, before);
     assert!(
-        store.get_toast().contains("how `rule ls` writes a rule"),
+        // On Windows the app words the command as its place in the app.
+        store
+            .get_toast()
+            .contains("writes a rule with a tab or line break"),
         "{}",
         store.get_toast()
     );

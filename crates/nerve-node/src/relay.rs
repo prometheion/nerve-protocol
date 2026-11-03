@@ -2575,7 +2575,8 @@ mod tests {
         if cfg!(windows) {
             assert!(
                 out.contains("a removed or replaced token still opens new tunnels")
-                    && out.contains("Restart-Service nerve-node"),
+                    && out.contains("Restart on the app's Overview")
+                    && !out.contains("Restart-Service"),
                 "{out}"
             );
             assert!(!out.contains("no longer works"), "{out}");
