@@ -142,6 +142,24 @@ pub struct Parsed {
     /// The walk hit a bound and could not take the whole line apart. The
     /// checker treats this as "cannot see" and refuses.
     pub overflow: Option<Overflow>,
+    /// The line runs a command inside another: a substitution (`$( )`,
+    /// backticks, `<( )`), a shell's `-c` body (`cmd /c`, PowerShell's
+    /// `-Command`), or a program `Start-Process` starts.
+    pub nested: bool,
+}
+
+impl Parsed {
+    /// The commands a saved allow rule is matched against: the text
+    /// splitter's, and none for a line that runs a command inside another,
+    /// since what a substitution or a `-c` body runs is no command the rule
+    /// names, however the outer one reads.
+    pub fn for_allow(&self) -> &[Command] {
+        if self.nested {
+            &[]
+        } else {
+            &self.commands[..self.walked]
+        }
+    }
 }
 
 /// Wrapper programs that run another command: stripped so the real program is
@@ -298,12 +316,14 @@ fn walk(line: &str, shell: Shell) -> Parsed {
     let mut w = Walk {
         commands: Vec::new(),
         overflow: None,
+        nested: false,
     };
     w.collect(line, shell, 0);
     Parsed {
         walked: w.commands.len(),
         commands: w.commands,
         overflow: w.overflow,
+        nested: w.nested,
     }
 }
 
@@ -312,6 +332,8 @@ fn walk(line: &str, shell: Shell) -> Parsed {
 struct Walk {
     commands: Vec<Command>,
     overflow: Option<Overflow>,
+    /// A command was found inside another ([`Parsed::nested`]).
+    nested: bool,
 }
 
 impl Walk {
@@ -336,6 +358,7 @@ impl Walk {
             }
         }
         for body in subs {
+            self.nested = true;
             self.collect(&body, shell, depth + 1);
             if self.overflow.is_some() {
                 return;
@@ -383,6 +406,7 @@ impl Walk {
             None
         };
         if let Some((body, inner)) = body {
+            self.nested = true;
             self.collect(&body, inner, depth + 1);
             if self.overflow.is_some() {
                 return;
@@ -395,6 +419,7 @@ impl Walk {
         if STARTERS.contains(&program.as_str())
             && let Some(started) = started_program(rest)
         {
+            self.nested = true;
             self.parse_command(&started, shell, depth + 1);
         }
     }

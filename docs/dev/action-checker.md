@@ -150,6 +150,18 @@ only those, so a command the parser sees behind a wrapper (`timeout 600 make
 test && ./deploy.sh` for the rule `exec.run:make *`) is no further way to skip
 the model.
 
+An allow rule is matched the other way round from a blocklist entry
+(`Rule::matches_with` against `Rule::blocks_with`): a command pattern or a
+`cmd-re:` covers a line only when every command of `Parsed::for_allow` meets
+it, and there is at least one. `for_allow` is empty when the walk found a
+command inside another (`Parsed::nested`: a substitution, a `-c` body, a
+started program), so such a line is covered only by `exec.run:exact:<line>`
+(the whole trimmed line, which the Audit page's **Allow** saves) or by a `re:`
+the owner wrote over the whole line. As an allow rule a structured pattern
+also takes no flag or operand it does not name (`CmdPattern::covers`), unless
+it has a bare `*`. The node's allowlist draws the same line
+(`nerve-policy/src/decide.rs`: a wildcard never covers a chained line).
+
 The splitter splits on separators and subshell parentheses, pulls `$( )`,
 backticks, process substitution, `sh -c` (`c` anywhere in the flag word:
 `-lc`, `-ce`, `-c -e`), `cmd /c` and `powershell -Command` bodies, and

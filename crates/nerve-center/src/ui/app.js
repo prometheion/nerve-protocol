@@ -647,7 +647,7 @@ function allowCard(cfg) {
     ruleIn.value = "";
     await saveChecker();
   });
-  return section("Allow rules", "A call that matches an allow rule skips the decision model and goes straight to the machine. It does not skip the blocklist.", null,
+  return section("Allow rules", "A call that matches an allow rule skips the decision model and goes straight to the machine. It does not skip the blocklist. A command rule covers a line only when every command in it meets the rule, with no flag or operand the rule does not name (but after a bare *), and nothing run inside another command ($( ), sh -c); exec.run:exact:… covers one line exactly.", null,
     el("div", { class: "card" }, el("div", { class: "form-row" },
       el("label", { class: "field grow" }, el("span", { class: "label" }, "Add a rule"), ruleIn, ruleFieldsHint(ruleIn)),
       nodePicker.root),

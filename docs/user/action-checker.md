@@ -265,13 +265,28 @@ Allow rules are the same syntax, saved for every machine or for one machine. A
 call that matches one skips the decision model and goes to the machine. It does
 not skip the blocklist: the blocklist is a hard deny, so to let something
 through that the blocklist caught, remove or switch off the blocklist entry.
-A rule matches the commands the checker's own splitter finds in a line, not
-those only the guard's parser sees behind `timeout`, `eval` and the like, so
-`exec.run:make *` does not cover `timeout 600 make test` and the model still
-judges it.
+An `exec.run` rule covers a command line only when **every** command in it
+meets the rule, and nothing in the line runs inside another command:
+
+- `exec.run:make *` covers `make test`, `sudo make test` (the checker reads
+  past `sudo` and the like) and `make test && make lint`, but not
+  `make test && ./deploy.sh` or `ls && make test`: the model judges those.
+- A pattern without a bare `*` covers no flag or operand it does not name:
+  `exec.run:git status` covers `git status`, not `git status --porcelain` or
+  `git -c core.fsmonitor=… status`.
+- A line with `$( )`, backticks, `<( )`, a shell's `-c` body (`sh -c`,
+  `cmd /c`, PowerShell's `-Command`) or a program `Start-Process` starts is
+  covered by no pattern, only by an exact rule.
+- `exec.run:exact:<line>` covers that one line and nothing else (blanks at
+  either end aside).
+- A rule matches the commands the checker's own splitter finds in a line, not
+  those only the guard's parser sees behind `timeout`, `eval` and the like, so
+  `exec.run:make *` does not cover `timeout 600 make test` either.
 
 The Audit page has **Allow** and **Allow as wildcard** buttons on a model
-refusal, which save an allow rule for that machine for you. Where the call
+refusal, which save an allow rule for that machine for you. **Allow** saves
+the refused command line exactly (`exec.run:exact:git status`); **Allow as
+wildcard** saves its program and `*` (`exec.run:git *`). Where the call
 has arguments a rule may pin, it also offers them: pick one, then **Allow with
 this value** saves `lamp.set:room=office` and the like.
 

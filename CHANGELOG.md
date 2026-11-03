@@ -107,7 +107,8 @@
 - An HTTP harness session ends after 30 minutes without a request, and at once when the harness token that opened it is deleted, with its jobs and streams; before, it lasted until the harness sent `DELETE /mcp`, which most never do. See `docs/user/harness.md`.
 - One peer can no longer shut a port of the center: each port takes at most 256 connections at once that are not settled yet, 16 of them from one address and 64 from one IPv6 /64, and closes one past that at once instead of waiting for a slot. A node's link stops counting once its hello is checked. See `docs/user/center.md#connections`.
 - A pairing, and a harness token made in the web UI, is only answered as done once it is in `state.json`; when the center cannot write it, the node or the page is told so (500), nothing is kept in memory, and the pairing code stays valid. Another change whose write failed is written by the next save instead of only by a later change.
-- Breaks: `--ui-no-login` (`NERVE_UI_NO_LOGIN`) is gone, and the harness token no longer logs in to the web UI; log in with the owner token from `nerve-center owner-token`.
+- The action checker's allow rules cover a command line only when every command in it meets the rule, with no flag or operand the rule does not name (but after a bare `*`), and no substitution, `-c` body or started program in the line; before, one matching command was enough, so `git status; <anything>` skipped the model under an allow rule for `git status`. `sudo make test` still meets `exec.run:make *`. The Audit page's **Allow** saves the exact line, as `exec.run:exact:<line>`. See `docs/user/action-checker.md#allow-rules`.
+- Breaks: `--ui-no-login` (`NERVE_UI_NO_LOGIN`) is gone, and the harness token no longer logs in to the web UI; log in with the owner token from `nerve-center owner-token`. A saved allow rule like `exec.run:git status` covers fewer lines than before: check your rules.
 
 ## 0.0.6
 

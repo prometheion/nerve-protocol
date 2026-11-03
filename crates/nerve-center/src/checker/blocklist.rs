@@ -70,6 +70,9 @@ enum Matcher {
     Command(CmdPattern),
     /// `exec.run` regex over the whole normalized line.
     Regex(Regex),
+    /// `exec.run:exact:<line>`: this command line and no other, as the
+    /// Audit page's **Allow** saves it.
+    Exact(String),
     /// `exec.run` regex over each command pulled from the line, as
     /// `program arg …` with the arguments as written and lower-cased: for a
     /// pattern that must look at one command's words (PowerShell's
@@ -112,7 +115,13 @@ impl Rule {
         let matcher = if (cap.as_str(), action.as_deref()) == ("exec", Some("run")) {
             let pattern =
                 pattern.ok_or_else(|| format!("rule {rule:?}: exec.run needs a pattern"))?;
-            if let Some(re) = pattern.strip_prefix("re:") {
+            if let Some(line) = pattern.strip_prefix("exact:") {
+                let line = line.trim();
+                if line.is_empty() {
+                    return Err(format!("rule {rule:?}: exact: names no command line"));
+                }
+                Matcher::Exact(line.to_string())
+            } else if let Some(re) = pattern.strip_prefix("re:") {
                 Matcher::Regex(
                     Regex::new(re).map_err(|e| format!("rule {rule:?}: bad regex: {e}"))?,
                 )
@@ -187,6 +196,12 @@ impl Rule {
     /// Whether `call` matches this rule, with the command line already pulled
     /// apart (the checker parses it once and reuses it across every entry):
     /// as an allow rule, which covers a call that meets all its conditions.
+    /// A command pattern covers a line only when every command in it meets
+    /// the pattern, with no flag or operand the pattern does not name (but
+    /// after a bare `*`); `commands` are then the ones an allow rule reads
+    /// ([`normalize::Parsed::for_allow`]), none for a line that runs a
+    /// command inside another. The blocklist's matching is the opposite: one
+    /// command in the line that meets an entry is enough.
     pub fn matches_with(&self, call: &Call, commands: Option<&[Command]>) -> bool {
         self.hits(call, commands, false)
     }
@@ -202,7 +217,23 @@ impl Rule {
         if !self.covers(call.cap, call.action) {
             return false;
         }
+        // An allow rule covers a line when every command in it meets the
+        // rule, and there is at least one.
+        let all = |covers: &dyn Fn(&Command) -> bool| {
+            let parsed;
+            let c = match commands {
+                Some(c) => c,
+                None => {
+                    parsed = normalize::parse(call.target, normalize::Shell::Posix);
+                    parsed.for_allow()
+                }
+            };
+            !c.is_empty() && c.iter().all(covers)
+        };
         match &self.matcher {
+            Matcher::Command(p) if !deny => all(&|c| p.covers(c)),
+            Matcher::CmdRegex(re) if !deny => all(&|c| re.is_match(&c.line())),
+            Matcher::Exact(line) => call.target.trim() == line,
             Matcher::Command(p) => match commands {
                 Some(c) => c.iter().any(|c| p.matches(c)),
                 None => normalize::commands(call.target)
@@ -229,13 +260,16 @@ impl Rule {
 
 /// The structured `exec.run` pattern: a program glob, the short and long
 /// flags that must all be present, and operand globs that must each be met by
-/// some operand. Extra flags and operands on the command do not stop a match,
-/// so `rm -rf /` matches `rm -rf /` even with `-v` added.
+/// some operand. As a blocklist entry, extra flags and operands on the
+/// command do not stop a match, so `rm -rf /` matches `rm -rf /` even with
+/// `-v` added; as an allow rule they do ([`CmdPattern::covers`]).
 struct CmdPattern {
     program: GlobMatcher,
     short: Vec<char>,
     long: Vec<String>,
     operands: Vec<GlobMatcher>,
+    /// A bare `*` word: as an allow rule, anything may follow.
+    rest: bool,
 }
 
 impl CmdPattern {
@@ -252,7 +286,9 @@ impl CmdPattern {
         let mut short = Vec::new();
         let mut long = Vec::new();
         let mut operands = Vec::new();
+        let mut rest = false;
         for w in words {
+            rest |= w == "*";
             if let Some(l) = w.strip_prefix("--") {
                 if !l.is_empty() {
                     long.push(l.split('=').next().unwrap_or(l).to_ascii_lowercase());
@@ -281,6 +317,38 @@ impl CmdPattern {
             short,
             long,
             operands,
+            rest,
+        })
+    }
+
+    /// Whether `c` meets this pattern as an allow rule: it [`matches`], and
+    /// carries no flag or operand the pattern does not name, unless the
+    /// pattern has a bare `*`. So `git status` covers `git status` and not
+    /// `git -c core.fsmonitor=… status`; `make *` covers any `make`.
+    ///
+    /// [`matches`]: CmdPattern::matches
+    fn covers(&self, c: &Command) -> bool {
+        if !self.matches(c) {
+            return false;
+        }
+        if self.rest {
+            return true;
+        }
+        c.args.iter().all(|a| {
+            if let Some(l) = a.strip_prefix("--").filter(|l| !l.is_empty()) {
+                let l = l.split('=').next().unwrap_or(l).to_ascii_lowercase();
+                self.long.contains(&l)
+                    || self
+                        .short
+                        .iter()
+                        .any(|s| long_for(*s).contains(&l.as_str()))
+            } else if a.len() == 2 && a.starts_with('-') && a.as_bytes()[1].is_ascii_alphanumeric()
+            {
+                let f = a.as_bytes()[1] as char;
+                self.short.iter().any(|s| s.eq_ignore_ascii_case(&f))
+            } else {
+                self.operands.iter().any(|g| g.is_match(norm_operand(a)))
+            }
         })
     }
 
@@ -413,8 +481,9 @@ mod tests {
         }
     }
 
+    /// Whether `rule`, as a blocklist entry, refuses `command`.
     fn hits(rule: &str, command: &str) -> bool {
-        Rule::parse(rule).unwrap().matches(&exec(command))
+        Rule::parse(rule).unwrap().blocks_with(&exec(command), None)
     }
 
     #[test]
@@ -438,7 +507,7 @@ mod tests {
             .iter()
             .map(|e| Rule::parse(&e.rule).unwrap_or_else(|e| panic!("{e}")))
             .collect();
-        let blocked = |cmd: &str| compiled.iter().any(|r| r.matches(&exec(cmd)));
+        let blocked = |cmd: &str| compiled.iter().any(|r| r.blocks_with(&exec(cmd), None));
         for ok in [
             "rm file",
             "rm -rf ./build",
@@ -576,15 +645,19 @@ mod tests {
     #[test]
     fn every_default_pattern_has_a_hit() {
         let rules = defaults();
-        let blocked =
-            |h: &(&str, &str, &str)| rules.iter().any(|r| r.matches(&call(h.0, h.1, h.2)));
+        let blocked = |h: &(&str, &str, &str)| {
+            rules
+                .iter()
+                .any(|r| r.blocks_with(&call(h.0, h.1, h.2), None))
+        };
         for h in HITS {
             assert!(blocked(h), "should be blocked: {h:?}");
         }
         for (i, e) in super::super::config::default_blocklist().iter().enumerate() {
             let rule = Rule::parse(&e.rule).unwrap();
             assert!(
-                HITS.iter().any(|h| rule.matches(&call(h.0, h.1, h.2))),
+                HITS.iter()
+                    .any(|h| rule.blocks_with(&call(h.0, h.1, h.2), None)),
                 "default entry {i} has no hit in HITS: {}",
                 e.rule
             );
@@ -597,7 +670,9 @@ mod tests {
     fn near_benign_commands_stay_allowed() {
         let rules = defaults();
         let blocked = |cap: &str, action: &str, t: &str| {
-            rules.iter().any(|r| r.matches(&call(cap, action, t)))
+            rules
+                .iter()
+                .any(|r| r.blocks_with(&call(cap, action, t), None))
         };
         for cmd in [
             "rm file",
@@ -638,7 +713,7 @@ mod tests {
     #[test]
     fn the_review_bypasses_are_closed() {
         let rules = defaults();
-        let blocked = |cmd: &str| rules.iter().any(|r| r.matches(&exec(cmd)));
+        let blocked = |cmd: &str| rules.iter().any(|r| r.blocks_with(&exec(cmd), None));
         for bad in [
             "bash -lc 'rm -rf /'",
             "sh -xec 'mkfs.ext4 /dev/sda'",
@@ -676,7 +751,7 @@ mod tests {
         p.overflow.is_some()
             || defaults()
                 .iter()
-                .any(|r| r.matches_with(&exec(cmd), Some(&p.commands)))
+                .any(|r| r.blocks_with(&exec(cmd), Some(&p.commands)))
     }
 
     /// A pattern on any other `cap.action` is conditions on its arguments,

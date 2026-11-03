@@ -3887,7 +3887,12 @@ impl Center {
         pin: Option<(&str, &Value)>,
         node_id: Option<String>,
     ) -> Result<String, String> {
-        let rule = audit_rule("allow", cap, action, target, wildcard, pin)?;
+        let mut rule = audit_rule("allow", cap, action, target, wildcard, pin)?;
+        // **Allow** saves the command line it was shown, and covers that line
+        // alone: a pattern would also take more flags, operands or commands.
+        if (cap, action) == ("exec", "run") && !wildcard && pin.is_none() {
+            rule = format!("exec.run:exact:{}", target.trim());
+        }
         self.read(|s| checker_typed(&rule, node_id.as_deref(), &s.nodes))?;
         let mut cfg = self.read(|s| s.checker.clone());
         let entry = AllowRule {
@@ -5552,6 +5557,42 @@ pub(crate) mod tests {
         let stale = c.checker_json()["stale"].clone();
         let why = stale["notes.save:tag!=~/drafts"].as_str().unwrap_or("");
         assert!(why.contains("cannot tell the home"), "{stale:?}");
+    }
+
+    /// **Allow** on an audited command saves that line exactly: its rule
+    /// covers no other line. **Allow as wildcard** saves the program and
+    /// `*`.
+    #[test]
+    fn the_allow_button_saves_the_exact_command_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let rule = c
+            .add_checker_allow("exec", "run", "  git status  ", false, None, None)
+            .unwrap();
+        assert_eq!(rule, "exec.run:exact:git status");
+        let rule = c
+            .add_checker_allow("exec", "run", "git status", true, None, None)
+            .unwrap();
+        assert_eq!(rule, "exec.run:git *");
+        let saved: Vec<String> = c.read(|s| {
+            s.checker
+                .allow_rules
+                .iter()
+                .map(|a| a.rule.clone())
+                .collect()
+        });
+        assert_eq!(saved, ["exec.run:exact:git status", "exec.run:git *"]);
+        let exact = Rule::parse("exec.run:exact:git status").unwrap();
+        let at = |line: &'static str| crate::checker::blocklist::Call {
+            cap: "exec",
+            action: "run",
+            target: line,
+            args: None,
+            marked: &[],
+        };
+        assert!(exact.matches(&at("git status")));
+        assert!(!exact.matches(&at("git status; rm -rf ~")));
+        assert!(Rule::parse("exec.run:exact:  ").is_err());
     }
 
     /// A checker rule with conditions is checked against the schema the
