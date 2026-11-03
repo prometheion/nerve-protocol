@@ -1117,8 +1117,12 @@ pub struct RunOptions {
     /// crate::account); `None` runs it as the node's own user.
     pub account: Option<crate::service::Account>,
     /// Whether that account is `nerve-run`, whose command gets the
-    /// environment of its own home ([`separate_env`]).
+    /// environment of its own home ([`separate_env`]) and of the node's
+    /// only what [`kept_env`] keeps.
     pub separate: bool,
+    /// The names of the node's variables a command of `nerve-run` gets
+    /// besides [`KEPT_ENV`] (`machine.command_env`).
+    pub pass_env: Vec<String>,
     /// The node's own folders, which the account must not reach.
     pub own: Vec<PathBuf>,
     /// Set only for an allowed sudo command of `nerve-run`, which runs as
@@ -1133,6 +1137,29 @@ pub struct RunOptions {
     /// Where the output goes as well as into the result, for the call's
     /// `output` stream (crate::tap); `None` keeps it in the result only.
     pub tap: Option<std::sync::Arc<crate::tap::Tap>>,
+}
+
+/// The variables of the node's environment every command of `nerve-run`
+/// keeps (#89). The installed node's environment is the service's: what its
+/// unit names (the owner, and whatever an operator put there, such as a
+/// proxy URL with its password), and systemd's own. A command of
+/// `nerve-run` gets none of it but these and the names the owner adds
+/// (`machine.command_env`); HOME, USER, LOGNAME and its XDG and git
+/// variables the node sets itself ([`separate_env`]).
+pub const KEPT_ENV: [&str; 4] = ["PATH", "LANG", "TERM", "TMPDIR"];
+
+/// What of `env`, the node's environment, a command of `nerve-run` keeps:
+/// [`KEPT_ENV`] and the names in `more`.
+pub fn kept_env(
+    env: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    more: &[String],
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    env.into_iter()
+        .filter(|(k, _)| {
+            k.to_str()
+                .is_some_and(|k| KEPT_ENV.contains(&k) || more.iter().any(|m| m == k))
+        })
+        .collect()
 }
 
 /// The environment of a command of `nerve-run` besides HOME, USER and
@@ -1800,9 +1827,13 @@ pub async fn run(
     }
     match &opts.account {
         Some(a) => {
-            // Root's command gets nothing of the node's environment.
+            // Root's command gets nothing of the node's environment, and
+            // one of nerve-run's only the few variables it keeps.
             if opts.root.is_some() {
                 cmd.env_clear().env("PATH", ROOT_PATH);
+            } else if opts.separate {
+                cmd.env_clear()
+                    .envs(kept_env(std::env::vars_os(), &opts.pass_env));
             }
             cmd.env("HOME", &a.home)
                 .env("USER", &a.name)
@@ -2179,6 +2210,35 @@ mod tests {
     use super::*;
     use nerve_policy::config::Access;
 
+    /// A command of nerve-run keeps of the node's environment only the few
+    /// variables it always gets and the names the owner adds: not what the
+    /// unit and systemd put there.
+    #[test]
+    fn nerve_run_keeps_only_the_named_variables() {
+        let env = [
+            ("PATH", "/usr/bin"),
+            ("LANG", "C.UTF-8"),
+            ("TERM", "dumb"),
+            ("TMPDIR", "/var/tmp"),
+            ("NERVE_NODE_OWNER", "alice"),
+            ("INVOCATION_ID", "x"),
+            ("https_proxy", "http://u:secret@proxy:3128"),
+            ("CORP_TOKEN", "t"),
+        ]
+        .map(|(k, v)| (k.into(), v.into()));
+        let kept = |more: &[String]| -> Vec<String> {
+            kept_env(env.clone(), more)
+                .into_iter()
+                .map(|(k, _)| k.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(kept(&[]), ["PATH", "LANG", "TERM", "TMPDIR"]);
+        assert_eq!(
+            kept(&["https_proxy".into()]),
+            ["PATH", "LANG", "TERM", "TMPDIR", "https_proxy"]
+        );
+    }
+
     fn opts(cap: usize) -> RunOptions {
         RunOptions {
             shell: None,
@@ -2190,6 +2250,7 @@ mod tests {
             sudo: None,
             account: None,
             separate: false,
+            pass_env: Vec::new(),
             own: Vec::new(),
             root: None,
             limits: None,
@@ -3627,6 +3688,7 @@ mod windows_tests {
             sudo: None,
             account: None,
             separate: false,
+            pass_env: Vec::new(),
             own: Vec::new(),
             root: None,
             limits: None,

@@ -3202,6 +3202,7 @@ impl Link {
             sudo,
             account,
             separate,
+            pass_env: cfg.machine.command_env.clone(),
             own,
             root,
             limits: self
@@ -3370,6 +3371,7 @@ impl Link {
             sudo: None,
             account,
             separate: true,
+            pass_env: cfg.machine.command_env.clone(),
             own,
             root: None,
             limits: self

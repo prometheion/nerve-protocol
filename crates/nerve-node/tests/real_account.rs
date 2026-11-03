@@ -221,6 +221,18 @@ async fn folder_mode_runs_as_nerve_run_on_this_machine() {
         unit.contains(&format!("Environment=NERVE_NODE_OWNER={owner}")),
         "{unit}"
     );
+    // A variable an operator put into the service's environment, as a
+    // proxy's password or a token would be (#89).
+    let drop_in = Path::new("/etc/systemd/system/nerve-node.service.d");
+    std::fs::create_dir_all(drop_in).unwrap();
+    std::fs::write(
+        drop_in.join("nerve-real-env.conf"),
+        "[Service]\nEnvironment=NERVE_REAL_SECRET=from-the-unit\n",
+    )
+    .unwrap();
+    assert!(sh(Command::new("systemctl").arg("daemon-reload")).0);
+    assert!(sh(Command::new("systemctl").args(["restart", "nerve-node"])).0);
+    until("the node answers again", || as_owner(&owner, &["status"]).0);
     let run_home = Path::new("/var/lib/nerve-run");
     let (_, st) = sh(Command::new("stat").args(["-c", "%U %a"]).arg(run_home));
     assert_eq!(st.trim(), "nerve-run 700");
@@ -373,6 +385,35 @@ except OSError as e:
     // As nerve-run, with its own home.
     let r = run(&mut conn, &proj, "./who.sh").await.unwrap();
     assert_eq!(out(&r), "nerve-run\n/var/lib/nerve-run\n", "{r}");
+    // Of the service's environment only what a command always gets, and
+    // what the owner names.
+    let env = "./env.sh";
+    std::fs::write(
+        proj.join("env.sh"),
+        "#!/bin/sh\necho \"${NERVE_REAL_SECRET-none}|${NERVE_NODE_OWNER-none}|${INVOCATION_ID-none}|${PATH:+path}\"\n",
+    )
+    .unwrap();
+    chown(&proj.join("env.sh"));
+    chmod(&proj.join("env.sh"), "755");
+    let r = run(&mut conn, &proj, env).await.unwrap();
+    assert_eq!(out(&r), "none|none|none|path\n", "{r}");
+    let (ok, said) = as_owner(
+        &owner,
+        &["config", "add", "machine.command_env", "NERVE_REAL_SECRET"],
+    );
+    assert!(ok, "{said}");
+    let r = run(&mut conn, &proj, env).await.unwrap();
+    assert_eq!(out(&r), "from-the-unit|none|none|path\n", "{r}");
+    let (ok, said) = as_owner(
+        &owner,
+        &[
+            "config",
+            "remove",
+            "machine.command_env",
+            "NERVE_REAL_SECRET",
+        ],
+    );
+    assert!(ok, "{said}");
     // Its folder, /tmp and its home: read and write.
     let r = run(&mut conn, &proj, "./rw.sh").await.unwrap();
     assert_eq!(r["exit_code"], 0, "{r}");
@@ -749,6 +790,8 @@ time.sleep(60)
         said.contains("files of nerve-run in /tmp, /var/tmp, /dev/shm"),
         "{said}"
     );
+    std::fs::remove_dir_all(drop_in).unwrap();
+    assert!(sh(Command::new("systemctl").arg("daemon-reload")).0);
     let (_, left) = sh(Command::new("find").args([
         "/tmp",
         "/var/tmp",

@@ -147,6 +147,20 @@ pub struct Machine {
     /// ran `install`, and `nerve-node config set` refuses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// Linux, the installed node: the variables of the service's environment
+    /// a command of `nerve-run` gets besides the few it always gets (`PATH`,
+    /// `LANG`, `TERM`, `TMPDIR`, and what the node sets itself). Names only:
+    /// the values are the service's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command_env: Vec<String>,
+}
+
+/// Whether `name` can be the name of an environment variable: letters,
+/// digits and `_`, not starting with a digit.
+pub fn valid_env_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
 }
 
 /// Whether `name` can be an account name: 1 to 32 characters of a-z, A-Z,
@@ -1206,6 +1220,11 @@ impl NodeConfig {
                 "machine.user {u:?}: an account name, 1 to 32 characters of a-z, A-Z, 0-9, ., _ and -"
             ));
         }
+        if let Some(n) = self.machine.command_env.iter().find(|n| !valid_env_name(n)) {
+            return Err(format!(
+                "machine.command_env {n:?}: the name of a variable, letters, digits and _"
+            ));
+        }
         if self.limits.max_running == 0 {
             return Err("limits.max_running must be at least 1".into());
         }
@@ -2117,6 +2136,20 @@ sudo_allow = ["sudo apt update"]
         for bad in ["", "-x", "a b", "a:b", "a/b"] {
             let e = NodeConfig::parse(&format!("[machine]\nuser = {bad:?}\n")).unwrap_err();
             assert!(e.contains("machine.user"), "{bad}: {e}");
+        }
+    }
+
+    /// The owner names the variables a command of nerve-run gets; a name
+    /// that is no variable's is refused.
+    #[test]
+    fn the_command_environment_takes_names_only() {
+        let c = NodeConfig::parse("[machine]\ncommand_env = [\"HTTPS_PROXY\", \"corp_token_2\"]\n")
+            .unwrap();
+        assert_eq!(c.machine.command_env, ["HTTPS_PROXY", "corp_token_2"]);
+        for bad in ["A=B", "", "2X", "A B"] {
+            let text = format!("[machine]\ncommand_env = [{bad:?}]\n");
+            let e = NodeConfig::parse(&text).unwrap_err();
+            assert!(e.contains("machine.command_env"), "{bad}: {e}");
         }
     }
 

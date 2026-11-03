@@ -42,6 +42,7 @@ fn opts(policy: &CenterPolicy, account: &Account, own: &[PathBuf]) -> RunOptions
         sudo: None,
         account: Some(account.clone()),
         separate: false,
+        pass_env: Vec::new(),
         own: own.to_vec(),
         root: None,
         limits: None,
@@ -189,12 +190,16 @@ async fn a_command_of_nerve_run_has_its_home_and_the_temporary_folders() {
     }
     o.landlock = Some(spec);
     o.separate = true;
+    // Of the node's environment only PATH and the few others it keeps, and
+    // the names the owner adds: here two that cargo gives the test.
+    o.pass_env = vec!["CARGO_PKG_NAME".into()];
     let tmp = format!("/tmp/nerve-142-{}", std::process::id());
     let probe = format!(
         "echo \"$HOME|$XDG_CONFIG_HOME|$XDG_CACHE_HOME|${{XDG_RUNTIME_DIR-none}}|${{DBUS_SESSION_BUS_ADDRESS-none}}\"; \
          echo t > {tmp} && cat {tmp} && rm {tmp}; \
          echo h > \"$HOME/h\" && cat \"$HOME/h\"; \
-         echo $GIT_CONFIG_KEY_0=$GIT_CONFIG_VALUE_0"
+         echo $GIT_CONFIG_KEY_0=$GIT_CONFIG_VALUE_0; \
+         echo \"${{CARGO_MANIFEST_DIR-none}}|${{CARGO_PKG_NAME-none}}|${{PATH:+path}}\""
     );
     let call = RunCall {
         command: probe,
@@ -206,9 +211,10 @@ async fn a_command_of_nerve_run_has_its_home_and_the_temporary_folders() {
     let r = exec::run(&call, &o, |_| {}).await.unwrap();
     let out = r["stdout"].as_str().unwrap();
     let h = run_home.display();
+    let pkg = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "none".into());
     assert_eq!(
         out,
-        format!("{h}|{h}/.config|{h}/.cache|none|none\nt\nh\nsafe.directory=*\n"),
+        format!("{h}|{h}/.config|{h}/.cache|none|none\nt\nh\nsafe.directory=*\nnone|{pkg}|path\n"),
         "{}",
         r["stderr"]
     );
