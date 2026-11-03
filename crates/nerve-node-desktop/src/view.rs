@@ -965,7 +965,8 @@ pub fn log_rows(newest: &[Value], problems_only: bool, now_ms: u64) -> Vec<LogRo
         .map(|e| {
             let ts = e["ts"].as_u64().unwrap_or_default();
             let level = s(&e["level"]);
-            let mut msg = s(&e["msg"]).to_string();
+            // The node's own line, in the app's words on Windows.
+            let mut msg = crate::in_app::text(s(&e["msg"]), cfg!(windows));
             if let Some(n) = e["node"].as_str() {
                 msg = format!("{msg} ({n})");
             }

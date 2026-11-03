@@ -2,11 +2,13 @@
 // by topic or from A to Z, to filter, each one opening on its arguments, an
 // example and the place in the app that does the same (src/reference.rs).
 // Each action in the app runs one of these commands. Every part opens and
-// closes on its own: opening one leaves the others as they are.
+// closes on its own: opening one leaves the others as they are. Windows
+// has no reference: there the app is the only way to the node, and a list
+// of commands to type would send the owner to a terminal that is not there.
 
 import { Theme, Type, Space, Radius, Tone } from "theme.slint";
 import { Page, RefRow } from "data.slint";
-import { Manual, Store, Prefs } from "store.slint";
+import { Manual, Store, Prefs, Install } from "store.slint";
 import {
     Button, ButtonKind, Card, PageHeader, PageFrame, Divider, Code, Fit, Reveal, Expander,
     TextField, Segmented, Icon, Pill, FocusRing,
@@ -351,7 +353,7 @@ export component HelpPage inherits PageFrame {
             does: "Choose in a row of choices or tabs";
         }
     }
-    Expander {
+    if !Install.windows: Expander {
         title: "Command reference";
         open: Manual.commands-open;
         toggled => {

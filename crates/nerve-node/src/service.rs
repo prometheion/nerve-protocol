@@ -2535,7 +2535,7 @@ pub fn check_access(paths: &NodePaths) -> Result<(), String> {
     #[cfg(windows)]
     if !crate::win_host::is_admin() && crate::win_user::current_user().as_deref() != Ok(USER) {
         return Err(format!(
-            "the node is installed as a service, and its files are open to the user {USER} and the administrators only: run `nerve-node …` in a terminal opened with \"Run as administrator\""
+            "the node is installed as a service, and its files are open to the user {USER} and the administrators only: the app asks Windows for an administrator's rights where they are needed"
         ));
     }
     Ok(())

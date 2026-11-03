@@ -741,7 +741,7 @@ pub fn token_for(account: &Account) -> Result<Arc<Token>, String> {
     {
         return Ok(t.clone());
     }
-    let again = "`nerve-node install`, run again as administrator, asks for it";
+    let again = crate::account::NO_ACCOUNT_INSTALL;
     let file = SECRET
         .get()
         .ok_or_else(|| format!("no password of {} is stored; {again}", account.name))?;

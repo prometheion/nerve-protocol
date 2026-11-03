@@ -380,10 +380,9 @@ export component InstallerView inherits Rectangle {
                                 spacing: Space.xl;
                                 StepHead {
                                     title: Install.node-only ? "Add the app to the node on this machine" : "Install Nerve on this machine";
+                                    // Only on Linux: Windows has no node alone (src/app/install.rs).
                                     text: Install.node-only
-                                        ? (Install.windows
-                                            ? "The node's service then runs the app's program, and nerve-node.exe is removed. For a terminal, download the CLI edition."
-                                            : "The node's service then runs the app's program, and the command nerve-node becomes a link to it.")
+                                        ? "The node's service then runs the app's program, and the command nerve-node becomes a link to it."
                                         : "Nerve links this machine to your centers, and lets them do only what you allow.";
                                 }
                                 VerticalLayout {

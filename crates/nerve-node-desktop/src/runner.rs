@@ -127,7 +127,12 @@ impl Runner {
             Some(b) => b.run(args, input)?,
             None => run_process(&self.exe, &args, &[], input)?,
         };
-        answer(out.ok, out.code, &out.stdout, &out.stderr)
+        // On Windows the app is the only way to the node: what the node
+        // says, it says in the app's words (crate::in_app).
+        crate::in_app::answer(
+            answer(out.ok, out.code, &out.stdout, &out.stderr),
+            cfg!(windows),
+        )
     }
 
     /// Runs `nerve-node --json <args>` that keeps answering (`--follow`):
@@ -149,7 +154,8 @@ impl Runner {
         };
         let on_end = move |out: Output| {
             if !out.ok
-                && let Err(e) = answer(out.ok, out.code, b"", &out.stderr)
+                && let Err(e) =
+                    crate::in_app::answer(answer(out.ok, out.code, b"", &out.stderr), cfg!(windows))
             {
                 (each.lock().unwrap_or_else(|p| p.into_inner()))(Err(e));
             }

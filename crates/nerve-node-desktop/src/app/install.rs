@@ -53,19 +53,26 @@ pub fn newer(a: &str, b: &str) -> bool {
     }
 }
 
+/// Whether the installer adds the app to a node installed alone: on Linux,
+/// where the app takes it over. Windows has no node alone (#176): there the
+/// installer installs Nerve as on a machine without it.
+fn adds_the_app(installed: bool, app: bool, windows: bool) -> bool {
+    installed && !app && !windows
+}
+
 /// What a service command said, as the steps it did and what it warned
-/// about. Its advice for a terminal (`Next: …`, the command that asks for
-/// the Windows password again) is the app's to give, in its own words: the
-/// app asked for root through pkexec, and the password is in its Settings.
+/// about. Its advice for what comes next (`Next: …`) is the app's to give,
+/// in its own words: the app asked for root through pkexec, and opens its
+/// first-run steps. Where the Windows password is entered again the node
+/// says in the app's words itself (nerve_node::account::NO_ACCOUNT_INSTALL).
 pub fn steps(v: &Value) -> (Vec<String>, Vec<String>) {
-    use nerve_node::account::NO_ACCOUNT_INSTALL;
     let (mut did, mut warn) = (Vec::new(), Vec::new());
     for line in v["messages"].as_array().into_iter().flatten() {
         let Some(line) = line.as_str() else { continue };
         if line.starts_with("Next:") {
             continue;
         }
-        let line = line.replace(NO_ACCOUNT_INSTALL, ENTER_PASSWORD);
+        let line = line.to_string();
         if line.starts_with("Warning:") || line.starts_with("no account for commands") {
             warn.push(line);
         } else {
@@ -74,10 +81,6 @@ pub fn steps(v: &Value) -> (Vec<String>, Vec<String>) {
     }
     (did, warn)
 }
-
-/// Where the app takes the password of the account of the commands on
-/// Windows, for what a service command says of it.
-const ENTER_PASSWORD: &str = "enter its password in Settings, General, Account for commands";
 
 fn shared(lines: Vec<String>) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(
@@ -122,7 +125,7 @@ impl Ctl {
                 c.with_install(|i| {
                     i.set_installed_version(version.as_str().into());
                     i.set_newer(app && newer(&i.get_version(), &version));
-                    i.set_node_only(installed && !app);
+                    i.set_node_only(adds_the_app(installed, app, cfg!(windows)));
                     i.set_step(if app { "installed" } else { "welcome" }.into());
                 });
             },
@@ -411,6 +414,15 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
 mod tests {
     use super::*;
 
+    /// Only Linux takes a node installed alone over.
+    #[test]
+    fn the_app_is_added_to_a_node_alone_on_linux_only() {
+        assert!(adds_the_app(true, false, false));
+        assert!(!adds_the_app(true, false, true));
+        assert!(!adds_the_app(true, true, false));
+        assert!(!adds_the_app(false, false, false));
+    }
+
     #[test]
     fn a_newer_version_and_the_steps_of_an_install() {
         assert!(newer("0.0.6", "0.0.5"));
@@ -430,8 +442,9 @@ mod tests {
         assert!(warn[0].starts_with("Warning: no owner"), "{}", warn[0]);
         assert!(
             warn[1].starts_with("no account")
-                && warn[1]
-                    .ends_with("enter its password in Settings, General, Account for commands")
+                && warn[1].ends_with(
+                    "enter its password under Settings › General › Account for commands in the app"
+                )
         );
         // Nothing sends the owner to a terminal.
         for line in did.iter().chain(&warn) {

@@ -479,7 +479,7 @@ impl WinSystem for WinHost {
         };
         Ok(held.then(|| {
             format!(
-                "Windows still holds the profile folder {} of {name}; after a restart of Windows, an administrator PowerShell removes it: Get-CimInstance Win32_UserProfile -Filter \"SID='{text}'\" | Remove-CimInstance",
+                "Windows still holds the profile folder {} of {name} (SID {text}); after a restart of Windows, delete it under System Properties › Advanced › User Profiles › Settings, where it shows as Account Unknown",
                 profile.map_or_else(|| "?".into(), |p| p.display().to_string())
             )
         }))

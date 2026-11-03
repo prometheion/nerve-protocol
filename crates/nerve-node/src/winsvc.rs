@@ -27,6 +27,12 @@ use crate::service::{
 
 /// The name the service is registered under.
 pub const SERVICE_NAME: &str = "nerve-node";
+/// Why a command for the service does nothing here, and where the node is
+/// installed: the app is the only way to the node on Windows.
+pub const NOT_INSTALLED: &str = "the node is not installed as a service here; Nerve's installer installs it: open the downloaded nerve-node-desktop file";
+/// What puts back what the install made: the install again, which the app
+/// runs when the password of the account commands run as is saved.
+pub const INSTALL_AGAIN: &str = "the install makes it again: in the app, save the password under Settings › General › Account for commands, which installs the node again";
 /// The file in the config folder that holds the password of the account
 /// the commands run as, encrypted with DPAPI.
 pub const SECRET_FILE: &str = "command-account.dpapi";
@@ -144,7 +150,7 @@ fn put_owners(sys: &dyn WinSystem, steps: &mut Steps) -> Result<(), String> {
     }
     sys.put_owners(&owners)?;
     steps.did(format!(
-        "{name} is an owner of the node: the app and `nerve-node` change its settings, and start and stop its service, without administrator rights"
+        "{name} is an owner of the node: the app changes its settings, and starts and stops its service, without administrator rights"
     ));
     Ok(())
 }
@@ -185,9 +191,9 @@ fn remove_grants(
             .map(|g| g.path.display().to_string())
             .collect();
         let then = if kept {
-            "connect their drives and run `nerve-node uninstall` again to take them off"
+            "connect their drives, then install Nerve and uninstall it again to take them off"
         } else {
-            "their record goes with --purge, so once their drives are connected, take them off with `icacls <folder> /reset`"
+            "their record goes with the data, so once their drives are connected, take them off by hand (docs/user/modes.md)"
         };
         steps.did(format!(
             "left {} folder grants of {whose} on, on drives that are not connected now ({}): {then}",
@@ -204,9 +210,9 @@ fn remove_grants(
     }
     if !p.kept.is_empty() {
         let then = if kept {
-            "stop it and run `nerve-node uninstall` again to remove them"
+            "once it stopped, install Nerve and uninstall it again to remove them"
         } else {
-            "its config goes with --purge, so once it stopped, remove them by hand (docs/user/modes.md)"
+            "its config goes with the data, so once it stopped, remove them by hand (docs/user/modes.md)"
         };
         steps.did(format!(
             "left the AppContainer profiles of {whose} ({}), since {}: {then}",
@@ -262,11 +268,20 @@ fn previous(bin: &Path) -> PathBuf {
 /// Whether `what` can run here: as an elevated administrator.
 fn supported(sys: &dyn WinSystem, what: &str) -> Result<(), String> {
     if !sys.is_admin() {
-        return Err(format!(
-            "{what} needs an administrator: run `nerve-node {what}` in a terminal opened with \"Run as administrator\""
-        ));
+        return Err(needs_admin(what));
     }
     Ok(())
+}
+
+/// Why `what` (install, update, uninstall) does not run without an
+/// administrator, and where the app does it, asking Windows for the rights.
+pub(crate) fn needs_admin(what: &str) -> String {
+    let place = match what {
+        "install" => "the installer, which opens with the downloaded nerve-node-desktop file,",
+        "update" => "Settings › App › Update",
+        _ => "Settings › App › Uninstall",
+    };
+    format!("{what} needs an administrator: in the app, {place} asks Windows for the rights")
 }
 
 /// `install`: the account, the folders, the account of the commands and its
@@ -291,7 +306,7 @@ pub fn install(
     r?;
     let _ = writeln!(
         steps.out,
-        "Next: `nerve-node setup` names the node and pairs it with its first center; `Restart-Service {SERVICE_NAME}` then lets the service take the change."
+        "Next: open Nerve; its first-run steps name the node and pair it with its first center."
     );
     Ok(())
 }
@@ -310,7 +325,7 @@ fn install_steps(
             &layout.paths,
             crate::secrets::NoKeyring::WindowsService,
             "install changed nothing",
-            "run `nerve-node install` again",
+            "install again with the installer",
         ));
     }
     // A running service holds the program and the folders' files.
@@ -330,7 +345,7 @@ fn install_steps(
         }
         Some(_) => {
             return Err(format!(
-                "a user {USER} exists already, and nerve-node install did not make it; the node needs a user of its own"
+                "a user {USER} exists already, and Nerve's install did not make it; the node needs a user of its own"
             ));
         }
         None => {
@@ -596,7 +611,7 @@ fn uninstall_steps(
             sys.secure(dir, None)?;
         }
         steps.did(format!(
-            "kept {} with the stored password, and {} (only administrators can open them now; `uninstall --purge` deletes them)",
+            "kept {} with the stored password, and {} (only administrators can open them now; an uninstall that deletes the data deletes them)",
             layout.paths.config_dir.display(),
             layout.paths.state_dir.display()
         ));
@@ -612,7 +627,7 @@ fn uninstall_steps(
         Some(_) => {
             let _ = writeln!(
                 steps.out,
-                "left the user {USER} as it is: nerve-node install did not make it"
+                "left the user {USER} as it is: Nerve's install did not make it"
             );
         }
         None => {}
@@ -650,9 +665,7 @@ pub async fn update(
 ) -> Result<(), String> {
     supported(sys, "update")?;
     if sys.service()?.is_none() || !layout.bin.is_file() {
-        return Err(
-            "the node is not installed as a service here; `nerve-node install` installs it".into(),
-        );
+        return Err(NOT_INSTALLED.into());
     }
     let mut steps = Steps {
         done: Vec::new(),
@@ -672,9 +685,7 @@ async fn update_steps(
     let program = layout.edition.program;
     sys.account(USER)?
         .filter(|a| a.comment == USER_MARK)
-        .ok_or_else(|| {
-            format!("the user {USER} is missing; `nerve-node install` makes it again")
-        })?;
+        .ok_or_else(|| format!("the user {USER} is missing; {INSTALL_AGAIN}"))?;
     let new = match from {
         Some(f) => {
             let b = std::fs::read(f).map_err(|e| format!("{}: {e}", f.display()))?;
@@ -783,9 +794,7 @@ pub fn control(
     // The service's DACL decides: the administrators and the owners may
     // (crate::owner).
     if sys.service()?.is_none() {
-        return Err(
-            "the node is not installed as a service here; `nerve-node install` installs it".into(),
-        );
+        return Err(NOT_INSTALLED.into());
     }
     if action != ServiceAction::Start {
         sys.stop()?;
@@ -1223,14 +1232,14 @@ pub(crate) mod tests {
         let e = install(&l, &sys, &exe, "alice", &mut Vec::new()).unwrap_err();
         assert!(e.contains("install changed nothing"), "{e}");
         assert!(e.contains("Credential Manager"), "{e}");
-        // The command names the folders: without a registered service the CLI
-        // would work on the administrator's own.
-        let command = format!(
-            "`nerve-node --config-dir \"{}\" --state-dir \"{}\" config set machine.secret_storage file`",
+        // It names the folders to delete, and no command for a terminal.
+        let folders = format!(
+            "delete {} and {}",
             l.paths.config_dir.display(),
             l.paths.state_dir.display()
         );
-        assert!(e.contains(&command), "{e}");
+        assert!(e.contains(&folders), "{e}");
+        assert!(!e.contains("nerve-node "), "{e}");
         assert!(sys.calls().is_empty(), "{:?}", sys.calls());
         assert!(sys.secured.borrow().is_empty());
         assert!(!l.bin.exists());
@@ -1264,7 +1273,10 @@ pub(crate) mod tests {
             "{out}"
         );
         assert!(!out.contains("Warning"), "{out}");
-        assert!(out.contains("nerve-node setup"), "{out}");
+        assert!(
+            out.contains("Next: open Nerve; its first-run steps"),
+            "{out}"
+        );
         assert_eq!(user(&l).as_deref(), Some("alice"));
         assert_eq!(
             sys.calls(),
@@ -1488,7 +1500,10 @@ pub(crate) mod tests {
             out.contains("removed the source nerve-node from the Windows Event Log"),
             "{out}"
         );
-        assert!(out.contains("uninstall --purge"), "{out}");
+        assert!(
+            out.contains("an uninstall that deletes the data deletes them"),
+            "{out}"
+        );
         assert!(out.contains("removed the program"), "{out}");
         assert!(out.contains("removed the stored sudo password"), "{out}");
     }
@@ -1714,7 +1729,7 @@ pub(crate) mod tests {
         uninstall(&l, &hand, &sys, false, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         let left = format!(
-            "left the AppContainer profiles of the node run by hand ({}) (nerve.n-lab), since the node runs: stop it and run `nerve-node uninstall` again",
+            "left the AppContainer profiles of the node run by hand ({}) (nerve.n-lab), since the node runs: once it stopped, install Nerve and uninstall it again",
             hand.state_dir.display()
         );
         assert!(out.contains(&left), "{out}");
@@ -1755,7 +1770,7 @@ pub(crate) mod tests {
         uninstall(&l, &hand, &sys, true, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         let left = format!(
-            "left 1 folder grants of the node run by hand ({}) on, on drives that are not connected now (E:\\proj): connect their drives and run `nerve-node uninstall` again",
+            "left 1 folder grants of the node run by hand ({}) on, on drives that are not connected now (E:\\proj): connect their drives, then install Nerve and uninstall it again",
             hand.state_dir.display()
         );
         assert!(out.contains(&left), "{out}");

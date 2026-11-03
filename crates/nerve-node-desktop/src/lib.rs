@@ -10,6 +10,7 @@ pub mod broker;
 pub mod deps;
 pub mod dialog;
 pub mod headless;
+pub mod in_app;
 pub mod instance;
 pub mod motion;
 pub mod parts;

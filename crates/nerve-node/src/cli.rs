@@ -5361,7 +5361,7 @@ async fn relay_in_force(paths: &NodePaths, out: &mut dyn Write, now: Option<&str
 
 /// [`relay_in_force`] on Windows, where a running node has not taken the
 /// change.
-const RELAY_AT_NEXT_START: &str = "a running node takes this change only at its next start, and until then works by its old relay settings: a removed or replaced token still opens new tunnels, the tunnels it carries stay, and a new token or node is refused. Restart it (`Restart-Service nerve-node` for the installed node) to apply the change now";
+const RELAY_AT_NEXT_START: &str = "a running node takes this change only at its next start, and until then works by its old relay settings: a removed or replaced token still opens new tunnels, the tunnels it carries stay, and a new token or node is refused. Restart it (Restart on the app's Overview) to apply the change now";
 
 /// Refuses a `--center` list that names a center this node is not paired
 /// with, or one twice.
@@ -7293,7 +7293,7 @@ mod tests {
         assert!(e.contains("cannot be \"keyring\""), "{e}");
         assert!(
             e.contains(
-                "go to the Credential Manager of the account that runs them, not to that of nerve"
+                "go to the Credential Manager of the account that put them there, not to that of nerve"
             ),
             "{e}"
         );
@@ -8531,12 +8531,12 @@ mod tests {
             let e = run(&paths, args).unwrap_err();
             assert!(
                 e.contains(
-                    "go to the Credential Manager of the account that runs it, not to that of nerve"
+                    "go to the Credential Manager of the account that put them there, not to that of nerve"
                 ),
                 "{e}"
             );
             assert!(e.contains("nothing was changed"), "{e}");
-            assert!(e.contains("`nerve-node proxy set <url>`"), "{e}");
+            assert!(e.contains("Settings › Network › Proxy"), "{e}");
             assert!(!e.contains("s3cret") && !e.contains("pa55w0rd"), "{e}");
             assert!(!e.contains("alice"), "{e}");
         }

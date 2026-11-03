@@ -323,7 +323,7 @@ mod sys {
                 }
                 Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
                     return Err(
-                        "the running node lets only the administrators, SYSTEM and its own account change it: run `nerve-node …` in a terminal opened with \"Run as administrator\"".into(),
+                        "the running node lets only the administrators, SYSTEM and its own account change it: the app asks Windows for an administrator's rights where they are needed".into(),
                     );
                 }
                 Err(e) => return Err(format!("cannot reach the running node: {e}")),
