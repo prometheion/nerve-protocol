@@ -1126,9 +1126,9 @@ fn every_page_light_and_dark() {
     install.set_error("the service nerve-node did not start: the node did not answer on its control pipe within 30 seconds; the Windows Event Log (Application, source nerve-node) and C:\\ProgramData\\Nerve\\state\\log.jsonl say why".into());
     shots.take("installer-welcome-windows-failed");
     install.set_error("".into());
-    install.set_node_only(true);
-    shots.take("installer-node-only-windows");
+    // Only Linux adds the app to a node installed alone (#176).
     install.set_windows(false);
+    install.set_node_only(true);
     install.set_program("/usr/local/bin/nerve-node-desktop".into());
     shots.take("installer-node-only");
     install.set_action("install".into());
@@ -1142,19 +1142,6 @@ fn every_page_light_and_dark() {
         "the service nerve-node.service runs as nerve and starts with the machine",
     ]));
     shots.take("installer-node-only-done");
-    install.set_windows(true);
-    install.set_did(lines(&[
-        "put the program at C:\\Program Files\\Nerve\\nerve-node-desktop.exe",
-        "put Nerve in the Start menu (C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Nerve.lnk)",
-        "nerve:// links open in Nerve (HKEY_LOCAL_MACHINE\\Software\\Classes\\nerve)",
-        "put Nerve in Apps & features, where Uninstall removes it",
-        "registered the service nerve-node, which runs as nerve and starts with the machine",
-        "registered the source nerve-node in the Windows Event Log (Application): the service's start, stop and failures go there as well as to C:\\ProgramData\\Nerve\\state\\log.jsonl",
-        "removed C:\\Program Files\\Nerve\\nerve-node.exe, the node installed alone: C:\\Program Files\\Nerve\\nerve-node-desktop.exe is the node now (Windows holds the old file, as when the Event Log read it or it runs; Windows deletes it at its next start). For a terminal, download the CLI edition nerve-node.exe on its own",
-        "the service nerve-node runs",
-    ]));
-    shots.take("installer-node-only-done-windows");
-    install.set_windows(false);
     install.set_did(lines(&[]));
     install.set_node_only(false);
     install.set_action("install".into());
