@@ -107,7 +107,7 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
         let server = Server::bind(&a, &center, !tls).await?;
         ui = Some(server.local_addr());
         tasks.push(tokio::spawn(
-            Ui::new(&center, token.clone(), ui_login, tls).serve(server),
+            Ui::new(&center, token.clone(), ui_login).serve(server),
         ));
     }
 

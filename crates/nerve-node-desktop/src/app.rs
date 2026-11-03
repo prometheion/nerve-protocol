@@ -941,18 +941,12 @@ impl Ctl {
     /// `center add`: without `yes` the preview the owner confirms, with it
     /// the pairing. In the first-run steps the steps go on after it.
     fn pair(self: &Rc<Self>, link: &str, name: &str, yes: bool) {
-        let mut args = vec!["center".to_string(), "add".into(), link.trim().to_string()];
-        if !name.trim().is_empty() {
-            args.push(format!("--name={}", name.trim()));
-        }
-        if yes {
-            args.push("--yes".into());
-        }
+        let (args, input) = view::pair_command(link, name, yes);
         self.with_store(|s| {
             s.set_pair_busy(true);
             s.set_pair_error(SharedString::new());
         });
-        self.command(args, None, move |c, answer| {
+        self.command(args, Some(input), move |c, answer| {
             c.with_store(|s| s.set_pair_busy(false));
             match answer {
                 Ok(v) if !yes => {

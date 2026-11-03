@@ -17,10 +17,10 @@
     <div class="login-head">
       <img class="login-mark" src="/icon.svg" alt="" width="56" height="56">
       <h1>Nerve</h1>
-      <p>One center for all your machines.</p>
+      <p>{{TAGLINE}}</p>
     </div>
-    <input class="login-input" type="password" name="token" placeholder="Harness token" aria-label="Harness token" autocomplete="off" autocapitalize="off" spellcheck="false" autofocus required{{INVALID}}>
-    {{ERROR}}
+    <input class="login-input" type="password" name="token" placeholder="{{SECRET}}" aria-label="{{SECRET}}" aria-describedby="login-error" autocomplete="off" autocapitalize="off" spellcheck="false" autofocus required>
+    <p id="login-error" class="login-error" role="alert" hidden></p>
     <button class="login-submit" type="submit">Sign in</button>
   </form>
 </main>

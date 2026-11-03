@@ -618,6 +618,9 @@ pub(crate) struct Shared {
     pub aside: Option<tokio::sync::mpsc::UnboundedSender<Aside>>,
     /// The relay for other nodes (crate::relay), and who is connected.
     pub relay: crate::relay::Relays,
+    /// Linux: the web UI's state and sessions (crate::webui).
+    #[cfg(target_os = "linux")]
+    pub(crate) webui: Arc<crate::webui::WebUi>,
     /// Linux: the installed node's owner ([`NodeOptions::owner`]).
     #[cfg_attr(windows, allow(dead_code))]
     pub owner: Option<String>,
@@ -940,6 +943,7 @@ impl Shared {
         center: &str,
         path: &str,
         access: nerve_policy::config::Access,
+        web_locks: Option<u64>,
     ) -> Result<AddedFolder, String> {
         use crate::exec::Settled;
         use crate::folder_change::{FolderChange, apply_to};
@@ -971,6 +975,15 @@ impl Shared {
         let mut applied = None;
         lock(&self.store)
             .update(|c| {
+                // A folder of the web UI's request that a panic overtook is
+                // not added; checked under the store's lock, as
+                // `config.write` does.
+                #[cfg(target_os = "linux")]
+                if web_locks.is_some_and(|n| n != self.webui.lock_count()) {
+                    return Err(WEB_LOCKED.into());
+                }
+                #[cfg(not(target_os = "linux"))]
+                let _ = web_locks;
                 applied = Some(apply_to(c, Some(center), &change)?);
                 Ok(())
             })
@@ -990,7 +1003,12 @@ impl Shared {
 
     pub fn bump(&self) {
         self.changed.send_modify(|v| *v += 1);
-        self.tell_confinement(&self.config());
+        let cfg = self.config();
+        // Before the writer is answered: a panic has ended the web UI's
+        // sessions and stopped their commands when the CLI prints it.
+        #[cfg(target_os = "linux")]
+        self.webui.settle(&cfg);
+        self.tell_confinement(&cfg);
     }
 
     /// Reads the config file again because the owner asked (SIGHUP, the
@@ -1377,7 +1395,21 @@ impl Shared {
             "home_warning": self.home_warning(&cfg),
             "centers": centers,
             "relay": self.relay.status(&cfg),
+            "ui": self.ui_status(&cfg),
         })
+    }
+}
+
+impl Shared {
+    /// The web UI's state for `status`: none where there is no web UI.
+    fn ui_status(&self, cfg: &NodeConfig) -> Value {
+        #[cfg(target_os = "linux")]
+        return self.webui.status(cfg);
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = cfg;
+            Value::Null
+        }
     }
 }
 
@@ -1466,6 +1498,8 @@ pub struct Daemon {
     shared: Arc<Shared>,
     supervisor: JoinHandle<()>,
     relay: JoinHandle<()>,
+    /// The web UI's task, on a node that serves it (crate::webui).
+    webui: Option<JoinHandle<()>>,
     ctl: Option<JoinHandle<()>>,
     /// The owner endpoint's task and its socket (crate::owner).
     owner: Option<(JoinHandle<()>, PathBuf)>,
@@ -1641,6 +1675,8 @@ impl Daemon {
             #[cfg(target_os = "linux")]
             provider_socket: endpoint.as_ref().map(|e| e.provider_socket()),
             relay: Default::default(),
+            #[cfg(target_os = "linux")]
+            webui: Default::default(),
             aside: opts.aside,
             owner: opts.owner,
             own_user: crate::account::own_name(),
@@ -1676,6 +1712,14 @@ impl Daemon {
         };
         #[cfg(not(target_os = "linux"))]
         let providers = None;
+        // The web UI is the installed node's, for the owners of its
+        // endpoint; it listens only while the config says so.
+        #[cfg(target_os = "linux")]
+        let webui = endpoint
+            .clone()
+            .map(|e| tokio::spawn(crate::webui::run(shared.clone(), e)));
+        #[cfg(not(target_os = "linux"))]
+        let webui = None;
         // A node whose owner endpoint cannot be made runs on without it:
         // its owners then need root, as before there was one.
         let owner = match endpoint {
@@ -1718,6 +1762,7 @@ impl Daemon {
             shared,
             supervisor,
             relay,
+            webui,
             ctl,
             owner,
             providers,
@@ -1783,6 +1828,9 @@ impl Daemon {
         // Their connections outlive the socket's task otherwise.
         self.shared.providers.detach_all();
         let _ = tokio::time::timeout(Duration::from_secs(2), self.relay).await;
+        if let Some(w) = self.webui {
+            let _ = tokio::time::timeout(Duration::from_secs(2), w).await;
+        }
         if let Some(c) = self.ctl {
             c.abort();
             let socket = self.shared.paths.ctl_socket();
@@ -2143,6 +2191,10 @@ async fn rotate_key(shared: &Arc<Shared>, params: &Value) -> nerve_transport::ct
     }
 }
 
+/// What a web UI request gets when a lock overtook it.
+#[cfg(target_os = "linux")]
+const WEB_LOCKED: &str = "the node was locked while the web UI's request ran; nothing was changed";
+
 /// Why a request without the control socket's token is refused.
 #[cfg(unix)]
 const NO_TOKEN: &str = "refused: this request does not carry the control socket's token, which only the owner's own programs can read";
@@ -2292,6 +2344,16 @@ pub(crate) fn control(
             // reads them (crate::link).
             let taken = shared.taken();
             let mut store = lock(&shared.store);
+            // A command of the web UI whose request began before the node
+            // was locked writes nothing after it. Checked under the store's
+            // lock, where a lock is counted ([`crate::webui::WebUi::settle`]
+            // below), so no write falls between.
+            #[cfg(target_os = "linux")]
+            if let Some(n) = params.get("web_locks").and_then(Value::as_u64)
+                && n != shared.webui.lock_count()
+            {
+                return Reply::Err(WEB_LOCKED.into());
+            }
             if new.machine.sudo != store.config().machine.sudo {
                 return Reply::Err(
                     "machine.sudo changes only through nerve-node sudo on|off".into(),
@@ -2331,6 +2393,18 @@ pub(crate) fn control(
             store.set_user(str_of("user"));
             let r = store.set_local(new, if_version);
             store.set_user(None);
+            // A lock ends the web UI's sessions and counts, before another
+            // write can be checked against the count.
+            #[cfg(target_os = "linux")]
+            if r.is_ok() {
+                // A panic counts also when the node is locked already: the
+                // owner's way to end a session that started in the lock.
+                if params.get("panic").and_then(Value::as_bool) == Some(true) {
+                    shared.webui.settle_panic(store.config());
+                } else {
+                    shared.webui.settle(store.config());
+                }
+            }
             drop(store);
             match r {
                 Ok(v) => {
@@ -2353,7 +2427,8 @@ pub(crate) fn control(
                 Ok(a) => a,
                 Err(e) => return Reply::Err(e),
             };
-            match shared.add_folder(&center, &path, access) {
+            let web_locks = params.get("web_locks").and_then(Value::as_u64);
+            match shared.add_folder(&center, &path, access, web_locks) {
                 Ok(a) => Reply::Ok(json!({
                     "stored": a.stored,
                     "recorded": a.recorded,
@@ -2419,6 +2494,7 @@ pub(crate) fn control(
 fn is_quiet_key(key: &str) -> bool {
     key.starts_with("connection")
         || key.starts_with("relay.node")
+        || key.starts_with("ui.token")
         || key.ends_with(".pin")
         || key.ends_with("_id")
 }
@@ -2967,6 +3043,120 @@ mod tests {
         let mut o = options(&d, &log);
         o.full_rights = Some(false);
         Daemon::start(o).await.unwrap().stop().await;
+    }
+
+    /// A write of the config by a command of the web UI whose request began
+    /// before the node was locked is refused, whatever the order of the
+    /// processes: it must not undo the lock. One that began after it, as an
+    /// unlock from a new login does, goes through.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_web_write_that_a_lock_overtook_is_refused() {
+        use nerve_transport::ctl::Reply;
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let mut o = options(&d, &log);
+        o.full_rights = Some(false);
+        let daemon = Daemon::start(o).await.unwrap();
+        let s = daemon.shared.clone();
+        let write = |locked: bool, web_locks: Option<u64>| {
+            let Reply::Ok(v) = control(&s, "config.read", json!({}), None) else {
+                panic!("config.read failed")
+            };
+            let mut cfg = NodeConfig::parse(v["config"].as_str().unwrap()).unwrap();
+            cfg.locked = locked;
+            let mut params = json!({"config": cfg.to_toml(), "if_version": v["version"]});
+            if let Some(n) = web_locks {
+                params["web_locks"] = json!(n);
+            }
+            control(&s, "config.write", params, None)
+        };
+        let before = s.webui.lock_count();
+        assert!(matches!(write(false, Some(before)), Reply::Ok(_)));
+        // The panic.
+        assert!(matches!(write(true, None), Reply::Ok(_)));
+        assert!(daemon.config().locked);
+        assert_eq!(s.webui.lock_count(), before + 1);
+        // An unlock that began before it.
+        let Reply::Err(why) = write(false, Some(before)) else {
+            panic!("a write from before the lock went through")
+        };
+        assert!(why.contains("was locked"), "{why}");
+        assert!(daemon.config().locked);
+        // One that began after it.
+        assert!(matches!(write(false, Some(before + 1)), Reply::Ok(_)));
+        assert!(!daemon.config().locked);
+        daemon.stop().await;
+    }
+
+    /// A folder that a web UI request adds after a panic overtook it is not
+    /// added (the lock is counted under the store's lock, where the folder
+    /// is stored): the panic's promise that the session writes nothing after
+    /// it holds for `folder.add` as for `config.write`.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_web_folder_that_a_lock_overtook_is_not_added() {
+        use nerve_transport::ctl::Reply;
+        let (d, daemon) = daemon().await;
+        let s = daemon.shared.clone();
+        let place = std::fs::canonicalize(d.path()).unwrap().join("docs");
+        std::fs::create_dir(&place).unwrap();
+        lock(&s.store)
+            .update(|c| {
+                c.centers.push(nerve_policy::CenterEntry {
+                    name: "home".into(),
+                    url: "https://center.example".into(),
+                    pin: None,
+                    center_id: "c".into(),
+                    node_id: "n".into(),
+                    settings: Default::default(),
+                    paused: false,
+                    revoked: false,
+                    unknown: false,
+                    public_key: None,
+                    key_rotations: 0,
+                    pin_rotations: 0,
+                    old_pin: None,
+                    policy: Default::default(),
+                    capabilities: Vec::new(),
+                });
+                Ok(())
+            })
+            .unwrap();
+        let add = |web_locks: Option<u64>| {
+            let mut params = json!({
+                "center": "home",
+                "path": place.display().to_string(),
+                "access": "r",
+            });
+            if let Some(n) = web_locks {
+                params["web_locks"] = json!(n);
+            }
+            control(&s, "folder.add", params, None)
+        };
+        let folders = || s.config().centers[0].policy.folders.len();
+        let before = s.webui.lock_count();
+        // The panic.
+        let mut locked = s.config();
+        locked.locked = true;
+        let Reply::Ok(_) = control(
+            &s,
+            "config.write",
+            json!({"config": locked.to_toml(), "if_version": locked.version}),
+            None,
+        ) else {
+            panic!("the panic was not written")
+        };
+        assert_eq!(s.webui.lock_count(), before + 1);
+        let Reply::Err(why) = add(Some(before)) else {
+            panic!("a folder from before the lock was added")
+        };
+        assert!(why.contains("was locked"), "{why}");
+        assert_eq!(folders(), 0);
+        // One that began after it, and one that is no web request.
+        assert!(matches!(add(Some(before + 1)), Reply::Ok(_)));
+        assert_eq!(folders(), 1);
+        daemon.stop().await;
     }
 
     /// With the keys moved into the keyring where Landlock cannot keep a
@@ -4174,6 +4364,23 @@ node_id = "n1"
             text,
             "settings changed by local (version 7): relay.listen: 0.0.0.0:7490 -> 0.0.0.0:7491; relay.node changed"
         );
+    }
+
+    /// The web UI's address is told; its tokens and their hashes only as
+    /// changed.
+    #[test]
+    fn a_web_ui_token_hash_is_never_shown() {
+        let hash = "c".repeat(64);
+        let a = "[ui]\nlisten = \"127.0.0.1:7470\"\n";
+        let b = format!(
+            "[ui]\nlisten = \"127.0.0.1:7471\"\n\n[[ui.token]]\nlabel = \"laptop\"\ntoken_sha256 = \"{hash}\"\n"
+        );
+        let text = told(a, &b);
+        assert_eq!(
+            text,
+            "settings changed by local (version 7): ui.listen: 127.0.0.1:7470 -> 127.0.0.1:7471; ui.token changed"
+        );
+        assert!(!text.contains("ccc") && !text.contains("laptop"), "{text}");
     }
 
     /// An older text of the guard holds tabs and line breaks; the log line

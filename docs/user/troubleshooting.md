@@ -195,6 +195,18 @@ from the source `nerve-node` under **Windows Logs > Application**, and
 | `… always needs a login; drop --ui-no-login …` | `--ui-no-login` with a UI beyond loopback | Drop `--ui-no-login` |
 | The MCP endpoint refuses every client | No harness token yet | Set `--harness-token`, or make one in the web UI |
 
+## The node's web UI does not answer
+
+| What you see | Cause | Fix |
+|---|---|---|
+| `ui status` says `cannot listen on …: …` | Another program holds the port, or the address is not this machine's | Free the port, or `nerve-node ui on --listen 127.0.0.1:<other port>` |
+| `the web UI is part of the installed node …` | The node is not installed as a service | `sudo nerve-node install`; a node run by hand serves no web UI |
+| `ui status` says `… no TLS certificate …` | The UI listens beyond loopback, and its certificate's key is gone (after a restore, say) | `nerve-node ui on --listen <address> --new-cert` |
+| The browser warns about the certificate | The UI's certificate is its own, not one a browser knows | Compare the fingerprint the browser shows with the one `ui status` prints, then go on |
+| `Wrong token.` | The token is not one of `ui token ls` | `nerve-node ui token add <label>` makes a new one |
+| A command of a center gets its connection closed at once | Only your account and root may connect from this machine | Nothing to fix: that is what keeps the commands out |
+| The page asks to sign in again | A new tab, a restart of the node, `panic`, `ui off`, or the token was revoked | Sign in again |
+
 ## Output is cut
 
 A command returns at most 1 MiB of stdout and 1 MiB of stderr. The result has

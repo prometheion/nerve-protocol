@@ -8,7 +8,7 @@ same way and so the owner knows what each setting does.
 
 | What | Default | Override |
 |---|---|---|
-| `node.toml` and one key per center (`keys/<name>.key`), the relay's TLS key (`keys/relay-tls.pem`) and an `https://` proxy's password (`keys/proxy-login.secret`); on Windows also `sudo.dpapi` and, on the installed node, `command-account.dpapi` | `~/.config/nerve` | `--config-dir`, `NERVE_CONFIG_DIR` |
+| `node.toml` and one key per center (`keys/<name>.key`), the relay's TLS key (`keys/relay-tls.pem`), the web UI's TLS key (`keys/ui-tls.pem`) and an `https://` proxy's password (`keys/proxy-login.secret`); on Windows also `sudo.dpapi` and, on the installed node, `command-account.dpapi` | `~/.config/nerve` | `--config-dir`, `NERVE_CONFIG_DIR` |
 | control socket `run/ctl.sock` and its token `run/ctl.token`, audit log `audit.jsonl`, log `log.jsonl`, the config's MAC key `config.key`, the last version of the config `config.version`, `keys.lock`, `keys.moving`; on Windows the record of the folder grants `grants.json` and its lock `grants.json.lock` | `~/.local/state/nerve` | `--state-dir`, `NERVE_STATE_DIR` |
 
 With `machine.secret_storage = "keyring"` the keys are in the system keyring
@@ -194,17 +194,18 @@ at the next start of the node").
 ### Where the keys are
 
 `machine.secret_storage` says where the node keeps its own keys: the key of
-the config's MAC, its key per center, the relay's TLS key (§2, Relay) and
-the password of an `https://` proxy, the relay token of a relayed node (§2,
+the config's MAC, its key per center, the relay's TLS key (§2, Relay), the
+web UI's TLS key (§2, The web UI) and the password of an `https://` proxy, the relay token of a relayed node (§2,
 Proxy).
 
 - `file`, the default: `<state>/config.key`, `<config>/keys/<name>.key`,
-  `<config>/keys/relay-tls.pem` and `<config>/keys/proxy-login.secret`,
-  each 0600.
+  `<config>/keys/relay-tls.pem`, `<config>/keys/ui-tls.pem` and
+  `<config>/keys/proxy-login.secret`, each 0600.
 - `keyring`: the system keyring (Credential Manager on Windows, the Secret
   Service on Linux), under the service `nerve`, one entry per key, named
   `config-key:<state folder>`, `center-key:<name>:<config folder>`,
-  `relay-tls:<config folder>` and `proxy-login:<config folder>`. Each holds
+  `relay-tls:<config folder>`, `ui-tls:<config folder>` and
+  `proxy-login:<config folder>`. Each holds
   the key's text. No copy stays in a file.
 
 While a rotation of the key for a center waits for the center's answer
@@ -481,6 +482,15 @@ token_sha256 = "<hex>"      # SHA-256 of its token; the token is in no file
 centers = ["home"]          # optional: the centers it may reach; all when missing
 max_links = 12              # optional: its own tunnels at once (a relay behind this one)
 max_opens_per_minute = 300  # optional: its own opens a minute
+
+[ui]                        # optional; the web UI of the installed node on Linux (§2, The web UI)
+listen = "127.0.0.1:7470"   # ip:port; the UI is off without it
+pin = "<pin>"               # beyond loopback: the pin of the UI's TLS certificate; its key is a node key
+
+[[ui.token]]
+label = "laptop"            # 1 to 32 of a-z, 0-9 and -, not starting with -; unique
+token_sha256 = "<hex>"      # SHA-256 of the token; the token is in no file
+made = "2026-11-02T10:00:00Z" # when it was made, RFC 3339 in UTC
 
 [[center]]
 name = "home"               # the owner's name; the CLI's --center
@@ -1029,6 +1039,78 @@ tunnels, a new token or node is refused (`407`), and `relay off` leaves the
 listener up. Every `relay` command that changes the file says so there
 (and says nothing is "now" in force); where a running node took the
 change, the commands that take something away say what ends now.
+
+### The web UI
+
+The installed node on Linux (`nerve-node` and `nerve-node-desktop` alike)
+can serve the pages of the desktop app over HTTP. It is a task of the node's
+process, off until the owner sets `ui.listen`, and then it is the only
+listener of the node besides the relay's; off, the node listens on nothing for
+it. A node run by hand, and the node on Windows, serve none (`ui` says so).
+Only the owner turns it on, and a center reads and changes nothing of it,
+grant or not.
+
+- `nerve-node ui on [--listen <ip:port>] [--name <host>]... [--new-cert]` sets
+  `ui.listen` (`127.0.0.1:7470` unless given) and, with no token yet, makes
+  one labelled `first` and shows it once; `ui off` clears `ui.listen` and
+  keeps the tokens and the key; `ui status` shows the address, the node's
+  state of it (`listening` or why not) and the labels. The running node takes
+  each at once, so `ui on` waits for it for a few seconds.
+- `nerve-node ui token add <label>` makes a token (43 characters of `a-z0-9`),
+  shown once; `node.toml` keeps its SHA-256 only. `ui token rm <label>` takes
+  it away and ends the sessions it opened. `ui token ls` shows labels and
+  times. Tokens are made at the CLI only.
+- Beyond loopback the UI speaks TLS only, with a certificate of its own made
+  by the first `ui on` there (self-signed; it names the address, this
+  machine's name, `localhost` and each `--name`): the key is a node key
+  (`keys/ui-tls.pem` or the keyring entry `ui-tls:<config folder>`, §1) and
+  `ui.pin` keeps its pin. `ui on` and `ui status` print its SHA-256
+  fingerprint. `--new-cert` makes a new one and ends every session. Without
+  its key the UI does not listen beyond loopback (`status` says why). On
+  loopback it is plain HTTP and takes no certificate flags.
+- The login is always on. A token is posted once to `/login` (JSON or a
+  form, never in a URL) and answered with a session of 12 hours, which the
+  page keeps in its tab's `sessionStorage` and sends as `X-Nerve-Session`
+  with every API call; there is no cookie. A wrong token waits 300 ms before
+  it is answered and never locks the login. A session ends with sign out, its
+  token's removal, `ui off`, a restart of the node and `panic`. Every POST
+  needs an `Origin` that names the page's own host.
+- `panic` ends every session and counts a lock (`WebUi::settle_panic`, under
+  the store's lock in `config.write`, which `Cmd::Panic` marks with
+  `panic: true`) also when the node is locked already, so a session that
+  logged in during the lock is ended by the next panic; `commit` and
+  `config.write` must not skip this as a no-op. A command a session started
+  before a lock is stopped (`run_for_web` watches the count), and
+  `config.write` and `folder.add` carry the count the command began with
+  (`web_locks`) and are refused when it differs, so it changes no setting
+  after the lock. A `log clear` or `audit clear` already running may still
+  land. A token is not a session: a leaked one is revoked first, then `panic`.
+- On loopback the request's `Host` must be a loopback name, or the address the
+  UI listens on as a number; over TLS any name is taken, since the machine's
+  own name often resolves to a loopback address on that machine and a page of
+  another name cannot get past the UI's certificate.
+- From this machine only the owner's account and root may connect. The node
+  names the account that owns the connecting socket (the kernel's socket
+  diagnostics, else the tables in `/proc/net`) before it reads a byte; any
+  other account, `nerve-run` above all, is closed. A peer on another
+  machine is held to the same limits. An account or other address has 16
+  connections at once; a wrong token waiting its 300 ms holds none, so many
+  of them cannot keep the owner out.
+- Every change in the UI is one `nerve-node` command that the node runs for
+  its owner through the owner endpoint (below), with `NERVE_OWNER_VIA=web` in
+  its environment and every check the CLI makes. A command with that variable
+  refuses `ui on`, `ui off`, `ui token add`, any change of a `ui.*` setting
+  (`config set`, `config edit` and the like) that is not the removal of a
+  token, and `config accept`; the rest of `ui` reads or revokes. So a browser
+  session can neither widen the UI's address, nor give itself a token that
+  outlives it. The pages offer what the desktop app's offer; the commands
+  that need root (`install`, `update`, `uninstall`, `service`, `sudo on`),
+  `backup`, `restore` and `setup` stay at the CLI.
+- `center add --link-stdin` reads the pairing link from the first line of its
+  input, so it is not in the process list; the web UI pairs that way.
+- A `restore` of a config that turns the UI on says so, and at which address;
+  when the address is beyond loopback and neither the backup nor this node
+  has the UI's key, the UI does not listen until `ui on --new-cert` makes one.
 
 ### Modes
 

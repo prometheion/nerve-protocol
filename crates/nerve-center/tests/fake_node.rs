@@ -1053,19 +1053,15 @@ async fn a_second_link_while_the_first_answers_is_a_duplicate() {
 
 /// `/api/overview` as the web UI's page reads it.
 async fn overview(r: &Running) -> Value {
-    let ui = nerve_center::ui::Ui::new(&r.center, None, false, false);
+    let ui = nerve_center::ui::Ui::new(&r.center, None, false);
     let mut req = http("GET", &[("host", "127.0.0.1:1")], Value::Null);
     req.path = "/api/session".into();
     let resp = ui.request(req).await;
-    let (_, cookie) = resp
-        .headers
-        .iter()
-        .find(|(k, _)| k == "Set-Cookie")
-        .expect("a session cookie");
-    let cookie = cookie.split(';').next().unwrap();
+    let v: Value = serde_json::from_slice(&resp.body).unwrap();
+    let session = v["session"].as_str().expect("a session");
     let mut req = http(
         "GET",
-        &[("host", "127.0.0.1:1"), ("cookie", cookie)],
+        &[("host", "127.0.0.1:1"), ("x-nerve-session", session)],
         Value::Null,
     );
     req.path = "/api/overview".into();
@@ -2078,19 +2074,15 @@ async fn audit_targets_are_cut_and_the_audit_feed_is_bounded() {
         feed.len()
     );
     // The UI without a login hands out a session to the page.
-    let ui = nerve_center::ui::Ui::new(&r.center, None, false, false);
+    let ui = nerve_center::ui::Ui::new(&r.center, None, false);
     let mut req = http("GET", &[("host", "127.0.0.1:1")], Value::Null);
     req.path = "/api/session".into();
     let resp = ui.request(req).await;
-    let (_, cookie) = resp
-        .headers
-        .iter()
-        .find(|(k, _)| k == "Set-Cookie")
-        .expect("a session cookie");
-    let cookie = cookie.split(';').next().unwrap();
+    let v: Value = serde_json::from_slice(&resp.body).unwrap();
+    let session = v["session"].as_str().expect("a session");
     let mut req = http(
         "GET",
-        &[("host", "127.0.0.1:1"), ("cookie", cookie)],
+        &[("host", "127.0.0.1:1"), ("x-nerve-session", session)],
         Value::Null,
     );
     req.path = "/api/audit".into();

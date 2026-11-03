@@ -164,6 +164,15 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         "nerve-node relay ls",
         (Some(Page::Relay), -1, "Relay"),
     ),
+    // The web UI is the node's other way in from a browser; the app does
+    // not switch it.
+    ("ui", "nerve-node ui", NOT_HERE),
+    ("ui status", "nerve-node ui status", NOT_HERE),
+    ("ui on", "nerve-node ui on", NOT_HERE),
+    ("ui off", "nerve-node ui off", NOT_HERE),
+    ("ui token add", "nerve-node ui token add laptop", NOT_HERE),
+    ("ui token ls", "nerve-node ui token ls", NOT_HERE),
+    ("ui token rm", "nerve-node ui token rm laptop", NOT_HERE),
     (
         "mode set",
         "nerve-node mode set folder --center lab",

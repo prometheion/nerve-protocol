@@ -705,17 +705,21 @@ Whether there is a login is settled at start:
   that the first token can be made in the UI; it then answers only for
   loopback host names.
 
-With a login, every page and API call but the login form and its assets needs
-a session: a browser without one is sent to `/login`, where the token is
-posted once as a form (never in a URL). A right token answers with the
-session cookie (`HttpOnly`, `SameSite=Strict`, `Secure` over TLS, 12 hours);
-`POST /logout` ends the session and clears the cookie. Tokens are compared in
-constant time, a wrong one is answered after 300 ms, and five wrong tokens in
-a minute lock the login for the rest of that minute (429). A session ends
-with its token: deleting the token in the UI stops the cookie that logged in
-with it. A token that is lost is replaced by starting once with
-`--ui-no-login` on loopback and making a new one. Every change needs the CSRF
-header from `/api/session`. Pairing shows the link and the code; a QR code is
+The page and its assets are public; every API call needs a session. The
+page asks `/api/session` first and goes to `/login` without one, where the
+token is posted once (as JSON or a form, never in a URL). A right token
+answers with a session (12 hours), which the page keeps in its tab's
+`sessionStorage` and sends as the `X-Nerve-Session` header with every API
+call; there is no cookie and no CSRF token (another origin can neither read
+the session nor send the header without a CORS preflight, which is not
+answered). `POST /logout` ends the session. Tokens are compared in constant
+time, a wrong one is answered after 300 ms, and five wrong tokens in a minute
+lock the login for the rest of that minute (429). A session ends with its
+token: deleting the token in the UI ends the sessions that logged in with it.
+A token that is lost is replaced by starting once with `--ui-no-login` on
+loopback and making a new one. Without a login, `/api/session` hands each tab
+a session of its own. A post must carry a matching `Origin` when the browser
+sends one. Pairing shows the link and the code; a QR code is
 not offered.
 
 ## 8. What the center keeps

@@ -26,6 +26,7 @@ center is paired.
 | Command | Does | Page |
 |---|---|---|
 | `center add '<link>' [--name N] [--yes]` | Pair with a center | [pairing](pairing.md) |
+| `center add --link-stdin [--name N] [--yes]` | The same, with the link read from the first line of stdin, so it never shows in the process list | [pairing](pairing.md) |
 | `center rm` | Unpair and delete the key | [pairing](pairing.md#unpair) |
 | `center rotate-key [--end-grace]` | Give this machine a new key for a center, or end the old key's 7 days | [pairing](pairing.md#rotate-the-machines-key) |
 | `center ls` | List centers, their mode and grant | [pairing](pairing.md) |
@@ -72,6 +73,8 @@ center is paired.
 | `log [--problems] [--last N] [--follow]` | Show the node's log | [logs](logs.md) |
 | `log clear` | Empty the node's log | [logs](logs.md#clear-it) |
 | `panic`, `unlock` | Stop everything, then allow it again | [stop](stop.md#panic) |
+| `ui [status]`, `ui on [--listen ADDRESS] [--name HOST]… [--new-cert]`, `ui off` | The node's web UI (the installed node on Linux): show it, turn it on, turn it off | [node web UI](node-web-ui.md) |
+| `ui token add <label>`, `ui token ls`, `ui token rm <label>` | Make, list and revoke the tokens that log in to it | [node web UI](node-web-ui.md#tokens) |
 
 ## Install and set up
 
@@ -145,7 +148,10 @@ one JSON value from stdout:
   with `"next_start": true` when the node takes the change only at its next
   start (it does not run, or it is the installed node on Windows, which
   takes only folder changes while it runs); `center add --yes` says it the
-  same way. `relay add` and `relay token` add `"token"` (`node`, `token`,
+  same way. `ui on` (with no token yet) and `ui token add` add `"token"`
+  (`label`, `token`), `ui on` beyond loopback `"certificate"`
+  (`fingerprint`, `made`); `ui status` adds `"ui"` and `ui token ls`
+  `"tokens"`. `relay add` and `relay token` add `"token"` (`node`, `token`,
   `address`, `link`, the `nerve://relay` link the other node pastes,
   `proxy`, the URL it sets with `proxy set`, and `pin`); `relay ls` has
   `"address"`, where a new link says the relay is,

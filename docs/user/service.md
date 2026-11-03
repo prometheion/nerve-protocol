@@ -179,6 +179,11 @@ cap provider allow`. Any other account is refused as it connects. The two
 sockets have places of their own, so attached programs never keep the owner's
 commands out, nor the reverse.
 
+The [web UI](node-web-ui.md) is part of the service too, on Linux, and off
+until the owner runs `nerve-node ui on`: then the running service listens on
+`127.0.0.1:7470` itself, with no change to the unit. `nerve-node ui off`
+stops it at once. Off, the service listens on nothing for it.
+
 ## The accounts commands run as
 
 `nerve` only holds the node's config, keys and state; no command runs as it.
