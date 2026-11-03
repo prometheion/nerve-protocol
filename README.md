@@ -94,10 +94,15 @@ decide. Set it up on the **Action checker** page of the web UI
 | Building, changing and releasing Nerve: architecture, policy engine, checks | [docs/dev/](docs/dev/README.md) |
 | The protocol and the conformance suite | [docs/dev/spec/](docs/dev/spec/README.md), [schemas/](schemas), [crates/nerve-conformance](crates/nerve-conformance) |
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md): how to build and check a change, and what a pull request brings.
+
 ## Security
 
 Report a security hole privately, through **Report a vulnerability** on the
-repository's Security tab. [SECURITY.md](SECURITY.md) says how, what is in
+repository's Security tab (without that button, open an issue that says only
+that you have a report, and no more). [SECURITY.md](SECURITY.md) says how, what is in
 scope, what `update` trusts (the releases are not signed yet), and the known
 limits.
 

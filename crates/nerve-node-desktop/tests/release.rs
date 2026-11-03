@@ -2,7 +2,8 @@
 //! `nerve-node` of its own, since there the app is the only way to the node
 //! (docs/user/install.md); what the released app keeps for the licence it
 //! uses Slint under; and that the Linux programs are installed and tested
-//! where the docs say before they are published.
+//! where the docs say before they are published; and that the security
+//! policy names a way in that needs no repository setting.
 
 const RELEASE: &str = include_str!("../../../.github/workflows/release.yml");
 
@@ -183,4 +184,30 @@ fn the_release_installs_its_linux_programs_where_the_docs_say_they_are_tested() 
     for name in ["Ubuntu 22.04 and 24.04, Debian 12", "aarch64"] {
         assert!(tested.contains(name), "{name}: {tested}");
     }
+}
+
+/// GitHub's private vulnerability reporting is a setting of the repository,
+/// and the Security tab has no button while it is off. The policy then still
+/// names a way in that is no public report of the hole.
+#[test]
+fn the_security_policy_names_a_way_in_without_the_reporting_button() {
+    let policy = include_str!("../../../SECURITY.md");
+    let readme = include_str!("../../../README.md");
+    assert!(policy.contains("security/advisories/new"), "{policy}");
+    for (name, text) in [("SECURITY.md", policy), ("README.md", readme)] {
+        assert!(
+            text.contains("open an issue") || text.contains("Open an [issue]"),
+            "{name} has no way in when the Security tab has no button"
+        );
+    }
+    assert!(
+        policy.contains("nerve-protocol/issues/new")
+            && policy.contains("with nothing about the hole in it"),
+        "{policy}"
+    );
+    // The contribution guide sends a hole to the policy, and the README
+    // sends a contributor to the guide.
+    let guide = include_str!("../../../CONTRIBUTING.md");
+    assert!(guide.contains("(SECURITY.md)"), "{guide}");
+    assert!(readme.contains("(CONTRIBUTING.md)"), "{readme}");
 }

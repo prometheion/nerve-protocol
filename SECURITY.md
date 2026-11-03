@@ -12,6 +12,11 @@ Use GitHub's private vulnerability reporting: on the repository's
 (<https://github.com/prometheion/nerve-protocol/security/advisories/new>).
 Only the maintainers see the report.
 
+If the Security tab has no such button, do not put the hole in a public issue.
+Open an [issue](https://github.com/prometheion/nerve-protocol/issues/new) that
+says only that you have a security report, with nothing about the hole in it.
+A maintainer answers there and gives you a private way to send it.
+
 Please say:
 
 - which program and version (`nerve-node --version`, `nerve-center --version`,
