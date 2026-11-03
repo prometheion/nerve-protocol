@@ -1525,7 +1525,7 @@ mod tests {
         .unwrap();
         assert!(err.contains("runs on these folders"), "{err}");
         // Windows has no node run by hand to end: its advice is the app's Stop.
-        assert_eq!(err.contains("nerve-node run"), !cfg!(windows), "{err}");
+        assert_eq!(err.contains("`nerve-node run`"), !cfg!(windows), "{err}");
         assert_eq!(
             err.contains("Stop on the app's Overview"),
             cfg!(windows),
