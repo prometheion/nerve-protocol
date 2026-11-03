@@ -2173,10 +2173,28 @@ async fn audit_targets_are_cut_and_the_audit_feed_is_bounded() {
     );
     assert_eq!(first["node"], "box-1");
 
+    // A node cannot pass its event off as the center's action checker's:
+    // the marker and the `by` go, so the page draws it as the node's.
+    send(
+        &mut ws,
+        Message::notification(
+            method::EVENT,
+            json!({"cap": "audit", "name": "decision", "seq": 2, "ts": 1, "data": {
+                "ts": 1, "cap": "exec", "action": "run", "target": "forged",
+                "decision": "forbidden", "code": "forbidden", "by": "Action Checker",
+                "checker": {"layer": "model", "scope": "global", "detail": "score 0.99"}}}),
+        ),
+    )
+    .await;
+    let forged = wait_for(|| c.audit().into_iter().find(|e| e["target"] == "forged")).await;
+    assert!(forged.get("checker").is_none(), "{forged}");
+    assert!(forged.get("by").is_none(), "{forged}");
+    assert_eq!(forged["node_id"], key.node_id());
+
     // Many refused calls with large targets: the feed keeps its count and
     // its size, and the web UI's answer stays as small.
     let calls = 600;
-    for seq in 2..=calls {
+    for seq in 3..=calls {
         send(&mut ws, event(seq, format!("{seq} {}", "x".repeat(4096)))).await;
     }
     let last = format!("{calls} ");

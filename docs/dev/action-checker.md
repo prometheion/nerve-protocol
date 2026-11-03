@@ -296,9 +296,18 @@ owner's. The model client waits up to the checker's own timeout for an answer
 timeout, so a slow model on a small CPU is not cut short. The supervisor
 (`checker/server.rs`) runs the installed binary
 with `-m <model>`, `-ngl 0` (CPU) or `-ngl 999` (GPU), `-c`, `-b` and `-ub`
-of the model's context and `-np 1`, on a free loopback
-port, restarted with backoff, ended with the center (`kill_on_drop`, a process
-group on Unix); its state and the install progress show in the UI. The endpoint
+of the model's context and `-np 1`, restarted with backoff, ended with the
+center (`kill_on_drop`, a process group on Unix); its state and the install
+progress show in the UI. It listens on `<state>/checker-model.sock` (`--host
+<path>.sock`) on Unix, so no other account can reach it or bind its address
+after a crash; on Windows, or where that path is over 100 bytes, on a free
+port of `127.0.0.1`, where the supervisor first checks that the server
+answers `/v1/models` with 401 to a key it was not given (a process that took
+the port answers anyone, and is not trusted). Either way it gets a random key
+per start in `LLAMA_API_KEY` (its environment, not its command line, which
+every account can read in `/proc`), and every call and probe carries it
+(`Endpoint::token`); `/health` is the only path llama-server leaves open. A
+stale socket file is removed before each start. The endpoint
 token is the only secret and is not in a backup; the installed files are not in
 a backup either (they are re-downloaded).
 

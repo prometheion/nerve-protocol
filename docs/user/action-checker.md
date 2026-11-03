@@ -308,7 +308,10 @@ text generated, so a judgement is fast and cheap. There are two sources:
   GPU). The center downloads a prebuilt `llama-server` from llama.cpp's GitHub
   release and the model from Hugging Face into `checker/` in its own state
   folder — never system-wide — checks each against a pinned SHA-256, unpacks
-  it, and runs it on loopback. These files are not in a backup; after a
+  it, and runs it so that only the center reaches it: on Linux on a socket in
+  the state folder (`checker-model.sock`), which no other account may open,
+  and with a key of its own that each call carries. Another process can
+  neither use the model nor answer in its place. These files are not in a backup; after a
   restore on another machine, install the model again, or a model that is on
   refuses every call it sees. The [installed center
   service](center.md#run-it-as-a-service) on Linux sees no GPU, so it runs the

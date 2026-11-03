@@ -143,6 +143,7 @@ In the state folder:
 | `owner-token` | The [owner token](web-ui.md#log-in), which logs in to the web UI (mode 0600). Not in a backup |
 | `log.jsonl` | The [log](logs.md): links, pairing, changes, refused and failed calls, the action checker's decisions, errors. `log.jsonl.1` is the older half |
 | `checker-model.token` | The bearer token of the action checker's model endpoint, when you set one (mode 0600) |
+| `checker-model.sock` | The socket the action checker's local model listens on while it runs (Linux) |
 | `checker/` | The action checker's local model, when you installed it: the llama.cpp build and the model file, 1.1 or 3.0 GB |
 
 It never stores file contents, command output or arguments. The secrets are

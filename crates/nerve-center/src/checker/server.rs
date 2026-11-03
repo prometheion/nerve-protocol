@@ -1,11 +1,19 @@
 //! The local `llama-server` the center runs itself (docs/dev/action-checker.md).
 //!
 //! The center installs a prebuilt `llama-server` and the chosen model into its
-//! state folder ([`super::install`]) and runs it from there. The server
-//! listens on `127.0.0.1` on a free port, on the CPU or (the Vulkan build) the
-//! GPU. The center checks `/v1/models` says `decisions` and refuses a
-//! non-decision model. A server that dies is restarted with backoff; it ends
-//! with the center, with no orphan.
+//! state folder ([`super::install`]) and runs it from there, on the CPU or
+//! (the Vulkan build) the GPU. The center checks `/v1/models` says
+//! `decisions` and refuses a non-decision model. A server that dies is
+//! restarted with backoff; it ends with the center, with no orphan.
+//!
+//! Only the center reaches it. On Unix it listens on a socket in the state
+//! folder, which no other account may enter, so no other process can take
+//! its place after a crash and answer for it; elsewhere (or where that path
+//! is too long for a socket) on a free port of `127.0.0.1`, where the center
+//! first checks that the server refuses a key it was not given. Either way
+//! it takes calls only with a random key of this start, passed in its
+//! environment (`LLAMA_API_KEY`), not on its command line, which every
+//! account may read: another process cannot use it, or hold its one slot.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -59,7 +67,9 @@ struct Inner {
 /// Windows refuses while it runs); dropping it only aborts the supervisor.
 pub struct LocalServer {
     inner: Arc<Mutex<Inner>>,
-    port: u16,
+    listen: Listen,
+    /// The key calls carry, made for this server.
+    key: String,
     task: JoinHandle<()>,
     /// Asked to end the server.
     shutdown: Arc<tokio::sync::Notify>,
@@ -67,6 +77,48 @@ pub struct LocalServer {
     exited: Arc<tokio::sync::Notify>,
     /// Its speed, kept across calls for as long as one process of it runs.
     budget: Arc<ReadBudget>,
+}
+
+/// Where the server listens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Listen {
+    /// A Unix socket in the center's state folder.
+    Socket(PathBuf),
+    /// A port of `127.0.0.1`.
+    Port(u16),
+}
+
+/// The socket's name in the state folder.
+pub const SOCKET: &str = "checker-model.sock";
+/// The longest socket path: a Unix socket's address holds 108 bytes.
+const SOCKET_PATH_MAX: usize = 100;
+
+impl Listen {
+    /// A socket in `dir` where the platform has them and the path fits, else
+    /// a free port.
+    fn for_dir(dir: &Path) -> Result<Listen, String> {
+        let sock = dir.join(SOCKET);
+        if cfg!(unix) && sock.as_os_str().len() <= SOCKET_PATH_MAX {
+            return Ok(Listen::Socket(sock));
+        }
+        free_port().map(Listen::Port)
+    }
+
+    /// The endpoint's URL: the address, or for a socket only the `Host`.
+    fn url(&self) -> String {
+        match self {
+            Listen::Socket(_) => "http://localhost:80".into(),
+            Listen::Port(p) => format!("http://127.0.0.1:{p}"),
+        }
+    }
+
+    /// How the UI names it.
+    fn shown(&self) -> String {
+        match self {
+            Listen::Socket(p) => format!("unix:{}", p.display()),
+            Listen::Port(p) => format!("http://127.0.0.1:{p}"),
+        }
+    }
 }
 
 impl Drop for LocalServer {
@@ -84,9 +136,23 @@ impl LocalServer {
     /// at once; the status moves from starting to ready (or failed) as the
     /// server comes up. The model is already on disk (the one-click install
     /// fetched it), so there is no download at start.
+    /// Starts the server of `bin` on `model`; its socket goes in `dir`, the
+    /// center's state folder.
     pub fn start(
         bin: PathBuf,
         model: PathBuf,
+        dir: &Path,
+        gpu: bool,
+        timeout_ms: u64,
+        pin: &ModelPin,
+    ) -> Result<LocalServer, String> {
+        LocalServer::start_at(bin, model, Listen::for_dir(dir)?, gpu, timeout_ms, pin)
+    }
+
+    fn start_at(
+        bin: PathBuf,
+        model: PathBuf,
+        listen: Listen,
         gpu: bool,
         timeout_ms: u64,
         pin: &ModelPin,
@@ -95,17 +161,18 @@ impl LocalServer {
         if !bin.exists() {
             return Err("the local model is not installed".into());
         }
-        let port = free_port()?;
+        let key = nerve_transport::keys::random_token(40);
         let inner = Arc::new(Mutex::new(Inner::default()));
-        let args = build_args(&model, gpu, port, context);
+        let args = build_args(&model, gpu, &listen, context);
         let timeout = Duration::from_millis(timeout_ms.max(100));
         let shutdown = Arc::new(tokio::sync::Notify::new());
         let exited = Arc::new(tokio::sync::Notify::new());
         let budget = Arc::new(ReadBudget::new(context, pin.read_ms, pin.read_growth));
+        let endpoint = endpoint_of(&listen, &key, None);
         let task = tokio::spawn(supervise(
             bin,
             args,
-            port,
+            (listen.clone(), endpoint),
             timeout,
             inner.clone(),
             shutdown.clone(),
@@ -114,7 +181,8 @@ impl LocalServer {
         ));
         Ok(LocalServer {
             inner,
-            port,
+            listen,
+            key,
             task,
             shutdown,
             exited,
@@ -143,11 +211,7 @@ impl LocalServer {
 
     /// The endpoint for the client, once the server is listening.
     pub fn endpoint(&self) -> Endpoint {
-        Endpoint {
-            budget: Some(self.budget.clone()),
-            ..Endpoint::parse(&format!("http://127.0.0.1:{}", self.port), None, None)
-                .expect("a loopback URL parses")
-        }
+        endpoint_of(&self.listen, &self.key, Some(self.budget.clone()))
     }
 
     /// Whether the server ended while it read a call and has not come up
@@ -181,8 +245,22 @@ impl LocalServer {
     }
 }
 
+/// The endpoint of a server that listens at `listen` and takes `key`.
+fn endpoint_of(listen: &Listen, key: &str, budget: Option<Arc<ReadBudget>>) -> Endpoint {
+    Endpoint {
+        budget,
+        socket: match listen {
+            Listen::Socket(p) => Some(p.clone()),
+            Listen::Port(_) => None,
+        },
+        ..Endpoint::parse(&listen.url(), Some(key.to_string()), None)
+            .expect("a loopback URL parses")
+    }
+}
+
 /// The llama-server command line (without the program itself): the installed
-/// model file, all layers on the GPU or none (CPU only), and the context.
+/// model file, where it listens, all layers on the GPU or none (CPU only),
+/// and the context. The key is not on it: it is in the environment.
 ///
 /// Without `-c` the server sizes the context from the model (up to 262,144
 /// tokens, 13 GB for Kev-4B), and without `-b`/`-ub` it reads 512 tokens at a
@@ -190,15 +268,21 @@ impl LocalServer {
 /// long command failed closed. One slot: the checker asks one question at a
 /// time per call, and four slots would share the one context, each keeping
 /// its last state in it.
-fn build_args(model: &Path, gpu: bool, port: u16, context: u32) -> Vec<String> {
+fn build_args(model: &Path, gpu: bool, listen: &Listen, context: u32) -> Vec<String> {
     let context = context.to_string();
-    vec![
-        "-m".into(),
-        model.to_string_lossy().into_owned(),
-        "--host".into(),
-        "127.0.0.1".into(),
-        "--port".into(),
-        port.to_string(),
+    let at = match listen {
+        // A host that ends in `.sock` is a Unix socket to llama-server.
+        Listen::Socket(p) => vec!["--host".into(), p.to_string_lossy().into_owned()],
+        Listen::Port(port) => vec![
+            "--host".into(),
+            "127.0.0.1".into(),
+            "--port".into(),
+            port.to_string(),
+        ],
+    };
+    let mut args: Vec<String> = vec!["-m".into(), model.to_string_lossy().into_owned()];
+    args.extend(at);
+    args.extend([
         "-ngl".into(),
         // 999 puts every layer on the GPU; 0 keeps it on the CPU.
         if gpu { "999".into() } else { "0".into() },
@@ -210,7 +294,8 @@ fn build_args(model: &Path, gpu: bool, port: u16, context: u32) -> Vec<String> {
         context,
         "-np".into(),
         "1".into(),
-    ]
+    ]);
+    args
 }
 
 /// A free loopback port: bind to port 0, read the port, and drop the
@@ -228,7 +313,7 @@ fn free_port() -> Result<u16, String> {
 async fn supervise(
     program: PathBuf,
     args: Vec<String>,
-    port: u16,
+    at: (Listen, Endpoint),
     timeout: Duration,
     inner: Arc<Mutex<Inner>>,
     shutdown: Arc<tokio::sync::Notify>,
@@ -242,7 +327,7 @@ async fn supervise(
             i.url = None;
         });
         budget.restart();
-        match run_once(&program, &args, port, timeout, &inner, &shutdown, &budget).await {
+        match run_once(&program, &args, &at, timeout, &inner, &shutdown, &budget).await {
             RunEnd::NotDecision => {
                 // A clear, final failure: do not restart.
                 budget.settled();
@@ -298,14 +383,23 @@ async fn kill_and_wait(child: &mut tokio::process::Child) {
 async fn run_once(
     program: &PathBuf,
     args: &[String],
-    port: u16,
+    (listen, endpoint): &(Listen, Endpoint),
     timeout: Duration,
     inner: &Arc<Mutex<Inner>>,
     shutdown: &Arc<tokio::sync::Notify>,
     budget: &ReadBudget,
 ) -> RunEnd {
+    // A socket a run before left behind would stop this one from listening;
+    // it is the center's own, in its own folder.
+    if let Listen::Socket(p) = listen {
+        let _ = std::fs::remove_file(p);
+    }
     let mut cmd = Command::new(program);
     cmd.args(args)
+        .env(
+            "LLAMA_API_KEY",
+            endpoint.token.as_deref().unwrap_or_default(),
+        )
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -331,9 +425,7 @@ async fn run_once(
         });
     }
     // Probe until it is ready, it exits, or we are aborted.
-    let endpoint = Endpoint::parse(&format!("http://127.0.0.1:{port}"), None, None)
-        .expect("a loopback URL parses");
-    let url = format!("http://127.0.0.1:{port}");
+    let url = listen.shown();
     loop {
         tokio::select! {
             _ = shutdown.notified() => {
@@ -358,7 +450,15 @@ async fn run_once(
                 return RunEnd::Exited;
             }
             _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                match tokio::time::timeout(timeout, model::is_decision_model(&endpoint)).await {
+                match tokio::time::timeout(timeout, model::is_decision_model(endpoint)).await {
+                    Ok(Ok(true)) if !ours(listen, endpoint, timeout).await => {
+                        set(inner, |i| {
+                            i.phase = Some(Phase::Failed);
+                            i.message = format!("another process answers at {url} for the local model, and takes keys it was not given; the checker does not trust it");
+                        });
+                        kill_and_wait(&mut child).await;
+                        return RunEnd::Exited;
+                    }
                     Ok(Ok(true)) => {
                         set(inner, |i| {
                             i.phase = Some(Phase::Ready);
@@ -407,6 +507,19 @@ async fn run_once(
     }
 }
 
+/// Whether the server that answered is the one this run started: on a
+/// socket in the state folder it is, as no other account can listen there;
+/// on a port it must refuse a key it was not given.
+async fn ours(listen: &Listen, endpoint: &Endpoint, timeout: Duration) -> bool {
+    match listen {
+        Listen::Socket(_) => true,
+        Listen::Port(_) => matches!(
+            tokio::time::timeout(timeout, model::refuses_other_keys(endpoint)).await,
+            Ok(Ok(true))
+        ),
+    }
+}
+
 fn is_download(line: &str) -> bool {
     let l = line.to_ascii_lowercase();
     l.contains("download") || l.contains("fetching") || l.contains("%|")
@@ -427,9 +540,11 @@ fn set(inner: &Arc<Mutex<Inner>>, f: impl FnOnce(&mut Inner)) {
 #[cfg(all(test, unix))]
 pub(crate) mod fake {
     /// A fake `llama-server`: a shell script that ignores the model and serves
-    /// `/v1/models` (a decision model) and `/v1/systemone` on the `--port` it
-    /// is given, so the supervisor can be tested without a real model. It
-    /// writes its process id to `pid` beside it. Unix only (it uses
+    /// `/v1/models` (a decision model) and `/v1/systemone` on the `--host`
+    /// socket or the `--port` it is given, with the key of `LLAMA_API_KEY`
+    /// as llama-server checks it, so the supervisor can be tested without a
+    /// real model. It writes its process id to `pid` and its key to `key`
+    /// beside it. Unix only (it uses
     /// `/bin/sh` and `nc`-free shell); skipped elsewhere.
     pub(crate) fn fake_llama_server(dir: &std::path::Path) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -439,24 +554,40 @@ pub(crate) mod fake {
         // path.
         let script = r#"#!/bin/sh
 port=""
+host=""
 prev=""
 for a in "$@"; do
   if [ "$prev" = "--port" ]; then port="$a"; fi
+  if [ "$prev" = "--host" ]; then host="$a"; fi
   prev="$a"
 done
 echo $$ > "$(dirname "$0")/pid"
-exec python3 - "$port" "$(dirname "$0")" <<'PY'
-import os, sys, http.server
-port = int(sys.argv[1])
-here = sys.argv[2]
+exec python3 - "$host" "$port" "$(dirname "$0")" <<'PY'
+import os, sys, http.server, socketserver
+host, port, here = sys.argv[1], sys.argv[2], sys.argv[3]
+key = os.environ.get("LLAMA_API_KEY", "")
+with open(here + "/key", "w") as f:
+    f.write(key)
 class H(http.server.BaseHTTPRequestHandler):
+    def address_string(self):
+        return "local"
     def _send(self, body, code=200):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+    def _key_ok(self):
+        # As llama-server with --api-key: every path but /health needs it.
+        if not key or self.path == "/health":
+            return True
+        if self.headers.get("Authorization", "") == "Bearer " + key:
+            return True
+        self._send(b'{"error":{"code":401}}', 401)
+        return False
     def do_GET(self):
+        if not self._key_ok():
+            return
         # While a file `models-closed` lies beside the script, /v1/models
         # answers "not ready" and everything else goes on, as a server that
         # has loaded its model but is not counted ready yet.
@@ -467,13 +598,22 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         self.rfile.read(n)
+        if not self._key_ok():
+            return
         if self.path == "/tokenize":
             self._send(b'{"tokens":[1,2,3]}')
             return
         self._send(b'{"answers":{"danger":{"type":"noul","noul":0.99}}}')
     def log_message(self, *a):
         pass
-http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+class UnixServer(socketserver.UnixStreamServer):
+    def get_request(self):
+        sock, _ = super().get_request()
+        return sock, ("local", 0)
+if host.endswith(".sock"):
+    UnixServer(host, H).serve_forever()
+else:
+    http.server.HTTPServer(("127.0.0.1", int(port)), H).serve_forever()
 PY
 "#;
         std::fs::write(&bin, script).unwrap();
@@ -489,14 +629,25 @@ mod tests {
     #[test]
     fn cpu_and_gpu_args() {
         let model = std::path::Path::new("/s/checker/model/d1-2B-Q4_K_M.gguf");
-        let cpu = build_args(model, false, 12345, 4096);
+        let cpu = build_args(model, false, &Listen::Port(12345), 4096);
         assert!(cpu.windows(2).any(|w| w == ["-ngl", "0"]));
         assert!(cpu.windows(2).any(|w| w == ["--port", "12345"]));
+        let sock = build_args(
+            model,
+            false,
+            &Listen::Socket("/s/checker-model.sock".into()),
+            4096,
+        );
+        assert!(
+            sock.windows(2)
+                .any(|w| w == ["--host", "/s/checker-model.sock"])
+        );
+        assert!(!sock.iter().any(|a| a == "--port"), "{sock:?}");
         assert!(
             cpu.windows(2)
                 .any(|w| w == ["-m", "/s/checker/model/d1-2B-Q4_K_M.gguf"])
         );
-        let gpu = build_args(model, true, 12345, 4096);
+        let gpu = build_args(model, true, &Listen::Port(12345), 4096);
         assert!(gpu.windows(2).any(|w| w == ["-ngl", "999"]));
     }
 
@@ -505,7 +656,7 @@ mod tests {
     #[test]
     fn the_context_is_bounded_and_read_in_one_batch() {
         let model = std::path::Path::new("/s/checker/model/d1-2B-Q4_K_M.gguf");
-        let args = build_args(model, false, 12345, 12_288);
+        let args = build_args(model, false, &Listen::Port(12345), 12_288);
         for flag in ["-c", "-b", "-ub"] {
             assert!(
                 args.windows(2).any(|w| w == [flag, "12288"]),
@@ -527,9 +678,15 @@ mod tests {
         std::fs::write(&bin, b"").unwrap();
         for model in [LocalModel::D1_2b, LocalModel::Kev4b] {
             let pin = crate::checker::install::model_pin(model);
-            let server =
-                LocalServer::start(bin.clone(), dir.path().join("model.gguf"), false, 5000, pin)
-                    .expect("start");
+            let server = LocalServer::start(
+                bin.clone(),
+                dir.path().join("model.gguf"),
+                dir.path(),
+                false,
+                5000,
+                pin,
+            )
+            .expect("start");
             let budget = server.endpoint().budget.expect("a budget");
             assert_eq!(
                 budget.built_with(),
@@ -559,6 +716,7 @@ mod tests {
         let server = LocalServer::start(
             bin,
             model,
+            dir.path(),
             false,
             5000,
             crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b),
@@ -580,14 +738,16 @@ mod tests {
         .unwrap();
         assert_eq!(score, 0.99);
         // Stop returns well inside its own 10 s cap, because the child has
-        // exited (not because the cap ran out), and the port is free: the
-        // process is gone (review r3, finding 6).
-        let port = server.port;
+        // exited (not because the cap ran out), and its socket answers no
+        // more: the process is gone (review r3, finding 6).
+        let Listen::Socket(sock) = server.listen.clone() else {
+            panic!("a socket on Unix")
+        };
         tokio::time::timeout(Duration::from_secs(4), server.stop())
             .await
             .expect("stop did not end the child");
         assert!(
-            std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
+            std::os::unix::net::UnixStream::connect(&sock).is_err(),
             "the server still answers after stop"
         );
     }
@@ -605,7 +765,7 @@ mod tests {
         let model = dir.path().join("model.gguf");
         std::fs::write(&model, b"x").unwrap();
         let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
-        let server = LocalServer::start(bin, model, false, 5000, pin).expect("start");
+        let server = LocalServer::start(bin, model, dir.path(), false, 5000, pin).expect("start");
         let until = async |what: &str, f: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + Duration::from_secs(20);
             while !f() {
@@ -639,6 +799,73 @@ mod tests {
         server.stop().await;
     }
 
+    /// The server listens on a socket in the state folder on Unix, and
+    /// takes calls only with the key of this start, which it gets in its
+    /// environment, not on its command line: a call without it is refused.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_the_center_reaches_its_local_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = ready_fake(dir.path()).await;
+        assert_eq!(server.listen, Listen::Socket(dir.path().join(SOCKET)));
+        let given = std::fs::read_to_string(dir.path().join("key")).unwrap();
+        assert!(given.len() >= 32, "the server got no key: {given:?}");
+        assert_eq!(given, server.key);
+        let args = build_args(Path::new("m"), false, &server.listen, 4096);
+        assert!(!args.iter().any(|a| a.contains(&server.key)), "{args:?}");
+        // The key is what lets a call in.
+        let ep = server.endpoint();
+        assert!(model::is_decision_model(&ep).await.unwrap());
+        assert!(model::refuses_other_keys(&ep).await.unwrap());
+        let without = Endpoint { token: None, ..ep };
+        assert!(model::is_decision_model(&without).await.is_err());
+        server.stop().await;
+    }
+
+    /// On a port, which any process may take after a crash, a server that
+    /// answers a key it was not given is not taken for the center's own:
+    /// its answers would decide every call.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_process_that_took_the_port_is_not_trusted() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let squatter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = squatter.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut io, _)) = squatter.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = io.read(&mut buf).await;
+                    let body = r#"{"data":[{"architecture":{"output_modalities":["decisions"]}}]}"#;
+                    let _ = io
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                });
+            }
+        });
+        let listen = Listen::Port(port);
+        let ep = endpoint_of(&listen, "the-key", None);
+        assert!(model::is_decision_model(&ep).await.unwrap());
+        assert!(!ours(&listen, &ep, Duration::from_secs(5)).await);
+        // The fake server on a port of its own refuses other keys, and so is
+        // the one this run started.
+        let dir = tempfile::tempdir().unwrap();
+        let bin = super::fake::fake_llama_server(dir.path());
+        let model = dir.path().join("model.gguf");
+        std::fs::write(&model, b"x").unwrap();
+        let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
+        let at = Listen::Port(free_port().unwrap());
+        let server = LocalServer::start_at(bin, model, at, false, 5000, pin).expect("start");
+        until(&server, "ready", &|| server.ready()).await;
+        server.stop().await;
+    }
+
     /// Starts the fake server and waits until it is ready.
     #[cfg(unix)]
     async fn ready_fake(dir: &std::path::Path) -> LocalServer {
@@ -646,7 +873,7 @@ mod tests {
         let model = dir.join("model.gguf");
         std::fs::write(&model, b"x").unwrap();
         let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
-        let server = LocalServer::start(bin, model, false, 5000, pin).expect("start");
+        let server = LocalServer::start(bin, model, dir, false, 5000, pin).expect("start");
         until(&server, "ready", &|| server.ready()).await;
         server
     }
@@ -887,7 +1114,8 @@ mod tests {
         let bin = dir.path().join("llama-server");
         std::fs::write(&bin, "x").unwrap();
         let server = Arc::new(
-            LocalServer::start(bin, dir.path().join("m"), false, 5000, pin).expect("start"),
+            LocalServer::start(bin, dir.path().join("m"), dir.path(), false, 5000, pin)
+                .expect("start"),
         );
         while server.status().phase != Phase::Failed {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -921,7 +1149,7 @@ mod tests {
         let model = dir.path().join("model.gguf");
         std::fs::write(&model, b"x").unwrap();
         let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
-        let server = LocalServer::start(bin, model, false, 5000, pin).expect("start");
+        let server = LocalServer::start(bin, model, dir.path(), false, 5000, pin).expect("start");
         // The supervisor is past its restart and probing; the first probe is
         // after 500 ms.
         tokio::time::sleep(Duration::from_millis(200)).await;

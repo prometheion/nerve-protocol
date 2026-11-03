@@ -42,6 +42,10 @@ pub const NEXT_IDENTITY_FILE: &str = "tls.next.pem";
 pub use crate::audit::{AUDIT_KEEP, AUDIT_MAX_BYTES};
 const ALERTS_KEEP: usize = 50;
 
+/// Why a Save of the Action checker page was refused: the config changed
+/// since the page loaded it.
+pub const CHECKER_STALE: &str = "the action checker's settings changed since this page loaded them (another tab, or an allow rule from the Audit page); reload the page and make the change again";
+
 /// How the error of a save through [`Center::update_saved`] that could not
 /// be written begins.
 pub(crate) const UNWRITABLE: &str = "the center cannot write its state file";
@@ -2185,6 +2189,16 @@ impl Center {
                 let name = self.node_name(&node);
                 let mut e = ev.data.clone();
                 if let Some(o) = e.as_object_mut() {
+                    // The action checker's marker is the center's own: from a
+                    // node it would draw a refusal of the center's model, with
+                    // Allow buttons that save a center rule the node chose.
+                    o.remove("checker");
+                    if o.get("by")
+                        .and_then(Value::as_str)
+                        .is_some_and(|b| b.trim().eq_ignore_ascii_case("action checker"))
+                    {
+                        o.remove("by");
+                    }
                     o.insert("node_id".into(), json!(node));
                     o.insert("node".into(), json!(name));
                     o.entry("ts").or_insert(json!(ev.ts));
@@ -3675,6 +3689,7 @@ impl Center {
                     LocalServer::start(
                         bin,
                         model,
+                        &self.dir,
                         cfg.model.local_gpu,
                         cfg.model.timeout_ms,
                         checker::install::model_pin(cfg.model.local_model),
@@ -3748,7 +3763,27 @@ impl Center {
     /// saves it, rebuilds the checker and tells the UI. `clear_taint` clears
     /// every session's taint mark, for when taint is switched off.
     pub fn set_checker_config(&self, cfg: CheckerConfig, clear_taint: bool) {
-        self.update(|s| s.checker = cfg);
+        self.store_checker_config(cfg, clear_taint, None)
+            .expect("a save without a version is never stale");
+    }
+
+    /// [`set_checker_config`](Self::set_checker_config), refused with
+    /// [`CHECKER_STALE`] when `if_version` is given and the stored config is
+    /// at another version: checked and written under one lock of the store.
+    fn store_checker_config(
+        &self,
+        mut cfg: CheckerConfig,
+        clear_taint: bool,
+        if_version: Option<u64>,
+    ) -> Result<(), String> {
+        self.update(|s| {
+            if if_version.is_some_and(|v| v != s.checker.version) {
+                return Err(CHECKER_STALE.to_string());
+            }
+            cfg.version = s.checker.version + 1;
+            s.checker = cfg;
+            Ok(())
+        })?;
         if clear_taint {
             for s in self.sessions.lock().unwrap().values() {
                 s.tainted.store(false, Ordering::SeqCst);
@@ -3757,6 +3792,7 @@ impl Center {
         self.rebuild_checker();
         self.changed(Change::Nodes);
         self.changed(Change::Sessions);
+        Ok(())
     }
 
     /// What the web UI's Action checker page reads: the config (no token),
@@ -3796,7 +3832,18 @@ impl Center {
     /// with the chosen device. Refused while an install is already running.
     /// Validates a posted checker config and, if it holds, saves it. Taint
     /// switched off clears every session's mark.
-    pub fn apply_checker_config(&self, mut cfg: CheckerConfig) -> Result<(), String> {
+    pub fn apply_checker_config(&self, cfg: CheckerConfig) -> Result<(), String> {
+        self.apply_checker_config_if(cfg, None)
+    }
+
+    /// [`apply_checker_config`](Self::apply_checker_config) for the page's
+    /// Save: refused with [`CHECKER_STALE`] unless the stored config is
+    /// still at `if_version`, the version the page loaded.
+    pub fn apply_checker_config_if(
+        &self,
+        mut cfg: CheckerConfig,
+        if_version: Option<u64>,
+    ) -> Result<(), String> {
         // A rule the config adds has its conditions checked against the
         // schemas the machines publish; one it keeps stays, flagged where
         // its argument went since (`stale` in checker_json).
@@ -3871,8 +3918,7 @@ impl Center {
         // Keep in memory what a restart reads back from the stored part.
         cfg.settle_blocklist();
         let clear_taint = self.read(|s| s.checker.taint_on) && !cfg.taint_on;
-        self.set_checker_config(cfg, clear_taint);
-        Ok(())
+        self.store_checker_config(cfg, clear_taint, if_version)
     }
 
     /// Adds a saved allow rule, built for an audit button's `cap.action` and
@@ -3894,15 +3940,25 @@ impl Center {
             rule = format!("exec.run:exact:{}", target.trim());
         }
         self.read(|s| checker_typed(&rule, node_id.as_deref(), &s.nodes))?;
-        let mut cfg = self.read(|s| s.checker.clone());
         let entry = AllowRule {
             rule: rule.clone(),
             node_id,
         };
-        if !cfg.allow_rules.contains(&entry) {
-            cfg.allow_rules.push(entry);
+        // Added to the stored config under its lock: a read, a push and a
+        // write of the whole config would lose a change saved in between.
+        let added = self.update(|s| {
+            let new = !s.checker.allow_rules.contains(&entry);
+            if new {
+                s.checker.allow_rules.push(entry);
+                s.checker.version += 1;
+            }
+            new
+        });
+        if added {
+            self.rebuild_checker();
+            self.changed(Change::Nodes);
+            self.changed(Change::Sessions);
         }
-        self.set_checker_config(cfg, false);
         Ok(rule)
     }
 
@@ -4006,7 +4062,10 @@ impl Center {
                         "the action checker's GPU build found no device; running the model on the CPU. Reinstall on CPU to keep it off the GPU.",
                     );
                 }
-                self.update(|s| s.checker.local_installed(use_gpu, model));
+                self.update(|s| {
+                    s.checker.local_installed(use_gpu, model);
+                    s.checker.version += 1;
+                });
                 checker::install::finish(&self.install, &r);
                 if gpu && !use_gpu {
                     self.install.lock().unwrap().message =
@@ -4068,6 +4127,7 @@ impl Center {
         // by its own setting, which would otherwise refuse its every call
         // with no model to ask (fail closed).
         self.update(|s| {
+            s.checker.version += 1;
             if s.checker.model.source == ModelSource::Local {
                 s.checker.model_on = false;
                 for n in s.checker.nodes.values_mut() {

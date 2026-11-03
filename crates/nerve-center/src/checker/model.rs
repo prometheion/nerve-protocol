@@ -10,6 +10,7 @@
 //! `state`, so a call cannot rephrase what is asked.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -31,6 +32,10 @@ pub struct Endpoint {
     /// timeout, so a call it cannot read in time is not sent. An endpoint
     /// has none, as the center does not know its machine.
     pub budget: Option<Arc<ReadBudget>>,
+    /// For the center's own local server on Unix: the socket it listens on,
+    /// in the state folder, in place of `url`'s address (which then only
+    /// names the `Host`).
+    pub socket: Option<PathBuf>,
 }
 
 impl Endpoint {
@@ -46,6 +51,7 @@ impl Endpoint {
             token: token.filter(|t| !t.is_empty()),
             model: model.filter(|m| !m.is_empty()),
             budget: None,
+            socket: None,
         })
     }
 }
@@ -848,14 +854,7 @@ async fn request(
     max_body: usize,
 ) -> Result<Value, ModelError> {
     let url = &endpoint.url;
-    let proxy = if url.tls {
-        nerve_transport::net::Proxy::from_env(&url.host).map_err(ModelError::Unreachable)?
-    } else {
-        None
-    };
-    let mut io = nerve_transport::net::open(url, None, proxy.as_ref())
-        .await
-        .map_err(ModelError::Unreachable)?;
+    let mut io = connect(endpoint).await.map_err(ModelError::Unreachable)?;
     let path = format!("{}{path}", url.base);
     let req = request_bytes(&url.authority(), &path, endpoint.token.as_deref(), body);
     use tokio::io::AsyncWriteExt;
@@ -889,6 +888,63 @@ async fn request(
         )),
         s => Err(ModelError::Bad(format!("HTTP {s}"))),
     }
+}
+
+/// Opens a connection to the endpoint: its socket, or its address.
+async fn connect(endpoint: &Endpoint) -> Result<nerve_transport::net::BoxIo, String> {
+    #[cfg(unix)]
+    if let Some(p) = &endpoint.socket {
+        let s = tokio::net::UnixStream::connect(p)
+            .await
+            .map_err(|e| format!("{}: {e}", p.display()))?;
+        return Ok(Box::new(s));
+    }
+    let url = &endpoint.url;
+    let proxy = if url.tls {
+        nerve_transport::net::Proxy::from_env(&url.host)?
+    } else {
+        None
+    };
+    nerve_transport::net::open(url, None, proxy.as_ref()).await
+}
+
+/// `GET /v1/models`, with `token` as the bearer token when given.
+async fn get_models(
+    endpoint: &Endpoint,
+    token: Option<&str>,
+) -> Result<nerve_transport::http::ClientResponse, ModelError> {
+    let url = &endpoint.url;
+    let mut io = connect(endpoint).await.map_err(ModelError::Unreachable)?;
+    let auth = token
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let req = format!(
+        "GET {}/v1/models HTTP/1.1\r\nHost: {}\r\nAccept: */*\r\n{auth}Connection: close\r\nUser-Agent: nerve/{}\r\n\r\n",
+        url.base,
+        url.authority(),
+        env!("CARGO_PKG_VERSION")
+    );
+    use tokio::io::AsyncWriteExt;
+    io.write_all(req.as_bytes())
+        .await
+        .map_err(|e| ModelError::Unreachable(e.to_string()))?;
+    nerve_transport::http::read_client_response(
+        &mut io,
+        MAX_BODY,
+        nerve_transport::http::HEAD_TIMEOUT,
+    )
+    .await
+    .map_err(ModelError::Unreachable)
+}
+
+/// Whether the server at `endpoint` refuses `/v1/models` to a token it was
+/// not given: the center's own server, started with a key of its own, does.
+/// One that answers anyone is not that server, but a process that took its
+/// port.
+pub async fn refuses_other_keys(endpoint: &Endpoint) -> Result<bool, ModelError> {
+    let other = nerve_transport::keys::random_token(32);
+    let resp = get_models(endpoint, Some(&other)).await?;
+    Ok(resp.status == 401)
 }
 
 /// The HTTP/1.1 request text, with the bearer token when there is one.
@@ -926,19 +982,7 @@ fn parse_noul(v: &Value) -> Result<f64, ModelError> {
 /// (`architecture.output_modalities` contains `"decisions"`). Used before the
 /// center trusts a local or endpoint model.
 pub async fn is_decision_model(endpoint: &Endpoint) -> Result<bool, ModelError> {
-    let url = &endpoint.url;
-    let proxy = if url.tls {
-        nerve_transport::net::Proxy::from_env(&url.host).map_err(ModelError::Unreachable)?
-    } else {
-        None
-    };
-    let mut io = nerve_transport::net::open(url, None, proxy.as_ref())
-        .await
-        .map_err(ModelError::Unreachable)?;
-    let target = format!("{}/v1/models", url.base);
-    let resp = nerve_transport::http::get(&mut io, &url.authority(), &target, MAX_BODY)
-        .await
-        .map_err(ModelError::Unreachable)?;
+    let resp = get_models(endpoint, endpoint.token.as_deref()).await?;
     if resp.status != 200 {
         return Err(ModelError::Bad(format!(
             "/v1/models answered HTTP {}",

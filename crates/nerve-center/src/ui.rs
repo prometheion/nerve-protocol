@@ -360,9 +360,22 @@ impl Ui {
             // ---- Action checker (issue #17) ----
             ("GET", "/api/checker") => Ok(c.checker_json()),
             ("POST", "/api/checker") => {
-                let cfg = serde_json::from_value(b.get("config").cloned().unwrap_or(Value::Null))
-                    .map_err(|e| bad(format!("the checker settings are not valid: {e}")))?;
-                c.apply_checker_config(cfg).map(|_| json!({})).map_err(bad)
+                let cfg: crate::checker::CheckerConfig =
+                    serde_json::from_value(b.get("config").cloned().unwrap_or(Value::Null))
+                        .map_err(|e| bad(format!("the checker settings are not valid: {e}")))?;
+                // The page sends back the version it loaded: a change made
+                // since (an allow rule from the Audit page) is not undone.
+                let loaded = cfg.version;
+                c.apply_checker_config_if(cfg, Some(loaded))
+                    .map(|_| json!({}))
+                    .map_err(|e| {
+                        let status = if e == crate::center::CHECKER_STALE {
+                            409
+                        } else {
+                            400
+                        };
+                        (status, json!({ "error": e }))
+                    })
             }
             ("POST", "/api/checker/token") => {
                 let token = b.get("token").and_then(Value::as_str);
@@ -2317,6 +2330,49 @@ mod tests {
             tokens, 2,
             "one for the token made, one for the token deleted"
         );
+    }
+
+    /// The Action checker page's Save sends the whole config with the
+    /// version it loaded: after an allow rule came in from the Audit page,
+    /// that Save is refused (409) instead of dropping the rule, and a Save
+    /// of the reloaded config goes through.
+    #[tokio::test]
+    async fn a_checker_save_from_a_stale_page_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let c = center(d.path());
+        let ui = Ui::new(&c, false, true);
+        let get = async || {
+            ui.api(&req("GET", "/api/checker", &[], ""), &json!({}))
+                .await
+                .unwrap()["config"]
+                .clone()
+        };
+        let save = async |mut cfg: Value| {
+            cfg["model_on"] = json!(false);
+            ui.api(
+                &req("POST", "/api/checker", &[], ""),
+                &json!({ "config": cfg }),
+            )
+            .await
+        };
+        let loaded = get().await;
+        ui.api(
+            &req("POST", "/api/checker/allow", &[], ""),
+            &json!({"cap": "exec", "action": "run", "target": "git status"}),
+        )
+        .await
+        .unwrap();
+        let (status, e) = save(loaded).await.unwrap_err();
+        assert_eq!(status, 409, "{e}");
+        assert_eq!(e["error"], crate::center::CHECKER_STALE);
+        let kept = |c: &Center| c.read(|s| s.checker.allow_rules.len());
+        assert_eq!(kept(&c), 1, "the allow rule was dropped");
+        save(get().await).await.unwrap();
+        assert_eq!(kept(&c), 1);
+        // Two saves of one loaded page: the second is the stale one.
+        let loaded = get().await;
+        save(loaded.clone()).await.unwrap();
+        assert_eq!(save(loaded).await.unwrap_err().0, 409);
     }
 
     #[tokio::test]
