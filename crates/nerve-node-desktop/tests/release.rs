@@ -1,6 +1,7 @@
 //! What the release gives Windows: the desktop app and the center, and no
 //! `nerve-node` of its own, since there the app is the only way to the node
-//! (docs/user/install.md).
+//! (docs/user/install.md); and what the released app keeps for the licence it
+//! uses Slint under.
 
 const RELEASE: &str = include_str!("../../../.github/workflows/release.yml");
 
@@ -94,4 +95,39 @@ fn the_run_row_says_windows_refuses_it() {
     .unwrap();
     let row = page.lines().find(|l| l.starts_with("| `run` |")).unwrap();
     assert!(row.contains("Windows") && row.contains("refused"), "{row}");
+}
+
+/// The released app keeps what Slint's Royalty-free license 2.0, under which
+/// it uses Slint, asks of it (LICENSE.md): the AboutSlint widget in the About
+/// dialog, which an item of the main window's sidebar opens. The crate's
+/// licence names it, and NOTICE names Slint's licence.
+#[test]
+fn the_app_shows_slints_notice_as_its_licence_asks() {
+    let dialogs = include_str!("../ui/dialogs.slint");
+    let about = dialogs
+        .split("export component AboutDialog inherits Dialog {")
+        .nth(1)
+        .expect("an About dialog")
+        .split("\nexport component ")
+        .next()
+        .unwrap();
+    assert!(about.contains("AboutSlint {"), "{about}");
+    let app = include_str!("../ui/app.slint");
+    let item = app
+        .split("NavItem {")
+        .find(|i| i.contains("text: \"About\";"))
+        .expect("an About item in the sidebar");
+    assert!(item.contains("Store.about-open = true;"), "{item}");
+    assert!(app.contains("if Store.about-open: AboutDialog { }"));
+    let licence = include_str!("../LICENSE.md");
+    assert!(
+        licence.contains("# Slint Royalty-free Desktop, Mobile, and Web Applications License"),
+        "the crate's licence has Slint's text"
+    );
+    assert!(licence.contains("`AboutSlint`"));
+    let notice = include_str!("../../../NOTICE");
+    assert!(
+        notice.contains("Slint Royalty-free Desktop, Mobile, and Web Applications License 2.0"),
+        "{notice}"
+    );
 }

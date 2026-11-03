@@ -93,3 +93,18 @@ decide. Set it up on the **Action checker** page of the web UI
 | Running Nerve: install, pairing, rules and modes, the web UI, troubleshooting | [docs/user/](docs/user/README.md) |
 | Building, changing and releasing Nerve: architecture, policy engine, checks | [docs/dev/](docs/dev/README.md) |
 | The protocol and the conformance suite | [docs/dev/spec/](docs/dev/spec/README.md), [schemas/](schemas), [crates/nerve-conformance](crates/nerve-conformance) |
+
+## Security
+
+Report a security hole privately, through **Report a vulnerability** on the
+repository's Security tab. [SECURITY.md](SECURITY.md) says how, what is in
+scope, what `update` trusts (the releases are not signed yet), and the known
+limits.
+
+## Licence
+
+Nerve is under the [Apache License 2.0](LICENSE). The desktop app
+`nerve-node-desktop` is drawn with [Slint](https://slint.dev), which it uses
+under Slint's Royalty-free license 2.0: the app shows Slint's notice in its
+About dialog ([its licence](crates/nerve-node-desktop/LICENSE.md)).
+[NOTICE](NOTICE) lists the works Nerve includes.

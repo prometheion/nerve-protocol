@@ -4,6 +4,7 @@ description = "The Nerve node: links a machine to its centers under the owner's 
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 rust-version.workspace = true
 
 [[bin]]

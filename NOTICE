@@ -1,4 +1,16 @@
-Nerve Protocol includes icons from Lucide (https://lucide.dev): the icons of
+Nerve Protocol
+Copyright 2026 the Nerve Protocol authors
+
+This product is under the Apache License 2.0 (LICENSE). It includes the
+works below, under their own licences.
+
+Slint (https://slint.dev), in the desktop app nerve-node-desktop: used under
+the Slint Royalty-free Desktop, Mobile, and Web Applications License 2.0 of
+SixtyFPS GmbH. Its text and what it asks of the app are in
+crates/nerve-node-desktop/LICENSE.md; the app shows Slint's AboutSlint in its
+About dialog, as that licence asks.
+
+Icons from Lucide (https://lucide.dev): the icons of
 the web UIs of the center and the node (crates/nerve-transport/src/webui/kit.js)
 and of the node's desktop app (crates/nerve-node-desktop/ui/icons/). Their
 licence:
