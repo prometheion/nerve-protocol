@@ -1,14 +1,14 @@
 //! An `#[ignore]` end-to-end test of the one-click local install
 //! (`checker::install`) against the real pinned llama.cpp release: it
 //! downloads the CPU build through the center's own downloader (SHA-256
-//! checked), unpacks it, and starts d1-3B with it on the CPU.
+//! checked), unpacks it, and starts d1-2B with it on the CPU.
 //!
-//! The 1.7 GB model is not downloaded again: `NERVE_TEST_D1_MODEL` names a
+//! The 1.1 GB model is not downloaded again: `NERVE_TEST_D1_MODEL` names a
 //! local copy, which is linked (or copied) into the test state folder, where
 //! the install finds it and only checks its hash.
 //!
 //! ```sh
-//! NERVE_TEST_D1_MODEL=/path/to/d1-3B-Q4_K_M.gguf \
+//! NERVE_TEST_D1_MODEL=/path/to/d1-2B-Q4_K_M.gguf \
 //!     cargo test -p nerve-center --test local_install -- --ignored --nocapture
 //! ```
 
@@ -28,10 +28,10 @@ use nerve_proto::Effect;
 #[ignore = "downloads the real pinned llama.cpp CPU build; needs NERVE_TEST_D1_MODEL"]
 async fn the_real_cpu_build_installs_and_runs_d1() {
     let d1 = PathBuf::from(
-        std::env::var("NERVE_TEST_D1_MODEL").expect("set NERVE_TEST_D1_MODEL to the d1-3B GGUF"),
+        std::env::var("NERVE_TEST_D1_MODEL").expect("set NERVE_TEST_D1_MODEL to the d1-2B GGUF"),
     );
     let state = tempfile::tempdir().unwrap();
-    let model = install::model_path(state.path(), LocalModel::D1_3b);
+    let model = install::model_path(state.path(), LocalModel::D1_2b);
     std::fs::create_dir_all(model.parent().unwrap()).unwrap();
     if std::fs::hard_link(&d1, &model).is_err() {
         std::fs::copy(&d1, &model).unwrap();
@@ -43,7 +43,7 @@ async fn the_real_cpu_build_installs_and_runs_d1() {
     install::install(
         state.path().to_path_buf(),
         false,
-        LocalModel::D1_3b,
+        LocalModel::D1_2b,
         shared.clone(),
         cancel,
     )
@@ -62,12 +62,13 @@ async fn the_real_cpu_build_installs_and_runs_d1() {
         st.llama.total > 1_000_000,
         "the CPU build was really fetched"
     );
-    assert!(install::installed(state.path(), LocalModel::D1_3b));
+    assert!(install::installed(state.path(), LocalModel::D1_2b));
     assert_eq!(install::installed_variant(state.path()), Some(false));
 
     let bin = install::server_bin(state.path()).unwrap();
     println!("llama-server at {}", bin.display());
-    let server = LocalServer::start(bin, model, false, 8000).expect("start the server");
+    let pin = install::model_pin(LocalModel::D1_2b);
+    let server = LocalServer::start(bin, model, false, 8000, pin).expect("start the server");
     let deadline = Instant::now() + Duration::from_secs(180);
     while Instant::now() < deadline && !server.ready() {
         let s = server.status();
@@ -124,8 +125,10 @@ async fn the_real_cpu_build_installs_and_runs_d1() {
     assert!(matches!(allowed, Decision::Allowed { .. }), "{allowed:?}");
 }
 
-/// The center end to end with the real pinned build: install on the CPU, wait
-/// for the model to be ready, optionally switch to the GPU build while it runs
+/// The center end to end with the real pinned build, with a model file and a
+/// build no pin names left in the checker folder (as another build may leave
+/// them): install on the CPU, which deletes those files, wait for the model
+/// to be ready, optionally switch to the GPU build while it runs
 /// (`NERVE_TEST_GPU_SWITCH=1`, for a machine whose GPUs may be used; on one
 /// without a device it must fall back to the CPU), then Remove while it runs.
 /// On Windows a running `llama-server.exe` holds its files, so Remove and the
@@ -135,14 +138,20 @@ async fn the_real_cpu_build_installs_and_runs_d1() {
 async fn the_center_installs_switches_and_removes_a_running_model() {
     use nerve_center::center::{Center, Options};
     let d1 = PathBuf::from(
-        std::env::var("NERVE_TEST_D1_MODEL").expect("set NERVE_TEST_D1_MODEL to the d1-3B GGUF"),
+        std::env::var("NERVE_TEST_D1_MODEL").expect("set NERVE_TEST_D1_MODEL to the d1-2B GGUF"),
     );
     let state = tempfile::tempdir().unwrap();
-    let model = install::model_path(state.path(), LocalModel::D1_3b);
+    let model = install::model_path(state.path(), LocalModel::D1_2b);
     std::fs::create_dir_all(model.parent().unwrap()).unwrap();
     if std::fs::hard_link(&d1, &model).is_err() {
         std::fs::copy(&d1, &model).unwrap();
     }
+    // A model and a build no pin names, as another build may leave them.
+    let old_model = model.parent().unwrap().join("other-Q4_K_M.gguf");
+    std::fs::write(&old_model, b"other").unwrap();
+    let old_build = state.path().join("checker/llama/b0001");
+    std::fs::create_dir_all(old_build.join("build/bin")).unwrap();
+    std::fs::write(old_build.join("variant"), "cpu").unwrap();
     nerve_transport::init_crypto();
     let c = Center::open(Options {
         state_dir: state.path().to_path_buf(),
@@ -175,14 +184,15 @@ async fn the_center_installs_switches_and_removes_a_running_model() {
         }
     };
 
-    c.start_checker_install(false, LocalModel::D1_3b)
+    c.start_checker_install(false, LocalModel::D1_2b)
         .await
         .unwrap();
     wait_ready(c.clone(), "CPU install").await;
-    println!("installed and ready on the CPU");
+    assert!(!old_model.exists() && !old_build.exists(), "old files left");
+    println!("installed and ready on the CPU; the old model and build are gone");
 
     if std::env::var("NERVE_TEST_GPU_SWITCH").is_ok() {
-        c.start_checker_install(true, LocalModel::D1_3b)
+        c.start_checker_install(true, LocalModel::D1_2b)
             .await
             .unwrap();
         // The running model keeps judging calls during the download, and a

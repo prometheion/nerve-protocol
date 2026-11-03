@@ -2,17 +2,17 @@
 //! docs/user/action-checker.md).
 //!
 //! The center downloads a prebuilt `llama-server` from llama.cpp's GitHub
-//! release and the pinned d1-3B model from Hugging Face into its own state
+//! release and the pinned d1-2B model from Hugging Face into its own state
 //! folder — never system-wide — verifies each against a pinned SHA-256,
 //! unpacks the archive with the system `tar` (refusing any entry that would
 //! leave the target folder), and runs `llama-server -m <model>` on the CPU or,
 //! with the Vulkan build, the GPU. The model is one of two pinned ones,
-//! d1-3B (the default) or Kev-4B, whatever the device; the endpoint mode is
+//! d1-2B (the default) or Kev-4B, whatever the device; the endpoint mode is
 //! for any other model or another llama.cpp.
 //!
 //! Everything is pinned in code (the release tag, each asset's hash, and each
 //! model's repo/revision/file/size/hash), so an install fetches exactly the
-//! bytes verified on 2026-10-18 or fails.
+//! bytes verified when they were pinned or fails.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -22,8 +22,9 @@ use serde::Serialize;
 
 use super::config::LocalModel;
 
-/// The pinned llama.cpp release.
-pub const LLAMA_TAG: &str = "b11719";
+/// The pinned llama.cpp release: the build of llama.cpp's v0.8.0 release, the
+/// first release that runs d1-2B (`lfm3`). Hashes checked on 2026-11-02.
+pub const LLAMA_TAG: &str = "b11960";
 const LLAMA_BASE: &str = "https://github.com/ggml-org/llama.cpp/releases/download";
 const HF_BASE: &str = "https://huggingface.co";
 
@@ -102,6 +103,26 @@ pub struct ModelPin {
     pub threshold: f64,
     /// A timeout its normal calls on a CPU stay well inside.
     pub timeout_ms: u64,
+    /// The context, in tokens, the server is started with: the largest state
+    /// the checker sends ([`super::model_state`] clips every field) with the
+    /// question, and room to spare. A decision model reads the whole prompt
+    /// in one batch, so the batch is this size too; a state that did not fit
+    /// would be an error, and an error lets the call through when the owner
+    /// chose allow-and-log.
+    #[serde(skip)]
+    pub context: u32,
+    /// How long it takes to read a token of a request on 2 vCPUs, in
+    /// milliseconds: what the center assumes until its server answered a
+    /// call, then it measures (`model::ReadBudget`).
+    #[serde(skip)]
+    pub read_ms: f64,
+    /// The prompt length, in tokens, at which reading a token takes twice
+    /// as long as in a short call: a decision model reads the whole prompt
+    /// at once, and its attention grows with the length
+    /// (`model::ReadBudget`). Fitted below the steepest measurement, so a
+    /// long call is not estimated faster than it runs.
+    #[serde(skip)]
+    pub read_growth: f64,
     /// One plain line on speed and quality, for the UI.
     pub summary: &'static str,
 }
@@ -109,19 +130,33 @@ pub struct ModelPin {
 /// The two models the local mode offers, the default first.
 pub const MODELS: [ModelPin; 2] = [
     ModelPin {
-        id: LocalModel::D1_3b,
-        name: "LiquidAI d1-3B (Q4_K_M)",
-        repo: "LiquidAI/d1-3B-GGUF",
-        revision: "bb1e436ea78eb96a3f1acb6da865f70c2fbeb563",
-        file: "d1-3B-Q4_K_M.gguf",
-        bytes: 1_674_456_672,
-        sha256: "16aff27ea2eefdc32b9897f43854a5d3170c1dc8dccb9c756905af30a4e22402",
+        id: LocalModel::D1_2b,
+        name: "LiquidAI d1-2B (Q4_K_M)",
+        repo: "LiquidAI/d1-2B-GGUF",
+        revision: "e968f6575f0d4fad928312d7af15cad90fd365c0",
+        file: "d1-2B-Q4_K_M.gguf",
+        bytes: 1_099_629_888,
+        sha256: "adca5789ad30ae6027e8e936749bb9f19673097492ab26fa1c5b69643ca50b4b",
         licence: "LFM Open License v1.0",
-        threshold: 0.85,
-        // p95 was 3.0 s on the test CPU (2.3 s before the state grew by the
-        // description): twice that, for a busy machine.
-        timeout_ms: 6000,
-        summary: "Faster: about 2.5 s per call on a desktop CPU. Catches about 57 % of dangerous actions and 73 % of injection attempts; refuses about 1.7 % of ordinary work.",
+        threshold: 0.75,
+        // p95 was 5.8 to 6.1 s on 2 vCPUs (one core's two hardware threads,
+        // #178): about twice that, for a busy machine. A desktop CPU answers
+        // in about 2 s.
+        timeout_ms: 12_000,
+        // The largest state the checker sends is about 9,400 tokens for it
+        // (every field at its clip, control characters, which the state
+        // carries escaped, beside characters outside the basic plane in the
+        // arguments); the rest holds the longest question
+        // (`config::QUESTION_MAX`). checker::tests checks the sum.
+        context: 12_288,
+        // 18 ms per prompt token on 2 vCPUs (the median of the 231 cases,
+        // #178), rounded up.
+        read_ms: 20.0,
+        // A token of an 8,500-token call took 1.53 times as long as one of a
+        // 240-token call (review round 4 of #178), which 15,500 fits; 1.3
+        // times at 8,070 in the evaluation's peak run.
+        read_growth: 12_000.0,
+        summary: "Faster: about 2 s per call on a desktop CPU, 5 s on 2 vCPUs. Catches about 55 % of dangerous actions and 73 % of injection attempts; refuses about 1.5 % of ordinary work.",
     },
     ModelPin {
         id: LocalModel::Kev4b,
@@ -133,9 +168,19 @@ pub const MODELS: [ModelPin; 2] = [
         sha256: "33ae6b18926502b2209a1bf7d3b61a350d65938441515c686bb87d226a19eff9",
         licence: "Apache-2.0",
         threshold: 0.25,
-        // p95 was 5.6 s on the test CPU; leave room for a busy machine.
-        timeout_ms: 15_000,
-        summary: "Catches more: about 83 % of dangerous actions and 93 % of injection attempts, refusing about 1.7 % of ordinary work, but about 5 s per call on a desktop CPU.",
+        // p95 was 16.2 to 17.0 s on 2 vCPUs (#178): about twice that, as for
+        // d1-2B. A desktop CPU answers in about 5 s.
+        timeout_ms: 35_000,
+        // Its tokenizer reads the largest state as about 4,600 tokens
+        // (characters outside the basic plane); the rest holds the longest
+        // question.
+        context: 8192,
+        // 60 to 62 ms per prompt token on 2 vCPUs, rounded up.
+        read_ms: 65.0,
+        // 1.55 to 1.61 times at 4,386 tokens against 455 or 729 (the
+        // evaluation's peak run), which 5,300 to 6,700 fit.
+        read_growth: 5000.0,
+        summary: "Catches more: about 80 % of dangerous actions and 93 % of injection attempts, refusing about 1.5 % of ordinary work, but about 5 s per call on a desktop CPU, 15 s on 2 vCPUs, and about 6 GB of memory, up to 13 GB for a call with long arguments.",
     },
 ];
 
@@ -162,57 +207,57 @@ const ASSETS: [(&str, &str, bool, &str, &str); 8] = [
         "linux",
         "x86_64",
         false,
-        "llama-b11719-bin-ubuntu-x64.tar.gz",
-        "2c50edd1422cdc686a1620923a7dda9a33634509566d2821155fb3d4879510a3",
+        "llama-b11960-bin-ubuntu-x64.tar.gz",
+        "31cc3a6bc638ac6c48dc4b1b74888f1eaadf3d14227c1e5f67daf9a49541d97a",
     ),
     (
         "linux",
         "x86_64",
         true,
-        "llama-b11719-bin-ubuntu-vulkan-x64.tar.gz",
-        "9a09cce245acf8823feb99fb7ba8ddd3e878e3827564888131e0185044aa4429",
+        "llama-b11960-bin-ubuntu-vulkan-x64.tar.gz",
+        "164199e978304bb32a8a6c24b8efa015528ddf286821596eab676c90b375feac",
     ),
     (
         "windows",
         "x86_64",
         false,
-        "llama-b11719-bin-win-cpu-x64.zip",
-        "1b1234d208a8b851cc27cd3d96b850d1547a4e5cfc5cd75f0a9fdd1d4c5bea20",
+        "llama-b11960-bin-win-cpu-x64.zip",
+        "73f962f82850d244db47eaacb9d913637027b82399124324298576d58c5f4287",
     ),
     (
         "windows",
         "x86_64",
         true,
-        "llama-b11719-bin-win-vulkan-x64.zip",
-        "08dde7f4133443ac629431c35f0435e267ca73251fc002cb95e10625424e2963",
+        "llama-b11960-bin-win-vulkan-x64.zip",
+        "bac6914b5e83523eb008c6789eaa12669f93fbc196c3b9e8237b6672323b33e9",
     ),
     (
         "linux",
         "aarch64",
         false,
-        "llama-b11719-bin-ubuntu-arm64.tar.gz",
-        "290aa4432ad8e28b638285be6a75d0dd6f327d9b2d95f7048a8cf5e69704bee9",
+        "llama-b11960-bin-ubuntu-arm64.tar.gz",
+        "0065ecfbffe8a790bb0d28059a3320cdc8f723b7f3f248cdc8bfc04790927715",
     ),
     (
         "linux",
         "aarch64",
         true,
-        "llama-b11719-bin-ubuntu-vulkan-arm64.tar.gz",
-        "ec2b1e886192c9e1e686e4a5a4d95079f75b98966274264e7bf6e2e13a063185",
+        "llama-b11960-bin-ubuntu-vulkan-arm64.tar.gz",
+        "22d1f852055a95a5c969b90326a2b68b4618eca6c54638bae27b4ee603031d53",
     ),
     (
         "windows",
         "aarch64",
         false,
-        "llama-b11719-bin-win-cpu-arm64.zip",
-        "bb066fea4e7b396560704f05f227aa39057a27ae17aca604f1ef3d1b6503a1a3",
+        "llama-b11960-bin-win-cpu-arm64.zip",
+        "77349357c38da235bb0eed37bcc5ecf3efef21bb5dc42c2269589c0e71cfa00f",
     ),
     (
         "windows",
         "aarch64",
         true,
-        "llama-b11719-bin-win-vulkan-arm64.zip",
-        "69bd6da42725771831c3271d2198ebb71e9531282a755edb24917b9d81b1555e",
+        "llama-b11960-bin-win-vulkan-arm64.zip",
+        "cd375e330452496aadf8a872cde6d48c92e51d598088e5575a32a0d43bc0c9f0",
     ),
 ];
 
@@ -513,8 +558,10 @@ async fn prepare_into(
     .map_err(|e| format!("downloading {}: {e}", pin.name))
 }
 
-/// Swaps in what [`prepare`] staged, and deletes the other model, so a
-/// switch does not leave gigabytes behind. The caller has stopped the server
+/// Swaps in what [`prepare`] staged, and deletes every other model file and
+/// llama.cpp build in the checker folder, so neither a switch nor a changed
+/// pin (another model or build in a later release) leaves gigabytes behind.
+/// The caller has stopped the server
 /// (Windows refuses to move or delete a file a running process holds). The
 /// old build is moved aside first and put back if the new one cannot take
 /// its place, so a failed swap keeps the working build.
@@ -546,10 +593,28 @@ pub fn commit(state: &Path, p: Prepared) -> Result<(), String> {
         std::fs::rename(staged, model_path(state, p.model_id))
             .map_err(|e| format!("cannot put the model in place: {e}"))?;
     }
-    for other in MODELS.iter().filter(|m| m.id != p.model_id) {
-        let _ = std::fs::remove_file(model_path(state, other.id));
-    }
+    let keep = model_path(state, p.model_id);
+    remove_others(&model_dir(state), &keep);
+    remove_others(&checker_dir(state).join("llama"), &llama_dir(state));
     Ok(())
+}
+
+/// Deletes everything in `dir` but `keep`, best effort.
+fn remove_others(dir: &Path, keep: &Path) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let path = e.path();
+        if path == keep {
+            continue;
+        }
+        let _ = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+    }
 }
 
 /// Downloads, unpacks and marks a llama.cpp build in `staging`, without
@@ -844,6 +909,18 @@ mod tests {
         assert!(asset_for("freebsd", "x86_64", false).is_none());
     }
 
+    /// The pinned build runs the default model: llama.cpp serves d1-2B's
+    /// `lfm3` from build b11946 on (ggml-org/llama.cpp#31275), and an older
+    /// build does not load it.
+    #[test]
+    fn the_pinned_build_runs_lfm3() {
+        let build: u32 = LLAMA_TAG
+            .strip_prefix('b')
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("{LLAMA_TAG} is not a b<build> tag"));
+        assert!(build >= 11946, "{LLAMA_TAG}");
+    }
+
     /// Nerve runs on Linux and Windows only, so every pin is one of their
     /// builds and any other OS has none (the UI points it to the endpoint
     /// mode).
@@ -859,18 +936,23 @@ mod tests {
         }
     }
 
-    /// The two models: d1-3B is the default and first; each has its own
-    /// pins and evaluation defaults, and Kev-4B's timeout leaves room for
-    /// its measured 4 to 5 s per call on a CPU.
+    /// The two models: d1-2B is the default and first; each has its own
+    /// pins and evaluation defaults, and each timeout is about twice the
+    /// model's p95 on 2 vCPUs (d1-2B 6.1 s, Kev-4B 17 s).
     #[test]
     fn the_two_models_have_their_own_pins_and_defaults() {
         assert_eq!(MODELS[0].id, LocalModel::default());
-        let d1 = model_pin(LocalModel::D1_3b);
+        let d1 = model_pin(LocalModel::D1_2b);
         let kev = model_pin(LocalModel::Kev4b);
-        assert_eq!((d1.threshold, kev.threshold), (0.85, 0.25));
-        assert!(kev.timeout_ms >= 10_000, "{}", kev.timeout_ms);
-        assert!(d1.timeout_ms >= 6_000, "{}", d1.timeout_ms);
+        assert_eq!((d1.threshold, kev.threshold), (0.75, 0.25));
+        assert!(kev.timeout_ms >= 34_000, "{}", kev.timeout_ms);
+        assert!(d1.timeout_ms >= 10_000, "{}", d1.timeout_ms);
         assert_ne!(d1.file, kev.file);
+        assert_eq!(
+            (d1.repo, d1.file, d1.bytes),
+            ("LiquidAI/d1-2B-GGUF", "d1-2B-Q4_K_M.gguf", 1_099_629_888)
+        );
+        assert_eq!(d1.licence, "LFM Open License v1.0");
         assert_eq!(kev.bytes, 3_033_489_824);
         assert_eq!(kev.licence, "Apache-2.0");
         let dir = tempfile::tempdir().unwrap();
@@ -960,8 +1042,8 @@ mod tests {
     }
 
     /// `commit` swaps a staged build and model in, keeps nothing of the old
-    /// build, and deletes the other model; `prepare` of a build that is
-    /// already right leaves the installed files alone.
+    /// build, and deletes the other model, and any model file and build no
+    /// pin names.
     #[test]
     fn commit_swaps_in_the_staged_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -971,7 +1053,12 @@ mod tests {
         std::fs::write(ld.join("bin").join(server_name()), b"old").unwrap();
         std::fs::write(ld.join("variant"), "cpu").unwrap();
         std::fs::create_dir_all(model_dir(state)).unwrap();
-        std::fs::write(model_path(state, LocalModel::D1_3b), b"d1").unwrap();
+        std::fs::write(model_path(state, LocalModel::D1_2b), b"d1").unwrap();
+        // A model and a build no pin names, such as another build left.
+        let old_model = model_dir(state).join("other-Q4_K_M.gguf");
+        std::fs::write(&old_model, b"other").unwrap();
+        let old_build = checker_dir(state).join("llama").join("b0001");
+        std::fs::create_dir_all(old_build.join("bin")).unwrap();
         let staging = ld.with_extension("staging");
         std::fs::create_dir_all(staging.join("bin")).unwrap();
         std::fs::write(staging.join("bin").join(server_name()), b"new").unwrap();
@@ -993,7 +1080,8 @@ mod tests {
             std::fs::read(model_path(state, LocalModel::Kev4b)).unwrap(),
             b"kev"
         );
-        assert!(!model_path(state, LocalModel::D1_3b).exists());
+        assert!(!model_path(state, LocalModel::D1_2b).exists());
+        assert!(!old_model.exists() && !old_build.exists());
         assert!(!staging.exists() && !staged.exists());
         assert!(!ld.with_extension("old").exists());
     }
@@ -1071,12 +1159,12 @@ mod tests {
             std::fs::write(ld.join("bin").join(server_name()), b"#!/bin/sh\n").unwrap();
             std::fs::write(ld.join("variant"), "cpu").unwrap();
             std::fs::create_dir_all(model_dir(dir.path())).unwrap();
-            std::fs::write(model_path(dir.path(), LocalModel::D1_3b), b"x").unwrap();
+            std::fs::write(model_path(dir.path(), LocalModel::D1_2b), b"x").unwrap();
             // A GPU reinstall whose download fails: nothing listens there.
             let dead = Sources::at("http://127.0.0.1:9");
             let shared: Shared = Arc::new(Mutex::new(Status::default()));
             let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let r = prepare(dir.path(), true, LocalModel::D1_3b, &shared, &cancel, &dead).await;
+            let r = prepare(dir.path(), true, LocalModel::D1_2b, &shared, &cancel, &dead).await;
             assert!(r.is_err(), "{r:?}");
             // The old CPU build is still there and nothing is staged.
             assert_eq!(installed_variant(dir.path()), Some(false));

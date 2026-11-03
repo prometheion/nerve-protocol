@@ -398,6 +398,62 @@ impl Checker {
                 scope,
                 detail: format!("score {score:.2} < threshold {:.2}", m.threshold),
             },
+            // Not sent: refused with allow-and-log too, or a long enough
+            // call would get past the model by its length alone (#178).
+            Err(model::ModelError::TooLong(why)) => Decision::Refuse {
+                layer: Layer::Model,
+                scope,
+                detail: format!("too long to judge: {why}"),
+                message: format!(
+                    "the center's action checker refused this call without asking its decision model: the call is too long for the model to read within the checker's timeout ({why}). A call with shorter arguments is judged as usual. The owner can raise the timeout or switch the model off in the center's web UI (Action checker); {switch}."
+                ),
+            },
+            // Not sent either: the calls ahead of it (any session's) decided
+            // it, so it is refused with allow-and-log too (review T1 of #178).
+            Err(model::ModelError::Busy(why)) => Decision::Refuse {
+                layer: Layer::Model,
+                scope,
+                detail: format!("model busy: {why}"),
+                message: format!(
+                    "the center's action checker refused this call without asking its decision model: the model was still reading the calls sent before it and would not have read this one within the checker's timeout ({why}). The same call is judged as usual once fewer calls are checked at once. The owner can raise the timeout or switch the model off in the center's web UI (Action checker); {switch}."
+                ),
+            },
+            // The running local model took the call and did not judge it: its
+            // own read took longer than the timeout, or the server failed on
+            // it, so it is refused with allow-and-log too (review T1 of #178).
+            Err(model::ModelError::NotJudged(why)) => Decision::Refuse {
+                layer: Layer::Model,
+                scope,
+                detail: format!("not judged: {why}"),
+                message: format!(
+                    "the center's action checker refused this call: its decision model was running and took the call, but did not judge it ({why}), and such a call is refused also when the owner chose allow-and-log for a model that cannot be reached. A call with shorter arguments is judged as usual; if calls keep ending this way, the timeout is too short for the model on this machine. The owner can raise the timeout or switch the model off in the center's web UI (Action checker); {switch}."
+                ),
+            },
+            // Not sent: the running local model failed to count the call's
+            // tokens. Refused with allow-and-log too (review T5 and T6 of
+            // #178). The text says the call was not taken, and that a longer
+            // timeout does not help.
+            Err(model::ModelError::NotCounted(why)) => Decision::Refuse {
+                layer: Layer::Model,
+                scope,
+                detail: format!("not counted: {why}"),
+                message: format!(
+                    "the center's action checker refused this call without asking its decision model: the running model failed to count the call's tokens ({why}), and a call is refused then also when the owner chose allow-and-log for a model that cannot be reached. A call with shorter arguments may be judged; a longer timeout does not change that. The owner can switch the model off in the center's web UI (Action checker); {switch}."
+                ),
+            },
+            // Not sent: the local model could not be reached while an earlier
+            // call was in it, which is most likely its end on that call. It
+            // is refused with allow-and-log too (review T3 of #178). The
+            // text does not say the call was taken, or blame the timeout:
+            // neither is so.
+            Err(model::ModelError::Lost(why)) => Decision::Refuse {
+                layer: Layer::Model,
+                scope,
+                detail: format!("model lost: {why}"),
+                message: format!(
+                    "the center's action checker refused this call without asking its decision model: the model was lost while it read an earlier call ({why}), and a call is refused then also when the owner chose allow-and-log for a model that cannot be reached. The same call is judged as usual once the model is up again; a longer timeout does not change that. The owner can switch the model off in the center's web UI (Action checker); {switch}."
+                ),
+            },
             Err(e) => fail(e.to_string()),
         }
     }
@@ -793,6 +849,141 @@ mod tests {
         ));
     }
 
+    /// A call too long for the local model to read within the timeout is
+    /// refused without being sent, also with allow-and-log: an unreachable
+    /// model lets calls through there, but a long call is the agent's
+    /// choice, and its length alone must not get it past the model (#178).
+    #[tokio::test]
+    async fn a_call_too_long_to_judge_is_refused_with_allow_and_log_too() {
+        let mut cfg = CheckerConfig::default();
+        cfg.blocklist_on = false;
+        cfg.model_on = true;
+        cfg.model.fail_closed = false;
+        let checker = Checker::build(cfg, None);
+        let (ep, asked) = model::fake::server(5000, std::time::Duration::ZERO);
+        let ep = Endpoint {
+            budget: Some(std::sync::Arc::new(model::ReadBudget::new(
+                12_288, 20.0, 12_000.0,
+            ))),
+            ..ep
+        };
+        let args = Map::new();
+        let c = call("exec", "run", Effect::Execute, "make", &args);
+        let Decision::Refuse {
+            layer: Layer::Model,
+            message,
+            ..
+        } = checker.check(&c, Some(&ep)).await
+        else {
+            panic!("should be refused");
+        };
+        assert!(message.contains("too long"), "{message}");
+        assert!(message.contains("raise the timeout"), "{message}");
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// With allow-and-log, a call the running local model took and did not
+    /// judge (it timed out in the server, the server failed on it) is
+    /// refused, and so is one that waited behind another for the whole
+    /// timeout; only a local model that is not running lets a call through
+    /// (review T1 of #178).
+    #[tokio::test]
+    async fn a_call_the_running_local_model_did_not_judge_is_refused_with_allow_and_log_too() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let mut cfg = CheckerConfig::default();
+        cfg.blocklist_on = false;
+        cfg.model_on = true;
+        cfg.model.fail_closed = false;
+        cfg.model.timeout_ms = 600;
+        let checker = Checker::build(cfg, None);
+        let local = |(ep, asked): (Endpoint, _)| {
+            let budget = Arc::new(model::ReadBudget::new(12_288, 0.1, f64::INFINITY));
+            (
+                Endpoint {
+                    budget: Some(budget),
+                    ..ep
+                },
+                asked,
+            )
+        };
+        let args = Map::new();
+        let c = call("exec", "run", Effect::Execute, "make", &args);
+        let refused = |d: Decision, what: &str| match d {
+            Decision::Refuse {
+                layer: Layer::Model,
+                detail,
+                ..
+            } => assert!(detail.starts_with(what), "{detail}"),
+            d => panic!("should be refused as {what}: {d:?}"),
+        };
+        // Sent, and the server takes longer than the timeout.
+        let (slow, asked) = local(model::fake::server(100, Duration::from_millis(1500)));
+        let Decision::Refuse { message, .. } = checker.check(&c, Some(&slow)).await else {
+            panic!("should be refused");
+        };
+        // Its own read was too slow; checking fewer calls at once changes
+        // nothing about that (review T2 of #178).
+        assert!(!message.contains("at once"), "{message}");
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Two at once: the second waits for the first, then is refused as
+        // busy, not sent.
+        let (slow, asked) = local(model::fake::server(100, Duration::from_millis(1500)));
+        let (a, b) = tokio::join!(
+            checker.check(&c, Some(&slow)),
+            checker.check(&c, Some(&slow))
+        );
+        let (a, b) = match (&a, &b) {
+            (Decision::Refuse { detail, .. }, _) if detail.starts_with("model busy") => (b, a),
+            _ => (a, b),
+        };
+        refused(a, "not judged");
+        refused(b, "model busy");
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Sent, and the server fails on it.
+        let (failing, asked) = local(model::fake::server_failing(100));
+        refused(checker.check(&c, Some(&failing)).await, "not judged");
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // The server is counted ready and fails the count: not sent, and
+        // not allowed as a model that is down is (review T5 of #178).
+        let (counting, asked) = local(model::fake::server_failing_to_count(500));
+        counting.budget.as_ref().unwrap().became_ready();
+        refused(checker.check(&c, Some(&counting)).await, "not counted");
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // Sent, and the server answers with a probability it cannot read.
+        let (unreadable, asked) =
+            local(model::fake::server_answering(100, serde_json::Value::Null));
+        refused(checker.check(&c, Some(&unreadable)).await, "not judged");
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // The server ended on an earlier call and is starting again (nothing
+        // answers on its port): not sent, and not allowed as a model that is
+        // down is.
+        let gone = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = gone.local_addr().unwrap().port();
+        drop(gone);
+        let restarting = Endpoint {
+            budget: Some(Arc::new(model::ReadBudget::new(12_288, 0.1, f64::INFINITY))),
+            ..Endpoint::parse(&format!("http://127.0.0.1:{port}"), None, None).unwrap()
+        };
+        restarting.budget.as_ref().unwrap().die_on_call();
+        refused(checker.check(&c, Some(&restarting)).await, "model lost");
+        // No server listening: allowed and logged, as the owner chose.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let down = Endpoint::parse(&format!("http://127.0.0.1:{port}"), None, None).unwrap();
+        let down = Endpoint {
+            budget: Some(Arc::new(model::ReadBudget::new(12_288, 0.1, f64::INFINITY))),
+            ..down
+        };
+        assert!(matches!(
+            checker.check(&c, Some(&down)).await,
+            Decision::Allowed { layer: Layer::Model, ref detail, .. } if detail.starts_with("model unreachable")
+        ),);
+    }
+
     /// The checker reads a rule's conditions from the call's arguments: a
     /// blocklist entry refuses a call that may meet them (one that leaves
     /// the argument out counts), a saved allow rule covers only a call that
@@ -1139,5 +1330,119 @@ mod tests {
         assert!(taints(Effect::Execute));
         assert!(!taints(Effect::Write));
         assert!(!taints(Effect::Actuate));
+    }
+
+    /// Every pinned model's context holds the largest state `model_state`
+    /// builds beside the longest question the center takes (#178): a prompt
+    /// that does not fit is an error on that call, and an error lets the
+    /// call through when the owner chose allow-and-log, so padding a command
+    /// would get it past the model. The tokens are an upper bound from what
+    /// the evaluation measured with both models' tokenizers
+    /// (docs/dev/action-checker.md, "The context and memory"): at most one
+    /// token per byte of the text the model reads (one, for characters
+    /// outside the basic plane), and for d1-2B, which reads the state as
+    /// JSON, three for the six-byte escape a control character becomes and
+    /// one for a two-byte escape (`\"`, `\\`, `\n`). A longer clip, a longer
+    /// question or a smaller context fails here; then measure again.
+    #[test]
+    fn the_largest_state_and_question_fit_every_models_context() {
+        use crate::checker::install::MODELS;
+        use nerve_proto::descriptor::NAME_MAX;
+
+        // d1-2B reads the state as compact JSON.
+        fn json_tokens(state: &Value) -> usize {
+            let short = |c: char| "\"\\\u{8}\t\n\u{c}\r".contains(c);
+            let saved = |v: &Value| {
+                v.as_str().map_or(0, |t| {
+                    t.chars()
+                        .map(|c| match c {
+                            c if short(c) => 1,
+                            c if c < ' ' => 3,
+                            _ => 0,
+                        })
+                        .sum()
+                })
+            };
+            let saved: usize = state.as_object().unwrap().values().map(saved).sum();
+            state.to_string().len() - saved
+        }
+        // Kev-4B reads it as "key: value" lines, the text as it is.
+        fn text_tokens(state: &Value) -> usize {
+            state
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| k.len() + 3 + v.as_str().map_or(5, str::len))
+                .sum()
+        }
+        // The prompt's tokens beside the state's: the template's and the
+        // default question's, as the server counted them.
+        let (d1_rest, kev_rest) = (184, 141);
+
+        // The kinds that cost the most tokens per byte of a clip, in every
+        // field: control characters, characters outside the basic plane,
+        // quotes and backslashes (escaped twice in the arguments) and a
+        // special-token spelling, which the server rewrites.
+        let kinds = [
+            "\u{1}".repeat(3000),
+            "\u{10000}".repeat(1000),
+            "\"".repeat(3000),
+            "\"\\\n\t".repeat(750),
+            "<|a|>".repeat(1000),
+        ];
+        let name = "a".repeat(NAME_MAX);
+        // The node's platform: any 1 to 32 bytes the pairing took (review
+        // r2), of each kind too.
+        let platforms: Vec<String> = kinds
+            .iter()
+            .map(|k| {
+                let mut p = String::new();
+                for c in k.chars() {
+                    if p.len() + c.len_utf8() > 32 {
+                        break;
+                    }
+                    p.push(c);
+                }
+                p
+            })
+            .collect();
+        assert!(platforms.iter().all(|p| p.len() > 28 && p.len() <= 32));
+        let (mut d1, mut kev) = (0, 0);
+        for target in &kinds {
+            for description in &kinds {
+                for arg in &kinds {
+                    for os in &platforms {
+                        let mut args = Map::new();
+                        args.insert("command".into(), Value::String(arg.clone()));
+                        let c = CallInfo {
+                            description,
+                            os,
+                            tainted: true,
+                            ..call(&name, &name, Effect::Execute, target, &args)
+                        };
+                        let state = model_state(&c);
+                        d1 = d1.max(json_tokens(&state));
+                        kev = kev.max(text_tokens(&state));
+                    }
+                }
+            }
+        }
+        let question = config::QUESTION_MAX;
+        assert!(config::question_len(&config::ModelConfig::default()) <= question);
+        for m in &MODELS {
+            let need = match m.id {
+                LocalModel::D1_2b => d1 + d1_rest + question,
+                LocalModel::Kev4b => kev + kev_rest + question,
+            };
+            assert!(
+                need <= m.context as usize,
+                "{}: up to {need} tokens, context {}",
+                m.name,
+                m.context
+            );
+        }
+        // The bound covers what was measured: d1-2B 9,425 tokens for its
+        // largest prompt, Kev-4B 4,584.
+        assert!(d1 + d1_rest >= 9425 && kev + kev_rest >= 4584, "{d1} {kev}");
     }
 }

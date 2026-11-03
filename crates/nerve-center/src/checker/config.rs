@@ -233,12 +233,12 @@ pub struct ModelConfig {
     // ---- Local llama-server ----
     /// Run the installed local model on the GPU (the Vulkan build, all layers
     /// on the GPU). `false` (the default) runs it on the CPU. The center
-    /// installs and runs llama.cpp and the d1-3B model itself
+    /// installs and runs llama.cpp and the local model itself
     /// ([`crate::checker::install`]); there is no llama-server path, model repo
     /// or model file to set any more.
     #[serde(default)]
     pub local_gpu: bool,
-    /// Which model the one-click local mode installs and runs: d1-3B (the
+    /// Which model the one-click local mode installs and runs: d1-2B (the
     /// default, faster on a CPU) or Kev-4B (catches more, slower). The pins
     /// and each model's default threshold and timeout are in
     /// [`crate::checker::install::model_pin`].
@@ -290,14 +290,14 @@ impl Default for ModelConfig {
 
 /// The model the one-click local mode runs. Both are pinned in
 /// [`crate::checker::install`]; the evaluation in docs/dev/action-checker.md
-/// is why d1-3B is the default (it is about 2.5 times faster on a CPU) and
+/// is why d1-2B is the default (it is several times faster on a CPU) and
 /// when Kev-4B is the better pick (it catches more).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum LocalModel {
-    /// LiquidAI d1-3B, Q4_K_M. LFM Open License v1.0.
+    /// LiquidAI d1-2B, Q4_K_M. LFM Open License v1.0.
     #[default]
-    #[serde(rename = "d1-3b")]
-    D1_3b,
+    #[serde(rename = "d1-2b")]
+    D1_2b,
     /// ggml-org Kev-4B, Q4_K_M. Apache-2.0.
     #[serde(rename = "kev-4b")]
     Kev4b,
@@ -369,14 +369,30 @@ impl CheckerConfig {
     }
 }
 
-/// The default threshold and timeout are d1-3B's (the default model); a
-/// switch to Kev-4B sets that model's own (`install::model_pin`).
+/// The default threshold and timeout are the default model's; a switch to
+/// Kev-4B sets that model's own (`install::model_pin`).
 fn default_threshold() -> f64 {
-    0.85
+    crate::checker::install::model_pin(LocalModel::default()).threshold
 }
 
 fn default_timeout_ms() -> u64 {
-    6000
+    crate::checker::install::model_pin(LocalModel::default()).timeout_ms
+}
+
+/// The longest question the center takes for the local source, in bytes:
+/// the instructions and both criteria, each counted as JSON writes it (a
+/// control character takes six). Every pinned model's context holds a
+/// question this long beside the largest state the checker sends
+/// (`install::ModelPin::context`); the client refuses a call that does not
+/// fit (`model::ReadBudget`). The default is about 800.
+pub const QUESTION_MAX: usize = 2000;
+
+/// The question's length as [`QUESTION_MAX`] counts it.
+pub fn question_len(m: &ModelConfig) -> usize {
+    [&m.instructions, &m.criteria_true, &m.criteria_false]
+        .iter()
+        .map(|t| serde_json::to_string(t).map_or(0, |j| j.len() - 2))
+        .sum()
 }
 
 /// The question's default instructions, tuned on the evaluation
@@ -1277,16 +1293,16 @@ mod tests {
         );
     }
 
-    /// A model config that names no local model reads as d1-3B, and the
+    /// A model config that names no local model reads as d1-2B, and the
     /// models have stable names on the wire.
     #[test]
     fn the_local_model_defaults_to_d1_and_has_stable_names() {
         let old: ModelConfig = serde_json::from_str(r#"{"source": "local"}"#).unwrap();
-        assert_eq!(old.local_model, LocalModel::D1_3b);
+        assert_eq!(old.local_model, LocalModel::D1_2b);
         assert_eq!(serde_json::to_value(LocalModel::Kev4b).unwrap(), "kev-4b");
         assert_eq!(
-            serde_json::from_value::<LocalModel>("d1-3b".into()).unwrap(),
-            LocalModel::D1_3b
+            serde_json::from_value::<LocalModel>("d1-2b".into()).unwrap(),
+            LocalModel::D1_2b
         );
     }
 
@@ -1300,13 +1316,17 @@ mod tests {
         assert_eq!(c.model.source, ModelSource::Local);
         assert_eq!(c.model.local_model, LocalModel::Kev4b);
         assert_eq!(c.model.threshold, 0.25);
-        assert!(c.model.timeout_ms >= 10_000);
+        assert!(c.model.timeout_ms >= 34_000, "{}", c.model.timeout_ms);
         c.model.threshold = 0.6;
         c.local_installed(true, LocalModel::Kev4b);
         assert_eq!(c.model.threshold, 0.6, "the owner's threshold stays");
         assert!(c.model.local_gpu);
-        c.local_installed(false, LocalModel::D1_3b);
-        assert_eq!((c.model.threshold, c.model.timeout_ms), (0.85, 6000));
+        let d1 = crate::checker::install::model_pin(LocalModel::D1_2b);
+        c.local_installed(false, LocalModel::D1_2b);
+        assert_eq!(
+            (c.model.threshold, c.model.timeout_ms),
+            (d1.threshold, d1.timeout_ms)
+        );
 
         // The first local install, coming from an endpoint whose threshold and
         // timeout were the endpoint's, takes the model's own (review r2,
@@ -1315,8 +1335,11 @@ mod tests {
         e.model.source = ModelSource::Endpoint;
         e.model.threshold = 0.5;
         e.model.timeout_ms = 1000;
-        e.local_installed(false, LocalModel::D1_3b);
-        assert_eq!((e.model.threshold, e.model.timeout_ms), (0.85, 6000));
+        e.local_installed(false, LocalModel::D1_2b);
+        assert_eq!(
+            (e.model.threshold, e.model.timeout_ms),
+            (d1.threshold, d1.timeout_ms)
+        );
     }
 
     /// The config a fresh center starts with, and a stored model section
@@ -1337,7 +1360,7 @@ mod tests {
     #[test]
     fn a_switch_keeps_a_model_that_is_on_for_one_node_only() {
         let mut c = CheckerConfig::default();
-        c.local_installed(false, LocalModel::D1_3b);
+        c.local_installed(false, LocalModel::D1_2b);
         assert!(c.model_on, "the first install switches it on");
 
         c.model_on = false;
@@ -1349,7 +1372,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        c.local_installed(true, LocalModel::D1_3b);
+        c.local_installed(true, LocalModel::D1_2b);
         c.local_installed(true, LocalModel::Kev4b);
         assert!(!c.model_on);
         assert_eq!(c.model_for("n1"), (true, Scope::Node));

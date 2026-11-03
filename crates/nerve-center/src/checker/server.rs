@@ -1,6 +1,6 @@
 //! The local `llama-server` the center runs itself (docs/dev/action-checker.md).
 //!
-//! The center installs a prebuilt `llama-server` and the d1-3B model into its
+//! The center installs a prebuilt `llama-server` and the chosen model into its
 //! state folder ([`super::install`]) and runs it from there. The server
 //! listens on `127.0.0.1` on a free port, on the CPU or (the Vulkan build) the
 //! GPU. The center checks `/v1/models` says `decisions` and refuses a
@@ -17,7 +17,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::task::JoinHandle;
 
-use super::model::{self, Endpoint};
+use super::install::ModelPin;
+use super::model::{self, Endpoint, ReadBudget};
 
 /// How far along the local server is, for the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -64,10 +65,13 @@ pub struct LocalServer {
     shutdown: Arc<tokio::sync::Notify>,
     /// Fired by the supervisor once the child has exited and it is returning.
     exited: Arc<tokio::sync::Notify>,
+    /// Its speed, kept across calls for as long as one process of it runs.
+    budget: Arc<ReadBudget>,
 }
 
 impl Drop for LocalServer {
     fn drop(&mut self) {
+        self.budget.stopped();
         self.shutdown.notify_waiters();
         self.task.abort();
     }
@@ -76,24 +80,28 @@ impl Drop for LocalServer {
 impl LocalServer {
     /// Starts the supervisor for the installed `llama-server` at `bin` with
     /// the installed `model`, on the GPU (all layers, the Vulkan build) or the
-    /// CPU. It returns at once; the status moves from starting to ready (or
-    /// failed) as the server comes up. The model is already on disk (the
-    /// one-click install fetched it), so there is no download at start.
+    /// CPU, with the context of its `pin` ([`ModelPin::context`]). It returns
+    /// at once; the status moves from starting to ready (or failed) as the
+    /// server comes up. The model is already on disk (the one-click install
+    /// fetched it), so there is no download at start.
     pub fn start(
         bin: PathBuf,
         model: PathBuf,
         gpu: bool,
         timeout_ms: u64,
+        pin: &ModelPin,
     ) -> Result<LocalServer, String> {
+        let context = pin.context;
         if !bin.exists() {
             return Err("the local model is not installed".into());
         }
         let port = free_port()?;
         let inner = Arc::new(Mutex::new(Inner::default()));
-        let args = build_args(&model, gpu, port);
+        let args = build_args(&model, gpu, port, context);
         let timeout = Duration::from_millis(timeout_ms.max(100));
         let shutdown = Arc::new(tokio::sync::Notify::new());
         let exited = Arc::new(tokio::sync::Notify::new());
+        let budget = Arc::new(ReadBudget::new(context, pin.read_ms, pin.read_growth));
         let task = tokio::spawn(supervise(
             bin,
             args,
@@ -102,6 +110,7 @@ impl LocalServer {
             inner.clone(),
             shutdown.clone(),
             exited.clone(),
+            budget.clone(),
         ));
         Ok(LocalServer {
             inner,
@@ -109,6 +118,7 @@ impl LocalServer {
             task,
             shutdown,
             exited,
+            budget,
         })
     }
 
@@ -133,12 +143,31 @@ impl LocalServer {
 
     /// The endpoint for the client, once the server is listening.
     pub fn endpoint(&self) -> Endpoint {
-        Endpoint::parse(&format!("http://127.0.0.1:{}", self.port), None, None)
-            .expect("a loopback URL parses")
+        Endpoint {
+            budget: Some(self.budget.clone()),
+            ..Endpoint::parse(&format!("http://127.0.0.1:{}", self.port), None, None)
+                .expect("a loopback URL parses")
+        }
+    }
+
+    /// Whether the server ended while it read a call and has not come up
+    /// again ([`ReadBudget::died_on_call`]).
+    pub fn died_on_call(&self) -> bool {
+        self.budget.died_on_call()
     }
 
     pub fn ready(&self) -> bool {
         self.inner.lock().unwrap().phase == Some(Phase::Ready)
+    }
+
+    /// Whether calls are sent to the server: it is ready, or it ended on a
+    /// call and is starting again, when the client refuses them as lost.
+    /// Both are read under the lock the supervisor changes them under, so a
+    /// call never meets the moment between "not ready" and "marked", or
+    /// between "ready" and "unmarked" (review T3 of #178).
+    pub fn takes_calls(&self) -> bool {
+        let i = self.inner.lock().unwrap();
+        i.phase == Some(Phase::Ready) || self.budget.died_on_call()
     }
 
     pub fn status(&self) -> Status {
@@ -153,8 +182,16 @@ impl LocalServer {
 }
 
 /// The llama-server command line (without the program itself): the installed
-/// model file, and all layers on the GPU or none (CPU only).
-fn build_args(model: &Path, gpu: bool, port: u16) -> Vec<String> {
+/// model file, all layers on the GPU or none (CPU only), and the context.
+///
+/// Without `-c` the server sizes the context from the model (up to 262,144
+/// tokens, 13 GB for Kev-4B), and without `-b`/`-ub` it reads 512 tokens at a
+/// time, which a decision model refuses for a longer prompt (HTTP 500), so a
+/// long command failed closed. One slot: the checker asks one question at a
+/// time per call, and four slots would share the one context, each keeping
+/// its last state in it.
+fn build_args(model: &Path, gpu: bool, port: u16, context: u32) -> Vec<String> {
+    let context = context.to_string();
     vec![
         "-m".into(),
         model.to_string_lossy().into_owned(),
@@ -165,6 +202,14 @@ fn build_args(model: &Path, gpu: bool, port: u16) -> Vec<String> {
         "-ngl".into(),
         // 999 puts every layer on the GPU; 0 keeps it on the CPU.
         if gpu { "999".into() } else { "0".into() },
+        "-c".into(),
+        context.clone(),
+        "-b".into(),
+        context.clone(),
+        "-ub".into(),
+        context,
+        "-np".into(),
+        "1".into(),
     ]
 }
 
@@ -177,7 +222,9 @@ fn free_port() -> Result<u16, String> {
 }
 
 /// Runs the server, restarting it with backoff until the task is aborted. A
-/// non-decision model is a reason not to restart.
+/// non-decision model is a reason not to restart. Each process starts with
+/// the budget's speeds forgotten.
+#[allow(clippy::too_many_arguments)]
 async fn supervise(
     program: PathBuf,
     args: Vec<String>,
@@ -186,6 +233,7 @@ async fn supervise(
     inner: Arc<Mutex<Inner>>,
     shutdown: Arc<tokio::sync::Notify>,
     exited: Arc<tokio::sync::Notify>,
+    budget: Arc<ReadBudget>,
 ) {
     let mut backoff = Duration::from_secs(1);
     loop {
@@ -193,9 +241,11 @@ async fn supervise(
             i.phase = Some(Phase::Starting);
             i.url = None;
         });
-        match run_once(&program, &args, port, timeout, &inner, &shutdown).await {
+        budget.restart();
+        match run_once(&program, &args, port, timeout, &inner, &shutdown, &budget).await {
             RunEnd::NotDecision => {
                 // A clear, final failure: do not restart.
+                budget.settled();
                 exited.notify_waiters();
                 return;
             }
@@ -207,6 +257,9 @@ async fn supervise(
             }
             RunEnd::Exited => {}
             RunEnd::StartFailed(e) => {
+                // The restart came to nothing: the model is down, not
+                // ended on a call, and allow-and-log applies as it says.
+                budget.settled();
                 set(&inner, |i| {
                     i.phase = Some(Phase::Failed);
                     i.message = format!("cannot start {}: {e}", program.display());
@@ -249,6 +302,7 @@ async fn run_once(
     timeout: Duration,
     inner: &Arc<Mutex<Inner>>,
     shutdown: &Arc<tokio::sync::Notify>,
+    budget: &ReadBudget,
 ) -> RunEnd {
     let mut cmd = Command::new(program);
     cmd.args(args)
@@ -283,12 +337,18 @@ async fn run_once(
     loop {
         tokio::select! {
             _ = shutdown.notified() => {
+                budget.stopped();
                 kill_and_wait(&mut child).await;
                 return RunEnd::Stopped;
             }
             status = child.wait() => {
                 let how = status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
                 set(inner, |i| {
+                    // It ended before it was ready: marked if a call was
+                    // sent to it, else a restart that did not come up
+                    // (review T3 and T4 of #178). With the phase, under its
+                    // lock.
+                    budget.ended_before_ready();
                     if i.phase != Some(Phase::Failed) {
                         i.phase = Some(Phase::Starting);
                     }
@@ -304,10 +364,14 @@ async fn run_once(
                             i.phase = Some(Phase::Ready);
                             i.url = Some(url.clone());
                             i.message.clear();
+                            // Calls are sent to the server again. Unmarked
+                            // with the phase, under its lock.
+                            budget.became_ready();
                         });
                         // Stay here until the child exits or we are stopped.
                         tokio::select! {
                             _ = shutdown.notified() => {
+                                budget.stopped();
                                 kill_and_wait(&mut child).await;
                                 return RunEnd::Stopped;
                             }
@@ -316,6 +380,9 @@ async fn run_once(
                                     .map(|s| s.to_string())
                                     .unwrap_or_else(|e| e.to_string());
                                 set(inner, |i| {
+                                    // Marked with the phase, under its lock,
+                                    // if a call was in it.
+                                    budget.ended();
                                     i.phase = Some(Phase::Starting);
                                     i.url = None;
                                     push_line(&mut i.output, format!("llama-server ended ({how})"));
@@ -361,8 +428,9 @@ fn set(inner: &Arc<Mutex<Inner>>, f: impl FnOnce(&mut Inner)) {
 pub(crate) mod fake {
     /// A fake `llama-server`: a shell script that ignores the model and serves
     /// `/v1/models` (a decision model) and `/v1/systemone` on the `--port` it
-    /// is given, so the supervisor can be tested without a real model. Unix
-    /// only (it uses `/bin/sh` and `nc`-free shell); skipped elsewhere.
+    /// is given, so the supervisor can be tested without a real model. It
+    /// writes its process id to `pid` beside it. Unix only (it uses
+    /// `/bin/sh` and `nc`-free shell); skipped elsewhere.
     pub(crate) fn fake_llama_server(dir: &std::path::Path) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("llama-server");
@@ -376,21 +444,32 @@ for a in "$@"; do
   if [ "$prev" = "--port" ]; then port="$a"; fi
   prev="$a"
 done
-exec python3 - "$port" <<'PY'
-import sys, http.server
+echo $$ > "$(dirname "$0")/pid"
+exec python3 - "$port" "$(dirname "$0")" <<'PY'
+import os, sys, http.server
 port = int(sys.argv[1])
+here = sys.argv[2]
 class H(http.server.BaseHTTPRequestHandler):
-    def _send(self, body):
-        self.send_response(200)
+    def _send(self, body, code=200):
+        self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
     def do_GET(self):
+        # While a file `models-closed` lies beside the script, /v1/models
+        # answers "not ready" and everything else goes on, as a server that
+        # has loaded its model but is not counted ready yet.
+        if os.path.exists(here + "/models-closed"):
+            self._send(b'{}', 503)
+            return
         self._send(b'{"data":[{"architecture":{"output_modalities":["decisions"]}}]}')
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         self.rfile.read(n)
+        if self.path == "/tokenize":
+            self._send(b'{"tokens":[1,2,3]}')
+            return
         self._send(b'{"answers":{"danger":{"type":"noul","noul":0.99}}}')
     def log_message(self, *a):
         pass
@@ -409,16 +488,55 @@ mod tests {
 
     #[test]
     fn cpu_and_gpu_args() {
-        let model = std::path::Path::new("/s/checker/model/d1-3B-Q4_K_M.gguf");
-        let cpu = build_args(model, false, 12345);
+        let model = std::path::Path::new("/s/checker/model/d1-2B-Q4_K_M.gguf");
+        let cpu = build_args(model, false, 12345, 4096);
         assert!(cpu.windows(2).any(|w| w == ["-ngl", "0"]));
         assert!(cpu.windows(2).any(|w| w == ["--port", "12345"]));
         assert!(
             cpu.windows(2)
-                .any(|w| w == ["-m", "/s/checker/model/d1-3B-Q4_K_M.gguf"])
+                .any(|w| w == ["-m", "/s/checker/model/d1-2B-Q4_K_M.gguf"])
         );
-        let gpu = build_args(model, true, 12345);
+        let gpu = build_args(model, true, 12345, 4096);
         assert!(gpu.windows(2).any(|w| w == ["-ngl", "999"]));
+    }
+
+    /// The server gets the model's context, and reads a prompt of that size
+    /// in one batch, on one slot.
+    #[test]
+    fn the_context_is_bounded_and_read_in_one_batch() {
+        let model = std::path::Path::new("/s/checker/model/d1-2B-Q4_K_M.gguf");
+        let args = build_args(model, false, 12345, 12_288);
+        for flag in ["-c", "-b", "-ub"] {
+            assert!(
+                args.windows(2).any(|w| w == [flag, "12288"]),
+                "{flag}: {args:?}"
+            );
+        }
+        assert!(args.windows(2).any(|w| w == ["-np", "1"]), "{args:?}");
+    }
+
+    /// The local server's endpoint carries its budget, built from the pin of
+    /// the model it runs: without it every call is sent, however long (review
+    /// round 3 of #178).
+    #[tokio::test]
+    async fn the_local_endpoint_holds_calls_to_its_models_budget() {
+        use crate::checker::config::LocalModel;
+        let dir = tempfile::tempdir().unwrap();
+        // It only has to exist: the budget is set before the server runs.
+        let bin = dir.path().join("llama-server");
+        std::fs::write(&bin, b"").unwrap();
+        for model in [LocalModel::D1_2b, LocalModel::Kev4b] {
+            let pin = crate::checker::install::model_pin(model);
+            let server =
+                LocalServer::start(bin.clone(), dir.path().join("model.gguf"), false, 5000, pin)
+                    .expect("start");
+            let budget = server.endpoint().budget.expect("a budget");
+            assert_eq!(
+                budget.built_with(),
+                (pin.context as usize, pin.read_ms, pin.read_growth),
+                "{model:?}"
+            );
+        }
     }
 
     #[test]
@@ -438,7 +556,14 @@ mod tests {
         let bin = super::fake::fake_llama_server(dir.path());
         let model = dir.path().join("model.gguf");
         std::fs::write(&model, b"x").unwrap();
-        let server = LocalServer::start(bin, model, false, 5000).expect("start");
+        let server = LocalServer::start(
+            bin,
+            model,
+            false,
+            5000,
+            crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b),
+        )
+        .expect("start");
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while std::time::Instant::now() < deadline && !server.ready() {
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -465,5 +590,353 @@ mod tests {
             std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
             "the server still answers after stop"
         );
+    }
+
+    /// A restarted server is held to the assumed speed again until it
+    /// answered a call: it may run slower than the process before it (one
+    /// that lost its GPU runs on the CPU), and a long call admitted at the
+    /// old speed would hold its one slot for many timeouts (review T1 of
+    /// #178).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restarted_server_forgets_the_speed_it_measured() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = super::fake::fake_llama_server(dir.path());
+        let model = dir.path().join("model.gguf");
+        std::fs::write(&model, b"x").unwrap();
+        let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
+        let server = LocalServer::start(bin, model, false, 5000, pin).expect("start");
+        let until = async |what: &str, f: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while !f() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{what}: {:?}",
+                    server.status()
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+        until("ready", &|| server.ready()).await;
+        // Far faster than the 20 ms assumed for d1-2B.
+        server.budget.learn(1000, 1000.0);
+        assert!(server.budget.ms_per_token() < 1.0);
+        let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
+        let killed = std::process::Command::new("kill")
+            .args(["-9", pid.trim()])
+            .status()
+            .unwrap();
+        assert!(killed.success());
+        // A call was on its way when the server ended.
+        server.budget.die_on_call();
+        until("ended", &|| !server.ready()).await;
+        // Until the new process is up, the center keeps the endpoint so the
+        // client refuses calls (review T2 of #178).
+        assert!(server.died_on_call());
+        until("ready again", &|| server.ready()).await;
+        assert!(!server.died_on_call());
+        assert_eq!(server.budget.ms_per_token(), pin.read_ms);
+        server.stop().await;
+    }
+
+    /// Starts the fake server and waits until it is ready.
+    #[cfg(unix)]
+    async fn ready_fake(dir: &std::path::Path) -> LocalServer {
+        let bin = super::fake::fake_llama_server(dir);
+        let model = dir.join("model.gguf");
+        std::fs::write(&model, b"x").unwrap();
+        let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
+        let server = LocalServer::start(bin, model, false, 5000, pin).expect("start");
+        until(&server, "ready", &|| server.ready()).await;
+        server
+    }
+
+    #[cfg(unix)]
+    async fn until(server: &LocalServer, what: &str, f: &dyn Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !f() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{what}: {:?}",
+                server.status()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    fn kill_fake(dir: &std::path::Path) {
+        let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
+        let killed = std::process::Command::new("kill")
+            .args(["-9", pid.trim()])
+            .status()
+            .unwrap();
+        assert!(killed.success());
+    }
+
+    /// A server that ends with a call in it is marked in the same step as it
+    /// leaves the ready phase, without waiting for that call's own task to
+    /// see its connection end: a call that arrives in between would find it
+    /// neither ready nor marked, and be let through by allow-and-log (review
+    /// T3 of #178). The mark goes when the restarted process is ready.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_server_that_ends_with_a_call_in_it_is_marked_as_it_leaves_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = ready_fake(dir.path()).await;
+        let reading = server.budget.hold_slot();
+        kill_fake(dir.path());
+        until(&server, "ended", &|| !server.ready()).await;
+        assert!(server.died_on_call());
+        assert!(server.takes_calls());
+        drop(reading);
+        until(&server, "ready again", &|| server.ready()).await;
+        assert!(!server.died_on_call());
+        server.stop().await;
+    }
+
+    /// A server that ends with no call in it is down, not marked.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_server_that_ends_with_no_call_in_it_is_not_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = ready_fake(dir.path()).await;
+        kill_fake(dir.path());
+        until(&server, "ended", &|| !server.ready()).await;
+        assert!(!server.died_on_call());
+        assert!(!server.takes_calls());
+        server.stop().await;
+    }
+
+    /// A restart that does not come up clears the mark: the model is down
+    /// then, which is what the docs say allow-and-log applies to, and not
+    /// "starting again" for as long as the center runs (review T3 of #178).
+    /// Either way the new process does not come up: it ends at once, or it
+    /// cannot be started.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_that_does_not_come_up_clears_the_mark() {
+        use std::os::unix::fs::PermissionsExt;
+        for ends_at_once in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let server = ready_fake(dir.path()).await;
+            let bin = dir.path().join("llama-server");
+            // The running process keeps its file; a restart finds this.
+            std::fs::remove_file(&bin).unwrap();
+            if ends_at_once {
+                std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+                std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let reading = server.budget.hold_slot();
+            kill_fake(dir.path());
+            until(&server, "marked", &|| server.died_on_call()).await;
+            drop(reading);
+            // The restart follows after the backoff.
+            until(&server, "unmarked", &|| !server.died_on_call()).await;
+            assert!(!server.takes_calls(), "ends_at_once: {ends_at_once}");
+            server.stop().await;
+        }
+    }
+
+    /// Starts the fake server, ends it with a call in it, and waits until the
+    /// process that replaced it answers a call, while `/v1/models` is still
+    /// closed: it is loaded, and the supervisor does not count it ready.
+    #[cfg(unix)]
+    async fn loaded_but_not_counted_ready(dir: &std::path::Path) -> LocalServer {
+        let server = ready_fake(dir).await;
+        std::fs::write(dir.join("models-closed"), b"").unwrap();
+        let reading = server.budget.hold_slot();
+        kill_fake(dir);
+        until(&server, "marked", &|| server.died_on_call()).await;
+        drop(reading);
+        // The calls of the window are refused as lost until the new process
+        // answers.
+        let endpoint = server.endpoint();
+        let config = crate::checker::config::ModelConfig::default();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while model::ask(&endpoint, &config, serde_json::json!({"command": "x"}))
+            .await
+            .is_err()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{:?}",
+                server.status()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        server
+    }
+
+    /// The restarted process answers before the supervisor counts it ready,
+    /// and a call it answers does not clear the mark: the calls until the
+    /// supervisor's probe are still sent to it (and refused as lost while it
+    /// does not answer), not let through as a model that is down (review T4
+    /// of #178).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_call_the_restarted_server_answers_before_it_is_ready_keeps_the_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = loaded_but_not_counted_ready(dir.path()).await;
+        assert!(!server.ready());
+        assert!(server.died_on_call());
+        assert!(server.takes_calls());
+        let config = crate::checker::config::ModelConfig::default();
+        model::ask(
+            &server.endpoint(),
+            &config,
+            serde_json::json!({"command": "x"}),
+        )
+        .await
+        .expect("a second call is sent too");
+        assert!(server.takes_calls());
+        // The probe opens: ready, and the mark goes with it.
+        std::fs::remove_file(dir.path().join("models-closed")).unwrap();
+        until(&server, "ready", &|| server.ready()).await;
+        assert!(!server.died_on_call());
+        server.stop().await;
+    }
+
+    /// A restarted process that ends before it is ready, on a call sent to
+    /// it, is marked like the process before it: the backoff and the next
+    /// load are refused as lost, not let through (review T4 of #178).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restarted_server_that_ends_on_a_call_before_it_is_ready_is_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = loaded_but_not_counted_ready(dir.path()).await;
+        let ended = |server: &LocalServer| {
+            server
+                .status()
+                .output
+                .iter()
+                .filter(|l| l.contains("llama-server ended"))
+                .count()
+        };
+        assert_eq!(ended(&server), 1);
+        let reading = server.budget.hold_slot();
+        kill_fake(dir.path());
+        until(&server, "ended again", &|| ended(&server) == 2).await;
+        assert!(server.died_on_call());
+        assert!(server.takes_calls());
+        drop(reading);
+        std::fs::remove_file(dir.path().join("models-closed")).unwrap();
+        until(&server, "ready", &|| server.ready()).await;
+        assert!(!server.died_on_call());
+        server.stop().await;
+    }
+
+    /// A server stopped on purpose, or dropped, is not up: a count it cut off
+    /// meets a model that is down, not one that failed (review T6 of #178).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stopped_or_dropped_server_is_not_counted_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = ready_fake(dir.path()).await;
+        server.stop().await;
+        assert!(!server.budget.count_failed(false), "stopped");
+        let dir = tempfile::tempdir().unwrap();
+        let server = ready_fake(dir.path()).await;
+        let budget = server.budget.clone();
+        drop(server);
+        assert!(!budget.count_failed(false), "dropped");
+    }
+
+    /// The usual order of a real end: the call's own task sees its connection
+    /// end first, marks the process and frees the slot, and the supervisor
+    /// reaps the process after that. The mark stays (review T5 of #178).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restarted_server_whose_call_saw_the_end_first_stays_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = loaded_but_not_counted_ready(dir.path()).await;
+        let ended = |server: &LocalServer| {
+            server
+                .status()
+                .output
+                .iter()
+                .filter(|l| l.contains("llama-server ended"))
+                .count()
+        };
+        assert_eq!(ended(&server), 1);
+        // The call's task marks this process, as `Flight::died` does, and
+        // the slot is free when the supervisor reaps it.
+        server.budget.die_on_call();
+        kill_fake(dir.path());
+        until(&server, "ended again", &|| ended(&server) == 2).await;
+        assert!(server.died_on_call());
+        assert!(server.takes_calls());
+        std::fs::remove_file(dir.path().join("models-closed")).unwrap();
+        until(&server, "ready", &|| server.ready()).await;
+        assert!(!server.died_on_call());
+        server.stop().await;
+    }
+
+    /// Whether the server takes calls is read with the phase and the mark
+    /// together: the reader keeps the phase's lock while it reads the mark,
+    /// and the supervisor changes the mark under that lock. Otherwise a call
+    /// could read "not ready" just before the restarted server is ready and
+    /// "not marked" just after the mark went, and be let through by
+    /// allow-and-log (review T3 of #178).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_phase_is_read_together_with_the_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
+        // A server that cannot start (the file cannot be run): not ready,
+        // not marked.
+        let bin = dir.path().join("llama-server");
+        std::fs::write(&bin, "x").unwrap();
+        let server = Arc::new(
+            LocalServer::start(bin, dir.path().join("m"), false, 5000, pin).expect("start"),
+        );
+        while server.status().phase != Phase::Failed {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let mark = server.budget.hold_state();
+        let asking = {
+            let server = server.clone();
+            std::thread::spawn(move || server.takes_calls())
+        };
+        // The reader waits for the mark, holding the phase's lock.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while server.inner.try_lock().is_ok() {
+            assert!(std::time::Instant::now() < deadline, "never waited");
+            // Not tokio's sleep: the supervisor blocked on the mark may hold
+            // the thread that drives its timers.
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(mark);
+        assert!(!asking.join().unwrap());
+        server.stop().await;
+    }
+
+    /// The supervisor unmarks the server in the step that makes it ready,
+    /// under the phase's lock, and sets the phase first (review T3 of
+    /// #178).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_mark_goes_in_the_step_that_makes_the_server_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = super::fake::fake_llama_server(dir.path());
+        let model = dir.path().join("model.gguf");
+        std::fs::write(&model, b"x").unwrap();
+        let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
+        let server = LocalServer::start(bin, model, false, 5000, pin).expect("start");
+        // The supervisor is past its restart and probing; the first probe is
+        // after 500 ms.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mark = server.budget.hold_state();
+        // When the server answers, the step waits for the mark with the
+        // phase's lock held: nobody reads between the two.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while server.inner.try_lock().is_ok() {
+            assert!(std::time::Instant::now() < deadline, "never waited");
+            // Not tokio's sleep: the supervisor blocked on the mark may hold
+            // the thread that drives its timers.
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(mark);
+        until(&server, "ready", &|| server.ready()).await;
+        server.stop().await;
     }
 }

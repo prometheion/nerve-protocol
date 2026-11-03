@@ -318,25 +318,23 @@ text generated, so a judgement is fast and cheap. There are two sources:
 There are two local models; the page shows each one's size, licence, speed and
 quality in one line:
 
-| Model | Size | Licence | On a desktop CPU |
-|---|---|---|---|
-| **LiquidAI d1-3B** (the default) | 1.7 GB | LFM Open License v1.0 (not Apache) | Faster: about 2.5 s per call. Catches about 57 % of dangerous actions and 73 % of injection attempts, refuses about 1.7 % of ordinary work |
-| **Kev-4B** (ggml-org) | 3.0 GB | Apache-2.0 | Catches more: about 83 % of dangerous actions and 93 % of injection attempts, refuses about 1.7 % of ordinary work, but about 5 s per call |
+| Model | Size | Memory | Licence | Speed on a desktop CPU, and quality |
+|---|---|---|---|---|
+| **LiquidAI d1-2B** (the default) | 1.1 GB | about 2 GB | LFM Open License v1.0 (not Apache) | Faster: about 2 s per call (5 s on 2 vCPUs). Catches about 55 % of dangerous actions and 73 % of injection attempts, refuses about 1.5 % of ordinary work |
+| **Kev-4B** (ggml-org) | 3.0 GB | about 6 GB, up to 13 GB for a very long call | Apache-2.0 | Catches more: about 80 % of dangerous actions and 93 % of injection attempts, refuses about 1.5 % of ordinary work, but about 5 s per call (15 s on 2 vCPUs) |
 
-Pick d1-3B when the checker should stay quick on a CPU, Kev-4B when catching
-more matters more than a few seconds per call, or when the machine has a GPU.
-Switching the model downloads the other one and removes the first. Each model
-comes with its own default threshold and timeout (d1-3B 0.85 and 6 s, Kev-4B
-0.25 and 15 s, so Kev-4B's normal calls are not cut off); a switch sets them, and you
-can change them afterwards. A threshold and timeout you set before keep their
-values when you update: set the new defaults by hand on the Action checker page, or
-switch to the other model and back. Check that a model's licence suits you before you
-install it.
+Pick d1-2B when the checker should stay quick on a CPU, Kev-4B when catching
+more matters more than a few seconds per call and memory, or when the machine
+has a GPU. Switching the model downloads the other one and removes the first.
+Each model comes with its own default threshold and timeout (d1-2B 0.75 and
+12 s, Kev-4B 0.25 and 35 s, so normal calls are not cut off, on 2 vCPUs
+either); a switch sets them, and you can change them afterwards. Check that
+a model's licence suits you before you install it.
 
-The speeds above are for a desktop CPU. A small machine is much slower (d1-3B
-took about 35 s per call on a 4-core virtual machine); there, raise the timeout,
-use the GPU, or use an endpoint, or the checker refuses every call it cannot
-judge in time.
+The speeds above are for a desktop CPU. A small machine is much slower (d1-2B
+took about 22 s per call on a 4-core virtual machine, Windows); there, raise
+the timeout, use the GPU, or use an endpoint, or the checker refuses every
+call it cannot judge in time.
 
 **Settings:**
 
@@ -346,15 +344,38 @@ judge in time.
 - **Threshold.** At or above this probability the call is refused. The default
   (per model, see above) is tuned so ordinary work is almost never refused.
 - **Timeout**, and what to do on an error or a timeout: **fail closed** (refuse
-  the call, the default and the safe choice) or allow-and-log.
+  the call, the default and the safe choice) or allow-and-log. The local model
+  reads one call at a time, and is not sent a call it cannot read within the
+  timeout on your machine: a call too long for that (long arguments, a long
+  write on a slow CPU) is refused as too long, and one that would wait too long
+  behind the calls checked before it as busy, so that long calls, or many at
+  once, cannot keep the model busy while every other call waits. A call the
+  running local model took and then did not judge (it ran past the timeout, or
+  the model failed on it) is refused too. All three are refused with
+  allow-and-log as well: with the local model, allow-and-log lets a call
+  through only while the model is not running (not installed, starting, or
+  failed); a model that ended while it read a call counts as running until it
+  is up again, and the calls in between are refused as lost. If the restart
+  does not come up and no call was sent to it, it counts as down and the calls
+  are allowed and logged again (the page may say "starting" in both cases; the
+  refusal or the log entry tells them apart). A running model that fails to
+  count a call's tokens does not judge the call either, and the call is
+  refused. The
+  refusal says which; a longer timeout gets longer calls judged.
+  On a desktop CPU d1-2B judges a 2 KB write in its 12 s.
 - **The question.** The instructions and the true/false criteria the model is
   asked. You can edit and reset them. The command text is never put into the
   question — it goes only into the state the model reads — so a crafted command
-  cannot rephrase what is asked.
+  cannot rephrase what is asked. With the local model they take at most
+  2,000 bytes together (the default about 800; a control character counts as
+  six), so that its context holds the question beside the longest call; an
+  endpoint takes a longer one. A longer question kept from before is not cut,
+  but shorten it: a long call beside it does not fit and is refused.
 
 If the model is on and cannot be reached, a call is refused (fail closed) with a
 message that says so and where to switch the model off. Switch it to
-allow-and-log if you would rather let calls through when the model is down.
+allow-and-log if you would rather let calls through when the model is down
+(for the local model: not running, see **Timeout** above).
 
 ## Taint
 

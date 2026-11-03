@@ -3652,10 +3652,30 @@ impl Center {
             match bin
                 .ok_or_else(|| "the local model is not installed".to_string())
                 .and_then(|bin| {
-                    LocalServer::start(bin, model, cfg.model.local_gpu, cfg.model.timeout_ms)
+                    LocalServer::start(
+                        bin,
+                        model,
+                        cfg.model.local_gpu,
+                        cfg.model.timeout_ms,
+                        checker::install::model_pin(cfg.model.local_model),
+                    )
                 }) {
                 Ok(srv) => {
                     *self.local_model.lock().unwrap() = Some(Arc::new(srv));
+                    // A question stored before the cap (or with an
+                    // endpoint) is kept; the client refuses a call it
+                    // pushes over the context, so say why.
+                    let question = checker::config::question_len(&cfg.model);
+                    if question > checker::config::QUESTION_MAX {
+                        self.log.record(
+                            Level::Warn,
+                            None,
+                            &format!(
+                                "the action checker's model question is {question} bytes long, over the {} the local model's context is sized for: a long call beside it is refused as too long; shorten the question on the Action checker page",
+                                checker::config::QUESTION_MAX
+                            ),
+                        );
+                    }
                     self.log.record(
                         Level::Info,
                         None,
@@ -3676,14 +3696,20 @@ impl Center {
     }
 
     /// The model endpoint to use now: the owner's endpoint, or the local
-    /// server's once it is ready. `None` when the model is on but not
+    /// server's once it is ready (or while it starts again after it ended
+    /// on a call). `None` when the model is on but not
     /// reachable (the checker then fails closed, or logs, by its setting).
     fn resolved_endpoint(&self, checker: &Checker) -> Option<Endpoint> {
         match checker.model_source() {
             ModelSource::Endpoint => checker.endpoint().cloned(),
             ModelSource::Local => {
                 let srv = self.local_model.lock().unwrap().clone()?;
-                srv.ready().then(|| srv.endpoint())
+                // A server that ended while it read a call keeps its
+                // endpoint while it starts again, so the client refuses the
+                // calls of that window as lost, and allow-and-log
+                // does not let them through as it does for a model that is
+                // down (review T2 of #178).
+                srv.takes_calls().then(|| srv.endpoint())
             }
         }
     }
@@ -3745,7 +3771,7 @@ impl Center {
         self.install.lock().unwrap().clone()
     }
 
-    /// Starts the one-click install of llama.cpp and the d1-3B model on the
+    /// Starts the one-click install of llama.cpp and the chosen model on the
     /// CPU or GPU, in the background. On success it turns the local model on
     /// with the chosen device. Refused while an install is already running.
     /// Validates a posted checker config and, if it holds, saves it. Taint
@@ -3794,6 +3820,15 @@ impl Center {
         }
         if cfg.model.instructions.trim().is_empty() {
             return Err("the model question needs instructions".into());
+        }
+        // Only the local server's context is the center's to size; an
+        // endpoint's model reads what its own machine holds.
+        let question = checker::config::question_len(&cfg.model);
+        if cfg.model.source == ModelSource::Local && question > checker::config::QUESTION_MAX {
+            return Err(format!(
+                "the model question (the instructions and both criteria) is {question} bytes long; at most {} fit",
+                checker::config::QUESTION_MAX
+            ));
         }
         // The owner's note is one line of a few sentences: `list()` gives it
         // to every harness on one line, and a long one would cost every
@@ -5810,6 +5845,41 @@ pub(crate) mod tests {
         assert_eq!(r.why.as_deref(), Some("its job was forgotten"));
     }
 
+    /// A question longer than every model's context holds beside the
+    /// largest state is refused at the save with the local source (#178),
+    /// counted as the model reads it: a control character as its six-byte
+    /// escape.
+    #[test]
+    fn a_question_too_long_for_the_context_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let with = |instructions: String| {
+            let mut cfg = c.read(|s| s.checker.clone());
+            cfg.model.instructions = instructions;
+            cfg
+        };
+        let m = c.read(|s| s.checker.model.clone());
+        let criteria = m.criteria_true.len() + m.criteria_false.len();
+        let fits = checker::config::QUESTION_MAX - criteria;
+        c.apply_checker_config(with("x".repeat(fits))).unwrap();
+        let e = c
+            .apply_checker_config(with("x".repeat(fits + 1)))
+            .unwrap_err();
+        assert!(e.contains("at most 2000 fit"), "{e}");
+        assert_eq!(c.read(|s| s.checker.model.instructions.len()), fits);
+        let e = c
+            .apply_checker_config(with(format!("{}\u{1}", "x".repeat(fits - 5))))
+            .unwrap_err();
+        assert!(e.contains("is 2001 bytes"), "{e}");
+        // An endpoint's context is not the center's: a longer question
+        // saves there (review r2), and other settings with it.
+        let mut cfg = with("x".repeat(fits + 1000));
+        cfg.model.source = ModelSource::Endpoint;
+        cfg.model_on = !cfg.model_on;
+        c.apply_checker_config(cfg).unwrap();
+        assert_eq!(c.read(|s| s.checker.model.instructions.len()), fits + 1000);
+    }
+
     /// The owner's note on a machine is kept on one line, refused when long,
     /// shown by `list()` for that machine only, and outlives the machine's
     /// pairing like its other settings; a note of blanks is no setting.
@@ -6066,14 +6136,14 @@ pub(crate) mod tests {
     }
 
     /// An installed CPU build that is the fake `llama-server` (it answers as
-    /// a decision model), with a d1-3B file it ignores.
+    /// a decision model), with a d1-2B file it ignores.
     #[cfg(unix)]
     fn install_fake_build(state: &Path) {
         let bin = checker::install::llama_dir(state).join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         checker::server::fake::fake_llama_server(&bin);
         std::fs::write(bin.parent().unwrap().join("variant"), "cpu").unwrap();
-        let model = checker::install::model_path(state, LocalModel::D1_3b);
+        let model = checker::install::model_path(state, LocalModel::D1_2b);
         std::fs::create_dir_all(model.parent().unwrap()).unwrap();
         std::fs::write(model, b"x").unwrap();
     }
@@ -6107,6 +6177,38 @@ pub(crate) mod tests {
         c.rebuild_checker();
         until("the model to be ready", || local_ready(&c)).await;
         c
+    }
+
+    /// A local model that ended on a call keeps its endpoint while it starts
+    /// again, so the client refuses the calls of that window; one that is
+    /// merely down has none, and allow-and-log applies (review T2 of #178).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_local_model_that_ended_on_a_call_keeps_its_endpoint_while_it_starts_again() {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let dir = tempfile::tempdir().unwrap();
+            let c = center_with_a_running_model(dir.path()).await;
+            let checker = c.checker();
+            assert!(c.resolved_endpoint(&checker).is_some());
+            let pid =
+                std::fs::read_to_string(checker::install::llama_dir(dir.path()).join("bin/pid"))
+                    .unwrap();
+            let killed = std::process::Command::new("kill")
+                .args(["-9", pid.trim()])
+                .status()
+                .unwrap();
+            assert!(killed.success());
+            until("the model to end", || !local_ready(&c)).await;
+            // Down, with no call lost: no endpoint.
+            assert!(c.resolved_endpoint(&checker).is_none());
+            let srv = c.local_model.lock().unwrap().clone().unwrap();
+            srv.endpoint().budget.unwrap().die_on_call();
+            assert!(c.resolved_endpoint(&checker).is_some());
+            until("the model to be ready again", || local_ready(&c)).await;
+            assert!(!srv.died_on_call());
+        })
+        .await
+        .expect("the test did not finish within 60 s");
     }
 
     /// The local model runs when only a node has the model on, and Remove
@@ -6170,7 +6272,7 @@ pub(crate) mod tests {
             let (base, release) = held_download();
             *c.install_from.lock().unwrap() = Arc::new(checker::install::Sources::at(&base));
             // The switch to the GPU build starts downloading.
-            c.start_checker_install(true, LocalModel::D1_3b)
+            c.start_checker_install(true, LocalModel::D1_2b)
                 .await
                 .unwrap();
             until("the download to start", || {
@@ -6239,13 +6341,13 @@ pub(crate) mod tests {
             })
             .await;
             assert_eq!(c.read(|s| s.checker.model.local_model), LocalModel::Kev4b);
-            assert!(!checker::install::model_path(dir.path(), LocalModel::D1_3b).exists());
+            assert!(!checker::install::model_path(dir.path(), LocalModel::D1_2b).exists());
             until("the new model to run", || local_ready(&c)).await;
-            // A swap that fails: something is in the way where d1-3B's file
+            // A swap that fails: something is in the way where d1-2B's file
             // goes.
-            let d1 = checker::install::model_path(dir.path(), LocalModel::D1_3b);
+            let d1 = checker::install::model_path(dir.path(), LocalModel::D1_2b);
             std::fs::create_dir_all(d1.join("in-the-way")).unwrap();
-            c.start_checker_install(false, LocalModel::D1_3b)
+            c.start_checker_install(false, LocalModel::D1_2b)
                 .await
                 .unwrap();
             until("the install to fail", || {
@@ -6300,7 +6402,7 @@ pub(crate) mod tests {
             let c = open(dir.path(), None);
             let (base, release) = held_download();
             *c.install_from.lock().unwrap() = Arc::new(checker::install::Sources::at(&base));
-            c.start_checker_install(false, LocalModel::D1_3b)
+            c.start_checker_install(false, LocalModel::D1_2b)
                 .await
                 .unwrap();
             until("the download to start", || {
@@ -6318,7 +6420,7 @@ pub(crate) mod tests {
             // still open and silent.
             let (base2, release2) = held_download();
             *c.install_from.lock().unwrap() = Arc::new(checker::install::Sources::at(&base2));
-            c.start_checker_install(false, LocalModel::D1_3b)
+            c.start_checker_install(false, LocalModel::D1_2b)
                 .await
                 .unwrap();
             until("the second download to start", || {

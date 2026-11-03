@@ -377,7 +377,7 @@ impl Ui {
                 let model = match b.get("model") {
                     None | Some(Value::Null) => c.read(|st| st.checker.model.local_model),
                     Some(v) => serde_json::from_value(v.clone())
-                        .map_err(|_| bad("the model is d1-3b or kev-4b"))?,
+                        .map_err(|_| bad("the model is d1-2b or kev-4b"))?,
                 };
                 c.start_checker_install(gpu, model)
                     .await

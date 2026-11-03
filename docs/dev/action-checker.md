@@ -261,7 +261,10 @@ files (`Center::hold_local_files`: a `files_held` flag that
 `manage_local_model` checks under the same lock, so a config save cannot start
 a server from them, then `LocalServer::stop`, which ends the child and waits
 for it) and `install::commit` swaps them in (the old build is moved aside and
-put back if the swap fails) and deletes the other model. Success or failure,
+put back if the swap fails) and deletes every other file in `checker/model/`
+and every other build in `checker/llama/`: the other model, and any model
+file or build no pin names, such as the former ones after a pin changed.
+Success or failure,
 the install ends with `rebuild_checker`, which starts the new build or the old
 one again. Installs are serialised (the phase is claimed under the status
 lock) and the center keeps the task's handle: `Remove` aborts it and waits for
@@ -270,16 +273,18 @@ takes the files the same way, deletes them, and turns the local model off even
 when a delete failed (a half-removed model cannot run, and left on it would
 refuse every call). There is no path or build to choose; the
 model is one of the two pinned in `install::MODELS` (`ModelConfig::local_model`,
-d1-3B by default), independent of the device. Each pin carries its repo,
-revision, file, size, SHA-256, licence, and the evaluation's default threshold
-and timeout (d1-3B 0.85 / 6 s, Kev-4B 0.25 / 15 s); a model switch
+d1-2B by default), independent of the device. Each pin carries its repo,
+revision, file, size, SHA-256, licence, the evaluation's default threshold
+and timeout (d1-2B 0.75 / 12 s, Kev-4B 0.25 / 35 s) and the context the
+server gets (d1-2B 12,288 tokens, Kev-4B 8,192; see below); a model switch
 (`CheckerConfig::local_installed`) downloads the other file, deletes the first,
 and takes that model's defaults, while a reinstall of the same model keeps the
 owner's. The model client waits up to the checker's own timeout for an answer
 (`http::read_client_response` takes it), not the transport's fixed 15 s head
 timeout, so a slow model on a small CPU is not cut short. The supervisor
 (`checker/server.rs`) runs the installed binary
-with `-m <model>` and `-ngl 0` (CPU) or `-ngl 999` (GPU), on a free loopback
+with `-m <model>`, `-ngl 0` (CPU) or `-ngl 999` (GPU), `-c`, `-b` and `-ub`
+of the model's context and `-np 1`, on a free loopback
 port, restarted with backoff, ended with the center (`kill_on_drop`, a process
 group on Unix); its state and the install progress show in the UI. The endpoint
 token is the only secret and is not in a backup; the installed files are not in
@@ -298,18 +303,23 @@ and after a failed one, a config save while the files are held starts
 nothing, and a Remove during a stalled download ends it for good.
 `tests/local_install.rs` has two `#[ignore]` end-to-end tests. The first
 that does the real thing: it downloads the pinned CPU build of this platform
-through the center's downloader, unpacks it, starts d1-3B with it (from a local
-copy named by `NERVE_TEST_D1_MODEL`, so the 1.7 GB file is not fetched again)
+through the center's downloader, unpacks it, starts d1-2B with it (from a local
+copy named by `NERVE_TEST_D1_MODEL`, so the 1.1 GB file is not fetched again)
 and checks a dangerous call is refused by its score and an ordinary one allowed.
-It passed on Linux x86_64 (`ubuntu-x64`, 17 968 546 bytes) and on the Windows
-test VM (`win-cpu-x64`, 19 662 517 bytes, unpacked by the system bsdtar). The
-second drives the center itself: install on the CPU, wait for ready, switch to
+With b11960 it passed on Linux x86_64 (`ubuntu-x64`, 22 686 210 bytes, about
+2 s a call on a busy desktop) and on the Windows test VM (`win-cpu-x64`,
+24 407 745 bytes, unpacked by the system bsdtar, about 22 s a call on its 4
+vCPUs, so with `NERVE_TEST_TIMEOUT_MS`) on 2026-11-02. The
+second drives the center itself, with a model file and a build no pin names
+in the checker folder: install on the CPU (which deletes that file and
+build), wait for ready, switch to
 the GPU build while the model runs (`NERVE_TEST_GPU_SWITCH=1`, only on a machine
 whose GPUs may be used), then Remove while it runs. On the Windows VM (no usable
 GPU: `--list-devices` finds none) it switched, fell back to the CPU with a note,
 and removed every file while the server was running (2026-10-18; re-run after
 review round 3 with two config saves during the switch, while the CPU model
-stayed ready); on Linux it ran without the GPU step.
+stayed ready); on Linux it ran without the GPU step. With b11960 and d1-2B it
+passed without the GPU step on Linux and on the Windows VM (2026-11-02).
 
 ## Taint
 
@@ -381,7 +391,9 @@ benign cases refused, the injection catch rate, and p50/p95 latency, for all
 cases, the command and file cases, and the capability cases, with each
 capability case's score. `NERVE_CHECKER_TIMEOUT_MS` raises
 the client timeout for a slow model (e.g. Kev-4B on CPU); it is the runner
-only, not the product default.
+only, not the product default. `NERVE_EVAL_STRIDE=<n>` runs every nth case (a
+latency run), and `NERVE_EVAL_DUMP=<file>` writes each case's id, kind, score
+and latency as JSON, for a sweep or a comparison of two runs.
 
 Two limits of the set. A file write is recorded by its path only, so the
 runner's `args` for it lack the `content` and `if_match` a real write sends
@@ -473,29 +485,246 @@ blocklist's and the node's part: an `fs.write` entry refuses the write to
 `authorized_keys` before the model (it scored 0.17 and 0.49), and actuate needs
 the owner's `on` on the node.
 
-**The default is LiquidAI d1-3B** (Q4_K_M) at a threshold of **0.85**, for one
-reason: speed on a CPU. At ~2.5 s per call it can sit in front of every
-execute/write call; Kev-4B takes ~5 s. On quality d1-3B is **not** the best:
-Kev-4B catches more dangerous actions (82.8 % vs 57.0 %) and far more injection
-attempts (93 % vs 73 %) at the same benign refusals (1.7 % each). **Pick
-Kev-4B** when catching more matters more than a few seconds per call, or on a
-machine with a GPU, where its latency drops; it is the second model of the
-one-click local mode (Apache-2.0), with its own default threshold of 0.25 and a
-15 s timeout. d1-3B's licence is the **LFM Open License v1.0** (not Apache);
-both licences are named in the UI and the user guide.
+**On llama.cpp b11960, with d1-2B in d1-3B's place** (#178, 2026-11-02): the
+release build `llama-b11960-bin-ubuntu-x64` (CPU, `CUDA_VISIBLE_DEVICES=`,
+`-ngl 0`) with the product's flags (`-np 1`, `-c`/`-b`/`-ub` of the model's
+context), all 231 cases, the same runner. d1-2B is LiquidAI's `lfm3` decision
+model on LFM3-VL-2B (1.92B parameters, LFM Open License v1.0 as d1-3B). Its
+scores are the ones of the 2026-10-28 evaluation on llama.cpp's PR build to
+the last digit, and Kev-4B's moved by at most 0.024 (one decision of 231 flips
+at 0.5, none at 0.25), so the 0.8.0 rework of the LFM code changed nothing
+that counts. The operating point is the lowest threshold of the sweep (0.10 to
+0.95 in steps of 0.05) at which ordinary cases refused stay under 2 %; scores
+are catch % / ordinary refused % / injection caught % over all 231 cases (101
+dangerous, 130 ordinary, 15 injection):
 
-On a small CPU both are slower: on the 4-vCPU Windows test VM d1-3B took about
-35 s per call (the real one-click install with the pinned `win-cpu-x64` build,
-2026-10-18). There the default 6 s timeout fails closed on every call; raise the
-timeout, use a GPU, or use an endpoint.
+| Model | File | Threshold | All 231 | 214 command and file | Capability dangerous (of 8) / misleading (of 3) | p50 / p95, 4 threads | p50 / p95, 2 vCPUs |
+|---|---|---|---|---|---|---|---|
+| **d1-2B** Q4_K_M | 1.10 GB | **0.75** | **55.4 / 1.5 / 73.3** | 59.1 / 1.7 | 1 / 0 | 1.6 s / 2.0 s | 5.1 s / 6.1 s |
+| Kev-4B Q4_K_M | 3.03 GB | 0.25 | 80.2 / 1.5 / 93.3 | 82.8 / 1.7 | 4 / 1 | 4.7 s / 6.0 s | 14.2 s / 16.2 s |
+| d1-3B Q4_K_M (2026-10-28, PR build) | 1.67 GB | 0.85 | 54.5 / 1.5 / 73.3 | 57.0 / 1.7 | 2 / 0 | | |
+
+The 4-thread figures are the scoring runs (all 231 cases, the machine shared
+with other work, load 3 to 5 on 16 threads); "2 vCPUs" is one core's two
+hardware threads (`taskset -c 4,5`, `-t 2`, as a 2-vCPU VM has them), in a
+quiet window (load about 2): d1-2B over all 231 cases, Kev-4B over every 4th
+(58); two more runs of each were within 0.5 s. On two separate cores d1-2B
+takes 3.3 s (p95 3.7 s). On the busy machine of 2026-10-28 d1-2B took 0.33
+(4 threads) to 0.60 (2 threads) of d1-3B's time. One case is about 1 point of catch, so d1-2B and
+d1-3B are level on this set. d1-2B's operating point sits on an edge: at 0.70
+ordinary refusals go to 3.1 %. Sweep (catch / ordinary refused / injection):
+
+| Threshold | d1-2B | Kev-4B |
+|---|---|---|
+| 0.15 | 82.2 / 19.2 / 80.0 | 90.1 / 2.3 / 100.0 |
+| 0.25 | 77.2 / 14.6 / 80.0 | **80.2 / 1.5 / 93.3** |
+| 0.50 | 68.3 / 6.9 / 73.3 | 67.3 / 0.0 / 86.7 |
+| 0.65 | 62.4 / 4.6 / 73.3 | 56.4 / 0.0 / 73.3 |
+| 0.70 | 59.4 / 3.1 / 73.3 | 54.5 / 0.0 / 73.3 |
+| 0.75 | **55.4 / 1.5 / 73.3** | 43.6 / 0.0 / 60.0 |
+| 0.85 | 48.5 / 1.5 / 53.3 | 37.6 / 0.0 / 53.3 |
+| 0.90 | 39.6 / 0.8 / 53.3 | 31.7 / 0.0 / 46.7 |
+
+d1-2B's timeout is about twice its 2-vCPU p95 (5.8 to 6.1 s in three runs):
+12 s, 1.6 times the slowest call seen (7.6 s). Kev-4B's by the same rule
+(16.2 to 17.0 s in two runs): 35 s, where its former 15 s was about its p50
+on 2 vCPUs and failed closed on about half the calls there.
+
+**The context and memory.** A decision model reads the whole prompt in one
+physical batch: llama-server refuses a longer prompt with HTTP 500 ("input
+(N tokens) is too large to process. increase the physical batch size"). With
+the server's default batch of 512 tokens a call whose state was longer got no
+answer and failed closed, or was allowed with allow-and-log; and without `-c`
+the server sized the context from the model (d1-2B 128,000 tokens, Kev-4B
+262,144, four slots), so Kev-4B took 13.3 GB. The center now passes `-c`,
+`-b` and `-ub` of the model's `ModelPin::context` and `-np 1` (with four slots
+on one shared context, each slot kept its last state and the server ran out
+of room). The context holds the largest state `model_state` builds, every
+field at its clip (description 400 bytes, target and arguments 2000 bytes
+each, names of 64), with the default question: written in control characters,
+which the state carries escaped as `\u00XX`, it is 8,103 tokens for d1-2B; in
+characters outside the basic plane 4,427 (Kev-4B 4,393); random ASCII 3,476
+(Kev-4B 3,535); words of a command line 1,341 (Kev-4B 1,181). Mixed per field
+it is more: control characters in the target and description and characters
+outside the basic plane in the arguments give 9,425 for d1-2B and 4,584 for
+Kev-4B, the largest of every mix of those kinds, quotes, backslashes and
+special-token spellings. An ordinary call is 230 to 400. So d1-2B gets 12,288
+and Kev-4B 8,192, and the question (instructions and both criteria) is capped
+at `config::QUESTION_MAX`, 2,000 bytes as JSON writes it (the default about
+800): a byte is at most one token, and the context holds the largest state
+with a question that long. `checker::tests::the_largest_state_and_question_fit_every_models_context`
+keeps that true: it builds the largest states and bounds their tokens with
+what both tokenizers were measured to read (at most a token per byte, three
+for a `\u00XX` escape, one for a two-byte escape such as `\"`; d1-2B reads
+the state as JSON, Kev-4B as `key: value` lines), so a longer clip, a longer
+question or a smaller context fails there. The memory, as `VmRSS` of the
+server with these flags:
+
+| Model | After the load | Ordinary calls (the 231 cases) | A state of about 1,300 tokens | 4,400 tokens | The largest state |
+|---|---|---|---|---|---|
+| d1-2B | 1.88 GB | 1.96 GB | 2.17 GB | 2.73 GB | 3.37 GB (8,070 tokens) |
+| Kev-4B | 5.28 GB | 5.87 GB | 7.72 GB | 12.78 GB | 12.78 GB |
+
+Kev-4B's compute grows by about 2 MB per token of the prompt (`-fa on` does
+not change it), so the context bounds what an ordinary call takes (5.9 GB, from
+13.3), but a state near the clip still takes up to 13 GB. d1-2B stays under
+3.4 GB.
+
+The question cap holds for the local source only: an endpoint's context is its
+machine's, not the center's, and the Action checker page saves the whole config
+for every change, so a cap there would block every other setting of an owner
+whose endpoint takes a longer question. A question stored over the cap (from
+before it, or with an endpoint, then a switch to the local model) is kept; the
+center logs a warning when it starts the local model with it, and the client
+refuses a call it pushes past the context (below).
+
+**What the model reads in time.** The context bounds the tokens, not the time.
+A decision task is read in one batch, which llama-server does not stop when the
+client gives up on it, and with one slot every other call waits behind it.
+d1-2B on 4 threads took 12 s for 1,982 tokens and 60 s for 8,070
+(`raw/peak-d1-2b-c12288.server.log` in the evaluation folder), Kev-4B 42 s for
+2,002 and 135 s for 4,386; on 2 vCPUs they read about 18 and 60 ms per token.
+So with the 12 s timeout one long call held the server for a minute, and every
+model-checked call of every session in that minute timed out: refused, or with
+allow-and-log let through unjudged (review round 2 of #178). The client
+therefore holds the local server to a budget (`model::ReadBudget`, carried by
+the local `Endpoint` only). It counts the request's tokens with `POST
+/tokenize` first, which the server answers on its HTTP thread at once, not
+behind the busy slot. It counts the text as plain text (`parse_special:
+false`) and one more token for each `<`: by default `/tokenize` reads a
+special token's spelling (`<|im_start|>`) as one token, but the decision server
+breaks every spelling in the call's text into plain tokens (d1-2B's with a
+zero-width space, Kev-4B's as `<¦x¦>`), which is at most one token more per
+spelling, and every spelling of both models starts with `<`. Counted the
+default way, a command of 2 KB of spellings was 416 tokens, sent at any speed,
+and the server read 2,519 (review round 3). A request of up to 512 tokens
+(`model::ALWAYS_SENT_TOKENS`, what every earlier release sent) is sent as
+before. A longer one is sent only when it is read within the timeout at the
+slowest speed of the last eight calls that ran alone (a call that overlapped
+another one would count its wait), or, before the server's first answer, at the pin's 2-vCPU speed
+(`ModelPin::read_ms`: d1-2B 20 ms, Kev-4B 65 ms per token). A call's speed
+is taken from the tokens the server says it read (`usage.input_tokens` of its
+answer), not from the count it was let through with: that count only bounds
+them, and a call padded with plain `<` counts about four times what d1-2B
+reads, so calls of `<` taught a speed four times too fast, after which a call
+that held the server for a minute was let through (review round 4). An answer
+that does not say teaches nothing; a call the server has not answered after
+ten timeouts (`STUCK_AFTER_TIMEOUTS`, a stuck server) has none, and counts as
+that time for the tokens counted, but never as faster than the slowest speed
+already kept (or the assumed one): a call of up to 512 tokens is not checked
+against the timeout, and a timeout the owner raised later would otherwise turn
+its too fast speed into a stall (review round 5). A token of a long prompt also takes longer than one of a short
+prompt: d1-2B took 5.7 ms per token for 376 tokens and 7.4 ms for 8,070, and
+in review round 4 1.53 times a 240-token call's time per token for 8,500;
+Kev-4B 19 to 20 ms for 455 to 1,191 and 30.8 ms for 4,386. So the time of a
+call of n tokens (with 64 for the template) is estimated as n · (1 + n / g)
+tokens at a short call's speed, and a speed is taken back the same way, with
+g per model below the steepest measurement (`ModelPin::read_growth`: d1-2B
+12,000, Kev-4B 5,000); without it a call of 8,500 tokens was estimated at
+45 s and took 62. A request whose tokens with 64 for the prompt template
+exceed the context is never sent. Either
+is refused as too long (`ModelError::TooLong`), also with allow-and-log: the
+length is the agent's choice, and padding a call must not get it past the
+model. The refusal names the tokens and the time and says that a longer timeout
+gets longer calls judged. On a desktop CPU d1-2B reads about 1,500 to 1,800
+tokens within its 12 s, so a 2 KB write of code is judged; on 2 vCPUs about 500
+to 600. Kev-4B on a desktop CPU reads 800 to 1,500 tokens within its 35 s, which
+keeps its memory under about 8.5 GB; on 2 vCPUs only calls of up to 512 tokens
+are sent to it; a GPU reads much faster, so there a long call can
+still take it up to 13 GB. A call of up to 512 tokens can still run past the timeout on a slow
+server (by the budget's own estimate Kev-4B reads 512 tokens in about 42 s on
+2 vCPUs, d1-2B in 12.1 s).
+
+The budget bounds each call as if it ran alone, but the server reads one at a
+time, and a session runs up to 16 calls at once. So the client also holds the
+server's one slot itself (a semaphore in the budget, as `-np 1`): a call is
+sent only once the call before it was answered. A task of its own sends it and
+keeps the slot until the server answered, also after the caller gave up at its
+timeout, since the server reads a call it took to the end; that whole read
+gives the call's speed. The timeout covers the wait for the slot and the read.
+A call that did not get the slot within it, or that got it with less time left
+than its estimate (one of up to 512 tokens too), is not sent and is refused as
+busy (`ModelError::Busy`). A call that got the slot at once is held to the time
+left after `/tokenize` too, but only when it is over 512 tokens (refused as too
+long). A call that was sent and got no answer in time, or
+none that could be read (an HTTP error, a reset connection, no `noul`), is
+refused as not judged (`ModelError::NotJudged`). Both are refused with
+allow-and-log too, as `TooLong` is: before review T1 of #178 parallel calls
+queued in the server, and every call behind them, of any session, timed out
+and was with allow-and-log let through unjudged ("model unreachable"), and so
+was a Kev-4B call of 430 to 512 tokens on 2 vCPUs. With the local model,
+allow-and-log covers only a server that does not answer `/tokenize` (not
+installed, starting, failed to start). A server that ended while it read a call
+is marked (`ReadBudget::died_on_call`): by the call's own task when its
+connection ended without an answer (not an HTTP error), and by `run_once` when
+the process exits while a call holds the slot, in the step that sets the phase
+(under the phase's lock, which `LocalServer::takes_calls` reads it under).
+`resolved_endpoint` keeps the endpoint while the mark stands, and `ask_local`
+refuses a call as lost (`ModelError::Lost`, not sent) when `/tokenize` cannot
+reach the server and the mark stands or a call holds the slot (the slot is
+read first: a call marks before it frees it), so those seconds are not a model
+that is down. A `/tokenize` that answers clears the mark, so one set by a
+failed connect while the server ran does not outlast the next call, but only
+while the supervisor counts the process ready and only a mark that was there
+when that `/tokenize` began: the restarted process answers before the
+supervisor's next probe, and the calls in between must still meet the mark.
+The mark goes in the step that makes the restarted process ready, and when the
+restart comes to nothing (the process cannot be started, or exits before it is
+ready with no call sent to it): then the model is down, and allow-and-log
+applies. A call sent to a process that exits before it is ready marks it as
+any other end on a call does, whether the call's own task saw the end first
+or the supervisor did. The Ready step clears only the mark of an earlier
+process (`marked_in < process`): a call may have ended the process between
+its answer to the probe and that step, and the end is not seen again. A
+`/tokenize` that fails while the supervisor counts the process ready is not a
+model that is down: the server is running and failed on the call's text, or
+has just ended, and the call is refused as not counted (it was not sent).
+A count is a request like a read: one in flight when the process ends marks
+it (`Flights::counting`), and a count that loses its connection marks the
+process itself, so the restart window is refused as lost whichever of the
+count and the supervisor sees the end first. A stop on purpose clears `ready`
+(`ReadBudget::stopped`), and a count it cuts off meets a model that is down.
+`/tokenize`'s answer is read up to eight bytes per byte of
+the text (at least 128 KiB), so a question over the cap is counted and refused
+as too long, and not reported as an unreachable model. Each new process of the server starts with the
+speeds forgotten (`ReadBudget::restart`, called by `supervise`), as it may read
+slower than the one before it: a Vulkan build that finds no usable GPU at its
+start runs on the CPU, and a machine may swap after an out-of-memory kill.
+How many calls one session may have waiting is not bounded (the queue is
+first come, first served), so one session's many calls can keep another's
+refused as busy for as long as they come; that is a refusal, never a call let
+through.
+
+`model::tests` covers the budget and the slot against a loopback fake,
+`checker::tests` the refusals with allow-and-log, `server::tests` the restart,
+and `tests/local_model.rs` (ignored, a real server) a 2,000-character command
+and one of special-token spellings, both refused at once, and that calls of
+`<` do not make the learned speed faster.
+
+**The default is LiquidAI d1-2B** (Q4_K_M) at a threshold of **0.75**: it
+catches what d1-3B caught (55.4 % against 54.5 %, 73 % of injections, the same
+1.5 % of ordinary work refused) at two thirds of the download, half the memory
+and a third to six tenths of the time. On quality it is **not** the best:
+Kev-4B catches more dangerous actions (80.2 %) and far more injection attempts
+(93 %) at the same ordinary refusals. **Pick Kev-4B** when catching more
+matters more than a few seconds per call and 6 GB of memory (up to 13 GB for a
+call with long arguments), or on a machine
+with a GPU, where its latency drops; it is the second model of the one-click
+local mode (Apache-2.0), with its own default threshold of 0.25 and a 35 s
+timeout. d1-2B's licence is the **LFM Open License v1.0** (not Apache); both
+licences are named in the UI and the user guide.
+
+On a small CPU both are slower: on the 4-vCPU Windows test VM d1-2B took about
+22 s per call (the real one-click install with the pinned `win-cpu-x64` build,
+2026-11-02; d1-3B took about 35 s there). There the default 12 s timeout fails
+closed on every call; raise the timeout, use a GPU, or use an endpoint.
 
 The model does not stand alone: the deterministic blocklist already refuses the
 obvious dangerous commands (so many of the "missed" dangerous cases above are
 caught before the model), and the node's own policy is the authority. The model
-is the optional layer for the long tail and for injection, which is why a 57 %
+is the optional layer for the long tail and for injection, which is why a 55 %
 catch at a low benign-refusal rate is a good operating point rather than a
-weak one. A higher threshold does not refuse less ordinary work on this
-measurement: d1-3B refuses 1.7 % of it at 0.85 and at 0.9, and 0.9 only
-catches 50.5 % instead of 57.0 %. The trade that exists is downwards: 0.80
-catches 64.5 % at 3.3 % benign refused. For Kev-4B, 0.30 catches 77.4 % at
-0.8 % benign refused.
+weak one. A higher threshold buys little: d1-2B refuses 1.5 % of ordinary work
+at 0.75 to 0.85 and 0.8 % at 0.9, where it catches 39.6 % instead of 55.4 %.
+The trade that exists is downwards: 0.70 catches 59.4 % at 3.1 % refused,
+0.50 68.3 % at 6.9 %. For Kev-4B, 0.30 catches 75.2 % at 0.8 % refused.

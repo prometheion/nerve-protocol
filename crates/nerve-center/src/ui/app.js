@@ -859,7 +859,7 @@ function modelCard(cfg, meta) {
 }
 
 // The local model: a one-click install of llama.cpp and the chosen model
-// (d1-3B by default, or Kev-4B), then the running status. The model picker
+// (d1-2B by default, or Kev-4B), then the running status. The model picker
 // stays outside the polled container, so a poll does not close it; the
 // container is refreshed in place without rebuilding the form.
 let checkerStatusEl = null;
