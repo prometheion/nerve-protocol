@@ -9,7 +9,8 @@
 use serde_json::Value;
 
 /// The answer of a command as the app shows it: on Windows its messages,
-/// the problem a pairing's check found, and its error in the app's words.
+/// the problem a pairing's check or the proxy found, a center's link status
+/// and its error in the app's words.
 /// The answer's data stays as it is: a rule may hold backquotes of its own.
 pub fn answer(r: Result<Value, String>, windows: bool) -> Result<Value, String> {
     if !windows {
@@ -20,8 +21,18 @@ pub fn answer(r: Result<Value, String>, windows: bool) -> Result<Value, String> 
             if let Some(lines) = v.get_mut("messages").and_then(Value::as_array_mut) {
                 lines.iter_mut().for_each(reword_value);
             }
+            // The proxy's problem and a center's link status carry the same
+            // advice (`proxy set` again) as the messages do.
             if let Some(p) = v.pointer_mut("/check/problem") {
                 reword_value(p);
+            }
+            if let Some(p) = v.pointer_mut("/proxy/problem") {
+                reword_value(p);
+            }
+            if let Some(cs) = v.get_mut("centers").and_then(Value::as_array_mut) {
+                cs.iter_mut()
+                    .filter_map(|c| c.get_mut("status"))
+                    .for_each(reword_value);
             }
             Ok(v)
         }
@@ -65,7 +76,7 @@ pub fn reword(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = backquote_outside_quotes(rest) {
-        let Some(len) = rest[start + 1..].find('`') else {
+        let Some(len) = closing_backquote(&rest[start + 1..]) else {
             break;
         };
         out.push_str(&rest[..start]);
@@ -81,6 +92,26 @@ pub fn reword(text: &str) -> String {
         out = out.replace(option, words);
     }
     out
+}
+
+/// The backquote that closes a command span: the first one outside the
+/// quotes of the command's arguments (a rule may hold a backquote of its own
+/// in single or double quotes). Without balanced quotes, the first one.
+fn closing_backquote(span: &str) -> Option<usize> {
+    let mut quote = None;
+    let mut chars = span.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match (c, quote) {
+            ('\\', Some('"')) => {
+                chars.next();
+            }
+            ('"' | '\'', None) => quote = Some(c),
+            (q, Some(open)) if q == open => quote = None,
+            ('`', None) => return Some(i),
+            _ => {}
+        }
+    }
+    span.find('`')
 }
 
 /// The first backquote of `text` that is not inside double quotes: the node
@@ -192,6 +223,11 @@ mod tests {
                 "machine.user is `alice` in `folder` mode",
             ),
             ("a lone ` stays", "a lone ` stays"),
+            // A rule in single quotes inside a command's span keeps its own.
+            (
+                "both \"echo `n\" and \"echo `n *\" are on the allow list: remove \"echo `n *\" first with `nerve-node rule rm allow 'echo `n *' --center lab`, and then \"echo `n\" with `nerve-node rule rm allow 'echo `n' --center lab`",
+                "both \"echo `n\" and \"echo `n *\" are on the allow list: remove \"echo `n *\" first with the app's Permissions › Allowed commands / Forbidden commands, and then \"echo `n\" with the app's Permissions › Allowed commands / Forbidden commands",
+            ),
             // A rule the node quotes keeps its own backquotes.
             (
                 "both \"echo `nerve-node status`\" and x: `nerve-node unlock`",
@@ -218,6 +254,30 @@ mod tests {
             text("`nerve-node unlock` first", true),
             "the app's Overview › Unlock first"
         );
+    }
+
+    /// The proxy's problem and a center's link status name `proxy set`, which
+    /// is a place in the app on Windows.
+    #[test]
+    fn the_proxy_problem_and_a_center_status_are_in_the_app_words() {
+        let v = json!({
+            "proxy": {"problem": "holds no password; run `nerve-node proxy set` again"},
+            "centers": [{"name": "a", "status": "bad proxy: run `nerve-node proxy set` again"}],
+        });
+        let shown = answer(Ok(v.clone()), true).unwrap();
+        assert!(
+            !shown["proxy"]["problem"]
+                .as_str()
+                .unwrap()
+                .contains("nerve-node")
+        );
+        assert!(
+            !shown["centers"][0]["status"]
+                .as_str()
+                .unwrap()
+                .contains("nerve-node")
+        );
+        assert_eq!(answer(Ok(v.clone()), false), Ok(v));
     }
 
     /// Only Windows gets the app's words, and only the messages, the check's

@@ -1546,11 +1546,7 @@ impl Daemon {
         if crate::secrets::stated_storage(&paths) == SecretStorage::Keyring
             && let Some(n) = crate::secrets::no_keyring(&paths)
         {
-            let then = match n {
-                crate::secrets::NoKeyring::WindowsService => {
-                    "Start on the app's Overview starts it"
-                }
-            };
+            let then = n.then_at_start();
             return Err(crate::secrets::keyring_refused(
                 &paths,
                 n,
@@ -2980,7 +2976,7 @@ mod tests {
         assert!(e.contains("the node does not start"), "{e}");
         assert!(e.contains("Credential Manager"), "{e}");
         assert!(e.contains("Settings › App › Uninstall"), "{e}");
-        assert!(e.contains("Start on the app's Overview"), "{e}");
+        assert!(e.contains("install Nerve again with the installer"), "{e}");
         assert!(!e.contains("Restart-Service"), "{e}");
     }
 

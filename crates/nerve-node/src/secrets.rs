@@ -408,6 +408,16 @@ impl NoKeyring {
         }
     }
 
+    /// What to do after deleting the folders, when the node's start refused:
+    /// the folders are gone with the install, so it is installed again first.
+    pub fn then_at_start(self) -> &'static str {
+        match self {
+            NoKeyring::WindowsService => {
+                "install Nerve again with the installer, and pair the centers again"
+            }
+        }
+    }
+
     /// What becomes of the keys in the keyring.
     fn unreachable(self) -> &'static str {
         match self {
@@ -495,7 +505,7 @@ pub(crate) mod for_tests {
 /// `what` says what does not happen, `then` what to do after.
 pub fn keyring_refused(paths: &NodePaths, n: NoKeyring, what: &str, then: &str) -> String {
     format!(
-        "{} keeps the node's keys in the system keyring (machine.secret_storage = \"keyring\"), but {}. So {what}. {}: delete {} and {} (where Nerve is installed, Settings › App › Uninstall in the app, with Delete the data, does it), and pair the centers again; then {then}",
+        "{} keeps the node's keys in the system keyring (machine.secret_storage = \"keyring\"), but {}. So {what}. {}: delete {} and {} (where Nerve is installed, Settings › App › Uninstall in the app, with Delete the data, does it); then {then}",
         paths.config_file().display(),
         n.why(),
         n.unreachable(),
@@ -1309,6 +1319,21 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let paths = NodePaths::new(d.path().join("config"), d.path().join("state"));
         (d, paths)
+    }
+
+    /// The refusal at the node's start puts the install before the pairing:
+    /// after Uninstall there is nothing to Start, and no center to pair.
+    #[test]
+    fn the_keyring_refusal_at_start_installs_before_it_pairs() {
+        let (_d, paths) = node();
+        let n = NoKeyring::WindowsService;
+        let said = keyring_refused(&paths, n, "the node does not start", n.then_at_start());
+        let (delete, then) = said.split_once("; then ").unwrap();
+        assert!(!delete.contains("pair"), "{said}");
+        let (install, pair) = then.split_once("pair").unwrap();
+        assert!(install.contains("install"), "{said}");
+        assert!(pair.contains("centers"), "{said}");
+        assert!(!said.contains("Start on the app"), "{said}");
     }
 
     fn in_keyring(paths: &NodePaths, key: Key) -> Option<String> {

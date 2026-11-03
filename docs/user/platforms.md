@@ -159,8 +159,9 @@ signed `node.toml` is written, and the node takes them at its next start,
 for which the app restarts it. Until then the node refuses folder changes,
 which would undo them: restart it first
 ([troubleshooting](troubleshooting.md#restart-the-node-then-change-the-folder-again-windows)).
-The commands the node runs for a center run as another account, which
-cannot open the node's folders ([Windows](service.md#windows)).
+The commands the node runs for a center run as another account than the
+node's, which cannot open the node's folders unless it is an administrator:
+UAC is no security boundary ([Windows](service.md#windows)).
 
 ### Windows protected paths
 

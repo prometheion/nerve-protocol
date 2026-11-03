@@ -1038,7 +1038,7 @@ fn install_steps(
             &layout.paths,
             n,
             "install changed nothing",
-            "run `sudo nerve-node install` again",
+            "run `sudo nerve-node install` again, and pair the centers again",
         ));
     }
     // Asked before anything changes.

@@ -325,7 +325,7 @@ fn install_steps(
             &layout.paths,
             crate::secrets::NoKeyring::WindowsService,
             "install changed nothing",
-            "install again with the installer",
+            "install again with the installer, and pair the centers again",
         ));
     }
     // A running service holds the program and the folders' files.
