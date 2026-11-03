@@ -11,6 +11,11 @@ three lists.
 
 In `folder` and `user` mode, allow rules do nothing. The mode decides.
 
+The commands below are the CLI's, on Linux. On Windows the
+[desktop app](desktop.md)'s **Permissions** page adds, edits and removes the
+rules (**Allowed commands**, **Forbidden commands**, the sudo list), and puts
+the guard on (**Add the guard**).
+
 ## Allow a command
 
 ```sh
@@ -89,7 +94,7 @@ So `env X=1 sudo systemctl stop nerve-node`, `timeout 30 sudo systemctl
 restart nerve-node`, `bash -c 'pkill nerve-node'` and
 `powershell -Command "Stop-Service nerve-node"` (or `/c`, as PowerShell
 takes `/` before its switches too) are refused. cmd's `/c` text is read as cmd reads it from the line, also in the form with doubled quotes that a program path with a blank needs
-(`cmd /s /c ""C:\Program Files\Nerve\nerve-node.exe" status"`), and the argument string of `Start-Process cmd`. A word of
+(`cmd /s /c ""C:\Program Files\Nerve\nerve-node-desktop.exe" status"`), and the argument string of `Start-Process cmd`. A word of
 another program is data, so a line that only mentions the node runs:
 `git commit -m "refuse systemctl stop nerve-node"`, `echo`, `grep`, a
 here-document written to a file. The name alone is not refused either:

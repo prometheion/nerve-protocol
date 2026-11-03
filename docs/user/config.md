@@ -37,7 +37,7 @@ name = "laptop"             # shown to centers; the host name by default
 
 [machine]
 shell = "/bin/bash"         # runs commands; the platform shell by default
-allow_root = false          # let the node run as root, or elevated as administrator on Windows
+allow_root = false          # let a node run by hand run as root (Linux)
 sudo_path = "/usr/bin/sudo" # optional
 user = "alice"              # installed node on Windows: the account commands and sudo run as
 secret_storage = "file"     # file | keyring: where the node keeps its keys

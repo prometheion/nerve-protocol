@@ -232,17 +232,17 @@ Each of these ends the tunnels it concerns at once:
 
 ## On Windows
 
-Windows has no control socket, so a `relay` change is in `node.toml` and
-takes effect at the next start of the node (`Restart-Service nerve-node` for
-the installed node). Until then the running node works by its old relay
-settings, for new tunnels as well as the ones it carries: a token taken
-away with `relay rm` or replaced with `relay token` still opens tunnels, a
-node off its center list still reaches the center, `relay off` does not stop
-the listener, and a new token or node gets `407`. Every `relay` change says
-so on Windows. After `relay token`, `relay rm`, `relay off` or `relay
-set-centers`, restart the node to apply it now, above all when a token may
-have leaked. `relay ls` asks the running node who is connected. Windows
-Firewall must let other machines reach the relay's port.
+On Windows the [desktop app](desktop.md)'s **Relay** page does the relay's
+commands. Windows has no control socket, so a relay change is in `node.toml`
+and takes effect at the next start of the node, for which the app restarts
+the service. Until then the running node works by its old relay settings,
+for new tunnels as well as the ones it carries: a token taken away or
+replaced still opens tunnels, a node off its center list still reaches the
+center, a relay turned off still listens, and a new token or node gets
+`407`. Should the restart fail, **Restart** on the app's **Overview** applies
+the change, above all when a token may have leaked. The **Relay** page asks
+the running node who is connected. Windows Firewall must let other machines
+reach the relay's port.
 
 ## What to know
 

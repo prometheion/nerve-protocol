@@ -3,18 +3,14 @@
 Run them as a normal user on the machine. On a node
 [installed as a service](service.md), the owner (the account that ran
 `install`) runs them without `sudo`; `install`, `update`, `uninstall` and
-`sudo on` need `sudo`, and on Windows `setup` too (there, a terminal opened
-with "Run as administrator"). `nerve-node --help` and
-`nerve-node <command> --help` list the same. The center's web UI has a Help
-page with them too.
+`sudo on` need `sudo`. `nerve-node --help` and `nerve-node <command> --help`
+list the same. The center's web UI has a Help page with them too.
 
-On Windows, `nerve-node-desktop.exe` is the desktop app. It runs these commands
-itself, but a terminal does not wait for it: in a terminal use `nerve-node.exe`
-from the release. Where the app took over the installed node, the installed
-`nerve-node.exe` is removed, so download `nerve-node-x86_64-windows.exe` from the
-release for a terminal; it works on the node the app installed
-([the desktop app](desktop.md#in-a-terminal)). On Linux the installed
-`nerve-node` stays a link to the app, and works in a terminal as before.
+On Windows there is no `nerve-node` for a terminal: the
+[desktop app](desktop.md) is the only way to the node, and it does each of
+these commands in its pages ([in a terminal](desktop.md#in-a-terminal-linux)).
+On Linux the desktop app's `nerve-node-desktop` takes the same commands, and
+where the app took over the installed node, `nerve-node` stays a link to it.
 
 Every command takes `--config-dir` and `--state-dir`
 ([where files live](install.md#where-files-live)). A command that works on
@@ -80,7 +76,7 @@ center is paired.
 
 | Command | Does | Page |
 |---|---|---|
-| `install [--owner=root --accept-root-owner \| --owner=none]` | Install the node as a service under its own user, make `nerve-run` and take you as the owner (Linux with sudo, Windows as administrator); run by root itself, make root the owner after its yes, or with the flags, and keep it at a later install; `--owner=none` leaves the node without an owner | [service](service.md#install) |
+| `install [--owner=root --accept-root-owner \| --owner=none]` | Install the node as a service under its own user, make `nerve-run` and take you as the owner (with sudo; on Windows the desktop app's installer does it); run by root itself, make root the owner after its yes, or with the flags, and keep it at a later install; `--owner=none` leaves the node without an owner | [service](service.md#install) |
 | `setup` | Name the node, choose where the keys are, pair the first center, choose its mode and a folder | [service](service.md#setup) |
 | `update [--from FILE]` | Put the latest release in place and restart the service | [service](service.md#update) |
 | `service start\|stop\|restart` | Start, stop or restart the installed service | [service](service.md#start-and-stop) |

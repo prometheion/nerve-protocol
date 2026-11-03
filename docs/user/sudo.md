@@ -118,33 +118,31 @@ Windows has no `sudo` program. A sudo command runs as the
 with that account's administrator rights: the elevated token that "Run as
 administrator" gives, not the token UAC gives its other commands. So:
 
-- It works only on the node installed as a service. A node you start
-  yourself refuses to switch sudo on.
+- It works on the node installed as a service, which on Windows is always
+  the node ([Windows](service.md#windows)).
 - The account commands run as must be an administrator. Otherwise the switch
   refuses to turn on. An administrator's other commands run with the token
   UAC filtered, but UAC is no security boundary: any command of that account,
   not only a sudo command, can get the administrator rights back and read the
   node's keys. While the account is an administrator, allow commands only to
   centers you trust with the whole machine.
-- `sudo on` asks for that account's password, the one `install` stored. A
-  wrong password is refused and the switch stays as it was.
+- Turning it on asks for that account's password, the one the install
+  stored. A wrong password is refused and the switch stays as it was.
 - The node keeps the password with DPAPI in the config folder, as `install`
   keeps it (`sudo.dpapi`). Unlike on Linux, sudo stays on when the service
-  restarts. `sudo off` removes the file, and `uninstall` removes it too.
-  Neither takes the account out of Administrators: do that yourself to close
-  the other way to the administrator rights again. `sudo off` reminds you.
+  restarts. Turning it off removes the file, and uninstalling removes it
+  too. Neither takes the account out of Administrators: do that yourself to
+  close the other way to the administrator rights again. Turning it off
+  reminds you.
 
-Run the commands in a terminal opened with "Run as administrator". The
+In the [desktop app](desktop.md), the **Sudo** section of **Permissions**
+turns it on and off, and the center's sudo list there takes the commands
+(`net session`). Turning it on needs an administrator: the app asks Windows
+for the rights, with the UAC prompt. The
 [control pipe](platforms.md#the-control-pipe) on Windows takes folder changes
-only, so `sudo on` takes effect when the service starts again. `sudo off` takes effect at once: the running service drops the
-password within a second.
-
-```powershell
-& "C:\Program Files\Nerve\nerve-node.exe" rule add sudo 'net session'
-& "C:\Program Files\Nerve\nerve-node.exe" sudo on
-Restart-Service nerve-node
-& "C:\Program Files\Nerve\nerve-node.exe" sudo off
-```
+only, so turning it on takes effect when the service starts again, for which
+the app restarts it. Turning it off takes effect at once: the running service
+drops the password within a second.
 
 A center with the settings grant switches the running service at once, as on
 Linux.

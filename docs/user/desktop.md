@@ -6,9 +6,10 @@ It is one program: it holds the node, its CLI and the app. It installs
 itself like any other program, runs the node as a service, and does what
 `nerve-node` does in a terminal (pairing, modes, folders, rules, sudo, the
 proxy, the relay, the audit log, backups, the account commands run as)
-without one; two things stay with the terminal ([settings](#settings)). The
-window runs the CLI for every action, so it has the CLI's checks and audit
-records.
+without one; on Linux two things stay with the terminal
+([settings](#settings)). On Windows the app is the only way to the node:
+there is no `nerve-node` for a terminal there. The window runs the CLI for
+every action, so it has the CLI's checks and audit records.
 
 ## Download
 
@@ -75,15 +76,12 @@ file is no longer needed.
 | Apps & features | | `Nerve`, in `HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\Nerve` |
 | The node's files, the service | as `nerve-node install` puts them ([service](service.md#install)) | as on Windows ([service](service.md#windows)) |
 
-A node installed before with `nerve-node install` keeps its settings, pairings
-and keys: the installer adds the app, and the service runs the app's program
-from then on, so there is one program to update. On Linux the old program,
-`/usr/local/bin/nerve-node`, becomes a link to the app's, so the command
-`nerve-node` keeps working. On Windows the old
-`C:\Program Files\Nerve\nerve-node.exe` is removed: the app replaces it, and
-for a terminal you download the CLI edition on its own
-([in a terminal](#in-a-terminal)). A plain `nerve-node uninstall` later hands
-over to the app's uninstall, so it removes the app too
+On Linux, a node installed before with `nerve-node install` keeps its
+settings, pairings and keys: the installer adds the app, and the service runs
+the app's program from then on, so there is one program to update. The old
+program, `/usr/local/bin/nerve-node`, becomes a link to the app's, so the
+command `nerve-node` keeps working. A plain `nerve-node uninstall` later
+hands over to the app's uninstall, so it removes the app too
 ([uninstall](service.md#uninstall)).
 
 ## Administrator rights
@@ -180,7 +178,7 @@ opens, and the app keeps them until it closes.
 The **Overview** shows the service: whether it runs and starts with the
 machine. **Stop** ends the node's links and runs nothing until **Start**;
 **Restart** stops and starts it. A stopped service starts again with the
-machine. In a terminal this is `nerve-node service stop|start|restart`
+machine. On Linux, in a terminal this is `nerve-node service stop|start|restart`
 ([service](service.md#start-and-stop)).
 
 On Windows the running service takes folder changes at once and every other
@@ -228,8 +226,8 @@ so the node checks a value as it checks the command line's.
   allow or deny list as it is.
 
 The settings without a control of their own are under **Advanced**:
-`machine.allow_root` and `machine.sudo_path` (for a node run by hand, not
-the installed one), and `policy.protected` of a center ([protected
+`machine.allow_root` and `machine.sudo_path` (Linux, for a node run by hand,
+not the installed one), and `policy.protected` of a center ([protected
 paths](protected-paths.md)). The programs allowed as providers and the
 capabilities of your `node.toml` are on [Capabilities](#capabilities).
 A center's other settings are on **Centers**, **Permissions** and
@@ -284,10 +282,11 @@ the guard's older text patterns, which keep working, shows **Update the
 guard**. Both run `rule guard`
 ([rules](rules.md#the-guard-against-changing-the-node)).
 
-What stays with the terminal: restoring the keys straight into the keyring
-(`restore --secret-storage keyring`; restore, then switch **Keys** to the
-keyring), and the keyring `setup` installs for the node's account on a
-Linux without a desktop session for it.
+What stays with the terminal on Linux: restoring the keys straight into the
+keyring (`restore --secret-storage keyring`; restore, then switch **Keys** to
+the keyring), and the keyring `setup` installs for the node's account on a
+Linux without a desktop session for it. On Windows neither is there: the
+installed node keeps its keys in files ([Windows](service.md#windows)).
 
 ## Capabilities
 
@@ -433,21 +432,18 @@ When a part is missing, the app says so:
 
 Windows needs nothing besides the app.
 
-## In a terminal
+## In a terminal (Linux)
 
 On Linux, `nerve-node-desktop <command>` is `nerve-node <command>`, with
 `sudo` on the installed node; where the app took over a node installed with
 `nerve-node`, the command `nerve-node` runs the app's program, which says
 `nerve-node-desktop` for `--version`.
 
-On Windows the app is the node's program, and it has no console, so a
-terminal does not wait for it. For a terminal, download the CLI edition
-`nerve-node-x86_64-windows.exe` from the release: it is a console program,
-and run from an administrator's terminal it works on the node the app
-installed ([commands](commands.md)). The app's program in a terminal needs a
-pipe to be waited for: `"C:\Program Files\Nerve\nerve-node-desktop.exe" status | more`
-in cmd, `& "C:\Program Files\Nerve\nerve-node-desktop.exe" status | Out-Default`
-in PowerShell. A batch file waits for it as it is.
+On Windows there is no command line for the node. The app's program,
+started with arguments, is how the app talks to the node, not a command for
+a person, and it shows nothing in a terminal. Where a message of the node
+names one of its commands (`nerve-node folder rm`), the app on Windows shows
+the place in the app that does it instead (**Permissions › Folders**).
 
 ## The web UI (Linux)
 
@@ -473,11 +469,13 @@ A click on the page that is open reads nothing again; **Refresh** does.
 
 ## Help
 
-**Help** lists these keys and has the command reference: every `nerve-node`
-command by topic or from A to Z, with a filter. A command opens on its
-arguments, an example, and a button to the place in the app that does the
-same. The keys, the reference, each topic and each command open and close on
-their own.
+**Help** lists these keys and, on Linux, has the command reference: every
+`nerve-node` command by topic or from A to Z, with a filter. A command opens
+on its arguments, an example, and a button to the place in the app that does
+the same. The keys, the reference, each topic and each command open and close
+on their own. On Windows Help has the keys and no command reference: there
+the app is the only way to the node, and every page it would point to is in
+the sidebar.
 
 ## The app's own settings
 

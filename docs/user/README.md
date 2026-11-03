@@ -22,9 +22,8 @@ open port.
 1. [Install](install.md) the programs.
 2. [Run the center](center.md) and [connect a harness](harness.md).
 3. [Pair a machine](pairing.md), or [install the node as a
-   service](service.md) and run `nerve-node setup` (on Windows as
-   administrator), or on a desktop open the
-   [desktop app](desktop.md).
+   service](service.md) and run `nerve-node setup`, or on a desktop open the
+   [desktop app](desktop.md), which on Windows is the only way to the node.
 4. Give the pairing a [folder](modes.md#folders): a new pairing is in `folder`
    mode, and until you do it writes and runs nothing of yours (on the
    installed node it may read what every account may read). Or choose another

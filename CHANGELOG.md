@@ -94,6 +94,9 @@
 
 - On Windows the node is the desktop app, `nerve-node-desktop-x86_64-windows.exe`: the release has no `nerve-node-x86_64-windows.exe` any more, and Windows gets the app and `nerve-center-x86_64-windows.exe` (seven programs in all). Started with arguments, the app's program is the app's interface to the node and takes no terminal's console.
 - `nerve-node run` on Windows starts the node only as the installed service: from a terminal or a script it is refused, on any folders, and says that the app's installer installs the node and **Start** on the Overview starts it.
+- No message of the node on Windows sends the owner to a terminal any more (`Restart-Service nerve-node`, "Run as administrator", `nerve-node.exe setup`, the CLI edition): each says where in the app to do it (Settings › App › Update, Permissions › Sudo, Settings › General › Account for commands, Start or Restart on the Overview). The app shows every `nerve-node …` command a message or a log line names as the place in the app that does it, and the options of `restore` as the boxes of its restore.
+- On Windows the app's Help page has the keyboard shortcuts and no command reference: there are no commands to type there, and every page the reference pointed to is in the sidebar.
+- The user docs name no terminal command for the node on Windows: installing, the service, sudo, the relay, the proxy, backups, logs and troubleshooting say where in the app each is done.
 - The app no longer takes over a node installed with the plain `nerve-node.exe`, and no `nerve-node.exe uninstall` hands over to the app. A Windows machine with such a node: uninstall it with that `nerve-node.exe` (`uninstall`, from an administrator's PowerShell) before you install the app, or delete the `nerve-node.exe` the app's install leaves in `C:\Program Files\Nerve`.
 
 ## 0.0.6

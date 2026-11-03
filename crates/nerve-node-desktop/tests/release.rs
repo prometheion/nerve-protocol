@@ -48,3 +48,36 @@ fn windows_gets_the_app_and_the_center_and_no_nerve_node() {
         "{footer}"
     );
 }
+
+/// The user docs name no terminal command for the node on Windows (#176).
+/// The rules page is left out: it lists what an agent's command may not do
+/// to the node, Windows' commands among them.
+#[test]
+fn the_docs_send_nobody_to_a_terminal_on_windows() {
+    let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/user");
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(&docs).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "md") || path.ends_with("rules.md") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        for (i, line) in text.lines().enumerate() {
+            for word in [
+                "nerve-node-x86_64-windows",
+                "nerve-node.exe",
+                "Restart-Service nerve-node",
+                "Start-Service nerve-node",
+                "Stop-Service nerve-node",
+                "Run as administrator",
+                "administrator's terminal",
+                "CLI edition",
+            ] {
+                if line.contains(word) {
+                    found.push(format!("{}:{}: {word}", path.display(), i + 1));
+                }
+            }
+        }
+    }
+    assert!(found.is_empty(), "{}", found.join("\n"));
+}

@@ -9,6 +9,7 @@ Fedora 36 and later) and fontconfig.
 
 | | Linux | Windows |
 |---|---|---|
+| The node's program | `nerve-node`, or the [desktop app](desktop.md) | The desktop app only |
 | Shell for commands | `/bin/sh -c` | Windows PowerShell 5.1 (`powershell.exe -NoProfile -Command`) |
 | `folder` mode runs commands | Yes, confined by Landlock; on the installed node as `nerve-run`, also where Landlock is missing | Yes, confined by an AppContainer; not yet on the [installed service](service.md#windows) |
 | `allowlist` and `user` mode run commands | Yes | Yes, in a Job Object, not confined to folders |
@@ -77,6 +78,8 @@ Fedora 36 and later) and fontconfig.
 
 ## Windows
 
+- The [desktop app](desktop.md) is the only way to the node: there is no
+  `nerve-node` for a terminal, and the app does each of its commands.
 - Commands run in Windows PowerShell 5.1. `;` chains commands. `&` does not.
 - Each command runs in a Job Object. The shell starts suspended, joins the job
   and only then runs, so every process it starts is in the job. Ending the job
@@ -104,34 +107,30 @@ Fedora 36 and later) and fontconfig.
   security boundary, so those commands can get the administrator rights back
   as well.
 - Paths in rules and over the wire look like `/c/Users/x`.
-- A node that runs elevated (as an administrator) is refused unless
-  `machine.allow_root` is set ([root and administrator](#root-and-administrator)).
+- The node runs only as the installed service, which the
+  [desktop app](desktop.md) installs and starts, as its own account `nerve`:
+  never elevated, and never by hand ([root and administrator](#root-and-administrator)).
 - `cap add` keeps a [capability of your own](config-capabilities.md) in
   `node.toml`, also one for `windows`, but the node offers none yet.
 
 ### Root and administrator
 
 A node with full rights hands those rights to every command a center runs:
-root on Linux, an elevated administrator token on Windows. On Linux the
-installed node runs the commands as `nerve-run` or its owner instead; on
-Windows an elevated node cannot start a command as another account, so
-commands run with the node's own token (`machine.user` there is for the
-[installed service](service.md#windows)). So on both platforms it is refused
-at start unless you allow it:
+root on Linux. The installed node runs the commands as `nerve-run` or its
+owner instead. A node you run by hand as root is refused at start unless you
+allow it:
 
 ```
 nerve-node config set machine.allow_root true
 ```
 
-The refusal is the same message on both: `refusing to run as root; set
-machine.allow_root = true to allow it`.
+The refusal says: `refusing to run as root; set machine.allow_root = true
+to allow it`.
 
-On Windows the node counts as elevated when its token is elevated: a
-PowerShell started with "Run as administrator", a scheduled task that runs
-with highest privileges, an account such as SYSTEM, or an administrator's
-session over SSH, which Windows OpenSSH gives the full, elevated token. An
-administrator at the desktop whose PowerShell was not started elevated (a
-UAC-filtered session) is a normal user to the node, and needs no setting.
+On Windows the node runs only as the installed service, as `nerve`, and
+starts commands as the account chosen for them
+([Windows](service.md#windows)): it is never run by hand, elevated or not,
+and `machine.allow_root` has no use there.
 
 When the node runs with full rights because you allowed it, it says so with a
 warning at start: in the stderr output and in the node's log file. The
@@ -139,8 +138,7 @@ center's Log page shows the center's own log and does not carry it. Commands
 from a center then run with full rights on the machine (on Linux unless the
 node is the installed one, which runs them as `nerve-run` or its owner), and
 you are responsible for
-what they do. On Windows, in `folder` mode, their AppContainer still holds
-them to their folders.
+what they do.
 
 ### The node's web UI
 
@@ -149,24 +147,20 @@ there is none: the desktop app is the node's UI there.
 
 ### The control pipe
 
-A running node on Windows answers `nerve-node status` and `relay ls` (with the
-relay's live tunnels) over a named pipe, and takes `center rotate-key`,
-`folder add`, `folder set` and `folder rm` from the CLI at once. For a folder
+A running node on Windows answers the app's status and relay pages (with the
+relay's live tunnels) over a named pipe, and takes a new key for a center
+and the folder changes of **Permissions › Folders** at once. For a folder
 change it brings the folders' permission entries in line before it answers.
-Only the administrators (in a terminal
-opened with "Run as administrator"), SYSTEM and the node's own account can
-open the pipe, and the node refuses every request from a process of a
-command it runs. The pipe takes no other change yet: for those the CLI
-writes the signed `node.toml` itself, and the node takes them at its next
-start. Until then the node refuses folder changes, which would undo them:
-restart it first ([troubleshooting](troubleshooting.md#restart-the-node-then-change-the-folder-again-windows)).
-A command that the node runs for a center can change the node's own policy
-where it can write that file.
-
-Allow commands on Windows only for centers you would also give the
-[settings grant](settings-grant.md), or [install the node as a
-service](service.md#windows): its commands run as another account, which
-cannot open the node's folders.
+Only the administrators, SYSTEM and the node's own account can open the
+pipe; the owner's changes in the app reach it through the service, which
+runs them as its own account. The node refuses every request from a process
+of a command it runs. The pipe takes no other change yet: for those the
+signed `node.toml` is written, and the node takes them at its next start,
+for which the app restarts it. Until then the node refuses folder changes,
+which would undo them: restart it first
+([troubleshooting](troubleshooting.md#restart-the-node-then-change-the-folder-again-windows)).
+The commands the node runs for a center run as another account, which
+cannot open the node's folders ([Windows](service.md#windows)).
 
 ### Windows protected paths
 
