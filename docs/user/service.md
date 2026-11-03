@@ -385,9 +385,12 @@ do not ask where the keys go, and take keys they find in the keyring into
 files; the keyring under **Settings**, **Keys** is refused and changes
 nothing. A `node.toml` that keeps the keys in the keyring is refused by the
 install, before it changes anything, and the service does not start with
-one: those keys are out of the service's reach. Delete the node's folders
+one: those keys are out of the service's reach. If the keys are still in
+files in `config\keys` (the line in `node.toml` was changed), set the line
+back to `"file"` and nothing is lost. Otherwise delete the node's folders
 (with **Settings**, **App**, **Uninstall** and **Delete the data**, where
-Nerve is installed) and pair the centers again.
+Nerve is installed; that deletes the audit log too, so copy
+`state\audit.jsonl` aside first) and pair the centers again.
 
 The same account problem keeps the proxy's values out of reach: the installed
 node on Windows takes a proxy only if it needs no header and no password.

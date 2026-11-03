@@ -505,12 +505,14 @@ pub(crate) mod for_tests {
 /// `what` says what does not happen, `then` what to do after.
 pub fn keyring_refused(paths: &NodePaths, n: NoKeyring, what: &str, then: &str) -> String {
     format!(
-        "{} keeps the node's keys in the system keyring (machine.secret_storage = \"keyring\"), but {}. So {what}. {}: delete {} and {} (where Nerve is installed, Settings › App › Uninstall in the app, with Delete the data, does it); then {then}",
+        "{} keeps the node's keys in the system keyring (machine.secret_storage = \"keyring\"), but {}. So {what}. If the keys are still in files in {} (a line in node.toml that someone changed), set that line back to \"file\" and nothing is lost. {}: delete {} and {} (where Nerve is installed, Settings › App › Uninstall in the app, with Delete the data, does it; that deletes the audit log {} too, so copy it aside first); then {then}",
         paths.config_file().display(),
         n.why(),
+        paths.config_dir.join("keys").display(),
         n.unreachable(),
         paths.config_dir.display(),
         paths.state_dir.display(),
+        paths.audit_log().display(),
     )
 }
 
@@ -1334,6 +1336,23 @@ mod tests {
         assert!(install.contains("install"), "{said}");
         assert!(pair.contains("centers"), "{said}");
         assert!(!said.contains("Start on the app"), "{said}");
+    }
+
+    /// The refusal does not send the owner to delete keys that may still be
+    /// in their files, or the audit log, without saying so.
+    #[test]
+    fn the_keyring_refusal_keeps_good_keys_and_warns_about_the_audit_log() {
+        let (_d, paths) = node();
+        let n = NoKeyring::WindowsService;
+        let said = keyring_refused(&paths, n, "the node does not start", n.then_at_start());
+        let (before, delete) = said.split_once("delete ").unwrap();
+        assert!(before.contains("still in files"), "{said}");
+        assert!(before.contains("nothing is lost"), "{said}");
+        assert!(
+            delete.contains(&paths.audit_log().display().to_string()),
+            "{said}"
+        );
+        assert!(delete.contains("copy it aside"), "{said}");
     }
 
     fn in_keyring(paths: &NodePaths, key: Key) -> Option<String> {

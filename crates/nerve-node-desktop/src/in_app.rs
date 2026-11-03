@@ -29,6 +29,10 @@ pub fn answer(r: Result<Value, String>, windows: bool) -> Result<Value, String> 
             if let Some(p) = v.pointer_mut("/proxy/problem") {
                 reword_value(p);
             }
+            // `relay ls` carries the relay's status as free text.
+            if let Some(p) = v.pointer_mut("/status") {
+                reword_value(p);
+            }
             if let Some(cs) = v.get_mut("centers").and_then(Value::as_array_mut) {
                 cs.iter_mut()
                     .filter_map(|c| c.get_mut("status"))
@@ -96,20 +100,33 @@ pub fn reword(text: &str) -> String {
 
 /// The backquote that closes a command span: the first one outside the
 /// quotes of the command's arguments (a rule may hold a backquote of its own
-/// in single or double quotes). Without balanced quotes, the first one.
+/// in single or double quotes). A single quote opens a quoted argument only
+/// after a space and ends it only before a space, a backquote or the end,
+/// since a rule may hold quotes of its own (`echo "it's"`). Without a
+/// closing one, the first backquote.
 fn closing_backquote(span: &str) -> Option<usize> {
     let mut quote = None;
-    let mut chars = span.char_indices();
+    let mut prev = ' ';
+    let mut chars = span.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
         match (c, quote) {
             ('\\', Some('"')) => {
                 chars.next();
             }
-            ('"' | '\'', None) => quote = Some(c),
-            (q, Some(open)) if q == open => quote = None,
+            ('"', None) => quote = Some(c),
+            ('\'', None) if prev.is_whitespace() => quote = Some(c),
+            ('"', Some('"')) => quote = None,
+            ('\'', Some('\''))
+                if chars
+                    .peek()
+                    .is_none_or(|(_, n)| n.is_whitespace() || *n == '`') =>
+            {
+                quote = None
+            }
             ('`', None) => return Some(i),
             _ => {}
         }
+        prev = c;
     }
     span.find('`')
 }
@@ -193,6 +210,10 @@ mod tests {
                 "remove it first with the app's Permissions › Allowed commands / Forbidden commands",
             ),
             (
+                "remove it first with `nerve-node rule rm allow 'exec.run:echo \"it's\"' --center lab`, and then \"echo \\\"it's\\\"\" with `nerve-node rule rm allow 'echo \"it's\"' --center lab`",
+                "remove it first with the app's Permissions › Allowed commands / Forbidden commands, and then \"echo \\\"it's\\\"\" with the app's Permissions › Allowed commands / Forbidden commands",
+            ),
+            (
                 "the relay knows no node lab; `relay add lab` makes one",
                 "the relay knows no node lab; the app's Relay › Add a node makes one",
             ),
@@ -263,6 +284,7 @@ mod tests {
         let v = json!({
             "proxy": {"problem": "holds no password; run `nerve-node proxy set` again"},
             "centers": [{"name": "a", "status": "bad proxy: run `nerve-node proxy set` again"}],
+            "status": "the relay has no TLS certificate; `nerve-node relay set <address>` makes one",
         });
         let shown = answer(Ok(v.clone()), true).unwrap();
         assert!(
@@ -277,6 +299,7 @@ mod tests {
                 .unwrap()
                 .contains("nerve-node")
         );
+        assert!(!shown["status"].as_str().unwrap().contains("nerve-node"));
         assert_eq!(answer(Ok(v.clone()), false), Ok(v));
     }
 
