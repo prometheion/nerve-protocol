@@ -50,6 +50,18 @@ const IDLE: std::time::Duration = std::time::Duration::from_secs(30);
 /// nothing, and the way to stop the node anyway is to stop its process.
 pub const MAX_CONNECTIONS: usize = 64;
 
+/// How many connections one account holds at once on a socket open to
+/// every account ([`serve_anyone`]), unless it is one the socket keeps its
+/// places for: root and the ones the handler names (the node's owner). Such an account may only ask for the `status`, and
+/// a CLI makes one connection at a time.
+pub const PER_ACCOUNT: usize = 4;
+
+/// How many connections the accounts of [`PER_ACCOUNT`] hold together. They
+/// are places of their own, apart from the [`MAX_CONNECTIONS`] of the kept
+/// accounts: a command of another account that opens connections and sends
+/// nothing never keeps the owner out.
+pub const OTHER_ACCOUNTS: usize = 16;
+
 /// How many capability providers a provider socket keeps at once
 /// ([`serve_providers`]): each one's connection stays while it is attached.
 /// Far past what one machine runs, and places of its own, so the providers
@@ -327,8 +339,8 @@ mod unix {
     use tokio::net::{UnixListener, UnixStream};
 
     use super::{
-        BUSY, CtlRequest, IDLE, MAX_CONNECTIONS, NOT_RUNNING, PEER_ENDED, Peer, Reply, answer,
-        call_stream, serve_stream_within, token_file, write_line,
+        BUSY, CtlRequest, IDLE, MAX_CONNECTIONS, NOT_RUNNING, OTHER_ACCOUNTS, PEER_ENDED,
+        PER_ACCOUNT, Peer, Reply, answer, call_stream, serve_stream_within, token_file, write_line,
     };
 
     /// Who a socket serves, and what it takes from the caller beside the
@@ -338,8 +350,10 @@ mod unix {
         /// The socket's own user and root ([`bind`]).
         Own,
         /// Every account; the handler decides, and gets the files sent with
-        /// the request ([`serve_anyone`]).
-        Anyone,
+        /// the request ([`serve_anyone`]). The accounts `kept` names and
+        /// root share the places; every other one has a few of its own
+        /// ([`PER_ACCOUNT`], [`OTHER_ACCOUNTS`]).
+        Anyone(Arc<Kept>),
         /// The accounts `admit` lets in, told at once, before they may hold
         /// a place for a request; the handler gets the caller's pidfd
         /// ([`serve_providers`]).
@@ -348,6 +362,9 @@ mod unix {
 
     /// Whether a caller is let in, or why not.
     type Admit = dyn Fn(&Peer) -> Result<(), String> + Send + Sync;
+
+    /// Whether the account of a uid gets the places of the owner.
+    type Kept = dyn Fn(u32) -> bool + Send + Sync;
 
     /// How long [`call`] waits for an answer. The slowest handler, the check
     /// of a sudo password, ends after 30 s itself. A node that does not
@@ -400,9 +417,19 @@ mod unix {
     /// handler gets every caller and decides by its [`Peer`] itself. It
     /// also gets the open files the caller sent with its request
     /// ([`send_files`]): an owner's own backup file, which the node must
-    /// not open by its path.
-    pub async fn serve_anyone<F, Fut>(listener: UnixListener, handler: F) -> std::io::Result<()>
+    /// not open by its path. The accounts `kept` says yes to (the owner's)
+    /// share [`MAX_CONNECTIONS`] with root; any
+    /// other account holds at most [`PER_ACCOUNT`] connections, of
+    /// [`OTHER_ACCOUNTS`] for all of them. The account is known at `accept`,
+    /// before the caller holds anything, so `kept` must answer at once: no
+    /// lookup, no program started.
+    pub async fn serve_anyone<K, F, Fut>(
+        listener: UnixListener,
+        kept: K,
+        handler: F,
+    ) -> std::io::Result<()>
     where
+        K: Fn(u32) -> bool + Send + Sync + 'static,
         F: Fn(CtlRequest, Peer, Vec<OwnedFd>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Reply> + Send + 'static,
     {
@@ -411,9 +438,61 @@ mod unix {
             move |req, peer, files, _pidfd| handler(req, peer, files),
             IDLE,
             MAX_CONNECTIONS,
-            Callers::Anyone,
+            Callers::Anyone(Arc::new(kept)),
         )
         .await
+    }
+
+    /// The connections of the accounts [`Callers::Anyone`] keeps no places
+    /// for: [`OTHER_ACCOUNTS`] in all, [`PER_ACCOUNT`] each.
+    struct Others {
+        places: Arc<tokio::sync::Semaphore>,
+        held: std::sync::Mutex<std::collections::HashMap<u32, usize>>,
+    }
+
+    impl Others {
+        fn new() -> Arc<Others> {
+            Arc::new(Others {
+                places: Arc::new(tokio::sync::Semaphore::new(OTHER_ACCOUNTS)),
+                held: Default::default(),
+            })
+        }
+
+        /// A place for a connection of `uid`, if it has one left.
+        fn take(self: &Arc<Self>, uid: u32) -> Option<Place> {
+            let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+            let n = held.entry(uid).or_insert(0);
+            if *n >= PER_ACCOUNT {
+                return None;
+            }
+            let permit = self.places.clone().try_acquire_owned().ok()?;
+            *n += 1;
+            Some(Place {
+                _permit: permit,
+                of: Some((self.clone(), uid)),
+            })
+        }
+    }
+
+    /// A connection's place, given back when it ends.
+    struct Place {
+        _permit: tokio::sync::OwnedSemaphorePermit,
+        /// For the account it is counted for ([`Others`]).
+        of: Option<(Arc<Others>, u32)>,
+    }
+
+    impl Drop for Place {
+        fn drop(&mut self) {
+            if let Some((others, uid)) = self.of.take() {
+                let mut held = others.held.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(n) = held.get_mut(&uid) {
+                    *n -= 1;
+                    if *n == 0 {
+                        held.remove(&uid);
+                    }
+                }
+            }
+        }
     }
 
     /// [`serve_anyone`] for a socket of capability providers, whose
@@ -694,6 +773,7 @@ mod unix {
     {
         let handler = Arc::new(handler);
         let places = Arc::new(tokio::sync::Semaphore::new(max));
+        let others = Others::new();
         let me = crate::net::euid();
         let mut failing = false;
         loop {
@@ -711,7 +791,23 @@ mod unix {
                 Err(e) => return Err(e),
             };
             failing = false;
-            let Ok(place) = places.clone().try_acquire_owned() else {
+            // The account is known before the caller holds anything: the
+            // kernel tells it at `connect`.
+            let peer = match stream.peer_cred() {
+                Ok(c) => Peer {
+                    uid: c.uid(),
+                    pid: c.pid().and_then(|p| u32::try_from(p).ok()),
+                },
+                Err(_) => continue,
+            };
+            let place = match &callers {
+                Callers::Anyone(kept) if peer.uid != 0 && !kept(peer.uid) => others.take(peer.uid),
+                _ => places.clone().try_acquire_owned().ok().map(|permit| Place {
+                    _permit: permit,
+                    of: None,
+                }),
+            };
+            let Some(place) = place else {
                 // Said without waiting: the caller has written its request
                 // and may find the connection reset when it reads.
                 // A fresh connection has room for the line; `writable` only
@@ -725,13 +821,6 @@ mod unix {
             let callers = callers.clone();
             tokio::spawn(async move {
                 let _place = place;
-                let peer = match stream.peer_cred() {
-                    Ok(c) => Peer {
-                        uid: c.uid(),
-                        pid: c.pid().and_then(|p| u32::try_from(p).ok()),
-                    },
-                    Err(_) => return,
-                };
                 let handler = Arc::new(
                     move |req, (peer, files, pidfd): (Peer, Vec<OwnedFd>, Option<OwnedFd>)| {
                         handler(req, peer, files, pidfd)
@@ -768,7 +857,7 @@ mod unix {
                                 .await;
                         return;
                     }
-                    Callers::Anyone => {}
+                    Callers::Anyone(_) => {}
                 }
                 // Only the open socket takes files: its callers are other
                 // accounts, who hand over what they opened themselves.
@@ -982,6 +1071,7 @@ mod unix {
             let listener = bind_open(&at).await.unwrap();
             tokio::spawn(serve_anyone(
                 listener,
+                |_| true,
                 |req: CtlRequest, _peer: Peer, files: Vec<OwnedFd>| async move {
                     let mut said = Vec::new();
                     for f in files {
@@ -1022,6 +1112,64 @@ mod unix {
                 assert_eq!(v["ok"]["files"], json!(want), "{answer}");
                 assert_eq!(v["ok"]["len"], pad, "{answer}");
             }
+        }
+
+        /// Another account that opens every connection the socket takes and
+        /// sends nothing holds only its own few: the next of its connections
+        /// is told the node is busy, and the owner's request is answered.
+        #[tokio::test]
+        async fn another_account_cannot_keep_the_owner_off_the_open_socket() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let d = tempfile::tempdir().unwrap();
+            let at = d.path().join("owner.sock");
+            let listener = bind_open(&at).await.unwrap();
+            // The test has one account: it is another's until it says it is
+            // the owner's.
+            let owner = Arc::new(AtomicBool::new(false));
+            let is_owner = owner.clone();
+            tokio::spawn(serve_anyone(
+                listener,
+                move |_| is_owner.load(Ordering::SeqCst),
+                |_req: CtlRequest, _peer: Peer, _files: Vec<OwnedFd>| async move {
+                    Reply::Ok(json!("answered"))
+                },
+            ));
+            let mut idle = Vec::new();
+            let mut busy = 0;
+            for _ in 0..MAX_CONNECTIONS + 1 {
+                let mut s = UnixStream::connect(&at).await.unwrap();
+                let mut first = [0u8; 256];
+                // A connection told it is busy gets the line at once; one
+                // with a place waits for its request.
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    s.read(&mut first),
+                )
+                .await
+                {
+                    Ok(Ok(n)) => {
+                        let said = String::from_utf8_lossy(&first[..n]).to_string();
+                        assert!(said.contains(BUSY), "{said}");
+                        busy += 1;
+                    }
+                    Ok(Err(e)) => panic!("{e}"),
+                    Err(_) => idle.push(s),
+                }
+            }
+            assert_eq!(idle.len(), PER_ACCOUNT, "{busy} busy");
+            owner.store(true, Ordering::SeqCst);
+            let line = format!("{}\n", json!({"method": "status"}));
+            let answer = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let mut s = UnixStream::connect(&at).await.unwrap();
+                s.write_all(line.as_bytes()).await.unwrap();
+                let mut answer = String::new();
+                s.read_to_string(&mut answer).await.unwrap();
+                answer
+            })
+            .await
+            .expect("the owner is answered");
+            assert!(answer.contains("answered"), "{answer}");
+            drop(idle);
         }
 
         /// A caller whose pidfd the kernel will not give because it is gone

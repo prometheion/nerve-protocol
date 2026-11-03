@@ -45,6 +45,9 @@ pub struct Layout {
     pub home: PathBuf,
     /// The home of the account commands run as, `nerve-run` (Linux).
     pub run_home: PathBuf,
+    /// The folders every account may write in, where that account's files
+    /// are left behind: `/tmp`, `/var/tmp` and `/dev/shm` (Linux).
+    pub run_temp: Vec<PathBuf>,
     pub paths: NodePaths,
     /// Where `update` finds the programs of the latest release and their
     /// `SHA256SUMS`.
@@ -82,6 +85,7 @@ impl Layout {
                 paths: NodePaths::new(data.join("config"), data.join("state")),
                 home: data,
                 run_home: PathBuf::new(),
+                run_temp: Vec::new(),
                 release,
                 edition,
             };
@@ -91,6 +95,10 @@ impl Layout {
             bin: PathBuf::from("/usr/local/bin").join(program),
             home: "/var/lib/nerve".into(),
             run_home: crate::account::RUN_HOME.into(),
+            run_temp: ["/tmp", "/var/tmp", "/dev/shm"]
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
             paths: NodePaths::new("/etc/nerve", "/var/lib/nerve/state"),
             release,
             edition,
@@ -1642,6 +1650,25 @@ fn uninstall_steps(
     }
     match sys.account(crate::account::RUN_USER)? {
         Some(a) if a.comment == crate::account::RUN_MARK => {
+            // Also what its commands left in the folders every account may
+            // write in: they outlive the service.
+            #[cfg(target_os = "linux")]
+            {
+                let n = remove_files_of(a.uid, &layout.run_temp)?;
+                if n > 0 {
+                    let places: Vec<String> = layout
+                        .run_temp
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect();
+                    steps.did(format!(
+                        "deleted {n} {} of {} in {}",
+                        if n == 1 { "file" } else { "files" },
+                        crate::account::RUN_USER,
+                        places.join(", ")
+                    ));
+                }
+            }
             sys.remove_account(crate::account::RUN_USER)?;
             steps.did(format!("removed the account {}", crate::account::RUN_USER));
         }
@@ -2361,6 +2388,123 @@ fn chown_below(at: &Path, shown: &Path, uid: u32, gid: u32) -> Result<(), String
     Ok(())
 }
 
+/// Deletes what the account `uid` has in `dirs`, the folders every account
+/// may write in, as its uid is about to be freed. Each folder is walked
+/// through descriptors, on its own file system only, and no link is
+/// followed: what another account swaps in meanwhile is not walked. A folder
+/// of `uid`'s that still holds another account's files is given to root.
+/// The number of files and folders deleted.
+#[cfg(target_os = "linux")]
+fn remove_files_of(uid: u32, dirs: &[PathBuf]) -> Result<usize, String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut n = 0;
+    let mut errors = Vec::new();
+    for dir in dirs {
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(dir);
+        let f = match f {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                errors.push(format!("{}: {e}", dir.display()));
+                continue;
+            }
+        };
+        let dev = f
+            .metadata()
+            .map_err(|e| format!("{}: {e}", dir.display()))?
+            .dev();
+        remove_below(&f, dir, uid, dev, &mut n, &mut errors);
+    }
+    if !errors.is_empty() {
+        return Err(format!(
+            "the files {} left could not all be deleted, so the account stays: {}; run `sudo nerve-node uninstall` again once that is fixed",
+            crate::account::RUN_USER,
+            errors.join("; ")
+        ));
+    }
+    Ok(n)
+}
+
+/// [`remove_files_of`] below the open folder `dir`, shown as `shown`.
+#[cfg(target_os = "linux")]
+fn remove_below(
+    dir: &std::fs::File,
+    shown: &Path,
+    uid: u32,
+    dev: u64,
+    n: &mut usize,
+    errors: &mut Vec<String>,
+) {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let fd = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()));
+    let names: Vec<std::ffi::OsString> = match std::fs::read_dir(&fd) {
+        Ok(r) => r.filter_map(|e| e.ok().map(|e| e.file_name())).collect(),
+        Err(e) => {
+            errors.push(format!("{}: {e}", shown.display()));
+            return;
+        }
+    };
+    for name in names {
+        let at = fd.join(&name);
+        let here = shown.join(&name);
+        // Gone meanwhile: nothing to delete.
+        let Ok(m) = std::fs::symlink_metadata(&at) else {
+            continue;
+        };
+        if m.is_dir() {
+            // Another file system mounted here is not this folder's.
+            if m.dev() != dev {
+                continue;
+            }
+            let sub = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&at);
+            match sub {
+                // The folder looked at, not one swapped in since.
+                Ok(sub) if sub.metadata().is_ok_and(|s| s.ino() == m.ino()) => {
+                    remove_below(&sub, &here, uid, dev, n, errors)
+                }
+                _ => continue,
+            }
+        }
+        if m.uid() != uid {
+            continue;
+        }
+        let Ok(c) = std::ffi::CString::new(name.as_bytes()) else {
+            continue;
+        };
+        let flag = if m.is_dir() { libc::AT_REMOVEDIR } else { 0 };
+        // SAFETY: a valid C string, relative to the open folder `dir`.
+        if unsafe { libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), flag) } == 0 {
+            *n += 1;
+            continue;
+        }
+        let e = std::io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::ENOENT) => {}
+            // Another account's files are in it: the folder is root's.
+            // SAFETY: as above; the entry itself is changed, not followed.
+            Some(libc::ENOTEMPTY | libc::EEXIST) => unsafe {
+                if libc::fchownat(dir.as_raw_fd(), c.as_ptr(), 0, 0, libc::AT_SYMLINK_NOFOLLOW) != 0
+                {
+                    errors.push(format!(
+                        "{}: {}",
+                        here.display(),
+                        std::io::Error::last_os_error()
+                    ));
+                }
+            },
+            _ => errors.push(format!("{}: {e}", here.display())),
+        }
+    }
+}
+
 /// Gives the file or link at `at` (not followed) to `uid`:`gid`. A file
 /// with more than one name is refused: its other name can be anywhere on
 /// the same file system, as a hard link the node's user made to a file of
@@ -2744,6 +2888,7 @@ pub(crate) mod tests {
             bin: root.join("usr/local/bin/nerve-node"),
             home: root.join("var/lib/nerve"),
             run_home: root.join("var/lib/nerve-run"),
+            run_temp: vec![root.join("tmp"), root.join("var/tmp"), root.join("dev/shm")],
             paths: NodePaths::new(root.join("etc/nerve"), root.join("var/lib/nerve/state")),
             release: "http://127.0.0.1:1/none".into(),
             edition: &crate::edition::NODE,
@@ -3922,6 +4067,78 @@ pub(crate) mod tests {
                 (l.paths.state_dir.clone(), 0)
             ]
         );
+    }
+
+    /// What nerve-run's commands left in the folders every account may
+    /// write in goes before its uid is freed: its files and folders, a link
+    /// of its but not what the link names, and nothing of another file
+    /// system or account.
+    #[test]
+    fn uninstall_deletes_what_nerve_run_left_in_the_temporary_folders() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        // The test's own files stand for nerve-run's here.
+        let mine = me().uid;
+        for a in sys.others.borrow_mut().iter_mut() {
+            if a.name == crate::account::RUN_USER {
+                a.uid = mine;
+            }
+        }
+        let outside = d.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("kept.txt"), "k").unwrap();
+        for t in &l.run_temp {
+            std::fs::create_dir_all(t.join("left/deeper")).unwrap();
+            std::fs::write(t.join("left/deeper/f"), "x").unwrap();
+            std::fs::write(t.join("file"), "x").unwrap();
+            std::os::unix::fs::symlink(&outside, t.join("link")).unwrap();
+        }
+        let mut out = Vec::new();
+        uninstall(&l, &sys, false, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        for t in &l.run_temp {
+            assert_eq!(std::fs::read_dir(t).unwrap().count(), 0, "{t:?}");
+        }
+        assert!(outside.join("kept.txt").exists());
+        assert!(
+            out.contains(&format!(
+                "deleted 15 files of nerve-run in {}",
+                l.run_temp[0].display()
+            )),
+            "{out}"
+        );
+        // Before the account goes.
+        let calls = sys.calls();
+        assert!(
+            calls.contains(&"userdel nerve-run".to_string()),
+            "{calls:?}"
+        );
+    }
+
+    /// The walk passes over files of other accounts and does not follow a
+    /// link put where a folder was.
+    #[test]
+    fn the_temporary_folders_lose_only_the_files_of_the_account() {
+        let d = tempfile::tempdir().unwrap();
+        let t = d.path().join("tmp");
+        std::fs::create_dir_all(t.join("dir")).unwrap();
+        std::fs::write(t.join("dir/f"), "x").unwrap();
+        // Not the test's account: nothing goes.
+        assert_eq!(remove_files_of(me().uid + 1, std::slice::from_ref(&t)).unwrap(), 0);
+        assert!(t.join("dir/f").exists());
+        // A folder missing is no error.
+        assert_eq!(
+            remove_files_of(me().uid, &[d.path().join("none"), t.clone()]).unwrap(),
+            2
+        );
+        assert!(!t.join("dir").exists());
+        // The folder itself is no link.
+        std::os::unix::fs::symlink(d.path().join("elsewhere"), d.path().join("l")).unwrap();
+        std::fs::create_dir_all(d.path().join("elsewhere")).unwrap();
+        std::fs::write(d.path().join("elsewhere/f"), "x").unwrap();
+        assert!(remove_files_of(me().uid, &[d.path().join("l")]).is_err());
+        assert!(d.path().join("elsewhere/f").exists());
     }
 
     #[cfg(unix)]

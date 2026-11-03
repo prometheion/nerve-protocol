@@ -339,6 +339,21 @@ except OSError as e:
     let (_, ls) = as_owner(&owner, &["--json", "center", "ls"]);
     let ls: Value = serde_json::from_str(ls.trim()).unwrap();
     assert_eq!(ls["centers"][0]["mode"], "folder", "{ls}");
+    // A folder named like a word of the command, given by a relative path,
+    // is that folder; the word stays a word.
+    let named = base.join("folder");
+    std::fs::create_dir_all(&named).unwrap();
+    chown(&named);
+    for args in [
+        &["folder", "add", "folder", "+r"][..],
+        &["folder", "rm", "folder"],
+    ] {
+        let (ok, said) = sh(Command::new("runuser")
+            .args(["-u", &owner, "--", BIN])
+            .args(args)
+            .current_dir(&base));
+        assert!(ok, "{args:?}: {said}");
+    }
     // Without Landlock folder mode runs as nerve-run all the same, and
     // `status` says so.
     let (_, st) = as_owner(&owner, &["status"]);
@@ -658,10 +673,66 @@ except OSError as e:
     std::fs::hard_link(&twin, base.join("twin-outside")).unwrap();
     assert!(sh(Command::new("chown").arg("nerve-run:nerve-run").arg(&twin)).0);
 
+    // Another account that fills the owner socket with connections that
+    // send nothing, as a command of any center may, keeps the owner out of
+    // nothing: the owner's places stay its own.
+    let hold = r#"import socket, time
+held = []
+for _ in range(80):
+    s = socket.socket(socket.AF_UNIX)
+    s.connect("/run/" + "nerve-node/owner.sock")
+    held.append(s)
+print("held", flush=True)
+time.sleep(60)
+"#;
+    let mut holder = Command::new("runuser")
+        .args(["-u", "nerve-run", "--", "python3", "-c", hold])
+        .current_dir("/")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::BufRead;
+        let mut line = String::new();
+        std::io::BufReader::new(holder.stdout.as_mut().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line, "held\n");
+    }
+    let (ok, st) = as_owner(&owner, &["status"]);
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert!(ok && !st.contains("does not take connections"), "{st}");
+
+    // What nerve-run's commands left in the folders every account may write
+    // in goes with the account.
+    let (ok, said) = sh(Command::new("runuser")
+        .args(["-u", "nerve-run", "--", "sh", "-c"])
+        .arg(
+            "echo x > /var/tmp/nerve-real-left && mkdir -p /var/tmp/nerve-real-dir \
+             && echo y > /var/tmp/nerve-real-dir/f && echo z > /dev/shm/nerve-real-shm \
+             && echo w > /tmp/nerve-real-tmp",
+        )
+        .current_dir("/"));
+    assert!(ok, "{said}");
+
     // Uninstall: the account, its home and every entry go.
     let (ok, said) = sh(Command::new(BIN).args(["uninstall", "--purge"]));
     assert!(ok, "{said}");
     assert!(said.contains("removed the account nerve-run"), "{said}");
+    assert!(
+        said.contains("files of nerve-run in /tmp, /var/tmp, /dev/shm"),
+        "{said}"
+    );
+    let (_, left) = sh(Command::new("find").args([
+        "/tmp",
+        "/var/tmp",
+        "/dev/shm",
+        "-xdev",
+        "-uid",
+        run_uid.as_str(),
+    ]));
+    assert!(left.trim().is_empty(), "{left}");
     assert!(
         said.contains("but not 1 file with more than one name"),
         "{said}"
