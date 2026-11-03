@@ -818,6 +818,18 @@ impl Center {
     /// the state unlocked, so a slow disk holds up no reader (issue #150);
     /// it holds this change, or a later one, when this returns.
     pub fn update<T>(&self, f: impl FnOnce(&mut Store) -> T) -> T {
+        self.update_kept(f).0
+    }
+
+    /// [`update`](Self::update), and whether the state file took the change
+    /// (a failed save's error starts with [`UNWRITABLE`]). For a removal the
+    /// center makes at once, whatever the disk says (a token or a node that
+    /// goes must stop working now), but must not answer as kept while the
+    /// file still holds what it removed: that comes back at the next start.
+    pub(crate) fn update_kept<T>(
+        &self,
+        f: impl FnOnce(&mut Store) -> T,
+    ) -> (T, Result<(), String>) {
         let (out, snap) = {
             let mut s = self.store.lock().unwrap();
             let out = f(&mut s);
@@ -833,8 +845,9 @@ impl Center {
                 None,
                 &format!("cannot write the state file: {e}"),
             );
+            return (out, Err(format!("{UNWRITABLE}: {e}")));
         }
-        out
+        (out, Ok(()))
     }
 
     /// The state file's text for the state `s`, locked by the caller, with
@@ -1794,15 +1807,20 @@ impl Center {
             // A parked link has no connection for the bye; its calls end.
             l.fail_all();
         }
-        self.forget(node_id, "removed by the owner; its link got bye revoked");
-        Ok(())
+        self.forget(node_id, "removed by the owner; its link got bye revoked")
+            .map_err(|e| {
+                format!(
+                    "{e}; the node is removed now, but it is paired again when the center starts unless the state file can be written by then"
+                )
+            })
     }
 
     /// Drops a node's record (a remove, or the node's `bye unpaired`); `why`
-    /// goes to the log.
-    pub fn forget(&self, node_id: &str, why: &str) {
+    /// goes to the log. An error says the state file did not take it
+    /// ([`Center::update_kept`]).
+    pub fn forget(&self, node_id: &str, why: &str) -> Result<(), String> {
         let name = self.node_name(node_id);
-        let had = self.update(|s| {
+        let (had, saved) = self.update_kept(|s| {
             s.stats.remove(node_id);
             s.nodes.remove(node_id).is_some()
         });
@@ -1815,6 +1833,7 @@ impl Center {
             );
             self.changed(Change::Nodes);
         }
+        saved
     }
 
     pub fn alert(&self, node_id: &str, text: &str) {
@@ -4999,6 +5018,34 @@ pub(crate) mod tests {
         assert_eq!(Store::load(dir.path()).unwrap().unwrap().nodes.len(), 1);
     }
 
+    /// A node removed while the state file cannot be written is gone at
+    /// once, but the answer says it is not kept yet; the next flush keeps it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_that_cannot_be_written_is_said() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        c.update(|s| {
+            s.nodes.insert("n1".into(), node_record("n1", "linux"));
+        });
+        let mode = |m| std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(m));
+        mode(0o500).unwrap();
+        let e = c.remove("n1").await.unwrap_err();
+        mode(0o700).unwrap();
+        assert!(e.starts_with(UNWRITABLE), "{e}");
+        assert!(!c.knows("n1"));
+        assert!(
+            Store::load(dir.path())
+                .unwrap()
+                .unwrap()
+                .nodes
+                .contains_key("n1")
+        );
+        c.flush();
+        assert!(Store::load(dir.path()).unwrap().unwrap().nodes.is_empty());
+    }
+
     /// A change whose write failed is written by the next flush: it is not
     /// only in memory until a later change happens to write the file.
     #[cfg(unix)]
@@ -6105,7 +6152,7 @@ pub(crate) mod tests {
         let kept = c.read(|s| s.checker.nodes.clone());
         assert_eq!(kept.keys().collect::<Vec<_>>(), ["n1", "n2"]);
         // Unpaired and paired again, the machine has its note back.
-        c.forget("n1", "test");
+        c.forget("n1", "test").unwrap();
         assert_eq!(notes().len(), 1);
         assert_eq!(
             c.read(|s| s.checker.nodes["n1"].note.clone()),

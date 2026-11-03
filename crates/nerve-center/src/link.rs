@@ -1390,7 +1390,10 @@ pub async fn run(
                         said_bye = true;
                         why = format!("the node said bye ({})", end.as_str());
                         if end == ByeReason::Unpaired {
-                            center.forget(&node_id, "the node unpaired itself (bye unpaired)");
+                            // A failed save is logged, and the flush tries
+                            // again.
+                            let _ =
+                                center.forget(&node_id, "the node unpaired itself (bye unpaired)");
                         }
                         break;
                     }

@@ -282,7 +282,7 @@ impl Ui {
                     .map_err(|e| (404, json!({"error": e})))
             }
             ("POST", "/api/nodes/remove") => {
-                c.remove(&s("id")).await.map(|_| json!({})).map_err(bad)
+                c.remove(&s("id")).await.map(|_| json!({})).map_err(unkept)
             }
             ("POST", "/api/sessions/end") => {
                 if c.end_session(&s("id")).await {
@@ -459,7 +459,9 @@ impl Ui {
             }
             ("POST", "/api/tokens/delete") => {
                 let id = s("id");
-                let gone = c.update(|st| {
+                // Gone at once, whatever the disk says: a token deleted
+                // because it leaked must stop now.
+                let (gone, saved) = c.update_kept(|st| {
                     let label = st
                         .harness_tokens
                         .iter()
@@ -477,7 +479,11 @@ impl Ui {
                         &format!("the harness token labelled {label:?} was deleted"),
                     );
                 }
-                Ok(json!({}))
+                saved.map(|()| json!({})).map_err(|e| {
+                    unkept(format!(
+                        "{e}; the token no longer works, but it comes back when the center starts unless the state file can be written by then"
+                    ))
+                })
             }
             // The center's key (docs/dev/spec/protocol.md §4.10): the answer
             // to a rotation is the only place the new pin is shown.
@@ -611,6 +617,16 @@ fn log_query(req: &Request) -> Result<Query, (u16, Value)> {
 
 fn bad(m: impl Into<String>) -> (u16, Value) {
     (400, json!({"error": m.into()}))
+}
+
+/// [`bad`], but a change the state file did not take is the center's
+/// failure (500), not the request's.
+fn unkept(m: String) -> (u16, Value) {
+    if m.starts_with(crate::center::UNWRITABLE) {
+        (500, json!({ "error": m }))
+    } else {
+        bad(m)
+    }
 }
 
 /// The argument an audit button pins, from the request's `pin`
@@ -2287,6 +2303,42 @@ mod tests {
         );
         assert_eq!(sign_in(&ui, TOKEN).await.status, 401);
         assert_eq!(sign_in(&ui, &new).await.status, 200);
+    }
+
+    /// A token deleted while the state file cannot be written stops at
+    /// once, and the answer says the delete is not kept yet: before, it was
+    /// answered as done and came back at the next start.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_token_deleted_while_the_state_cannot_be_written_stops_and_says_so() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let c = center(d.path());
+        let ui = Ui::new(&c, false, true);
+        let h = ("Host", "127.0.0.1:7480");
+        let ck = session_token(&owner_login(&ui, h).await);
+        let r = ui
+            .request(req(
+                "POST",
+                "/api/tokens/create",
+                &[h, (SESSION, &ck)],
+                "{}",
+            ))
+            .await;
+        let id = json(&r)["id"].as_str().unwrap().to_string();
+        let mode = |m| std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(m));
+        mode(0o500).unwrap();
+        let r = ui
+            .request(req(
+                "POST",
+                "/api/tokens/delete",
+                &[h, (SESSION, &ck)],
+                &json!({ "id": id }).to_string(),
+            ))
+            .await;
+        mode(0o700).unwrap();
+        assert_eq!(r.status, 500, "{}", body(&r));
+        assert!(c.read(|s| s.harness_tokens.is_empty()));
     }
 
     /// A token the center cannot keep is not shown: the harness that took
