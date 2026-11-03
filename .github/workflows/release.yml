@@ -10,9 +10,11 @@
 # checks out that commit, so a push to the branch during the run changes
 # nothing. `conformance` runs the conformance suite against the Linux binaries
 # that were built (the ones that will be released), on a runner of their own
-# architecture. `publish` is the only job that may write: it tags the commit
-# and publishes the release only after every check, build and the conformance
-# run passed, so a failed run leaves no tag. Tags are never moved or reused.
+# architecture, and `installed` installs and drives them on the distributions
+# Nerve supports (.github/workflows/installed.yml). `publish` is the only job
+# that may write: it tags the commit and publishes the release only after
+# every check, build, the conformance run and the install test passed, so a
+# failed run leaves no tag. Tags are never moved or reused.
 #
 # No secrets: nothing is signed (the node's `update` checks a download against
 # SHA256SUMS). The actions are pinned by commit.
@@ -224,10 +226,29 @@ jobs:
               exit 1
             fi
           done
+      # The real-machine tests of the `installed` job, built from the same
+      # commit; they are not published (`publish` takes nerve-* only).
+      - name: The test programs
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: |
+          cargo test --locked --target "$TARGET" -p nerve-node \
+            --test real_account --test real_root_owner --test keyring --no-run --message-format=json \
+            | python3 -c 'import json,sys; [print(m["target"]["name"], m["executable"]) for m in map(json.loads, sys.stdin) if m.get("executable") and m["target"]["kind"] == ["test"]]' \
+            > "$RUNNER_TEMP/tests.path"
+          mkdir tests
+          while read -r name exe; do strip -o "tests/$name" "$exe"; done < "$RUNNER_TEMP/tests.path"
+          test "$(find tests -type f | wc -l)" = 3
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nerve-${{ env.SUFFIX }}
           path: dist/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tests-${{ env.SUFFIX }}
+          path: tests/*
           if-no-files-found: error
 
   # The desktop app for Linux (crates/nerve-node-desktop): the node with its
@@ -314,6 +335,17 @@ jobs:
           NERVE_NODE_BIN: ${{ github.workspace }}/dist/nerve-node-${{ env.SUFFIX }}
         run: cargo test --locked -p nerve-conformance --no-fail-fast
 
+  # The binaries to be released, installed and driven on Ubuntu 22.04 and
+  # 24.04 (x86_64 and arm64) and Debian 12, with the scripts of the commit
+  # being released.
+  installed:
+    needs: [check, linux]
+    uses: ./.github/workflows/installed.yml
+    with:
+      binaries: nerve-{0}-linux
+      tests: tests-{0}-linux
+      ref: ${{ needs.check.outputs.sha }}
+
   windows:
     needs: check
     runs-on: windows-2025
@@ -368,7 +400,7 @@ jobs:
   # before there is a tag. If anything here fails, the last step removes the
   # draft and the tag this run created, and nothing else (see there).
   publish:
-    needs: [check, linux, desktop-linux, windows, conformance]
+    needs: [check, linux, desktop-linux, windows, conformance, installed]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

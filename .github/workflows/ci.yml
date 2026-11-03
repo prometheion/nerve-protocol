@@ -1,9 +1,10 @@
 # The checks on every pull request, and on main after a merge: fmt, clippy and
 # the whole test suite, on Linux and on Windows, the tests that differ on
-# musl, the C library of the released Linux programs, the installed node
-# with its keys in the system keyring and the real-machine tests on the
-# Ubuntu 22.04 and 24.04 runners, whose kernels are older than 7.1 (6.8 and
-# 7.0), the center as a service, and the desktop app's own install. A test
+# musl, the C library of the released Linux programs, those programs built
+# as the release builds them and installed on Ubuntu 22.04 and 24.04 (x86_64
+# and arm64) and Debian 12, with the node's keys in the system keyring, the
+# real-machine tests and the center as a service, on kernels older than 7.1
+# (6.8 and 7.0), and the desktop app's own install. A test
 # that skips says why, and a job fails on a skip that .github/test-skips.txt
 # does not give it (docs/dev/building.md). The release workflow runs
 # the same fmt, clippy and tests on Linux before it builds anything
@@ -152,18 +153,33 @@ jobs:
   # from `OpenOptions::custom_flags`, as musl's O_ACCMODE holds it. The walk
   # that gives the node's and the center's folders away (install,
   # uninstall) opened sockets, links and FIFOs on musl only, so its tests
-  # run on that target as well.
+  # run on that target as well. Then the programs are built as the release
+  # builds them, on each architecture's own runner, with the test programs
+  # of the real-machine tests, for the `installed` job.
   musl:
-    name: Linux musl (folder walk of install and uninstall)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    name: Linux musl ${{ matrix.arch }} (folder walk, the release build)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    env:
+      TARGET: ${{ matrix.arch }}-unknown-linux-musl
+      SUFFIX: ${{ matrix.arch }}-linux
+      CC_x86_64_unknown_linux_musl: musl-gcc
+      CC_aarch64_unknown_linux_musl: musl-gcc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Toolchain
         run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target x86_64-unknown-linux-musl
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "$TARGET"
           rustup default "$RUST_TOOLCHAIN"
       - name: A C compiler for musl (ring's C parts)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
@@ -175,107 +191,66 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-${{ runner.os }}-musl-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-musl-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
       - name: Tests
-        env:
-          CC_x86_64_unknown_linux_musl: musl-gcc
-        run: cargo test --locked --target x86_64-unknown-linux-musl -p nerve-node --lib -- service::tests::chown
-
-  # The node keeps its keys in the system keyring on every Linux kernel, and
-  # folder mode runs as the account `nerve-run` (issue #135). That used to be
-  # refused below Linux 7.1, so this job installs the node on the two Ubuntu
-  # runners and takes the whole path an owner takes: the real-machine tests
-  # (folder grants, an owner's program as a provider held to the folders,
-  # capabilities of node.toml, rules on their arguments, the limits per
-  # command in the service's cgroup, root as the owner), then `setup` in a
-  # terminal answering yes to the keyring, the keys moving out of their files,
-  # the keyring test as `nerve`, a restart of the keyring's session and of the
-  # node, `status`, a folder mode command as `nerve-run`, the web UI, and
-  # `uninstall --purge`; then the center installed as a service, driven over
-  # MCP, updated, uninstalled. A real test that skips fails the job.
-  # The kernels are GitHub's Azure kernels, not the ones the distributions
-  # ship: 6.8 on ubuntu-22.04 and 7.0 on ubuntu-24.04 at the time of writing,
-  # both with Landlock. So the 5.15 kernel of a 22.04 install, and a kernel
-  # without Landlock, are not tested here (the second only on a test VM); the
-  # script fails when a runner gets a kernel of 7.1 or later, so the job
-  # cannot go on passing while it tests nothing below 7.1. The runner is a
-  # disposable virtual machine, so the script
-  # (.github/scripts/keyring-end-to-end.sh) may install the node, make
-  # accounts and a keyring, and break them; it sets up nothing a real machine
-  # would not have, except the owner it needs (a person who installs) and a
-  # system-wide environment that names another user's session, as the
-  # runner image's does. The node is built on the runner it runs on (the
-  # glibc differs), hence one cache each.
-  keyring:
-    name: Installed node, keyring and folder mode (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # The least Landlock ABI of each runner's kernel (6.8 has 4, 7.0
-          # has 8 at the time of writing).
-          - os: ubuntu-22.04
-            landlock: 4
-          - os: ubuntu-24.04
-            landlock: 6
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Toolchain
+        run: cargo test --locked --target "$TARGET" -p nerve-node --lib -- service::tests::chown
+      # The command of release.yml's `linux` job.
+      - name: The release build
         run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          rustup default "$RUST_TOOLCHAIN"
-      - name: Cargo cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: cargo-${{ matrix.os }}-keyring-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
-      # getfacl for the test, which reads the access lists the node wrote.
-      - name: Tools of the test
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends acl
-      # One build: the test programs, and with them the node's own program,
-      # which cargo builds for the package's integration tests; and the center.
-      - name: Build the node, the center and the test programs
+          cargo build --release --locked --target "$TARGET" -p nerve-center -p nerve-node
+          mkdir -p dist/tests
+          for b in nerve-center nerve-node; do
+            cp "target/$TARGET/release/$b" "dist/$b-$SUFFIX"
+          done
+      - name: The test programs
         run: |
-          cargo test --locked -p nerve-node --test real_account --test real_root_owner --test keyring \
-            --no-run --message-format=json \
+          cargo test --locked --target "$TARGET" -p nerve-node \
+            --test real_account --test real_root_owner --test keyring --no-run --message-format=json \
             | python3 -c 'import json,sys; [print(m["target"]["name"], m["executable"]) for m in map(json.loads, sys.stdin) if m.get("executable") and m["target"]["kind"] == ["test"]]' \
             > "$RUNNER_TEMP/tests.path"
-          cat "$RUNNER_TEMP/tests.path"
-          test "$(wc -l < "$RUNNER_TEMP/tests.path")" = 3
-          cargo build --locked -p nerve-center
-          test -x target/debug/nerve-node
-          test -x target/debug/nerve-center
-      # As root, as a person with sudo would run the installer; cargo is not
-      # run as root. The script prints the kernel and whether it has Landlock.
-      # Not `sudo -E`: the runner's session (XDG_RUNTIME_DIR, the session bus
-      # of its user) is not the script's, and the three variables it needs
-      # are named.
-      - name: Install, keyring, folder mode, uninstall
-        run: >-
-          sudo
-          GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY"
-          LANDLOCK_ABI_MIN=${{ matrix.landlock }}
-          NERVE_NODE_REAL="$PWD/target/debug/nerve-node"
-          REAL_ACCOUNT_TEST="$(awk '$1 == "real_account" {print $2}' "$RUNNER_TEMP/tests.path")"
-          REAL_ROOT_OWNER_TEST="$(awk '$1 == "real_root_owner" {print $2}' "$RUNNER_TEMP/tests.path")"
-          KEYRING_TEST="$(awk '$1 == "keyring" {print $2}' "$RUNNER_TEMP/tests.path")"
-          .github/scripts/keyring-end-to-end.sh
-      # The center as a service (docs/user/center.md), after the node's run
-      # left nothing behind.
-      - name: The center as a service
-        run: >-
-          sudo
-          GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY"
-          NERVE_CENTER_REAL="$PWD/target/debug/nerve-center"
-          .github/scripts/center-service-end-to-end.sh
+          while read -r name exe; do strip -o "dist/tests/$name" "$exe"; done < "$RUNNER_TEMP/tests.path"
+          ls -l dist dist/tests
+          test "$(find dist/tests -type f | wc -l)" = 3
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-musl-${{ matrix.arch }}
+          path: dist/nerve-*
+          if-no-files-found: error
+          retention-days: 3
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-musl-tests-${{ matrix.arch }}
+          path: dist/tests/*
+          if-no-files-found: error
+          retention-days: 3
+
+  # The node keeps its keys in the system keyring on every Linux kernel, and
+  # folder mode runs as the account `nerve-run` (issue #135). The programs the
+  # `musl` job built are installed on Ubuntu 22.04 and 24.04 (x86_64 and
+  # arm64) and Debian 12, and take the whole path an owner takes: the
+  # real-machine tests (folder grants, an owner's program as a provider held
+  # to the folders, capabilities of node.toml, rules on their arguments, the
+  # limits per command in the service's cgroup, root as the owner), then
+  # `setup` in a terminal answering yes to the keyring, the keys moving out of
+  # their files, the keyring test as `nerve`, a restart of the keyring's
+  # session and of the node, `status`, a folder mode command as `nerve-run`,
+  # the web UI, and `uninstall --purge`; then the center installed as a
+  # service, driven over MCP, updated, uninstalled. A real test that skips
+  # fails the job. The kernels are GitHub's Azure kernels, not the ones the
+  # distributions ship: the 5.15 kernel of a 22.04 install, and a kernel
+  # without Landlock, are not tested here (the second only on a test VM); the
+  # script fails when a runner gets a kernel of 7.1 or later, so the job
+  # cannot go on passing while it tests nothing below 7.1. The script sets up
+  # nothing a real machine would not have, except the owner it needs (a
+  # person who installs) and a system-wide environment that names another
+  # user's session, as the runner image's does (.github/workflows/installed.yml).
+  installed:
+    name: Installed
+    needs: musl
+    uses: ./.github/workflows/installed.yml
+    with:
+      binaries: linux-musl-{0}
+      tests: linux-musl-tests-{0}
 
   # The desktop app's own install on Linux (crates/nerve-node-desktop/tests/real.rs):
   # through the code its buttons run, as root, it installs the node as a

@@ -47,8 +47,8 @@ by `Cargo.lock` (a change to the lock file builds once from scratch). Its jobs:
 | Job | Runs |
 |---|---|
 | `linux` | fmt, clippy and `cargo test --workspace` on Ubuntu 24.04, as the runner's account with a systemd user session; then the tests that need root, as root: root's backup file (`tests/backup_caller.rs`), root's start (`tests/root_start.rs`) and four ACL tests of uninstall and revoked grants |
-| `musl` | the folder walk of install and uninstall (`service::tests::chown`) on musl, the C library of the released Linux programs |
-| `keyring` | the node installed on Ubuntu 22.04 and 24.04 (`.github/scripts/keyring-end-to-end.sh`): the real tests below, `setup` with the keys moved into GNOME Keyring, the keyring test as `nerve`, restarts of the keyring's session and of the node, the web UI, `uninstall --purge`; then the center as a service (`.github/scripts/center-service-end-to-end.sh`) |
+| `musl` | on x86_64 and arm64: the folder walk of install and uninstall (`service::tests::chown`) on musl, the C library of the released Linux programs; then `nerve-node` and `nerve-center` built as the release builds them, and the real tests' programs |
+| `installed` | those static programs installed on Ubuntu 22.04 and 24.04 (x86_64, and arm64 on 24.04) and Debian 12, a container with systemd on an Ubuntu runner (`.github/workflows/installed.yml`): `.github/scripts/keyring-end-to-end.sh` runs the real tests below, `setup` with the keys moved into GNOME Keyring, the keyring test as `nerve`, restarts of the keyring's session and of the node, the web UI, `uninstall --purge`; then `.github/scripts/center-service-end-to-end.sh` installs the center as a service, drives it over MCP, updates and uninstalls it. The release runs the same on the binaries it publishes |
 | `desktop-real` | the desktop app's own install, control, update and uninstall on Ubuntu 24.04, as root (`crates/nerve-node-desktop/tests/real.rs`) |
 | `windows` | fmt, clippy and `cargo test --workspace` on Windows, so the tests compiled only there run (grants, the integrity level, the service steps, the job object, the AppContainer, Windows paths) |
 
@@ -57,13 +57,13 @@ A test that cannot run on a machine returns early and prints why
 `--show-output`, and `.github/scripts/skips.py` fails the job on a skip that
 `.github/test-skips.txt` does not let that job have: a runner that loses
 Landlock, user namespaces or its user session turns the job red instead of
-passing with less tested. The `linux` and `keyring` jobs also fail when the
+passing with less tested. The `linux` and `installed` jobs also fail when the
 kernel has less Landlock than they expect (`.github/scripts/landlock-abi.py`).
 
 A test that needs more than a hosted runner has (the node installed as a
 service, an administrator account, a virtual disk, the system keyring) is
 `#[ignore = "<reason>"]`: every run lists it as ignored with its reason. The
-`keyring` and `desktop-real` jobs run these of them:
+`installed` and `desktop-real` jobs run these of them, and fail when one skips:
 
 | Test | Does |
 |---|---|

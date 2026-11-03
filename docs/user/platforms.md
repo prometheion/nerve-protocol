@@ -3,9 +3,10 @@
 The center and the node run on Linux (x86_64, aarch64) and Windows (x86_64),
 the [desktop app](desktop.md) (`nerve-node-desktop`, the node with an app) on
 Linux x86_64 and Windows x86_64. The node behaves the same except where this
-page says so. The Linux programs are static and run on any distribution; the
-desktop app is not, and needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12,
-Fedora 36 and later) and fontconfig.
+page says so. The Linux programs are static and run on any distribution;
+installing them as a service needs systemd ([distributions](#linux-distributions)).
+The desktop app is not static, and needs glibc 2.35 or newer (Ubuntu 22.04,
+Debian 12, Fedora 36 and later) and fontconfig.
 
 | | Linux | Windows |
 |---|---|---|
@@ -20,6 +21,70 @@ Fedora 36 and later) and fontconfig.
 | Install as a service | Yes, with systemd, the node and the [center](center.md#run-it-as-a-service) | The node |
 | The center's [action checker](action-checker.md) | Yes. Its local model on x86_64 and aarch64, on the CPU or a Vulkan GPU; the installed center service runs it on the CPU only | Yes. Its local model on x86_64, on the CPU or a Vulkan GPU |
 | Config folder | `~/.config/nerve` | `C:\ProgramData\Nerve\config` (the installed service) |
+
+## Linux distributions
+
+| | Distributions |
+|---|---|
+| Tested | Ubuntu 22.04 and 24.04, Debian 12. CI installs the released programs on each and runs the node's and the center's whole install, use and uninstall there, on x86_64 and on Ubuntu 24.04 also on aarch64 |
+| Expected to work, not tested | Fedora, Arch Linux, and other distributions with systemd |
+| Not supported as a service | Distributions without systemd (Alpine with OpenRC, Void with runit, containers without an init, WSL 1): run the node by hand ([below](#a-node-you-run-by-hand)) |
+
+The tests run on GitHub's kernels, which are newer than the ones the
+distributions ship (Ubuntu 22.04 has 5.15, Debian 12 has 6.1). How much
+Landlock holds depends on the kernel ([modes](modes.md#what-a-command-can-reach-in-folder-mode-linux));
+`nerve-node status` shows the version yours has.
+
+`install` and the installed node need:
+
+- systemd, to run the service;
+- `useradd`, `userdel`, `getent` and `id`, for the accounts `nerve` and
+  `nerve-run`;
+- a file system with POSIX ACLs where you grant folders (ext4, XFS, Btrfs
+  have them);
+- cgroup v2, which systemd gives every current distribution, for the
+  [limits per command](limits.md);
+- polkit with `pkexec`, for `nerve-node service` and the desktop app to start
+  and stop the service without `sudo`;
+- for the keyring step of `setup` only, `apt`, `dnf` or `pacman`
+  ([config](config.md)); elsewhere install GNOME Keyring yourself, or keep the
+  keys in files.
+
+### A node you run by hand
+
+Without systemd, or for a node of your own account, run `nerve-node run`
+under your service manager. Such a node runs every command as you: there is
+no `nerve-run`, `folder` mode needs Landlock, and it offers no
+[capabilities of `node.toml`](config-capabilities.md). With systemd, a unit of
+your own systemd keeps it running and gives it its [limits](limits.md):
+
+```ini
+# ~/.config/systemd/user/nerve-node.service
+[Unit]
+Description=Nerve node
+
+[Service]
+ExecStart=%h/.local/bin/nerve-node run
+Restart=on-failure
+RestartSec=5
+# The node's own cgroup, to hold each command to its limits.
+Delegate=yes
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+install -m 755 nerve-node-x86_64-linux ~/.local/bin/nerve-node
+systemctl --user daemon-reload
+systemctl --user enable --now nerve-node
+loginctl enable-linger "$USER"   # starts it at boot, before you log in
+nerve-node status
+```
+
+Without systemd, start `nerve-node run` from your service manager as your
+own account, not as root; its commands then run without limits, and
+`nerve-node status` says why.
 
 ## Linux
 

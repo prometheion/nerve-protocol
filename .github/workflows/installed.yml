@@ -1,0 +1,132 @@
+# The static Linux programs installed and driven on real machines: the
+# distributions Nerve supports (docs/user/platforms.md), on x86_64 and arm64.
+# CI calls it with the programs its `musl` job built the way the release
+# builds them; the release calls it with the very programs it is about to
+# publish, before it publishes them.
+#
+# Each machine runs .github/scripts/keyring-end-to-end.sh (the real-machine
+# tests of the installed node, setup with the keys in the system keyring,
+# folder mode as `nerve-run`, the web UI, `uninstall --purge`) and
+# .github/scripts/center-service-end-to-end.sh (the center as a service). The
+# programs are static, so one build of each architecture serves every
+# distribution. Ubuntu 22.04 and 24.04 are GitHub's own runners. Debian 12 has
+# no runner: it is a container of debian:12 with systemd as its init, on an
+# Ubuntu 24.04 runner (.github/scripts/systemd-container.sh), so it shares that
+# runner's kernel. The runners are disposable virtual machines: the scripts may
+# install the programs, make accounts and a keyring, and break them.
+#
+# The kernels are GitHub's, not the ones the distributions ship (6.8 on
+# ubuntu-22.04, 7.0 on ubuntu-24.04 at the time of writing). `landlock` is the
+# least Landlock ABI each must have: a runner that loses it fails the job
+# instead of testing less.
+name: Installed
+
+on:
+  workflow_call:
+    inputs:
+      binaries:
+        description: "The artifact with nerve-node-<arch>-linux and nerve-center-<arch>-linux; {0} stands for the arch"
+        type: string
+        required: true
+      tests:
+        description: "The artifact with the test programs real_account, real_root_owner and keyring; {0} stands for the arch"
+        type: string
+        required: true
+      ref:
+        description: "The commit whose scripts run (the default: the commit of the run)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  installed:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 22.04 x86_64
+            runner: ubuntu-22.04
+            arch: x86_64
+            landlock: 4
+          - name: Ubuntu 24.04 x86_64
+            runner: ubuntu-24.04
+            arch: x86_64
+            landlock: 6
+          - name: Ubuntu 24.04 arm64
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+            landlock: 4
+          - name: Debian 12 x86_64
+            runner: ubuntu-24.04
+            arch: x86_64
+            landlock: 6
+            image: debian:12
+    env:
+      SUFFIX: ${{ matrix.arch }}-linux
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ format(inputs.binaries, matrix.arch) }}
+          path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ format(inputs.tests, matrix.arch) }}
+          path: dist/tests
+      # The artifact does not keep the executable bit.
+      - name: The programs
+        run: |
+          chmod +x dist/nerve-* dist/tests/*
+          ls -l dist dist/tests
+          for b in nerve-center nerve-node; do
+            file -b "dist/$b-$SUFFIX" | tee /dev/stderr | grep -Eq 'static(-pie)? linked|statically linked'
+          done
+      - name: The machine, a container of ${{ matrix.image }}
+        if: ${{ matrix.image }}
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: .github/scripts/systemd-container.sh "$IMAGE" nerve-machine
+      # getfacl for the tests, which read the access lists the node wrote.
+      - name: Tools of the test
+        if: ${{ !matrix.image }}
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends acl
+      - name: The machine
+        run: |
+          name=$(.github/scripts/as-root.sh cat /etc/os-release | sed -n 's/^PRETTY_NAME=//p' | tr -d '"')
+          kernel=$(.github/scripts/as-root.sh uname -rm)
+          systemd=$(.github/scripts/as-root.sh systemctl --version | head -n 1)
+          echo "$name, $kernel, $systemd" | tee -a "$GITHUB_STEP_SUMMARY"
+      # Not `sudo -E`: the runner's session (XDG_RUNTIME_DIR, the session bus
+      # of its user) is not the script's, and the variables it needs are named.
+      - name: Install, keyring, folder mode, uninstall
+        run: >-
+          .github/scripts/as-root.sh
+          GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY"
+          LANDLOCK_ABI_MIN=${{ matrix.landlock }}
+          NERVE_NODE_REAL="$PWD/dist/nerve-node-$SUFFIX"
+          REAL_ACCOUNT_TEST="$PWD/dist/tests/real_account"
+          REAL_ROOT_OWNER_TEST="$PWD/dist/tests/real_root_owner"
+          KEYRING_TEST="$PWD/dist/tests/keyring"
+          "$PWD/.github/scripts/keyring-end-to-end.sh"
+      # After the node's run, which left nothing behind.
+      - name: The center as a service
+        run: >-
+          .github/scripts/as-root.sh
+          GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY"
+          NERVE_CENTER_REAL="$PWD/dist/nerve-center-$SUFFIX"
+          "$PWD/.github/scripts/center-service-end-to-end.sh"
+      - name: The container's log
+        if: ${{ failure() && matrix.image }}
+        run: docker logs nerve-machine 2>&1 | tail -n 200

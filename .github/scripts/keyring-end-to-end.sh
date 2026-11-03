@@ -4,10 +4,13 @@
 # on a machine that may be changed and broken (a CI runner, a test VM). The
 # keyring used to be refused below Linux 7.1, so the script refuses a kernel
 # of 7.1 or later (the job would prove nothing new there) unless
-# KEYRING_E2E_ANY_KERNEL=1. CI runs it on the Ubuntu 22.04 and 24.04 runners,
-# whose kernels are 6.8 and 7.0 at the time of writing (GitHub's Azure kernels;
-# neither is the 5.15 of a 22.04 install), both with Landlock: the case
-# without Landlock, and the 5.15 kernel, are not tested there.
+# KEYRING_E2E_ANY_KERNEL=1. CI runs it with the static programs on the Ubuntu
+# 22.04 and 24.04 runners (x86_64, and arm64 on 24.04) and in a Debian 12
+# container on an Ubuntu 24.04 runner (.github/workflows/installed.yml),
+# whose kernels are 6.8 and 7.0 at the time of writing (GitHub's Azure
+# kernels; neither is the 5.15 of a 22.04 install nor the 6.1 of Debian 12),
+# all with Landlock: the case without Landlock, and the distributions' own
+# kernels, are not tested there.
 #
 #   NERVE_NODE_REAL=<the nerve-node to install>
 #   REAL_ACCOUNT_TEST=<the real_account test program>

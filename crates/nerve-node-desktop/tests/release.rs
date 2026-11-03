@@ -1,7 +1,8 @@
 //! What the release gives Windows: the desktop app and the center, and no
 //! `nerve-node` of its own, since there the app is the only way to the node
-//! (docs/user/install.md); and what the released app keeps for the licence it
-//! uses Slint under.
+//! (docs/user/install.md); what the released app keeps for the licence it
+//! uses Slint under; and that the Linux programs are installed and tested
+//! where the docs say before they are published.
 
 const RELEASE: &str = include_str!("../../../.github/workflows/release.yml");
 
@@ -130,4 +131,56 @@ fn the_app_shows_slints_notice_as_its_licence_asks() {
         notice.contains("Slint Royalty-free Desktop, Mobile, and Web Applications License 2.0"),
         "{notice}"
     );
+}
+
+/// The release publishes no Linux program before the install test passed on
+/// the very files it publishes (`installed.yml`), CI runs the same test, and
+/// the machines it runs on are the ones the platforms page calls tested.
+#[test]
+fn the_release_installs_its_linux_programs_where_the_docs_say_they_are_tested() {
+    let publish = job("publish");
+    let needs = publish
+        .lines()
+        .find(|l| l.trim_start().starts_with("needs:"))
+        .unwrap();
+    assert!(needs.contains("installed"), "{needs}");
+    let installed = job("installed");
+    for line in [
+        "uses: ./.github/workflows/installed.yml",
+        "binaries: nerve-{0}-linux",
+        "ref: ${{ needs.check.outputs.sha }}",
+    ] {
+        assert!(installed.contains(line), "{line}: {installed}");
+    }
+    let ci = include_str!("../../../.github/workflows/ci.yml");
+    assert!(ci.contains("uses: ./.github/workflows/installed.yml"));
+    let workflow = include_str!("../../../.github/workflows/installed.yml");
+    let matrix = workflow
+        .split("        include:\n")
+        .nth(1)
+        .unwrap()
+        .split("\n    env:")
+        .next()
+        .unwrap();
+    let machines: Vec<&str> = matrix
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("- name: "))
+        .collect();
+    assert_eq!(
+        machines,
+        [
+            "Ubuntu 22.04 x86_64",
+            "Ubuntu 24.04 x86_64",
+            "Ubuntu 24.04 arm64",
+            "Debian 12 x86_64"
+        ]
+    );
+    let platforms = include_str!("../../../docs/user/platforms.md");
+    let tested = platforms
+        .lines()
+        .find(|l| l.starts_with("| Tested |"))
+        .unwrap();
+    for name in ["Ubuntu 22.04 and 24.04, Debian 12", "aarch64"] {
+        assert!(tested.contains(name), "{name}: {tested}");
+    }
 }
