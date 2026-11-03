@@ -1,0 +1,73 @@
+# The dependencies, checked by cargo-deny against deny.toml: their licences fit
+# the Apache License 2.0 (and Slint's terms for the desktop app alone), none has
+# a published advisory that deny.toml does not name with a reason, no crate is
+# there twice unless deny.toml says why, and all come from crates.io. On every
+# pull request and push to main, and once a week, since an advisory can be
+# published for a crate nobody changed.
+#
+# cargo-deny is a tool here, not a dependency of Nerve: the job downloads its
+# release from GitHub and checks it against the sha256 below, which the
+# release states. To raise it, take the version and the sha256 of
+# cargo-deny-<version>-x86_64-unknown-linux-musl.tar.gz from
+# https://github.com/EmbarkStudios/cargo-deny/releases.
+#
+# No dependabot: the repository has Dependabot's alerts and security updates
+# off, and a dependabot.yml would open pull requests of its own. This job
+# finds the same advisories, and Cargo.lock is updated by hand.
+name: Dependencies
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    # Mondays, 05:17 UTC.
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deny-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  RUST_TOOLCHAIN: "1.99.0"
+  CARGO_TERM_COLOR: never
+  CARGO_DENY_VERSION: "0.20.2"
+  CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+
+jobs:
+  deny:
+    name: cargo-deny (licences, advisories, duplicates, sources)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # cargo-deny reads the dependency graph through `cargo metadata`.
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: cargo-deny
+        run: |
+          name="cargo-deny-$CARGO_DENY_VERSION-x86_64-unknown-linux-musl"
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/$CARGO_DENY_VERSION/$name.tar.gz"
+          echo "$CARGO_DENY_SHA256  $RUNNER_TEMP/$name.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          install -m 755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
+          cargo deny --version
+      - name: Licences, duplicates and sources
+        run: cargo deny --locked check licenses bans sources
+      # Apart, so the log shows at once whether a new advisory or the change
+      # itself failed the job.
+      - name: Advisories
+        run: cargo deny --locked check advisories

@@ -100,6 +100,31 @@ NERVE_CENTER_BIN=/path/to/nerve-center NERVE_NODE_BIN=/path/to/nerve-node \
   cargo test -p nerve-conformance
 ```
 
+## Dependencies
+
+The `Dependencies` workflow (`.github/workflows/deny.yml`) runs
+[cargo-deny](https://github.com/EmbarkStudios/cargo-deny) against `deny.toml`
+on every pull request, on `main`, and every Monday, since an advisory can come
+out for a crate nobody changed. It fails on:
+
+- a licence that is not in `deny.toml`'s list (licences that fit the Apache
+  License 2.0); Slint's Royalty-free licence is allowed for Slint's crates and
+  the desktop app only, and Slint may be linked by the desktop app alone;
+- an advisory of the RustSec database, an unmaintained or unsound crate too,
+  that `deny.toml` does not name with its reason;
+- a second version of a crate that `deny.toml` does not name with its reason;
+- a crate from anywhere but crates.io, a wildcard version, OpenSSL.
+
+To run it here, get the release named in `deny.yml` and:
+
+```sh
+cargo deny --locked check
+```
+
+An advisory that a newer patch release fixes is fixed with
+`cargo update -p <crate>`; one that cannot be fixed yet goes into `deny.toml`
+with why Nerve is not reached, and comes out again with the fix.
+
 ## Static Linux binaries
 
 Needs the musl target and clang:
