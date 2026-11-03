@@ -252,3 +252,56 @@ fn a_real_test_that_skips_fails_the_script_with_one_test_thread_too() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Chrome prints its DevTools line a moment before it lists its first tab:
+/// the web UI smoke test must wait for it, and when it never comes it must
+/// say so, end the browser and fail, not crash on a missing page.
+#[cfg(unix)]
+#[test]
+fn the_web_ui_smoke_test_waits_for_the_browsers_first_page_and_ends_the_browser() {
+    use std::os::unix::fs::PermissionsExt;
+    if std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        println!("skipped: no node");
+        return;
+    }
+    let smoke = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../.github/scripts/web-ui-smoke.mjs"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("pid");
+    // A browser that announces its endpoint and lists no page, ever.
+    let chrome = dir.path().join("chrome");
+    std::fs::write(
+        &chrome,
+        format!(
+            "#!/usr/bin/env node\nconst http = require('http');\n\
+             require('fs').writeFileSync({pid:?}, String(process.pid));\n\
+             const s = http.createServer((q, r) => r.end('[]'));\n\
+             s.listen(0, '127.0.0.1', () => console.error('DevTools listening on ws://127.0.0.1:' + s.address().port + '/devtools/browser/x'));\n",
+            pid = pidfile.display().to_string()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&chrome, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let run = std::process::Command::new("node")
+        .args([smoke, chrome.to_str().unwrap(), "http://127.0.0.1:1/", "t"])
+        .output()
+        .expect("node");
+    let said = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        !run.status.success() && said.contains("listed no page"),
+        "{run:?}"
+    );
+    let pid = std::fs::read_to_string(&pidfile).unwrap();
+    // The killed browser is reaped by init a moment after the script ends.
+    let gone = (0..40).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        !std::path::Path::new(&format!("/proc/{pid}")).exists()
+    });
+    assert!(gone, "the browser still runs");
+}

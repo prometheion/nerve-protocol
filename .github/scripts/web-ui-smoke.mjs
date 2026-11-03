@@ -48,10 +48,23 @@ const port = await new Promise((resolve, reject) => {
   chrome.on("exit", (c) => reject(new Error(`the browser ended (${c}): ${text}`)));
 }).catch((e) => { console.error(e.message); end(1); });
 
-const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-const target = pages.find((p) => p.type === "page");
-const ws = new WebSocket(target.webSocketDebuggerUrl);
-await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
+// Chrome prints the DevTools line a moment before its first tab is listed, so
+// wait for the page target; a failure on the way still ends the browser.
+async function firstPage() {
+  for (let t = 0; t < 10000; t += 250) {
+    const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+    const target = pages.find((p) => p.type === "page");
+    if (target) return target;
+    await sleep(250);
+  }
+  throw new Error("the browser listed no page within 10 s");
+}
+const ws = await (async () => {
+  const target = await firstPage();
+  const socket = new WebSocket(target.webSocketDebuggerUrl);
+  await new Promise((r, j) => { socket.onopen = r; socket.onerror = j; });
+  return socket;
+})().catch((e) => { console.error(`web UI ${url}: ${e.message}`); end(1); });
 
 let next = 1;
 const waiting = new Map();
