@@ -367,7 +367,7 @@ pub fn for_commands(
     if !can_switch {
         // Started by hand, or by a systemd without AmbientCapabilities=.
         return Err(if cfg!(windows) {
-            "this installed node runs without SeAssignPrimaryTokenPrivilege and cannot start a command as another account; start it as the service: `Start-Service nerve-node`".into()
+            "this installed node runs without SeAssignPrimaryTokenPrivilege and cannot start a command as another account; start it as the service (Start on the app's Overview)".into()
         } else {
             format!(
                 "this installed node runs as uid {own_uid} without CAP_SETUID and CAP_SETGID and cannot start a command as another account; start it as the service: `sudo systemctl start nerve-node`"
@@ -962,7 +962,7 @@ mod tests {
         for as_owner in [false, true] {
             let e = for_commands(as_owner, Some("alice"), 990, true, false, db).unwrap_err();
             let start = if cfg!(windows) {
-                "Start-Service nerve-node"
+                "Start on the app's Overview"
             } else {
                 "systemctl start"
             };

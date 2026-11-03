@@ -2602,7 +2602,7 @@ mod tests {
         }
         let rm = cli(&["relay", "rm", "lab"]).await;
         if cfg!(windows) {
-            assert!(rm.contains("Restart-Service nerve-node"), "{rm}");
+            assert!(rm.contains("Restart on the app's Overview"), "{rm}");
             assert!(!rm.contains("end now"), "{rm}");
         } else {
             assert_eq!(

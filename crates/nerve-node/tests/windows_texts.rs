@@ -85,3 +85,30 @@ fn the_shared_windows_texts_say_where_in_the_app() {
         assert!(text.contains("app"), "{text:?}");
     }
 }
+
+/// The two messages of an installed node that runs without its token
+/// privilege name the app's Start button, not a service command.
+#[test]
+fn a_node_without_its_privilege_says_where_in_the_app_to_start_it() {
+    for (file, source) in [
+        ("account.rs", include_str!("../src/account.rs")),
+        ("daemon.rs", include_str!("../src/daemon.rs")),
+    ] {
+        let lines: Vec<_> = texts(source)
+            .into_iter()
+            .filter(|(_, t)| t.contains("SeAssignPrimaryTokenPrivilege"))
+            .collect();
+        assert!(!lines.is_empty(), "{file}: no such message found");
+        for (line, text) in lines {
+            let lower = text.to_lowercase();
+            assert!(
+                !TERMINAL.iter().any(|w| lower.contains(w)),
+                "{file}:{line}: {text:?}"
+            );
+            assert!(
+                text.contains("Start on the app's Overview"),
+                "{file}:{line}"
+            );
+        }
+    }
+}

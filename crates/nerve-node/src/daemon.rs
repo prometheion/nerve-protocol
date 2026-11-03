@@ -1636,7 +1636,7 @@ impl Daemon {
             crate::win_user::init(&paths.config_dir);
             if service && crate::account::own_uid() != 0 && !crate::account::can_switch() {
                 tracing::warn!(
-                    "this is the installed node, started without SeAssignPrimaryTokenPrivilege: it runs no command; start it as the service: `Start-Service nerve-node`"
+                    "this is the installed node, started without SeAssignPrimaryTokenPrivilege: it runs no command; start it as the service (Start on the app's Overview)"
                 );
             }
         }
