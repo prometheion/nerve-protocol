@@ -84,6 +84,7 @@ enum Peer {
     /// Another machine (or a local peer that is not on loopback).
     Addr(IpAddr),
     /// A loopback peer of this account.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Account(u32),
     /// A loopback peer whose account is not known.
     Local,
