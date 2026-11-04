@@ -3485,17 +3485,42 @@ async fn add_folder(
 /// answers, with `every` walking every grant. Nothing without such a node.
 async fn tell_grants(paths: &NodePaths, every: bool, out: &mut dyn Write) {
     #[cfg(target_os = "linux")]
-    if let Ok(v) = nerve_transport::ctl::call(
+    match nerve_transport::ctl::call(
         &paths.ctl_socket(),
         "folder.grants",
         json!({ "every": every }),
     )
     .await
     {
-        tell_grants_of(&v, out);
+        Ok(v) => tell_grants_of(&v, out),
+        Err(e) => {
+            if let Some(line) = walk_goes_on(&e) {
+                let _ = writeln!(out, "{line}");
+            }
+        }
     }
     #[cfg(not(target_os = "linux"))]
     let _ = (paths, every, out);
+}
+
+/// What to tell when the node did not answer a walk of the folders in time:
+/// on a large tree the walk takes longer than the wait, and it goes on. A
+/// second call would only queue another walk.
+#[cfg(target_os = "linux")]
+fn walk_goes_on(error: &str) -> Option<String> {
+    (error == nerve_transport::ctl::NO_ANSWER).then(|| {
+        "the node is still walking the folders and goes on; do not run this again, `nerve-node status` shows what it left"
+            .to_string()
+    })
+}
+
+/// What `folder sync` tells when the call to the node failed.
+#[cfg(target_os = "linux")]
+fn sync_failed(error: String) -> String {
+    if error == nerve_transport::ctl::NOT_RUNNING {
+        return "the node does not run; it walks the folders when it starts".to_string();
+    }
+    walk_goes_on(&error).unwrap_or(error)
 }
 
 /// `folder sync`: the running installed Linux node walks every grant now,
@@ -3509,12 +3534,7 @@ async fn sync_folders(paths: &NodePaths, out: &mut dyn Write) -> Result<(), Stri
             json!({ "every": true }),
         )
         .await
-        .map_err(|e| match e.as_str() {
-            nerve_transport::ctl::NOT_RUNNING => {
-                "the node does not run; it walks the folders when it starts".to_string()
-            }
-            _ => e,
-        })?;
+        .map_err(sync_failed)?;
         if v["service"] != true {
             let _ = writeln!(out, "{FOLDERS_WITHOUT_ACL}");
             return Ok(());
@@ -7788,6 +7808,22 @@ mod tests {
             tell_grants(&paths, every, &mut Vec::new()).await;
             assert_eq!(got.lock().unwrap().last().unwrap().1["every"], want);
         }
+    }
+
+    /// A walk that outlasts the wait for the node's answer goes on: the
+    /// owner is told not to ask again, which would queue one more walk.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_walk_longer_than_the_wait_is_said_to_go_on() {
+        let line = walk_goes_on(nerve_transport::ctl::NO_ANSWER).unwrap();
+        assert!(
+            line.contains("still walking") && !line.contains("try again"),
+            "{line}"
+        );
+        assert_eq!(walk_goes_on(nerve_transport::ctl::NOT_RUNNING), None);
+        assert_eq!(sync_failed(nerve_transport::ctl::NO_ANSWER.into()), line);
+        assert!(sync_failed(nerve_transport::ctl::NOT_RUNNING.into()).contains("does not run"));
+        assert_eq!(sync_failed("other".into()), "other");
     }
 
     /// `folder set` walks every grant of the running node, as `folder sync`

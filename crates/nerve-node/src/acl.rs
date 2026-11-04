@@ -961,7 +961,7 @@ pub fn sync(
     who: Who,
     act_as: &dyn Fn() -> Result<Option<crate::account::FsAs>, String>,
 ) -> Report {
-    sync_with(file, want, who, act_as, false)
+    sync_with(file, want, who, act_as, false, &|_| {})
 }
 
 /// [`sync`] that walks every grant, also one that did not change: a file or
@@ -973,16 +973,19 @@ pub fn sync_all(
     who: Who,
     act_as: &dyn Fn() -> Result<Option<crate::account::FsAs>, String>,
 ) -> Report {
-    sync_with(file, want, who, act_as, true)
+    sync_with(file, want, who, act_as, true, &|_| {})
 }
 
-/// [`sync`], walking every grant of `want` when `every`.
-fn sync_with(
+/// [`sync`], walking every grant of `want` when `every`. `stored` gets the
+/// report just before the record is written: once the record shows the walk
+/// as done, a reader that finds nothing behind must find its report as well.
+pub fn sync_with(
     file: &Path,
     want: &[Granted],
     who: Who,
     act_as: &dyn Fn() -> Result<Option<crate::account::FsAs>, String>,
     every: bool,
+    stored: &dyn Fn(&Report),
 ) -> Report {
     let mut report = Report::default();
     let before = match read_record(file) {
@@ -1155,6 +1158,7 @@ fn sync_with(
     kept.made_defaults = below(defaults.made);
     kept.failed = missed.clone();
     report.failed = missed;
+    stored(&report);
     if let Err(e) = write_record(file, &kept) {
         report.errors.push(e);
     }
@@ -1400,6 +1404,23 @@ mod tests {
         assert_eq!(file_perm(a("rwx"), 0o644), R | W);
         assert_eq!(file_perm(a("rx"), 0o755), R | X);
         assert_eq!(file_perm(a("w"), 0o755), W);
+    }
+
+    /// The report is handed over before the record shows the walk as done:
+    /// a reader that finds the record up to date must find the report too.
+    #[test]
+    fn the_report_is_stored_before_the_record_is_written() {
+        let d = tempfile::tempdir().unwrap();
+        let work = d.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let file = d.path().join("acl.json");
+        let want = [grant(&work, "rw")];
+        let behind_then = std::cell::Cell::new(None);
+        sync_with(&file, &want, who(), &none, false, &|_| {
+            behind_then.set(Some(behind(&file, &want, who(), false)));
+        });
+        assert_eq!(behind_then.get(), Some(true));
+        assert!(!behind(&file, &want, who(), false));
     }
 
     /// A file and a folder moved into a granted folder keep the ACL they

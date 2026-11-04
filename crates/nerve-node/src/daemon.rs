@@ -551,6 +551,12 @@ pub(crate) fn confinement_for(detected: Confinement, service: bool) -> Confineme
     }
 }
 
+/// The sync of [`Shared::walk_acls`]: what to grant, and where to store the
+/// report just before the record is written.
+#[cfg(target_os = "linux")]
+type AclSync<'a> =
+    dyn Fn(&[crate::acl::Granted], &dyn Fn(&crate::acl::Report)) -> crate::acl::Report + 'a;
+
 /// How far [`Shared::sync_acls`] goes.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -889,22 +895,37 @@ impl Shared {
         let file = crate::acl::record_file(&self.paths);
         // The folders are resolved as the owner sees them: the node's user
         // may not look into the owner's home.
-        let want = match crate::account::FsAs::new(&owner) {
-            Ok(_as) => crate::acl::wanted(cfg, &self.paths, &owner.home, crate::now_ms()),
+        let wanted = |cfg: &NodeConfig| match crate::account::FsAs::new(&owner) {
+            Ok(_as) => Some(crate::acl::wanted(
+                cfg,
+                &self.paths,
+                &owner.home,
+                crate::now_ms(),
+            )),
             Err(e) => {
                 tracing::warn!("folder grants: cannot act as {}: {e}", owner.name);
-                return;
+                None
             }
+        };
+        let Some(want) = wanted(cfg) else {
+            return;
         };
         let act_as = || {
             crate::account::FsAs::new(&owner)
                 .map(Some)
                 .map_err(|e| format!("cannot act as {}: {e}", owner.name))
         };
-        self.walk_acls(&file, &want, who, walk, &|| match walk {
-            AclWalk::Every => crate::acl::sync_all(&file, &want, who, &act_as),
-            AclWalk::IfBehind | AclWalk::Now => crate::acl::sync(&file, &want, who, &act_as),
-        });
+        self.walk_acls(
+            &file,
+            &want,
+            who,
+            walk,
+            // A walk that waited applies the config as it is when it runs.
+            &|| wanted(&self.config()),
+            &|want, stored| {
+                crate::acl::sync_with(&file, want, who, &act_as, walk == AclWalk::Every, stored)
+            },
+        );
     }
 
     /// The locking of [`Shared::sync_acls`]: `sync` makes the report, and
@@ -912,7 +933,11 @@ impl Shared {
     /// that find the record up to date do not wait for a walk over a large
     /// folder. A sync that finds the record not behind returns before it
     /// waits for a walk that runs; one that waited looks again, as that walk
-    /// may have done its work.
+    /// may have done its work. A record behind only for a grant that failed
+    /// before is not worth the wait: the running walk tries that grant
+    /// itself. `fresh` gives `want` as it is once the walk lock is held, and
+    /// `sync` stores the report (its argument) just before the record shows
+    /// the walk as done.
     #[cfg(target_os = "linux")]
     fn walk_acls(
         &self,
@@ -920,21 +945,34 @@ impl Shared {
         want: &[crate::acl::Granted],
         who: crate::acl::Who,
         walk: AclWalk,
-        sync: &dyn Fn() -> crate::acl::Report,
+        fresh: &dyn Fn() -> Option<Vec<crate::acl::Granted>>,
+        sync: &AclSync,
     ) {
-        let behind = || {
-            let retry = lock(&self.acl_tried).is_none_or(|t| t.elapsed() >= ACL_RETRY);
+        let behind = |want: &[crate::acl::Granted], retry: bool| {
+            let retry = retry && lock(&self.acl_tried).is_none_or(|t| t.elapsed() >= ACL_RETRY);
             crate::acl::behind(file, want, who, retry)
         };
-        if walk == AclWalk::IfBehind && !behind() {
+        if walk == AclWalk::IfBehind && !behind(want, true) {
             return;
         }
-        let _walking = lock(&self.acl_walk);
-        if walk == AclWalk::IfBehind && !behind() {
+        let _walking = match self.acl_walk.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if walk == AclWalk::IfBehind && !behind(want, false) {
+                    return;
+                }
+                lock(&self.acl_walk)
+            }
+        };
+        let Some(want) = fresh() else {
+            return;
+        };
+        if walk == AclWalk::IfBehind && !behind(&want, true) {
             return;
         }
         *lock(&self.acl_tried) = Some(std::time::Instant::now());
-        let report = sync();
+        let report = sync(&want, &|r| *lock(&self.acl) = r.clone());
         for e in &report.errors {
             tracing::warn!("folder grants: {e}");
         }
@@ -3124,13 +3162,20 @@ mod tests {
         let walker = {
             let (s, file, running) = (s.clone(), file.clone(), running.clone());
             std::thread::spawn(move || {
-                s.walk_acls(&file, &[], who, AclWalk::Every, &|| {
-                    running.fetch_add(1, Ordering::SeqCst);
-                    started.send(()).unwrap();
-                    let _ = release_rx.recv();
-                    running.fetch_sub(1, Ordering::SeqCst);
-                    crate::acl::Report::default()
-                });
+                s.walk_acls(
+                    &file,
+                    &[],
+                    who,
+                    AclWalk::Every,
+                    &|| Some(vec![]),
+                    &|_, _| {
+                        running.fetch_add(1, Ordering::SeqCst);
+                        started.send(()).unwrap();
+                        let _ = release_rx.recv();
+                        running.fetch_sub(1, Ordering::SeqCst);
+                        crate::acl::Report::default()
+                    },
+                );
             })
         };
         started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -3153,9 +3198,14 @@ mod tests {
         answers(
             "a sync of an up to date record",
             Box::new(move || {
-                t.walk_acls(&f, &[], who, AclWalk::IfBehind, &|| {
-                    panic!("the record is not behind")
-                })
+                t.walk_acls(
+                    &f,
+                    &[],
+                    who,
+                    AclWalk::IfBehind,
+                    &|| Some(vec![]),
+                    &|_, _| panic!("the record is not behind"),
+                )
             }),
         );
 
@@ -3164,7 +3214,7 @@ mod tests {
         let second = {
             let (s, file, running) = (s.clone(), file.clone(), running.clone());
             std::thread::spawn(move || {
-                s.walk_acls(&file, &[], who, AclWalk::Now, &|| {
+                s.walk_acls(&file, &[], who, AclWalk::Now, &|| Some(vec![]), &|_, _| {
                     second_in.send(running.load(Ordering::SeqCst)).unwrap();
                     crate::acl::Report::default()
                 });
@@ -3178,6 +3228,106 @@ mod tests {
         walker.join().unwrap();
         second.join().unwrap();
         assert_eq!(second_rx.recv().unwrap(), 0);
+    }
+
+    /// A record behind only for a grant that failed before does not make a
+    /// command wait for the walk that runs: that walk tries the grant itself.
+    /// A walk that waited for the lock applies the config as it is by then,
+    /// and stores its report before the record shows it done.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_waiting_walk_uses_the_current_config_and_a_retry_does_not_wait() {
+        use std::sync::mpsc;
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(options(&d, &log)).await.unwrap();
+        let s = daemon.shared.clone();
+        let file = d.path().join("acl.json");
+        let who = crate::acl::Who { run: 1, owner: 2 };
+        // A record whose only problem is a grant that failed before.
+        let record = crate::acl::Record {
+            uid: 1,
+            owner: 2,
+            failed: vec![d.path().join("slow")],
+            ..Default::default()
+        };
+        std::fs::write(&file, serde_json::to_vec(&record).unwrap()).unwrap();
+        let (started, started_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let walker = {
+            let (s, file) = (s.clone(), file.clone());
+            std::thread::spawn(move || {
+                s.walk_acls(
+                    &file,
+                    &[],
+                    who,
+                    AclWalk::Every,
+                    &|| Some(vec![]),
+                    &|_, _| {
+                        started.send(()).unwrap();
+                        let _ = release_rx.recv();
+                        crate::acl::Report::default()
+                    },
+                );
+            })
+        };
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        // The walk has run for longer than a failed grant waits for its retry.
+        *lock(&s.acl_tried) =
+            std::time::Instant::now().checked_sub(ACL_RETRY + Duration::from_secs(1));
+
+        let (done, done_rx) = mpsc::channel();
+        {
+            let (s, file) = (s.clone(), file.clone());
+            std::thread::spawn(move || {
+                s.walk_acls(
+                    &file,
+                    &[],
+                    who,
+                    AclWalk::IfBehind,
+                    &|| Some(vec![]),
+                    &|_, _| panic!("the running walk tries the failed grant"),
+                );
+                let _ = done.send(());
+            });
+        }
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a retry waits for the walk");
+
+        // A walk queued behind the first one walks what the config grants
+        // when it gets its turn, and the report is stored by `stored`.
+        let old = crate::acl::Granted {
+            path: d.path().join("revoked"),
+            access: nerve_policy::config::Access::ALL,
+        };
+        let (seen, seen_rx) = mpsc::channel();
+        let second = {
+            let (s, file, old) = (s.clone(), file.clone(), old.clone());
+            std::thread::spawn(move || {
+                s.walk_acls(
+                    &file,
+                    &[old],
+                    who,
+                    AclWalk::Now,
+                    &|| Some(vec![]),
+                    &|want, stored| {
+                        let mut r = crate::acl::Report::default();
+                        r.errors.push("stored".into());
+                        stored(&r);
+                        seen.send((want.len(), lock(&s.acl).errors.clone()))
+                            .unwrap();
+                        r
+                    },
+                );
+            })
+        };
+        release.send(()).unwrap();
+        walker.join().unwrap();
+        second.join().unwrap();
+        let (n, stored) = seen_rx.recv().unwrap();
+        assert_eq!(n, 0, "a walk used the config it was called with");
+        assert_eq!(stored, ["stored"]);
     }
 
     /// The walk at the start is every grant; the one a later config version

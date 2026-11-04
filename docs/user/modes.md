@@ -269,7 +269,7 @@ The node confines commands with Landlock:
 - A command has no controlling terminal: it runs in a session of its own.
   On a node you run yourself in a terminal that terminal is yours, and a
   command cannot write to it, type into it, or read your terminals by
-  name: `/dev/pts`, `/dev/console` and the `/dev/tty*` files are left out of
+  name: `/dev/pts`, `/dev/console` and every tty device the kernel lists (`tty*`, `hvc*`, serial lines) are left out of
   what it may read (the rest of `/dev` stays, but it cannot list `/dev`).
   The installed node's commands run as `nerve-run`, which may not open your
   terminals either.

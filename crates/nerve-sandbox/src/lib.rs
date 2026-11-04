@@ -21,7 +21,7 @@
 //! runs each command in a cgroup of its own for that (`nerve-node`'s
 //! `cgroup` module).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -314,27 +314,50 @@ pub fn system_dirs() -> Vec<PathBuf> {
 }
 
 /// The terminals of the machine's users under `/dev`: the pseudo-terminals
-/// (`pts`), the console and the text consoles and serial lines (`tty*`). A
-/// command of a node run by hand runs as the owner, who owns the terminal
-/// they work in, so it must not read these by name: what the owner types
-/// there would reach the command. A program that makes a terminal of its
-/// own needs none of them: `ptmx` stays, and a pseudo-terminal's slave is
-/// reached through the master's descriptor.
+/// (`pts`), the console and every device the kernel's tty layer lists
+/// (`/sys/class/tty`: the text consoles and serial lines, but also the
+/// hypervisor consoles `hvc*`, which are no `tty*`). A command of a node
+/// run by hand runs as the owner, who owns the terminal they work in, so it
+/// must not read these by name: what the owner types there would reach the
+/// command. A program that makes a terminal of its own needs none of them:
+/// `ptmx` stays, and a pseudo-terminal's slave is reached through the
+/// master's descriptor.
 pub fn terminal_devices() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = ["/dev/pts", "/dev/console"]
+    terminals_in(Path::new("/dev"), Path::new("/sys/class/tty"))
+}
+
+/// [`terminal_devices`] for a `/dev` and the kernel's list of tty devices.
+/// A name that starts with `tty` counts also where the list does not have
+/// it. The list writes `/dev/3270/tty1` as `3270!tty1`.
+fn terminals_in(dev: &Path, tty_class: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = ["pts", "console"]
         .iter()
-        .map(PathBuf::from)
+        .map(|n| dev.join(n))
         .filter(|p| p.exists())
         .collect();
-    if let Ok(entries) = std::fs::read_dir("/dev") {
-        let mut ttys: Vec<PathBuf> = entries
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with("tty"))
-            .map(|e| e.path())
-            .collect();
-        ttys.sort();
-        out.extend(ttys);
+    let mut named: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dev) {
+        named.extend(
+            entries
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with("tty"))
+                .map(|e| e.path()),
+        );
     }
+    if let Ok(entries) = std::fs::read_dir(tty_class) {
+        named.extend(
+            entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().replace('!', "/"))
+                .filter(|n| n != "ptmx")
+                .map(|n| dev.join(n))
+                .filter(|p| p.exists()),
+        );
+    }
+    named.sort();
+    named.dedup();
+    let seen = out.clone();
+    out.extend(named.into_iter().filter(|p| !seen.contains(p)));
     out
 }
 
@@ -2730,6 +2753,29 @@ mod tests {
         assert!(!t.contains(&PathBuf::from("/dev/null")), "{t:?}");
         assert!(!t.contains(&PathBuf::from("/dev/ptmx")), "{t:?}");
         assert!(t.iter().all(|p| p.starts_with("/dev")), "{t:?}");
+    }
+
+    /// A terminal that has no `tty` name, such as a hypervisor console, is
+    /// named by the kernel's list of tty devices; `ptmx` is not left out of
+    /// the commands' reach by it.
+    #[test]
+    fn a_terminal_without_a_tty_name_is_left_out_too() {
+        let d = tempfile::tempdir().unwrap();
+        let (dev, class) = (d.path().join("dev"), d.path().join("class"));
+        std::fs::create_dir_all(dev.join("3270")).unwrap();
+        std::fs::create_dir_all(&class).unwrap();
+        for f in ["hvc0", "ttyS0", "ptmx", "null", "3270/tty1"] {
+            std::fs::write(dev.join(f), "").unwrap();
+        }
+        for f in ["hvc0", "ptmx", "3270!tty1", "gone0"] {
+            std::fs::create_dir(class.join(f)).unwrap();
+        }
+        let t = terminals_in(&dev, &class);
+        assert_eq!(
+            t,
+            [dev.join("3270/tty1"), dev.join("hvc0"), dev.join("ttyS0")],
+            "{t:?}"
+        );
     }
 
     /// Landlock below ABI 3 does not guard truncate(2): a node run by hand

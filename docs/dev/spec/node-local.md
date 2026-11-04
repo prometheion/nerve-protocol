@@ -1162,7 +1162,7 @@ grant or not.
   terminal, and outside its `w` folders it may write only `/dev/null`,
   `/dev/zero` and `/dev/full` (`nerve_sandbox::system_writable`), not
   `/dev/tty`. `/dev` stays in the read and exec sets but for the terminals
-  (`nerve_sandbox::terminal_devices`: `/dev/pts`, `/dev/console`, `/dev/tty*`),
+  (`nerve_sandbox::terminal_devices`: `/dev/pts`, `/dev/console`, and every device in `/sys/class/tty` but `ptmx` (`hvc*`, `tty*`, serial lines)),
   which `exec::landlock_spec` leaves out as it does the node's own folders, so
   `/dev` is given as its other entries (not its links, which a rule cannot
   follow to a pipe or a socket); a command of a node run by hand, which runs as the
