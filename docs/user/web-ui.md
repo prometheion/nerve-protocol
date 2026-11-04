@@ -18,7 +18,7 @@ allow, so a harness token never logs in here.
   `~/.local/state/nerve-center/owner-token` for a center you run yourself,
   `/var/lib/nerve-center/owner-token` for the [service](center.md#run-it-as-a-service),
   whose `install` prints it. The log says where it is, never the token.
-  Under systemd stderr goes to the journal, so there the token is not
+  Where stderr is the systemd journal (the service), the token is not
   printed at all.
 - `nerve-center owner-token` prints it again. `nerve-center owner-token --new`
   makes a new one: the old one stops at once, also on a running center, and

@@ -1238,6 +1238,13 @@ pub const HTTP_IDLE: Duration = Duration::from_secs(30 * 60);
 /// The HTTP sessions one harness token keeps open at most. A harness opens
 /// one per agent it runs.
 pub const HTTP_SESSIONS_PER_TOKEN: usize = 32;
+/// The requests one harness token has in flight at most. A request holds
+/// its connection (and the body it sent) while a call waits for its node,
+/// and no listener place is held for it any more once its token is checked,
+/// so this is what keeps a token from filling the center's open files. It
+/// is far above what a harness with [`HTTP_SESSIONS_PER_TOKEN`] agents needs
+/// at once; past it a request is answered 503.
+pub const HTTP_ACTIVE_PER_TOKEN: usize = 128;
 /// How often the HTTP sessions are looked over for one to end.
 const HTTP_SWEEP: Duration = Duration::from_secs(30);
 
@@ -1248,11 +1255,15 @@ const HTTP_SWEEP: Duration = Duration::from_secs(30);
 /// and at once when the harness token that opened it is deleted: the agent
 /// that held a token which leaked must not go on with what it started. A
 /// session answers only the token that opened it, and one token keeps
-/// [`HTTP_SESSIONS_PER_TOKEN`] open at most.
+/// [`HTTP_SESSIONS_PER_TOKEN`] open at most and [`HTTP_ACTIVE_PER_TOKEN`]
+/// requests in flight.
 pub struct HttpMcp {
     center: Center,
     env_token: Option<String>,
     sessions: Mutex<HashMap<String, Held>>,
+    /// The requests in flight, by the SHA-256 (hex) of the token.
+    active: Mutex<HashMap<String, usize>>,
+    active_max: std::sync::atomic::AtomicUsize,
     idle: Mutex<Duration>,
     /// The center's changes, from the endpoint's making on: a token deleted
     /// before [`HttpMcp::serve`] first runs is not missed.
@@ -1265,6 +1276,24 @@ struct Sweeper(tokio::task::JoinHandle<()>);
 impl Drop for Sweeper {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+/// A request in flight of one token, counted until it is dropped.
+struct Active<'a> {
+    http: &'a HttpMcp,
+    via: String,
+}
+
+impl Drop for Active<'_> {
+    fn drop(&mut self) {
+        let mut map = self.http.active.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = map.get_mut(&self.via) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.via);
+            }
+        }
     }
 }
 
@@ -1282,6 +1311,8 @@ impl HttpMcp {
             center: center.clone(),
             env_token,
             sessions: Mutex::new(HashMap::new()),
+            active: Mutex::new(HashMap::new()),
+            active_max: std::sync::atomic::AtomicUsize::new(HTTP_ACTIVE_PER_TOKEN),
             idle: Mutex::new(HTTP_IDLE),
             changes: Mutex::new(Some(center.subscribe())),
         })
@@ -1291,6 +1322,28 @@ impl HttpMcp {
     #[doc(hidden)]
     pub fn set_idle(&self, d: Duration) {
         *self.idle.lock().unwrap() = d;
+    }
+
+    /// Another bound on a token's requests in flight, for a test.
+    #[doc(hidden)]
+    pub fn set_active_max(&self, n: usize) {
+        self.active_max
+            .store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A place among `via`'s requests in flight, if one is free.
+    fn enter(&self, via: &str) -> Option<Active<'_>> {
+        let max = self.active_max.load(std::sync::atomic::Ordering::Relaxed);
+        let mut map = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        let n = map.entry(via.to_string()).or_insert(0);
+        if *n >= max {
+            return None;
+        }
+        *n += 1;
+        Some(Active {
+            http: self,
+            via: via.to_string(),
+        })
     }
 
     /// How many HTTP sessions are open.
@@ -1429,6 +1482,10 @@ impl HttpMcp {
         // answers only the token that opened it: its id is no secret (the
         // nodes it calls and the Overview see it).
         let via = util::sha256_hex(req.bearer().unwrap_or_default().as_bytes());
+        let Some(_active) = self.enter(&via) else {
+            return Response::text(503, "this token has too many requests in flight")
+                .with_header("Retry-After", "1");
+        };
         match req.method.as_str() {
             "POST" => self.post(req, sid, via).await,
             "DELETE" => {
@@ -1462,6 +1519,9 @@ impl HttpMcp {
                 );
             }
         };
+        // The body is parsed; a call may wait long for its node, and keeps
+        // nothing of what was sent.
+        drop(req);
         let is_init = msg.get("method").and_then(Value::as_str) == Some("initialize");
         let (engine, new_id) = if is_init && sid.is_none() {
             let e = Arc::new(Engine::new(&self.center, "http"));

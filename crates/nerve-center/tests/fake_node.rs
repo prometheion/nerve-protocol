@@ -1620,6 +1620,122 @@ async fn idle_connections_hold_only_their_peers_places_on_the_mcp_port() {
     r.stop().await;
 }
 
+/// A token's requests wait for their node without any place of the
+/// listener, so the token itself is bounded: past its share a request is
+/// answered 503 at once, another token's is not, and the share frees as the
+/// waiting calls end. Before, a harness could hold as many connections open
+/// as the center had files.
+#[tokio::test]
+async fn a_token_has_a_bounded_number_of_requests_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = center_with(dir.path(), &["--call-wait", "2s"]).await;
+    let hash = |t: &str| nerve_center::util::sha256_hex(t.as_bytes());
+    r.center.update(|s| {
+        for id in ["a", "b"] {
+            s.harness_tokens.push(nerve_center::store::TokenRecord {
+                id: id.into(),
+                label: id.into(),
+                hash: hash(&format!("nrv_token-{id}")),
+                created_ms: 1,
+            });
+        }
+    });
+    let key = NodeKey::generate().unwrap();
+    assert_eq!(pair(&r, &key, "box-1").await.0, 200);
+    let (ws, _) = handshake(&r, &key).await;
+    let mut seen = serve(ws, descriptor(&key, "box-1"));
+    described(&r.center).await;
+    let h = nerve_center::mcp::HttpMcp::new(&r.center, None);
+    h.set_active_max(2);
+    let call = |token: &'static str, sid: String, body: Value| {
+        let h = h.clone();
+        async move {
+            let bearer = format!("Bearer nrv_token-{token}");
+            h.request(http(
+                "POST",
+                &[("authorization", &bearer), ("mcp-session-id", &sid)],
+                body,
+            ))
+            .await
+        }
+    };
+    let bearer = "Bearer nrv_token-a";
+    let init = h
+        .request(http(
+            "POST",
+            &[("authorization", bearer)],
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "t", "version": "1"}}}),
+        ))
+        .await;
+    assert_eq!(init.status, 200);
+    let sid = init
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("mcp-session-id"))
+        .map(|(_, v)| v.clone())
+        .expect("a session id");
+    let tool = |id: u64, name: &str, arguments: Value| {
+        json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments}})
+    };
+    let details = call(
+        "a",
+        sid.clone(),
+        tool(
+            2,
+            "list",
+            json!({"node": "box-1", "capability": "exec.run"}),
+        ),
+    )
+    .await;
+    assert_eq!(details.status, 200);
+    // Two calls wait for a node that never answers.
+    let run = tool(
+        3,
+        "execute",
+        json!({"node": "box-1", "capability": "exec.run", "args": {"command": "hang"}}),
+    );
+    let waiting: Vec<_> = (0..2)
+        .map(|_| tokio::spawn(call("a", sid.clone(), run.clone())))
+        .collect();
+    for _ in 0..2 {
+        let got = tokio::time::timeout(Duration::from_secs(5), seen.recv())
+            .await
+            .expect("the node got the call");
+        assert!(matches!(got, Some(Seen::Hang(_))));
+    }
+    let list = json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list"});
+    let started = std::time::Instant::now();
+    let refused = call("a", sid.clone(), list.clone()).await;
+    assert_eq!(refused.status, 503, "a token past its share");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(
+        refused
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("retry-after") && v == "1")
+    );
+    // Another token has its own share.
+    let other = h
+        .request(http(
+            "POST",
+            &[("authorization", "Bearer nrv_token-b")],
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "t", "version": "1"}}}),
+        ))
+        .await;
+    assert_eq!(other.status, 200);
+    // The calls end at the call wait, and the share is free again.
+    for w in waiting {
+        assert_eq!(w.await.unwrap().status, 200);
+    }
+    assert_eq!(call("a", sid, list).await.status, 200);
+    r.stop().await;
+}
+
 /// A disabled node stays paired and connected; `list` marks it and offers
 /// none of its capabilities, and `execute` on it never reaches it.
 #[tokio::test]

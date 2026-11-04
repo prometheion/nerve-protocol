@@ -17,6 +17,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -409,12 +410,22 @@ async fn run_once(
         Ok(c) => c,
         Err(e) => return RunEnd::StartFailed(e.to_string()),
     };
-    // Follow stderr into the ring buffer, flagging a download.
+    // Follow stderr into the ring buffer, flagging a download and noting
+    // when the server says it listens.
+    let listening = Arc::new(AtomicBool::new(false));
     if let Some(err) = child.stderr.take() {
         let inner = inner.clone();
+        let listening = listening.clone();
+        let port = match listen {
+            Listen::Port(p) => Some(*p),
+            Listen::Socket(_) => None,
+        };
         tokio::spawn(async move {
             let mut lines = BufReader::new(err).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                if port.is_some_and(|p| says_listening(&line, p)) {
+                    listening.store(true, Ordering::SeqCst);
+                }
                 set(&inner, |i| {
                     if i.phase != Some(Phase::Ready) && is_download(&line) {
                         i.phase = Some(Phase::Downloading);
@@ -452,7 +463,7 @@ async fn run_once(
             _ = tokio::time::sleep(Duration::from_millis(500)) => {
                 // Who answers is checked before the real key is sent: a
                 // process that took the port must not learn it.
-                match ours(listen, endpoint, timeout).await {
+                match ours(listen, &listening, endpoint, timeout).await {
                     Some(true) => {}
                     Some(false) => {
                         set(inner, |i| {
@@ -514,14 +525,31 @@ async fn run_once(
     }
 }
 
+/// Whether `line` of llama-server's log says it listens on `port`
+/// ("listening on http://127.0.0.1:8080").
+fn says_listening(line: &str, port: u16) -> bool {
+    line.to_ascii_lowercase().contains("listening on") && line.contains(&format!(":{port}"))
+}
+
 /// Whether the server that answers is the one this run started, or none
 /// while nothing answers yet: on a socket in the state folder it is, as no
-/// other account can listen there; on a port it must refuse a key it was
-/// not given.
-async fn ours(listen: &Listen, endpoint: &Endpoint, timeout: Duration) -> Option<bool> {
+/// other account can listen there. On a port, any process may answer, and
+/// one probe cannot tell it from the server (both can refuse a key), so
+/// nothing is asked before the server's own log says it listens (it cannot
+/// say that when the port was taken, and ends), and then it must still
+/// refuse a key it was not given.
+async fn ours(
+    listen: &Listen,
+    listening: &AtomicBool,
+    endpoint: &Endpoint,
+    timeout: Duration,
+) -> Option<bool> {
     match listen {
         Listen::Socket(_) => Some(true),
         Listen::Port(_) => {
+            if !listening.load(Ordering::SeqCst) {
+                return None;
+            }
             match tokio::time::timeout(timeout, model::refuses_other_keys(endpoint)).await {
                 Ok(Ok(refuses)) => Some(refuses),
                 _ => None,
@@ -621,9 +649,12 @@ class UnixServer(socketserver.UnixStreamServer):
         sock, _ = super().get_request()
         return sock, ("local", 0)
 if host.endswith(".sock"):
-    UnixServer(host, H).serve_forever()
+    server = UnixServer(host, H)
 else:
-    http.server.HTTPServer(("127.0.0.1", int(port)), H).serve_forever()
+    server = http.server.HTTPServer(("127.0.0.1", int(port)), H)
+# As llama-server, once it is bound.
+print("srv  main: listening on http://127.0.0.1:" + port, file=sys.stderr, flush=True)
+server.serve_forever()
 PY
 "#;
         std::fs::write(&bin, script).unwrap();
@@ -862,9 +893,16 @@ mod tests {
         let listen = Listen::Port(port);
         let ep = endpoint_of(&listen, "the-key", None);
         assert!(model::is_decision_model(&ep).await.unwrap());
+        let said = AtomicBool::new(true);
         assert_eq!(
-            ours(&listen, &ep, Duration::from_secs(5)).await,
+            ours(&listen, &said, &ep, Duration::from_secs(5)).await,
             Some(false)
+        );
+        // Nothing is asked before the server says it listens.
+        let silent = AtomicBool::new(false);
+        assert_eq!(
+            ours(&listen, &silent, &ep, Duration::from_secs(5)).await,
+            None
         );
         // The fake server on a port of its own refuses other keys, and so is
         // the one this run started.
@@ -879,8 +917,11 @@ mod tests {
         server.stop().await;
     }
 
-    /// A process that took the port never sees the real key: who answers
-    /// is checked with a key of no use first, and the run fails there.
+    /// A process that took the port never sees the real key, however it
+    /// answers: nothing is asked before the server's own log says it
+    /// listens, and a server whose port was taken never says so. The
+    /// squatter here refuses the first key of each pair (as the center's
+    /// probe with a key of no use expects) and takes the second.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_process_that_took_the_port_never_sees_the_key() {
@@ -891,8 +932,11 @@ mod tests {
         let seen = Arc::new(Mutex::new(String::new()));
         let heard = seen.clone();
         tokio::spawn(async move {
+            let mut asked = 0u32;
             while let Ok((mut io, _)) = squatter.accept().await {
                 let heard = heard.clone();
+                asked += 1;
+                let refuse = asked % 2 == 1;
                 tokio::spawn(async move {
                     let mut buf = [0u8; 4096];
                     let n = io.read(&mut buf).await.unwrap_or(0);
@@ -900,11 +944,18 @@ mod tests {
                         .lock()
                         .unwrap()
                         .push_str(&String::from_utf8_lossy(&buf[..n]));
-                    let body = r#"{"data":[{"architecture":{"output_modalities":["decisions"]}}]}"#;
+                    let (status, body) = if refuse {
+                        ("401 Unauthorized", r#"{"error":{"code":401}}"#)
+                    } else {
+                        (
+                            "200 OK",
+                            r#"{"data":[{"architecture":{"output_modalities":["decisions"]}}]}"#,
+                        )
+                    };
                     let _ = io
                         .write_all(
                             format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                                 body.len()
                             )
                             .as_bytes(),
@@ -913,8 +964,8 @@ mod tests {
                 });
             }
         });
-        // A server that starts and never listens, while the squatter
-        // answers on its port.
+        // A server that starts and never listens (its bind failed, say),
+        // while the squatter answers on its port.
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("llama-server");
         std::fs::write(&bin, "#!/bin/sh\nexec sleep 30\n").unwrap();
@@ -924,12 +975,10 @@ mod tests {
         let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
         let server =
             LocalServer::start_at(bin, model, Listen::Port(port), false, 5000, pin).expect("start");
-        until(&server, "failed", &|| {
-            server.status().phase == Phase::Failed
-        })
-        .await;
+        // Several probe rounds (one every 500 ms) go by.
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert!(!server.ready(), "{:?}", server.status());
         let heard = seen.lock().unwrap().clone();
-        assert!(heard.contains("Bearer "), "{heard}");
         assert!(
             !heard.contains(&server.key),
             "the squatter saw the key: {heard}"
@@ -965,7 +1014,28 @@ mod tests {
         });
         let listen = Listen::Port(port);
         let ep = endpoint_of(&listen, "the-key", None);
-        assert_eq!(ours(&listen, &ep, Duration::from_secs(5)).await, None);
+        let said = AtomicBool::new(true);
+        assert_eq!(
+            ours(&listen, &said, &ep, Duration::from_secs(5)).await,
+            None
+        );
+    }
+
+    #[test]
+    fn the_listening_line_names_the_port() {
+        assert!(says_listening(
+            "srv    main: listening on http://127.0.0.1:41234",
+            41234
+        ));
+        assert!(says_listening(
+            "main: Server is Listening on http://[::1]:41234",
+            41234
+        ));
+        assert!(!says_listening(
+            "listening on http://127.0.0.1:41234",
+            41235
+        ));
+        assert!(!says_listening("loading model for 127.0.0.1:41234", 41234));
     }
 
     /// Starts the fake server and waits until it is ready.

@@ -343,4 +343,7 @@ it polls with `job.status` keeps its session going.
 An HTTP session answers only the token that opened it: another token gets
 `404` for it, though the id is no secret. One token keeps 32 sessions open
 at most; the 33rd ends that token's session that had no request for the
-longest.
+longest, with its jobs and streams, even if its other sessions are busy
+(a harness that needs more opens a second token). One token also has at most
+128 requests in flight at once, waiting calls included; one past that gets
+`503` with `Retry-After`, and the harness tries again.

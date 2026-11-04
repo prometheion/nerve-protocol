@@ -139,24 +139,45 @@ fn the_first_start_says_the_owner_token_on_stderr() {
 
 /// Under systemd stderr goes to the journal, which more accounts read than
 /// the token file: there the first start keeps the token off stderr.
+/// systemd names the journal's stream in `JOURNAL_STREAM`, and the variable
+/// is also inherited by what a user service starts (a terminal): there
+/// stderr is not the journal, and the token is shown.
+#[cfg(unix)]
 #[test]
 fn under_systemd_the_owner_token_stays_off_stderr() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_nerve-center"))
-        .env_clear()
-        .env("NERVE_STATE_DIR", dir.path())
-        .env("NERVE_LISTEN", "127.0.0.1:0")
-        .env("NERVE_PLAIN_LOOPBACK", "true")
-        .env("NERVE_UI", "127.0.0.1:0")
-        .env("NERVE_LOG", "info")
-        .env("JOURNAL_STREAM", "8:12345")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    let token = nerve_center::owner::read(dir.path()).unwrap().unwrap();
-    assert!(!err.contains(&token), "{err}");
+    use std::os::unix::fs::MetadataExt;
+    let start = |journal: Option<bool>| {
+        let dir = tempfile::tempdir().unwrap();
+        let err = std::fs::File::create(dir.path().join("stderr")).unwrap();
+        let meta = err.metadata().unwrap();
+        let stream = match journal {
+            Some(true) => format!("{}:{}", meta.dev(), meta.ino()),
+            Some(false) => format!("{}:{}", meta.dev(), meta.ino() + 1),
+            None => String::new(),
+        };
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_nerve-center"));
+        cmd.env_clear()
+            .env("NERVE_STATE_DIR", &state)
+            .env("NERVE_LISTEN", "127.0.0.1:0")
+            .env("NERVE_PLAIN_LOOPBACK", "true")
+            .env("NERVE_UI", "127.0.0.1:0")
+            .env("NERVE_LOG", "info")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(err);
+        if journal.is_some() {
+            cmd.env("JOURNAL_STREAM", stream).env("INVOCATION_ID", "x");
+        }
+        assert!(cmd.status().unwrap().success());
+        let token = nerve_center::owner::read(&state).unwrap().unwrap();
+        let err = std::fs::read_to_string(dir.path().join("stderr")).unwrap();
+        err.contains(&token)
+    };
+    assert!(!start(Some(true)), "the token went to the journal");
+    assert!(start(Some(false)), "a terminal under a user service");
+    assert!(start(None), "no systemd");
 }
 
 /// A token file that holds no token stops a center with a web UI, and only

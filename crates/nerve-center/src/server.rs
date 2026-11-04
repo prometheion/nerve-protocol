@@ -186,10 +186,8 @@ fn owner_token(center: &Center, ui: bool) -> Result<(), String> {
     };
     let file = crate::owner::path(center.dir());
     center.log().set_secret("owner-token", Some(&token));
-    let journal =
-        std::env::var_os("JOURNAL_STREAM").is_some() || std::env::var_os("INVOCATION_ID").is_some();
     if made {
-        if !journal {
+        if !stderr_is_journal() {
             eprintln!(
                 "nerve-center: the web UI logs in with this owner token, kept in {}:\n{token}",
                 file.display()
@@ -205,6 +203,31 @@ fn owner_token(center: &Center, ui: bool) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Whether stderr is the systemd journal. `JOURNAL_STREAM` names the
+/// journal's stream (device and inode) for exactly this check; the variable
+/// alone is also inherited by whatever a user service starts, a terminal
+/// among them.
+fn stderr_is_journal() -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(stream) = std::env::var("JOURNAL_STREAM") else {
+            return false;
+        };
+        let Some((dev, ino)) = stream.split_once(':') else {
+            return false;
+        };
+        let (Ok(dev), Ok(ino)) = (dev.parse::<u64>(), ino.parse::<u64>()) else {
+            return false;
+        };
+        // SAFETY: fstat writes into the zeroed struct it is given.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        let r = unsafe { libc::fstat(2, &mut st) };
+        r == 0 && st.st_dev as u64 == dev && st.st_ino as u64 == ino
+    }
+    #[cfg(not(unix))]
+    false
 }
 
 /// Runs `nerve-center` as `main` does: owner or attached, until stdin ends or

@@ -98,6 +98,7 @@ ExecStart={bin} --state-dir {state}
 Restart=on-failure
 RestartSec=5
 UMask=0077
+LimitNOFILE=65536
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 ProtectSystem=strict
@@ -108,7 +109,7 @@ PrivateDevices=yes
 InaccessiblePaths=-/dev/shm
 RemoveIPC=yes
 RestrictNamespaces=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
@@ -908,7 +909,11 @@ mod tests {
             &format!("ReadWritePaths={}", l.state.display()),
             "InaccessiblePaths=-/dev/shm",
             "RestrictNamespaces=yes",
-            "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+            // Netlink is how the kernel names the account of a loopback
+            // peer; without it every connection reads the TCP tables.
+            "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+            // A harness's waiting requests each hold a file.
+            "LimitNOFILE=65536",
             "SystemCallFilter=@system-service",
             "MemoryDenyWriteExecute=yes",
         ] {

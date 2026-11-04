@@ -267,6 +267,14 @@ impl Server {
             .expect("a bound listener has an address")
     }
 
+    /// The peer a connection `tcp` from `peer` is counted as. The kernel
+    /// knows the peer's socket by the address it connected to, which on a
+    /// listener bound to `0.0.0.0` or `[::]` is not the listener's own.
+    fn peer_of(&self, tcp: &tokio::net::TcpStream, peer: SocketAddr) -> Peer {
+        let local = tcp.local_addr().unwrap_or_else(|_| self.local_addr());
+        Peer::of(peer, local, self.accounts)
+    }
+
     /// Accepts connections until the task is dropped. Each one is admitted
     /// first ([`UNDECIDED`], [`PER_PEER`], [`PER_PREFIX`]) or closed at once;
     /// the handler gets its slot with it, and may give it back early.
@@ -278,7 +286,6 @@ impl Server {
         let handler = Arc::new(handler);
         let slots = Arc::new(Semaphore::new(self.slots));
         let places = Arc::new(Mutex::new(Places::default()));
-        let local = self.local_addr();
         loop {
             let (tcp, peer) = match self.listener.accept().await {
                 Ok(c) => c,
@@ -288,7 +295,7 @@ impl Server {
                     continue;
                 }
             };
-            let who = Peer::of(peer, local, self.accounts);
+            let who = self.peer_of(&tcp, peer);
             let Some(admitted) = admit(&slots, &places, peer, who) else {
                 tracing::debug!("closed a connection from {peer}: no free place for it");
                 continue;
@@ -542,6 +549,25 @@ mod tests {
         assert_eq!(n, 0);
         drop(idle);
         task.abort();
+    }
+
+    /// A listener bound to every address still names the account of a
+    /// loopback peer: the node port's default is `0.0.0.0`.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_listener_on_every_address_names_a_loopback_peers_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = center(dir.path());
+        let server = Server::bind("0.0.0.0:0", &c, false).await.unwrap();
+        let port = server.local_addr().port();
+        let client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let (tcp, peer) = server.listener.accept().await.unwrap();
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        assert_eq!(server.peer_of(&tcp, peer), Peer::Account(uid));
+        drop(client);
     }
 
     /// A peer that asks for an answer and reads none of it gives its

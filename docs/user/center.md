@@ -78,14 +78,18 @@ hold 16, and one IPv6 /64 64. A connection past that is closed at once, so
 a peer that opens many and sends nothing keeps nobody else out. A node's
 link counts no more once its hello is checked, so many nodes behind one
 router link as usual, and a harness's call counts no more once its token is
-checked. These numbers are fixed.
+checked. These numbers are fixed. A harness's request past its token check
+is not undecided, so it counts against its token instead: 128 in flight at
+most, more get `503`.
 
 A peer is its address. On loopback every local program has the same one
 (or any address of 127.0.0.0/8 it picks), so there a peer is the account
 the connection comes from, which Linux names: another account on the
 machine cannot fill your browser's places. Elsewhere, and where Linux cannot
-name the account, all loopback connections count as one peer. Your own
-account is one peer too: an agent running as you shares your places.
+name the account, all loopback connections count as one peer. This holds
+for a port bound to every address (`0.0.0.0`, the nodes' default) too: the
+peer is looked up by the address it connected to. Your own account is one
+peer too: an agent running as you shares your places.
 
 A pairing is only answered as done once the center has written it to
 `state.json`. When it cannot (a full disk, a read-only state folder) the

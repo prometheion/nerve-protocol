@@ -307,10 +307,15 @@ center (`kill_on_drop`, a process group on Unix); its state and the install
 progress show in the UI. It listens on `<state>/checker-model.sock` (`--host
 <path>.sock`) on Unix, so no other account can reach it or bind its address
 after a crash; on Windows, or where that path is over 100 bytes, on a free
-port of `127.0.0.1`, where the supervisor first checks that the server
-answers `/v1/models` with 401 to a key it was not given (a process that took
-the port answers anyone, and is not trusted). That check comes before any
-probe with the real key, so such a process never sees it. Either way it gets a random key
+port of `127.0.0.1`. There any process may answer, and a probe cannot tell
+the server from one that refuses a key too, so the supervisor asks nothing
+until the server's own log (stderr) says `listening on http://127.0.0.1:<port>`:
+a server whose port was taken cannot bind, never says so and ends. Only
+then does it check that the server answers `/v1/models` with 401 to a key it
+was not given, and send the real one. A process that took the port is so
+never sent the key, short of one that may share a port with the server
+(Windows lets a process do that by choice); the check is a guard against a
+mistake, not a boundary. Either way it gets a random key
 per start in `LLAMA_API_KEY` (its environment, not its command line, which
 every account can read in `/proc`), and every call and probe carries it
 (`Endpoint::token`); `/health` is the only path llama-server leaves open. A
