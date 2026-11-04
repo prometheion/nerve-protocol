@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
+use nerve_policy::CenterEntry;
 use nerve_policy::config::{Access, Folder};
 
 use crate::service::Account;
@@ -81,6 +82,46 @@ pub fn built_in(own: &Own) -> Vec<Folder> {
         access: all,
     })
     .collect()
+}
+
+/// The folders the owner granted, cut around `run_home`, the home of
+/// [`RUN_USER`] that holds every pairing's own folders: a grant at or above
+/// it is replaced by its other entries, level by level down to it, and one
+/// inside it is dropped (`exec::leave_out`, as for the node's own folders).
+/// Every pairing's commands and file calls run as that one account, which
+/// owns all the pairings' folders, so a grant like `/` or `/var` would give
+/// a pairing the others' homes. The pairing's own two folders come after
+/// this ([`built_in`]). `home` is the `~` of the folders.
+pub fn around_pairings(folders: &[Folder], home: &Path, run_home: &Path) -> Vec<Folder> {
+    let run_home = [run_home.to_path_buf()];
+    let mut out = Vec::new();
+    for f in folders {
+        let Some(path) = nerve_policy::protected::expand(home, &f.path) else {
+            out.push(f.clone());
+            continue;
+        };
+        let cut = crate::exec::leave_out(std::slice::from_ref(&path), &run_home);
+        if cut.len() == 1 && cut[0] == path {
+            out.push(f.clone());
+        } else {
+            out.extend(cut.into_iter().map(|p| Folder {
+                path: p.display().to_string(),
+                access: f.access,
+            }));
+        }
+    }
+    out
+}
+
+/// `entry` as the gate and the sandbox see it when its commands run as
+/// `run` (`nerve-run`): the owner's folders cut around the account's home
+/// ([`around_pairings`]), then the pairing's built-in ones ([`built_in`]).
+/// `home` is the `~` of the folders.
+pub fn with_built_in(mut entry: CenterEntry, home: &Path, run: &Account) -> CenterEntry {
+    let own = Own::of(&run.home, &entry.name);
+    entry.policy.folders = around_pairings(&entry.policy.folders, home, &run.home);
+    entry.policy.folders.extend(built_in(&own));
+    entry
 }
 
 /// Whether `path` (a folder of [`built_in`]) is one every pairing shares:
@@ -1065,6 +1106,39 @@ mod tests {
             };
             assert!(e.contains(start), "{e}");
         }
+    }
+
+    /// A grant that has nothing to do with the account's home stays as the
+    /// owner wrote it (`~` and all); one at or above it is cut around it,
+    /// one inside it goes, whoever's it is.
+    #[test]
+    fn grants_are_cut_around_the_account_home_and_kept_otherwise() {
+        let d = tempfile::tempdir().unwrap();
+        let top = std::fs::canonicalize(d.path()).unwrap();
+        let run_home = top.join("srv/nerve-run");
+        for dir in ["srv/nerve-run/c/home", "srv/www", "owner/work"] {
+            std::fs::create_dir_all(top.join(dir)).unwrap();
+        }
+        let grant = |p: &str, a: &str| Folder {
+            path: p.into(),
+            access: Access::parse(a).unwrap(),
+        };
+        let under = |p: &str| top.join(p).display().to_string();
+        let folders = vec![
+            grant("~/work", "rw"),
+            grant(&under("srv"), "r"),
+            grant(&under("srv/nerve-run/c/home"), "rwx"),
+            grant("/srv/proj", "rx"),
+        ];
+        let cut = around_pairings(&folders, &top.join("owner"), &run_home);
+        assert_eq!(
+            cut,
+            vec![
+                grant("~/work", "rw"),
+                grant(&under("srv/www"), "r"),
+                grant("/srv/proj", "rx"),
+            ]
+        );
     }
 
     #[test]

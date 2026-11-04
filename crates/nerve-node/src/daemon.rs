@@ -779,17 +779,18 @@ impl Shared {
     /// The built-in folders of a pairing whose commands run as `nerve-run`
     /// ([`crate::account::built_in`]: its own home and temporary folder,
     /// `/tmp` and `/var/tmp`) added to `entry`'s, for the gate and the
-    /// sandbox; the config keeps only those the owner gave.
+    /// sandbox; the config keeps only those the owner gave. The owner's
+    /// folders are cut around the account's home first, which holds every
+    /// pairing's own folders ([`crate::account::around_pairings`]).
     pub fn with_built_in(
         &self,
         cfg: &NodeConfig,
-        mut entry: nerve_policy::CenterEntry,
+        entry: nerve_policy::CenterEntry,
     ) -> nerve_policy::CenterEntry {
         if self.separate(&entry.policy)
             && let Ok(Some(a)) = self.command_account(cfg, &entry.policy)
         {
-            let own = crate::account::Own::of(&a.home, &entry.name);
-            entry.policy.folders.extend(crate::account::built_in(&own));
+            return crate::account::with_built_in(entry, &self.rules_home(cfg), &a);
         }
         entry
     }
@@ -843,11 +844,29 @@ impl Shared {
         entry: &nerve_policy::CenterEntry,
     ) -> crate::descriptor::Reach {
         let now = crate::now_ms();
-        let own = self
+        let seen = self
             .separate(&entry.policy)
             .then(|| self.account_seen(cfg, &entry.policy))
-            .flatten()
+            .flatten();
+        let own = seen
+            .as_ref()
             .map(|a| crate::account::Own::of(&a.home, &entry.name));
+        // The folders as the gate sees them: not those of the other
+        // pairings' homes ([`crate::account::around_pairings`]).
+        let cut;
+        let entry = match &seen {
+            Some(a) => {
+                let mut c = entry.clone();
+                c.policy.folders = crate::account::around_pairings(
+                    &c.policy.folders,
+                    &self.rules_home(cfg),
+                    &a.home,
+                );
+                cut = c;
+                &cut
+            }
+            None => entry,
+        };
         // A machine that cannot hold the pairing's network switch runs none
         // of its folder-mode commands, so it offers none.
         let mut reach = crate::descriptor::Reach::of(
@@ -3963,6 +3982,122 @@ mod tests {
             }
             daemon.stop().await;
         }
+    }
+
+    /// A folder the owner granted that holds the home of `nerve-run` is cut
+    /// around it for the gate, the sandbox and the descriptor, and one inside
+    /// it is dropped: every pairing's folders are that one account's, so a
+    /// grant like `/var` would give this pairing the others' homes. Its own
+    /// two folders come after, whole.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_grant_above_the_accounts_home_is_cut_around_the_pairings_homes() {
+        use nerve_policy::config::{Access, CenterPolicy, Folder, Mode};
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap().join("world");
+        std::fs::create_dir(&root).unwrap();
+        let mut o = options(&d, &log);
+        o.full_rights = Some(false);
+        o.exe = Some("/bin/true".into());
+        o.service = Some(true);
+        o.owner = Some("alice".into());
+        let daemon = Daemon::start(o).await.unwrap();
+        let s = daemon.shared.clone();
+        let run_home = root.join("srv/nerve-run");
+        for (name, uid, home) in [
+            (crate::account::RUN_USER, 4243, run_home.clone()),
+            ("alice", 4242, root.join("alice")),
+        ] {
+            lock(&s.account_cache).insert(
+                name.into(),
+                (
+                    std::time::Instant::now(),
+                    Some(crate::service::Account {
+                        name: name.into(),
+                        uid,
+                        gid: uid,
+                        comment: String::new(),
+                        home,
+                        groups: vec![uid],
+                    }),
+                ),
+            );
+        }
+        for dir in [
+            "srv/nerve-run/c/home",
+            "srv/nerve-run/other/home",
+            "srv/www",
+            "alice",
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let grant = |p: PathBuf| Folder {
+            path: p.display().to_string(),
+            access: Access::parse("rw").unwrap(),
+        };
+        let entry = nerve_policy::CenterEntry {
+            name: "c".into(),
+            url: "https://center.example".into(),
+            pin: None,
+            center_id: "c".into(),
+            node_id: "n".into(),
+            settings: Default::default(),
+            paused: false,
+            revoked: false,
+            unknown: false,
+            public_key: None,
+            key_rotations: 0,
+            pin_rotations: 0,
+            old_pin: None,
+            policy: CenterPolicy {
+                mode: Mode::Folder,
+                folders: vec![
+                    grant(root.clone()),
+                    grant(run_home.join("other/home")),
+                    grant(PathBuf::from("/srv/proj")),
+                ],
+                ..Default::default()
+            },
+            capabilities: Vec::new(),
+        };
+        let cfg = s.config();
+        let wanted: Vec<String> = [
+            root.join("alice"),
+            root.join("srv/www"),
+            PathBuf::from("/srv/proj"),
+            PathBuf::from("/tmp"),
+            PathBuf::from("/var/tmp"),
+            run_home.join("c/home"),
+            run_home.join("c/tmp"),
+        ]
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+        let sorted = |mut v: Vec<String>| {
+            v.sort();
+            v
+        };
+        // What the gate sees, for the account as the database has it (the
+        // test's node cannot switch accounts, so a lookup would refuse).
+        let run = lock(&s.account_cache)
+            .get(crate::account::RUN_USER)
+            .and_then(|(_, a)| a.clone())
+            .unwrap();
+        let gate = crate::account::with_built_in(entry.clone(), &root.join("alice"), &run);
+        let got = sorted(gate.policy.folders.iter().map(|f| f.path.clone()).collect());
+        assert_eq!(got, sorted(wanted.clone()));
+        // The descriptor tells the same, its own folders apart.
+        let told = s.reach(&cfg, &entry);
+        let got = sorted(
+            told.folders
+                .iter()
+                .map(|f| f.path.clone())
+                .chain(told.own.iter().map(|f| f.path.clone()))
+                .collect(),
+        );
+        assert_eq!(got, sorted(wanted));
+        daemon.stop().await;
     }
 
     /// The installed node without Landlock holds folder-mode commands back

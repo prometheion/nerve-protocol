@@ -2301,6 +2301,17 @@ impl Link {
                 if self.shared.separate(&entry.policy) {
                     self.acls_ready(&cfg).await?;
                 }
+                // The pairing's own home and temporary folder are the ones the
+                // node made for it: those an earlier pairing under its name
+                // left are deleted first, and while that cannot be done the
+                // call does not run (it would read them).
+                let own_ready = match known
+                    .as_ref()
+                    .filter(|_| self.shared.separate(&entry.policy))
+                {
+                    Some(a) => self.own_ready(a, &entry).await.map(drop),
+                    None => Ok(()),
+                };
                 // A path that does not resolve is in the audit once the
                 // switch is over, as for a provider's.
                 let parsed = {
@@ -2343,6 +2354,7 @@ impl Link {
                 .await
                 .map_err(|e| as_given(e, &named))?;
                 account.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
+                own_ready.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
                 let protected = self.protected(&entry);
                 let deny = RuleSet::new(&entry.policy.deny, &self.home());
                 let folders = entry.policy.folders.clone();
@@ -3089,11 +3101,13 @@ impl Link {
         // here where the pairing's sync has not made them yet, so the
         // folder it starts in is there to be looked at; one that cannot be
         // made stops the command once it is decided and audited.
-        let ready = known
+        let ready = match known
             .as_ref()
             .filter(|_| self.shared.separate(&entry.policy) && !sudo_call)
-            .map(|a| self.shared.own_ready(a, entry))
-            .transpose();
+        {
+            Some(a) => self.own_ready(a, entry).await.map(Some),
+            None => Ok(None),
+        };
         let pairing = match &ready {
             Ok(own) => own.clone(),
             Err(_) => known
@@ -3112,6 +3126,22 @@ impl Link {
         // `nerve-run` sees the folders once their ACLs are on.
         if self.shared.separate(&entry.policy) && !sudo_call {
             self.acls_ready(cfg).await?;
+        }
+        // Where the pairing's home cannot be had and the call names no other
+        // folder, the command has nowhere to start: it says why, and is in
+        // the audit, rather than the missing folder's path.
+        if let Err(why) = &ready
+            && matches!(inv.args.get("cwd"), None | Some(Value::Null))
+        {
+            let target = inv.args.get("command").and_then(Value::as_str);
+            self.audit(
+                inv,
+                target.unwrap_or_default(),
+                "forbidden",
+                Some("unavailable"),
+                Some(why),
+            );
+            return Err(RpcError::new(ErrorCode::Unavailable, why.clone()));
         }
         // The paths are looked at as the account (crate::account::FsAs).
         let rc = {
@@ -3380,11 +3410,11 @@ impl Link {
         }
         // It starts in its pairing's own home (the node's own by hand),
         // made where it is missing.
-        let pairing = account
-            .as_ref()
-            .map(|a| self.shared.own_ready(a, &entry))
-            .transpose()
-            .map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
+        let pairing = match account.as_ref() {
+            Some(a) => self.own_ready(a, &entry).await.map(Some),
+            None => Ok(None),
+        }
+        .map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
         let start_in = pairing
             .as_ref()
             .map_or_else(|| self.shared.home.clone(), |o| o.home.clone());
@@ -3473,6 +3503,19 @@ fn root_account() -> crate::service::Account {
 }
 
 impl Link {
+    /// [`Shared::own_ready`] off the runtime: it does file I/O, and waits for
+    /// work on this pairing's folders, a delete of what a big home holds.
+    async fn own_ready(
+        &self,
+        run: &crate::service::Account,
+        entry: &CenterEntry,
+    ) -> Result<crate::account::Own, String> {
+        let (s, run, entry) = (self.shared.clone(), run.clone(), entry.clone());
+        tokio::task::spawn_blocking(move || s.own_ready(&run, &entry))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+
     /// Waits until the folders' ACLs for `nerve-run` follow `cfg`
     /// (crate::acl), or says why its call does not run: an entry that should
     /// have come off is still there. A change that takes long holds the call.

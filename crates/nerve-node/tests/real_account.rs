@@ -1984,15 +1984,20 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     let run_home = Path::new("/var/lib/nerve-run");
     // What an earlier version's command left under a center's name: never
     // taken for that pairing's home.
+    // First one with no `home` in it (a `mkdir ~/home` of an earlier
+    // version), then one with.
     let left = run_home.join("home/home");
-    std::fs::create_dir_all(&left).unwrap();
-    std::fs::write(left.join(".bashrc"), "planted\n").unwrap();
-    assert!(
-        sh(Command::new("chown")
-            .args(["-R", "nerve-run:nerve-run"])
-            .arg(run_home.join("home")))
-        .0
-    );
+    std::fs::create_dir_all(run_home.join("home")).unwrap();
+    std::fs::write(run_home.join("home/notes"), "planted\n").unwrap();
+    let chown_left = || {
+        assert!(
+            sh(Command::new("chown")
+                .args(["-R", "nerve-run:nerve-run"])
+                .arg(run_home.join("home")))
+            .0
+        );
+    };
+    chown_left();
     // A folder of the owner's for each center, outside the owner's home.
     let mut links = Vec::new();
     for name in ["lab", "home"] {
@@ -2033,9 +2038,35 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     // The home pairing's commands do not run until it is gone.
     {
         let (_, work, conn, _) = &mut links[1];
+        // A command that names no folder starts in the home that is not
+        // there: it says why, not that a path is no directory.
+        let e = conn
+            .call(
+                "invoke",
+                json!({"cap": "exec", "action": "run", "args": {"command": "pwd"}}),
+                WAIT,
+            )
+            .await
+            .expect("an answer")
+            .unwrap_err()
+            .message;
+        assert!(e.contains("the node did not make it"), "{e}");
+        std::fs::create_dir_all(&left).unwrap();
+        std::fs::write(left.join(".bashrc"), "planted\n").unwrap();
+        chown_left();
         let e = run(conn, work, "echo ran").await.unwrap_err();
         assert!(e.contains("the node did not make it"), "{e}");
         assert!(left.join(".bashrc").exists());
+        // Nor do its file calls read what an earlier pairing under its name
+        // left in what looks like its home.
+        let e = fs_call(
+            conn,
+            "read",
+            json!({"path": left.join(".bashrc").display().to_string()}),
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("the node did not make it"), "{e}");
     }
     assert!(sh(Command::new("rm").arg("-rf").arg(run_home.join("home"))).0);
     // Each command has its pairing's own home and temporary folder, and
@@ -2116,6 +2147,31 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     .await
     .unwrap();
     assert_eq!(r["paths"], json!([]), "{r}");
+    // A folder the owner gives that holds the account's home gives no other
+    // pairing's folders: the grant is cut around it.
+    let (ok, said) = as_owner(
+        &owner,
+        &["folder", "add", "/var/lib", "+r", "--center", "home"],
+    );
+    assert!(ok, "{said}");
+    let e = fs_call(
+        conn,
+        "read",
+        json!({"path": lab_config.display().to_string()}),
+    )
+    .await
+    .unwrap_err();
+    assert!(!e.contains("mine"), "{e}");
+    let r = fs_call(
+        conn,
+        "find",
+        json!({"path": "/var/lib", "glob": "nerve-run/lab/home/.gitconfig"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r["paths"], json!([]), "{r}");
+    let (ok, said) = as_owner(&owner, &["folder", "rm", "/var/lib", "--center", "home"]);
+    assert!(ok, "{said}");
     let (_, work, conn, _) = &mut links[0];
     run(conn, work, "true").await.unwrap();
     for p in [run_home, &run_home.join("lab"), &run_home.join("lab/home")] {
