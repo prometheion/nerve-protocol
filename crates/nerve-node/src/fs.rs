@@ -219,6 +219,26 @@ pub fn open_to_all(path: &Path) -> bool {
         }
 }
 
+/// Whether `path`, which a pairing's call reads in none of its folders, is
+/// the command account's own (`nerve-run`): below its home, where every
+/// pairing's own home and temporary folder lies, or a file or folder that
+/// account owns, which another pairing's command made. Their modes tell
+/// nothing: every pairing's commands may change them, as Landlock does not
+/// rule `chmod`. The pairing's own home and temporary folder are among its
+/// folders, so they are never asked here.
+#[cfg(unix)]
+pub fn accounts_own(path: &Path, account: &crate::service::Account) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    path.starts_with(&account.home) || std::fs::metadata(path).is_ok_and(|m| m.uid() == account.uid)
+}
+
+/// No platform but Unix has a command account of its own
+/// (nerve_policy::decide::Reads::Account is Linux only).
+#[cfg(not(unix))]
+pub fn accounts_own(_: &Path, _: &crate::service::Account) -> bool {
+    false
+}
+
 /// No platform but Unix has a command account of its own
 /// (nerve_policy::decide::Reads::Account is Linux only), so nothing counts
 /// as open to it.
@@ -240,17 +260,30 @@ pub fn open_to_all(_: &Path) -> bool {
 /// owner's rights, so a folder handed to it here would let it read below as
 /// the owner whatever is closed to others.
 ///
+/// The command account's own files never go by their modes here
+/// ([`accounts_own`]): every pairing's commands may change those.
+///
 /// The refusals other than the node's own process name no path: `path` is
 /// resolved as the command account, which every pairing's commands share,
 /// and a link of another of its processes (`/proc/<n>/cwd`) leads where
 /// that process works. The center gave the path, and the audit entry names
 /// where it led.
-pub fn may_read_outside(path: &Path, provider: bool) -> Result<(), String> {
+pub fn may_read_outside(
+    path: &Path,
+    provider: bool,
+    account: &crate::service::Account,
+) -> Result<(), String> {
     if own_process(path) {
         Err(format!(
             "{} belongs to the node's own process; no mode reaches it",
             path.display()
         ))
+    } else if accounts_own(path, account) {
+        Err(
+            "a path this call reads is in no folder of this pairing, and belongs to the account \
+             its commands run as: it is another pairing's, whatever its modes say"
+                .into(),
+        )
     } else if !open_to_all(path) {
         Err(
             "a path this call reads is in no folder that allows reading, and not open to every \
@@ -1221,7 +1254,7 @@ mod tests {
         std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         let fifo = d.path().join("pipe");
         let writer = a_writer_waits_on(&fifo);
-        let why = may_read_outside(&fifo, false).unwrap_err();
+        let why = may_read_outside(&fifo, false, &other()).unwrap_err();
         assert!(
             why.contains("neither a file nor a folder")
                 && !why.contains(&*d.path().to_string_lossy()),
@@ -1340,6 +1373,65 @@ mod tests {
         mode(&home, 0o755);
     }
 
+    /// A command account that owns none of the test's files, with its home
+    /// elsewhere.
+    fn other() -> crate::service::Account {
+        crate::service::Account {
+            name: "nerve-run".into(),
+            uid: u32::MAX - 1,
+            gid: u32::MAX - 1,
+            comment: String::new(),
+            home: PathBuf::from("/nonexistent/nerve-run"),
+            groups: Vec::new(),
+        }
+    }
+
+    /// A read in no folder never reaches the command account's own files,
+    /// what lies in its home (the pairings' own homes) or what it made
+    /// elsewhere, however open their modes are; another account's file open
+    /// to all it reaches.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_outside_the_folders_never_reaches_the_command_accounts_own() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap()
+        };
+        let d = tempfile::tempdir().unwrap();
+        mode(d.path(), 0o755);
+        // SAFETY: plain getters.
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        let run = crate::service::Account {
+            uid,
+            gid,
+            home: d.path().join("run"),
+            ..other()
+        };
+        let home = run.home.join("lab/home");
+        std::fs::create_dir_all(&home).unwrap();
+        let secret = home.join(".git-credentials");
+        std::fs::write(&secret, "x").unwrap();
+        for p in [&run.home, &run.home.join("lab"), &home, &secret] {
+            mode(p, 0o755);
+        }
+        let made = d.path().join("made");
+        std::fs::write(&made, "x").unwrap();
+        mode(&made, 0o644);
+        for p in [&secret, &home, &run.home, &made, &run.home.join("missing")] {
+            let why = may_read_outside(p, false, &run).unwrap_err();
+            assert!(why.contains("another pairing's"), "{why}");
+            assert!(accounts_own(p, &run), "{}", p.display());
+        }
+        assert_eq!(may_read_outside(&made, false, &other()), Ok(()));
+        if uid != 0 {
+            assert!(!accounts_own(Path::new("/etc/passwd"), &run));
+            assert_eq!(
+                may_read_outside(Path::new("/etc/passwd"), false, &run),
+                Ok(())
+            );
+        }
+    }
+
     /// A read in no folder, where the node reads as the command account,
     /// goes only where the path is open to every account and that account
     /// may open it, never into the node's own process, and a provider is
@@ -1356,20 +1448,23 @@ mod tests {
         let file = d.path().join("a.txt");
         std::fs::write(&file, "x").unwrap();
         mode(&file, 0o644);
-        assert_eq!(may_read_outside(&file, false), Ok(()));
-        assert_eq!(may_read_outside(&file, true), Ok(()));
-        assert_eq!(may_read_outside(&d.path().join("missing"), true), Ok(()));
-        assert_eq!(may_read_outside(d.path(), false), Ok(()));
+        assert_eq!(may_read_outside(&file, false, &other()), Ok(()));
+        assert_eq!(may_read_outside(&file, true, &other()), Ok(()));
+        assert_eq!(
+            may_read_outside(&d.path().join("missing"), true, &other()),
+            Ok(())
+        );
+        assert_eq!(may_read_outside(d.path(), false, &other()), Ok(()));
         // The refusals name no path: one resolved as the command account
         // may be where another of its processes works.
         let named = |why: &str| why.contains(&*d.path().to_string_lossy());
-        let why = may_read_outside(d.path(), true).unwrap_err();
+        let why = may_read_outside(d.path(), true, &other()).unwrap_err();
         assert!(
             why.contains("a provider would read below it") && !named(&why),
             "{why}"
         );
         mode(&file, 0o600);
-        let why = may_read_outside(&file, false).unwrap_err();
+        let why = may_read_outside(&file, false, &other()).unwrap_err();
         assert!(
             why.contains("not open to every account") && !named(&why),
             "{why}"
@@ -1377,7 +1472,7 @@ mod tests {
         // Others may read it, its owner may not; root opens anything.
         if unsafe { libc::geteuid() } != 0 {
             mode(&file, 0o004);
-            let why = may_read_outside(&file, false).unwrap_err();
+            let why = may_read_outside(&file, false, &other()).unwrap_err();
             assert!(why.contains("may not read") && !named(&why), "{why}");
         }
         mode(&file, 0o644);
@@ -1394,20 +1489,21 @@ mod tests {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 });
                 let tid = rx.recv().unwrap();
-                let r = may_read_outside(&PathBuf::from(format!("/proc/{tid}/stat")), false);
+                let r =
+                    may_read_outside(&PathBuf::from(format!("/proc/{tid}/stat")), false, &other());
                 t.join().unwrap();
                 r
             })
             .join()
             .unwrap();
             for r in [
-                may_read_outside(&own, false),
-                may_read_outside(Path::new("/proc/self/maps"), false),
-                may_read_outside(Path::new("/proc/thread-self/stat"), false),
+                may_read_outside(&own, false, &other()),
+                may_read_outside(Path::new("/proc/self/maps"), false, &other()),
+                may_read_outside(Path::new("/proc/thread-self/stat"), false, &other()),
                 thread,
                 // No process or thread has this id (it lies above every
                 // `pid_max`); the node's next thread could take an unused one.
-                may_read_outside(Path::new("/proc/4294967295/maps"), false),
+                may_read_outside(Path::new("/proc/4294967295/maps"), false, &other()),
             ] {
                 let why = r.unwrap_err();
                 assert!(why.contains("the node's own process"), "{why}");

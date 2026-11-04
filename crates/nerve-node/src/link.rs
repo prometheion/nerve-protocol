@@ -2318,7 +2318,9 @@ impl Link {
                 // that account's access holds the reads in no folder
                 // (nerve_policy::decide::Reads), as in the gate.
                 let by_folders = entry.policy.mode_at(crate::now_ms()) == Mode::Folder;
-                let by_account = by_folders && self.reads_by_account(&entry, known.as_ref());
+                let by_account = (by_folders && self.reads_by_account(&entry, known.as_ref()))
+                    .then(|| known.clone())
+                    .flatten();
                 let unconfined = self.shared.unconfined_as(&cfg, || known.clone());
                 // Its refusal names the path as given, as a program's does.
                 let named = match inv.args.get("path") {
@@ -2356,14 +2358,19 @@ impl Link {
                     // open to every account and out of the node's own
                     // process as the gate does; what that account may not
                     // open the walk cannot read anyway.
-                    let open = |p: &std::path::Path| {
-                        if crate::fs::open_to_all(p) && !crate::fs::own_process(p) {
+                    // Nor does it go into what the account owns there: another
+                    // pairing's (crate::fs::accounts_own).
+                    let open = |p: &std::path::Path| match &by_account {
+                        Some(a)
+                            if crate::fs::open_to_all(p)
+                                && !crate::fs::own_process(p)
+                                && !crate::fs::accounts_own(p, a) =>
+                        {
                             Ok(())
-                        } else {
-                            Err(String::new())
                         }
+                        _ => Err(String::new()),
                     };
-                    let reads = if by_account {
+                    let reads = if by_account.is_some() {
                         Reads::Account(&open)
                     } else {
                         Reads::Folders
@@ -2618,7 +2625,9 @@ impl Link {
             unconfined: unconfined.map(Into::into),
             sudo: self.shared.sudo_on(),
             shell: self.shell_for(command),
-            by_account: self.reads_by_account(entry, account),
+            by_account: account
+                .filter(|a| self.reads_by_account(entry, Some(a)))
+                .cloned(),
             // The node's own `fs` and the commands of a config capability
             // (as `nerve-run`) read with that account's rights; a program
             // with the owner's.
@@ -3638,7 +3647,7 @@ pub(crate) fn may_take(
         unconfined: None,
         sudo: false,
         shell: shell_of(cfg.machine.shell.as_deref(), None),
-        by_account: false,
+        by_account: None,
         provider: true,
     };
     let call = Call {
@@ -3664,8 +3673,9 @@ struct Judged {
     unconfined: Option<String>,
     sudo: bool,
     shell: Shell,
-    /// Whether the node reads as the command account (Link::reads_by_account).
-    by_account: bool,
+    /// The command account, where the node reads as it
+    /// (Link::reads_by_account).
+    by_account: Option<crate::service::Account>,
     /// Whether the call is a program's, not the node's own `fs`.
     provider: bool,
 }
@@ -3676,14 +3686,17 @@ impl Judged {
     /// asked of that account (crate::fs::may_read_outside), so `f` runs
     /// under the switch to it.
     fn with<R>(&self, f: impl FnOnce(&Env) -> R) -> R {
-        let may_read = |p: &std::path::Path| crate::fs::may_read_outside(p, self.provider);
+        let may_read = |p: &std::path::Path| match &self.by_account {
+            Some(a) => crate::fs::may_read_outside(p, self.provider, a),
+            None => Err(String::new()),
+        };
         f(&Env {
             home: &self.home,
             protected: &self.protected,
             unconfined: self.unconfined.as_deref(),
             sudo: self.sudo,
             shell: self.shell,
-            reads: if self.by_account {
+            reads: if self.by_account.is_some() {
                 Reads::Account(&may_read)
             } else {
                 Reads::Folders
