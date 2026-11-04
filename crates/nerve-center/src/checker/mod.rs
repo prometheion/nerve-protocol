@@ -1495,8 +1495,14 @@ mod tests {
                 "exec.run:cat *",
                 &["/tmp/cat x", "./cat x", "../x/cat x", "Cat x", "cat.exe x"][..],
             ),
-            ("exec.run:re:^cat ", &["/tmp/cat x", "./cat x", "Cat x"][..]),
-            ("exec.run:grep -r x", &["grep -R x", "/tmp/grep -r x"][..]),
+            (
+                "exec.run:cmd-re:^cat ",
+                &["/tmp/cat x", "./cat x", "Cat x"][..],
+            ),
+            (
+                "exec.run:grep -r x",
+                &["grep -R x", "grep -r -R x", "/tmp/grep -r x"][..],
+            ),
             ("exec.run:grep -r *", &["grep -R x", "/tmp/grep -r x"][..]),
         ] {
             let checker = checker_with(rule);
@@ -1506,6 +1512,7 @@ mod tests {
         }
         for (rule, line) in [
             ("exec.run:cat *", "cat x"),
+            ("exec.run:cmd-re:^cat ", "cat x"),
             ("exec.run:grep -r x", "grep -r x"),
             ("exec.run:grep -r x", "grep --recursive x"),
         ] {
