@@ -3,6 +3,7 @@ name = "nerve-policy"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 rust-version.workspace = true
 
 [dependencies]

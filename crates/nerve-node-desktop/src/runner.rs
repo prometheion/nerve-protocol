@@ -252,7 +252,19 @@ pub fn follow_process(
                 }
                 on_line(line);
             }
-            let status = child.lock().unwrap_or_else(|p| p.into_inner()).wait();
+            // Never waits while it holds the child: a stop takes it to end
+            // the child, and a child that keeps running after its output
+            // ended (or a stop that came between a line and this) would
+            // keep the stop, and the window or the broker's loop that
+            // called it, waiting for good.
+            let status = loop {
+                match child.lock().unwrap_or_else(|p| p.into_inner()).try_wait() {
+                    Ok(Some(s)) => break Ok(s),
+                    Ok(None) => {}
+                    Err(e) => break Err(e),
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            };
             let stderr = err.join().unwrap_or_default();
             if !stopped.load(Ordering::SeqCst) {
                 on_end(Output {
@@ -332,6 +344,42 @@ mod tests {
         assert!(e.contains("stopped"), "{e}");
         // Success without JSON is no answer either.
         assert!(answer(true, Some(0), b"text\n", b"").is_err());
+    }
+
+    /// A stop ends a followed command at once, also one that closed its
+    /// output and still runs: the reader does not hold the command while it
+    /// waits for its end (shared-6).
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_ends_a_command_that_closed_its_output() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let f = follow_process(
+            &PathBuf::from("/bin/sh"),
+            &["-c".into(), "echo up; exec >&- 2>&-; sleep 30".into()],
+            &[],
+            Box::new(move |l| {
+                let _ = tx.send(l);
+            }),
+            Box::new(|_| {}),
+        )
+        .unwrap();
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap(),
+            "up"
+        );
+        // The reader has seen the output end and waits for the command.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(f);
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok(),
+            "the stop waited for the command"
+        );
     }
 
     #[test]

@@ -50,8 +50,12 @@ workflow from" too: GitHub takes the workflow file from there, not from
 3. Runs the conformance suite (`cargo test -p nerve-conformance`) against the
    Linux binaries that were just built, the ones to be released, with
    `NERVE_CENTER_BIN` and `NERVE_NODE_BIN` set to them. `x86_64` runs on an
-   x86_64 runner and `aarch64` on an arm64 runner. The Windows binaries are
-   built but not run by the workflow.
+   x86_64 runner and `aarch64` on an arm64 runner. Then it installs them on
+   Ubuntu 22.04 and 24.04 (x86_64, and arm64 on 24.04) and Debian 12, and
+   runs the real-machine tests, the keyring path and the center as a service
+   there, as CI does (`.github/workflows/installed.yml`,
+   [building](building.md#checks)). The Windows binaries are built but not
+   run by the workflow.
 4. Publishes a GitHub Release with the seven binaries and `SHA256SUMS`
    (Windows has no `nerve-node` of its own: the desktop app is the node there). The
    desktop app's update takes `nerve-node-desktop-x86_64-linux` or

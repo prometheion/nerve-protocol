@@ -228,17 +228,15 @@ async fn an_owner_changes_the_node_through_it_and_is_audited() {
 /// does: setup asks to install a keyring as root only then (#142).
 #[tokio::test(flavor = "multi_thread")]
 async fn the_command_is_told_whether_the_owner_is_at_a_terminal() {
-    use std::os::unix::fs::PermissionsExt;
     let d = tempfile::tempdir().unwrap();
     let (mut o, at) = options(d.path(), vec![uid()]);
     // A program in the node's place that says what it was told.
     let said = o.home.join("said");
-    std::fs::write(
+    nerve_transport::files::write_program(
         &said,
         "#!/bin/sh\nprintf 'terminal=%s\\n' \"$NERVE_OWNER_TERMINAL\"\n",
     )
     .unwrap();
-    std::fs::set_permissions(&said, std::fs::Permissions::from_mode(0o755)).unwrap();
     o.owners.as_mut().unwrap().program = said;
     let daemon = Daemon::start(o).await.unwrap();
     for (terminal, want) in [(true, "terminal=1\n"), (false, "terminal=\n")] {

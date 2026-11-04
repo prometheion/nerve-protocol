@@ -1,0 +1,124 @@
+# What `cargo deny check` holds the dependencies to (the `deny` job of
+# .github/workflows/deny.yml, docs/dev/building.md): licences that fit the
+# Apache License 2.0 Nerve is under, no crate with a published advisory, one
+# version of each crate where that can be had, and crates only from
+# crates.io. An exception below names its reason.
+
+[graph]
+# The programs Nerve releases, and the Linux build CI tests with: what other
+# platforms would pull in is no concern of a release.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+]
+
+[advisories]
+# Every advisory of the RustSec database fails the check, an unmaintained or
+# unsound crate too, also for a crate only the tests use. One is ignored
+# below only by its id and with the reason, when no fixed release exists
+# yet; one that a newer patch release fixes is fixed in Cargo.lock
+# (`cargo update -p <crate>`). Take an entry out once Cargo.lock has the fixed
+# version: the check then says the entry is not needed.
+unmaintained = "all"
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained: Slint's winit decorations (sctk-adwaita) take it; no maintained version to move to" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant is now part of zbus: the keyring's and Slint's accessibility D-Bus take it; no release of theirs without it yet" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names is now part of zbus, as RUSTSEC-2026-0370" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is now part of zbus, as RUSTSEC-2026-0370" },
+]
+
+[licenses]
+# Licences that ask nothing the Apache License 2.0 cannot give: notices, no
+# copyleft. A crate under several of them needs one.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+# Nerve's own crates are checked too, so a crate without a licence fails.
+private = { ignore = false }
+
+# Slint, for the desktop app only: it is used under Slint's Royalty-free
+# license 2.0 (crates/nerve-node-desktop/LICENSE.md), which is no licence of
+# the list above, so only Slint's crates may have it. [bans] keeps Slint to
+# the desktop app.
+exceptions = [
+    { crate = "slint", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "slint-build", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "slint-macros", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-backend-selector", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-backend-winit", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-common", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-compiler", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-core", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-core-macros", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-renderer-femtovg", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-renderer-software", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    # The desktop app's own crate: its code is Apache-2.0, its program has
+    # Slint's part (its LICENSE.md says both).
+    { crate = "nerve-node-desktop", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+]
+
+# The desktop app's licence file holds both: what it says is written here,
+# since a scan cannot read it. The hash is the file's: a change of the file
+# fails the check until this is looked at again.
+[[licenses.clarify]]
+crate = "nerve-node-desktop"
+expression = "Apache-2.0 AND LicenseRef-Slint-Royalty-free-2.0"
+license-files = [{ path = "LICENSE.md", hash = 0x5524ff9c }]
+
+[bans]
+# A second version of a crate fails, except the ones named here, each with
+# why it is there: a new duplicate is seen when it comes in. Most come with
+# Slint's tree (the desktop app), whose toolkit, windowing and font crates
+# take versions Nerve does not choose; they line up as Slint moves.
+multiple-versions = "deny"
+skip = [
+    { crate = "base64@0.22.1", reason = "Nerve's own; rcgen's pem and Slint's usvg take 0.23, and moving Nerve to 0.23 is a dependency change" },
+    { crate = "getrandom@0.2.17", reason = "ring 0.17 takes 0.2; Slint's winit takes 0.3 and cc's jobserver (a build tool) 0.4" },
+    { crate = "getrandom@0.3.4", reason = "Slint's winit (through ahash)" },
+    { crate = "syn@2.0.119", reason = "zbus 5.19 (the keyring's D-Bus) moved to syn 3; the other derive crates are on 2" },
+    { crate = "toml_datetime@1.1.2", reason = "toml 1 of skia-bindings' build (Slint, Windows); Nerve is on toml 0.9" },
+    { crate = "winnow@1.0.4", reason = "toml 1 of skia-bindings' build (Slint, Windows); Nerve is on toml 0.9" },
+    { crate = "foldhash@0.1.5", reason = "Slint's tree (hashbrown 0.15 of petgraph)" },
+    { crate = "hashbrown@0.14.5", reason = "Slint's compiler (rowan)" },
+    { crate = "hashbrown@0.15.5", reason = "Slint's tree (petgraph of the clipboard)" },
+    { crate = "hashbrown@0.16.1", reason = "Slint's accessibility (accesskit)" },
+    { crate = "linux-raw-sys@0.4.15", reason = "Slint's Wayland event loop (calloop, rustix 0.38)" },
+    { crate = "rustix@0.38.44", reason = "Slint's Wayland event loop (calloop)" },
+    { crate = "miniz_oxide@0.8.9", reason = "Slint's compiler (png through image)" },
+    { crate = "smol_str@0.2.2", reason = "Slint's winit" },
+    { crate = "thiserror@1.0.69", reason = "Slint's Wayland toolkit (calloop, smithay-client-toolkit)" },
+    { crate = "thiserror-impl@1.0.69", reason = "Slint's Wayland toolkit (calloop, smithay-client-toolkit)" },
+    { crate = "tiny-skia@0.11.4", reason = "Slint's winit (sctk-adwaita)" },
+    { crate = "tiny-skia-path@0.11.4", reason = "Slint's winit (sctk-adwaita)" },
+    { crate = "windows-sys@0.52.0", reason = "Slint's Windows backend (glutin)" },
+]
+wildcards = "deny"
+# Nerve's own crates name each other by path, with a version.
+allow-wildcard-paths = true
+deny = [
+    # Slint's licence covers the desktop app; no other program of Nerve may
+    # link it.
+    { crate = "slint", wrappers = ["nerve-node-desktop"] },
+    { crate = "slint-build", wrappers = ["nerve-node-desktop"] },
+    # TLS is rustls with ring; OpenSSL would be a second, C, TLS stack.
+    { crate = "openssl" },
+    { crate = "openssl-sys" },
+    { crate = "native-tls" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

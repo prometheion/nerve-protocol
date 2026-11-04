@@ -3,9 +3,10 @@
 The center and the node run on Linux (x86_64, aarch64) and Windows (x86_64),
 the [desktop app](desktop.md) (`nerve-node-desktop`, the node with an app) on
 Linux x86_64 and Windows x86_64. The node behaves the same except where this
-page says so. The Linux programs are static and run on any distribution; the
-desktop app is not, and needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12,
-Fedora 36 and later) and fontconfig.
+page says so. The Linux programs are static and run on any distribution;
+installing them as a service needs systemd ([distributions](#linux-distributions)).
+The desktop app is not static, and needs glibc 2.35 or newer (Ubuntu 22.04,
+Debian 12, Fedora 36 and later) and fontconfig.
 
 | | Linux | Windows |
 |---|---|---|
@@ -21,11 +22,77 @@ Fedora 36 and later) and fontconfig.
 | The center's [action checker](action-checker.md) | Yes. Its local model on x86_64 and aarch64, on the CPU or a Vulkan GPU; the installed center service runs it on the CPU only | Yes. Its local model on x86_64, on the CPU or a Vulkan GPU |
 | Config folder | `~/.config/nerve` | `C:\ProgramData\Nerve\config` (the installed service) |
 
+## Linux distributions
+
+| | Distributions |
+|---|---|
+| Tested | Ubuntu 22.04 and 24.04, Debian 12. CI installs the released programs on each and runs the node's and the center's whole install, use and uninstall there, on x86_64 and on Ubuntu 24.04 also on aarch64 |
+| Expected to work, not tested | Fedora, Arch Linux, and other distributions with systemd |
+| Not supported as a service | Distributions without systemd (Alpine with OpenRC, Void with runit, containers without an init, WSL 1): run the node by hand ([below](#a-node-you-run-by-hand)) |
+
+The tests run on GitHub's kernels, which are newer than the ones the
+distributions ship (Ubuntu 22.04 has 5.15, Debian 12 has 6.1). How much
+Landlock holds depends on the kernel ([modes](modes.md#what-a-command-can-reach-in-folder-mode-linux));
+`nerve-node status` shows the version yours has.
+
+`install` and the installed node need:
+
+- systemd, to run the service;
+- `useradd`, `userdel`, `getent` and `id`, for the accounts `nerve` and
+  `nerve-run`;
+- a file system with POSIX ACLs where you grant folders (ext4, XFS, Btrfs
+  have them);
+- cgroup v2, which systemd gives every current distribution, for the
+  [limits per command](limits.md);
+- polkit with `pkexec`, for `nerve-node service` and the desktop app to start
+  and stop the service without `sudo`;
+- for the keyring step of `setup` only, `apt`, `dnf` or `pacman`
+  ([config](config.md)); elsewhere install GNOME Keyring yourself, or keep the
+  keys in files.
+
+### A node you run by hand
+
+Without systemd, or for a node of your own account, run `nerve-node run`
+under your service manager. Such a node runs every command as you: there is
+no `nerve-run`, `folder` mode needs Landlock, and it offers no
+[capabilities of `node.toml`](config-capabilities.md). With systemd, a unit of
+your own systemd keeps it running and gives it its [limits](limits.md):
+
+```ini
+# ~/.config/systemd/user/nerve-node.service
+[Unit]
+Description=Nerve node
+
+[Service]
+ExecStart=%h/.local/bin/nerve-node run
+Restart=on-failure
+RestartSec=5
+# The node's own cgroup, to hold each command to its limits.
+Delegate=yes
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+install -m 755 nerve-node-x86_64-linux ~/.local/bin/nerve-node
+systemctl --user daemon-reload
+systemctl --user enable --now nerve-node
+loginctl enable-linger "$USER"   # starts it at boot, before you log in
+nerve-node status
+```
+
+Without systemd, start `nerve-node run` from your service manager as your
+own account, not as root; its commands then run without limits, and
+`nerve-node status` says why.
+
 ## Linux
 
 - With the node running, `nerve-node status` shows `confinement landlock
   v…`, or `confinement none` when the kernel has no Landlock (some
-  container hosts, older kernels). On the node installed as a service,
+  container hosts, older kernels; on a node you run yourself also Landlock
+  below ABI 3, before Linux 6.2: the stock kernels of Ubuntu 22.04 and
+  Debian 12). On the node installed as a service,
   `folder` and `allowlist` mode then run their commands as `nerve-run`
   without Landlock, held back by the account alone; `status` says `as
   nerve-run, without Landlock`. A node you run yourself refuses every
@@ -39,6 +106,21 @@ Fedora 36 and later) and fontconfig.
   Landlock; `umask 027` only narrows what it can read. See
   [modes](modes.md#your-home-and-other-accounts). With Landlock nothing is
   said: it holds each command to its folders.
+- Landlock below ABI 6 (Linux 6.12; the stock kernels of Ubuntu 22.04 and
+  24.04 and Debian 12 are older) lets a command signal other processes of its account and
+  reach abstract unix sockets: the installed node's pairings, whose commands
+  are all `nerve-run`'s, are kept apart from each other only from ABI 6.
+  Below ABI 3 (Ubuntu 22.04's 5.15, Debian 12's 6.1) a command can also cut
+  a file it may write outside its folders to nothing; the installed node
+  still uses that Landlock, a node you run yourself runs no `folder` mode
+  command there. `install` and `status` name what the kernel's Landlock
+  lacks. See [Landlock versions](modes.md#landlock-versions).
+- A `folder` mode command, and every command of `nerve-run`, has no
+  controlling terminal; a node you run yourself gives its `allowlist` and
+  `user` mode commands the terminal it was started in. Of the installed node's
+  environment a command of `nerve-run` gets only `PATH`, `LANG`, `TERM`,
+  `TMPDIR` and the names in `machine.command_env`. A node you run yourself
+  gives its commands your whole environment.
 - Commands run with `no_new_privs`, so setuid programs cannot gain privileges.
   Only a command on the [sudo list](sudo.md) runs without it.
 - When a call ends, the node kills the command's whole process group.

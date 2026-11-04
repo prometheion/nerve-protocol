@@ -4,6 +4,9 @@ description = "The Nerve node with its desktop app: the node, its CLI and a wind
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+# Its own code is Apache-2.0 like the workspace; the program it builds
+# contains Slint, used under Slint's Royalty-free license 2.0.
+license-file = "LICENSE.md"
 # Slint's own minimum.
 rust-version = "1.92"
 publish = false

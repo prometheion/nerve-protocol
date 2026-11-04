@@ -258,7 +258,7 @@ The node confines commands with Landlock:
 | A command can | Where |
 |---|---|
 | Read | the system folders (`/usr`, `/bin`, `/lib`, `/etc`, `/opt`, `/proc`, `/sys`, `/dev`, `/run` but `/run/nerve-node`, and similar) and the `r` folders |
-| Write | the `w` folders and the null and terminal devices |
+| Write | the `w` folders and the null devices (`/dev/null`, `/dev/zero`, `/dev/full`) |
 | Run programs | the system folders and the `x` folders |
 
 - A folder with `w` and no `r` can be written but not read or listed by a
@@ -266,6 +266,13 @@ The node confines commands with Landlock:
 - Landlock cannot run a file it may not read. So an `x` folder also lets a
   command read files there by name. It still cannot list the folder.
 - The node's own folders are in none of these sets.
+- A command has no controlling terminal: it runs in a session of its own.
+  On a node you run yourself in a terminal that terminal is yours, and a
+  command cannot write to it, type into it, or read your terminals by
+  name: `/dev/pts`, `/dev/console` and every tty device the kernel lists (`tty*`, `hvc*`, serial lines) are left out of
+  what it may read (the rest of `/dev` stays, but it cannot list `/dev`).
+  The installed node's commands run as `nerve-run`, which may not open your
+  terminals either.
 - `/tmp`, `/var/tmp` and the home of `nerve-run` are in every set of a
   `nerve-run` command, to read, write and run programs in
   ([below](#the-account-nerve-run-linux)).
@@ -290,7 +297,11 @@ The node confines commands with Landlock:
     where no `w` folder is, and the folder of another pairing there follows
     it. Look for links in the folders you grant before you give a pairing one
     of those.
-- On a node you run yourself, the command runs as you. Landlock holds the
+- On a node you run yourself, the command runs as you, with your whole
+  environment: every variable of the shell you started the node from,
+  tokens and `SSH_AUTH_SOCK` included. The installed node gives
+  `nerve-run`'s commands only a few ([below](#the-account-nerve-run-linux)).
+- On a node you run yourself, Landlock holds the
   command's own processes, not the other programs of your account: `folder`
   mode there is no boundary against those of them that run things on
   request (a session's service manager, a terminal multiplexer and the
@@ -304,7 +315,8 @@ The node confines commands with Landlock:
 The node installed as a service runs `folder` mode commands, and
 `allowlist` mode commands unless you set `--as-owner`, as `nerve-run`.
 `install` makes it, with a home of its own, `/var/lib/nerve-run`, no login
-and no other groups; `uninstall` removes both.
+and no other groups; `uninstall` removes both, and what its commands left
+in `/tmp`, `/var/tmp` and `/dev/shm`.
 
 - It is not you. Your session's programs (the service manager, the session
   bus, tmux, a container engine) take requests from your own account only,
@@ -312,7 +324,15 @@ and no other groups; `uninstall` removes both.
   change the node's settings: the owner socket refuses it.
 - It gets the folders you grant as POSIX ACL entries: the folder and
   everything below it, with the rights of its flags, and a default entry, so
-  that what it makes there stays yours to use as well. A folder of yours
+  that what it makes there stays yours to use as well. What you make in such
+  a folder later gets the entry by the default; what you move into it (`mv`
+  of a download or a clone) keeps the ACL it had, so `nerve-run` reaches it
+  only as any other account would. The node gives it the folder's entries
+  when it walks every grant again: when it starts, on `folder set`, and on
+  `nerve-node folder sync`. Each walk is a pass over everything in every
+  granted folder, which takes a while for large trees. `status` and the
+  commands of `nerve-run` do not wait for it while the folders' entries are
+  up to date; a change of the folders made meanwhile waits for it. A folder of yours
   above a grant that others may not enter gets an entry that lets it pass
   through it: with Landlock that is all it does there, without Landlock its
   commands can then read what others may read inside that folder ([your
@@ -345,6 +365,13 @@ and no other groups; `uninstall` removes both.
   ACLs) is named by `folder add` and `folder set` and in `nerve-node status`,
   also after a restart, and is tried again: at the node's start, with the
   next change of the folders, and at most once a minute before a command.
+- Of the service's environment its commands get only `PATH`, `LANG`, `TERM`
+  and `TMPDIR`, and `HOME`, `USER`, `LOGNAME` and the `XDG_*` and git
+  variables the node sets for its home: not `NERVE_NODE_OWNER`, nor what
+  systemd adds, nor what you put into the unit with `Environment=` (a proxy
+  URL with its password, a token). To pass one on, name it:
+  `nerve-node config add machine.command_env HTTPS_PROXY`; its value is the
+  service's. Do not put secrets into the unit that commands should not see.
 - It always has `/tmp`, `/var/tmp` and its home, to read, write and run
   programs in. Its tools keep their caches and configs in its home: `HOME`
   and the `XDG_*` folders point there. Every pairing whose commands run as
@@ -409,10 +436,36 @@ the narrower set Landlock gives (`w` without `r`, `x` without listing). A
 node you run yourself refuses every `folder` mode command without Landlock,
 and a line `folder mode runs no command: …` says why.
 
+### Landlock versions
+
+Each kernel version adds guards to Landlock (its ABI). The node asks for ABI
+6 and uses what the kernel has:
+
+| ABI | Linux | What it adds |
+|---|---|---|
+| 1, 2 | 5.13, 5.19 | Files and folders. These do not guard truncating a file (`truncate`), so a command can cut any file it may write outside its folders to nothing. A node you run yourself takes them as no Landlock and runs no `folder` mode command; the installed node uses them |
+| 3 | 6.2 | Truncating files: from here on a node you run yourself uses Landlock |
+| 4 | 6.7 | Network rules (the node sets none) |
+| 5 | 6.10 | Device ioctls |
+| 6 | 6.12 | Signals to other processes and abstract unix sockets: the commands of the installed node's pairings, all of `nerve-run`, are kept apart from each other only from here on |
+
+Below ABI 6 a command can still signal other processes of its account, reach
+abstract unix sockets and (below 5) send ioctls to the devices it may open.
+On the installed node that means one pairing's commands can stop another's.
+`install` and `status` say so (`warning: this kernel's Landlock is ABI 4,
+which does not guard device ioctls, signals to other processes of the
+account, abstract unix sockets: …`). On ABI 1 or 2 they name truncating
+files too: the installed node still holds each command to its folders, but
+a command can cut a file `nerve-run` may write outside them to nothing. A
+node you run yourself runs no `folder` mode command there and `status`
+says `confinement none`. These are the stock kernels of Ubuntu 22.04 (5.15,
+ABI 1) and Debian 12 (6.1, ABI 2); Ubuntu 24.04 (6.8) has ABI 4.
+
 ### Your home and other accounts
 
 With Landlock, each command of `nerve-run` is held to its own pairing's
-folders, and nothing below is a concern for commands. File calls in `folder`
+folders (apart from the other pairings' commands from ABI 6, see [Landlock
+versions](#landlock-versions)), and nothing below is a concern for commands. File calls in `folder`
 mode read, outside the folders, what every account on the machine may read,
 with or without Landlock: where your home is open to others (755 or 711), that
 includes the files in it that others may read, as it does for any account on

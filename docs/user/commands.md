@@ -43,6 +43,7 @@ center is paired.
 | `folder add <path> +r +w +x` | Grant a folder | [modes](modes.md#folders) |
 | `folder set <path> -w` | Change a folder's rights | [modes](modes.md#folders) |
 | `folder rm <path>`, `folder ls` | Remove or list folders | [modes](modes.md#folders) |
+| `folder sync` | Give `nerve-run` its entries on everything in the granted folders again, also on what was moved in (the installed Linux node; a pass over every granted folder) | [modes](modes.md#the-account-nerve-run-linux) |
 | `rule add allow\|deny\|sudo '<command>' [--wildcard] [--action A [--pin F=V]]` | Add a command rule, a rule on an action's arguments (`'lamp.set:room=office'`), or with `--action` the rule of an audit entry, `--pin` holding it to one argument | [rules](rules.md), [arguments](rules.md#rules-on-an-actions-arguments) |
 | `rule rm allow\|deny\|sudo '<command>' [--wildcard] [--action A [--pin F=V]]` | Remove a rule | [rules](rules.md#list-change-and-remove-rules) |
 | `rule edit allow\|deny\|sudo '<entry>' '<new>'` | Change a rule in place, as one change | [rules](rules.md#list-change-and-remove-rules) |
@@ -154,7 +155,7 @@ one JSON value from stdout:
   `backup` adds `"backup"` (`file`, `centers`, `saved`, and `left_out`, each
   with `what` and `why`: `keyring`, `does-not-fit` or `missing`),
   `center rotate-key` adds `"public_key"`, the new key,
-  `folder add`, `folder set` and `folder rm` on the installed Linux node add
+  `folder add`, `folder set`, `folder rm` and `folder sync` on the installed Linux node add
   `"grant_errors"` (what giving `nerve-run` its folders left, each
   `<path>: <why>`) and `"grant_stale"` (folders whose access `nerve-run`
   keeps although it should have lost it) when there are any, and

@@ -961,6 +961,32 @@ pub fn sync(
     who: Who,
     act_as: &dyn Fn() -> Result<Option<crate::account::FsAs>, String>,
 ) -> Report {
+    sync_with(file, want, who, act_as, false, &|_| {})
+}
+
+/// [`sync`] that walks every grant, also one that did not change: a file or
+/// folder moved into a granted folder keeps the ACL it had, and only a walk
+/// gives it the grant's entries. It costs a pass over every granted tree.
+pub fn sync_all(
+    file: &Path,
+    want: &[Granted],
+    who: Who,
+    act_as: &dyn Fn() -> Result<Option<crate::account::FsAs>, String>,
+) -> Report {
+    sync_with(file, want, who, act_as, true, &|_| {})
+}
+
+/// [`sync`], walking every grant of `want` when `every`. `stored` gets the
+/// report just before the record is written: once the record shows the walk
+/// as done, a reader that finds nothing behind must find its report as well.
+pub fn sync_with(
+    file: &Path,
+    want: &[Granted],
+    who: Who,
+    act_as: &dyn Fn() -> Result<Option<crate::account::FsAs>, String>,
+    every: bool,
+    stored: &dyn Fn(&Report),
+) -> Report {
     let mut report = Report::default();
     let before = match read_record(file) {
         Ok(r) => r.unwrap_or_default(),
@@ -1030,11 +1056,11 @@ pub fn sync(
         let had = if old_uid { &[][..] } else { &before.grants[..] };
         let retry = if old_uid { &[][..] } else { &before.failed[..] };
         // A grant is walked when it is new, changed, failed last time or
-        // gone.
+        // gone, or when every one is.
         let mut roots: Vec<&Path> = Vec::new();
         for g in want
             .iter()
-            .filter(|g| !had.contains(g) || retry.contains(&g.path))
+            .filter(|g| every || !had.contains(g) || retry.contains(&g.path))
         {
             roots.push(&g.path);
         }
@@ -1132,6 +1158,7 @@ pub fn sync(
     kept.made_defaults = below(defaults.made);
     kept.failed = missed.clone();
     report.failed = missed;
+    stored(&report);
     if let Err(e) = write_record(file, &kept) {
         report.errors.push(e);
     }
@@ -1152,6 +1179,24 @@ pub fn behind(file: &Path, want: &[Granted], who: Who, retry: bool) -> bool {
         Ok(None) => !want.is_empty(),
         Err(_) => true,
     }
+}
+
+/// What the record in `file` says is left from an earlier run: the report
+/// the node starts with, so that a command which finds nothing behind while
+/// the start walk runs is still refused for what earlier accounts left
+/// ([`Record::left`]). Only `left` counts here, as `behind` looks at no other
+/// entry that a walk could not take off.
+pub fn remembered(file: &Path) -> Report {
+    let mut report = Report::default();
+    if let Ok(Some(r)) = read_record(file)
+        && !r.left.is_empty()
+    {
+        report
+            .errors
+            .push("an earlier walk left them, and the walk of this start has not finished".into());
+        report.stale = r.left.into_iter().map(|l| l.path).collect();
+    }
+    report
 }
 
 /// The accounts the record in `file` names entries for, and whether it
@@ -1267,6 +1312,11 @@ pub fn remove_all(file: &Path, heir: &dyn Fn(u32) -> (u32, u32)) -> Report {
     report
 }
 
+/// The re-run of a test in a namespace, with its skips said again.
+#[cfg(test)]
+#[path = "../tests/common/ns.rs"]
+mod ns;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1377,6 +1427,53 @@ mod tests {
         assert_eq!(file_perm(a("rwx"), 0o644), R | W);
         assert_eq!(file_perm(a("rx"), 0o755), R | X);
         assert_eq!(file_perm(a("w"), 0o755), W);
+    }
+
+    /// The report is handed over before the record shows the walk as done:
+    /// a reader that finds the record up to date must find the report too.
+    #[test]
+    fn the_report_is_stored_before_the_record_is_written() {
+        let d = tempfile::tempdir().unwrap();
+        let work = d.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let file = d.path().join("acl.json");
+        let want = [grant(&work, "rw")];
+        let behind_then = std::cell::Cell::new(None);
+        sync_with(&file, &want, who(), &none, false, &|_| {
+            behind_then.set(Some(behind(&file, &want, who(), false)));
+        });
+        assert_eq!(behind_then.get(), Some(true));
+        assert!(!behind(&file, &want, who(), false));
+    }
+
+    /// A file and a folder moved into a granted folder keep the ACL they
+    /// had: a sync of the unchanged grants passes them over, a walk of every
+    /// grant gives them the grant's entries.
+    #[test]
+    fn a_walk_of_every_grant_gives_what_was_moved_in_its_entries() {
+        let Some(d) = tree() else { return };
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let work = root.join("work");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(outside.join("tree")).unwrap();
+        std::fs::write(outside.join("moved.txt"), "m").unwrap();
+        std::fs::write(outside.join("tree/deep.txt"), "d").unwrap();
+        let file = root.join("acl.json");
+        let want = [grant(&work, "rw")];
+        assert!(sync(&file, &want, who(), &none).errors.is_empty());
+        std::fs::rename(outside.join("moved.txt"), work.join("moved.txt")).unwrap();
+        std::fs::rename(outside.join("tree"), work.join("tree")).unwrap();
+        assert!(sync(&file, &want, who(), &none).errors.is_empty());
+        assert_eq!(rights(&work.join("moved.txt"), RUN), None);
+        let r = sync_all(&file, &want, who(), &none);
+        assert_eq!(r.errors, Vec::<String>::new());
+        assert_eq!(rights(&work.join("moved.txt"), RUN), Some(R | W));
+        assert_eq!(rights(&work.join("tree"), RUN), Some(R | W | X));
+        assert_eq!(rights(&work.join("tree/deep.txt"), RUN), Some(R | W));
+        // The walk changed nothing of the record: the next sync has nothing
+        // to do.
+        assert!(!behind(&file, &want, who(), true));
     }
 
     /// A grant puts the entries on the folder and everything below, and the
@@ -2093,14 +2190,13 @@ mod tests {
             return false;
         }
         let test = format!("{}::{name}", module_path!().split_once("::").unwrap().1);
-        let status = Command::new("unshare")
-            .args(args)
-            .arg(std::env::current_exe().unwrap())
-            .args(["--exact", &test, "--nocapture", "--test-threads=1"])
-            .env("NERVE_TEST_IN_NS", "1")
-            .status()
-            .unwrap();
-        assert!(status.success(), "in the namespace: {status}");
+        super::ns::run_saying_skips(
+            Command::new("unshare")
+                .args(args)
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", &test, "--nocapture", "--test-threads=1"])
+                .env("NERVE_TEST_IN_NS", "1"),
+        );
         false
     }
 

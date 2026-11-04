@@ -202,6 +202,9 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         "nerve-node folder ls --center lab",
         (Some(Page::Policy), -1, "Permissions › Folders"),
     ),
+    // The pass over every grant is for the installed Linux node's accounts;
+    // the app has no such account.
+    ("folder sync", "nerve-node folder sync", NOT_HERE),
     (
         "rule add",
         "nerve-node rule add allow 'git status' --center lab",

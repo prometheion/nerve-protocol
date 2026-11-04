@@ -15,6 +15,9 @@ members = [
 version = "0.0.7"
 edition = "2024"
 repository = "https://github.com/prometheion/nerve-protocol"
+# The workspace is under the Apache License 2.0 (LICENSE); the desktop app
+# adds Slint's terms (crates/nerve-node-desktop/LICENSE.md).
+license = "Apache-2.0"
 rust-version = "1.88"
 
 [workspace.dependencies]
