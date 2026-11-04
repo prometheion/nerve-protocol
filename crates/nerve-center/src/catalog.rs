@@ -1811,10 +1811,7 @@ mod tests {
         );
         // Shared marks only one of the account's own folders.
         assert!(
-            !reach(json!([{"path": "/srv/x", "access": "rw", "shared": true}]))
-                .note()
-                .unwrap()
-                .contains("shared")
+            !reach(json!([{"path": "/srv/x", "access": "rw", "shared": true}])).folders[0].shared
         );
         // It names no path: the paths are the node's words.
         assert!(!advice.contains('/'), "{advice}");
