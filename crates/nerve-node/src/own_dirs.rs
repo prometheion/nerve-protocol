@@ -15,7 +15,8 @@ use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use nerve_policy::NodeConfig;
 
@@ -42,17 +43,50 @@ fn write_record(file: &Path, r: &BTreeMap<String, String>) -> Result<(), String>
         .map_err(|e| format!("{}: {e}", file.display()))
 }
 
-/// One [`sync`] or [`ready`] at a time: each reads the record, deletes
-/// and makes folders, and writes the record back, so two at once would
-/// lose what the other wrote, and walk the same tree at once.
+/// One [`sync`] at a time: each reads the config once its turn has come,
+/// so that one started for an older version cannot undo a newer one.
 static SYNCING: Mutex<()> = Mutex::new(());
+
+/// The record is read, changed and written back under this, and nothing
+/// slow is done while it is held: two changes at once would lose what the
+/// other wrote.
+static RECORD: Mutex<()> = Mutex::new(());
+
+/// One lock per pairing name, held while that pairing's folders are made
+/// or deleted. A delete of a big home takes seconds or minutes, and the
+/// commands of every other pairing go on meanwhile; a command of the
+/// pairing itself waits, so it never makes folders into a tree being
+/// deleted.
+static NAMES: Mutex<BTreeMap<String, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
+
+fn name_lock(name: &str) -> Arc<Mutex<()>> {
+    let mut names = NAMES.lock().unwrap_or_else(PoisonError::into_inner);
+    names.entry(name.to_string()).or_default().clone()
+}
+
+/// The node's id at the center `name` that the record has folders for.
+fn recorded(file: &Path, name: &str) -> Option<String> {
+    let _one = RECORD.lock().unwrap_or_else(PoisonError::into_inner);
+    read_record(file).remove(name)
+}
+
+fn change_record(
+    file: &Path,
+    change: impl FnOnce(&mut BTreeMap<String, String>),
+) -> Result<(), String> {
+    let _one = RECORD.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut record = read_record(file);
+    change(&mut record);
+    write_record(file, &record)
+}
 
 /// Brings the pairings' folders in line with the config `cfg` gives, as
 /// `run` (`nerve-run`, whose home holds them): those of a pairing that is
 /// gone, or was made again under its name, are deleted with what they hold,
 /// and every pairing's are made where missing. What failed is said, and the
 /// record keeps a pairing whose folders could not all be deleted, so the
-/// next sync tries again.
+/// next sync tries again. A pairing's folders are handled under its own
+/// lock, so the commands of the others do not wait for a long delete.
 pub fn sync(run: &Account, cfg: impl FnOnce() -> NodeConfig, file: &Path) -> Vec<String> {
     let _one = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
     // The config as it is once this sync's turn has come: one started for
@@ -60,40 +94,56 @@ pub fn sync(run: &Account, cfg: impl FnOnce() -> NodeConfig, file: &Path) -> Vec
     // made.
     let cfg = cfg();
     let mut errors = Vec::new();
-    let mut record = read_record(file);
     let now: BTreeMap<&str, &str> = cfg
         .centers
         .iter()
         .map(|c| (c.name.as_str(), c.node_id.as_str()))
         .collect();
-    let gone: Vec<String> = record
-        .iter()
-        .filter(|(name, id)| now.get(name.as_str()) != Some(&id.as_str()))
-        .map(|(name, _)| name.clone())
-        .collect();
+    let gone: Vec<String> = {
+        let _one = RECORD.lock().unwrap_or_else(PoisonError::into_inner);
+        read_record(file)
+            .into_iter()
+            .filter(|(name, id)| now.get(name.as_str()) != Some(&id.as_str()))
+            .map(|(name, _)| name)
+            .collect()
+    };
     for name in gone {
+        let lock = name_lock(&name);
+        let _name = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        // A command may have made the pairing's folders again while this
+        // waited for its lock.
+        if recorded(file, &name).is_none_or(|id| now.get(name.as_str()) == Some(&id.as_str())) {
+            continue;
+        }
         match remove(run, &name) {
             Ok(()) => {
-                record.remove(&name);
+                if let Err(e) = change_record(file, |r| {
+                    r.remove(&name);
+                }) {
+                    errors.push(e);
+                }
                 tracing::info!("deleted the home and temporary folder of the pairing {name}");
             }
             Err(e) => errors.push(e),
         }
     }
     for (name, id) in now {
-        if record.contains_key(name) {
+        let lock = name_lock(name);
+        let _name = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        if recorded(file, name).is_some() {
             // Made again only where a command found them gone.
             continue;
         }
         match make_new(run, name) {
             Ok(_) => {
-                record.insert(name.to_string(), id.to_string());
+                if let Err(e) = change_record(file, |r| {
+                    r.insert(name.to_string(), id.to_string());
+                }) {
+                    errors.push(e);
+                }
             }
             Err(e) => errors.push(e),
         }
-    }
-    if let Err(e) = write_record(file, &record) {
-        errors.push(e);
     }
     errors
 }
@@ -102,21 +152,25 @@ pub fn sync(run: &Account, cfg: impl FnOnce() -> NodeConfig, file: &Path) -> Vec
 /// `node_id`, for a command, made where they are missing: what [`sync`]
 /// does for that pairing alone, for a command that comes before it. The
 /// folders of an earlier pairing under its name are deleted first, and a
-/// folder the node did not make for it is refused.
+/// folder the node did not make for it is refused. It waits only for work
+/// on this pairing's own folders.
 pub fn ready(run: &Account, center: &str, node_id: &str, file: &Path) -> Result<Own, String> {
-    let _one = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut record = read_record(file);
-    match record.get(center) {
+    let lock = name_lock(center);
+    let _name = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    match recorded(file, center) {
         Some(id) if id == node_id => return make(run, center),
         Some(_) => {
             remove(run, center)?;
-            record.remove(center);
+            change_record(file, |r| {
+                r.remove(center);
+            })?;
         }
         None => {}
     }
     let own = make_new(run, center)?;
-    record.insert(center.to_string(), node_id.to_string());
-    write_record(file, &record)?;
+    change_record(file, |r| {
+        r.insert(center.to_string(), node_id.to_string());
+    })?;
     Ok(own)
 }
 
@@ -433,6 +487,27 @@ fn names(dir: &OwnedFd) -> std::io::Result<Vec<CString>> {
     }
 }
 
+/// Numbers the folders [`remove`] moves up, for the whole process: a tree
+/// that an earlier call left under its number (it stopped on an error) must
+/// not meet a later call's folder of the same name.
+static DEEPER: AtomicUsize = AtomicUsize::new(0);
+
+/// A name in `top` for a folder moved up that nothing has: not one an
+/// earlier call left (also of an earlier process of the same id).
+fn free_deeper_name(top: &OwnedFd) -> std::io::Result<CString> {
+    for _ in 0..4096 {
+        let n = DEEPER.fetch_add(1, Ordering::Relaxed);
+        let name = CString::new(format!(".deeper-{}-{n}", std::process::id()))
+            .expect("no NUL in the name");
+        match stat_at(top, &name) {
+            Err(e) if e.raw_os_error() == Some(libc::ENOENT) => return Ok(name),
+            Err(e) => return Err(e),
+            Ok(_) => {}
+        }
+    }
+    Err(std::io::Error::from_raw_os_error(libc::EEXIST))
+}
+
 /// Deletes what the open folder `dir` (shown as `shown`, `depth` levels
 /// below `top`) holds. A folder at [`WALK_DEPTH`] is moved up into `top`
 /// under a new name and counted in `moved`, for the next pass.
@@ -473,8 +548,13 @@ fn empty(
                 continue;
             }
             if depth + 1 >= WALK_DEPTH {
-                let up = CString::new(format!(".deeper-{}-{}", std::process::id(), *moved))
-                    .expect("no NUL in the name");
+                let up = match free_deeper_name(top) {
+                    Ok(up) => up,
+                    Err(e) => {
+                        errors.push(format!("{}: {e}", here.display()));
+                        continue;
+                    }
+                };
                 // SAFETY: valid C strings, relative to descriptors we hold.
                 let r = unsafe {
                     libc::renameat(dir.as_raw_fd(), name.as_ptr(), top.as_raw_fd(), up.as_ptr())
@@ -584,6 +664,75 @@ mod tests {
         assert!(other.home.join(".gitconfig").exists());
         // Gone already is fine.
         remove(&run, "lab").unwrap();
+    }
+
+    /// A deep tree that an earlier removal moved up (and stopped on an
+    /// error) lies under a `.deeper-` name; a later removal of the pairing
+    /// moves new ones under names of their own, and deletes the old tree
+    /// too.
+    #[test]
+    fn a_removal_moves_deep_folders_up_under_names_nothing_has() {
+        let d = tempfile::tempdir().unwrap();
+        let run = me(&d.path().join("run"));
+        std::fs::create_dir(&run.home).unwrap();
+        let own = make(&run, "lab").unwrap();
+        let top = run.home.join("lab");
+        // Every name the next moves would take, as a tree with a file in
+        // it (a rename onto an empty folder would replace it, onto this
+        // one it fails), the first of them holding a deep tree itself.
+        let from = DEEPER.load(Ordering::Relaxed);
+        let pid = std::process::id();
+        for n in from..from + 64 {
+            let left = top.join(format!(".deeper-{pid}-{n}"));
+            let mut deep = left.clone();
+            if n == from {
+                for _ in 0..WALK_DEPTH + 5 {
+                    deep.push("d");
+                }
+            }
+            std::fs::create_dir_all(&deep).unwrap();
+            std::fs::write(deep.join("f"), "x").unwrap();
+        }
+        let mut deep = own.home.join("deep");
+        for _ in 0..WALK_DEPTH + 10 {
+            deep.push("d");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("f"), "x").unwrap();
+        remove(&run, "lab").unwrap();
+        assert!(!top.exists());
+    }
+
+    /// The commands of one pairing do not wait while another pairing's
+    /// folders are made or deleted; its own do.
+    #[test]
+    fn a_pairing_waits_only_for_work_on_its_own_folders() {
+        let d = tempfile::tempdir().unwrap();
+        let run = me(&d.path().join("run"));
+        std::fs::create_dir(&run.home).unwrap();
+        let file = d.path().join("own-folders.json");
+        let busy = name_lock("busy");
+        let held = busy.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        for name in ["other", "busy"] {
+            let (run, file, tx) = (run.clone(), file.clone(), tx.clone());
+            std::thread::spawn(move || {
+                ready(&run, name, "n1", &file).unwrap();
+                tx.send(name).unwrap();
+            });
+        }
+        let first = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(first, "other");
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "it did not wait for the lock of its own folders"
+        );
+        drop(held);
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap(),
+            "busy"
+        );
     }
 
     fn center(name: &str, id: &str) -> nerve_policy::CenterEntry {
