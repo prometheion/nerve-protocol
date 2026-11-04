@@ -6,12 +6,16 @@
 //! user may not enter. A record in the node's state folder names the
 //! pairings it made folders for, each with the node's id at that center,
 //! so that a pairing made again under the same name gets new folders, and
-//! nothing else in the account's home is ever taken for a pairing's.
+//! nothing else in the account's home is ever taken for a pairing's: a
+//! folder under a pairing's name that the node did not make for it is
+//! refused (it may be left from an earlier version, or made there by a
+//! command), unless it is as empty as a new one.
 
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use nerve_policy::NodeConfig;
 
@@ -38,13 +42,23 @@ fn write_record(file: &Path, r: &BTreeMap<String, String>) -> Result<(), String>
         .map_err(|e| format!("{}: {e}", file.display()))
 }
 
-/// Brings the pairings' folders in line with `cfg`, as `run` (`nerve-run`,
-/// whose home holds them): those of a pairing that is gone, or was made
-/// again under its name, are deleted with what they hold, and every
-/// pairing's are made where missing. What failed is said, and the record
-/// keeps a pairing whose folders could not all be deleted, so the next
-/// sync tries again.
-pub fn sync(run: &Account, cfg: &NodeConfig, file: &Path) -> Vec<String> {
+/// One [`sync`] or [`ready`] at a time: each reads the record, deletes
+/// and makes folders, and writes the record back, so two at once would
+/// lose what the other wrote, and walk the same tree at once.
+static SYNCING: Mutex<()> = Mutex::new(());
+
+/// Brings the pairings' folders in line with the config `cfg` gives, as
+/// `run` (`nerve-run`, whose home holds them): those of a pairing that is
+/// gone, or was made again under its name, are deleted with what they hold,
+/// and every pairing's are made where missing. What failed is said, and the
+/// record keeps a pairing whose folders could not all be deleted, so the
+/// next sync tries again.
+pub fn sync(run: &Account, cfg: impl FnOnce() -> NodeConfig, file: &Path) -> Vec<String> {
+    let _one = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
+    // The config as it is once this sync's turn has come: one started for
+    // an older version would delete the folders of a pairing a newer one
+    // made.
+    let cfg = cfg();
     let mut errors = Vec::new();
     let mut record = read_record(file);
     let now: BTreeMap<&str, &str> = cfg
@@ -71,7 +85,7 @@ pub fn sync(run: &Account, cfg: &NodeConfig, file: &Path) -> Vec<String> {
             // Made again only where a command found them gone.
             continue;
         }
-        match make(run, name) {
+        match make_new(run, name) {
             Ok(_) => {
                 record.insert(name.to_string(), id.to_string());
             }
@@ -84,17 +98,86 @@ pub fn sync(run: &Account, cfg: &NodeConfig, file: &Path) -> Vec<String> {
     errors
 }
 
+/// The folders of the pairing `center`, whose node id at that center is
+/// `node_id`, for a command, made where they are missing: what [`sync`]
+/// does for that pairing alone, for a command that comes before it. The
+/// folders of an earlier pairing under its name are deleted first, and a
+/// folder the node did not make for it is refused.
+pub fn ready(run: &Account, center: &str, node_id: &str, file: &Path) -> Result<Own, String> {
+    let _one = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut record = read_record(file);
+    match record.get(center) {
+        Some(id) if id == node_id => return make(run, center),
+        Some(_) => {
+            remove(run, center)?;
+            record.remove(center);
+        }
+        None => {}
+    }
+    let own = make_new(run, center)?;
+    record.insert(center.to_string(), node_id.to_string());
+    write_record(file, &record)?;
+    Ok(own)
+}
+
+/// [`make`] for a pairing the record does not name: its folder must not be
+/// there yet, or hold nothing but an empty `home` and `tmp` (what a make
+/// that the record missed leaves).
+fn make_new(run: &Account, center: &str) -> Result<Own, String> {
+    let root = run.home.join(center);
+    let unused = {
+        let _as = act_as(run)?;
+        unused(&root)
+    };
+    if !unused {
+        return Err(format!(
+            "{} is there already, and the node did not make it for the pairing {center}: \
+             delete it or move it away (it may be left from an earlier version), and the \
+             pairing gets a home of its own",
+            root.display()
+        ));
+    }
+    make(run, center)
+}
+
+/// Whether `root` is missing, or a folder (not a link) that holds nothing
+/// but its `home` and `tmp` folders, both empty.
+fn unused(root: &Path) -> bool {
+    let empty_dir = |p: &Path| {
+        std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir())
+            && std::fs::read_dir(p).is_ok_and(|mut d| d.next().is_none())
+    };
+    match std::fs::symlink_metadata(root) {
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+        Ok(m) if !m.is_dir() => false,
+        Ok(_) => std::fs::read_dir(root).is_ok_and(|d| {
+            d.into_iter().all(|e| {
+                e.is_ok_and(|e| {
+                    (e.file_name() == "home" || e.file_name() == "tmp") && empty_dir(&e.path())
+                })
+            })
+        }),
+    }
+}
+
 /// Makes the folders of the pairing `center` where they are missing, as
 /// `run`, each 0700: its folder below the account's home, and in it `home`
-/// and `tmp`. A command of the pairing may have opened its home to others
-/// (`chmod`), which closes again here. Something else under one of those
-/// names (a file, a link, another account's folder) is refused, not
-/// followed.
-pub fn make(run: &Account, center: &str) -> Result<Own, String> {
+/// and `tmp`. A command of a pairing may have opened them, or the
+/// account's home, to others (`chmod`, which Landlock does not rule), and
+/// they close again here. Something else under one of those names (a file,
+/// a link, another account's folder) is refused, not followed.
+fn make(run: &Account, center: &str) -> Result<Own, String> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     let own = Own::of(&run.home, center);
     let root = own.home.parent().unwrap_or(&run.home).to_path_buf();
     let _as = act_as(run)?;
+    if let Ok(m) = std::fs::symlink_metadata(&run.home)
+        && m.is_dir()
+        && m.mode() & 0o077 != 0
+    {
+        std::fs::set_permissions(&run.home, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("{}: {e}", run.home.display()))?;
+    }
     for dir in [&root, &own.home, &own.temp] {
         let err = |e: std::io::Error| format!("{}: {e}", dir.display());
         match std::fs::DirBuilder::new().mode(0o700).create(dir) {
@@ -453,10 +536,13 @@ mod tests {
             assert!(p.is_dir(), "{}", p.display());
             assert_eq!(mode(&p), 0o700, "{}", p.display());
         }
-        // A home its command opened to others closes again.
+        // A home a command opened to others closes again, and so does the
+        // account's.
         std::fs::set_permissions(&own.home, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         make(&run, "lab").unwrap();
         assert_eq!(mode(&own.home), 0o700);
+        assert_eq!(mode(d.path()), 0o700);
         // A link in the home's place is refused, not followed.
         std::fs::remove_dir(&own.temp).unwrap();
         std::os::unix::fs::symlink(d.path(), &own.temp).unwrap();
@@ -500,15 +586,8 @@ mod tests {
         remove(&run, "lab").unwrap();
     }
 
-    #[test]
-    fn a_sync_deletes_the_folders_of_a_pairing_that_went_or_was_made_again() {
-        let d = tempfile::tempdir().unwrap();
-        let run = me(&d.path().join("run"));
-        std::fs::create_dir(&run.home).unwrap();
-        let file = d.path().join("own-folders.json");
-        // What the account's home held before: never a pairing's.
-        std::fs::create_dir(run.home.join("bin")).unwrap();
-        let center = |name: &str, id: &str| nerve_policy::CenterEntry {
+    fn center(name: &str, id: &str) -> nerve_policy::CenterEntry {
+        nerve_policy::CenterEntry {
             name: name.into(),
             url: "https://c".into(),
             pin: None,
@@ -524,23 +603,118 @@ mod tests {
             old_pin: None,
             policy: Default::default(),
             capabilities: Vec::new(),
+        }
+    }
+
+    /// A folder under a new pairing's name that the node did not make for
+    /// it (an earlier version's, or one a command made) is neither taken
+    /// nor deleted, by the sync and before a command; one as empty as a new
+    /// one is taken.
+    #[test]
+    fn a_folder_the_node_did_not_make_is_not_taken_for_a_pairing() {
+        let d = tempfile::tempdir().unwrap();
+        let run = me(&d.path().join("run"));
+        std::fs::create_dir(&run.home).unwrap();
+        let file = d.path().join("own-folders.json");
+        let lab = Own::of(&run.home, "lab");
+        std::fs::create_dir_all(&lab.home).unwrap();
+        std::fs::write(lab.home.join(".gitconfig"), "x").unwrap();
+        let home = Own::of(&run.home, "home");
+        std::fs::create_dir_all(&home.home).unwrap();
+        std::fs::create_dir_all(&home.temp).unwrap();
+        let cfg = NodeConfig {
+            centers: vec![center("lab", "n1"), center("home", "n2")],
+            ..Default::default()
         };
+        let errors = sync(&run, || cfg.clone(), &file);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("the node did not make it"), "{errors:?}");
+        let record = read_record(&file);
+        assert!(!record.contains_key("lab") && record.contains_key("home"));
+        assert!(lab.home.join(".gitconfig").exists());
+        let e = ready(&run, "lab", "n1", &file).unwrap_err();
+        assert!(e.contains("the node did not make it"), "{e}");
+        assert!(lab.home.join(".gitconfig").exists());
+        // Once it is gone, the pairing gets its own.
+        std::fs::remove_dir_all(run.home.join("lab")).unwrap();
+        assert_eq!(ready(&run, "lab", "n1", &file).unwrap(), lab);
+        assert_eq!(
+            read_record(&file).get("lab").map(String::as_str),
+            Some("n1")
+        );
+    }
+
+    /// A command that comes before the sync gets its pairing's folders, not
+    /// those an earlier pairing under its name left, and gets them again
+    /// where they went.
+    #[test]
+    fn a_command_before_the_sync_gets_folders_of_its_own_pairing() {
+        let d = tempfile::tempdir().unwrap();
+        let run = me(&d.path().join("run"));
+        std::fs::create_dir(&run.home).unwrap();
+        let file = d.path().join("own-folders.json");
+        let lab = ready(&run, "lab", "n1", &file).unwrap();
+        std::fs::write(lab.home.join(".bashrc"), "x").unwrap();
+        assert_eq!(ready(&run, "lab", "n1", &file).unwrap(), lab);
+        assert!(lab.home.join(".bashrc").exists());
+        // Paired again under the name, before a sync.
+        assert_eq!(ready(&run, "lab", "n2", &file).unwrap(), lab);
+        assert!(lab.home.is_dir() && !lab.home.join(".bashrc").exists());
+        assert_eq!(
+            read_record(&file).get("lab").map(String::as_str),
+            Some("n2")
+        );
+        std::fs::remove_dir(&lab.temp).unwrap();
+        ready(&run, "lab", "n2", &file).unwrap();
+        assert!(lab.temp.is_dir());
+    }
+
+    /// A sync waits for the one running, and then goes by the config as it
+    /// is then: one started for an older version would undo a newer one.
+    #[test]
+    fn a_sync_waits_for_the_one_running_and_takes_the_config_as_it_is_then() {
+        let d = tempfile::tempdir().unwrap();
+        let run = me(&d.path().join("run"));
+        std::fs::create_dir(&run.home).unwrap();
+        let file = d.path().join("own-folders.json");
+        let cfg = std::sync::Arc::new(Mutex::new(NodeConfig::default()));
+        let running = SYNCING.lock().unwrap();
+        let waiting = {
+            let (run, cfg, file) = (run.clone(), cfg.clone(), file.clone());
+            std::thread::spawn(move || sync(&run, || cfg.lock().unwrap().clone(), &file))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!file.exists(), "it did not wait");
+        cfg.lock().unwrap().centers = vec![center("lab", "n1")];
+        drop(running);
+        assert!(waiting.join().unwrap().is_empty());
+        assert!(Own::of(&run.home, "lab").home.is_dir());
+    }
+
+    #[test]
+    fn a_sync_deletes_the_folders_of_a_pairing_that_went_or_was_made_again() {
+        let d = tempfile::tempdir().unwrap();
+        let run = me(&d.path().join("run"));
+        std::fs::create_dir(&run.home).unwrap();
+        let file = d.path().join("own-folders.json");
+        // What the account's home held before: never a pairing's.
+        std::fs::create_dir(run.home.join("bin")).unwrap();
         let mut cfg = NodeConfig {
             centers: vec![center("lab", "n1"), center("home", "n2")],
             ..Default::default()
         };
-        assert!(sync(&run, &cfg, &file).is_empty());
+        assert!(sync(&run, || cfg.clone(), &file).is_empty());
         let lab = Own::of(&run.home, "lab");
         assert!(lab.home.is_dir() && Own::of(&run.home, "home").temp.is_dir());
         std::fs::write(lab.home.join(".bashrc"), "x").unwrap();
         // Paired again under the same name: a new id, empty folders.
         cfg.centers = vec![center("lab", "n3")];
-        assert!(sync(&run, &cfg, &file).is_empty());
+        assert!(sync(&run, || cfg.clone(), &file).is_empty());
         assert!(lab.home.is_dir() && !lab.home.join(".bashrc").exists());
         assert!(!run.home.join("home").exists());
         assert!(run.home.join("bin").is_dir());
         cfg.centers.clear();
-        assert!(sync(&run, &cfg, &file).is_empty());
+        assert!(sync(&run, || cfg.clone(), &file).is_empty());
         assert!(!run.home.join("lab").exists());
         assert!(read_record(&file).is_empty());
     }

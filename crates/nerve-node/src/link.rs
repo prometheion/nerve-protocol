@@ -3083,7 +3083,7 @@ impl Link {
         let ready = known
             .as_ref()
             .filter(|_| self.shared.separate(&entry.policy) && !sudo_call)
-            .map(|a| self.shared.own_ready(a, &entry.name))
+            .map(|a| self.shared.own_ready(a, &entry))
             .transpose();
         let pairing = match &ready {
             Ok(own) => own.clone(),
@@ -3373,7 +3373,7 @@ impl Link {
         // made where it is missing.
         let pairing = account
             .as_ref()
-            .map(|a| self.shared.own_ready(a, &entry.name))
+            .map(|a| self.shared.own_ready(a, &entry))
             .transpose()
             .map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
         let start_in = pairing

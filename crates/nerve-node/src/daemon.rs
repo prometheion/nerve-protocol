@@ -794,27 +794,30 @@ impl Shared {
         entry
     }
 
-    /// The home and temporary folder of the pairing `center` for a command
+    /// The home and temporary folder of the pairing `entry` for a command
     /// that runs as `run` (`nerve-run`), made where they are missing
-    /// (crate::own_dirs): the node makes them as the pairing comes, and a
-    /// command that finds them gone gets them again. Only the installed
-    /// Linux node makes them; elsewhere they are named alone.
+    /// (crate::own_dirs::ready): the node makes them as the pairing comes,
+    /// and a command that finds them gone, or comes first, gets them. Only
+    /// the installed Linux node makes them; elsewhere they are named alone.
     pub fn own_ready(
         &self,
         run: &crate::service::Account,
-        center: &str,
+        entry: &nerve_policy::CenterEntry,
     ) -> Result<crate::account::Own, String> {
         #[cfg(target_os = "linux")]
         if self.service {
-            return crate::own_dirs::make(run, center);
+            let file = crate::own_dirs::record_file(&self.paths);
+            return crate::own_dirs::ready(run, &entry.name, &entry.node_id, &file);
         }
-        Ok(crate::account::Own::of(&run.home, center))
+        Ok(crate::account::Own::of(&run.home, &entry.name))
     }
 
-    /// Brings the pairings' home and temporary folders in line with `cfg`
-    /// (crate::own_dirs::sync), on the installed Linux node: a new
-    /// pairing's are made, those of a pairing that went are deleted. What
-    /// failed is logged; the next change of the config tries again.
+    /// Brings the pairings' home and temporary folders in line with the
+    /// config (crate::own_dirs::sync), on the installed Linux node: a new
+    /// pairing's are made, those of a pairing that went are deleted. It
+    /// waits for one already running, and then goes by the config as it is
+    /// then, not by `cfg`, which only names the account. What failed is
+    /// logged; the next change of the config tries again.
     #[cfg(target_os = "linux")]
     pub fn sync_own_dirs(&self, cfg: &NodeConfig) {
         if !self.service {
@@ -824,7 +827,7 @@ impl Shared {
             return;
         };
         let file = crate::own_dirs::record_file(&self.paths);
-        for e in crate::own_dirs::sync(&run, cfg, &file) {
+        for e in crate::own_dirs::sync(&run, || self.config(), &file) {
             tracing::warn!("pairing folders: {e}");
         }
     }
