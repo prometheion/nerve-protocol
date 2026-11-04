@@ -1369,7 +1369,8 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     // the folder does not.
     for args in [
         &["mode", "set", "allowlist"][..],
-        &["rule", "add", "allow", "files.open"],
+        // The rule an audit entry's button makes for the capability.
+        &["rule", "add", "allow", "", "--action", "files.open"],
     ] {
         let (ok, said) = as_owner(&owner, args);
         assert!(ok, "{said}");
