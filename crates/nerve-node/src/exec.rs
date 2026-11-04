@@ -430,6 +430,10 @@ pub fn landlock_spec(
     // hand runs as its owner and must not read the owner's terminals by name
     // ([`nerve_sandbox::terminal_devices`]). What it loses: listing `/dev`.
     let no_read = [own, &nerve_sandbox::terminal_devices()].concat();
+    // The sockets a command reaches by path while its network is off: those
+    // in its folders and the system's own (nerve_sandbox::kept_sockets).
+    let granted = [&f.read[..], &f.write, &f.exec].concat();
+    let unix = [leave_out(&granted, own), nerve_sandbox::kept_sockets()].concat();
     LandlockSpec {
         read: dev_links_out(leave_out(
             &[nerve_sandbox::system_dirs(), f.read].concat(),
@@ -442,6 +446,7 @@ pub fn landlock_spec(
         )),
         // The caller sets it from the pairing's switch.
         no_network: false,
+        unix,
     }
 }
 
@@ -452,6 +457,8 @@ pub fn landlock_spec(
 /// so a folder of the owner that leads there through a link is resolved as
 /// the sandbox sees it here, which the cut of the folders before this
 /// (`account::around_pairings`, made as the node's user) may not manage.
+/// While the network is off its unix sockets by path are those of its
+/// folders and the system's, not those in the shared `/tmp` and `/var/tmp`.
 pub fn pairing_spec(
     policy: &CenterPolicy,
     home: &Path,
@@ -463,7 +470,17 @@ pub fn pairing_spec(
     let mut spec = landlock_spec(policy, home, own, writable);
     let around = [run_home.to_path_buf()];
     let mine = [real(&mine.home), real(&mine.temp)];
-    for set in [&mut spec.read, &mut spec.write, &mut spec.exec] {
+    // While its network is off it reaches no socket in `/tmp` and
+    // `/var/tmp`, which every account shares: a program of another could
+    // answer there and reach the network for it.
+    let shared = [real(Path::new("/tmp")), real(Path::new("/var/tmp"))];
+    spec.unix.retain(|p| !shared.contains(&real(p)));
+    for set in [
+        &mut spec.read,
+        &mut spec.write,
+        &mut spec.exec,
+        &mut spec.unix,
+    ] {
         let (kept, rest): (Vec<PathBuf>, Vec<PathBuf>) = std::mem::take(set)
             .into_iter()
             .partition(|p| mine.iter().any(|m| within(&real(p), m)));
@@ -2971,6 +2988,63 @@ mod tests {
         assert!(!reaches(&spec, &run_home.join("other/home")), "{spec:?}");
         assert!(!reaches(&spec, &run_home.join("other")), "{spec:?}");
         assert!(!reaches(&spec, &run_home), "{spec:?}");
+    }
+
+    /// While its network is off a command reaches unix sockets by path in
+    /// its pairing's own and granted folders and the system's kept sockets
+    /// alone: not in the node's own folders, another pairing's, or the
+    /// shared `/tmp` and `/var/tmp`, where a program of another account could
+    /// answer for it.
+    #[test]
+    fn a_command_off_the_network_reaches_the_sockets_of_its_folders_only() {
+        let d = tempfile::tempdir().unwrap();
+        let w = std::fs::canonicalize(d.path()).unwrap();
+        let run_home = w.join("srv/run");
+        let mine = crate::account::Own::of(&run_home, "lab");
+        for dir in [&mine.home, &mine.temp, &run_home.join("other/home")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for dir in ["proj", "state"] {
+            std::fs::create_dir_all(w.join(dir)).unwrap();
+        }
+        let folder = |p: &Path| nerve_policy::config::Folder {
+            path: p.display().to_string(),
+            access: Access::ALL,
+        };
+        let policy = CenterPolicy {
+            folders: [
+                w.join("proj"),
+                mine.home.clone(),
+                mine.temp.clone(),
+                w.clone(),
+            ]
+            .iter()
+            .chain([PathBuf::from("/tmp"), PathBuf::from("/var/tmp")].iter())
+            .map(|p| folder(p))
+            .collect(),
+            ..Default::default()
+        };
+        let own = [w.join("state")];
+        let reaches = |spec: &LandlockSpec, p: &Path| spec.unix.iter().any(|s| p.starts_with(s));
+        let plain = landlock_spec(&policy, &w, &own, &[]);
+        assert!(reaches(&plain, &w.join("proj/s")), "{plain:?}");
+        assert!(!reaches(&plain, &w.join("state/s")), "{plain:?}");
+        let spec = pairing_spec(&policy, &w, &own, &[], &run_home, &mine);
+        for p in [w.join("proj/s"), mine.home.join("s"), mine.temp.join("s")] {
+            assert!(reaches(&spec, &p), "{p:?}: {spec:?}");
+        }
+        for p in [
+            w.join("state/s"),
+            run_home.join("other/home/s"),
+            run_home.join("s"),
+            real(Path::new("/tmp")).join("s"),
+            real(Path::new("/var/tmp")).join("s"),
+        ] {
+            assert!(!reaches(&spec, &p), "{p:?}: {spec:?}");
+        }
+        for kept in nerve_sandbox::kept_sockets() {
+            assert!(spec.unix.contains(&kept), "{kept:?}: {spec:?}");
+        }
     }
 
     /// A folder that is, or since became, a link into a protected entry is

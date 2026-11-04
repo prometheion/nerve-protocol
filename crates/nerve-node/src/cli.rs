@@ -2096,6 +2096,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             }
             let e = crate::pair::pair(&paths, &link, name.as_deref()).await?;
             w(out, format!("paired with {} as {}", e.url, e.name));
+            tell_pairings_apart(&paths, out).await;
             Ok(())
         }
         Cmd::Center(CenterCmd::Rm(center)) => {
@@ -2262,6 +2263,9 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             let owner = crate::service::owner_of(&paths);
             for line in stopped_lines(&cfg, owner.as_deref()) {
                 w(out, line);
+            }
+            if let Some(warning) = pairings_warning_here(&paths, &cfg) {
+                w(out, format!("warning: {warning}"));
             }
             Ok(())
         }
@@ -2914,6 +2918,30 @@ fn settings_grant_warning(name: &str, g: SettingsGrant, root: bool) -> Option<St
     })
 }
 
+/// [`crate::account::pairings_warning`] for the node at `paths` with the
+/// config `cfg`, as this machine stands: whether it is the installed node,
+/// and its kernel's Landlock. For a node that does not run, and right after
+/// a pairing, which the running node may not have read yet.
+pub(crate) fn pairings_warning_here(paths: &NodePaths, cfg: &NodeConfig) -> Option<String> {
+    let separate = cfg!(target_os = "linux") && crate::service::is_service_node(paths);
+    crate::account::pairings_warning(
+        separate,
+        nerve_sandbox::Confinement::detect().landlock_abi,
+        cfg,
+        crate::now_ms(),
+    )
+}
+
+/// Says after a pairing that nothing keeps the pairings of nerve-run apart
+/// here ([`pairings_warning_here`]), once there are two of them.
+async fn tell_pairings_apart(paths: &NodePaths, out: &mut dyn Write) {
+    if let Ok((cfg, _)) = read_config(paths).await
+        && let Some(w) = pairings_warning_here(paths, &cfg)
+    {
+        let _ = writeln!(out, "Warning: {w}");
+    }
+}
+
 /// What `status` says of a node that does not run, with the config `cfg`
 /// and the `owner` the unit names, a line each.
 fn stopped_lines(cfg: &NodeConfig, owner: Option<&str>) -> Vec<String> {
@@ -2952,6 +2980,9 @@ fn status_lines(v: &Value) -> Vec<String> {
     }
     if let Some(l) = v["landlock_warning"].as_str() {
         lines.push(format!("warning: {l}"));
+    }
+    if let Some(p) = v["pairings_warning"].as_str() {
+        lines.push(format!("warning: {p}"));
     }
     lines.extend(
         grant_lines(&v["folder_grants"])
@@ -3234,6 +3265,7 @@ async fn setup_steps(
             let e = crate::pair::pair(paths, &link, None).await?;
             let _ = writeln!(out, "paired with {} as {}", e.url, e.name);
             steps.push(format!("paired with {} as {}", e.url, e.name));
+            tell_pairings_apart(paths, out).await;
             center = Some(e.name);
         } else {
             let _ = writeln!(out, "not paired");
@@ -7028,6 +7060,7 @@ mod tests {
             "owner": "alice",
             "home_warning": {"warning": "Without Landlock, nerve-run can read every file in your home /home/alice"},
             "landlock_warning": "this kernel's Landlock is ABI 4, which does not guard device ioctls",
+            "pairings_warning": "Without Landlock nothing keeps the pairings apart: the commands of a, b all run as nerve-run",
             "folder_grants": {
                 "stale": ["/home/alice/gone", "/var/lib/nerve/state/acl.json"],
                 "errors": [
@@ -7054,6 +7087,12 @@ mod tests {
         );
         assert!(
             has("warning: this kernel's Landlock is ABI 4, which does not guard device ioctls"),
+            "{lines:#?}"
+        );
+        assert!(
+            has(
+                "warning: Without Landlock nothing keeps the pairings apart: the commands of a, b all run as nerve-run"
+            ),
             "{lines:#?}"
         );
         assert!(

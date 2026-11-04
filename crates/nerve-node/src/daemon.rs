@@ -1384,6 +1384,18 @@ impl Shared {
         None
     }
 
+    /// That the commands of two or more pairings run as `nerve-run` here
+    /// with no Landlock to keep them apart (crate::account::pairings_warning).
+    fn pairings_warning(&self, cfg: &NodeConfig) -> Option<String> {
+        let separate = self.service && cfg!(target_os = "linux");
+        crate::account::pairings_warning(
+            separate,
+            self.confinement.landlock_abi,
+            cfg,
+            crate::now_ms(),
+        )
+    }
+
     /// What `nerve-run` may read of the owner's home beyond its folders on
     /// the installed Linux node without Landlock
     /// (crate::account::home_warning): the home, its mode when others may
@@ -1690,6 +1702,9 @@ impl Shared {
             "home_warning": self.home_warning(&cfg),
             // What this kernel's Landlock does not guard.
             "landlock_warning": self.landlock_warning(),
+            // That nothing keeps two pairings of nerve-run apart without
+            // Landlock.
+            "pairings_warning": self.pairings_warning(&cfg),
             "centers": centers,
             "relay": self.relay.status(&cfg),
             "ui": self.ui_status(&cfg),
@@ -4308,6 +4323,67 @@ mod tests {
                 w.contains(&format!("ABI {abi}, which does not guard device ioctls")),
                 told,
                 "service {service}, ABI {abi}: {st}"
+            );
+            daemon.stop().await;
+        }
+    }
+
+    /// The installed node's status says that nothing keeps its pairings of
+    /// nerve-run apart without Landlock once there are two; with Landlock,
+    /// with one, and on a node run by hand it says nothing of it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_status_says_two_pairings_of_nerve_run_are_not_apart_without_landlock() {
+        for (service, abi, two, told) in [
+            (true, None, true, true),
+            (true, None, false, false),
+            (true, Some(6), true, false),
+            (false, None, true, false),
+        ] {
+            let log = Log::new(Level::Info);
+            let d = tempfile::tempdir().unwrap();
+            let mut o = options(&d, &log);
+            o.full_rights = Some(false);
+            o.exe = Some("/bin/true".into());
+            o.service = Some(service);
+            o.owner = Some("alice".into());
+            o.confinement = Some(Confinement {
+                landlock_abi: abi,
+                appcontainer: false,
+            });
+            let daemon = Daemon::start(o).await.unwrap();
+            let entry = |name: &str| nerve_policy::CenterEntry {
+                name: name.into(),
+                url: "https://center.example".into(),
+                pin: None,
+                center_id: "c".into(),
+                node_id: name.into(),
+                settings: Default::default(),
+                paused: false,
+                revoked: false,
+                unknown: false,
+                public_key: None,
+                key_rotations: 0,
+                pin_rotations: 0,
+                old_pin: None,
+                policy: nerve_policy::config::CenterPolicy {
+                    mode: nerve_policy::Mode::Folder,
+                    ..Default::default()
+                },
+                capabilities: Vec::new(),
+            };
+            daemon.owner_edit(|c| {
+                c.centers.push(entry("home"));
+                if two {
+                    c.centers.push(entry("lab"));
+                }
+            });
+            let st = daemon.status();
+            let w = st["pairings_warning"].as_str().unwrap_or_default();
+            assert_eq!(
+                w.contains("nothing keeps the pairings apart"),
+                told,
+                "service {service}, ABI {abi:?}, two {two}: {st}"
             );
             daemon.stop().await;
         }

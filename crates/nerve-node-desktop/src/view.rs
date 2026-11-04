@@ -137,6 +137,7 @@ pub fn status(v: &Value, now_ms: u64) -> (NodeStatus, Vec<CenterRow>) {
         limits_off: limits_off.into(),
         limits_restart,
         warnings: text_model(warnings),
+        pairings_warning: s(&v["pairings_warning"]).into(),
     };
     (status, centers)
 }
@@ -1986,6 +1987,19 @@ mod tests {
         assert!(said.contains("run as root"), "{said}");
         assert!(!settings_grant_said("home", true, false).contains("root"));
         assert!(!settings_grant_said("home", false, true).contains("root"));
+    }
+
+    /// That nothing keeps the pairings of nerve-run apart without Landlock
+    /// is the Centers page's, running or not; none where the node says none.
+    #[test]
+    fn the_pairings_not_kept_apart_are_said() {
+        let said = "Without Landlock nothing keeps the pairings apart";
+        for daemon in ["running", "not running"] {
+            let v = json!({"daemon": daemon, "pairings_warning": said, "centers": []});
+            assert_eq!(status(&v, NOW).0.pairings_warning, said, "{daemon}");
+            let v = json!({"daemon": daemon, "pairings_warning": null, "centers": []});
+            assert_eq!(status(&v, NOW).0.pairings_warning, "", "{daemon}");
+        }
     }
 
     /// Root as the owner is a warning on the Overview, running or not.

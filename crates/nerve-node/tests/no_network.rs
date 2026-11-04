@@ -185,6 +185,48 @@ async fn a_folder_command_without_network_opens_no_tcp_connection() {
     }
 }
 
+/// With the switch and Landlock from ABI 9, a folder-mode command reaches a
+/// unix socket by path in its folders and not one elsewhere, which it
+/// reaches without the switch: a program answering there could reach the
+/// network for it. Skipped below ABI 9 and without python3 to connect with.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_command_without_network_reaches_unix_sockets_in_its_folders_only() {
+    let abi = nerve_sandbox::Confinement::detect().landlock_abi;
+    if abi.is_none_or(|v| v < nerve_sandbox::LANDLOCK_RESOLVE_UNIX)
+        || !nerve_sandbox::net_filter::available()
+        || !Path::new("/usr/bin/python3").exists()
+    {
+        eprintln!("skipped: no Landlock rules for unix sockets, no seccomp filters or no python3");
+        return;
+    }
+    for off in [false, true] {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let work = root.join("work");
+        let elsewhere = root.join("elsewhere");
+        for dir in [&work, &elsewhere] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let _in = std::os::unix::net::UnixListener::bind(work.join("s")).unwrap();
+        let _out = std::os::unix::net::UnixListener::bind(elsewhere.join("s")).unwrap();
+        let mut center = FakeCenter::start(false).await.unwrap();
+        let daemon = node(&root, &work, &center, off, None, None).await;
+        let mut conn = linked(&mut center).await;
+        for (dir, reached) in [(&work, true), (&elsewhere, !off)] {
+            let probe = format!(
+                "/usr/bin/python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1]); print(\"open\")' {}",
+                dir.join("s").display()
+            );
+            let r = run(&mut conn, &probe, &work)
+                .await
+                .expect("the command runs");
+            let opened = r["stdout"] == "open\n" && r["exit_code"] == 0;
+            assert_eq!(opened, reached, "network off {off}, {dir:?}: {r}");
+        }
+        daemon.stop().await;
+    }
+}
+
 /// Where the node has no network filter, it runs none of the pairing's
 /// folder-mode commands while its network is off, and says why; it offers
 /// it no command.

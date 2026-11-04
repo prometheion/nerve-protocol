@@ -321,6 +321,37 @@ pub fn landlock_warning(abi: Option<i32>) -> Option<String> {
     })
 }
 
+/// What `status`, a pairing and the apps say where two or more pairings'
+/// commands run as [`RUN_USER`] on a node without Landlock: `separate` (the
+/// installed Linux node, `crate::daemon::Shared::separate`), the kernel's
+/// Landlock ABI `landlock`, and the pairings of `cfg` at `now`. All of them
+/// run as that one account, which owns every pairing's folders, and only
+/// Landlock holds a command to its own pairing's: without it a command of
+/// one pairing reaches what the others keep. A revoked pairing runs nothing
+/// and is not counted.
+pub fn pairings_warning(
+    separate: bool,
+    landlock: Option<i32>,
+    cfg: &nerve_policy::NodeConfig,
+    now: u64,
+) -> Option<String> {
+    if !separate || landlock.is_some() {
+        return None;
+    }
+    let names: Vec<&str> = cfg
+        .centers
+        .iter()
+        .filter(|c| !c.revoked && !c.policy.runs_as_owner(now))
+        .map(|c| c.name.as_str())
+        .collect();
+    (names.len() > 1).then(|| {
+        format!(
+            "Without Landlock nothing keeps the pairings apart: the commands of {} all run as {RUN_USER}, so a command of one can read and change what the others keep in their own folders and in the folders you give them. A kernel with Landlock keeps each pairing to its own.",
+            names.join(", ")
+        )
+    })
+}
+
 /// What closes the reach of [`home_warning`].
 #[cfg(unix)]
 const LANDLOCK_ADVICE: &str =
@@ -334,6 +365,56 @@ const GIVEN_ADVICE: &str = "This warning stays while you give it a folder in you
 #[cfg(all(test, unix))]
 mod home_tests {
     use super::*;
+
+    /// Two or more pairings of nerve-run without Landlock are told, named:
+    /// not with Landlock, not on a node whose commands run as its own user,
+    /// and not where only one runs as nerve-run (the other in user mode, or
+    /// revoked).
+    #[test]
+    fn a_second_pairing_of_nerve_run_without_landlock_is_told() {
+        use nerve_policy::config::Mode;
+        let pairing = |name: &str, mode: Mode| nerve_policy::CenterEntry {
+            name: name.into(),
+            url: "https://c.example".into(),
+            pin: None,
+            center_id: "c".into(),
+            node_id: name.into(),
+            settings: Default::default(),
+            paused: false,
+            revoked: false,
+            unknown: false,
+            public_key: None,
+            key_rotations: 0,
+            pin_rotations: 0,
+            old_pin: None,
+            policy: nerve_policy::config::CenterPolicy {
+                mode,
+                ..Default::default()
+            },
+            capabilities: Vec::new(),
+        };
+        let mut cfg = nerve_policy::NodeConfig {
+            centers: vec![pairing("home", Mode::Folder)],
+            ..Default::default()
+        };
+        assert_eq!(pairings_warning(true, None, &cfg, 0), None);
+        cfg.centers.push(pairing("lab", Mode::Allowlist));
+        let w = pairings_warning(true, None, &cfg, 0).unwrap();
+        assert!(
+            w.contains("nothing keeps the pairings apart") && w.contains("home, lab"),
+            "{w}"
+        );
+        assert_eq!(pairings_warning(true, Some(6), &cfg, 0), None);
+        assert_eq!(pairings_warning(false, None, &cfg, 0), None);
+        cfg.centers[1].policy.as_owner = true;
+        assert_eq!(pairings_warning(true, None, &cfg, 0), None);
+        cfg.centers[1].policy.as_owner = false;
+        cfg.centers[1].revoked = true;
+        assert_eq!(pairings_warning(true, None, &cfg, 0), None);
+        cfg.centers[1].revoked = false;
+        cfg.centers[1].policy.mode = Mode::User;
+        assert_eq!(pairings_warning(true, None, &cfg, 0), None);
+    }
     use std::os::unix::fs::PermissionsExt;
 
     /// A home others may list or enter is open to `nerve-run` too; one

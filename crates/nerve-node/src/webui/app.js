@@ -49,6 +49,7 @@ function pageOverview() {
       : btn("Panic", "danger", act(panic), "ban", "panic")),
     o.locked ? banner("warn", "lock", "The node is locked: every link is closed and nothing runs until you unlock it.") : null,
     o.owner_is_root ? banner("warn", "alert", "Root is the owner: commands of user mode, and of allowlist mode as the owner, run as root and can do everything on this machine, Nerve and its keys included.") : null,
+    o.pairings_warning ? banner("warn", "alert", o.pairings_warning) : null,
     section("Centers", "The centers this machine is paired with.", null,
       o.centers.length ? el("div", { class: "stack" }, o.centers.map(centerCard)) : empty("No center is paired yet.", "server")),
     section("Service", "Starting, stopping and restarting the node is done at the CLI.", null,
@@ -90,6 +91,7 @@ function pageCenters() {
   if (!o) return [loading()];
   return [
     head("server", "Centers", "Pair this machine with a center, and decide what each one may change."),
+    o.pairings_warning ? banner("warn", "alert", o.pairings_warning) : null,
     section("Pair a center", "Paste the link the center's web UI shows under Pair a machine. It goes to the node as the command's input, never in a command line.", null,
       pairForm()),
     section("Paired centers", null, null,

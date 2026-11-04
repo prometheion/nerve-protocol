@@ -251,6 +251,16 @@ export component CentersPage inherits PageFrame {
     // When the node does not answer (a node.toml it refuses, say), the
     // cards are what it said last: greyed, and their buttons wait.
     Reveal {
+        shown: Store.status.pairings-warning != "";
+        gap: Space.xxl;
+        Banner {
+            tone: Tone.warn;
+            title: "The pairings are not kept apart";
+            text: Store.status.pairings-warning;
+        }
+    }
+
+    Reveal {
         shown: Store.centers.length > 0;
         gap: Space.xxl;
         VerticalLayout {
