@@ -1211,7 +1211,13 @@ mod tests {
             path: p.into(),
             access: Access::parse(a).unwrap(),
         };
-        let under = |p: &str| top.join(p).display().to_string();
+        // Joined part by part: a `/` inside one part stays a `/` on Windows.
+        let under = |p: &str| {
+            p.split('/')
+                .fold(top.clone(), |path, part| path.join(part))
+                .display()
+                .to_string()
+        };
         let folders = vec![
             grant("~/work", "rw"),
             grant(&under("srv"), "r"),
