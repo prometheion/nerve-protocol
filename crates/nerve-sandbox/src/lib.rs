@@ -2689,7 +2689,11 @@ mod tests {
     #[test]
     fn no_terminal_is_writable() {
         assert!(!system_writable().iter().any(|p| p.starts_with("/dev/tty")));
-        assert!(system_writable().contains(&PathBuf::from("/dev/null")));
+        // Windows has no such files; the list is empty there.
+        assert_eq!(
+            system_writable().contains(&PathBuf::from("/dev/null")),
+            cfg!(unix)
+        );
     }
 
     /// Landlock below ABI 3 does not guard truncate(2): the node takes it as
