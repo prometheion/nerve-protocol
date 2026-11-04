@@ -25,7 +25,8 @@ Fedora 36 and later) and fontconfig.
 
 - With the node running, `nerve-node status` shows `confinement landlock
   v…`, or `confinement none` when the kernel has no Landlock (some
-  container hosts, older kernels). On the node installed as a service,
+  container hosts, older kernels; Landlock below ABI 3, before Linux 6.2,
+  counts as none). On the node installed as a service,
   `folder` and `allowlist` mode then run their commands as `nerve-run`
   without Landlock, held back by the account alone; `status` says `as
   nerve-run, without Landlock`. A node you run yourself refuses every
@@ -39,6 +40,16 @@ Fedora 36 and later) and fontconfig.
   Landlock; `umask 027` only narrows what it can read. See
   [modes](modes.md#your-home-and-other-accounts). With Landlock nothing is
   said: it holds each command to its folders.
+- Landlock below ABI 6 (Linux 6.12; the stock kernels of Ubuntu 22.04 and
+  24.04 and Debian 12 are older) lets a command signal other processes of its account and
+  reach abstract unix sockets: the installed node's pairings, whose commands
+  are all `nerve-run`'s, are kept apart from each other only from ABI 6.
+  `install` and `status` name what the kernel's Landlock lacks. See
+  [Landlock versions](modes.md#landlock-versions).
+- A command has no controlling terminal, and of the installed node's
+  environment a command of `nerve-run` gets only `PATH`, `LANG`, `TERM`,
+  `TMPDIR` and the names in `machine.command_env`. A node you run yourself
+  gives its commands your whole environment.
 - Commands run with `no_new_privs`, so setuid programs cannot gain privileges.
   Only a command on the [sudo list](sudo.md) runs without it.
 - When a call ends, the node kills the command's whole process group.

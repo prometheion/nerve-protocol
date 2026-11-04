@@ -41,6 +41,7 @@ allow_root = false          # let a node run by hand run as root (Linux)
 sudo_path = "/usr/bin/sudo" # optional
 user = "alice"              # installed node on Windows: the account commands and sudo run as
 secret_storage = "file"     # file | keyring: where the node keeps its keys
+command_env = ["HTTPS_PROXY"] # installed Linux node: variables of the service nerve-run's commands get too
 
 [limits]
 max_running = 16            # commands at once, over all centers

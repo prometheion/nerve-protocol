@@ -1545,12 +1545,14 @@ below):
 | Socket | Who is served | Mode | Places | For |
 |---|---|---|---|---|
 | `<state>/run/ctl.sock` | the node's own user and root, each request with the token | 0600, in a 0700 folder | 64 | the CLI; a provider of a node run by hand (§7) |
-| `/run/nerve-node/owner.sock` (installed node, Linux) | every account; `cli` an owner's only | 0666, in the unit's runtime folder | 64 | the owner's commands (below) |
+| `/run/nerve-node/owner.sock` (installed node, Linux) | every account; `cli` an owner's only | 0666, in the unit's runtime folder | 64 for root and the owner; any other account 4, all of them 16, told by its uid at `accept` | the owner's commands (below) |
 | `/run/nerve-node/provider.sock` (installed node, Linux) | an owner (root always is one), told as it connects | 0666, in the unit's runtime folder | 16 | capability providers (§7) |
 
 Each socket has its places of its own: a connection held on one never takes
 one of another's, so providers, which hold theirs while they are attached,
-and the owner's commands never starve each other.
+and the owner's commands never starve each other. On the owner socket the
+other accounts have places of their own too, so a command of `nerve-run`
+that holds connections open never keeps the owner out.
 
 `<state>/run/ctl.sock` (Unix; Windows has the control pipe below). One
 JSON object per line: the client sends
@@ -1609,7 +1611,7 @@ Methods:
 | `config.accept` | | takes `node.toml` as it is after it was refused, and signs it (§1); an action that came to sense or actuate in it is switched off, in the same write, for each center whose earlier switch or allow rule covered it: `{version, held: [[center, action]]}` |
 | `folder.add` | `center`, `path`, `access` | `folder add`, done by the node so that it is judged as the owner (`exec::settle`): the path is followed a link at a time and must resolve to itself, the folder is stored at that place with `access` (replacing the entry there) and recorded in `policy.places`; `{stored, recorded, mode, counts}` (`counts`: whether the
 center's folders hold its commands, in folder mode or as `nerve-run`). An error, with nothing changed, when the path crosses a link inside a `w` folder of any center, leads nowhere, or changed while it was looked at. Where the node cannot tell either (a folder it may not look into, or a `w` folder it cannot resolve) the folder is stored as given, `recorded` is false, and a record it had stays. The CLI uses it whenever a node runs |
-| `folder.grants` | | the installed Linux node brings the folder ACLs in line at once (§Folder ACLs) and answers what that left: `{errors, stale, failed, skipped}`; `null` elsewhere. `folder add`, `set` and `rm` ask it |
+| `folder.grants` | `every` (bool) | the installed Linux node brings the folder ACLs in line at once (§Folder ACLs), with `every` walking every grant, and answers what that left, and whether this is the installed node: `{errors, stale, failed, skipped, service}`; `null` on Windows. `folder add` and `rm` ask it, `folder set` and `folder sync` with `every` |
 | `reload` | | rereads `node.toml`; only a file the node signed is applied (§1) |
 | `sudo.status` | | `{sudo: "on"|"off"}` |
 | `sudo.on` | `password` | checks it with `sudo -v` and turns the switch on (§4) |
@@ -1790,8 +1792,10 @@ whose path a link now crosses, is taken off by a walk of the outer grant,
 if that walk saw all of it: one that skipped a folder on another file system
 or one the owner may not list leaves the inner grant `stale`, until its own
 walk goes through.
-A sync runs at the start (also for failed grants), on each config version,
-on `folder.grants`, and before a call of `nerve-run` (`exec.run`, `fs`),
+A sync runs at the start (there it walks every grant, also an unchanged one,
+so what was moved into a granted folder gets its entries), on each config
+version, on `folder.grants` (with `{"every": true}`, from `folder set` and
+`folder sync`, every grant too), and before a call of `nerve-run` (`exec.run`, `fs`),
 where a failed grant is tried again at most once a minute (`ACL_RETRY`).
 The call is refused while an entry that should have come off is left
 (`stale`), for every pairing of `nerve-run`. `uninstall` takes every
