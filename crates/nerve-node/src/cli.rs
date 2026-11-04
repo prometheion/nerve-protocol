@@ -2329,6 +2329,9 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             if policy.no_network {
                 w(out, format!("{name}: {NO_NETWORK_LINE}"));
             }
+            if let Some(note) = network_mode_note(policy) {
+                w(out, note);
+            }
             Ok(())
         }
         Cmd::Cap(CapCmd::Set {
@@ -3420,7 +3423,25 @@ async fn set_network(
     if off && !network_rules_here() {
         let _ = writeln!(out, "warning: {}", crate::daemon::NETWORK_NOT_HELD);
     }
+    let (cfg, _) = read_config(paths).await?;
+    if let Some(note) = cfg.center(&name).and_then(|c| network_mode_note(&c.policy)) {
+        let _ = writeln!(out, "{note}");
+    }
     Ok(())
+}
+
+/// What `folder network off` and `folder ls` add where the center is not
+/// in folder mode now: the switch holds there only, and its commands keep
+/// the network in the other modes.
+fn network_mode_note(policy: &nerve_policy::config::CenterPolicy) -> Option<String> {
+    let mode = policy.mode_at(crate::now_ms());
+    (policy.no_network && mode != Mode::Folder).then(|| {
+        format!(
+            "note: it is in {} mode now, where its commands keep the network; the switch holds \
+             in folder mode only",
+            mode.as_str()
+        )
+    })
 }
 
 /// Whether this machine's kernel can keep a command off the network
@@ -6050,7 +6071,14 @@ mod tests {
     fn folder_network_switches_the_folder_commands_network() {
         let (_d, paths) = setup(&["home"]);
         let policy = || load(&paths).centers[0].policy.clone();
+        // Outside folder mode it is said that the switch does not hold.
+        let note = "note: it is in allowlist mode now, where its commands keep the network";
         let out = run(&paths, &["folder", "network", "off"]).unwrap();
+        assert!(out.contains(note), "{out}");
+        assert!(run(&paths, &["folder", "ls"]).unwrap().contains(note));
+        run(&paths, &["mode", "set", "folder"]).unwrap();
+        let out = run(&paths, &["folder", "network", "off"]).unwrap();
+        assert!(!out.contains("note:"), "{out}");
         assert!(
             out.starts_with(&format!("home: {NO_NETWORK_LINE}\n")),
             "{out}"
