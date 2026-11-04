@@ -1127,7 +1127,8 @@ impl Link {
                         }
                     }
                 }
-                _ = stop.changed() => {
+                // Also a stop sent before this link's receiver was made.
+                _ = async { stop.wait_for(|s| *s).await.is_ok() } => {
                     self.handle.event("node", "going_away", json!({"reason": "shutdown"}));
                     self.cs.set_status("stopped");
                     return self.end(ByeReason::Shutdown, Outcome::Stop).await;

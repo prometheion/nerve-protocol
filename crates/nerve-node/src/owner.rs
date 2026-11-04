@@ -1691,10 +1691,12 @@ fn spawn<F: HandedFd>(
     } else {
         PathBuf::from("/")
     };
+    // The program may have been written a moment ago (an update's).
+    let start = |dir: &Path| nerve_transport::files::retry_busy(|| make(dir).spawn());
     match cwd.filter(|d| d.is_absolute()) {
         // A folder the node may not enter fails the start: then the root.
-        Some(d) => make(d).spawn().or_else(|_| make(&root).spawn()),
-        None => make(&root).spawn(),
+        Some(d) => start(d).or_else(|_| start(&root)),
+        None => start(&root),
     }
 }
 

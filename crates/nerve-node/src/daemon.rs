@@ -2020,10 +2020,12 @@ async fn supervise(shared: Arc<Shared>) {
         }
         lock(&shared.centers).retain(|n, _| cfg.center(n).is_some());
         changed.borrow_and_update();
+        // The stop's value, not its change: a stop sent before this task
+        // first ran counts as seen for a receiver made after it.
         tokio::select! {
             _ = tick.tick() => {}
             _ = changed.changed() => {}
-            _ = stop.changed() => break,
+            _ = async { stop.wait_for(|s| *s).await.is_ok() } => break,
         }
     }
     // Each link task sends its `bye shutdown` and ends.
@@ -3038,6 +3040,19 @@ mod tests {
         opts.ctl = false;
         opts.log = Some(log.clone());
         opts
+    }
+
+    /// A stop sent before the daemon's tasks first ran is not lost: a stop
+    /// right after the start, with no yield between, returns at once and
+    /// not after its time limits.
+    #[tokio::test]
+    async fn a_stop_right_after_the_start_is_not_lost() {
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(options(&d, &log)).await.unwrap();
+        let t = std::time::Instant::now();
+        daemon.stop().await;
+        assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
     }
 
     fn warnings(log: &Log) -> Vec<String> {

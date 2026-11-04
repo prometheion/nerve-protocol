@@ -641,8 +641,8 @@ impl System for Host {
         }
         #[cfg(not(unix))]
         let _ = account;
-        let o = c
-            .output()
+        // The program `update` staged a moment ago.
+        let o = nerve_transport::files::retry_busy(|| c.output())
             .map_err(|e| format!("{}: {e}", program.display()))?;
         if !o.status.success() {
             return Err(format!("{} --version: {}", program.display(), failure(&o)));
@@ -1966,11 +1966,11 @@ pub fn hand_over_uninstall(app: &Path, purge: bool, out: &mut dyn Write) -> Resu
     if purge {
         cmd.arg("--purge");
     }
-    let mut child = cmd
-        .stdin(Stdio::inherit())
+    cmd.stdin(Stdio::inherit())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    // The app may have been written a moment ago.
+    let mut child = nerve_transport::files::retry_busy(|| cmd.spawn())
         .map_err(|e| format!("{}: {e}", app.display()))?;
     let stderr = child.stderr.take().expect("piped");
     let said = std::thread::spawn(move || {
@@ -4800,7 +4800,6 @@ pub(crate) mod tests {
     #[cfg(unix)]
     #[test]
     fn the_node_alone_hands_the_uninstall_of_a_takeover_to_the_app() {
-        use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let node = layout(d.path());
         let app = Layout {
@@ -4811,14 +4810,13 @@ pub(crate) mod tests {
         assert_eq!(app_beside(&node), None);
         std::fs::create_dir_all(app.bin.parent().unwrap()).unwrap();
         let script = |code: u8| {
-            std::fs::write(
+            nerve_transport::files::write_program(
                 &app.bin,
-                format!(
+                &format!(
                     "#!/bin/sh\necho \"removed the program, asked: $*\"\necho \"a log line\" >&2\nexit {code}\n"
                 ),
             )
             .unwrap();
-            std::fs::set_permissions(&app.bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         };
         script(0);
         assert_eq!(app_beside(&node).as_ref(), Some(&app.bin));

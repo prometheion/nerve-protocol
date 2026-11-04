@@ -79,8 +79,8 @@ pub enum Reply {
     /// each line the client sends, a JSON value of at most [`LINE_BYTES`],
     /// to `inbound`. It ends when the client closes or sends a line that is
     /// too long or no JSON, or when the handler drops the sender of `out` or
-    /// the receiver of `inbound`; `inbound` is dropped then, which tells
-    /// the handler.
+    /// the receiver of `inbound` (once the values it sent are written);
+    /// `inbound` is dropped then, which tells the handler.
     Session {
         ok: Value,
         out: mpsc::Receiver<Value>,
@@ -198,31 +198,62 @@ where
             // one line before it reads the next would else wait on the node
             // writing while the node waits on it, for good, as soon as a
             // line in each direction fills the socket's buffer.
+            // The handler took its last line: it dropped `inbound`'s
+            // receiver.
+            let gone = tokio::sync::Notify::new();
             let reading = async {
                 loop {
                     let Line::Text(text) =
                         read_line_within(&mut lines, LINE_BYTES, &mut buf).await?
                     else {
-                        return Ok(());
+                        return Ok(true);
                     };
                     let Ok(v) = serde_json::from_str::<Value>(&text) else {
-                        return Ok(());
+                        return Ok(true);
                     };
                     if inbound.send(v).await.is_err() {
-                        return Ok::<(), std::io::Error>(());
+                        gone.notify_one();
+                        return Ok::<bool, std::io::Error>(false);
                     }
                 }
             };
+            // What the handler sent before it took its last line still goes
+            // out: a command that failed at once says why, then its end, and
+            // drops both ends in the same moment the client sends its input.
             let writing = async {
-                while let Some(v) = out.recv().await {
+                let mut taking = true;
+                loop {
+                    let v = if taking {
+                        tokio::select! {
+                            v = out.recv() => match v {
+                                Some(v) => v,
+                                None => break,
+                            },
+                            () = gone.notified() => {
+                                taking = false;
+                                continue;
+                            }
+                        }
+                    } else {
+                        match out.try_recv() {
+                            Ok(v) => v,
+                            Err(_) => break,
+                        }
+                    };
                     write_line(&mut w, &v).await?;
                 }
                 Ok::<(), std::io::Error>(())
             };
-            // Whichever ends first ends the session.
+            tokio::pin!(writing);
+            // The client's end or the handler's ends the session; the
+            // handler's once what it sent is written.
             tokio::select! {
-                r = reading => r?,
-                r = writing => r?,
+                r = reading => {
+                    if !r? {
+                        (&mut writing).await?;
+                    }
+                }
+                r = &mut writing => r?,
             }
         }
     }
@@ -1254,6 +1285,49 @@ mod unix {
             .expect("told before any request")
             .unwrap();
             assert_eq!(told, "{\"error\":\"not you\"}\n");
+        }
+
+        /// A handler that sends its last lines and takes no more input (a
+        /// command that could not start says why, and its end) has them
+        /// written, also when the client's input comes in the same moment.
+        #[tokio::test]
+        async fn a_session_writes_what_the_handler_sent_before_it_ended() {
+            for _ in 0..20 {
+                let (client, server) = UnixStream::pair().unwrap();
+                let handler = Arc::new(|_: CtlRequest, _: ()| async {
+                    let (out_tx, out) = mpsc::channel(4);
+                    let (inbound, in_rx) = mpsc::channel::<Value>(4);
+                    out_tx.send(json!({"err": "cannot run it"})).await.unwrap();
+                    out_tx.send(json!({"exit": 1})).await.unwrap();
+                    drop(in_rx);
+                    Reply::Session {
+                        ok: json!({}),
+                        out,
+                        inbound,
+                    }
+                });
+                let task = tokio::spawn(crate::ctl::serve_stream(server, (), handler));
+                let (r, mut w) = client.into_split();
+                // The request and the input at once, as a CLI with nothing
+                // to type sends them.
+                w.write_all(b"{\"method\": \"cli\"}\n{\"eof\": true}\n")
+                    .await
+                    .unwrap();
+                let mut lines = BufReader::new(r).lines();
+                let mut got = Vec::new();
+                while let Ok(Some(l)) = lines.next_line().await {
+                    got.push(l);
+                }
+                assert_eq!(
+                    got,
+                    [
+                        r#"{"ok":{}}"#,
+                        r#"{"err":"cannot run it"}"#,
+                        r#"{"exit":1}"#
+                    ]
+                );
+                task.await.unwrap().unwrap();
+            }
         }
 
         /// A session on a real socket does not wedge when the node writes a

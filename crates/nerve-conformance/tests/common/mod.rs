@@ -564,12 +564,10 @@ impl Node {
              [ \"$pw\" = '{right}' ] || {{ echo 'Sorry, try again.' >&2; exit 1; }}\n\
              [ -n \"$v\" ] && exit 0\nexec \"$@\"\n"
         );
-        std::fs::write(&script, body).unwrap();
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        nerve_transport::files::write_program(&script, &body).unwrap();
+        #[cfg(not(unix))]
+        std::fs::write(&script, body).unwrap();
         // Through the CLI: the node refuses a node.toml it did not sign.
         let path = script.display().to_string();
         self.ok(&["config", "set", "machine.sudo_path", &path]);

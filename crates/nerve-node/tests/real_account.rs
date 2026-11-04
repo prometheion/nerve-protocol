@@ -751,12 +751,24 @@ for _ in range(80):
 print("held", flush=True)
 time.sleep(60)
 "#;
-    let mut holder = Command::new("runuser")
-        .args(["-u", "nerve-run", "--", "python3", "-c", hold])
-        .current_dir("/")
-        .stdout(std::process::Stdio::piped())
-        .spawn()
+    // As nerve-run itself, not through runuser, whose child a kill of it
+    // leaves running.
+    let run_gid: u32 = sh(Command::new("id").args(["-g", "nerve-run"]))
+        .1
+        .trim()
+        .parse()
         .unwrap();
+    let mut holder = {
+        use std::os::unix::process::CommandExt;
+        Command::new("python3")
+            .args(["-c", hold])
+            .current_dir("/")
+            .gid(run_gid)
+            .uid(run_uid.parse().unwrap())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
     {
         use std::io::BufRead;
         let mut line = String::new();
