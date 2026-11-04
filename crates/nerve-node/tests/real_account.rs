@@ -2107,6 +2107,15 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     .await
     .unwrap_err();
     assert!(e.contains("another pairing's"), "{e}");
+    // Nor does a walk from a folder open to all go into it.
+    let r = fs_call(
+        conn,
+        "find",
+        json!({"path": "/var/lib", "glob": "nerve-run/lab/home/.gitconfig"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r["paths"], json!([]), "{r}");
     let (_, work, conn, _) = &mut links[0];
     run(conn, work, "true").await.unwrap();
     for p in [run_home, &run_home.join("lab"), &run_home.join("lab/home")] {
