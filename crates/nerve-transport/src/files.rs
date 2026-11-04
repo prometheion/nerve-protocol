@@ -53,8 +53,10 @@ pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 /// How often [`retry_busy`] starts a program again.
+#[cfg(unix)]
 const BUSY_TRIES: u32 = 5;
 /// How long apart.
+#[cfg(unix)]
 const BUSY_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Runs `start`, the start of a program, again up to five times 50 ms apart
@@ -64,17 +66,14 @@ const BUSY_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
 /// for writing (#168). Cargo and Go retry for the same reason. Any other
 /// answer, and the last one, is given as it is. Blocks while it waits.
 pub fn retry_busy<T>(mut start: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
-    let mut tries = 0;
-    loop {
+    #[cfg(unix)]
+    for _ in 0..BUSY_TRIES {
         match start() {
-            #[cfg(unix)]
-            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < BUSY_TRIES => {
-                tries += 1;
-                std::thread::sleep(BUSY_PAUSE);
-            }
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => std::thread::sleep(BUSY_PAUSE),
             r => return r,
         }
     }
+    start()
 }
 
 /// Writes the program `text` to `path`, mode 755, through a shell of its
