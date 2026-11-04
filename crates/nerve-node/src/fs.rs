@@ -1375,6 +1375,7 @@ mod tests {
 
     /// A command account that owns none of the test's files, with its home
     /// elsewhere.
+    #[cfg(unix)]
     fn other() -> crate::service::Account {
         crate::service::Account {
             name: "nerve-run".into(),
