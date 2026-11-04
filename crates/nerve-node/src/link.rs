@@ -3083,7 +3083,7 @@ impl Link {
         let ready = known
             .as_ref()
             .filter(|_| self.shared.separate(&entry.policy) && !sudo_call)
-            .map(|a| self.shared.own_ready(a, &entry))
+            .map(|a| self.shared.own_ready(a, entry))
             .transpose();
         let pairing = match &ready {
             Ok(own) => own.clone(),
