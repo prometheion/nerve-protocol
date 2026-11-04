@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use nerve_policy::CenterEntry;
 use nerve_policy::config::{Access, Folder};
+use nerve_policy::paths::within;
 
 use crate::service::Account;
 
@@ -111,6 +112,57 @@ pub fn around_pairings(folders: &[Folder], home: &Path, run_home: &Path) -> Vec<
         }
     }
     out
+}
+
+/// The home of the command account as the paths of a call are compared
+/// (resolved), and the pairing `center`'s own folders in it.
+pub fn pairing_view(run_home: &Path, center: &str) -> (PathBuf, Own) {
+    let home = std::fs::canonicalize(run_home).unwrap_or_else(|_| run_home.to_path_buf());
+    let own = Own::of(&home, center);
+    (home, own)
+}
+
+/// Whether `path` (resolved) lies in `run_home`, the command account's
+/// home, outside the pairing's own two folders `mine`: in another
+/// pairing's home or temporary folder, or in what the account keeps there
+/// besides. With `on_the_way`, the folders above the pairing's own two
+/// (`run_home` itself and the pairing's folder) are not counted: a walk
+/// passes through them and sees only what it may go into.
+pub fn in_other_pairings(path: &Path, run_home: &Path, mine: &Own, on_the_way: bool) -> bool {
+    within(path, run_home)
+        && !within(path, &mine.home)
+        && !within(path, &mine.temp)
+        && !(on_the_way && (within(&mine.home, path) || within(&mine.temp, path)))
+}
+
+/// Why a call of a pairing whose commands run as the command account may
+/// not use `targets`, if it may not: a path in another pairing's folders,
+/// whatever the mode, the folders and the allow rules say (every pairing's
+/// files are that one account's, and the node acts as it). A program is
+/// handed a folder it works below with the owner's rights, so a folder that
+/// holds the account's home is refused too.
+pub fn other_pairings(
+    targets: &[nerve_policy::Target],
+    run_home: &Path,
+    mine: &Own,
+    program: bool,
+) -> Option<String> {
+    targets.iter().find_map(|t| {
+        let shown = nerve_policy::paths::to_wire(&t.path);
+        if in_other_pairings(&t.path, run_home, mine, false) {
+            Some(format!(
+                "{shown} is in the home or temporary folder of another pairing, or in what its \
+                 commands' account keeps besides; no mode, folder or rule gives a pairing those"
+            ))
+        } else if program && t.holds && within(run_home, &t.path) {
+            Some(format!(
+                "{shown} holds the other pairings' home and temporary folders, and a program \
+                 would work below it"
+            ))
+        } else {
+            None
+        }
+    })
 }
 
 /// `entry` as the gate and the sandbox see it when its commands run as
@@ -1139,6 +1191,67 @@ mod tests {
                 grant("/srv/proj", "rx"),
             ]
         );
+    }
+
+    /// Whatever the mode or the rules say, a pairing's paths in another
+    /// pairing's folders, or among what the account keeps in its home, are
+    /// refused; its own two folders, `/tmp` and the rest are not. A program
+    /// is not handed a folder above the account's home either.
+    #[cfg(unix)]
+    #[test]
+    fn a_pairing_gets_no_path_in_another_pairings_folders() {
+        use nerve_policy::{PathAccess, Target};
+        let run_home = Path::new("/srv/nerve-run");
+        let mine = Own::of(run_home, "lab");
+        let target = |p: &str, access: PathAccess, holds: bool| Target {
+            path: PathBuf::from(p),
+            access,
+            holds,
+            arg: None,
+        };
+        let refused = |p: &str, access: PathAccess, holds: bool, program: bool| {
+            other_pairings(&[target(p, access, holds)], run_home, &mine, program)
+        };
+        for p in [
+            "/srv/nerve-run/other/home/.gitconfig",
+            "/srv/nerve-run/other/tmp",
+            "/srv/nerve-run/.ssh/id",
+            "/srv/nerve-run/lab",
+            "/srv/nerve-run",
+        ] {
+            for access in [PathAccess::Read, PathAccess::Write, PathAccess::Run] {
+                let why = refused(p, access, false, false).unwrap_or_default();
+                assert!(why.contains("another pairing"), "{p}: {why}");
+            }
+        }
+        for p in [
+            "/srv/nerve-run/lab/home",
+            "/srv/nerve-run/lab/home/.gitconfig",
+            "/srv/nerve-run/lab/tmp/t",
+            "/srv/nerve-run-other/x",
+            "/srv/www",
+            "/tmp/x",
+        ] {
+            assert_eq!(refused(p, PathAccess::Write, false, false), None, "{p}");
+        }
+        // A folder that holds the account's home: a program works below it.
+        assert_eq!(refused("/srv", PathAccess::Read, true, false), None);
+        assert_eq!(refused("/srv", PathAccess::Read, false, true), None);
+        let why = refused("/srv", PathAccess::Read, true, true).unwrap_or_default();
+        assert!(why.contains("holds"), "{why}");
+        assert_eq!(refused("/srv/www", PathAccess::Read, true, true), None);
+        // A walk passes through the folders above its own two.
+        for (p, passes) in [
+            ("/srv/nerve-run", true),
+            ("/srv/nerve-run/lab", true),
+            ("/srv/nerve-run/lab/home", true),
+            ("/srv/nerve-run/other", false),
+            ("/srv/nerve-run/.ssh", false),
+            ("/srv/www", true),
+        ] {
+            let skipped = in_other_pairings(Path::new(p), run_home, &mine, true);
+            assert_eq!(skipped, !passes, "{p}");
+        }
     }
 
     #[test]

@@ -1321,6 +1321,46 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
         "{audit}"
     );
 
+    // A folder the owner gives that holds nerve-run's home gives the program
+    // no other pairing's folder: not a file in it, not the folder above it
+    // (the program works below what it is handed, with the owner's rights),
+    // and not a link in a folder of the grant that leads there.
+    let other = Path::new("/var/lib/nerve-run/nrv167-other/home");
+    std::fs::create_dir_all(other).unwrap();
+    std::fs::write(other.join("x"), "other\n").unwrap();
+    assert!(
+        sh(Command::new("chown").args([
+            "-R",
+            "nerve-run:nerve-run",
+            "/var/lib/nerve-run/nrv167-other"
+        ]))
+        .0
+    );
+    let linked = Path::new("/var/lib/nrv167-link");
+    std::fs::create_dir_all(linked).unwrap();
+    let _ = std::fs::remove_file(linked.join("to"));
+    std::os::unix::fs::symlink(other, linked.join("to")).unwrap();
+    chmod(linked, "755");
+    let (ok, said) = as_owner(&owner, &["folder", "add", "/var/lib", "+r"]);
+    assert!(ok, "{said}");
+    let e = files_call(&mut conn, "open", &other.join("x"))
+        .await
+        .unwrap_err();
+    assert!(e.contains("another pairing"), "{e}");
+    let e = files_call(&mut conn, "open", Path::new("/var/lib"))
+        .await
+        .unwrap_err();
+    assert!(e.contains("holds"), "{e}");
+    let _ = files_call(&mut conn, "open", linked).await.unwrap_err();
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !calls.contains("/var/lib"),
+        "no call reached the program: {calls}"
+    );
+    let (ok, said) = as_owner(&owner, &["folder", "rm", "/var/lib"]);
+    assert!(ok, "{said}");
+    let _ = std::fs::remove_dir_all(linked);
+
     // A process of a command the node runs (user mode, as the owner) is
     // refused, though it runs the allowed program, and the name is free:
     // the owner lets the attached one go first.
@@ -1352,6 +1392,7 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     assert!(ok, "{said}");
     let _ = std::fs::remove_file(tmp_closed);
     let _ = std::fs::remove_file(open_copy);
+    let _ = std::fs::remove_dir_all("/var/lib/nerve-run/nrv167-other");
     std::fs::remove_dir_all(&base).unwrap();
     std::fs::remove_file(ssh.join("id_b4")).unwrap();
     if made_ssh {
@@ -2177,6 +2218,68 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     for p in [run_home, &run_home.join("lab"), &run_home.join("lab/home")] {
         let (_, st) = sh(Command::new("stat").args(["-c", "%U %a"]).arg(p));
         assert_eq!(st.trim(), "nerve-run 700", "{}", p.display());
+    }
+    // Allowlist mode judges a file call by the allow rules alone, and a rule
+    // that covers every `fs` call is what an owner writes for a center that
+    // may only read. The node opens the paths as the one account that owns
+    // every pairing's folders, so they stay closed to the call all the same,
+    // whatever the rules say; its own home is open.
+    for args in [
+        &["mode", "set", "allowlist", "--center", "home"][..],
+        &["config", "add", "center.home.policy.allow", "fs"],
+    ] {
+        let (ok, said) = as_owner(&owner, args);
+        assert!(ok, "{args:?}: {said}");
+    }
+    let (_, _, conn, _) = &mut links[1];
+    let own_config = run_home.join("home/home/.gitconfig");
+    let mut seen = Err(String::new());
+    for _ in 0..50 {
+        seen = fs_call(
+            conn,
+            "read",
+            json!({"path": own_config.display().to_string()}),
+        )
+        .await;
+        if seen.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(seen.unwrap()["content"], "mine\n");
+    for (action, args) in [
+        ("read", json!({"path": lab_config.display().to_string()})),
+        (
+            "write",
+            json!({"path": run_home.join("lab/home/planted").display().to_string(), "content": "x"}),
+        ),
+    ] {
+        let e = fs_call(conn, action, args).await.unwrap_err();
+        assert!(e.contains("another pairing"), "{action}: {e}");
+    }
+    assert!(!run_home.join("lab/home/planted").exists());
+    let r = fs_call(
+        conn,
+        "find",
+        json!({"path": "/var/lib", "glob": "nerve-run/lab/home/.gitconfig"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r["paths"], json!([]), "{r}");
+    let r = fs_call(
+        conn,
+        "find",
+        json!({"path": "/var/lib", "glob": "nerve-run/home/home/.gitconfig"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r["paths"].as_array().map(Vec::len), Some(1), "{r}");
+    for args in [
+        &["config", "remove", "center.home.policy.allow", "fs"][..],
+        &["mode", "set", "folder", "--center", "home"],
+    ] {
+        let (ok, said) = as_owner(&owner, args);
+        assert!(ok, "{args:?}: {said}");
     }
     // `status` names both centers' switch and whether the machine has the
     // network rules.

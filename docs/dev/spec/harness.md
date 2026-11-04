@@ -254,9 +254,10 @@ the `result` of the envelope described below.
   or 0700 unless asked); where an `own` folder without `shared` is marked
   `w`, that those are the pairing's own home and temporary folder, where its
   programs keep their settings and caches, and (`exec.run`'s advice and
-  the joined one) that the sandbox keeps every other pairing's commands out
-  of their files, not out of a socket a program listens on there, so no
-  credential cache or key agent runs in them; where a `shared` one is marked `w`, that every pairing of that
+  the joined one) that the sandbox keeps every other pairing's commands
+  from reading and writing their files (though on an older kernel it cannot
+  stop one from emptying a file), not out of a socket a program listens on
+  there, so no credential cache or key agent runs in them; where a `shared` one is marked `w`, that every pairing of that
   account and every account on the machine shares it, with the settings and
   caches programs keep there, so what one leaves there can change what
   another one's commands do: it is for throwaway files only, nothing secret

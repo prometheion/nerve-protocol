@@ -445,6 +445,34 @@ pub fn landlock_spec(
     }
 }
 
+/// [`landlock_spec`] for a command that runs as `nerve-run` for the pairing
+/// whose own folders are `mine`: the sets are cut around that account's home
+/// `run_home` too, which holds every pairing's home and temporary folder,
+/// and the pairing's own two folders stay. The caller acts as the account,
+/// so a folder of the owner that leads there through a link is resolved as
+/// the sandbox sees it here, which the cut of the folders before this
+/// (`account::around_pairings`, made as the node's user) may not manage.
+pub fn pairing_spec(
+    policy: &CenterPolicy,
+    home: &Path,
+    own: &[PathBuf],
+    writable: &[PathBuf],
+    run_home: &Path,
+    mine: &crate::account::Own,
+) -> LandlockSpec {
+    let mut spec = landlock_spec(policy, home, own, writable);
+    let around = [run_home.to_path_buf()];
+    let mine = [real(&mine.home), real(&mine.temp)];
+    for set in [&mut spec.read, &mut spec.write, &mut spec.exec] {
+        let (kept, rest): (Vec<PathBuf>, Vec<PathBuf>) = std::mem::take(set)
+            .into_iter()
+            .partition(|p| mine.iter().any(|m| within(&real(p), m)));
+        *set = leave_out(&rest, &around);
+        set.extend(kept);
+    }
+    spec
+}
+
 /// `paths` without the links directly in `/dev` (`stdin`, `fd`, `log`,
 /// ...), which [`leave_out`] lists among its other entries. A rule follows
 /// a link and the kernel refuses one on what a link of `/dev` leads to (a
@@ -2836,6 +2864,54 @@ mod tests {
             assert!(set.contains(&w.join("a")), "{set:?}");
             assert!(!set.iter().any(|p| own[0].starts_with(p)), "{set:?}");
         }
+    }
+
+    /// A folder of the owner that is a link to a place holding the account's
+    /// home gives a command of a pairing the other pairings' folders unless
+    /// the sets are cut where the link is resolved: the sandbox's own
+    /// resolution, not the node user's. The pairing's own folders stay.
+    #[test]
+    fn a_pairings_sets_are_cut_around_the_accounts_home_through_a_link() {
+        let d = tempfile::tempdir().unwrap();
+        let w = std::fs::canonicalize(d.path()).unwrap();
+        let run_home = w.join("srv/run");
+        let mine = crate::account::Own::of(&run_home, "lab");
+        for dir in [&mine.home, &mine.temp, &run_home.join("other/home")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::create_dir_all(w.join("srv/www")).unwrap();
+        std::os::unix::fs::symlink(w.join("srv"), w.join("link")).unwrap();
+        let folder = |p: &Path| nerve_policy::config::Folder {
+            path: p.display().to_string(),
+            access: Access::ALL,
+        };
+        let policy = CenterPolicy {
+            folders: vec![
+                folder(&w.join("link")),
+                folder(&mine.home),
+                folder(&mine.temp),
+            ],
+            ..Default::default()
+        };
+        let reaches = |spec: &LandlockSpec, p: &Path| {
+            [&spec.read, &spec.write, &spec.exec]
+                .iter()
+                .any(|set| set.iter().any(|s| p.starts_with(s)))
+        };
+        // The link leads to a folder that holds the account's home.
+        let plain = landlock_spec(&policy, &w, &[], &[]);
+        assert!(reaches(&plain, &run_home.join("other/home")), "{plain:?}");
+        let spec = pairing_spec(&policy, &w, &[], &[], &run_home, &mine);
+        for set in [&spec.read, &spec.write, &spec.exec] {
+            assert!(set.contains(&w.join("srv/www")), "{set:?}");
+            assert!(
+                set.contains(&mine.home) && set.contains(&mine.temp),
+                "{set:?}"
+            );
+        }
+        assert!(!reaches(&spec, &run_home.join("other/home")), "{spec:?}");
+        assert!(!reaches(&spec, &run_home.join("other")), "{spec:?}");
+        assert!(!reaches(&spec, &run_home), "{spec:?}");
     }
 
     /// A folder that is, or since became, a link into a protected entry is

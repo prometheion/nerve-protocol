@@ -795,6 +795,29 @@ impl Shared {
         entry
     }
 
+    /// `entry` with the owner's folders cut around the pairings' homes
+    /// ([`crate::account::around_pairings`]) and nothing added, for a
+    /// program's action: it works with the owner's rights, so its paths
+    /// count by the folders the owner granted alone, but not by the
+    /// part of them that holds the other pairings' folders, which the
+    /// pairing's commands and file calls do not get either.
+    pub fn around_pairings(
+        &self,
+        cfg: &NodeConfig,
+        mut entry: nerve_policy::CenterEntry,
+    ) -> nerve_policy::CenterEntry {
+        if self.separate(&entry.policy)
+            && let Ok(Some(a)) = self.command_account(cfg, &entry.policy)
+        {
+            entry.policy.folders = crate::account::around_pairings(
+                &entry.policy.folders,
+                &self.rules_home(cfg),
+                &a.home,
+            );
+        }
+        entry
+    }
+
     /// The home and temporary folder of the pairing `entry` for a command
     /// that runs as `run` (`nerve-run`), made where they are missing
     /// (crate::own_dirs::ready): the node makes them as the pairing comes,

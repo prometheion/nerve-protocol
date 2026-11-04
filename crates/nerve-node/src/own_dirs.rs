@@ -99,20 +99,21 @@ pub fn sync(run: &Account, cfg: impl FnOnce() -> NodeConfig, file: &Path) -> Vec
         .iter()
         .map(|c| (c.name.as_str(), c.node_id.as_str()))
         .collect();
-    let gone: Vec<String> = {
+    let gone: Vec<(String, String)> = {
         let _one = RECORD.lock().unwrap_or_else(PoisonError::into_inner);
         read_record(file)
             .into_iter()
             .filter(|(name, id)| now.get(name.as_str()) != Some(&id.as_str()))
-            .map(|(name, _)| name)
             .collect()
     };
-    for name in gone {
+    for (name, old) in gone {
         let lock = name_lock(&name);
         let _name = lock.lock().unwrap_or_else(PoisonError::into_inner);
         // A command may have made the pairing's folders again while this
-        // waited for its lock.
-        if recorded(file, &name).is_none_or(|id| now.get(name.as_str()) == Some(&id.as_str())) {
+        // waited for its lock, also for a pairing made after this sync read
+        // its config: only the folders of the id it saw are its to delete.
+        // The next sync judges the newer ones by the newer config.
+        if recorded(file, &name).as_deref() != Some(old.as_str()) {
             continue;
         }
         match remove(run, &name) {
@@ -838,6 +839,43 @@ mod tests {
         drop(running);
         assert!(waiting.join().unwrap().is_empty());
         assert!(Own::of(&run.home, "lab").home.is_dir());
+    }
+
+    /// A pairing made under a name again after a sync read its config keeps
+    /// the folders a command made for it, while that sync is busy with
+    /// another pairing's.
+    #[test]
+    fn a_sync_leaves_the_folders_of_a_pairing_made_again_after_it_read_the_config() {
+        let d = tempfile::tempdir().unwrap();
+        let run = me(&d.path().join("run"));
+        std::fs::create_dir(&run.home).unwrap();
+        let file = d.path().join("own-folders.json");
+        let before = NodeConfig {
+            centers: vec![center("alpha", "a1"), center("lab", "n1")],
+            ..Default::default()
+        };
+        assert!(sync(&run, || before.clone(), &file).is_empty());
+        let lab = Own::of(&run.home, "lab");
+        std::fs::write(lab.home.join(".bashrc"), "x").unwrap();
+        // The sync sees neither pairing, and waits on alpha's lock.
+        let busy = name_lock("alpha");
+        let held = busy.lock().unwrap();
+        let syncing = {
+            let (run, file) = (run.clone(), file.clone());
+            std::thread::spawn(move || sync(&run, NodeConfig::default, &file))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        // Paired again as lab, and a command comes.
+        assert_eq!(ready(&run, "lab", "n2", &file).unwrap(), lab);
+        std::fs::write(lab.home.join(".gitconfig"), "y").unwrap();
+        drop(held);
+        assert!(syncing.join().unwrap().is_empty());
+        assert!(lab.home.join(".gitconfig").exists() && !lab.home.join(".bashrc").exists());
+        assert_eq!(
+            read_record(&file).get("lab").map(String::as_str),
+            Some("n2")
+        );
+        assert!(!run.home.join("alpha").exists());
     }
 
     #[test]

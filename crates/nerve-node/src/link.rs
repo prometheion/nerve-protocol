@@ -2139,7 +2139,8 @@ impl Link {
         // The gate and the sandbox see the built-in folders of `nerve-run`
         // too; the config keeps the owner's. A program (a provider) works
         // with the owner's rights, not that account's: its paths count by
-        // the folders the owner granted alone.
+        // the folders the owner granted alone, cut around the pairings'
+        // homes.
         let granted = entry.clone();
         let entry = self.shared.with_built_in(&cfg, entry);
         let view = descriptor::for_call(
@@ -2208,7 +2209,7 @@ impl Link {
                     format!("the provider {provider} is not attached now"),
                 )
             })?;
-            let entry = granted;
+            let entry = self.shared.around_pairings(&cfg, granted);
             nerve_proto::schema::validate(&action.params, &Value::Object(inv.args.clone()))?;
             let marked = nerve_proto::schema::path_args(&action.params);
             // The arguments its schema marks as paths are the call's rule
@@ -2359,6 +2360,13 @@ impl Link {
                 let deny = RuleSet::new(&entry.policy.deny, &self.home());
                 let folders = entry.policy.folders.clone();
                 let action = inv.action.clone();
+                // The account's home, where every pairing's own folders lie,
+                // is walked only as far as this pairing's own.
+                let name = entry.name.clone();
+                let run_home = known
+                    .clone()
+                    .filter(|_| self.shared.separate(&entry.policy))
+                    .map(|a| a.home);
                 tokio::task::spawn_blocking(move || {
                     let _as = act_as(known.as_ref())?;
                     // An entry the direct read would refuse stays out of the
@@ -2387,8 +2395,13 @@ impl Link {
                     } else {
                         Reads::Folders
                     };
+                    let pairings = run_home
+                        .as_ref()
+                        .map(|h| crate::account::pairing_view(h, &name));
                     let skip = |p: &std::path::Path, through: bool| {
-                        protected.check(p, false, &folders).is_some()
+                        pairings.as_ref().is_some_and(|(h, mine)| {
+                            crate::account::in_other_pairings(p, h, mine, true)
+                        }) || protected.check(p, false, &folders).is_some()
                             || deny
                                 .find("fs", &action, &nerve_policy::paths::to_wire(p))
                                 .is_some()
@@ -2649,7 +2662,18 @@ impl Link {
         // the audit entry below is the node's own again.
         let decision = {
             let _as = act_as(account)?;
-            judged.with(|env| nerve_policy::decide(&entry.policy, env, &call))
+            let decision = judged.with(|env| nerve_policy::decide(&entry.policy, env, &call));
+            // Whatever the mode and the rules say, a pairing whose commands
+            // run as `nerve-run` gets no other pairing's folders: the node
+            // opens the paths as that account, which owns them all.
+            match (decision, account) {
+                (Decision::Allow, Some(run)) if self.shared.separate(&entry.policy) => {
+                    let (run_home, mine) = crate::account::pairing_view(&run.home, &entry.name);
+                    crate::account::other_pairings(targets, &run_home, &mine, program.is_some())
+                        .map_or(Decision::Allow, Decision::Forbidden)
+                }
+                (decision, _) => decision,
+            }
         };
         // A program handed a folder follows the links in it: where they
         // lead is judged too, once the call is allowed, so a folder the
@@ -3251,7 +3275,14 @@ impl Link {
             // in place of a folder inside one leads nowhere the next
             // command gets rules for.
             let writable = exec::write_folders(cfg, &home);
-            let mut spec = exec::landlock_spec(&entry.policy, &home, &own, &writable);
+            let mut spec = match (separate.as_ref(), known.as_ref()) {
+                // Cut around every pairing's folders as the account sees the
+                // folders, which the gate's cut may not have resolved.
+                (Some(mine), Some(run)) => {
+                    exec::pairing_spec(&entry.policy, &home, &own, &writable, &run.home, mine)
+                }
+                _ => exec::landlock_spec(&entry.policy, &home, &own, &writable),
+            };
             // The owner's switch: no TCP for a folder-mode command, which
             // runs only where the kernel can refuse it (the gate took
             // `unconfined` with the network refusal in).
@@ -3431,7 +3462,12 @@ impl Link {
             // The folders' entries are listed as the account.
             let _as = act_as(account.as_ref()).ok().flatten();
             let writable = exec::write_folders(cfg, &home);
-            let mut spec = exec::landlock_spec(&policy, &home, &own, &writable);
+            let mut spec = match (pairing.as_ref(), account.as_ref()) {
+                (Some(mine), Some(run)) if self.shared.separate(&entry.policy) => {
+                    exec::pairing_spec(&policy, &home, &own, &writable, &run.home, mine)
+                }
+                _ => exec::landlock_spec(&policy, &home, &own, &writable),
+            };
             // Held off the network like the pairing's commands (refused
             // above where the kernel cannot).
             spec.no_network =

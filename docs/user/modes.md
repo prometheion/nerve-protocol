@@ -174,7 +174,12 @@ another's home: a center you trust less then needs a machine of its own.
 A folder you give a center that holds `nerve-run`'s home (`/`, `/var`,
 `/var/lib`) is cut around it: it gives that center no other pairing's home
 or temporary folder, in its commands and in its file calls, and a folder you
-give inside that home gives nothing. A pairing made again under the name of
+give inside that home gives nothing. In every mode, also `allowlist`, a
+file call or a program's action that names a path in another pairing's
+folders is refused whatever the folders and the allow rules say: the node
+opens it as `nerve-run`, which owns them all. On a kernel below Landlock ABI
+3 a command of another pairing can still cut a file in these folders to
+nothing (see [Landlock versions](#landlock-versions)). A pairing made again under the name of
 one that went waits for the node to delete the old folders before its
 commands and file calls run; where that cannot be done they say why.
 Even with Landlock the pairings share more than `/tmp`: see [the account
