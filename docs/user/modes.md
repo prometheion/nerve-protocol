@@ -268,12 +268,11 @@ The node confines commands with Landlock:
 - The node's own folders are in none of these sets.
 - A command has no controlling terminal: it runs in a session of its own.
   On a node you run yourself in a terminal that terminal is yours, and a
-  command cannot write to it or type into it. It can still open your
-  terminals under `/dev/pts` for reading, as it runs as you and `/dev` is in
-  the read set (a program that makes a terminal of its own needs it): what
-  you type in one of them can reach the command instead of the shell there.
-  The installed node's commands cannot: `nerve-run` may not open your
-  terminals.
+  command cannot write to it, type into it, or read your terminals by
+  name: `/dev/pts`, `/dev/console` and the `/dev/tty*` files are left out of
+  what it may read (the rest of `/dev` stays, but it cannot list `/dev`).
+  The installed node's commands run as `nerve-run`, which may not open your
+  terminals either.
 - `/tmp`, `/var/tmp` and the home of `nerve-run` are in every set of a
   `nerve-run` command, to read, write and run programs in
   ([below](#the-account-nerve-run-linux)).
@@ -331,7 +330,9 @@ in `/tmp`, `/var/tmp` and `/dev/shm`.
   only as any other account would. The node gives it the folder's entries
   when it walks every grant again: when it starts, on `folder set`, and on
   `nerve-node folder sync`. Each walk is a pass over everything in every
-  granted folder, which takes a while for large trees. A folder of yours
+  granted folder, which takes a while for large trees. `status` and the
+  commands of `nerve-run` do not wait for it while the folders' entries are
+  up to date; a change of the folders made meanwhile waits for it. A folder of yours
   above a grant that others may not enter gets an entry that lets it pass
   through it: with Landlock that is all it does there, without Landlock its
   commands can then read what others may read inside that folder ([your

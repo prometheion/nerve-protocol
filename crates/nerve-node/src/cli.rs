@@ -7738,6 +7738,127 @@ mod tests {
         assert!(!load(&paths).locked);
     }
 
+    /// A node whose `folder.grants` answers `answer` and keeps the requests
+    /// it got.
+    #[cfg(target_os = "linux")]
+    fn grants_node(
+        paths: &NodePaths,
+        answer: Value,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>> {
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (sock, kept) = (paths.ctl_socket(), got.clone());
+        tokio::spawn(async move {
+            let _ = nerve_transport::ctl::serve(&sock, move |req, _| {
+                let (answer, kept) = (answer.clone(), kept.clone());
+                async move {
+                    kept.lock().unwrap().push((req.method.clone(), req.params));
+                    nerve_transport::ctl::Reply::Ok(answer)
+                }
+            })
+            .await;
+        });
+        while !paths.ctl_socket().exists() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        got
+    }
+
+    /// `folder sync` asks the node to walk every grant, and tells the owner
+    /// what that left, or that there is nothing to sync where no ACL gives the
+    /// folders. `folder set` asks the same; `folder rm` only for the changed
+    /// grants.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn folder_sync_walks_every_grant_and_tells_what_it_left() {
+        let (_d, paths) = setup(&["home"]);
+        let mut out = Vec::new();
+        let e = sync_folders(&paths, &mut out).await.unwrap_err();
+        assert!(e.contains("does not run"), "{e}");
+
+        let got = grants_node(&paths, json!({"service": true, "errors": [], "stale": []}));
+        let mut out = Vec::new();
+        sync_folders(&paths, &mut out).await.unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("nerve-run has its access"), "{out}");
+        assert_eq!(
+            got.lock().unwrap().last().unwrap(),
+            &("folder.grants".to_string(), json!({"every": true}))
+        );
+        for (every, want) in [(true, true), (false, false)] {
+            tell_grants(&paths, every, &mut Vec::new()).await;
+            assert_eq!(got.lock().unwrap().last().unwrap().1["every"], want);
+        }
+    }
+
+    /// `folder set` walks every grant of the running node, as `folder sync`
+    /// does (what was moved into a folder gets its entries with the change);
+    /// `folder rm` only what changed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn folder_set_asks_the_node_for_a_walk_of_every_grant() {
+        use nerve_transport::ctl::{Reply, serve};
+        let (d, paths) = setup(&["home"]);
+        let folder = d.path().join("srv");
+        std::fs::create_dir(&folder).unwrap();
+        let folder = folder.display().to_string();
+        run(&paths, &["folder", "add", &folder, "+r"]).unwrap();
+        let text = std::fs::read_to_string(paths.config_file()).unwrap();
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (sock, kept) = (paths.ctl_socket(), asked.clone());
+        rt.spawn(async move {
+            let _ = serve(&sock, move |req, _| {
+                let (text, kept) = (text.clone(), kept.clone());
+                async move {
+                    match req.method.as_str() {
+                        "config.read" => Reply::Ok(json!({"config": text, "version": 7})),
+                        "folder.grants" => {
+                            kept.lock().unwrap().push(req.params["every"].clone());
+                            Reply::Ok(json!({"service": true}))
+                        }
+                        _ => Reply::Ok(json!({})),
+                    }
+                }
+            })
+            .await;
+        });
+        while !paths.ctl_socket().exists() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        run(&paths, &["folder", "set", &folder, "+w"]).unwrap();
+        run(&paths, &["folder", "rm", &folder]).unwrap();
+        assert_eq!(*asked.lock().unwrap(), [json!(true), json!(false)]);
+    }
+
+    /// `folder sync` does not say `nerve-run` has its access where the node
+    /// gave nothing, or where a grant did not come whole.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn folder_sync_does_not_claim_access_that_was_not_given() {
+        let (_d, paths) = setup(&["home"]);
+        grants_node(&paths, json!({"service": false}));
+        let mut out = Vec::new();
+        sync_folders(&paths, &mut out).await.unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("nothing to sync"), "{out}");
+        assert!(!out.contains("has its access"), "{out}");
+
+        let (_d, paths) = setup(&["home"]);
+        grants_node(
+            &paths,
+            json!({"service": true, "errors": ["/srv/x: no access"], "stale": []}),
+        );
+        let mut out = Vec::new();
+        sync_folders(&paths, &mut out).await.unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("did not get every folder"), "{out}");
+        assert!(!out.contains("has its access"), "{out}");
+    }
+
     /// The callers that only ask whether a node runs take a busy one for a
     /// node: it is not told that a change waits for the next start, and a
     /// second node does not start beside it.

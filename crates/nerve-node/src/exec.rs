@@ -426,11 +426,33 @@ pub fn landlock_spec(
 ) -> LandlockSpec {
     // Landlock is Linux's, so the list is the Unix one.
     let f = folder_sets(policy, home, own, &Platform::Unix, writable);
+    // `/dev` is read whole except the terminals: a command of a node run by
+    // hand runs as its owner and must not read the owner's terminals by name
+    // ([`nerve_sandbox::terminal_devices`]). What it loses: listing `/dev`.
+    let no_read = [own, &nerve_sandbox::terminal_devices()].concat();
     LandlockSpec {
-        read: leave_out(&[nerve_sandbox::system_dirs(), f.read].concat(), own),
+        read: dev_links_out(leave_out(
+            &[nerve_sandbox::system_dirs(), f.read].concat(),
+            &no_read,
+        )),
         write: leave_out(&[nerve_sandbox::system_writable(), f.write].concat(), own),
-        exec: leave_out(&[nerve_sandbox::system_dirs(), f.exec].concat(), own),
+        exec: dev_links_out(leave_out(
+            &[nerve_sandbox::system_dirs(), f.exec].concat(),
+            &no_read,
+        )),
     }
+}
+
+/// `paths` without the links directly in `/dev` (`stdin`, `fd`, `log`,
+/// ...), which [`leave_out`] lists among its other entries. A rule follows
+/// a link and the kernel refuses one on what a link of `/dev` leads to (a
+/// pipe, a socket), and what such a link leads to is under a rule of its
+/// own (`/proc`, the device) or none needs.
+fn dev_links_out(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths.retain(|p| {
+        p.parent() != Some(Path::new("/dev")) || !p.symlink_metadata().is_ok_and(|m| m.is_symlink())
+    });
+    paths
 }
 
 /// A center's folders by what its commands may do there, the system's
@@ -2897,6 +2919,28 @@ mod tests {
         assert!(spec.read.contains(&ssh), "{:?}", spec.read);
         assert!(!grants(&spec.write, &ssh), "{:?}", spec.write);
         assert!(!grants(&spec.exec, &ssh), "{:?}", spec.exec);
+    }
+
+    /// No rule of a command's read or exec set reaches a terminal of
+    /// `/dev`, and the rest of `/dev` stays readable.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_command_reads_no_terminal_under_dev() {
+        let h = tempfile::tempdir().unwrap();
+        let spec = landlock_spec(&CenterPolicy::default(), h.path(), &[], &[]);
+        let terminals = nerve_sandbox::terminal_devices();
+        assert!(!terminals.is_empty());
+        for set in [&spec.read, &spec.exec] {
+            for t in &terminals {
+                assert!(!set.iter().any(|r| t.starts_with(r)), "{t:?} in {set:?}");
+            }
+            assert!(set.contains(&PathBuf::from("/dev/null")), "{set:?}");
+            // A rule on what a link of `/dev` leads to (a pipe) is refused.
+            let link = |r: &&PathBuf| {
+                r.parent() == Some(Path::new("/dev")) && r.symlink_metadata().unwrap().is_symlink()
+            };
+            assert_eq!(set.iter().find(link), None, "{set:?}");
+        }
     }
 
     /// Every combination of the three flags puts a folder in exactly the

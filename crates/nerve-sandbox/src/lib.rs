@@ -313,6 +313,31 @@ pub fn system_dirs() -> Vec<PathBuf> {
     .collect()
 }
 
+/// The terminals of the machine's users under `/dev`: the pseudo-terminals
+/// (`pts`), the console and the text consoles and serial lines (`tty*`). A
+/// command of a node run by hand runs as the owner, who owns the terminal
+/// they work in, so it must not read these by name: what the owner types
+/// there would reach the command. A program that makes a terminal of its
+/// own needs none of them: `ptmx` stays, and a pseudo-terminal's slave is
+/// reached through the master's descriptor.
+pub fn terminal_devices() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = ["/dev/pts", "/dev/console"]
+        .iter()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .collect();
+    if let Ok(entries) = std::fs::read_dir("/dev") {
+        let mut ttys: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("tty"))
+            .map(|e| e.path())
+            .collect();
+        ttys.sort();
+        out.extend(ttys);
+    }
+    out
+}
+
 /// Files every confined command may write: the null devices, nothing else
 /// outside its folders. Not `/dev/tty`: a confined command has no
 /// controlling terminal, and the one it had would be the owner's.
@@ -2694,6 +2719,17 @@ mod tests {
             system_writable().contains(&PathBuf::from("/dev/null")),
             cfg!(unix)
         );
+    }
+
+    /// The terminals under `/dev` are named for the read sets to leave out.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_terminals_are_named() {
+        let t = terminal_devices();
+        assert!(t.contains(&PathBuf::from("/dev/pts")), "{t:?}");
+        assert!(!t.contains(&PathBuf::from("/dev/null")), "{t:?}");
+        assert!(!t.contains(&PathBuf::from("/dev/ptmx")), "{t:?}");
+        assert!(t.iter().all(|p| p.starts_with("/dev")), "{t:?}");
     }
 
     /// Landlock below ABI 3 does not guard truncate(2): a node run by hand

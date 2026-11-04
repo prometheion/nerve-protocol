@@ -1161,9 +1161,12 @@ grant or not.
   (`setsid` before anything else in the child), so it has no controlling
   terminal, and outside its `w` folders it may write only `/dev/null`,
   `/dev/zero` and `/dev/full` (`nerve_sandbox::system_writable`), not
-  `/dev/tty`. `/dev` stays in the read set, so a command of a node run by
-  hand, which runs as the owner, can still open the owner's terminals under
-  `/dev/pts` by name to read. On Windows a command runs in an AppContainer
+  `/dev/tty`. `/dev` stays in the read and exec sets but for the terminals
+  (`nerve_sandbox::terminal_devices`: `/dev/pts`, `/dev/console`, `/dev/tty*`),
+  which `exec::landlock_spec` leaves out as it does the node's own folders, so
+  `/dev` is given as its other entries (not its links, which a rule cannot
+  follow to a pipe or a socket); a command of a node run by hand, which runs as the
+  owner, cannot read the owner's terminals by name. On Windows a command runs in an AppContainer
   of its pairing (named from the state folder and the pairing's `node_id`,
   so a later pairing, also of the same center or under the same name, runs
   in another one and finds none of its entries), which reaches the system folders Windows opens to every
@@ -1818,6 +1821,9 @@ whose path a link now crosses, is taken off by a walk of the outer grant,
 if that walk saw all of it: one that skipped a folder on another file system
 or one the owner may not list leaves the inner grant `stale`, until its own
 walk goes through.
+A walk holds the walk lock (`Shared::acl_walk`) only: the last report
+(`Shared::acl`), which `status` and the refusal read, is free meanwhile, and a
+sync that finds the record not behind returns before it waits for a walk.
 A sync runs at the start (there it walks every grant, also an unchanged one,
 so what was moved into a granted folder gets its entries), on each config
 version, on `folder.grants` (with `{"every": true}`, from `folder set` and

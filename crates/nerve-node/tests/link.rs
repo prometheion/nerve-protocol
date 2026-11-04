@@ -1405,8 +1405,8 @@ async fn folder_mode_gives_no_rule_where_a_command_linked_a_nested_folder() {
 
 /// A folder mode command gets no controlling terminal. On a node run by hand
 /// in a terminal that is the owner's, which the command must not reach
-/// through `/dev/tty` (it may still open the pty by its name to read, as the
-/// owner; docs/user/modes.md). The test runs itself again in a session of
+/// through `/dev/tty`, nor read the pty by its name under `/dev/pts`
+/// (docs/user/modes.md). The test runs itself again in a session of
 /// its own whose controlling terminal is a new pty, as a node started in a
 /// terminal has.
 #[cfg(target_os = "linux")]
@@ -1426,6 +1426,8 @@ async fn a_folder_command_does_not_get_the_nodes_terminal() {
             std::fs::File::open("/dev/tty").is_ok(),
             "the test has no terminal"
         );
+        // The pty by its name, which the command must not read either.
+        let pty = std::env::var("NERVE_TEST_PTY").expect("the pty's name");
         let dir = tempdir();
         let mut center = FakeCenter::start(false).await.unwrap();
         let work = dir.path().join("home").join("work");
@@ -1443,8 +1445,11 @@ async fn a_folder_command_does_not_get_the_nodes_terminal() {
         let r = run_in(
             &mut conn,
             &work,
-            "if (exec 3</dev/tty) 2>/dev/null; then echo reads; else echo none; fi; \
-             if (exec 3>/dev/tty) 2>/dev/null; then echo writes; fi",
+            &"if (exec 3</dev/tty) 2>/dev/null; then echo reads; else echo none; fi; \
+             if (exec 3>/dev/tty) 2>/dev/null; then echo writes; fi; \
+             if (exec 3<{pty}) 2>/dev/null; then echo pts; else echo no-pts; fi; \
+             head -c 1 /dev/urandom >/dev/null && echo random"
+                .replace("{pty}", &pty),
         )
         .await;
         let said = r["stdout"]
@@ -1452,6 +1457,7 @@ async fn a_folder_command_does_not_get_the_nodes_terminal() {
             .unwrap_or_default()
             .trim()
             .replace('\n', ",");
+        eprintln!("{r}");
         println!("tty-result:{said}");
         node.stop().await;
         return;
@@ -1474,6 +1480,7 @@ async fn a_folder_command_does_not_get_the_nodes_terminal() {
     let mut c = std::process::Command::new(std::env::current_exe().unwrap());
     c.args(["--exact", NAME, "--nocapture", "--test-threads=1"])
         .env("NERVE_TEST_IN_TTY", "1")
+        .env("NERVE_TEST_PTY", slave.to_str().unwrap())
         .stdin(std::process::Stdio::null());
     // SAFETY: async-signal-safe calls only, on memory made before the fork.
     unsafe {
@@ -1506,7 +1513,8 @@ async fn a_folder_command_does_not_get_the_nodes_terminal() {
         .nth(1)
         .and_then(|r| r.lines().next())
         .unwrap_or_else(|| panic!("{out}"));
-    assert_eq!(got, "none", "{out}");
+    // Neither `/dev/tty` nor the pty by its name; the rest of `/dev` reads.
+    assert_eq!(got, "none,no-pts,random", "{out}");
 }
 
 /// A folder mode command that started with the keys in files is counted for as

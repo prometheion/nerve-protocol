@@ -564,6 +564,29 @@ pub(crate) enum AclWalk {
     Every,
 }
 
+/// The walk of the first sync after the start (`acl_synced`: the config
+/// version it last synced, none before the first): every grant, so that what
+/// was moved into a granted folder meanwhile gets its entries; later ones
+/// only where the record is behind.
+#[cfg(target_os = "linux")]
+fn start_walk(acl_synced: Option<u64>) -> AclWalk {
+    match acl_synced {
+        None => AclWalk::Every,
+        Some(_) => AclWalk::IfBehind,
+    }
+}
+
+/// The walk `folder.grants` makes for `params`: every grant with `every`,
+/// else the grants that changed.
+#[cfg(target_os = "linux")]
+fn grants_walk(params: &Value) -> AclWalk {
+    if params["every"] == true {
+        AclWalk::Every
+    } else {
+        AclWalk::Now
+    }
+}
+
 /// Everything the daemon's tasks share.
 /// How long a looked-up account is used before it is looked up again.
 const ACCOUNT_FRESH: std::time::Duration = std::time::Duration::from_secs(5);
@@ -647,9 +670,14 @@ pub(crate) struct Shared {
     /// node run by hand runs its commands as it.
     pub own_user: Option<String>,
     /// Linux: what the last sync of the folders' ACLs for `nerve-run` left
-    /// (crate::acl); held while one runs, so that two never run at once.
+    /// (crate::acl). Held only to read it or to store a new one, never
+    /// while a walk runs: `status` reads it.
     #[cfg(target_os = "linux")]
     pub acl: Mutex<crate::acl::Report>,
+    /// Linux: held while a sync of the ACLs walks, so that two never run at
+    /// once.
+    #[cfg(target_os = "linux")]
+    pub acl_walk: Mutex<()>,
     /// Linux: when a sync of the ACLs last ran, for trying a grant that
     /// failed again ([`ACL_RETRY`]).
     #[cfg(target_os = "linux")]
@@ -850,8 +878,9 @@ impl Shared {
 
     /// Brings the folders' ACLs in line with `cfg` (crate::acl), when the
     /// record is behind it or a grant failed and was not tried for
-    /// [`ACL_RETRY`], or at once as `walk` says; blocks while it walks. What it left is
-    /// logged and kept for the commands and `status`.
+    /// [`ACL_RETRY`], or at once as `walk` says; blocks while it walks (not
+    /// `status`: [`Shared::acl`] is free meanwhile). What it left is logged
+    /// and kept for the commands and `status`.
     #[cfg(target_os = "linux")]
     pub fn sync_acls(&self, cfg: &NodeConfig, walk: AclWalk) {
         let Some((who, owner)) = self.acl_accounts(cfg) else {
@@ -867,26 +896,49 @@ impl Shared {
                 return;
             }
         };
-        let mut last = lock(&self.acl);
-        let mut tried = lock(&self.acl_tried);
-        let retry = tried.is_none_or(|t| t.elapsed() >= ACL_RETRY);
-        if walk == AclWalk::IfBehind && !crate::acl::behind(&file, &want, who, retry) {
-            return;
-        }
-        *tried = Some(std::time::Instant::now());
         let act_as = || {
             crate::account::FsAs::new(&owner)
                 .map(Some)
                 .map_err(|e| format!("cannot act as {}: {e}", owner.name))
         };
-        let report = match walk {
+        self.walk_acls(&file, &want, who, walk, &|| match walk {
             AclWalk::Every => crate::acl::sync_all(&file, &want, who, &act_as),
             AclWalk::IfBehind | AclWalk::Now => crate::acl::sync(&file, &want, who, &act_as),
+        });
+    }
+
+    /// The locking of [`Shared::sync_acls`]: `sync` makes the report, and
+    /// runs with only the walk lock held, so that `status` and the commands
+    /// that find the record up to date do not wait for a walk over a large
+    /// folder. A sync that finds the record not behind returns before it
+    /// waits for a walk that runs; one that waited looks again, as that walk
+    /// may have done its work.
+    #[cfg(target_os = "linux")]
+    fn walk_acls(
+        &self,
+        file: &std::path::Path,
+        want: &[crate::acl::Granted],
+        who: crate::acl::Who,
+        walk: AclWalk,
+        sync: &dyn Fn() -> crate::acl::Report,
+    ) {
+        let behind = || {
+            let retry = lock(&self.acl_tried).is_none_or(|t| t.elapsed() >= ACL_RETRY);
+            crate::acl::behind(file, want, who, retry)
         };
+        if walk == AclWalk::IfBehind && !behind() {
+            return;
+        }
+        let _walking = lock(&self.acl_walk);
+        if walk == AclWalk::IfBehind && !behind() {
+            return;
+        }
+        *lock(&self.acl_tried) = Some(std::time::Instant::now());
+        let report = sync();
         for e in &report.errors {
             tracing::warn!("folder grants: {e}");
         }
-        *last = report;
+        *lock(&self.acl) = report;
     }
 
     /// Why a command of `nerve-run` may not run now: the ACLs could not be
@@ -1714,6 +1766,8 @@ impl Daemon {
             #[cfg(target_os = "linux")]
             acl: Mutex::default(),
             #[cfg(target_os = "linux")]
+            acl_walk: Mutex::default(),
+            #[cfg(target_os = "linux")]
             acl_tried: Mutex::default(),
         });
         shared.tell_confinement(&cfg);
@@ -1994,10 +2048,7 @@ async fn supervise(shared: Arc<Shared>) {
         // folder meanwhile gets its entries.
         #[cfg(target_os = "linux")]
         if shared.service && acl_synced != Some(cfg.version) {
-            let walk = match acl_synced {
-                None => AclWalk::Every,
-                Some(_) => AclWalk::IfBehind,
-            };
+            let walk = start_walk(acl_synced);
             acl_synced = Some(cfg.version);
             let (s, c) = (shared.clone(), cfg.clone());
             tokio::task::spawn_blocking(move || s.sync_acls(&c, walk));
@@ -2282,15 +2333,11 @@ async fn answer(
                 return nerve_transport::ctl::Reply::Err(FROM_A_COMMAND.into());
             }
             let s = shared.clone();
-            let every = req.params["every"] == true;
+            #[cfg(target_os = "linux")]
+            let walk = grants_walk(&req.params);
             let r = tokio::task::spawn_blocking(move || {
                 #[cfg(target_os = "linux")]
-                s.sync_acls(
-                    &s.config(),
-                    if every { AclWalk::Every } else { AclWalk::Now },
-                );
-                #[cfg(not(target_os = "linux"))]
-                let _ = every;
+                s.sync_acls(&s.config(), walk);
                 let mut v = s.folder_grants();
                 if let Some(m) = v.as_object_mut() {
                     m.insert("service".into(), json!(s.service));
@@ -3055,6 +3102,94 @@ mod tests {
         let t = std::time::Instant::now();
         daemon.stop().await;
         assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    }
+
+    /// A walk over every granted folder takes minutes on a large tree. While
+    /// it runs, `status` and a sync that finds the record up to date answer
+    /// at once, and a second walk waits for the first and does not run beside it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn status_and_an_up_to_date_sync_do_not_wait_for_a_walk() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(options(&d, &log)).await.unwrap();
+        let s = daemon.shared.clone();
+        let file = d.path().join("acl.json");
+        let who = crate::acl::Who { run: 1, owner: 2 };
+        let running = Arc::new(AtomicUsize::new(0));
+        let (started, started_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let walker = {
+            let (s, file, running) = (s.clone(), file.clone(), running.clone());
+            std::thread::spawn(move || {
+                s.walk_acls(&file, &[], who, AclWalk::Every, &|| {
+                    running.fetch_add(1, Ordering::SeqCst);
+                    started.send(()).unwrap();
+                    let _ = release_rx.recv();
+                    running.fetch_sub(1, Ordering::SeqCst);
+                    crate::acl::Report::default()
+                });
+            })
+        };
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        // Each runs on a thread of its own: one that waits for the walk is
+        // told so by the timeout and not by a hung test.
+        let answers = |what: &'static str, f: Box<dyn FnOnce() + Send>| {
+            let (done, done_rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                f();
+                let _ = done.send(());
+            });
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap_or_else(|_| panic!("{what} waits for the walk"));
+        };
+        let t = s.clone();
+        answers("status", Box::new(move || drop(t.status())));
+        let (t, f) = (s.clone(), file.clone());
+        answers(
+            "a sync of an up to date record",
+            Box::new(move || {
+                t.walk_acls(&f, &[], who, AclWalk::IfBehind, &|| {
+                    panic!("the record is not behind")
+                })
+            }),
+        );
+
+        // A second walk waits until the first is done.
+        let (second_in, second_rx) = mpsc::channel();
+        let second = {
+            let (s, file, running) = (s.clone(), file.clone(), running.clone());
+            std::thread::spawn(move || {
+                s.walk_acls(&file, &[], who, AclWalk::Now, &|| {
+                    second_in.send(running.load(Ordering::SeqCst)).unwrap();
+                    crate::acl::Report::default()
+                });
+            })
+        };
+        assert!(
+            second_rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "a second walk ran beside the first"
+        );
+        release.send(()).unwrap();
+        walker.join().unwrap();
+        second.join().unwrap();
+        assert_eq!(second_rx.recv().unwrap(), 0);
+    }
+
+    /// The walk at the start is every grant; the one a later config version
+    /// brings, and a `folder.grants` without `every`, only what changed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_start_and_folder_grants_choose_their_walk() {
+        assert_eq!(start_walk(None), AclWalk::Every);
+        assert_eq!(start_walk(Some(3)), AclWalk::IfBehind);
+        assert_eq!(grants_walk(&json!({"every": true})), AclWalk::Every);
+        assert_eq!(grants_walk(&json!({"every": false})), AclWalk::Now);
+        assert_eq!(grants_walk(&json!({})), AclWalk::Now);
     }
 
     fn warnings(log: &Log) -> Vec<String> {

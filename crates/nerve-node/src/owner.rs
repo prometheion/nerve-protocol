@@ -519,6 +519,18 @@ pub fn forwarded_args(
                 a.to_string_lossy()
             ));
         };
+        // The path word is found by its place, so it is made whole also
+        // after `--` (`folder add -- srv +rw`): the node would take it from
+        // its own folder.
+        if let Some((at, r)) = relative
+            && at == i
+        {
+            let cwd = cwd
+                .as_ref()
+                .ok_or("give the folder by its full path: this folder cannot be read")?;
+            out.push(cwd.join(r).display().to_string());
+            continue;
+        }
         if words || s == "--" {
             words = true;
             out.push(s.to_string());
@@ -533,15 +545,6 @@ pub fn forwarded_args(
             || s.starts_with("--state-dir=")
             || (own_passphrase && s.starts_with("--passphrase-file="))
         {
-            continue;
-        }
-        if let Some((at, r)) = relative
-            && at == i
-        {
-            let cwd = cwd
-                .as_ref()
-                .ok_or("give the folder by its full path: this folder cannot be read")?;
-            out.push(cwd.join(r).display().to_string());
             continue;
         }
         out.push(s.to_string());
@@ -2479,6 +2482,11 @@ mod tests {
             (vec!["folder", "rm", "rm"], 2),
             (vec!["backup", "backup", "--overwrite"], 1),
             (vec!["restore", "restore"], 1),
+            // After `--` too: the words there go as they are, the path
+            // among them not.
+            (vec!["folder", "add", "--", "srv", "+rw"], 3),
+            (vec!["folder", "rm", "--", "srv"], 3),
+            (vec!["folder", "set", "--", "srv", "-w"], 3),
         ] {
             let mut want: Vec<String> = given.iter().map(|w| w.to_string()).collect();
             want[at] = home.join(given[at]).display().to_string();
