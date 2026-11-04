@@ -55,30 +55,14 @@ impl Drop for Running {
 pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
     let ui_addr = (!args.ui_off()).then(|| args.ui.clone());
     let token = args.harness_token.clone().filter(|t| !t.is_empty());
-    // The web UI logs in with a harness token. Beyond loopback it must, and
-    // then it also needs TLS, since the token and the session cookie cross the
-    // network. On loopback it does once a token exists, unless the owner
-    // switched the login off; a center without any token yet is open to this
-    // machine so that the first token can be made in the UI. All of this is
-    // settled before anything is bound or written.
+    // The web UI always logs in, with the owner token (crate::owner), and
+    // beyond loopback it uses TLS, since the token and the session cross the
+    // network. Harness tokens only open /mcp.
     let state = args.state_dir();
     let has_token = token.is_some()
         || Store::load(&state)
             .map_err(|e| e.to_string())?
             .is_some_and(|s| !s.harness_tokens.is_empty());
-    if let Some(a) = ui_addr.as_deref().filter(|a| !is_loopback(a)) {
-        if args.ui_no_login {
-            return Err(format!(
-                "the web UI at {a} is beyond loopback, where it always needs a login; drop --ui-no-login or use --ui 127.0.0.1:<port>"
-            ));
-        }
-        if !has_token {
-            return Err(format!(
-                "the web UI at {a} is beyond loopback and logs in with a harness token, but there is none; set --harness-token (NERVE_HARNESS_TOKEN) or use --ui 127.0.0.1:<port>"
-            ));
-        }
-    }
-    let ui_login = has_token && !args.ui_no_login;
 
     let node_listener = listen::tcp(&args.listen).await?;
     let nodes = node_listener.local_addr().map_err(|e| e.to_string())?;
@@ -92,6 +76,7 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
     center.set_call_wait(args.call_wait);
     // Whatever else a message carries, this token is never in the log.
     center.log().set_secret("harness-token", token.as_deref());
+    owner_token(&center, token.as_deref(), ui_addr.is_some())?;
 
     let mut tasks = Vec::new();
 
@@ -107,7 +92,7 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
         let server = Server::bind(&a, &center, !tls).await?;
         ui = Some(server.local_addr());
         tasks.push(tokio::spawn(
-            Ui::new(&center, token.clone(), ui_login).serve(server),
+            Ui::new(&center, token.as_deref(), !tls).serve(server),
         ));
     }
 
@@ -175,6 +160,81 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
         tasks,
         _lock: lock,
     })
+}
+
+/// Makes the owner token at the center's first start, and says so at once:
+/// the token on stderr, where it is kept in the log too. The log keeps no
+/// token (it is shown in the web UI and downloaded from it), so the token
+/// itself is only on stderr and in its file. Under systemd stderr goes to
+/// the journal, which more accounts may read than the token file, so there
+/// the log line alone says where it is.
+///
+/// A token file the owner broke stops a center with a web UI, which nobody
+/// could log in to; without one it is only told.
+fn owner_token(center: &Center, harness: Option<&str>, ui: bool) -> Result<(), String> {
+    let (token, made) = match crate::owner::ensure(center.dir()) {
+        Ok(t) => t,
+        Err(e) if !ui => {
+            center.log().record(
+                Level::Warn,
+                None,
+                &format!("{e}; the web UI is off, so nothing needs it now"),
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+    let file = crate::owner::path(center.dir());
+    center.log().set_secret("owner-token", Some(&token));
+    // One secret for both would let the agent's own token into the web UI.
+    if ui && crate::mcp::token_ok(center, harness, &token) {
+        return Err(format!(
+            "the owner token in {} is also a harness token; make a new one with `nerve-center owner-token --new`",
+            file.display()
+        ));
+    }
+    if made {
+        if !stderr_is_journal() {
+            eprintln!(
+                "nerve-center: the web UI logs in with this owner token, kept in {}:\n{token}",
+                file.display()
+            );
+        }
+        center.log().record(
+            Level::Info,
+            None,
+            &format!(
+                "made the owner token, which logs in to the web UI; it is in {} (`nerve-center owner-token` says it again)",
+                file.display()
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// Whether stderr is the systemd journal. `JOURNAL_STREAM` names the
+/// journal's stream (device and inode) for exactly this check; the variable
+/// alone is also inherited by whatever a user service starts, a terminal
+/// among them.
+fn stderr_is_journal() -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(stream) = std::env::var("JOURNAL_STREAM") else {
+            return false;
+        };
+        let Some((dev, ino)) = stream.split_once(':') else {
+            return false;
+        };
+        let (Ok(dev), Ok(ino)) = (dev.parse::<u64>(), ino.parse::<u64>()) else {
+            return false;
+        };
+        // SAFETY: fstat writes into the zeroed struct it is given.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        let r = unsafe { libc::fstat(2, &mut st) };
+        r == 0 && st.st_dev as u64 == dev && st.st_ino as u64 == ino
+    }
+    #[cfg(not(unix))]
+    false
 }
 
 /// Runs `nerve-center` as `main` does: owner or attached, until stdin ends or

@@ -99,7 +99,7 @@ fn wrong_tokens_are_told_once_a_minute() {
         assert_eq!(ui.wrong_token(), None);
     }
     // A minute later the count of what came meanwhile is told.
-    lock(&ui.wrong).1 = Instant::now().checked_sub(Duration::from_secs(61));
+    ui.wrong.age(Duration::from_secs(61));
     assert_eq!(ui.wrong_token(), Some(51));
 }
 
@@ -132,39 +132,6 @@ fn a_peer_has_sixteen_connections_at_most() {
     drop(far_held);
     assert!(ui.place_for(owner).is_some());
     assert!(lock(&ui.places).is_empty());
-}
-
-/// A wrong token's answer waits; past [`LATE`] waiting, the one that waited
-/// longest goes at once, so the waits hold a bounded number of connections.
-#[tokio::test]
-async fn a_wrong_token_waits_and_past_the_limit_the_oldest_goes_first() {
-    let ui = Arc::new(WebUi::default());
-    let start = Instant::now();
-    ui.wait_late().await;
-    assert!(start.elapsed() >= webui::WRONG_SECRET_DELAY);
-    assert!(lock(&ui.late).is_empty());
-    let waits: Vec<_> = (0..LATE)
-        .map(|_| {
-            let ui = ui.clone();
-            tokio::spawn(async move { ui.wait_late().await })
-        })
-        .collect();
-    while lock(&ui.late).len() < LATE {
-        tokio::task::yield_now().await;
-    }
-    let extra = {
-        let ui = ui.clone();
-        tokio::spawn(async move { ui.wait_late().await })
-    };
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(waits[0].is_finished(), "the oldest still waits");
-    assert_eq!(waits.iter().filter(|w| w.is_finished()).count(), 1);
-    assert_eq!(lock(&ui.late).len(), LATE);
-    for w in waits {
-        w.await.unwrap();
-    }
-    extra.await.unwrap();
-    assert!(lock(&ui.late).is_empty());
 }
 
 #[test]

@@ -21,16 +21,16 @@
 
 #![deny(unsafe_code)]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Notify, OwnedSemaphorePermit};
+use tokio::sync::OwnedSemaphorePermit;
 
 use nerve_policy::NodeConfig;
 use nerve_transport::http::{self, Request, Response};
@@ -49,7 +49,8 @@ const APP_JS: &str = include_str!("webui/app.js");
 
 /// The largest request body: the biggest form of the UI is far smaller.
 const BODY_MAX: usize = 256 * 1024;
-/// Connections at once, but for the wrong tokens that wait ([`LATE`]).
+/// Connections at once, but for the wrong tokens that wait
+/// ([`webui::LATE`]).
 const SLOTS: usize = 64;
 /// Connections at once of one local account, or of one other machine (an
 /// IPv6 /64 counts as one), from the check of the peer to the answer. A
@@ -58,12 +59,6 @@ const SLOTS: usize = 64;
 /// On loopback every peer has the same address, so the account is what
 /// tells them apart.
 const PER_PEER: usize = 16;
-/// Wrong tokens whose answer waits [`webui::WRONG_SECRET_DELAY`], at once.
-/// They hold no slot and no place of their peer while they wait: a command
-/// of the owner's account that posts wrong tokens as fast as it can would
-/// fill both, and keep the owner's own login out. Past this many, the one
-/// that waited longest is answered at once.
-const LATE: usize = 128;
 /// How long a TLS handshake may take.
 const HANDSHAKE: Duration = Duration::from_secs(10);
 /// How soon a listener that could not bind tries again.
@@ -93,12 +88,13 @@ pub(crate) struct WebUi {
     /// before a panic must not finish its command after it (an unlock
     /// would undo the panic).
     locks: tokio::sync::watch::Sender<u64>,
-    /// Wrong tokens since the last line about them, and when that was.
-    wrong: Mutex<(u32, Option<Instant>)>,
+    /// The wrong tokens: told in the log once a minute, and their answers
+    /// wait with neither a slot nor a place of their peer, so a command of
+    /// the owner's account that posts them as fast as it can keeps the
+    /// owner's own login free.
+    wrong: webui::WrongSecrets,
     /// The connections at once, by who made them ([`PER_PEER`]).
     places: Mutex<HashMap<Who, usize>>,
-    /// The wrong tokens whose answer waits, the oldest first ([`LATE`]).
-    late: Mutex<VecDeque<Arc<Notify>>>,
 }
 
 /// Who a connection is counted for.
@@ -179,19 +175,9 @@ impl WebUi {
         }
     }
 
-    /// Counts a wrong token, and says how many to tell in the log: the
-    /// first of a minute at once, the rest when the next comes after it.
+    /// Counts a wrong token, and says how many to tell in the log.
     fn wrong_token(&self) -> Option<u32> {
-        let mut w = lock(&self.wrong);
-        w.0 += 1;
-        match w.1 {
-            Some(t) if t.elapsed() < Duration::from_secs(60) => None,
-            _ => {
-                let n = w.0;
-                *w = (0, Some(Instant::now()));
-                Some(n)
-            }
-        }
+        self.wrong.note()
     }
 
     /// Takes a place for a connection of `who`, if it has one left.
@@ -208,27 +194,9 @@ impl WebUi {
         })
     }
 
-    /// Waits [`webui::WRONG_SECRET_DELAY`] before a wrong token is answered,
-    /// or less when [`LATE`] others wait and this one waited longest.
+    /// Waits before a wrong token is answered ([`webui::WrongSecrets::wait`]).
     async fn wait_late(&self) {
-        let me = Arc::new(Notify::new());
-        {
-            let mut late = lock(&self.late);
-            if late.len() >= LATE
-                && let Some(oldest) = late.pop_front()
-            {
-                oldest.notify_one();
-            }
-            late.push_back(me.clone());
-        }
-        let _gone = Late {
-            late: &self.late,
-            me: me.clone(),
-        };
-        tokio::select! {
-            _ = tokio::time::sleep(webui::WRONG_SECRET_DELAY) => {}
-            _ = me.notified() => {}
-        }
+        self.wrong.wait().await
     }
 }
 
@@ -247,18 +215,6 @@ impl Drop for Place {
                 w.remove(&self.who);
             }
         }
-    }
-}
-
-/// A wrong token's wait, which leaves the line when it ends.
-struct Late<'a> {
-    late: &'a Mutex<VecDeque<Arc<Notify>>>,
-    me: Arc<Notify>,
-}
-
-impl Drop for Late<'_> {
-    fn drop(&mut self) {
-        lock(self.late).retain(|n| !Arc::ptr_eq(n, &self.me));
     }
 }
 

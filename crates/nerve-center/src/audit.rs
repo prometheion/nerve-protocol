@@ -25,7 +25,7 @@ const FIELDS: [&str; 12] = [
     "ts", "cap", "action", "target", "decision", "code", "session", "by", "node_id", "node",
     // The action checker's own decisions carry this: `{layer, scope,
     // detail}`, all short and built by the center, so it cannot blow an
-    // entry up.
+    // entry up. A node's event never brings it (Center::on_event drops it).
     "checker",
     // The call's arguments an audit button may pin: kept as the node keeps
     // them (nerve_policy::audit::pinnable_args), bounded in count and size.

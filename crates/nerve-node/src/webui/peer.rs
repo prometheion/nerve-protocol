@@ -152,7 +152,7 @@ pub(crate) fn judge(
 
 /// How the check finds a peer's socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Lookup {
+pub enum Lookup {
     /// The kernel looks the one socket up (crate::localnet::tcp_socket): the
     /// cost does not grow with the sockets of the machine, which a command
     /// that is closed at once can make many of, nor with how often it tries.
@@ -166,7 +166,7 @@ impl Lookup {
     /// The way that works here, tried on the listener at `at` itself: the
     /// kernel says "no such entry" also when it cannot look sockets up, and
     /// a check that took that for a peer that left would close every one.
-    pub(crate) fn for_listener(at: SocketAddr) -> Lookup {
+    pub fn for_listener(at: SocketAddr) -> Lookup {
         let any = SocketAddr::new(
             if at.is_ipv4() {
                 Ipv4Addr::UNSPECIFIED.into()
@@ -190,18 +190,7 @@ pub(crate) fn judge_now(
     allowed: &[u32],
     how: Lookup,
 ) -> Verdict {
-    let entries = match how {
-        Lookup::Kernel => match crate::localnet::tcp_socket(plain(peer), plain(local)) {
-            Ok(found) => found.into_iter().collect(),
-            Err(e) => {
-                tracing::debug!(
-                    "web UI: the kernel did not look the peer up ({e}); reading the tables"
-                );
-                tables()
-            }
-        },
-        Lookup::Tables => tables(),
-    };
+    let entries = entries_now(peer, local, how);
     // A local peer is placed by its entry; the machine's addresses are
     // only needed for a peer that may be another machine.
     let found = entries
@@ -214,6 +203,37 @@ pub(crate) fn judge_now(
         own_addresses()
     };
     judge(peer, local, &entries, allowed, &own)
+}
+
+/// The account whose live socket on this machine is the peer `peer` of a
+/// connection to `local`, if one is: the center counts the connections of
+/// local peers by account, since on loopback they all have one address
+/// (or any of 127.0.0.0/8 they bind). None for another machine, a peer that
+/// closed already, or two entries that claim to be the peer.
+pub fn account_of(peer: SocketAddr, local: SocketAddr, how: Lookup) -> Option<u32> {
+    let entries = entries_now(peer, local, how);
+    let found: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| same(e.local, peer) && same(e.remote, local))
+        .collect();
+    match found[..] {
+        [e] if e.state == ESTABLISHED && e.inode != 0 => Some(e.uid),
+        _ => None,
+    }
+}
+
+/// The entries that may be the peer's socket, looked up as `how` says.
+fn entries_now(peer: SocketAddr, local: SocketAddr, how: Lookup) -> Vec<Entry> {
+    match how {
+        Lookup::Kernel => match crate::localnet::tcp_socket(plain(peer), plain(local)) {
+            Ok(found) => found.into_iter().collect(),
+            Err(e) => {
+                tracing::debug!("the kernel did not look a peer up ({e}); reading the tables");
+                tables()
+            }
+        },
+        Lookup::Tables => tables(),
+    }
 }
 
 /// Both tables of /proc, in the node's network namespace.

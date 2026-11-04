@@ -1,9 +1,9 @@
 //! Flags and `NERVE_*` variables. A harness starts `nerve-center` from its MCP
 //! entry, so every setting is a flag or a variable there. The only
 //! subcommands are the owner's: `backup` and `restore`, which run by hand on a
-//! center that is not running (`restore`) or may be (`backup`), and the
-//! service's `install`, `update` and `uninstall`, run as root on Linux
-//! ([`crate::service`]).
+//! center that is not running (`restore`) or may be (`backup`),
+//! `owner-token` ([`crate::owner`]), and the service's `install`, `update`
+//! and `uninstall`, run as root on Linux ([`crate::service`]).
 
 use std::path::PathBuf;
 
@@ -43,21 +43,18 @@ pub struct Args {
     /// and nodes on the same machine.
     #[arg(long, env = "NERVE_PLAIN_LOOPBACK")]
     pub plain_loopback: bool,
-    /// The web UI address, or `off`.
+    /// The web UI address, or `off`. It always asks for the owner token
+    /// (`nerve-center owner-token`).
     #[arg(long, env = "NERVE_UI", default_value = "127.0.0.1:7480")]
     pub ui: String,
-    /// Let the web UI in without a login. It logs in with a harness token
-    /// otherwise; only for a UI on loopback, a UI beyond it always needs one.
-    #[arg(long, env = "NERVE_UI_NO_LOGIN")]
-    pub ui_no_login: bool,
     /// How harnesses talk to the center.
     #[arg(long, env = "NERVE_MCP", value_enum, default_value = "stdio")]
     pub mcp: McpMode,
     /// The HTTP MCP address (with `--mcp http`).
     #[arg(long, env = "NERVE_MCP_LISTEN", default_value = "127.0.0.1:7481")]
     pub mcp_listen: String,
-    /// A harness token: the bearer token of the HTTP MCP endpoint and the
-    /// secret that logs in to the web UI, besides tokens made in the web UI.
+    /// A harness token: a bearer token of the HTTP MCP endpoint, besides the
+    /// tokens made in the web UI. It does not log in to the web UI.
     #[arg(long, env = "NERVE_HARNESS_TOKEN", hide_env_values = true)]
     pub harness_token: Option<String>,
     /// How long `execute` waits for a call's result: a call still running
@@ -99,6 +96,12 @@ pub enum Cmd {
         /// Read the passphrase from the first line of this file instead of asking.
         #[arg(long, value_name = "FILE")]
         passphrase_file: Option<PathBuf>,
+    },
+    /// Say the owner token, the secret that logs in to the web UI, and where it is kept; with --new, make a new one first. Run it as the center's user, or as root for the installed center.
+    OwnerToken {
+        /// Make a new token in place of the old one: the old one stops at once, also on a running center.
+        #[arg(long)]
+        new: bool,
     },
     /// Install the center as a service that starts with the machine and runs under a user of its own, with MCP over HTTP (Linux with systemd, as root).
     Install,
@@ -263,12 +266,11 @@ mod tests {
         .unwrap();
         assert_eq!(a.public_url(9), "http://127.0.0.1:9");
         assert!(a.ui_off());
-        // The web UI logs in with the harness token; there is no password of
-        // its own, and the login is switched off by a flag alone.
-        assert!(!a.ui_no_login);
+        // The web UI always logs in with the owner token: there is no
+        // password of its own and no switch to turn the login off.
         assert!(Args::try_parse_from(["nerve-center", "--ui-password", "x"]).is_err());
-        let a = Args::try_parse_from(["nerve-center", "--ui-no-login"]).unwrap();
-        assert!(a.ui_no_login);
+        assert!(Args::try_parse_from(["nerve-center", "--ui-no-login"]).is_err());
+        let a = Args::try_parse_from(["nerve-center"]).unwrap();
         // The level comes from the flag, or else from the settings.
         assert_eq!(a.log, None);
         let a = Args::try_parse_from(["nerve-center", "--log", "Debug"]).unwrap();
@@ -300,6 +302,12 @@ mod tests {
         assert!(cmd(&["install"]).unwrap().is_service());
         assert!(!cmd(&["backup", "f"]).unwrap().is_service());
         assert!(!cmd(&["restore", "f"]).unwrap().is_service());
+        assert_eq!(cmd(&["owner-token"]), Some(Cmd::OwnerToken { new: false }));
+        assert_eq!(
+            cmd(&["owner-token", "--new"]),
+            Some(Cmd::OwnerToken { new: true })
+        );
+        assert!(!cmd(&["owner-token"]).unwrap().is_service());
         assert!(
             is_loopback("127.0.0.1:7480") && is_loopback("[::1]:1") && !is_loopback("0.0.0.0:7480")
         );

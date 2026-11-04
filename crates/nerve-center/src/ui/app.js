@@ -647,7 +647,7 @@ function allowCard(cfg) {
     ruleIn.value = "";
     await saveChecker();
   });
-  return section("Allow rules", "A call that matches an allow rule skips the decision model and goes straight to the machine. It does not skip the blocklist.", null,
+  return section("Allow rules", "A call that matches an allow rule skips the decision model and goes straight to the machine. It does not skip the blocklist. A command rule covers a line only when every command in it meets the rule, with no flag or operand the rule does not name (but after a bare *), no wrapper with words of its own (env A=B, sudo -u), and nothing run inside another command ($( ), sh -c, env -S); a re: rule covers a line of one command; exec.run:exact:… covers one line exactly.", null,
     el("div", { class: "card" }, el("div", { class: "form-row" },
       el("label", { class: "field grow" }, el("span", { class: "label" }, "Add a rule"), ruleIn, ruleFieldsHint(ruleIn)),
       nodePicker.root),
@@ -1380,7 +1380,7 @@ function pageSettings() {
       }) }, "Save")))),
     section("Center key", "Machines check the center by this key's pin. Rotating it makes a new key; the old one is served for 7 more days, so the machines learn the new one when they link.", null,
       centerKey(s.center.key)),
-    section("Harness tokens", "A token lets an AI harness call this center over HTTP.", null,
+    section("Harness tokens", "A token lets an AI harness call this center over HTTP. It does not log in here: this page asks for the owner token.", null,
       el("div", { class: "stack" }, el("div", { class: "card" }, tokenForm()), s.tokensBox)),
     section("Machines", "Settings kept on each machine itself.", null,
       s.nodes.length ? el("div", { class: "stack" }, s.nodes.map(nodeSettings)) : empty("No machines yet.", "server")),
@@ -1440,9 +1440,14 @@ function drawTokens() {
       el("span", {}, "New token, shown once: ", el("code", { class: "mono" }, state.newToken)),
       el("button", { type: "button", class: "btn ghost sm", onclick: () => copy(state.newToken) }, icon("copy", "sm"), "Copy"),
       el("button", { type: "button", class: "btn ghost sm", "aria-label": "Hide", onclick: () => { state.newToken = null; drawTokens(); } }, icon("x", "sm"))) : null,
-    s.tokens.length ? s.tokens.map((t) => el("div", { class: "card" }, el("div", { class: "card-top" },
-      icon("key"), el("span", { class: "name" }, t.label || "(no label)"), el("span", { class: "meta push" }, `Created ${ago(t.created_ms)}`),
-      btn("Delete", "danger-soft", act(async () => { await api("POST", "/api/tokens/delete", { id: t.id }); await loadTokens(); }), "trash", `token:${t.id}:delete`))))
+    s.tokens.length ? s.tokens.map((t) => t.settings
+      // The token of the settings (NERVE_HARNESS_TOKEN or --harness-token):
+      // only a change of the settings and a restart remove it.
+      ? el("div", { class: "card" }, el("div", { class: "card-top" },
+        icon("key"), el("span", { class: "name mono" }, t.label), el("span", { class: "meta push" }, "From the center's settings; remove it there")))
+      : el("div", { class: "card" }, el("div", { class: "card-top" },
+        icon("key"), el("span", { class: "name" }, t.label || "(no label)"), el("span", { class: "meta push" }, `Created ${ago(t.created_ms)}`),
+        btn("Delete", "danger-soft", act(async () => { await api("POST", "/api/tokens/delete", { id: t.id }); await loadTokens(); }), "trash", `token:${t.id}:delete`))))
       : el("p", { class: "meta" }, "No tokens yet.")].flat().filter(Boolean));
 }
 

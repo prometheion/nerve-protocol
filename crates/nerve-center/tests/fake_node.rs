@@ -1051,12 +1051,27 @@ async fn a_second_link_while_the_first_answers_is_a_duplicate() {
     r.stop().await;
 }
 
+/// The web UI's login with the owner token of `r`'s center.
+fn owner_login(r: &Running) -> nerve_transport::http::Request {
+    let token = nerve_center::owner::read(r.center.dir())
+        .unwrap()
+        .expect("an owner token");
+    let mut req = http(
+        "POST",
+        &[
+            ("host", "127.0.0.1:1"),
+            ("content-type", "application/json"),
+        ],
+        json!({ "token": token }),
+    );
+    req.path = "/login".into();
+    req
+}
+
 /// `/api/overview` as the web UI's page reads it.
 async fn overview(r: &Running) -> Value {
-    let ui = nerve_center::ui::Ui::new(&r.center, None, false);
-    let mut req = http("GET", &[("host", "127.0.0.1:1")], Value::Null);
-    req.path = "/api/session".into();
-    let resp = ui.request(req).await;
+    let ui = nerve_center::ui::Ui::new(&r.center, None, true);
+    let resp = ui.request(owner_login(r)).await;
     let v: Value = serde_json::from_slice(&resp.body).unwrap();
     let session = v["session"].as_str().expect("a session");
     let mut req = http(
@@ -1369,6 +1384,355 @@ async fn http_mcp_needs_a_token_and_a_session() {
         h.request(http("GET", &[auth], Value::Null)).await.status,
         405
     );
+    r.stop().await;
+}
+
+/// The links of many nodes behind one address do not hold that address's
+/// places on the node port: once a link's hello is checked it no longer
+/// counts, so the next node from there still pairs.
+#[tokio::test]
+async fn links_do_not_hold_their_peers_places() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(dir.path()).await;
+    let mut links = Vec::new();
+    for i in 0..nerve_center::listen::PER_PEER {
+        let key = NodeKey::generate().unwrap();
+        assert_eq!(pair(&r, &key, &format!("box-{i}")).await.0, 200);
+        let (ws, _) = handshake(&r, &key).await;
+        links.push(ws);
+    }
+    let key = NodeKey::generate().unwrap();
+    let (status, body) = tokio::time::timeout(Duration::from_secs(10), pair(&r, &key, "one-more"))
+        .await
+        .expect("the pairing was not answered");
+    assert_eq!(status, 200, "{body}");
+    drop(links);
+    r.stop().await;
+}
+
+/// An HTTP session ends when the harness token that opened it is deleted,
+/// at once and without a request of its own, and after a while without a
+/// request. Its center session ends with it: its jobs and streams stop.
+#[tokio::test]
+async fn http_sessions_end_with_their_token_and_when_idle() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(dir.path()).await;
+    let hash = |t: &str| nerve_center::util::sha256_hex(t.as_bytes());
+    r.center.update(|s| {
+        for id in ["a", "b"] {
+            s.harness_tokens.push(nerve_center::store::TokenRecord {
+                id: id.into(),
+                label: id.into(),
+                hash: hash(&format!("nrv_token-{id}")),
+                created_ms: 1,
+            });
+        }
+    });
+    let h = nerve_center::mcp::HttpMcp::new(&r.center, None);
+    let server = nerve_center::listen::Server::bind("127.0.0.1:0", &r.center, true)
+        .await
+        .unwrap();
+    let task = tokio::spawn(h.clone().serve(server));
+    let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}});
+    let mut sid = String::new();
+    for id in ["a", "b"] {
+        let bearer = format!("Bearer nrv_token-{id}");
+        let resp = h
+            .request(http("POST", &[("authorization", &bearer)], init.clone()))
+            .await;
+        assert_eq!(resp.status, 200);
+        sid = resp
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("mcp-session-id"))
+            .map(|(_, v)| v.clone())
+            .expect("a session id");
+    }
+    assert_eq!(h.session_count(), 2);
+    let before = r.center.session_count();
+    // Token a is deleted, as the web UI deletes it.
+    r.center
+        .update(|s| s.harness_tokens.retain(|t| t.id != "a"));
+    r.center.changed(nerve_center::center::Change::Tokens);
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while h.session_count() != 1 && std::time::Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        h.session_count(),
+        1,
+        "the session of the deleted token stays"
+    );
+    assert_eq!(r.center.session_count(), before - 1);
+    // The other one ends once it has been idle for the idle time; a
+    // request keeps it going.
+    h.set_idle(Duration::from_millis(400));
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
+    let used = h
+        .request(http(
+            "POST",
+            &[
+                ("authorization", "Bearer nrv_token-b"),
+                ("mcp-session-id", &sid),
+            ],
+            list,
+        ))
+        .await;
+    assert_eq!(used.status, 200);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    h.sweep().await;
+    assert_eq!(h.session_count(), 1);
+    h.set_idle(Duration::ZERO);
+    h.sweep().await;
+    assert_eq!(h.session_count(), 0);
+    assert_eq!(r.center.session_count(), before - 2);
+    task.abort();
+    r.stop().await;
+}
+
+/// An HTTP session answers only the token that opened it: another
+/// harness's token can neither use it nor end it, though it knows the id.
+/// And one token keeps a bounded number open: past it, its longest idle
+/// session ends for the new one.
+#[tokio::test]
+async fn http_sessions_are_their_tokens_and_bounded_per_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(dir.path()).await;
+    let hash = |t: &str| nerve_center::util::sha256_hex(t.as_bytes());
+    r.center.update(|s| {
+        for id in ["a", "b"] {
+            s.harness_tokens.push(nerve_center::store::TokenRecord {
+                id: id.into(),
+                label: id.into(),
+                hash: hash(&format!("nrv_token-{id}")),
+                created_ms: 1,
+            });
+        }
+    });
+    let h = nerve_center::mcp::HttpMcp::new(&r.center, None);
+    let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}});
+    let open = |id: &'static str| {
+        let h = h.clone();
+        let init = init.clone();
+        async move {
+            let bearer = format!("Bearer nrv_token-{id}");
+            let resp = h
+                .request(http("POST", &[("authorization", &bearer)], init))
+                .await;
+            assert_eq!(resp.status, 200);
+            resp.headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("mcp-session-id"))
+                .map(|(_, v)| v.clone())
+                .expect("a session id")
+        }
+    };
+    let list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
+    let a = open("a").await;
+    for (method, body) in [("POST", list.clone()), ("DELETE", Value::Null)] {
+        let resp = h
+            .request(http(
+                method,
+                &[
+                    ("authorization", "Bearer nrv_token-b"),
+                    ("mcp-session-id", &a),
+                ],
+                body,
+            ))
+            .await;
+        assert_eq!(resp.status, 404, "{method} with another token");
+    }
+    let used = h
+        .request(http(
+            "POST",
+            &[
+                ("authorization", "Bearer nrv_token-a"),
+                ("mcp-session-id", &a),
+            ],
+            list.clone(),
+        ))
+        .await;
+    assert_eq!(used.status, 200);
+    assert_eq!(h.session_count(), 1);
+
+    // Token b fills its share; token a's session stays, b's first goes.
+    let mut b = Vec::new();
+    for _ in 0..nerve_center::mcp::HTTP_SESSIONS_PER_TOKEN {
+        b.push(open("b").await);
+    }
+    let before = r.center.session_count();
+    assert_eq!(
+        h.session_count(),
+        1 + nerve_center::mcp::HTTP_SESSIONS_PER_TOKEN
+    );
+    open("b").await;
+    assert_eq!(
+        h.session_count(),
+        1 + nerve_center::mcp::HTTP_SESSIONS_PER_TOKEN,
+        "a token opened sessions past its share"
+    );
+    assert_eq!(r.center.session_count(), before);
+    for (sid, token, want) in [(&b[0], "b", 404), (&b[1], "b", 200), (&a, "a", 200)] {
+        let bearer = format!("Bearer nrv_token-{token}");
+        let resp = h
+            .request(http(
+                "POST",
+                &[("authorization", &bearer), ("mcp-session-id", sid)],
+                list.clone(),
+            ))
+            .await;
+        assert_eq!(resp.status, want, "{sid}");
+    }
+    r.stop().await;
+}
+
+/// Idle connections to the HTTP MCP port, without a token, hold only their
+/// peer's places: past them a new one is closed unread. Before, the port
+/// gave each connection's place back before its request was read, so one
+/// peer held as many open as it liked.
+#[tokio::test]
+async fn idle_connections_hold_only_their_peers_places_on_the_mcp_port() {
+    use tokio::io::AsyncReadExt;
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(dir.path()).await;
+    let h = nerve_center::mcp::HttpMcp::new(&r.center, Some("t".into()));
+    let server = nerve_center::listen::Server::bind("127.0.0.1:0", &r.center, true)
+        .await
+        .unwrap();
+    let addr = server.local_addr();
+    let task = tokio::spawn(h.serve(server));
+    let mut idle = Vec::new();
+    for _ in 0..nerve_center::listen::PER_PEER {
+        idle.push(tokio::net::TcpStream::connect(addr).await.unwrap());
+    }
+    let mut extra = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut buf = [0u8; 1];
+    let n = tokio::time::timeout(Duration::from_secs(5), extra.read(&mut buf))
+        .await
+        .expect("the extra connection was held open")
+        .unwrap_or(0);
+    assert_eq!(n, 0);
+    drop(idle);
+    task.abort();
+    r.stop().await;
+}
+
+/// A token's requests wait for their node without any place of the
+/// listener, so the token itself is bounded: past its share a request is
+/// answered 503 at once, another token's is not, and the share frees as the
+/// waiting calls end. Before, a harness could hold as many connections open
+/// as the center had files.
+#[tokio::test]
+async fn a_token_has_a_bounded_number_of_requests_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = center_with(dir.path(), &["--call-wait", "2s"]).await;
+    let hash = |t: &str| nerve_center::util::sha256_hex(t.as_bytes());
+    r.center.update(|s| {
+        for id in ["a", "b"] {
+            s.harness_tokens.push(nerve_center::store::TokenRecord {
+                id: id.into(),
+                label: id.into(),
+                hash: hash(&format!("nrv_token-{id}")),
+                created_ms: 1,
+            });
+        }
+    });
+    let key = NodeKey::generate().unwrap();
+    assert_eq!(pair(&r, &key, "box-1").await.0, 200);
+    let (ws, _) = handshake(&r, &key).await;
+    let mut seen = serve(ws, descriptor(&key, "box-1"));
+    described(&r.center).await;
+    let h = nerve_center::mcp::HttpMcp::new(&r.center, None);
+    h.set_active_max(2);
+    let call = |token: &'static str, sid: String, body: Value| {
+        let h = h.clone();
+        async move {
+            let bearer = format!("Bearer nrv_token-{token}");
+            h.request(http(
+                "POST",
+                &[("authorization", &bearer), ("mcp-session-id", &sid)],
+                body,
+            ))
+            .await
+        }
+    };
+    let bearer = "Bearer nrv_token-a";
+    let init = h
+        .request(http(
+            "POST",
+            &[("authorization", bearer)],
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "t", "version": "1"}}}),
+        ))
+        .await;
+    assert_eq!(init.status, 200);
+    let sid = init
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("mcp-session-id"))
+        .map(|(_, v)| v.clone())
+        .expect("a session id");
+    let tool = |id: u64, name: &str, arguments: Value| {
+        json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments}})
+    };
+    let details = call(
+        "a",
+        sid.clone(),
+        tool(
+            2,
+            "list",
+            json!({"node": "box-1", "capability": "exec.run"}),
+        ),
+    )
+    .await;
+    assert_eq!(details.status, 200);
+    // Two calls wait for a node that never answers.
+    let run = tool(
+        3,
+        "execute",
+        json!({"node": "box-1", "capability": "exec.run", "args": {"command": "hang"}}),
+    );
+    let waiting: Vec<_> = (0..2)
+        .map(|_| tokio::spawn(call("a", sid.clone(), run.clone())))
+        .collect();
+    for _ in 0..2 {
+        let got = tokio::time::timeout(Duration::from_secs(5), seen.recv())
+            .await
+            .expect("the node got the call");
+        assert!(matches!(got, Some(Seen::Hang(_))));
+    }
+    let list = json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list"});
+    let started = std::time::Instant::now();
+    let refused = call("a", sid.clone(), list.clone()).await;
+    assert_eq!(refused.status, 503, "a token past its share");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(
+        refused
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("retry-after") && v == "1")
+    );
+    // Another token has its own share.
+    let other = h
+        .request(http(
+            "POST",
+            &[("authorization", "Bearer nrv_token-b")],
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "t", "version": "1"}}}),
+        ))
+        .await;
+    assert_eq!(other.status, 200);
+    // The calls end at the call wait, and the share is free again.
+    for w in waiting {
+        assert_eq!(w.await.unwrap().status, 200);
+    }
+    assert_eq!(call("a", sid, list).await.status, 200);
     r.stop().await;
 }
 
@@ -2053,10 +2417,28 @@ async fn audit_targets_are_cut_and_the_audit_feed_is_bounded() {
     );
     assert_eq!(first["node"], "box-1");
 
+    // A node cannot pass its event off as the center's action checker's:
+    // the marker and the `by` go, so the page draws it as the node's.
+    send(
+        &mut ws,
+        Message::notification(
+            method::EVENT,
+            json!({"cap": "audit", "name": "decision", "seq": 2, "ts": 1, "data": {
+                "ts": 1, "cap": "exec", "action": "run", "target": "forged",
+                "decision": "forbidden", "code": "forbidden", "by": "Action Checker",
+                "checker": {"layer": "model", "scope": "global", "detail": "score 0.99"}}}),
+        ),
+    )
+    .await;
+    let forged = wait_for(|| c.audit().into_iter().find(|e| e["target"] == "forged")).await;
+    assert!(forged.get("checker").is_none(), "{forged}");
+    assert!(forged.get("by").is_none(), "{forged}");
+    assert_eq!(forged["node_id"], key.node_id());
+
     // Many refused calls with large targets: the feed keeps its count and
     // its size, and the web UI's answer stays as small.
     let calls = 600;
-    for seq in 2..=calls {
+    for seq in 3..=calls {
         send(&mut ws, event(seq, format!("{seq} {}", "x".repeat(4096)))).await;
     }
     let last = format!("{calls} ");
@@ -2073,11 +2455,8 @@ async fn audit_targets_are_cut_and_the_audit_feed_is_bounded() {
         "{}",
         feed.len()
     );
-    // The UI without a login hands out a session to the page.
-    let ui = nerve_center::ui::Ui::new(&r.center, None, false);
-    let mut req = http("GET", &[("host", "127.0.0.1:1")], Value::Null);
-    req.path = "/api/session".into();
-    let resp = ui.request(req).await;
+    let ui = nerve_center::ui::Ui::new(&r.center, None, true);
+    let resp = ui.request(owner_login(&r)).await;
     let v: Value = serde_json::from_slice(&resp.body).unwrap();
     let session = v["session"].as_str().expect("a session");
     let mut req = http(

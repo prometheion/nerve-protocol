@@ -861,7 +861,13 @@ process it sees below one of its commands, but none of that is a boundary.
 The same holds for `allowlist` mode with `--as-owner`. The node's
 [web UI](node-web-ui.md), when you turn it on, adds no way for such a command:
 it reaches only the login, and a token is what lets one in; a command as
-`nerve-run` is closed before it can try one.
+`nerve-run` is closed before it can try one. The same holds for the center's
+[web UI](web-ui.md) on a machine that also runs a node: a command reaches its
+login, which asks for the owner token. That token is in the center's state
+folder, which a `nerve-run` command cannot read; a `user` mode command runs
+as you and can, when the center runs as you too (a center the harness
+starts). A harness token, which the agent may read in its harness's
+settings, does not log in.
 
 Where root is the owner (an install that root ran itself and confirmed,
 [service](service.md#root-as-the-owner)), `user` mode and `allowlist` mode

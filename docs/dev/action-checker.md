@@ -150,6 +150,55 @@ only those, so a command the parser sees behind a wrapper (`timeout 600 make
 test && ./deploy.sh` for the rule `exec.run:make *`) is no further way to skip
 the model.
 
+An allow rule is matched the other way round from a blocklist entry
+(`Rule::matches_with` against `Rule::blocks_with`): a command pattern or a
+`cmd-re:` covers a line only when every command of `Parsed::for_allow` meets
+it, and there is at least one. `for_allow` is empty when the walk found a
+command inside another (`Parsed::nested`: a substitution, a `-c` body, a
+started program), when a wrapper did more than run its command
+(`Parsed::wrapped`: words of its own such as `env A=B`, `env -S '…'`,
+`sudo -u x`, or `xargs`/`npx`, which add to it at run time), and when the
+parser found a command the splitter did not (`commands.len() > walked`: a
+runner such as `timeout` or `eval`, or a wrapper's flags the splitter reads
+otherwise). Such a line is covered only by `exec.run:exact:<line>` (the
+whole trimmed line, which the Audit page's **Allow** saves). A `re:` allow
+rule matches the whole line but covers only a line whose `for_allow` holds
+exactly one command. As an allow rule a structured pattern also takes no
+flag or operand it does not name (`CmdPattern::covers`), unless it has a
+bare `*`; a long flag it spells `--name=value` takes that value only, and a
+short flag only in the case it spells it (`matches`, the blocklist's, takes
+either). A pattern, `cmd-re:` or `re:` rule covers only a `plain` command
+(`Command::plain`: the program word has no folder), since `program` keeps
+the base name only; for `re:` that is all it checks of the program, the
+regex sees the text.
+`Parsed::redirected` marks a line in which the parser reads a redirection
+(`Command::redirects`) or text the command reads as input (`Command::input`:
+a here-string or here-document); `for_allow` is empty for it. The splitter
+keeps a `>` and its file, or a `<<<` and its text, among a command's
+arguments and the parser takes them out, so the two readings of that command
+differ, which alone kept it from a rule; but
+`parse` dedupes the readings as a set, and a second, plain copy of the command
+in the line hid the difference. Only an `exact:` rule covers such a line, as
+the node's allowlist covers no wildcard line with `<` or `>`.
+`Parsed::unread` marks a line nerve-policy's parser gave up on (`Err`: an
+open quote or here-document, a shell fed from a pipe, an encoded PowerShell
+command, a bound hit). `for_allow` is empty for it, as for `nested`: the
+splitter alone would otherwise decide what skips the model, and it does not
+decode `-EncodedCommand`. The blocklist still reads `commands`. On a POSIX line `Command::written` keeps the word as it
+was written, and a pattern compares its program with that in its case
+(`CmdPattern::program_as_written`), so `Rscript *` covers `Rscript x.R` and
+not `rscript x.R`, `Cat` or `cat.exe` for `cat`; a `cmd-re:` rule meets the
+lower-cased line and so needs a word that is already lower case
+(`Command::written_lower`). A wrapper word that is not written as its base
+name (`./env`, `NOHUP`) marks the line `wrapped`. A word that starts with `-`
+and that the pattern does not name is no operand (`covers`), as
+`Command::operands` has it. The parser's duplicate of a command does not
+replace the splitter's, which saw the word.
+The node's allowlist is stricter
+(`nerve-policy/src/decide.rs`: a wildcard never covers a chained line, a
+line with a shell control character, or one with a word such as `powershell`
+or `-encodedcommand`).
+
 The splitter splits on separators and subshell parentheses, pulls `$( )`,
 backticks, process substitution, `sh -c` (`c` anywhere in the flag word:
 `-lc`, `-ce`, `-c -e`), `cmd /c` and `powershell -Command` bodies, and
@@ -284,9 +333,38 @@ owner's. The model client waits up to the checker's own timeout for an answer
 timeout, so a slow model on a small CPU is not cut short. The supervisor
 (`checker/server.rs`) runs the installed binary
 with `-m <model>`, `-ngl 0` (CPU) or `-ngl 999` (GPU), `-c`, `-b` and `-ub`
-of the model's context and `-np 1`, on a free loopback
-port, restarted with backoff, ended with the center (`kill_on_drop`, a process
-group on Unix); its state and the install progress show in the UI. The endpoint
+of the model's context and `-np 1`, restarted with backoff, ended with the
+center (`kill_on_drop`, a process group on Unix); its state and the install
+progress show in the UI. It listens on `<state>/checker-model.sock` (`--host
+<path>.sock`) on Unix, so no other account can reach it or bind its address
+after a crash; on Windows, or where that path is over 100 bytes, on a free
+port of `127.0.0.1`. There any process may answer, and a probe cannot tell
+the server from one that refuses a key too, so the supervisor asks nothing
+until the server's own log (stderr) says `listening on http://127.0.0.1:<port>`:
+a server whose port was taken cannot bind, never says so and ends. Only
+then does it check that the server answers `/v1/models` with 401 to a key it
+was not given, and send the real one. Calls wait for the same check (`ReadBudget::vet_calls`, `vetted`,
+cleared when a process ends): in the window after the server ended on a call
+they are refused as lost without a connection, so the old port, which a
+process may have taken, sees neither the key nor the text. That holds from
+the moment the center sees the process end: `vetted` is cleared when the
+supervisor reaps the child, and a connection that ends first (the kernel closes
+the server's sockets before it tells its parent) leaves a gap of micro- to
+milliseconds in which a call is still sent to the old port. For a call already
+waiting for the slot, or counted while another call ended the server,
+`ask_local` looks at the budget's marks (compared with those from before its
+count) and `may_send` again once it has the slot (the call before it marks the
+end before it frees the slot). A process that
+took the port is so never sent the key, short of one that may share a port with the server
+(Windows lets a process do that by choice); the check is a guard against a
+mistake, not a boundary. Either way it gets a random key
+per start in `LLAMA_API_KEY` (its environment, not its command line, which
+every account can read in `/proc`), and every call and probe carries it
+(`Endpoint::token`); `/health` is the only path llama-server leaves open. A
+stale socket file is removed before each start. On a port every restart
+takes a new free port (only the first run keeps the one it was given), so a
+process that bound the old port while the server was down cannot keep it
+from coming up. The endpoint
 token is the only secret and is not in a backup; the installed files are not in
 a backup either (they are re-downloaded).
 

@@ -14,7 +14,7 @@
 #   .github/scripts/center-service-end-to-end.sh
 #
 # With a browser named, the web UI opens every page in it, signed in with
-# the harness token (web-ui-smoke.mjs).
+# the owner token (web-ui-smoke.mjs); harness tokens open MCP only.
 set -euo pipefail
 
 CENTER=${NERVE_CENTER_REAL:?the nerve-center to install}
@@ -99,6 +99,13 @@ systemctl is-enabled --quiet nerve-center || fail "the service is not enabled"
 cmp -s "$CENTER" "$BIN" || fail "the program in place is not the one installed"
 TOKEN=$(token)
 [ -n "$TOKEN" ] || fail "the settings file has no harness token"
+# The owner token, apart from the harness token: kept in the state folder,
+# readable by the center alone, and named by install.
+OWNER=$(cat "$STATE/owner-token")
+[ -n "$OWNER" ] || fail "the center made no owner token"
+[ "$(stat -c '%U %a' "$STATE/owner-token")" = "nerve-center 600" ] || fail "the owner token file is $(stat -c '%U %a' "$STATE/owner-token")"
+grep -qF "$OWNER" "$OUT/install" || fail "install did not show the owner token"
+[ "$OWNER" != "$TOKEN" ] || fail "the owner token is the harness token"
 
 step "2. MCP over HTTP with the harness token, and with no other"
 until_up "$TOKEN"
@@ -131,7 +138,7 @@ grep -qx '127.0.0.1:7481' "$OUT/listen" || fail "no MCP endpoint on 127.0.0.1:74
 [ "$(grep -vcxE '(0\.0\.0\.0|\*|\[::\]):7443|127\.0\.0\.1:748[01]' "$OUT/listen")" = 0 ] \
   || fail "the center listens where the defaults do not say"
 
-ui_smoke http://127.0.0.1:7480/ "$TOKEN"
+ui_smoke http://127.0.0.1:7480/ "$OWNER"
 
 step "3. The unit holds the center"
 systemctl show nerve-center -p User -p NoNewPrivileges -p ProtectHome -p PrivateDevices \
@@ -149,6 +156,7 @@ pid=$(systemctl show nerve-center -p MainPID --value)
 step "4. install again keeps the token"
 "$CENTER" install | tee "$OUT/install2"
 [ "$(token)" = "$TOKEN" ] || fail "a second install changed the harness token"
+[ "$(cat "$STATE/owner-token")" = "$OWNER" ] || fail "a second install changed the owner token"
 until_up "$TOKEN"
 
 step "5. update --from another build"
@@ -172,6 +180,7 @@ if id nerve-center >/dev/null 2>&1; then fail "the user nerve-center is still th
 [ "$(stat -c %U "$ENV_FILE")" = root ] || fail "the kept settings are not root's"
 "$CENTER" install | tee "$OUT/install3"
 [ "$(token)" = "$TOKEN" ] || fail "install after uninstall has another token"
+[ "$(cat "$STATE/owner-token")" = "$OWNER" ] || fail "install after uninstall has another owner token"
 [ "$(stat -c %U "$STATE")" = nerve-center ] || fail "install did not take the kept state folder up again"
 until_up "$TOKEN"
 

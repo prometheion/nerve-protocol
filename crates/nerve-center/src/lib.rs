@@ -5,8 +5,9 @@
 //! tools, `list` and `execute`, and serves the center web UI. Everything is
 //! set by flags or `NERVE_*` variables in the harness's MCP entry, or in the
 //! web UI. Its only subcommands are the
-//! owner's: `backup` and `restore` ([`backup`]), and `install`, `update` and
-//! `uninstall`, which run it as a service on Linux ([`service`]).
+//! owner's: `backup` and `restore` ([`backup`]), `owner-token` ([`owner`]),
+//! and `install`, `update` and `uninstall`, which run it as a service on
+//! Linux ([`service`]).
 //
 // Harnesses get Nerve through MCP only: this MCP server is the whole
 // integration surface. Native plugins are a backlog item.
@@ -23,6 +24,7 @@ pub mod link;
 pub mod listen;
 pub mod listing;
 pub mod mcp;
+pub mod owner;
 pub mod pairing;
 pub mod server;
 pub mod service;

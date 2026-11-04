@@ -3,7 +3,6 @@
 //! an attached process's socket, and over Streamable HTTP.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -30,6 +29,8 @@ use crate::util;
 /// accepted because the parts used here did not change.
 pub const PROTOCOL: &str = "2025-06-18";
 const KNOWN: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+/// The longest request id the server answers; it is echoed in the reply.
+const ID_BYTES: usize = 256;
 /// The largest MCP message.
 pub const MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 /// The largest tool result text handed to a model.
@@ -110,6 +111,17 @@ impl Engine {
             ));
         };
         let id = obj.get("id").cloned();
+        // Every answer echoes the id, so what a request can make the center
+        // send back is bounded by it: MCP ids are short strings or numbers.
+        if let Some(id) = &id
+            && !(id.is_number() || id.as_str().is_some_and(|s| s.len() <= ID_BYTES))
+        {
+            return Some(error(
+                Value::Null,
+                -32600,
+                &format!("an id is a number or a string of at most {ID_BYTES} bytes"),
+            ));
+        }
         let method = obj.get("method").and_then(Value::as_str);
         let params = obj
             .get("params")
@@ -160,7 +172,11 @@ impl Engine {
                     None => return None,
                 }
             }
-            _ => error(id, -32601, &format!("unknown method {method}")),
+            _ => error(
+                id,
+                -32601,
+                &format!("unknown method {}", util::clip(method, 64)),
+            ),
         })
     }
 
@@ -209,7 +225,10 @@ impl Engine {
             EXECUTE_TOOL => Ok(self.execute(args).await),
             _ => Err((
                 -32602,
-                format!("unknown tool {name}; the tools are list and execute"),
+                format!(
+                    "unknown tool {}; the tools are list and execute",
+                    util::clip(name, 64)
+                ),
             )),
         }
     }
@@ -1208,14 +1227,16 @@ pub async fn serve_stdio(center: Center) {
 }
 
 /// Whether `given` is a harness token: the one from the environment or a flag,
-/// or one made in the web UI (stored hashed). The HTTP MCP endpoint and the
-/// web UI's login both ask this, so one secret opens both.
+/// or one made in the web UI (stored hashed). Only the HTTP MCP endpoint
+/// asks this: the web UI's login takes the owner token alone
+/// ([`crate::owner`]), never a harness token.
 pub(crate) fn token_ok(center: &Center, env_token: Option<&str>, given: &str) -> bool {
     token_hash_ok(center, env_token, &util::sha256_hex(given.as_bytes()))
 }
 
 /// [`token_ok`] for a token that is only known by its SHA-256 (hex), which is
-/// what a web UI session keeps to notice that its token was deleted.
+/// what an HTTP MCP session keeps, so the sweep ends it once its token is
+/// deleted.
 pub(crate) fn token_hash_ok(center: &Center, env_token: Option<&str>, hash: &str) -> bool {
     if let Some(t) = env_token.filter(|t| !t.is_empty())
         && util::ct_eq(util::sha256_hex(t.as_bytes()).as_bytes(), hash.as_bytes())
@@ -1229,12 +1250,79 @@ pub(crate) fn token_hash_ok(center: &Center, env_token: Option<&str>, hash: &str
     })
 }
 
+/// How long an HTTP session may go without a request before it ends. Most
+/// clients never send `DELETE /mcp` when they exit; a session that stayed
+/// would keep its jobs running, and its streams and subscriptions open on
+/// the nodes. A job's caller polls `job.status` far more often than this.
+pub const HTTP_IDLE: Duration = Duration::from_secs(30 * 60);
+/// The HTTP sessions one harness token keeps open at most. A harness opens
+/// one per agent it runs.
+pub const HTTP_SESSIONS_PER_TOKEN: usize = 32;
+/// The requests one harness token has in flight at most. A request holds
+/// its connection (and the body it sent) while a call waits for its node,
+/// and no listener place is held for it any more once its token is checked,
+/// so this is what keeps a token from filling the center's open files. It
+/// is far above what a harness with [`HTTP_SESSIONS_PER_TOKEN`] agents needs
+/// at once; past it a request is answered 503.
+pub const HTTP_ACTIVE_PER_TOKEN: usize = 128;
+/// How often the HTTP sessions are looked over for one to end.
+const HTTP_SWEEP: Duration = Duration::from_secs(30);
+
 /// The Streamable HTTP endpoint at `/mcp`. Replies are plain JSON; the
 /// server opens no SSE stream, and needs none: the tools never change.
+///
+/// A session ends with `DELETE /mcp`, after [`HTTP_IDLE`] without a request,
+/// and at once when the harness token that opened it is deleted: the agent
+/// that held a token which leaked must not go on with what it started. A
+/// session answers only the token that opened it, and one token keeps
+/// [`HTTP_SESSIONS_PER_TOKEN`] open at most and [`HTTP_ACTIVE_PER_TOKEN`]
+/// requests in flight.
 pub struct HttpMcp {
     center: Center,
     env_token: Option<String>,
-    sessions: Mutex<HashMap<String, Arc<Engine>>>,
+    sessions: Mutex<HashMap<String, Held>>,
+    /// The requests in flight, by the SHA-256 (hex) of the token.
+    active: Mutex<HashMap<String, usize>>,
+    active_max: std::sync::atomic::AtomicUsize,
+    idle: Mutex<Duration>,
+    /// The center's changes, from the endpoint's making on: a token deleted
+    /// before [`HttpMcp::serve`] first runs is not missed.
+    changes: Mutex<Option<tokio::sync::broadcast::Receiver<Change>>>,
+}
+
+/// The task that ends HTTP sessions, stopped with the endpoint.
+struct Sweeper(tokio::task::JoinHandle<()>);
+
+impl Drop for Sweeper {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// A request in flight of one token, counted until it is dropped.
+struct Active<'a> {
+    http: &'a HttpMcp,
+    via: String,
+}
+
+impl Drop for Active<'_> {
+    fn drop(&mut self) {
+        let mut map = self.http.active.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = map.get_mut(&self.via) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.via);
+            }
+        }
+    }
+}
+
+/// An HTTP session: its engine, the SHA-256 (hex) of the token that opened
+/// it, and its last request.
+struct Held {
+    engine: Arc<Engine>,
+    via: String,
+    last: Instant,
 }
 
 impl HttpMcp {
@@ -1243,59 +1331,221 @@ impl HttpMcp {
             center: center.clone(),
             env_token,
             sessions: Mutex::new(HashMap::new()),
+            active: Mutex::new(HashMap::new()),
+            active_max: std::sync::atomic::AtomicUsize::new(HTTP_ACTIVE_PER_TOKEN),
+            idle: Mutex::new(HTTP_IDLE),
+            changes: Mutex::new(Some(center.subscribe())),
         })
     }
 
+    /// Another idle time, for a test.
+    #[doc(hidden)]
+    pub fn set_idle(&self, d: Duration) {
+        *self.idle.lock().unwrap() = d;
+    }
+
+    /// Another bound on a token's requests in flight, for a test.
+    #[doc(hidden)]
+    pub fn set_active_max(&self, n: usize) {
+        self.active_max
+            .store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A place among `via`'s requests in flight, if one is free.
+    fn enter(&self, via: &str) -> Option<Active<'_>> {
+        let max = self.active_max.load(std::sync::atomic::Ordering::Relaxed);
+        let mut map = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        let n = map.entry(via.to_string()).or_insert(0);
+        if *n >= max {
+            return None;
+        }
+        *n += 1;
+        Some(Active {
+            http: self,
+            via: via.to_string(),
+        })
+    }
+
+    /// How many HTTP sessions are open.
+    pub fn session_count(&self) -> usize {
+        self.sessions.lock().unwrap().len()
+    }
+
+    /// Ends the sessions that went idle, whose token is gone, or that the
+    /// web UI ended.
+    pub async fn sweep(&self) {
+        let idle = *self.idle.lock().unwrap();
+        let gone: Vec<(Arc<Engine>, &str)> = {
+            let mut map = self.sessions.lock().unwrap();
+            let mut gone = Vec::new();
+            map.retain(|_, h| {
+                let why = if h.engine.session().ended() {
+                    Some("")
+                } else if !token_hash_ok(&self.center, self.env_token.as_deref(), &h.via) {
+                    Some("its harness token was deleted")
+                } else if h.last.elapsed() >= idle {
+                    Some("it had no request for a while")
+                } else {
+                    None
+                };
+                match why {
+                    Some(why) => {
+                        gone.push((h.engine.clone(), why));
+                        false
+                    }
+                    None => true,
+                }
+            });
+            gone
+        };
+        for (e, why) in gone {
+            if !why.is_empty() {
+                self.center.log().record(
+                    nerve_transport::log::Level::Info,
+                    None,
+                    &format!("the HTTP harness session {} ended: {why}", e.session().id),
+                );
+            }
+            e.close().await;
+        }
+    }
+
+    /// Serves `/mcp` on `server`, and ends sessions on the way: now and then,
+    /// and whenever the harness tokens change.
     pub async fn serve(self: Arc<Self>, server: crate::listen::Server) {
+        let me = self.clone();
+        let mut changes = self
+            .changes
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| self.center.subscribe());
+        let sweeper = tokio::spawn(async move {
+            // No session is open yet at the start, so the first look is
+            // after one period.
+            let start = tokio::time::Instant::now() + HTTP_SWEEP;
+            let mut tick = tokio::time::interval_at(start, HTTP_SWEEP);
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    c = changes.recv() => match c {
+                        Ok(Change::Tokens) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Ok(_) => continue,
+                        Err(_) => return,
+                    },
+                }
+                me.sweep().await;
+            }
+        });
+        let _sweeper = Sweeper(sweeper);
         server
-            .run(move |io, peer| {
+            .run(move |io, admitted| {
                 let me = self.clone();
-                async move { me.conn(io, peer).await }
+                async move { me.conn(io, admitted).await }
             })
             .await
     }
 
-    async fn conn(&self, mut io: BoxIo, _peer: SocketAddr) {
+    /// One connection: it holds its peer's place until its request is read
+    /// and its token checked, so idle connections without a token fill only
+    /// their own peer's places. A harness's call may then wait long for its
+    /// node (`--call-wait`), and does so without holding a place.
+    async fn conn(&self, mut io: BoxIo, mut admitted: crate::listen::Admitted) {
+        // The token's place is kept until the reply is written: a peer that
+        // does not read its replies must not hold any number of them.
+        let mut place = None;
         let resp = match http::read_request(&mut io, MESSAGE_BYTES).await {
-            Ok(req) => self.request(req).await,
+            Ok(req) => match self.refused(&req) {
+                Some(no) => no,
+                None => {
+                    admitted.decided();
+                    let (resp, held) = self.answer(req).await;
+                    place = held;
+                    resp
+                }
+            },
             Err(_) => Response::text(400, "bad request"),
         };
         let _ = resp.write(&mut io).await;
+        drop(place);
     }
 
     pub async fn request(&self, req: Request) -> Response {
+        match self.refused(&req) {
+            Some(no) => no,
+            None => self.answer(req).await.0,
+        }
+    }
+
+    /// The answer to a request that is not for `/mcp`, comes from a browser
+    /// page, or has no harness token; none for one that may go on.
+    fn refused(&self, req: &Request) -> Option<Response> {
         if req.path != "/mcp" {
-            return Response::text(404, "not found");
+            return Some(Response::text(404, "not found"));
         }
         // A browser page must not drive the harness endpoint (DNS rebinding).
         if let Some(origin) = req.header("origin")
             && !origin_matches(origin, req.header("host"))
         {
-            return Response::text(403, "cross-origin requests are refused");
+            return Some(Response::text(403, "cross-origin requests are refused"));
         }
         let ok = req
             .bearer()
             .is_some_and(|t| token_ok(&self.center, self.env_token.as_deref(), t));
         if !ok {
-            return Response::text(401, "a harness token is needed")
-                .with_header("WWW-Authenticate", "Bearer");
+            return Some(
+                Response::text(401, "a harness token is needed")
+                    .with_header("WWW-Authenticate", "Bearer"),
+            );
         }
+        None
+    }
+
+    /// The answer to a request [`HttpMcp::refused`] let through, and the
+    /// token's place that was taken for it: the caller keeps it until the
+    /// answer is written, since a reply held back by its reader is still a
+    /// request in flight.
+    async fn answer(&self, req: Request) -> (Response, Option<Active<'_>>) {
         let sid = req.header("mcp-session-id").map(str::to_string);
+        // The token was checked for this request, so it is there. A session
+        // answers only the token that opened it: its id is no secret (the
+        // nodes it calls and the Overview see it).
+        let via = util::sha256_hex(req.bearer().unwrap_or_default().as_bytes());
+        let Some(active) = self.enter(&via) else {
+            return (
+                Response::text(503, "this token has too many requests in flight")
+                    .with_header("Retry-After", "1"),
+                None,
+            );
+        };
+        (self.reply(req, sid, via).await, Some(active))
+    }
+
+    async fn reply(&self, req: Request, sid: Option<String>, via: String) -> Response {
         match req.method.as_str() {
-            "POST" => self.post(req, sid).await,
-            "DELETE" => match sid.and_then(|s| self.sessions.lock().unwrap().remove(&s)) {
-                Some(e) => {
-                    e.close().await;
-                    Response::new(204, "text/plain", Vec::new())
+            "POST" => self.post(req, sid, via).await,
+            "DELETE" => {
+                let held = sid.and_then(|s| {
+                    let mut map = self.sessions.lock().unwrap();
+                    match map.get(&s) {
+                        Some(h) if util::ct_eq(h.via.as_bytes(), via.as_bytes()) => map.remove(&s),
+                        _ => None,
+                    }
+                });
+                match held {
+                    Some(h) => {
+                        h.engine.close().await;
+                        Response::new(204, "text/plain", Vec::new())
+                    }
+                    None => Response::text(404, "no such session"),
                 }
-                None => Response::text(404, "no such session"),
-            },
+            }
             _ => Response::text(405, "this endpoint takes POST and DELETE")
                 .with_header("Allow", "POST, DELETE"),
         }
     }
 
-    async fn post(&self, req: Request, sid: Option<String>) -> Response {
+    async fn post(&self, req: Request, sid: Option<String>, via: String) -> Response {
         let msg: Value = match serde_json::from_slice(&req.body) {
             Ok(v) => v,
             Err(e) => {
@@ -1305,25 +1555,73 @@ impl HttpMcp {
                 );
             }
         };
+        // The body is parsed; a call may wait long for its node, and keeps
+        // nothing of what was sent.
+        drop(req);
         let is_init = msg.get("method").and_then(Value::as_str) == Some("initialize");
         let (engine, new_id) = if is_init && sid.is_none() {
             let e = Arc::new(Engine::new(&self.center, "http"));
             let id = e.session().id.clone();
-            self.sessions.lock().unwrap().insert(id.clone(), e.clone());
+            let oldest = {
+                let mut map = self.sessions.lock().unwrap();
+                // Past its share, a token's longest idle session ends for
+                // the new one: a harness that starts a session per request
+                // goes on working, and no token holds the center's engines
+                // without bound.
+                let mine: Vec<(&String, &Held)> = map
+                    .iter()
+                    .filter(|(_, h)| util::ct_eq(h.via.as_bytes(), via.as_bytes()))
+                    .collect();
+                let oldest = (mine.len() >= HTTP_SESSIONS_PER_TOKEN)
+                    .then(|| {
+                        mine.iter()
+                            .min_by_key(|(_, h)| h.last)
+                            .map(|(k, _)| (*k).clone())
+                    })
+                    .flatten()
+                    .and_then(|k| map.remove(&k));
+                map.insert(
+                    id.clone(),
+                    Held {
+                        engine: e.clone(),
+                        via,
+                        last: Instant::now(),
+                    },
+                );
+                oldest
+            };
+            if let Some(h) = oldest {
+                self.center.log().record(
+                    nerve_transport::log::Level::Info,
+                    None,
+                    &format!(
+                        "the HTTP harness session {} ended: its token opened {HTTP_SESSIONS_PER_TOKEN} newer ones",
+                        h.engine.session().id
+                    ),
+                );
+                h.engine.close().await;
+            }
             (e, Some(id))
         } else {
             let Some(sid) = sid else {
                 return Response::text(400, "Mcp-Session-Id is missing");
             };
-            let e = self.sessions.lock().unwrap().get(&sid).cloned();
+            let e = self.sessions.lock().unwrap().get_mut(&sid).and_then(|h| {
+                if !util::ct_eq(h.via.as_bytes(), via.as_bytes()) {
+                    return None;
+                }
+                h.last = Instant::now();
+                Some(h.engine.clone())
+            });
             match e {
                 // A session ended in the web UI is gone for HTTP clients; they
                 // start a new one.
                 Some(e) if !e.session().ended() => (e, None),
-                _ => {
+                Some(_) => {
                     self.sessions.lock().unwrap().remove(&sid);
                     return Response::text(404, "no such session");
                 }
+                None => return Response::text(404, "no such session"),
             }
         };
         let resp = match engine.handle(msg).await {
@@ -2229,5 +2527,102 @@ mod tests {
         assert!(l.next().await.is_err());
         assert_eq!(l.next().await.unwrap().unwrap().trim(), "{\"ok\":1}");
         assert_eq!(l.next().await.unwrap(), None);
+    }
+
+    /// Every answer echoes the request's id, so an id may not be a way to
+    /// make the center send a large reply: only numbers and short strings
+    /// are answered.
+    #[tokio::test]
+    async fn an_id_that_is_long_or_not_plain_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = Engine::new(&open(dir.path()), "test");
+        let ask = |id: Value| e.handle(json!({"jsonrpc": "2.0", "id": id, "method": "ping"}));
+        for id in [json!(7), json!("x".repeat(ID_BYTES)), json!("job-1")] {
+            let r = ask(id.clone()).await.unwrap();
+            assert_eq!(r["id"], id);
+            assert!(r.get("error").is_none(), "{r}");
+        }
+        for id in [
+            json!("x".repeat(ID_BYTES + 1)),
+            json!("x".repeat(100_000)),
+            json!({"k": "v"}),
+            json!(["a"]),
+            json!(null),
+            json!(true),
+        ] {
+            let r = ask(id).await.unwrap();
+            assert_eq!(r["error"]["code"], -32600, "{r}");
+            assert!(r.to_string().len() < 400, "{r}");
+        }
+    }
+
+    /// A method or a tool name the engine does not know is repeated in the
+    /// error, cut short: a reply is no larger than the tools' own caps
+    /// whatever the request carried.
+    #[tokio::test]
+    async fn an_unknown_name_is_cut_short_in_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = Engine::new(&open(dir.path()), "test");
+        let long = "x".repeat(100_000);
+        let r = e
+            .handle(json!({"jsonrpc": "2.0", "id": 1, "method": long}))
+            .await
+            .unwrap();
+        assert_eq!(r["error"]["code"], -32601, "{r}");
+        assert!(r.to_string().len() < 400, "{}", r.to_string().len());
+        let r = e
+            .handle(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": long, "arguments": {}}}))
+            .await
+            .unwrap();
+        assert_eq!(r["error"]["code"], -32602, "{r}");
+        assert!(r.to_string().len() < 400, "{}", r.to_string().len());
+    }
+
+    /// A reply a peer does not read is still a request in flight: the
+    /// token's place is kept until the reply is written, not given back
+    /// when the answer is made. The connection here is a pipe too small for
+    /// any reply, which nobody reads.
+    #[tokio::test]
+    async fn a_reply_nobody_reads_holds_its_tokens_place() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().unwrap();
+        let h = HttpMcp::new(&open(dir.path()), Some("tok".into()));
+        h.set_active_max(1);
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": PROTOCOL, "capabilities": {},
+            "clientInfo": {"name": "t", "version": "1"}}})
+        .to_string();
+        let (mut client, server) = tokio::io::duplex(64);
+        let peer = "127.0.0.1:50000".parse().unwrap();
+        let conn = {
+            let h = h.clone();
+            tokio::spawn(async move {
+                h.conn(Box::new(server), crate::listen::Admitted::for_test(peer))
+                    .await
+            })
+        };
+        let head = format!(
+            "POST /mcp HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer tok\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        client.write_all(head.as_bytes()).await.unwrap();
+        client.write_all(body.as_bytes()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!conn.is_finished(), "the reply is still being written");
+        let again = |token: &str| Request {
+            method: "POST".into(),
+            path: "/mcp".into(),
+            query: String::new(),
+            headers: [("authorization".to_string(), format!("Bearer {token}"))].into(),
+            body: body.clone().into_bytes(),
+        };
+        assert_eq!(h.request(again("tok")).await.status, 503);
+        // The reader takes the reply, and the place is free again.
+        let mut got = Vec::new();
+        client.read_to_end(&mut got).await.unwrap();
+        assert!(got.starts_with(b"HTTP/1.1 200"));
+        conn.await.unwrap();
+        assert_eq!(h.request(again("tok")).await.status, 200);
     }
 }

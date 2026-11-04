@@ -265,13 +265,65 @@ Allow rules are the same syntax, saved for every machine or for one machine. A
 call that matches one skips the decision model and goes to the machine. It does
 not skip the blocklist: the blocklist is a hard deny, so to let something
 through that the blocklist caught, remove or switch off the blocklist entry.
-A rule matches the commands the checker's own splitter finds in a line, not
-those only the guard's parser sees behind `timeout`, `eval` and the like, so
-`exec.run:make *` does not cover `timeout 600 make test` and the model still
-judges it.
+An `exec.run` rule covers a command line only when **every** command in it
+meets the rule, and nothing in the line runs inside another command:
+
+- `exec.run:make *` covers `make test`, `sudo make test` (the checker reads
+  past a bare `sudo`, `env`, `nohup` and the like) and
+  `make test && make lint`, but not `make test && ./deploy.sh` or
+  `ls && make test`: the model judges those.
+- A pattern without a bare `*` covers no flag or operand it does not name:
+  `exec.run:git status` covers `git status`, not `git status --porcelain` or
+  `git -c core.fsmonitor=… status`. A long flag written `--name=value` in
+  the pattern covers that value only (`--namespace=dev` does not cover
+  `--namespace=prod`).
+- A pattern names a program, not any file of that name. The program must be
+  written as the pattern has it: `/tmp/cat x`, `./cat x`, `Cat x` and
+  `cat.exe x` are not covered by `exec.run:cat *`, which a file of that name
+  somewhere else could use. (On Windows with PowerShell, case and `.exe`
+  do not matter, but a folder still does.) A short flag is covered in the
+  case the pattern has it: `exec.run:grep -r x` does not cover `grep -R x`.
+  A flag the pattern does not name is not covered either when its value is
+  attached (`-ofile.txt`), even if the word ends like an operand the pattern
+  names (`*.txt`).
+- A wrapper with words of its own is covered by no pattern, with or without
+  `*`: `env NAME=value …`, `env -S '…'`, `sudo -u other …`, `nice -n 5 …`.
+  A wrapper written with a folder (`./env make test`) or in another case is
+  a file of that name, not the wrapper, and counts the same way. What it adds (another environment, another account, a whole command line)
+  is nothing the rule names. Nor is `xargs …` or `npx …`, which give the
+  command words or a program the line does not show.
+- A line with `$( )`, backticks, `<( )`, a shell's `-c` body (`sh -c`,
+  `cmd /c`, PowerShell's `-Command`) or a program `Start-Process` starts is
+  covered by no pattern, only by an exact rule.
+- `exec.run:exact:<line>` covers that one line and nothing else (blanks at
+  either end aside).
+- A rule matches the commands the checker's own splitter finds in a line. A
+  line in which the guard's parser finds more (behind `timeout`, `eval` and
+  the like) is covered by no pattern: `exec.run:make *` does not cover
+  `timeout 600 make test`, and `exec.run:timeout *` does not cover
+  `timeout 5 bash -c …`.
+- A line with a redirection (`> file`, `2>> log`) or text written into it as
+  the command's input (`<<< text`, a here-document) is covered by no pattern
+  or regex, only by an exact rule: `exec.run:make *` does not cover `make test
+  > out.log` or `make test <<< 'x'`, also when the line has a plain `make
+  test` as well.
+- A line the guard's parser cannot read whole is covered by no pattern,
+  only by an exact rule: a quote or here-document left open, a shell that
+  reads its script from a pipe, a line past the parser's bounds, and a
+  PowerShell command written with its encoded-command switch (`-enc`), which
+  nobody can read. So `exec.run:powershell *` covers `powershell -File
+  build.ps1` and not `powershell -EncodedCommand …`.
+- An `exec.run:re:` rule matches the whole line, so as an allow rule it
+  covers a line of one command only, with nothing run inside it:
+  `exec.run:re:^git status` covers `git status`, not `git status; …`. The
+  regex alone decides which program it names, so anchor it at the start
+  (`^git`): an unanchored one is still not applied to a program written
+  with a folder (`/tmp/git status`).
 
 The Audit page has **Allow** and **Allow as wildcard** buttons on a model
-refusal, which save an allow rule for that machine for you. Where the call
+refusal, which save an allow rule for that machine for you. **Allow** saves
+the refused command line exactly (`exec.run:exact:git status`); **Allow as
+wildcard** saves its program and `*` (`exec.run:git *`). Where the call
 has arguments a rule may pin, it also offers them: pick one, then **Allow with
 this value** saves `lamp.set:room=office` and the like.
 
@@ -293,7 +345,10 @@ text generated, so a judgement is fast and cheap. There are two sources:
   GPU). The center downloads a prebuilt `llama-server` from llama.cpp's GitHub
   release and the model from Hugging Face into `checker/` in its own state
   folder — never system-wide — checks each against a pinned SHA-256, unpacks
-  it, and runs it on loopback. These files are not in a backup; after a
+  it, and runs it so that only the center reaches it: on Linux on a socket in
+  the state folder (`checker-model.sock`), which no other account may open,
+  and with a key of its own that each call carries. Another process can
+  neither use the model nor answer in its place. These files are not in a backup; after a
   restore on another machine, install the model again, or a model that is on
   refuses every call it sees. The [installed center
   service](center.md#run-it-as-a-service) on Linux sees no GPU, so it runs the
