@@ -1071,13 +1071,16 @@ mod tests {
     fn the_built_in_folders_are_the_temporary_ones_and_the_pairings_own() {
         let b = built_in(&Own::of(Path::new(RUN_HOME), "home-lab"));
         let paths: Vec<&str> = b.iter().map(|f| f.path.as_str()).collect();
+        // Joined, not spelled out: Windows separates the parts with a backslash.
+        let own = Path::new(RUN_HOME).join("home-lab");
+        let (home, temp) = (own.join("home"), own.join("tmp"));
         assert_eq!(
             paths,
             [
                 "/tmp",
                 "/var/tmp",
-                "/var/lib/nerve-run/home-lab/home",
-                "/var/lib/nerve-run/home-lab/tmp"
+                home.to_str().unwrap(),
+                temp.to_str().unwrap()
             ]
         );
         assert!(
