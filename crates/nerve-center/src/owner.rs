@@ -164,7 +164,11 @@ impl OwnerToken {
     pub fn hash(&self) -> Option<String> {
         let stamp = Stamp::of(&self.path);
         let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        if let (Some(now), Some((was, hash))) = (&stamp, &*seen)
+        // Without an inode (Windows) a token written within one tick of the
+        // clock has the old one's length and time, so the file is read each
+        // time there.
+        if cfg!(unix)
+            && let (Some(now), Some((was, hash))) = (&stamp, &*seen)
             && now == was
         {
             return hash.clone();
