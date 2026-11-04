@@ -80,7 +80,7 @@ link counts no more once its hello is checked, so many nodes behind one
 router link as usual, and a harness's call counts no more once its token is
 checked. These numbers are fixed. A harness's request past its token check
 is not undecided, so it counts against its token instead: 128 in flight at
-most, more get `503`.
+most (until its reply has been read), more get `503`.
 
 A peer is its address. On loopback every local program has the same one
 (or any address of 127.0.0.0/8 it picks), so there a peer is the account

@@ -345,5 +345,9 @@ An HTTP session answers only the token that opened it: another token gets
 at most; the 33rd ends that token's session that had no request for the
 longest, with its jobs and streams, even if its other sessions are busy
 (a harness that needs more opens a second token). One token also has at most
-128 requests in flight at once, waiting calls included; one past that gets
-`503` with `Retry-After`, and the harness tries again.
+128 requests in flight at once, waiting calls included, and a reply the
+harness has not read yet is still in flight; one past that gets `503` with
+`Retry-After`. A harness library may not wait and try again (the common MCP
+client library fails that call with the `503`), so a harness that needs more
+at once uses a second token. A request id is a number or a string of at most
+256 bytes; the reply repeats it.

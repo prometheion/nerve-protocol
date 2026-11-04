@@ -277,6 +277,12 @@ meets the rule, and nothing in the line runs inside another command:
   `git -c core.fsmonitor=… status`. A long flag written `--name=value` in
   the pattern covers that value only (`--namespace=dev` does not cover
   `--namespace=prod`).
+- A pattern names a program, not any file of that name. The program must be
+  written as the pattern has it: `/tmp/cat x`, `./cat x`, `Cat x` and
+  `cat.exe x` are not covered by `exec.run:cat *`, which a file of that name
+  somewhere else could use. (On Windows with PowerShell, case and `.exe`
+  do not matter, but a folder still does.) A short flag is covered in the
+  case the pattern has it: `exec.run:grep -r x` does not cover `grep -R x`.
 - A wrapper with words of its own is covered by no pattern, with or without
   `*`: `env NAME=value …`, `env -S '…'`, `sudo -u other …`, `nice -n 5 …`.
   What it adds (another environment, another account, a whole command line)

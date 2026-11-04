@@ -72,7 +72,11 @@ the token's SHA-256 with the session); both end it as `DELETE` does, with
 `session.end` to the nodes. A session answers only the token that opened it:
 a request or `DELETE` with another valid token gets 404 for it. One token
 keeps 32 sessions at most; an `initialize` past that ends the token's session
-with the oldest last request. Replies are JSON; the server opens no SSE stream.
+with the oldest last request. One token also has 128 requests in flight, a reply being written included
+(its place is given back after the write, so a reader that takes nothing
+holds it), and past that gets 503 with `Retry-After`. A request `id` is a
+number or a string of at most 256 bytes (every reply repeats it); any other
+is -32600. Replies are JSON; the server opens no SSE stream.
 Requests with an `Origin` that does not match `Host` are refused (403).
 
 ## 4. Tools

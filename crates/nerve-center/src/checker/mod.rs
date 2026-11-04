@@ -1487,6 +1487,33 @@ mod tests {
         ] {
             assert!(!covered(&checker, line).await, "re: covers {line}");
         }
+        // A rule names a program, not any file of that name: one in another
+        // folder, in another case or with `.exe` is another program on a
+        // POSIX shell. Short flags are taken in the case the rule has them.
+        for (rule, lines) in [
+            (
+                "exec.run:cat *",
+                &["/tmp/cat x", "./cat x", "../x/cat x", "Cat x", "cat.exe x"][..],
+            ),
+            ("exec.run:re:^cat ", &["/tmp/cat x", "./cat x", "Cat x"][..]),
+            ("exec.run:grep -r x", &["grep -R x", "/tmp/grep -r x"][..]),
+            ("exec.run:grep -r *", &["grep -R x", "/tmp/grep -r x"][..]),
+        ] {
+            let checker = checker_with(rule);
+            for line in lines {
+                assert!(!covered(&checker, line).await, "{rule} covers {line}");
+            }
+        }
+        for (rule, line) in [
+            ("exec.run:cat *", "cat x"),
+            ("exec.run:grep -r x", "grep -r x"),
+            ("exec.run:grep -r x", "grep --recursive x"),
+        ] {
+            assert!(
+                covered(&checker_with(rule), line).await,
+                "{rule} does not cover {line}"
+            );
+        }
         // A long flag's value is part of the rule.
         let checker = checker_with("exec.run:kubectl get pods --namespace=dev");
         assert!(covered(&checker, "kubectl get pods --namespace=dev").await);

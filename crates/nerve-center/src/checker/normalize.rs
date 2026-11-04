@@ -69,6 +69,12 @@ pub struct Command {
     /// The arguments as written (not expanded), for the patterns that look at
     /// words such as PowerShell's `-Recurse`.
     pub raw: Vec<String>,
+    /// Whether the program is written as its base name: no folder, and for a
+    /// POSIX shell not in another case or with `.exe`, since there `Git`,
+    /// `git.exe` and `/tmp/git` are other programs than `git`. An allow rule
+    /// covers only a plain program, so a file of that name somewhere else
+    /// does not run under it.
+    pub plain: bool,
 }
 
 impl Command {
@@ -284,7 +290,11 @@ pub fn parse(line: &str, shell: Shell) -> Parsed {
     if out.overflow.is_some() {
         return out;
     }
-    let mut seen: HashSet<Command> = out.commands.iter().cloned().collect();
+    // The parser reads a program by its base name only, so `plain` is not
+    // part of what makes two commands the same: the splitter's, which saw
+    // the word as written, stays.
+    let same = |c: &Command| (c.program.clone(), c.args.clone(), c.raw.clone());
+    let mut seen: HashSet<_> = out.commands.iter().map(same).collect();
     let script = match command::parse(line, shell.policy()) {
         Ok(script) => script,
         Err(gave_out) => gave_out.read,
@@ -301,15 +311,16 @@ pub fn parse(line: &str, shell: Shell) -> Parsed {
             program: base_name(&run.name),
             args: raw.iter().flat_map(|a| expand_flags(a)).collect(),
             raw,
+            plain: is_plain(&run.name, shell),
         };
-        if seen.contains(&c) {
+        if seen.contains(&same(&c)) {
             return;
         }
         if out.commands.len() >= MAX_COMMANDS {
             out.overflow = Some(Overflow::Commands);
             return;
         }
-        seen.insert(c.clone());
+        seen.insert(same(&c));
         out.commands.push(c);
     });
     out
@@ -411,6 +422,7 @@ impl Walk {
             program: program.clone(),
             args,
             raw: rest.to_vec(),
+            plain: is_plain(&words[i], shell),
         });
 
         // A nested shell: its `-c` / `/c` / `-Command` body is another
@@ -1045,6 +1057,16 @@ fn base_name(word: &str) -> String {
     }
 }
 
+/// Whether the program `word` is written as its base name ([`Command::plain`]).
+fn is_plain(word: &str, shell: Shell) -> bool {
+    !word.contains(['/', '\\'])
+        && match shell {
+            // PowerShell and Windows programs ignore case and `.exe`.
+            Shell::PowerShell => true,
+            Shell::Posix => word == base_name(word),
+        }
+}
+
 /// The body a shell's `-c` carries. As in bash, the `c` may be anywhere in a
 /// short-flag word (`-c`, `-lc`, `-ce`, `-xec`) and other options may follow
 /// (`bash -c -e '…'`, `bash -c -- '…'`): the body is the first word that is
@@ -1596,6 +1618,28 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(parse(&script, Shell::Posix).overflow, None);
+    }
+
+    /// A program written with a folder is not plain; nor, for a POSIX shell,
+    /// one in another case or with `.exe`. PowerShell ignores case and
+    /// `.exe`, but a folder still makes another program.
+    #[test]
+    fn a_program_is_plain_when_written_as_its_base_name() {
+        for (line, shell, plain) in [
+            ("git status", Shell::Posix, true),
+            ("/usr/bin/git status", Shell::Posix, false),
+            ("./git status", Shell::Posix, false),
+            ("Git status", Shell::Posix, false),
+            ("git.exe status", Shell::Posix, false),
+            ("git status", Shell::PowerShell, true),
+            ("Git.EXE status", Shell::PowerShell, true),
+            (".\\git status", Shell::PowerShell, false),
+            ("C:\\tools\\git.exe status", Shell::PowerShell, false),
+        ] {
+            let p = parse(line, shell);
+            assert_eq!(p.commands.len(), 1, "{line}: {:?}", p.commands);
+            assert_eq!(p.commands[0].plain, plain, "{line}");
+        }
     }
 
     /// A program `Start-Process` starts is a command inside another: no

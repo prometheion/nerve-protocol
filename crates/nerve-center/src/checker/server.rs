@@ -68,7 +68,10 @@ struct Inner {
 /// Windows refuses while it runs); dropping it only aborts the supervisor.
 pub struct LocalServer {
     inner: Arc<Mutex<Inner>>,
-    listen: Listen,
+    /// Where it listens now: on a port, a new one for each process, so a
+    /// process that took the old one while the server was down cannot keep
+    /// it from coming up again.
+    listen: Arc<Mutex<Listen>>,
     /// The key calls carry, made for this server.
     key: String,
     task: JoinHandle<()>,
@@ -164,16 +167,16 @@ impl LocalServer {
         }
         let key = nerve_transport::keys::random_token(40);
         let inner = Arc::new(Mutex::new(Inner::default()));
-        let args = build_args(&model, gpu, &listen, context);
         let timeout = Duration::from_millis(timeout_ms.max(100));
         let shutdown = Arc::new(tokio::sync::Notify::new());
         let exited = Arc::new(tokio::sync::Notify::new());
         let budget = Arc::new(ReadBudget::new(context, pin.read_ms, pin.read_growth));
-        let endpoint = endpoint_of(&listen, &key, None);
+        let listen = Arc::new(Mutex::new(listen));
         let task = tokio::spawn(supervise(
             bin,
-            args,
-            (listen.clone(), endpoint),
+            Box::new(move |at| build_args(&model, gpu, at, context)),
+            listen.clone(),
+            key.clone(),
             timeout,
             inner.clone(),
             shutdown.clone(),
@@ -212,7 +215,11 @@ impl LocalServer {
 
     /// The endpoint for the client, once the server is listening.
     pub fn endpoint(&self) -> Endpoint {
-        endpoint_of(&self.listen, &self.key, Some(self.budget.clone()))
+        endpoint_of(&self.listen(), &self.key, Some(self.budget.clone()))
+    }
+
+    fn listen(&self) -> Listen {
+        self.listen.lock().unwrap().clone()
     }
 
     /// Whether the server ended while it read a call and has not come up
@@ -307,14 +314,18 @@ fn free_port() -> Result<u16, String> {
     l.local_addr().map(|a| a.port()).map_err(|e| e.to_string())
 }
 
+/// The command line for a server that listens at a place.
+type ArgsFor = Box<dyn Fn(&Listen) -> Vec<String> + Send>;
+
 /// Runs the server, restarting it with backoff until the task is aborted. A
 /// non-decision model is a reason not to restart. Each process starts with
 /// the budget's speeds forgotten.
 #[allow(clippy::too_many_arguments)]
 async fn supervise(
     program: PathBuf,
-    args: Vec<String>,
-    at: (Listen, Endpoint),
+    args_for: ArgsFor,
+    listen: Arc<Mutex<Listen>>,
+    key: String,
     timeout: Duration,
     inner: Arc<Mutex<Inner>>,
     shutdown: Arc<tokio::sync::Notify>,
@@ -322,13 +333,43 @@ async fn supervise(
     budget: Arc<ReadBudget>,
 ) {
     let mut backoff = Duration::from_secs(1);
+    let mut first = true;
     loop {
         set(&inner, |i| {
             i.phase = Some(Phase::Starting);
             i.url = None;
         });
         budget.restart();
-        match run_once(&program, &args, &at, timeout, &inner, &shutdown, &budget).await {
+        // The first run has the port it was given. Each later one takes a
+        // new port: another process may have bound the old one while the
+        // server was down, and the server would then end on every try.
+        let at = {
+            let mut l = listen.lock().unwrap();
+            match (&*l, first) {
+                (Listen::Port(_), false) => free_port().map(|p| *l = Listen::Port(p)),
+                _ => Ok(()),
+            }
+            .map(|()| l.clone())
+        };
+        first = false;
+        let run = match at {
+            Ok(at) => {
+                let args = args_for(&at);
+                let endpoint = endpoint_of(&at, &key, None);
+                run_once(
+                    &program,
+                    &args,
+                    &(at, endpoint),
+                    timeout,
+                    &inner,
+                    &shutdown,
+                    &budget,
+                )
+                .await
+            }
+            Err(e) => RunEnd::StartFailed(format!("no free port: {e}")),
+        };
+        match run {
             RunEnd::NotDecision => {
                 // A clear, final failure: do not restart.
                 budget.settled();
@@ -781,7 +822,7 @@ mod tests {
         // Stop returns well inside its own 10 s cap, because the child has
         // exited (not because the cap ran out), and its socket answers no
         // more: the process is gone (review r3, finding 6).
-        let Listen::Socket(sock) = server.listen.clone() else {
+        let Listen::Socket(sock) = server.listen() else {
             panic!("a socket on Unix")
         };
         tokio::time::timeout(Duration::from_secs(4), server.stop())
@@ -848,11 +889,11 @@ mod tests {
     async fn only_the_center_reaches_its_local_server() {
         let dir = tempfile::tempdir().unwrap();
         let server = ready_fake(dir.path()).await;
-        assert_eq!(server.listen, Listen::Socket(dir.path().join(SOCKET)));
+        assert_eq!(server.listen(), Listen::Socket(dir.path().join(SOCKET)));
         let given = std::fs::read_to_string(dir.path().join("key")).unwrap();
         assert!(given.len() >= 32, "the server got no key: {given:?}");
         assert_eq!(given, server.key);
-        let args = build_args(Path::new("m"), false, &server.listen, 4096);
+        let args = build_args(Path::new("m"), false, &server.listen(), 4096);
         assert!(!args.iter().any(|a| a.contains(&server.key)), "{args:?}");
         // The key is what lets a call in.
         let ep = server.endpoint();
@@ -984,6 +1025,32 @@ mod tests {
             "the squatter saw the key: {heard}"
         );
         server.stop().await;
+    }
+
+    /// On a port, a restart takes a new one: a process that bound the old
+    /// port while the server was down would otherwise end every later start
+    /// (it cannot bind) and keep the local model down until the center
+    /// restarts. The first start here is on a port something else holds.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_on_a_port_does_not_stay_on_a_port_something_took() {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = taken.local_addr().unwrap().port();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = super::fake::fake_llama_server(dir.path());
+        let model = dir.path().join("model.gguf");
+        std::fs::write(&model, b"x").unwrap();
+        let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
+        let server =
+            LocalServer::start_at(bin, model, Listen::Port(port), false, 5000, pin).expect("start");
+        until(&server, "ready", &|| server.ready()).await;
+        let Listen::Port(now) = server.listen() else {
+            panic!("a port")
+        };
+        assert_ne!(now, port);
+        assert!(model::is_decision_model(&server.endpoint()).await.unwrap());
+        server.stop().await;
+        drop(taken);
     }
 
     /// A server that is still loading its model (503) says neither that it

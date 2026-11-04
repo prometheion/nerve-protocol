@@ -236,8 +236,8 @@ impl Rule {
             allowed(&|c: &[Command]| !c.is_empty() && c.iter().all(covers))
         };
         match &self.matcher {
-            Matcher::Command(p) if !deny => all(&|c| p.covers(c)),
-            Matcher::CmdRegex(re) if !deny => all(&|c| re.is_match(&c.line())),
+            Matcher::Command(p) if !deny => all(&|c| c.plain && p.covers(c)),
+            Matcher::CmdRegex(re) if !deny => all(&|c| c.plain && re.is_match(&c.line())),
             // A regex over the whole line cannot tell which command it
             // matched, so as an allow rule it covers a line of one command
             // only, with nothing run inside it.
@@ -339,16 +339,17 @@ impl CmdPattern {
         })
     }
 
-    /// Whether `c` meets this pattern as an allow rule: it [`matches`], and
-    /// carries no flag or operand the pattern does not name, unless the
-    /// pattern has a bare `*`. So `git status` covers `git status` and not
+    /// Whether `c` meets this pattern as an allow rule: it [`matches`], with
+    /// the short flags in the case the pattern spells them (`grep -R` is not
+    /// `grep -r`), and carries no flag or operand the pattern does not name,
+    /// unless the pattern has a bare `*`. So `git status` covers `git status` and not
     /// `git -c core.fsmonitor=… status`; `make *` covers any `make`. A long
     /// flag the pattern spells `--name=value` is covered with that value
     /// only, and one it spells `--name` only without a value.
     ///
     /// [`matches`]: CmdPattern::matches
     fn covers(&self, c: &Command) -> bool {
-        if !self.matches(c) {
+        if !self.matches_in(c, false) {
             return false;
         }
         if self.rest {
@@ -368,7 +369,7 @@ impl CmdPattern {
             } else if a.len() == 2 && a.starts_with('-') && a.as_bytes()[1].is_ascii_alphanumeric()
             {
                 let f = a.as_bytes()[1] as char;
-                self.short.iter().any(|s| s.eq_ignore_ascii_case(&f))
+                self.short.contains(&f)
             } else {
                 self.operands.iter().any(|g| g.is_match(norm_operand(a)))
             }
@@ -376,6 +377,12 @@ impl CmdPattern {
     }
 
     fn matches(&self, c: &Command) -> bool {
+        self.matches_in(c, true)
+    }
+
+    /// [`CmdPattern::matches`], with the short flags taken in either case or
+    /// only the case the pattern spells them (`fold`).
+    fn matches_in(&self, c: &Command, fold: bool) -> bool {
         if !self.program.is_match(&c.program) {
             return false;
         }
@@ -386,10 +393,15 @@ impl CmdPattern {
         // (`rm -Rf` meets `rm -rf`: `rm` treats `-R` and `-r` the same, and a
         // deny is better a touch broad than missed).
         let short_ok = |f: &char| {
-            have_short.iter().any(|h| h.eq_ignore_ascii_case(f))
-                || long_for(*f)
-                    .iter()
-                    .any(|l| have_long.iter().any(|h| h == l))
+            have_short.iter().any(|h| {
+                if fold {
+                    h.eq_ignore_ascii_case(f)
+                } else {
+                    h == f
+                }
+            }) || long_for(*f)
+                .iter()
+                .any(|l| have_long.iter().any(|h| h == l))
         };
         if !self.short.iter().all(short_ok) {
             return false;

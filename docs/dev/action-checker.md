@@ -165,7 +165,13 @@ whole trimmed line, which the Audit page's **Allow** saves). A `re:` allow
 rule matches the whole line but covers only a line whose `for_allow` holds
 exactly one command. As an allow rule a structured pattern also takes no
 flag or operand it does not name (`CmdPattern::covers`), unless it has a
-bare `*`; a long flag it spells `--name=value` takes that value only. The node's allowlist draws the same line
+bare `*`; a long flag it spells `--name=value` takes that value only, and a
+short flag only in the case it spells it (`matches`, the blocklist's, takes
+either). A pattern or `re:` rule covers only a `plain` command
+(`Command::plain`: the program word has no folder, and for POSIX not another
+case or `.exe`), since the command keeps the base name only; the parser's
+duplicate of a command does not replace the splitter's, which saw the word.
+The node's allowlist draws the same line
 (`nerve-policy/src/decide.rs`: a wildcard never covers a chained line).
 
 The splitter splits on separators and subshell parentheses, pulls `$( )`,
@@ -319,7 +325,10 @@ mistake, not a boundary. Either way it gets a random key
 per start in `LLAMA_API_KEY` (its environment, not its command line, which
 every account can read in `/proc`), and every call and probe carries it
 (`Endpoint::token`); `/health` is the only path llama-server leaves open. A
-stale socket file is removed before each start. The endpoint
+stale socket file is removed before each start. On a port every restart
+takes a new free port (only the first run keeps the one it was given), so a
+process that bound the old port while the server was down cannot keep it
+from coming up. The endpoint
 token is the only secret and is not in a backup; the installed files are not in
 a backup either (they are re-downloaded).
 

@@ -29,6 +29,8 @@ use crate::util;
 /// accepted because the parts used here did not change.
 pub const PROTOCOL: &str = "2025-06-18";
 const KNOWN: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+/// The longest request id the server answers; it is echoed in the reply.
+const ID_BYTES: usize = 256;
 /// The largest MCP message.
 pub const MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 /// The largest tool result text handed to a model.
@@ -109,6 +111,17 @@ impl Engine {
             ));
         };
         let id = obj.get("id").cloned();
+        // Every answer echoes the id, so what a request can make the center
+        // send back is bounded by it: MCP ids are short strings or numbers.
+        if let Some(id) = &id
+            && !(id.is_number() || id.as_str().is_some_and(|s| s.len() <= ID_BYTES))
+        {
+            return Some(error(
+                Value::Null,
+                -32600,
+                &format!("an id is a number or a string of at most {ID_BYTES} bytes"),
+            ));
+        }
         let method = obj.get("method").and_then(Value::as_str);
         let params = obj
             .get("params")
@@ -1431,23 +1444,29 @@ impl HttpMcp {
     /// their own peer's places. A harness's call may then wait long for its
     /// node (`--call-wait`), and does so without holding a place.
     async fn conn(&self, mut io: BoxIo, mut admitted: crate::listen::Admitted) {
+        // The token's place is kept until the reply is written: a peer that
+        // does not read its replies must not hold any number of them.
+        let mut place = None;
         let resp = match http::read_request(&mut io, MESSAGE_BYTES).await {
             Ok(req) => match self.refused(&req) {
                 Some(no) => no,
                 None => {
                     admitted.decided();
-                    self.answer(req).await
+                    let (resp, held) = self.answer(req).await;
+                    place = held;
+                    resp
                 }
             },
             Err(_) => Response::text(400, "bad request"),
         };
         let _ = resp.write(&mut io).await;
+        drop(place);
     }
 
     pub async fn request(&self, req: Request) -> Response {
         match self.refused(&req) {
             Some(no) => no,
-            None => self.answer(req).await,
+            None => self.answer(req).await.0,
         }
     }
 
@@ -1475,17 +1494,27 @@ impl HttpMcp {
         None
     }
 
-    /// The answer to a request [`HttpMcp::refused`] let through.
-    async fn answer(&self, req: Request) -> Response {
+    /// The answer to a request [`HttpMcp::refused`] let through, and the
+    /// token's place that was taken for it: the caller keeps it until the
+    /// answer is written, since a reply held back by its reader is still a
+    /// request in flight.
+    async fn answer(&self, req: Request) -> (Response, Option<Active<'_>>) {
         let sid = req.header("mcp-session-id").map(str::to_string);
         // The token was checked for this request, so it is there. A session
         // answers only the token that opened it: its id is no secret (the
         // nodes it calls and the Overview see it).
         let via = util::sha256_hex(req.bearer().unwrap_or_default().as_bytes());
-        let Some(_active) = self.enter(&via) else {
-            return Response::text(503, "this token has too many requests in flight")
-                .with_header("Retry-After", "1");
+        let Some(active) = self.enter(&via) else {
+            return (
+                Response::text(503, "this token has too many requests in flight")
+                    .with_header("Retry-After", "1"),
+                None,
+            );
         };
+        (self.reply(req, sid, via).await, Some(active))
+    }
+
+    async fn reply(&self, req: Request, sid: Option<String>, via: String) -> Response {
         match req.method.as_str() {
             "POST" => self.post(req, sid, via).await,
             "DELETE" => {
@@ -2491,5 +2520,79 @@ mod tests {
         assert!(l.next().await.is_err());
         assert_eq!(l.next().await.unwrap().unwrap().trim(), "{\"ok\":1}");
         assert_eq!(l.next().await.unwrap(), None);
+    }
+
+    /// Every answer echoes the request's id, so an id may not be a way to
+    /// make the center send a large reply: only numbers and short strings
+    /// are answered.
+    #[tokio::test]
+    async fn an_id_that_is_long_or_not_plain_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = Engine::new(&open(dir.path()), "test");
+        let ask = |id: Value| e.handle(json!({"jsonrpc": "2.0", "id": id, "method": "ping"}));
+        for id in [json!(7), json!("x".repeat(ID_BYTES)), json!("job-1")] {
+            let r = ask(id.clone()).await.unwrap();
+            assert_eq!(r["id"], id);
+            assert!(r.get("error").is_none(), "{r}");
+        }
+        for id in [
+            json!("x".repeat(ID_BYTES + 1)),
+            json!("x".repeat(100_000)),
+            json!({"k": "v"}),
+            json!(["a"]),
+            json!(null),
+            json!(true),
+        ] {
+            let r = ask(id).await.unwrap();
+            assert_eq!(r["error"]["code"], -32600, "{r}");
+            assert!(r.to_string().len() < 400, "{r}");
+        }
+    }
+
+    /// A reply a peer does not read is still a request in flight: the
+    /// token's place is kept until the reply is written, not given back
+    /// when the answer is made. The connection here is a pipe too small for
+    /// any reply, which nobody reads.
+    #[tokio::test]
+    async fn a_reply_nobody_reads_holds_its_tokens_place() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().unwrap();
+        let h = HttpMcp::new(&open(dir.path()), Some("tok".into()));
+        h.set_active_max(1);
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": PROTOCOL, "capabilities": {},
+            "clientInfo": {"name": "t", "version": "1"}}})
+        .to_string();
+        let (mut client, server) = tokio::io::duplex(64);
+        let peer = "127.0.0.1:50000".parse().unwrap();
+        let conn = {
+            let h = h.clone();
+            tokio::spawn(async move {
+                h.conn(Box::new(server), crate::listen::Admitted::for_test(peer))
+                    .await
+            })
+        };
+        let head = format!(
+            "POST /mcp HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer tok\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        client.write_all(head.as_bytes()).await.unwrap();
+        client.write_all(body.as_bytes()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!conn.is_finished(), "the reply is still being written");
+        let again = |token: &str| Request {
+            method: "POST".into(),
+            path: "/mcp".into(),
+            query: String::new(),
+            headers: [("authorization".to_string(), format!("Bearer {token}"))].into(),
+            body: body.clone().into_bytes(),
+        };
+        assert_eq!(h.request(again("tok")).await.status, 503);
+        // The reader takes the reply, and the place is free again.
+        let mut got = Vec::new();
+        client.read_to_end(&mut got).await.unwrap();
+        assert!(got.starts_with(b"HTTP/1.1 200"));
+        conn.await.unwrap();
+        assert_eq!(h.request(again("tok")).await.status, 200);
     }
 }
