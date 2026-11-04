@@ -1143,7 +1143,12 @@ grant or not.
   through. `folders` do not decide; on the installed Linux node, where its
   commands run as `nerve-run` (unless `as_owner`), they and the built-in
   `/tmp`, `/var/tmp` and the pairing's own home and temporary folder are its
-  Landlock sandbox.
+  Landlock sandbox. In every mode, a call of a pairing whose commands run
+  as `nerve-run` (`fs`, a program's action, a config capability) is refused
+  a path in `nerve-run`'s home outside the pairing's own two folders, and an
+  `fs` walk leaves them out (`account::other_pairings`), whatever the allow
+  rules say: the node opens the paths as that account, which owns every
+  pairing's folders. A program is not handed a folder that holds that home.
 - **folder** (the mode a new pairing starts in): reading, writing and
   commands inside the `folders` and, on the installed Linux node, the
   built-in `/tmp`, `/var/tmp` and the pairing's own home and temporary

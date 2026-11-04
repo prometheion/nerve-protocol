@@ -864,7 +864,16 @@ mod tests {
             let (run, file) = (run.clone(), file.clone());
             std::thread::spawn(move || sync(&run, NodeConfig::default, &file))
         };
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // It has read its config and the record once it asks for alpha's lock
+        // (the map holds one handle, this test one, the sync the third).
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while Arc::strong_count(&busy) < 3 {
+            assert!(
+                std::time::Instant::now() < until,
+                "the sync did not get there"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         // Paired again as lab, and a command comes.
         assert_eq!(ready(&run, "lab", "n2", &file).unwrap(), lab);
         std::fs::write(lab.home.join(".gitconfig"), "y").unwrap();

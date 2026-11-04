@@ -1350,7 +1350,11 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     let e = files_call(&mut conn, "open", Path::new("/var/lib"))
         .await
         .unwrap_err();
-    assert!(e.contains("holds"), "{e}");
+    // The node's own folders under it refuse it first on an installed node.
+    assert!(
+        e.contains("holds") || e.contains("belongs to the node itself"),
+        "{e}"
+    );
     let _ = files_call(&mut conn, "open", linked).await.unwrap_err();
     let calls = std::fs::read_to_string(&log).unwrap();
     assert!(
