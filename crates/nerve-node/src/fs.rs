@@ -2187,7 +2187,8 @@ mod tests {
         swap(&sub);
         for (what, call) in [("list", list), ("stat", stat), ("find", find)] {
             match call.run(&|_, _| false) {
-                Ok(v) => assert!(!reached(&v) && !v.to_string().contains("27"), "{what}: {v}"),
+                // `stat` tells sizes, not names: the other `mine` is longer.
+                Ok(v) => assert!(!reached(&v) && v["size"] != 28, "{what}: {v}"),
                 Err(e) => assert!(e.to_string().contains("changed"), "{what}: {e}"),
             }
         }
