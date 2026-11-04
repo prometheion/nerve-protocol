@@ -1,10 +1,12 @@
 //! The owner's network switch for a pairing's folder-mode commands
 //! (`folder network off`, docs/user/modes.md) on a real node daemon, in
-//! process and run by hand: where the kernel's Landlock has its network
-//! rules (ABI 4) a command of that pairing, and a capability of the config
-//! it calls, opens no TCP connection, which it opens without the switch; where the node cannot hold it to that (told
-//! here that the kernel's Landlock is ABI 3) it runs none of that pairing's
-//! folder-mode commands and says why. Linux only, as Landlock is.
+//! process and run by hand: a command of that pairing, and a capability of
+//! the config it calls, opens no TCP connection and no UDP socket, which it
+//! opens without the switch, held by the node's seccomp filter whether or
+//! not the kernel's Landlock has its network rules; where the node cannot
+//! hold it to that (told here that it has no filter) it runs none of that
+//! pairing's folder-mode commands and says why. Linux only, as the filter
+//! is.
 #![cfg(target_os = "linux")]
 
 use std::path::Path;
@@ -29,14 +31,15 @@ params = '{"type": "object", "properties": {"port": {"type": "integer"}}, "requi
 "#;
 
 /// Pairs with `center` as `lab` in folder mode, with `work` to run in and
-/// the network switch `off`, and starts the daemon as `confinement` says
-/// (`None`: the kernel's own).
+/// the network switch `off`, and starts the daemon as `confinement` and
+/// `filter` say (`None`: the kernel's own).
 async fn node(
     root: &Path,
     work: &Path,
     center: &FakeCenter,
     off: bool,
     confinement: Option<nerve_sandbox::Confinement>,
+    filter: Option<bool>,
 ) -> Daemon {
     let mut o = NodeOptions::new(NodePaths::new(root.join("config"), root.join("state")));
     o.home = root.join("home");
@@ -44,6 +47,7 @@ async fn node(
     o.full_rights = Some(false);
     o.exe = Some(env!("CARGO_BIN_EXE_nerve-node").into());
     o.confinement = confinement;
+    o.net_filter = filter;
     // The node by hand runs the config's capabilities as its own user, for
     // `nerve-run` (as config_caps.rs does).
     o.config_caps_by_hand = true;
@@ -107,31 +111,45 @@ async fn invoke(
 }
 
 /// With the switch, a folder-mode command cannot connect to a TCP port on
-/// this machine that it reaches without it, and the descriptor tells the
-/// center that its commands have no network.
+/// this machine that it reaches without it, nor open a UDP socket, also
+/// where the kernel's Landlock is taken to have no network rules (ABI 3,
+/// a node by hand's floor), and the descriptor tells the center that its
+/// commands have no network.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_folder_command_without_network_opens_no_tcp_connection() {
     let abi = nerve_sandbox::Confinement::detect().landlock_abi;
-    if abi.is_none_or(|v| v < nerve_sandbox::LANDLOCK_NETWORK) || !Path::new("/bin/bash").exists() {
-        eprintln!("skipped: no Landlock network rules or no bash here");
+    if abi.is_none_or(|v| v < nerve_sandbox::LANDLOCK_FLOOR)
+        || !nerve_sandbox::net_filter::available()
+        || !Path::new("/bin/bash").exists()
+    {
+        eprintln!("skipped: no Landlock, no seccomp filters or no bash here");
         return;
     }
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let udp_port = udp.local_addr().unwrap().port();
     let connect = format!("/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}' && echo open");
-    for off in [false, true] {
+    let send = format!("/bin/bash -c 'exec 3<>/dev/udp/127.0.0.1/{udp_port}' && echo open");
+    let older = nerve_sandbox::Confinement {
+        landlock_abi: Some(nerve_sandbox::LANDLOCK_FLOOR),
+        appcontainer: false,
+    };
+    for (off, confinement) in [(false, None), (true, None), (true, Some(older))] {
         let d = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(d.path()).unwrap();
         let work = root.join("work");
         std::fs::create_dir_all(&work).unwrap();
         let mut center = FakeCenter::start(false).await.unwrap();
-        let daemon = node(&root, &work, &center, off, None).await;
+        let daemon = node(&root, &work, &center, off, confinement, None).await;
         let mut conn = linked(&mut center).await;
-        let r = run(&mut conn, &connect, &work)
-            .await
-            .expect("the command runs");
-        let opened = r["stdout"] == "open\n" && r["exit_code"] == 0;
-        assert_eq!(opened, !off, "network off {off}: {r}");
+        for probe in [&connect, &send] {
+            let r = run(&mut conn, probe, &work)
+                .await
+                .expect("the command runs");
+            let opened = r["stdout"] == "open\n" && r["exit_code"] == 0;
+            assert_eq!(opened, !off, "network off {off}, {probe}: {r}");
+        }
         // A capability of the config is a command of the pairing too.
         let r = invoke(&mut conn, "probe.connect", json!({"port": port})).await;
         assert_eq!(
@@ -153,9 +171,9 @@ async fn a_folder_command_without_network_opens_no_tcp_connection() {
     }
 }
 
-/// Where the kernel's Landlock has no network rules, the node runs none of
-/// the pairing's folder-mode commands while its network is off, and says
-/// why; it offers it no command.
+/// Where the node has no network filter, it runs none of the pairing's
+/// folder-mode commands while its network is off, and says why; it offers
+/// it no command.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_node_that_cannot_keep_commands_off_the_network_runs_none() {
     let d = tempfile::tempdir().unwrap();
@@ -163,18 +181,18 @@ async fn a_node_that_cannot_keep_commands_off_the_network_runs_none() {
     let work = root.join("work");
     std::fs::create_dir_all(&work).unwrap();
     let mut center = FakeCenter::start(false).await.unwrap();
-    let old = nerve_sandbox::Confinement {
-        landlock_abi: Some(3),
+    let landlock = nerve_sandbox::Confinement {
+        landlock_abi: Some(6),
         appcontainer: false,
     };
-    let daemon = node(&root, &work, &center, true, Some(old)).await;
+    let daemon = node(&root, &work, &center, true, Some(landlock), Some(false)).await;
     let mut conn = linked(&mut center).await;
     let e = run(&mut conn, "echo ran", &work)
         .await
         .expect_err("refused");
     assert!(
         e.message.contains("cannot keep them off it")
-            && e.message.contains("Landlock's network rules")
+            && e.message.contains("seccomp filters")
             && e.message.contains("nerve-node folder network on"),
         "{}",
         e.message

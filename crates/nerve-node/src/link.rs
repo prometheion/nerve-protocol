@@ -3301,12 +3301,16 @@ impl Link {
                 }
                 _ => exec::landlock_spec(&entry.policy, &home, &own, &writable),
             };
-            // The owner's switch: no TCP for a folder-mode command, which
-            // runs only where the kernel can refuse it (the gate took
-            // `unconfined` with the network refusal in).
+            // The owner's switch, Landlock's layer of it: no TCP for a
+            // folder-mode command, where the kernel has the rules.
             spec.no_network = folder && entry.policy.no_network;
             spec
         });
+        // The owner's switch: a folder-mode command makes no socket but a
+        // unix one, held by the node's filter. It runs only where the node
+        // has the filter (the gate took `unconfined` with the network
+        // refusal in).
+        let no_network = folder && entry.policy.no_network;
         // Counted while it runs, so the keys do not move into the keyring
         // meanwhile, and not started when they moved after `cfg` was taken.
         let open = crate::daemon::reaches_bus(landlock.as_ref(), || account.clone())
@@ -3333,6 +3337,7 @@ impl Link {
                 .ok()
                 .map(|c| (c.clone(), granted)),
             tap,
+            no_network,
         };
         let r = exec::run(&rc, &opts, |e| guard.started(e)).await;
         drop(open);
@@ -3469,6 +3474,10 @@ impl Link {
             .map_or_else(|| self.shared.home.clone(), |o| o.home.clone());
         let home = self.shared.rules_home(cfg);
         let own = self.shared.own(cfg);
+        // Held off the network like the pairing's commands, by the node's
+        // filter (refused above where it has none).
+        let no_network =
+            entry.policy.no_network && entry.policy.mode_at(crate::now_ms()) == Mode::Folder;
         let landlock = (self.shared.exe.is_some()
             && self.shared.confinement.landlock_abi.is_some())
         .then(|| {
@@ -3486,10 +3495,9 @@ impl Link {
                 }
                 _ => exec::landlock_spec(&policy, &home, &own, &writable),
             };
-            // Held off the network like the pairing's commands (refused
-            // above where the kernel cannot).
-            spec.no_network =
-                entry.policy.no_network && entry.policy.mode_at(crate::now_ms()) == Mode::Folder;
+            // Landlock's layer of the network switch, as for the pairing's
+            // commands.
+            spec.no_network = no_network;
             spec
         });
         let granted = cfg
@@ -3525,6 +3533,7 @@ impl Link {
                 .ok()
                 .map(|c| (c.clone(), granted)),
             tap: guard.tap(true),
+            no_network,
         };
         let r = exec::run(&rc, &opts, |e| guard.started(e)).await;
         drop(guard);

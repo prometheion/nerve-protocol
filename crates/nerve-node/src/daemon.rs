@@ -48,6 +48,10 @@ pub struct NodeOptions {
     /// How commands can be confined, instead of asking the kernel. A test
     /// sets it, to stand for a kernel it does not run on.
     pub confinement: Option<Confinement>,
+    /// Whether the node can put its network filter on a command
+    /// (nerve_sandbox::net_filter), instead of asking the kernel. A test
+    /// sets it, to stand for a kernel without seccomp filters.
+    pub net_filter: Option<bool>,
     /// Whether this is the installed service, instead of asking where its
     /// folders are (crate::service::is_service_node). A test sets it, to
     /// stand for the installed node.
@@ -103,6 +107,7 @@ impl NodeOptions {
             log: nerve_transport::log::global(),
             full_rights: None,
             confinement: None,
+            net_filter: None,
             service: None,
             config_caps_by_hand: false,
             cgroups: None,
@@ -541,6 +546,15 @@ impl CenterState {
 /// Landlock below the floor as none and so refuses folder mode's commands
 /// (nerve_sandbox::LANDLOCK_FLOOR); the installed node keeps it, as its
 /// commands would run as `nerve-run` without it, held by nothing else.
+/// Whether the node can put its network filter on a command here
+/// ([`Shared::net_filter`]).
+fn net_filter_here() -> bool {
+    #[cfg(target_os = "linux")]
+    return nerve_sandbox::net_filter::available();
+    #[cfg(not(target_os = "linux"))]
+    false
+}
+
 pub(crate) fn confinement_for(detected: Confinement, service: bool) -> Confinement {
     if !service {
         return detected.by_hand();
@@ -617,6 +631,10 @@ pub(crate) struct Shared {
     /// Which protected list applies, and where its system folders are.
     pub platform: nerve_policy::protected::Platform,
     pub confinement: Confinement,
+    /// Whether the node can keep a command off the network with its filter
+    /// (nerve_sandbox::net_filter): Linux with seccomp filters, on x86_64 or
+    /// aarch64.
+    pub net_filter: bool,
     /// The cgroup that holds each command to its limits (crate::cgroup), or
     /// why there is none.
     pub cgroups: crate::cgroup::Found,
@@ -1279,15 +1297,16 @@ impl Shared {
         self.confinement.available() && self.exe.is_some()
     }
 
-    /// Whether this machine can keep a command off the network: Landlock
-    /// with its network rules ([`nerve_sandbox::LANDLOCK_NETWORK`]), and a
-    /// program to start the command through.
+    /// Whether this machine can keep a command off the network: the node's
+    /// filter, which makes every socket but a unix one fail
+    /// (nerve_sandbox::net_filter). Landlock's network rules, where the
+    /// kernel has them, are a second layer under it and not needed: the
+    /// filter refuses more than they do (UDP, raw and every other socket as
+    /// well as TCP), and what it leaves open (a unix socket to a program
+    /// that reaches the network, a socket another process hands over) is
+    /// open with the rules as well.
     pub fn network_held(&self) -> bool {
-        self.exe.is_some()
-            && self
-                .confinement
-                .landlock_abi
-                .is_some_and(|v| v >= nerve_sandbox::LANDLOCK_NETWORK)
+        self.net_filter
     }
 
     /// Why the folder-mode commands of a pairing with `policy` may not run
@@ -1683,7 +1702,7 @@ pub const KEYRING_NOT_CONFINED: &str = "commands cannot be confined on this mach
 /// turned their network off (`folder network off`) and this machine cannot
 /// hold them to that ([`Shared::network_refusal`]).
 #[cfg(not(windows))]
-pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this center's folder-mode commands, and this machine cannot keep them off it: that needs Landlock's network rules (ABI 4, Linux 6.7 or later), which this kernel does not have, so folder mode runs none of its commands; the owner turns the network back on with `nerve-node folder network on`, or runs the node on a newer kernel";
+pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this center's folder-mode commands, and this machine cannot keep them off it: that needs the kernel's seccomp filters on x86_64 or aarch64, which this node cannot use here, so folder mode runs none of its commands; the owner turns the network back on with `nerve-node folder network on`";
 /// [`NETWORK_NOT_HELD`] on Windows, where the AppContainer is not held to
 /// no network.
 #[cfg(windows)]
@@ -1899,6 +1918,7 @@ impl Daemon {
                 opts.confinement.unwrap_or_else(Confinement::detect),
                 service,
             ),
+            net_filter: opts.net_filter.unwrap_or_else(net_filter_here),
             cgroups,
             store: Mutex::new(store),
             changed,
@@ -3801,21 +3821,24 @@ mod tests {
     }
 
     /// A pairing whose folder-mode commands the owner took off the network
-    /// runs them only where Landlock has its network rules (ABI 4): below
-    /// that, or without Landlock, the node refuses them with why and offers
-    /// none (no folder marked `x`), and either way tells the center that its
-    /// commands have no network. Outside folder mode, or with the switch
-    /// off, nothing is refused for it.
+    /// runs them only where the node has its network filter, with or
+    /// without Landlock's network rules (ABI 4): without the filter the node
+    /// refuses them with why and offers none (no folder marked `x`), and
+    /// either way tells the center that its commands have no network.
+    /// Outside folder mode, or with the switch off, nothing is refused for
+    /// it.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_pairing_without_network_runs_folder_commands_only_where_that_holds() {
         use nerve_policy::config::{Access, CenterPolicy, Folder, Mode};
-        for (abi, held) in [
+        for (abi, filter) in [
+            (Some(3), true),
             (Some(3), false),
-            (None, false),
-            (Some(4), true),
+            (Some(4), false),
+            (Some(6), false),
             (Some(6), true),
         ] {
+            let held = filter;
             let log = Log::new(Level::Info);
             let d = tempfile::tempdir().unwrap();
             let mut o = options(&d, &log);
@@ -3825,9 +3848,10 @@ mod tests {
                 landlock_abi: abi,
                 appcontainer: false,
             });
+            o.net_filter = Some(filter);
             let daemon = Daemon::start(o).await.unwrap();
             let s = daemon.shared.clone();
-            let what = format!("ABI {abi:?}");
+            let what = format!("ABI {abi:?}, filter {filter}");
             assert_eq!(s.network_held(), held, "{what}");
             let mut policy = CenterPolicy {
                 mode: Mode::Folder,

@@ -26,6 +26,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub mod inherit;
+#[cfg(target_os = "linux")]
+pub mod net_filter;
 
 /// The argument that selects the shim in the `nerve-node` binary. Hidden from
 /// `--help`.
@@ -42,8 +44,10 @@ pub struct LandlockSpec {
     /// Programs below these may run. The files there can be read by name too
     /// (see `landlock_rules::prepare`), the folders not listed.
     pub exec: Vec<PathBuf>,
-    /// No TCP connection and no listening port ([`LANDLOCK_NETWORK`]): the
-    /// command does not run where the kernel cannot refuse them.
+    /// No TCP connection and no listening port ([`LANDLOCK_NETWORK`]), where
+    /// the kernel has the rules for them: a second layer under the node's
+    /// filter ([`net_filter`]), which holds the command off the network by
+    /// itself.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_network: bool,
 }
@@ -233,7 +237,8 @@ pub const LANDLOCK_FLOOR: i32 = 3;
 /// can be kept from making TCP connections and from listening on a TCP
 /// port. It rules nothing else of the network: UDP, raw and other sockets
 /// stay open, and so do unix sockets by path; abstract unix sockets close
-/// from [`LANDLOCK_WANTED`] on.
+/// from [`LANDLOCK_WANTED`] on. The node's filter ([`net_filter`]) is what
+/// holds a command off the network; these rules are a second layer.
 pub const LANDLOCK_NETWORK: i32 = 4;
 
 /// The Landlock ABI the node asks for (Linux 6.12): from it every guard the
@@ -510,8 +515,8 @@ pub mod landlock_rules {
 
     use super::LandlockSpec;
     use landlock::{
-        ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr,
-        RulesetCreated, RulesetCreatedAttr, RulesetStatus, Scope, path_beneath_rules,
+        ABI, Access, AccessFs, AccessNet, Ruleset, RulesetAttr, RulesetCreated, RulesetCreatedAttr,
+        RulesetStatus, Scope, path_beneath_rules,
     };
 
     /// Best effort up to this ABI: older kernels enforce what they know.
@@ -535,18 +540,12 @@ pub mod landlock_rules {
         if !Scope::from_all(ABI_WANTED).is_empty() {
             rs = rs.scope(Scope::from_all(ABI_WANTED)).map_err(e)?;
         }
-        // No TCP connection or listening port, with no rule to allow one.
-        // Not best effort: a kernel that cannot refuse them refuses the
-        // ruleset, and the command does not run. The level goes back to best
-        // effort after it, as the ruleset passes it on to its rules: the file
-        // rights of a later ABI than the kernel's (IoctlDev on ABI 4) would
-        // fail every rule otherwise.
+        // No TCP connection or listening port, with no rule to allow one,
+        // where the kernel has the rules (best effort): the node's filter
+        // (crate::net_filter) holds the command off the network without
+        // them, and these are a second layer under it.
         if spec.no_network {
-            rs = rs
-                .set_compatibility(CompatLevel::HardRequirement)
-                .handle_access(AccessNet::from_all(ABI::V4))
-                .map_err(e)?
-                .set_compatibility(CompatLevel::BestEffort);
+            rs = rs.handle_access(AccessNet::from_all(ABI::V4)).map_err(e)?;
         }
         rs.create()
             .map_err(e)?
@@ -3973,11 +3972,13 @@ mod tests {
         assert!(confined_sh(&off, "cat /etc/passwd > /dev/null"));
     }
 
-    /// The switch works on the first kernels with Landlock's network rules
-    /// (ABI 4, Linux 6.7 to 6.9), whose file rights are fewer than the node
-    /// asks for, and a kernel without them (ABI 3) refuses it. The kernel
-    /// here is told to say it is of that ABI ([`at_abi`]). Skipped where it
-    /// has no network rules itself, or no bash to connect with.
+    /// The switch's Landlock layer works on the first kernels with
+    /// Landlock's network rules (ABI 4, Linux 6.7 to 6.9), whose file rights
+    /// are fewer than the node asks for, and a kernel without them (ABI 3)
+    /// takes the ruleset all the same: the node's filter ([`net_filter`])
+    /// holds the command off the network there. The kernel here is told to
+    /// say it is of that ABI ([`at_abi`]). Skipped where it has no network
+    /// rules itself, or no bash to connect with.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_network_switch_holds_from_the_first_abi_with_network_rules() {
@@ -4007,11 +4008,11 @@ mod tests {
         };
         assert!(!reached);
         assert!(read);
-        let refused = at_abi(LANDLOCK_NETWORK - 1, || {
+        let older = at_abi(LANDLOCK_NETWORK - 1, || {
             landlock_rules::prepare(&off).map(|_| ())
         })
         .unwrap();
-        assert!(refused.is_err());
+        assert!(older.is_ok(), "{older:?}");
     }
 
     /// Runs `f` on a thread of its own where the kernel says its Landlock

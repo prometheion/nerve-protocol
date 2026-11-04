@@ -67,6 +67,7 @@ fn opts() -> RunOptions {
         root: None,
         limits: None,
         tap: None,
+        no_network: false,
     }
 }
 

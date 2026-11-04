@@ -206,7 +206,7 @@ function networkForm(c, entry, o) {
   return el("div", { class: "card" },
     el("label", { class: "check" }, off, el("span", {}, "No network for its commands")),
     entry.no_network && o.network_rules === false
-      ? el("p", { class: "meta" }, "This machine cannot keep commands off the network (Landlock's network rules need Linux 6.7), so folder mode runs none of this center's commands while this is on.")
+      ? el("p", { class: "meta" }, "This machine cannot keep commands off the network (the node's seccomp filter cannot be used here), so folder mode runs none of this center's commands while this is on.")
       : null,
     el("div", { class: "actions" }, btn("Save", "primary", act(() => api("POST", "/api/network", { center: c, off: off.checked })), "check", `network:${c}:set`)));
 }

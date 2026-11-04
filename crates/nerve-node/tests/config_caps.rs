@@ -1211,6 +1211,7 @@ async fn a_program_runs_whole_through_the_shim_under_landlock() {
         root: None,
         limits: None,
         tap: None,
+        no_network: false,
     };
     let run = |path: &Path| {
         let argv = vec!["cat".into(), "--".into(), path.display().to_string()];

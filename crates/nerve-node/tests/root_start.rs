@@ -56,6 +56,7 @@ fn opts(account: &Account, root: AsRoot) -> RunOptions {
         root: Some(root),
         limits: None,
         tap: None,
+        no_network: false,
     }
 }
 

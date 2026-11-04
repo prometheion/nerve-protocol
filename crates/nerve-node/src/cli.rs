@@ -3444,12 +3444,13 @@ fn network_mode_note(policy: &nerve_policy::config::CenterPolicy) -> Option<Stri
     })
 }
 
-/// Whether this machine's kernel can keep a command off the network
-/// (Landlock's network rules); never on Windows.
+/// Whether this machine's kernel can keep a command off the network (the
+/// node's seccomp filter, nerve_sandbox::net_filter); never on Windows.
 fn network_rules_here() -> bool {
-    nerve_sandbox::Confinement::detect()
-        .landlock_abi
-        .is_some_and(|v| v >= nerve_sandbox::LANDLOCK_NETWORK)
+    #[cfg(target_os = "linux")]
+    return nerve_sandbox::net_filter::available();
+    #[cfg(not(target_os = "linux"))]
+    false
 }
 
 /// `folder add`, and the folder step of `setup`.

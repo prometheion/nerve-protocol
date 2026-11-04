@@ -1146,6 +1146,11 @@ fn split(
     }
 }
 
+/// Why a command the owner's network switch holds does not run where the
+/// node has no filter for it ([`RunOptions::no_network`]).
+pub const NO_FILTER: &str =
+    "the command was not run: this machine has no filter that keeps it off the network";
+
 /// How one command runs.
 #[derive(Debug, Clone)]
 pub struct RunOptions {
@@ -1190,6 +1195,11 @@ pub struct RunOptions {
     /// Where the output goes as well as into the result, for the call's
     /// `output` stream (crate::tap); `None` keeps it in the result only.
     pub tap: Option<std::sync::Arc<crate::tap::Tap>>,
+    /// The owner's network switch: the command and all it starts make no
+    /// socket but a unix one, held by a seccomp filter put on it before it
+    /// starts (nerve_sandbox::net_filter). Linux only: elsewhere such a
+    /// command does not run.
+    pub no_network: bool,
 }
 
 /// The variables of the node's environment every command of `nerve-run`
@@ -1731,6 +1741,12 @@ pub async fn run(
     opts: &RunOptions,
     started: impl FnOnce(&Ender),
 ) -> Result<Value, RpcError> {
+    // Only Linux has the filter that keeps a command off the network; a
+    // command the switch holds runs nowhere else.
+    #[cfg(not(target_os = "linux"))]
+    if opts.no_network {
+        return Err(RpcError::new(ErrorCode::Unavailable, NO_FILTER));
+    }
     // Root's command runs in /bin/sh, whatever shell the others use.
     let shell = opts.shell.as_deref().filter(|_| opts.root.is_none());
     let (program, mut args) = match &call.argv {
@@ -1850,6 +1866,15 @@ pub async fn run(
         // Root as the account (the owner chose it, warned) gets root's
         // rights back at exec, which no_new_privs would keep from it.
         let nnp = opts.sudo.is_none() && opts.account.as_ref().is_none_or(|a| a.uid != 0);
+        // The filter of the owner's network switch, made here: the child
+        // only puts it on, last, once it is the account.
+        let net = match opts.no_network {
+            true => Some(
+                nerve_sandbox::net_filter::Filter::no_network()
+                    .ok_or_else(|| RpcError::new(ErrorCode::Unavailable, NO_FILTER))?,
+            ),
+            false => None,
+        };
         // SAFETY: plain system calls on memory moved into the closure.
         unsafe {
             cmd.pre_exec(move || {
@@ -1866,6 +1891,9 @@ pub async fn run(
                 }
                 if nnp && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                     return Err(std::io::Error::last_os_error());
+                }
+                if let Some(f) = &net {
+                    f.install()?;
                 }
                 Ok(())
             });
@@ -2313,6 +2341,7 @@ mod tests {
             root: None,
             limits: None,
             tap: None,
+            no_network: false,
         }
     }
 
@@ -2523,6 +2552,36 @@ mod tests {
             .unwrap();
         assert_eq!(r["stdout"].as_str().unwrap().len(), 100);
         assert_eq!(r["truncated"], true);
+    }
+
+    /// The owner's network switch holds a command and what it starts: no
+    /// TCP connection and no UDP socket, which it opens without; what needs
+    /// neither runs as it would. Skipped where the kernel takes no seccomp
+    /// filter, or there is no bash to connect with.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_command_off_the_network_opens_no_tcp_or_udp_socket() {
+        if !nerve_sandbox::net_filter::available() || !std::path::Path::new("/bin/bash").exists() {
+            eprintln!("no seccomp filters or no bash here; skipped");
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let udp_port = udp.local_addr().unwrap().port();
+        let script = format!(
+            "/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}' && echo tcp; \
+             /bin/bash -c 'exec 3<>/dev/udp/127.0.0.1/{udp_port}' && echo udp; echo done"
+        );
+        for off in [false, true] {
+            let o = RunOptions {
+                no_network: off,
+                ..opts(4096)
+            };
+            let r = run(&call(&script), &o, |_| {}).await.unwrap();
+            let want = if off { "done\n" } else { "tcp\nudp\ndone\n" };
+            assert_eq!(r["stdout"], want, "network off {off}: {r}");
+        }
     }
 
     /// The output stream carries all a command prints, also past the cap
@@ -3821,6 +3880,7 @@ mod windows_tests {
             root: None,
             limits: None,
             tap: None,
+            no_network: false,
         }
     }
 

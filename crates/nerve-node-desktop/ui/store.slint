@@ -175,8 +175,8 @@ export global Perm {
     in-out property <string> account;
     in-out property <bool> as-owner;
     // The owner turned the network off for this center's folder-mode
-    // commands, and whether this machine can hold them to that (Landlock's
-    // network rules); where it cannot, folder mode runs none of them.
+    // commands, and whether this machine can hold them to that (the node's
+    // seccomp filter); where it cannot, folder mode runs none of them.
     in-out property <bool> no-network;
     in-out property <bool> network-rules: true;
     // Root is the owner (#151): what runs as the owner runs as root.

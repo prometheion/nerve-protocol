@@ -47,6 +47,7 @@ fn opts(policy: &CenterPolicy, account: &Account, own: &[PathBuf]) -> RunOptions
         root: None,
         limits: None,
         tap: None,
+        no_network: false,
     }
 }
 
