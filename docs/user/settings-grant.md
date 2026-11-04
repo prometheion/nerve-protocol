@@ -61,7 +61,8 @@ No grant lets a center change:
   that yours do not
 - the network of its `folder` mode commands once you turned it off
   ([no network](modes.md#no-network-for-folder-mode-commands)): a center may
-  turn its own off, never on again
+  turn its own off, never on again, and while it is off it cannot change its
+  mode or its time limit (the switch holds in `folder` mode only)
 - the audit log
 - the programs that may add capabilities ([providers](providers.md))
 - turning on a [program's capability](providers.md) or a

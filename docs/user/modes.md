@@ -68,7 +68,11 @@ and the node does not open it to check. It reads nothing of yours that is closed
 where the node lets `nerve-run` pass through your home to a folder you gave,
 nothing another center was given unless it is open to everyone, no protected
 path and none of the node's own files (its keys, config and state), which are
-closed to `nerve-run`, nor the node's own process under `/proc`. Writing,
+closed to `nerve-run`, nor the node's own process under `/proc`. Nor does it
+read anything in `/var/lib/nerve-run` (the other pairings' homes and temporary
+folders) or a file of `nerve-run`'s elsewhere (what another pairing's commands
+made in its folders), however open their modes are: every pairing's commands
+run as that account and may change those modes, which Landlock does not rule. Writing,
 commands, and a path a write or a run reads stay in the folders. A program
 that reads a path for a call ([provider](providers.md)) gets the call outside
 the folders only for a file open to every account, never for a folder, since
@@ -325,10 +329,13 @@ hold the network or what a command reaches through it:
 - The network: a command can connect anywhere this machine reaches, the
   services on loopback (`127.0.0.1`) and your local network included, and
   listen on a port. What it may read it can send away.
-- Sockets by path that its rules let it open: `/tmp`, `/var/tmp` and the
-  `r` and `w` folders can hold one of another program's. On a node you run
-  yourself, the sockets of your session that lie there (a tmux server, an
-  X display) take its requests as yours.
+- Unix sockets by path: Landlock rules connecting to one only from ABI 9,
+  which the node does not ask for, so a command can connect to every socket
+  its account may write to by its modes, wherever it lies, not only in its
+  folders. On the installed node those are the sockets open to every account
+  (the system bus, a service's socket in `/run` with mode 0777); on a node you
+  run yourself, also the sockets of your session (a tmux server, an X display),
+  which take its requests as yours.
 - Below Landlock ABI 6, abstract unix sockets and signals to the other
   processes of its account ([versions](#landlock-versions)).
 
@@ -345,7 +352,10 @@ says when it is off. The app's and the node web UI's **Permissions** page
 have it as **No network for its commands**. The agent is told, in `list`,
 that its commands have no network. A center that may change its own
 settings ([settings grant](settings-grant.md)) can turn its own network
-off, never on again: only you can.
+off, never on again: only you can. While it is off, such a center cannot
+change its mode or its time limit either (it may only go into `folder` mode
+for good), since the switch holds in `folder` mode only. `folder network off`
+and `folder ls` say when the center is in another mode now.
 
 It needs Landlock's network rules, ABI 4 (Linux 6.7) or later. Where the
 kernel has none, or no Landlock at all, or on Windows, the node cannot hold
@@ -360,8 +370,10 @@ What it does not cover:
 - UDP, raw and the other kinds of socket that are not TCP: Landlock has
   no rules for them, so a command can still send DNS queries and other UDP
   packets.
-- Unix sockets by path, which go by the folders' file rules, and abstract
-  unix sockets, which only Landlock ABI 6 (Linux 6.12) closes.
+- Unix sockets by path, wherever they lie (see [above](#what-it-does-not-stop-linux)),
+  and abstract unix sockets, which only Landlock ABI 6 (Linux 6.12) closes.
+  Through a service that listens on one (a local proxy) a command can still
+  reach the network.
 - A command on your [sudo list](sudo.md), which runs outside the sandbox;
   a program's action ([providers](providers.md)), which runs as you; and
   every command of `allowlist` and `user` mode.
@@ -379,7 +391,15 @@ makes in it a folder for each pairing, `/var/lib/nerve-run/<center>`, with
 that pairing's own `home` and `tmp` (each 0700, made as `nerve-run` when the
 pairing comes or its first command runs), and deletes it with everything in
 it when the pairing goes (`center rm`, or a pairing made again under the
-same name). Other files in `/var/lib/nerve-run` it leaves alone.
+same name). Other files in `/var/lib/nerve-run` it leaves alone, and it takes
+no folder there for a pairing's that it did not make for it: where
+`/var/lib/nerve-run/<center>` is there already and holds anything, that
+pairing's commands do not run, and say so, until you delete it or move it
+away. A command of another pairing cannot read a pairing's home under
+Landlock, but it can change its modes (Landlock does not rule `chmod`), which
+would open it to the other accounts on the machine; the node closes the
+pairing's folders and `/var/lib/nerve-run` again before each of its commands.
+Keep nothing there that the machine's other accounts must not read.
 
 - It is not you. Your session's programs (the service manager, the session
   bus, tmux, a container engine) take requests from your own account only,
@@ -448,17 +468,28 @@ same name). Other files in `/var/lib/nerve-run` it leaves alone.
   pairing's home. Give a center you trust less a machine of its own where
   the kernel has no Landlock.
 - What `/var/lib/nerve-run` held before the node gave each pairing its own
-  home (the shared `.cache`, `.config`, `.gitconfig` and the like of an
-  earlier version) is no command's any more. The node leaves it; delete
-  every entry there that is not named after one of your centers (`nerve-node
-  center ls`), such as `sudo rm -rf /var/lib/nerve-run/.cache`.
+  home (the shared `.cache`, `.config`, `.gitconfig`, `.ssh` and the like of
+  an earlier version) is no command's any more. The node leaves it; delete
+  it, such as `sudo rm -rf /var/lib/nerve-run/.cache`. An entry there named
+  after one of your centers (`nerve-node center ls`) must go as well, or that
+  pairing's commands do not run: the node made none of them.
 - git trusts the repositories it reaches (`safe.directory`), so it works in
   your repositories although they are not its own.
 - It has no SSH keys or other credentials of yours, so `git push` and the
-  like fail unless you set that up for it. That is intended.
+  like fail unless you set that up for it. That is intended. ssh does not
+  go by `HOME`: it looks for its keys, its config and `known_hosts` in
+  `/var/lib/nerve-run/.ssh`, which with Landlock no command may read. To give
+  one pairing a key, put it into that pairing's home and name it to git there.
+  As root, for the center `lab`:
+  `install -d -o nerve-run -g nerve-run -m 700 /var/lib/nerve-run/lab/home/.ssh`,
+  copy the key in (owner `nerve-run`, mode 0600), and run, as a command of
+  that pairing, `git config --global core.sshCommand 'ssh -i "$HOME/.ssh/id_ed25519" -o UserKnownHostsFile="$HOME/.ssh/known_hosts"'`.
+  The key goes with the pairing's home when the pairing goes.
 - Tools you installed in your home (`~/.cargo`, `~/.rustup`, nvm, pyenv)
   are not on its way. Install them system-wide, grant their folder with `r`
-  and `x`, or install them for `nerve-run` in its home.
+  and `x`, or let a command of the pairing install them: they land in its
+  own home (`HOME`) and go with it. `/var/lib/nerve-run` itself is no
+  command's: with Landlock none may read it.
 - The node changes only your own files: a file of another account below a
   grant, a link, and what lies on another file system below the grant get no
   entry. A file with a second name (a hard link) gets none either, and loses

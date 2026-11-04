@@ -403,7 +403,7 @@ impl Reach {
         }
         if shared {
             out.push_str(
-                " A folder marked shared every pairing of that account and every account on \
+                " A folder marked shared is one that every pairing of that account and every account on \
                  the machine shares, with the settings and caches programs keep there: what one \
                  leaves there can change what another one's commands do. Use it for throwaway \
                  files only, keep nothing secret there, and change no program's settings there \
@@ -1785,7 +1785,7 @@ mod tests {
                    this pairing's own home and temporary folder, where its programs keep their \
                    settings and caches.";
         let kept = " The sandbox keeps every other pairing's commands out of them.";
-        let shared = " A folder marked shared every pairing of that account and every account on \
+        let shared = " A folder marked shared is one that every pairing of that account and every account on \
                       the machine shares, with the settings and caches programs keep there: what \
                       one leaves there can change what another one's commands do. Use it for \
                       throwaway files only, keep nothing secret there, and change no program's \
