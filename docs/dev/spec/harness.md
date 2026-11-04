@@ -255,7 +255,8 @@ the `result` of the envelope described below.
   `w`, that those are the pairing's own home and temporary folder, where its
   programs keep their settings and caches, and (`exec.run`'s advice and
   the joined one) that the sandbox keeps every other pairing's commands out
-  of them; where a `shared` one is marked `w`, that every pairing of that
+  of their files, not out of a socket a program listens on there, so no
+  credential cache or key agent runs in them; where a `shared` one is marked `w`, that every pairing of that
   account and every account on the machine shares it, with the settings and
   caches programs keep there, so what one leaves there can change what
   another one's commands do: it is for throwaway files only, nothing secret

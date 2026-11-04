@@ -1148,7 +1148,10 @@ grant or not.
   commands inside the `folders` and, on the installed Linux node, the
   built-in `/tmp`, `/var/tmp` and the pairing's own home and temporary
   folder below `nerve-run`'s home (and everything below them), by their
-  flags; where the node reads as `nerve-run` (the installed
+  flags (the owner's folders are cut around `nerve-run`'s home first,
+  `account::around_pairings`: a folder that holds it is replaced by its other
+  entries, one inside it is dropped, so no grant gives a pairing another
+  pairing's folders, which that one account owns); where the node reads as `nerve-run` (the installed
   Linux node), reading also, outside every folder, what every account may
   read (below).
   `access` is three independent flags, any combination
@@ -1218,7 +1221,10 @@ grant or not.
   and the other modes are not held by it. The owner sets it (`folder
   network off|on`, the app, the node web UI); a center's settings may set
   it, never clear it (`policy.no_network: only the owner can let the
-  commands back on the network`). `status` has each center's `no_network`
+  commands back on the network`); while it is on, a center's settings also
+  cannot change `mode` or `until`, except into folder mode for good (no
+  `until`), so the switch cannot be shed by leaving folder mode
+  (`settings::client_only`). `status` has each center's `no_network`
   and the machine's `network_rules`.
 - **user**: full access as the user, protected paths aside. `allow` rules
   do not count.

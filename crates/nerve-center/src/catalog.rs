@@ -398,7 +398,11 @@ impl Reach {
                  settings and caches.",
             );
             if commands {
-                out.push_str(" The sandbox keeps every other pairing's commands out of them.");
+                out.push_str(
+                    " The sandbox keeps every other pairing's commands out of their files, \
+                     not out of a socket a program listens on there: run no credential cache \
+                     or key agent in them.",
+                );
             }
         }
         if shared {
@@ -1784,7 +1788,9 @@ mod tests {
         let own = "The folders marked own belong to that account; those not marked shared are \
                    this pairing's own home and temporary folder, where its programs keep their \
                    settings and caches.";
-        let kept = " The sandbox keeps every other pairing's commands out of them.";
+        let kept = " The sandbox keeps every other pairing's commands out of their files, \
+                    not out of a socket a program listens on there: run no credential cache \
+                    or key agent in them.";
         let shared = " A folder marked shared is one that every pairing of that account and every account on \
                       the machine shares, with the settings and caches programs keep there: what \
                       one leaves there can change what another one's commands do. Use it for \

@@ -159,8 +159,10 @@ commands run as `nerve-run`, a home and a temporary folder of that pairing
 alone (`/var/lib/nerve-run/<center>/home` and `…/tmp`, where `HOME`, the
 `XDG_*` folders and `TMPDIR` of its commands point), and `/tmp` and
 `/var/tmp`, marked `shared` as well: every pairing and every account on the
-machine shares those two. With Landlock a command reaches its own pairing's
-home and temporary folder and no other pairing's, so the settings and
+machine shares those two. With Landlock a command reaches the files of its
+own pairing's home and temporary folder and no other pairing's (a socket
+that a program listens on there is the exception, see
+[what it does not stop](#what-it-does-not-stop-linux)), so the settings and
 caches its programs keep in its home are its own: what another center's
 agent leaves in its own home cannot steer this one's `git status` or `npm
 test`. What it leaves in `/tmp` or `/var/tmp` can, for programs that look
@@ -169,6 +171,12 @@ change no program's settings there unless asked. Without Landlock the
 folders are closed (0700) to other accounts, but every pairing's commands
 run as the one account `nerve-run`, so nothing keeps one pairing out of
 another's home: a center you trust less then needs a machine of its own.
+A folder you give a center that holds `nerve-run`'s home (`/`, `/var`,
+`/var/lib`) is cut around it: it gives that center no other pairing's home
+or temporary folder, in its commands and in its file calls, and a folder you
+give inside that home gives nothing. A pairing made again under the name of
+one that went waits for the node to delete the old folders before its
+commands and file calls run; where that cannot be done they say why.
 Even with Landlock the pairings share more than `/tmp`: see [the account
 `nerve-run`](#the-account-nerve-run-linux) for what it does not keep apart.
 Not `--as-owner` either: that runs the allowed commands as you (as root
@@ -333,9 +341,13 @@ hold the network or what a command reaches through it:
   which the node does not ask for, so a command can connect to every socket
   its account may write to by its modes, wherever it lies, not only in its
   folders. On the installed node those are the sockets open to every account
-  (the system bus, a service's socket in `/run` with mode 0777); on a node you
-  run yourself, also the sockets of your session (a tmux server, an X display),
-  which take its requests as yours.
+  (the system bus, a service's socket in `/run` with mode 0777) and every
+  socket of `nerve-run`, other pairings' included: a program of one pairing
+  that listens on a socket in its home or temporary folder (a credential
+  cache, a key agent) can be reached by every other pairing's commands, so
+  keep none running there. On a node you run yourself, also the sockets of
+  your session (a tmux server, an X display), which take its requests as
+  yours.
 - Below Landlock ABI 6, abstract unix sockets and signals to the other
   processes of its account ([versions](#landlock-versions)).
 
@@ -460,7 +472,8 @@ Keep nothing there that the machine's other accounts must not read.
   `/var/tmp`, to read, write and run programs in. Its tools keep their
   caches and configs in that home: `HOME` and the `XDG_*` folders point
   there, `TMPDIR` to the temporary folder. With Landlock no other pairing's
-  command reaches them. `/tmp` and `/var/tmp` stay shared, for programs
+  command reaches their files (not a program's socket there: keep no
+  credential cache or key agent running in them). `/tmp` and `/var/tmp` stay shared, for programs
   that use them whatever `TMPDIR` says: what one pairing leaves there
   another one's programs may read by themselves. Full isolation needs
   Landlock, ABI 6 or later ([versions](#landlock-versions)); without it the

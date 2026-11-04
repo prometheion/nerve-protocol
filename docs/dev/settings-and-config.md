@@ -109,6 +109,11 @@ center reads, or the node refuses the whole change and names the field.
     sensing ones keep their `cap` owner-only whatever else offers it
     (nerve-node `config_cap`). The store checks the write
     grant and audits each change as the center's (`Writer::Center`).
+13. The pairing's `policy.no_network` (folder mode, #167) once it is on: a
+    center cannot clear it, and while it is on it cannot change
+    `policy.mode` or `policy.until` except into folder mode with no `until`,
+    since leaving folder mode would shed the switch
+    (`settings::client_only`).
 
 One item is in the document a center reads and is still the owner's: the
 record of the folders' real places, `policy.places`
