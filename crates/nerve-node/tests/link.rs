@@ -1448,7 +1448,8 @@ async fn a_folder_command_does_not_get_the_nodes_terminal() {
             &"if (exec 3</dev/tty) 2>/dev/null; then echo reads; else echo none; fi; \
              if (exec 3>/dev/tty) 2>/dev/null; then echo writes; fi; \
              if (exec 3<{pty}) 2>/dev/null; then echo pts; else echo no-pts; fi; \
-             head -c 1 /dev/urandom >/dev/null && echo random"
+             head -c 1 /dev/urandom >/dev/null && echo random; \
+             set -- $(cat /proc/self/stat); echo ctty-$7"
                 .replace("{pty}", &pty),
         )
         .await;
@@ -1514,7 +1515,9 @@ async fn a_folder_command_does_not_get_the_nodes_terminal() {
         .and_then(|r| r.lines().next())
         .unwrap_or_else(|| panic!("{out}"));
     // Neither `/dev/tty` nor the pty by its name; the rest of `/dev` reads.
-    assert_eq!(got, "none,no-pts,random", "{out}");
+    // Field 7 of the stat line is the controlling terminal (0: none): the
+    // command's own session, not Landlock, takes it away.
+    assert_eq!(got, "none,no-pts,random,ctty-0", "{out}");
 }
 
 /// A folder mode command that started with the keys in files is counted for as

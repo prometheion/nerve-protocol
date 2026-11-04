@@ -4276,6 +4276,17 @@ pub(crate) mod tests {
         let r = remove_files_of(me().uid, &[d.path().join("l"), elsewhere.clone()]).unwrap();
         assert_eq!(r.n, 1);
         assert!(!elsewhere.join("f").exists() && elsewhere.exists());
+        // A link inside a folder is deleted as a link, not walked into.
+        let outside = d.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("f"), "x").unwrap();
+        let inner = d.path().join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::os::unix::fs::symlink(&outside, inner.join("trap")).unwrap();
+        let r = remove_files_of(me().uid, std::slice::from_ref(&inner)).unwrap();
+        assert!(r.errors.is_empty() && r.left.is_empty(), "{r:?}");
+        assert!(inner.join("trap").symlink_metadata().is_err());
+        assert!(outside.join("f").exists());
     }
 
     /// A tree deeper than the walk goes is left as it is, and so is a
