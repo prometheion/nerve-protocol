@@ -120,6 +120,8 @@ impl Ctl {
             p.set_separate(separate);
             p.set_account(account.as_str().into());
             p.set_as_owner(c["as_owner"] == true);
+            p.set_no_network(c["no_network"] == true);
+            p.set_network_rules(st["network_rules"] != false);
             p.set_owner_is_root(st["owner_is_root"] == true);
             p.set_built_in(built_in.as_str().into());
             p.set_grant_errors(errors.join("\n").into());
@@ -148,6 +150,23 @@ impl Ctl {
             format!("{center}'s allowed commands run as {whom}.")
         } else {
             format!("{center}'s allowed commands run as nerve-run.")
+        };
+        self.perm_change(args, None, said, |_| {}, |c, e| c.toast(e, Tone::Danger));
+    }
+
+    /// The center's folder-mode commands off the network
+    /// (`folder network off`), or on it again.
+    fn no_network_set(self: &Rc<Self>, off: bool) {
+        let center = self.perm_center();
+        let args = vec![
+            "folder".into(),
+            "network".into(),
+            if off { "off" } else { "on" }.into(),
+        ];
+        let said = if off {
+            format!("{center}'s folder-mode commands have no network.")
+        } else {
+            format!("{center}'s folder-mode commands may use the network.")
         };
         self.perm_change(args, None, said, |_| {}, |c, e| c.toast(e, Tone::Danger));
     }
@@ -651,6 +670,8 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     p.on_mode_apply(move || c.mode_apply());
     let c = ctl.clone();
     p.on_as_owner_set(move |on| c.as_owner_set(on));
+    let c = ctl.clone();
+    p.on_no_network_set(move |off| c.no_network_set(off));
     let c = ctl.clone();
     p.on_folder_choose(move || c.folder_choose());
     let c = ctl.clone();

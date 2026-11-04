@@ -3076,11 +3076,21 @@ impl Link {
             known.clone()
         };
         // A command of `nerve-run` starts in its pairing's own home
-        // (crate::account::Own), not the account's.
-        let pairing = known
+        // (crate::account::Own), not the account's. Its folders are made
+        // here where the pairing's sync has not made them yet, so the
+        // folder it starts in is there to be looked at; one that cannot be
+        // made stops the command once it is decided and audited.
+        let ready = known
             .as_ref()
             .filter(|_| self.shared.separate(&entry.policy) && !sudo_call)
-            .map(|a| crate::account::Own::of(&a.home, &entry.name));
+            .map(|a| self.shared.own_ready(a, &entry.name))
+            .transpose();
+        let pairing = match &ready {
+            Ok(own) => own.clone(),
+            Err(_) => known
+                .as_ref()
+                .map(|a| crate::account::Own::of(&a.home, &entry.name)),
+        };
         let start_in = match &pairing {
             Some(o) => o.home.clone(),
             None => looks_as
@@ -3119,7 +3129,12 @@ impl Link {
         // judged. A command of `nerve-run` is confined in every mode.
         let by_folders = entry.policy.mode_at(crate::now_ms()) == Mode::Folder;
         let separate = self.shared.separate(&entry.policy) && !sudo_call;
-        let unconfined = self.shared.unconfined_as(cfg, || known.clone());
+        // Where the owner turned the pairing's network off and the machine
+        // cannot hold that, folder mode runs none of its commands.
+        let unconfined = self
+            .shared
+            .unconfined_as(cfg, || known.clone())
+            .or_else(|| self.shared.network_refusal(&entry.policy));
         // Its refusal names the `cwd` given as given, as a program's paths
         // are; the default one the center did not name.
         let named: Vec<(String, String)> = inv
@@ -3182,16 +3197,9 @@ impl Link {
         } else {
             None
         };
-        // Its pairing's folders are there before it starts, made as the
-        // account where the pairing's sync has not made them yet.
-        let separate = match (separate, &account) {
-            (true, Some(a)) => Some(
-                self.shared
-                    .own_ready(a, &entry.name)
-                    .map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?,
-            ),
-            _ => None,
-        };
+        // Its pairing's folders are there before it starts.
+        let pairing = ready.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
+        let separate = pairing.filter(|_| separate);
         let guard = Running::start(self, id.clone(), cfg.limits.max_running as usize)?;
         // A sudo command's output is not streamed (exec::run leaves it out).
         let tap = guard.tap(sudo.is_none() && root.is_none());
@@ -3204,7 +3212,12 @@ impl Link {
             // in place of a folder inside one leads nowhere the next
             // command gets rules for.
             let writable = exec::write_folders(cfg, &home);
-            exec::landlock_spec(&entry.policy, &home, &own, &writable)
+            let mut spec = exec::landlock_spec(&entry.policy, &home, &own, &writable);
+            // The owner's switch: no TCP for a folder-mode command, which
+            // runs only where the kernel can refuse it (the gate took
+            // `unconfined` with the network refusal in).
+            spec.no_network = folder && entry.policy.no_network;
+            spec
         });
         // Counted while it runs, so the keys do not move into the keyring
         // meanwhile, and not started when they moved after `cfg` was taken.
@@ -3315,8 +3328,12 @@ impl Link {
         // command as it runs, the call's values in it, holds the owner's own
         // words and stays in the node's own log.
         let ran = nerve_policy::config::ConfigCapability::line(&argv);
+        // A command of a folder-mode pairing whose network the owner turned
+        // off runs only where the machine can hold it to that, whatever its
+        // effect.
+        let off_net = self.shared.network_refusal(&entry.policy);
         let unconfined = (effect == Effect::Execute)
-            .then(|| self.shared.unconfined_as(cfg, || known.clone()))
+            .then(|| self.shared.unconfined_as(cfg, || known.clone()).or(off_net))
             .flatten();
         self.gate(
             &entry,
@@ -3333,6 +3350,9 @@ impl Link {
         )
         .await
         .map_err(|e| as_given(e, &named))?;
+        if let Some(why) = off_net {
+            return Err(RpcError::forbidden(why));
+        }
         // A missing account stops the call once it is decided and audited.
         let account = runs_as.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
         // Only the installed Linux node has `nerve-run`, and only it offers
@@ -3372,7 +3392,12 @@ impl Link {
             // The folders' entries are listed as the account.
             let _as = act_as(account.as_ref()).ok().flatten();
             let writable = exec::write_folders(cfg, &home);
-            exec::landlock_spec(&policy, &home, &own, &writable)
+            let mut spec = exec::landlock_spec(&policy, &home, &own, &writable);
+            // Held off the network like the pairing's commands (refused
+            // above where the kernel cannot).
+            spec.no_network =
+                entry.policy.no_network && entry.policy.mode_at(crate::now_ms()) == Mode::Folder;
+            spec
         });
         let granted = cfg
             .limits

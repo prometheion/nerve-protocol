@@ -179,6 +179,7 @@ function pagePermissions() {
       state.permCenter = o.centers[i].name; state.perm = null; draw(true); loadPerm().then(() => draw(true)).catch((e) => notify(e.message, "error"));
     }) : null,
     section("Mode", entry.until ? `Until ${when(entry.until)}` : null, null, modeForm(c, entry)),
+    entry.mode === "folder" ? section("Network", "Whether its folder-mode commands may open TCP connections and listen on TCP ports.", null, networkForm(c, entry, o)) : null,
     p ? foldersSection(c, p.folders.folders || []) : loading(),
     p ? rulesSection(c, p.rules) : null,
     p ? section("Sudo", "Turning sudo on is done at the CLI: sudo nerve-node sudo on.", null,
@@ -198,6 +199,16 @@ function modeForm(c, entry) {
     el("div", { class: "actions" }, btn("Set the mode", "primary", act(() => api("POST", "/api/mode", {
       center: c, mode: chosen, hours: Number(hours.value) || undefined, as_owner: owner.checked,
     })), "check", `mode:${c}:set`)));
+}
+
+function networkForm(c, entry, o) {
+  const off = el("input", { type: "checkbox", checked: !!entry.no_network });
+  return el("div", { class: "card" },
+    el("label", { class: "check" }, off, el("span", {}, "No network for its commands")),
+    entry.no_network && o.network_rules === false
+      ? el("p", { class: "meta" }, "This machine cannot keep commands off the network (Landlock's network rules need Linux 6.7), so folder mode runs none of this center's commands while this is on.")
+      : null,
+    el("div", { class: "actions" }, btn("Save", "primary", act(() => api("POST", "/api/network", { center: c, off: off.checked })), "check", `network:${c}:set`)));
 }
 
 function foldersSection(c, folders) {

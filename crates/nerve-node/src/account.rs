@@ -3,7 +3,8 @@
 //! node's config, keys and state; no command runs as it. On Linux a command
 //! of `folder` mode, and of `allowlist` mode unless the pairing says
 //! otherwise, runs as [`RUN_USER`], an account of its own that `install`
-//! makes, with a home of its own and the folders the owner grants it
+//! makes, with a home and a temporary folder of each pairing's own
+//! ([`Own`], crate::own_dirs) and the folders the owner grants it
 //! (crate::acl); a command of `user` mode runs as the owner (the account
 //! that ran `install`, which the service unit names). On Windows every
 //! command runs as the owner, folder mode in an AppContainer. To switch to

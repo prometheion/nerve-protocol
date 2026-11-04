@@ -255,14 +255,18 @@ switches are on [Capabilities](#capabilities).
 
 On **Permissions**, the **Mode** names who runs the commands: in folder
 mode `nerve-run`, in user mode you; in allowlist mode **Run them as you**
-switches between `nerve-run` and you (`mode set allowlist --as-owner`).
+switches between `nerve-run` and you (`mode set allowlist --as-owner`). In
+folder mode **No network for its commands** keeps them off the network
+(`folder network off`); on a machine without Landlock's network rules the
+page then says that folder mode runs none of that center's commands.
 Where root is the node's owner ([service](service.md#root-as-the-owner)),
 the Overview says so, user mode and the chip say **as root**, and the mode
 shows **Its commands run as root** while they do. On **Centers**, a center's
 settings grant says **Up to user mode, which runs as root on this node**, and
 giving it says that the center can now make itself root.
 Under **Folders**, the line **Always** names what `nerve-run` has besides
-the folders you give it: `/tmp`, `/var/tmp` and its home. A folder that
+the folders you give it: the center's own home and temporary folder below
+`/var/lib/nerve-run`, and `/tmp` and `/var/tmp`, which every center shares. A folder that
 `nerve-run` could not be given (a file system without ACLs, a folder of
 another account's on its way) shows above the list with the reason. Access
 `nerve-run` keeps although it should have lost it (a folder you removed

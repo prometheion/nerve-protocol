@@ -440,6 +440,8 @@ pub fn landlock_spec(
             &[nerve_sandbox::system_dirs(), f.exec].concat(),
             &no_read,
         )),
+        // The caller sets it from the pairing's switch.
+        no_network: false,
     }
 }
 

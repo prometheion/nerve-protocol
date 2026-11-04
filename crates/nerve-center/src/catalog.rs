@@ -68,6 +68,10 @@ pub struct Reach {
     /// as far as that account may read ([`Access::reads_by_account`]).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub reads_by_account: bool,
+    /// In folder mode the owner turned the network off for this center's
+    /// commands ([`Access::no_network`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub no_network: bool,
     pub folders: Vec<FolderAccess>,
     /// The folders past [`FOLDERS_MAX`], not named.
     pub more_folders: usize,
@@ -128,6 +132,7 @@ impl Reach {
             confined: a.confined,
             sudo: a.sudo,
             reads_by_account: a.reads_by_account,
+            no_network: a.no_network,
             folders,
             more_folders,
             unnamed: a.unnamed,
@@ -340,6 +345,14 @@ impl Reach {
                 " The machine does not hold what a command reaches to these folders: where it \
                  runs commands, they reach what the account they run as may reach."
             });
+        }
+        // Only a command is held off the network; a sudo command, by the
+        // sentence after, by nothing.
+        if commands && self.no_network {
+            out.push_str(
+                " Its commands have no network: the owner turned it off, so they can open no TCP \
+                 connection and listen on no TCP port.",
+            );
         }
         if commands && self.sudo {
             out.push_str(

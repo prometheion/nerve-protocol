@@ -963,6 +963,12 @@ fn check_access(v: &Value) -> Result<(), String> {
             format!("access unnamed {n} in {mode} mode"),
         )?;
     }
+    if let Some(n) = a.get("no_network") {
+        ensure(
+            n.as_bool().is_some_and(|n| !n || mode == "folder"),
+            format!("access no_network {n} in {mode} mode"),
+        )?;
+    }
     let folders = match a.get("folders") {
         None => return Ok(()),
         Some(f) => f.as_array().ok_or("access folders is not a list")?,
@@ -1136,7 +1142,7 @@ mod tests {
     fn the_access_block_must_be_well_formed() {
         let good = json!({"mode": "folder", "until_ms": 5, "account": "nerve-run",
                           "confined": true, "sudo": true, "reads_by_account": true,
-                          "unnamed": 2,
+                          "unnamed": 2, "no_network": true,
                           "folders": [{"path": "/home/me/proj", "access": "rw",
                                        "closed_below": true},
                                       {"path": "/c/Users/me", "access": "rwx"},
@@ -1149,7 +1155,7 @@ mod tests {
         d["access"] = json!({"mode": "user", "account": "me"});
         check_descriptor(&d, "node-id", 1).unwrap();
         type Edit = fn(&mut Value);
-        let cases: [(Edit, &str); 27] = [
+        let cases: [(Edit, &str); 29] = [
             (|a| a["mode"] = json!("later"), "access mode"),
             (|a| a["until_ms"] = json!(-1), "access until_ms"),
             (|a| a["account"] = json!("me\nyou"), "access account"),
@@ -1194,8 +1200,20 @@ mod tests {
                     a["reads_by_account"] = json!(false);
                     a["unnamed"] = json!(0)
                 },
+                "access no_network true in user mode",
+            ),
+            (
+                |a| {
+                    a["mode"] = json!("user");
+                    a["confined"] = json!(false);
+                    a["sudo"] = json!(false);
+                    a["reads_by_account"] = json!(false);
+                    a["unnamed"] = json!(0);
+                    a["no_network"] = json!(false)
+                },
                 "access names folders in user mode",
             ),
+            (|a| a["no_network"] = json!(1), "access no_network 1"),
             (|a| a["sudo"] = json!("yes"), "access sudo"),
             (
                 |a| a["reads_by_account"] = json!("yes"),

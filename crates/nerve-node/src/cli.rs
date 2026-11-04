@@ -504,6 +504,15 @@ pub enum FolderCmd {
     /// center again, also what was moved into them (the installed node on
     /// Linux): a pass over every granted folder.
     Sync,
+    /// Keep a center's folder-mode commands off the network, or let them on
+    /// it again: `off` refuses them every TCP connection and listening TCP
+    /// port (Landlock 4, Linux 6.7); a machine that cannot runs none of them.
+    Network {
+        /// `off` or `on`.
+        state: String,
+        #[command(flatten)]
+        center: CenterArg,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2304,15 +2313,21 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             Ok(())
         }
         Cmd::Folder(FolderCmd::Sync) => sync_folders(&paths, out).await,
+        Cmd::Folder(FolderCmd::Network { state, center }) => {
+            set_network(&paths, &state, &center, out).await
+        }
         Cmd::Folder(FolderCmd::Ls { center }) => {
             let (cfg, _) = read_config(&paths).await?;
             let name = pick_center(&cfg, &center)?;
-            let folders = &cfg.center(&name).expect("picked").policy.folders;
-            if folders.is_empty() {
+            let policy = &cfg.center(&name).expect("picked").policy;
+            if policy.folders.is_empty() {
                 w(out, format!("{name}: no folders"));
             }
-            for f in folders {
+            for f in &policy.folders {
                 w(out, format!("{}  {}", f.access.to_chmod(), f.path));
+            }
+            if policy.no_network {
+                w(out, format!("{name}: {NO_NETWORK_LINE}"));
             }
             Ok(())
         }
@@ -3367,6 +3382,53 @@ async fn set_mode(
     let whom = if as_owner { ", as you" } else { "" };
     w(out, format!("{name}: mode {}{whom}", m.as_str()));
     Ok(())
+}
+
+/// What `folder network off` and `folder ls` say of a center whose network
+/// is off.
+const NO_NETWORK_LINE: &str =
+    "its folder-mode commands have no network (no TCP connection, no listening TCP port)";
+
+/// `folder network`: the pairing's network switch for its folder-mode
+/// commands (`policy.no_network`). Where this machine cannot hold them to
+/// it, the node runs none of them, and this says so.
+async fn set_network(
+    paths: &NodePaths,
+    state: &str,
+    center: &CenterArg,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let off = match state {
+        "off" => true,
+        "on" => false,
+        other => return Err(format!("unknown network setting {other} (on or off)")),
+    };
+    let name = edit_center(paths, center, |e| {
+        e.policy.no_network = off;
+        Ok(())
+    })
+    .await?;
+    let _ = writeln!(
+        out,
+        "{name}: {}",
+        if off {
+            NO_NETWORK_LINE
+        } else {
+            "its folder-mode commands may use the network"
+        }
+    );
+    if off && !network_rules_here() {
+        let _ = writeln!(out, "warning: {}", crate::daemon::NETWORK_NOT_HELD);
+    }
+    Ok(())
+}
+
+/// Whether this machine's kernel can keep a command off the network
+/// (Landlock's network rules); never on Windows.
+fn network_rules_here() -> bool {
+    nerve_sandbox::Confinement::detect()
+        .landlock_abi
+        .is_some_and(|v| v >= nerve_sandbox::LANDLOCK_NETWORK)
 }
 
 /// `folder add`, and the folder step of `setup`.
@@ -5979,6 +6041,33 @@ mod tests {
         assert!(e.contains("unknown mode"), "{e}");
         let e = run(&paths, &["cap", "set", "fs", "ask", "--center", "a"]).unwrap_err();
         assert!(e.contains("unknown setting"), "{e}");
+    }
+
+    /// `folder network off` keeps the center's folder-mode commands off the
+    /// network, `on` lets them on it again, `folder ls` says which, and a
+    /// machine without Landlock's network rules is warned of.
+    #[test]
+    fn folder_network_switches_the_folder_commands_network() {
+        let (_d, paths) = setup(&["home"]);
+        let policy = || load(&paths).centers[0].policy.clone();
+        let out = run(&paths, &["folder", "network", "off"]).unwrap();
+        assert!(
+            out.starts_with(&format!("home: {NO_NETWORK_LINE}\n")),
+            "{out}"
+        );
+        assert_eq!(out.contains("warning:"), !network_rules_here(), "{out}");
+        assert!(policy().no_network);
+        let ls = run(&paths, &["folder", "ls"]).unwrap();
+        assert!(ls.ends_with(&format!("home: {NO_NETWORK_LINE}\n")), "{ls}");
+        let out = run(&paths, &["folder", "network", "on"]).unwrap();
+        assert!(
+            out.starts_with("home: its folder-mode commands may use the network\n"),
+            "{out}"
+        );
+        assert!(!policy().no_network);
+        assert!(!run(&paths, &["folder", "ls"]).unwrap().contains("network"));
+        let e = run(&paths, &["folder", "network", "maybe"]).unwrap_err();
+        assert!(e.contains("unknown network setting maybe"), "{e}");
     }
 
     /// Allowlist mode runs as the owner only when asked for, and setting a

@@ -262,6 +262,13 @@ pub struct Access {
     /// the node's own files stay closed either way.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reads_by_account: bool,
+    /// In `folder` mode: the owner turned the network off for this
+    /// center's commands. They can make no TCP connection and listen on no
+    /// TCP port; other kinds of socket are not ruled by it. Where the node
+    /// cannot hold a command to that it runs none (`confined` is false and
+    /// no folder is marked `x`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_network: bool,
     /// In `folder` mode: the folders the center's file calls and commands
     /// may use. Only folder mode names them: in `allowlist` mode as
     /// `nerve-run` they still hold the allowed commands, which this block
@@ -661,6 +668,7 @@ mod tests {
             confined: true,
             sudo: true,
             reads_by_account: true,
+            no_network: true,
             folders: vec![FolderAccess {
                 path: "/a".into(),
                 access: "r".into(),

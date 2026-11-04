@@ -845,11 +845,13 @@ impl Shared {
             .then(|| self.account_seen(cfg, &entry.policy))
             .flatten()
             .map(|a| crate::account::Own::of(&a.home, &entry.name));
+        // A machine that cannot hold the pairing's network switch runs none
+        // of its folder-mode commands, so it offers none.
         let mut reach = crate::descriptor::Reach::of(
             entry,
             now,
             self.account_name(cfg, &entry.policy),
-            self.confined(cfg),
+            self.confined(cfg) && self.network_refusal(&entry.policy).is_none(),
             own.as_ref(),
         );
         // Without a sandbox, a folder-mode command that runs at all runs as
@@ -1232,6 +1234,32 @@ impl Shared {
         self.confinement.available() && self.exe.is_some()
     }
 
+    /// Whether this machine can keep a command off the network: Landlock
+    /// with its network rules ([`nerve_sandbox::LANDLOCK_NETWORK`]), and a
+    /// program to start the command through.
+    pub fn network_held(&self) -> bool {
+        self.exe.is_some()
+            && self
+                .confinement
+                .landlock_abi
+                .is_some_and(|v| v >= nerve_sandbox::LANDLOCK_NETWORK)
+    }
+
+    /// Why the folder-mode commands of a pairing with `policy` may not run
+    /// for its network switch: it is on, and this machine cannot hold them
+    /// to it ([`Shared::network_held`]). Fail closed: they do not run
+    /// without the network rules. `None` outside folder mode, which the
+    /// switch is not for.
+    pub fn network_refusal(
+        &self,
+        policy: &nerve_policy::config::CenterPolicy,
+    ) -> Option<&'static str> {
+        (policy.no_network
+            && policy.mode_at(crate::now_ms()) == nerve_policy::Mode::Folder
+            && !self.network_held())
+        .then_some(NETWORK_NOT_HELD)
+    }
+
     /// Whether the commands of a pairing with `policy` run under Landlock
     /// now: in folder mode, and as `nerve-run`, where the kernel has it.
     pub fn landlock_for(&self, policy: &nerve_policy::config::CenterPolicy) -> bool {
@@ -1515,6 +1543,9 @@ impl Shared {
                     "mode": c.policy.mode_at(now).as_str(),
                     "until": c.policy.until,
                     "as_owner": c.policy.as_owner,
+                    // The owner's network switch for its folder-mode
+                    // commands (`folder network off`).
+                    "no_network": c.policy.no_network,
                     // The account its commands run as now; none on a node
                     // run by hand, which runs them as itself.
                     "account": self.command_account(&cfg, &c.policy).ok().flatten().map(|a| a.name),
@@ -1545,6 +1576,9 @@ impl Shared {
             // Why folder mode runs no command, which `confinement` alone
             // does not say once the keyring is the reason.
             "folder_commands_off": self.unconfined(&cfg),
+            // Whether this machine can keep folder-mode commands off the
+            // network, which a pairing's switch needs to run any.
+            "network_rules": self.network_held(),
             "command_limits": crate::cgroup::status(&cfg.limits.command, &self.cgroups),
             "providers": self.providers.status(),
             "folder_grants": grants,
@@ -1599,6 +1633,16 @@ pub const KEYRING_NOT_CONFINED: &str = "commands cannot be confined on this mach
 /// nor the session bus exist there.
 #[cfg(windows)]
 pub const KEYRING_NOT_CONFINED: &str = "commands cannot be confined on this machine while the node's keys are in the system keyring: the AppContainer here is not known to keep a command from the Credential Manager the keys are in, so folder mode runs no command; `nerve-node config set machine.secret_storage file` brings them back";
+
+/// Why a pairing's commands of `folder` mode may not run where its owner
+/// turned their network off (`folder network off`) and this machine cannot
+/// hold them to that ([`Shared::network_refusal`]).
+#[cfg(not(windows))]
+pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this center's folder-mode commands, and this machine cannot keep them off it: that needs Landlock's network rules (ABI 4, Linux 6.7 or later), which this kernel does not have, so folder mode runs none of its commands; the owner turns the network back on with `nerve-node folder network on`, or runs the node on a newer kernel";
+/// [`NETWORK_NOT_HELD`] on Windows, where the AppContainer is not held to
+/// no network.
+#[cfg(windows)]
+pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this center's folder-mode commands, and this machine cannot keep them off it: Windows has no rule here that does, so folder mode runs none of its commands; the owner turns the network back on with `nerve-node folder network on`";
 
 /// Why commands of `folder` mode may not run ([`Shared::unconfined_as`]),
 /// or `None`: `sandbox` says whether the machine confines them, `service`
@@ -3707,6 +3751,84 @@ mod tests {
             let daemon = Daemon::start(o).await.unwrap();
             let st = daemon.status();
             assert_eq!(st["owner_is_root"], root, "{owner:?}: {st}");
+            daemon.stop().await;
+        }
+    }
+
+    /// A pairing whose folder-mode commands the owner took off the network
+    /// runs them only where Landlock has its network rules (ABI 4): below
+    /// that, or without Landlock, the node refuses them with why and offers
+    /// none (no folder marked `x`), and either way tells the center that its
+    /// commands have no network. Outside folder mode, or with the switch
+    /// off, nothing is refused for it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_pairing_without_network_runs_folder_commands_only_where_that_holds() {
+        use nerve_policy::config::{Access, CenterPolicy, Folder, Mode};
+        for (abi, held) in [
+            (Some(3), false),
+            (None, false),
+            (Some(4), true),
+            (Some(6), true),
+        ] {
+            let log = Log::new(Level::Info);
+            let d = tempfile::tempdir().unwrap();
+            let mut o = options(&d, &log);
+            o.full_rights = Some(false);
+            o.exe = Some("/bin/true".into());
+            o.confinement = Some(Confinement {
+                landlock_abi: abi,
+                appcontainer: false,
+            });
+            let daemon = Daemon::start(o).await.unwrap();
+            let s = daemon.shared.clone();
+            let what = format!("ABI {abi:?}");
+            assert_eq!(s.network_held(), held, "{what}");
+            let mut policy = CenterPolicy {
+                mode: Mode::Folder,
+                no_network: true,
+                folders: vec![Folder {
+                    path: "/srv/proj".into(),
+                    access: Access::ALL,
+                }],
+                ..Default::default()
+            };
+            assert_eq!(
+                s.network_refusal(&policy),
+                (!held).then_some(NETWORK_NOT_HELD),
+                "{what}"
+            );
+            assert_eq!(s.status()["network_rules"], held, "{what}");
+            let entry = nerve_policy::CenterEntry {
+                name: "c".into(),
+                url: "https://center.example".into(),
+                pin: None,
+                center_id: "c".into(),
+                node_id: "n".into(),
+                settings: Default::default(),
+                paused: false,
+                revoked: false,
+                unknown: false,
+                public_key: None,
+                key_rotations: 0,
+                pin_rotations: 0,
+                old_pin: None,
+                policy: policy.clone(),
+                capabilities: Vec::new(),
+            };
+            let cfg = s.config();
+            let r = s.reach(&cfg, &entry);
+            let a = crate::descriptor::for_center(&cfg, &entry, &r, &[])
+                .access
+                .unwrap();
+            assert!(a.no_network, "{what}");
+            // Only where it holds does folder mode run a command.
+            assert_eq!(a.folders[0].access == "rwx", held, "{what}: {a:?}");
+            policy.no_network = false;
+            assert_eq!(s.network_refusal(&policy), None, "{what}");
+            policy.no_network = true;
+            policy.mode = Mode::Allowlist;
+            assert_eq!(s.network_refusal(&policy), None, "{what}");
             daemon.stop().await;
         }
     }

@@ -179,7 +179,9 @@ the `result` of the envelope described below.
   be shown on one line`); with none of either, `Folders: none granted yet`,
   which with `sudo` adds that a command on the sudo list still runs, as
   the node sends `sudo` only while its sudo switch is on and `exec.run` is
-  callable); with `reads_by_account`, before the folders a line `Reads: in
+  callable); with `no_network`, after the folders a line `Network: none
+  for its commands, the owner turned it off (no TCP connection, no
+  listening TCP port).`; with `reads_by_account`, before the folders a line `Reads: in
   the folders marked r, and outside every folder what is open to every
   account on the machine; writes and commands keep to the folders.`, and with no folder `Folders:
   none granted yet` names writes, not file calls, as refused; a
@@ -198,7 +200,7 @@ the `result` of the envelope described below.
   summary, kind?}], off, more, more_off}` (`kind` `state`, `event` or
   `stream`; none for an action), with the names shown, `summary` only when
   the text has it, and the counts of those not shown; `access` is `{mode,
-  until_ms?, account?, confined, sudo?, reads_by_account?, folders: [{path,
+  until_ms?, account?, confined, sudo?, reads_by_account?, no_network?, folders: [{path,
   access, own?, shared?, closed_below?}], more_folders, unnamed?}`.
 - `list(node, capability)`: `capability` is a list of at most 32 names (a
   single name as a string is accepted too, though the schema declares the
@@ -236,7 +238,10 @@ the `result` of the envelope described below.
   only in one marked `x` (`exec.run`'s advice only); where folders nest the deepest one decides; with
   `confined` the machine's sandbox holds what a command reaches to these
   folders (and the system's files), without it the machine does not and
-  a command reaches what its account may reach; with `sudo`, a command on
+  a command reaches what its account may reach; `exec.run`'s advice says,
+  with `no_network`, that its commands have no
+  network, as the owner turned it off, so they can open no TCP connection
+  and listen on no TCP port; with `sudo`, a command on
   the owner's sudo list runs by that list alone, with full rights, in any
   folder and beyond the folders and the sandbox; a folder marked as having
   folders below it that allow less holds folders, not named, that allow

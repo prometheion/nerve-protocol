@@ -1029,6 +1029,12 @@ pub struct CenterPolicy {
     /// folders' sandbox ([`CenterPolicy::runs_as_owner`]).
     #[serde(default, skip_serializing_if = "is_false")]
     pub as_owner: bool,
+    /// `folder` mode only: its commands get no network (no TCP connection
+    /// or listening port), held by Landlock's network rules; a node that
+    /// cannot hold them runs none of that pairing's folder-mode commands.
+    /// Only the owner turns it off again.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub no_network: bool,
     /// `cap` or `cap.action` → setting; `cap.action` wins over `cap`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub caps: BTreeMap<String, CapSetting>,

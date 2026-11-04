@@ -206,6 +206,15 @@ const COMMANDS: &[(&str, &str, Place)] = &[
     // the app has no such account.
     ("folder sync", "nerve-node folder sync", NOT_HERE),
     (
+        "folder network",
+        "nerve-node folder network off --center lab",
+        (
+            Some(Page::Policy),
+            -1,
+            "Permissions › Mode › No network for its commands",
+        ),
+    ),
+    (
         "rule add",
         "nerve-node rule add allow 'git status' --center lab",
         (

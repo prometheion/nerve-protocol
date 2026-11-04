@@ -534,6 +534,11 @@ fn the_app_drives_the_cli_end_to_end() {
         f.access.read && f.access.write && !f.access.execute,
         "{f:?}"
     );
+    // The network switch of its folder-mode commands, off and on again.
+    perm.invoke_no_network_set(true);
+    assert!(config(&paths).centers[0].policy.no_network);
+    perm.invoke_no_network_set(false);
+    assert!(!config(&paths).centers[0].policy.no_network);
     // What the installed Linux node's status says of a pairing: who runs
     // its commands, nerve-run's built-in folders, and the failed grants of
     // its own folders only. Also without an owner (`install` as root alone).
@@ -553,6 +558,8 @@ fn the_app_drives_the_cli_end_to_end() {
         st["owner"] = owner.clone();
         st["centers"][0]["account"] = serde_json::json!("nerve-run");
         st["centers"][0]["landlock"] = serde_json::json!(false);
+        st["centers"][0]["no_network"] = serde_json::json!(true);
+        st["network_rules"] = serde_json::json!(false);
         st["home_warning"] = serde_json::json!({"warning": "Without Landlock, nerve-run can read every file in your home /home/alice that other accounts may read (mode 755)"});
         // A folder no center has any more whose access did not come off,
         // and the node's record of them that could not be read: shown on
@@ -584,6 +591,8 @@ fn the_app_drives_the_cli_end_to_end() {
             assert!(stale.contains("acl.json: expected value"), "{stale}");
             assert!(!stale.contains("work/closed"), "{stale}");
             assert!(!perm.get_landlock());
+            // Its network is off, which this machine cannot hold.
+            assert!(perm.get_no_network() && !perm.get_network_rules());
             assert!(perm.get_home_warning().contains("mode 755"));
         } else {
             assert!(!perm.get_separate());

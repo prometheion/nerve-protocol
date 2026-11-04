@@ -317,6 +317,57 @@ The node confines commands with Landlock:
   keyring, `folder` mode on a node you run yourself runs no command: the
   command could reach the keyring over your session bus.
 
+### What it does not stop (Linux)
+
+Landlock holds a command to files. Without the switch below it does not
+hold the network or what a command reaches through it:
+
+- The network: a command can connect anywhere this machine reaches, the
+  services on loopback (`127.0.0.1`) and your local network included, and
+  listen on a port. What it may read it can send away.
+- Sockets by path that its rules let it open: `/tmp`, `/var/tmp` and the
+  `r` and `w` folders can hold one of another program's. On a node you run
+  yourself, the sockets of your session that lie there (a tmux server, an
+  X display) take its requests as yours.
+- Below Landlock ABI 6, abstract unix sockets and signals to the other
+  processes of its account ([versions](#landlock-versions)).
+
+### No network for folder mode commands
+
+`nerve-node folder network off --center lab` keeps that center's `folder`
+mode commands off the network: they can make no TCP connection, to this
+machine or any other, and listen on no TCP port. It holds for `exec.run`
+and for the [capabilities of your `node.toml`](config-capabilities.md) that
+center calls, as both are commands of its pairing, and is stored as
+`no_network = true` in the center's policy in `node.toml`.
+`nerve-node folder network on` lets them on the network again; `folder ls`
+says when it is off. The app's and the node web UI's **Permissions** page
+have it as **No network for its commands**. The agent is told, in `list`,
+that its commands have no network. A center that may change its own
+settings ([settings grant](settings-grant.md)) can turn its own network
+off, never on again: only you can.
+
+It needs Landlock's network rules, ABI 4 (Linux 6.7) or later. Where the
+kernel has none, or no Landlock at all, or on Windows, the node cannot hold
+a command to it, so while the switch is off it runs none of that center's
+`folder` mode commands and says why (`the owner turned the network off for
+this center's folder-mode commands, and this machine cannot keep them off
+it: …`); `folder network off` warns of that there, and the agent is
+offered no command.
+
+What it does not cover:
+
+- UDP, raw and the other kinds of socket that are not TCP: Landlock has
+  no rules for them, so a command can still send DNS queries and other UDP
+  packets.
+- Unix sockets by path, which go by the folders' file rules, and abstract
+  unix sockets, which only Landlock ABI 6 (Linux 6.12) closes.
+- A command on your [sudo list](sudo.md), which runs outside the sandbox;
+  a program's action ([providers](providers.md)), which runs as you; and
+  every command of `allowlist` and `user` mode.
+- What the machine itself does for a command: a name lookup through a
+  local resolver socket, a proxy you set for its programs.
+
 ## The account `nerve-run` (Linux)
 
 The node installed as a service runs `folder` mode commands, and
@@ -465,7 +516,7 @@ Each kernel version adds guards to Landlock (its ABI). The node asks for ABI
 |---|---|---|
 | 1, 2 | 5.13, 5.19 | Files and folders. These do not guard truncating a file (`truncate`), so a command can cut any file it may write outside its folders to nothing. A node you run yourself takes them as no Landlock and runs no `folder` mode command; the installed node uses them |
 | 3 | 6.2 | Truncating files: from here on a node you run yourself uses Landlock |
-| 4 | 6.7 | Network rules (the node sets none) |
+| 4 | 6.7 | Network rules: TCP connections and listening ports, which the node shuts only for a center whose network you turned off ([no network](#no-network-for-folder-mode-commands)) |
 | 5 | 6.10 | Device ioctls |
 | 6 | 6.12 | Signals to other processes and abstract unix sockets: the commands of the installed node's pairings, all of `nerve-run`, are kept apart from each other only from here on |
 
@@ -766,7 +817,9 @@ planned.
   can listen on a port (checked). Whether another machine gets through to it
   is the Windows Firewall's say: with the firewall on and no rule for the
   port it did not, with a rule for the port it did (checked). The node adds
-  no firewall rule (code).
+  no firewall rule (code). The [network switch](#no-network-for-folder-mode-commands)
+  has no rule to hold here: with a center's network off, Windows runs none
+  of its `folder` mode commands.
 - **The environment.** The command starts with the node's environment: the node
   clears nothing (code). Windows replaces `TEMP`, `TMP` and
   `LOCALAPPDATA` with the container's own folder (checked). A secret in a

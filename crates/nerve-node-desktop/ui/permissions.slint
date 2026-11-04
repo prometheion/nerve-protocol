@@ -114,6 +114,32 @@ component ModeSection inherits Section {
             }
         }
     }
+    // Folder mode's commands may be kept off the network (Landlock's TCP
+    // rules); a machine that cannot hold them to that runs none.
+    Reveal {
+        shown: Perm.mode == "folder";
+        VerticalLayout {
+            padding-left: Space.xl;
+            padding-right: Space.xl;
+            padding-bottom: Space.lg;
+            spacing: Space.sm;
+            HorizontalLayout {
+                alignment: start;
+                Chip {
+                    text: "No network for its commands";
+                    label: "Keep the folder-mode commands off the network";
+                    on: Perm.no-network;
+                    toggled(on) => {
+                        Perm.no-network-set(on);
+                    }
+                }
+            }
+            if Perm.no-network && !Perm.network-rules: Banner {
+                tone: Tone.danger;
+                text: "This machine cannot keep commands off the network (Landlock's network rules need Linux 6.7), so folder mode runs none of " + Perm.center + "'s commands while this is on.";
+            }
+        }
+    }
     Reveal {
         shown: Perm.mode-until != "";
         HorizontalLayout {

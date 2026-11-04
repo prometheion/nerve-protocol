@@ -1084,6 +1084,23 @@ async fn the_permissions_audit_and_log_pages_change_the_node() {
     let policy = daemon.config().centers[0].policy.clone();
     assert_eq!(policy.mode, nerve_policy::Mode::Allowlist);
     assert!(policy.as_owner);
+    // The network switch of its folder-mode commands, off and on again.
+    change(
+        addr,
+        &s,
+        "/api/network",
+        json!({"center": "lab", "off": true}),
+    )
+    .await;
+    assert!(daemon.config().centers[0].policy.no_network);
+    change(
+        addr,
+        &s,
+        "/api/network",
+        json!({"center": "lab", "off": false}),
+    )
+    .await;
+    assert!(!daemon.config().centers[0].policy.no_network);
     let dir = std::fs::canonicalize(d.path()).unwrap().join("work");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.display().to_string();

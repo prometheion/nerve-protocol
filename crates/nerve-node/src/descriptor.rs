@@ -643,6 +643,10 @@ pub struct Reach {
     /// goes as far as that account may read ([`nerve_policy::decide::Reads`]).
     /// Set by the daemon.
     pub reads_by_account: bool,
+    /// The owner turned the network off for this center's folder-mode
+    /// commands ([`CenterPolicy::no_network`]); where the machine cannot
+    /// hold that, `confined` is false and folder mode offers no command.
+    pub no_network: bool,
     /// The folders the owner granted this center.
     pub folders: Vec<Folder>,
     /// The built-in folders of `nerve-run` where its commands run as that
@@ -678,6 +682,7 @@ impl Reach {
                     entry.policy.cap_setting("exec", Some("run")),
                     Some(CapSetting::Hidden | CapSetting::Off)
                 ),
+            no_network: entry.policy.no_network,
             folders: entry.policy.folders.clone(),
             own: own.map(crate::account::built_in).unwrap_or_default(),
         }
@@ -799,6 +804,7 @@ impl Reach {
             confined: folder && self.confined && !self.held_by_account,
             sudo: folder && self.sudo,
             reads_by_account: folder && self.reads_by_account,
+            no_network: folder && self.no_network,
             folders: folders
                 .into_iter()
                 .zip(closed_below)

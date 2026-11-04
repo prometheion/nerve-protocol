@@ -42,6 +42,10 @@ pub struct LandlockSpec {
     /// Programs below these may run. The files there can be read by name too
     /// (see `landlock_rules::prepare`), the folders not listed.
     pub exec: Vec<PathBuf>,
+    /// No TCP connection and no listening port ([`LANDLOCK_NETWORK`]): the
+    /// command does not run where the kernel cannot refuse them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_network: bool,
 }
 
 /// What the node sends the shim on its stdin.
@@ -224,6 +228,13 @@ pub fn shim_main() -> i32 {
 /// node keeps it: without Landlock its commands would run as its account
 /// with no confinement at all.
 pub const LANDLOCK_FLOOR: i32 = 3;
+
+/// The Landlock ABI that rules the network (Linux 6.7): from it a command
+/// can be kept from making TCP connections and from listening on a TCP
+/// port. It rules nothing else of the network: UDP, raw and other sockets
+/// stay open, and so do unix sockets by path; abstract unix sockets close
+/// from [`LANDLOCK_WANTED`] on.
+pub const LANDLOCK_NETWORK: i32 = 4;
 
 /// The Landlock ABI the node asks for (Linux 6.12): from it every guard the
 /// node sets is held, and the commands of the installed node's pairings, all
@@ -499,8 +510,8 @@ pub mod landlock_rules {
 
     use super::LandlockSpec;
     use landlock::{
-        ABI, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreated, RulesetCreatedAttr,
-        RulesetStatus, Scope, path_beneath_rules,
+        ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr,
+        RulesetCreated, RulesetCreatedAttr, RulesetStatus, Scope, path_beneath_rules,
     };
 
     /// Best effort up to this ABI: older kernels enforce what they know.
@@ -523,6 +534,15 @@ pub mod landlock_rules {
         let mut rs = Ruleset::default().handle_access(handled).map_err(e)?;
         if !Scope::from_all(ABI_WANTED).is_empty() {
             rs = rs.scope(Scope::from_all(ABI_WANTED)).map_err(e)?;
+        }
+        // No TCP connection or listening port, with no rule to allow one.
+        // Not best effort: a kernel that cannot refuse them refuses the
+        // ruleset, and the command does not run.
+        if spec.no_network {
+            rs = rs
+                .set_compatibility(CompatLevel::HardRequirement)
+                .handle_access(AccessNet::from_all(ABI::V4))
+                .map_err(e)?;
         }
         rs.create()
             .map_err(e)?
@@ -3849,6 +3869,7 @@ mod tests {
             read: [system_dirs(), vec![rw.path().into()]].concat(),
             write: [system_writable(), vec![rw.path().into()]].concat(),
             exec: system_dirs(),
+            no_network: false,
         };
         let run = |target: &std::path::Path| {
             confined_sh(&spec, &format!("echo x > {}", target.display()))
@@ -3878,6 +3899,7 @@ mod tests {
             read: system_dirs(),
             write: [system_writable(), vec![wo.path().into()]].concat(),
             exec: [system_dirs(), vec![xo.path().into()]].concat(),
+            no_network: false,
         };
         let d = |p: &std::path::Path| p.display().to_string();
         assert!(confined_sh(
@@ -3908,5 +3930,42 @@ mod tests {
             ..spec.clone()
         };
         assert!(!confined_sh(&none, &format!("{}/tool", d(xo.path()))));
+    }
+
+    /// The network switch holds in a real child: with it a command cannot
+    /// connect to a TCP port that it reaches without it. Skipped where the
+    /// kernel's Landlock has no network rules, or there is no bash to
+    /// connect with (`/dev/tcp`).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn landlock_keeps_a_command_off_tcp() {
+        if landlock_rules::abi_version().is_none_or(|v| v < LANDLOCK_NETWORK)
+            || !std::path::Path::new("/bin/bash").exists()
+        {
+            eprintln!("no Landlock network rules or no bash here; skipped");
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let open = LandlockSpec {
+            read: system_dirs(),
+            write: system_writable(),
+            exec: system_dirs(),
+            no_network: false,
+        };
+        let connect = |spec: &LandlockSpec| {
+            confined_sh(
+                spec,
+                &format!("/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}'"),
+            )
+        };
+        assert!(connect(&open));
+        let off = LandlockSpec {
+            no_network: true,
+            ..open.clone()
+        };
+        assert!(!connect(&off));
+        // The files stay as the folders say.
+        assert!(confined_sh(&off, "cat /etc/passwd > /dev/null"));
     }
 }

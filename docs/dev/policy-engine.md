@@ -219,7 +219,7 @@ another (`fs::Closed`, picked by `nerve_node::link::closed_for`): on the
 installed node the walk runs as `nerve-run` and the program as the owner or
 root, which could follow a link there. For a program's paths the link
 decides by the folders the owner granted alone: `nerve-run`'s own folders
-(its home, `/tmp`, `/var/tmp`) count as none, since the program works with
+(the pairing's own home and temporary folder, `/tmp`, `/var/tmp`) count as none, since the program works with
 its own account's rights, not the command account's. The
 tool-config check (writes to `.git`, `.envrc`, `.vscode`, `.idea`) looks at
 the path itself only, since a program may make those anywhere below a folder

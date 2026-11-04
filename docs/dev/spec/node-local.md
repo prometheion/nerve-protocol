@@ -535,6 +535,7 @@ old_pin = { pin = "<pin>", until_ms = 1790000000000 }  # after the center rotate
 [center.policy]
 mode = "folder"             # allowlist | folder | user (a new pairing: folder; a file without it: allowlist)
 as_owner = false            # allowlist only: its commands run as the owner, not as nerve-run
+no_network = false          # folder only: its commands get no TCP; only the owner sets it false again
 until = 1790000000000  # optional, folder and user: ms since the epoch; then allowlist
 folders = [{ path = "/home/u/proj", access = "rwx" }]  # folder mode; r w x in any mix, "" for none
 places = ["/home/u/proj"]  # folders `folder add` recorded at their real place; the owner's, a center's write keeps it
@@ -1203,6 +1204,22 @@ grant or not.
   sets: a folder that holds one is granted as its other entries, level by
   level down to it, so the command can neither list those levels nor make
   new entries right in them.
+- **`no_network`** (folder mode only, #167): the pairing's `exec.run`
+  commands and the config capabilities it calls get Landlock's network
+  rules with no rule that allows anything (`AccessNet` `BindTcp` and
+  `ConnectTcp`, ABI 4, as a hard requirement in the shim): no TCP
+  connection, no listening TCP port. Where the node cannot hold that
+  (`Shared::network_held`: Landlock ABI 4 or later and the shim's host;
+  never on Windows) a folder-mode command of that pairing is refused with
+  `daemon::NETWORK_NOT_HELD` (through the gate's `unconfined`, so it is
+  audited; a config capability of any effect after the gate), its
+  descriptor offers no command (`confined` false, no `x`), and the access
+  block carries `no_network` either way. A sudo command, a program's action
+  and the other modes are not held by it. The owner sets it (`folder
+  network off|on`, the app, the node web UI); a center's settings may set
+  it, never clear it (`policy.no_network: only the owner can let the
+  commands back on the network`). `status` has each center's `no_network`
+  and the machine's `network_rules`.
 - **user**: full access as the user, protected paths aside. `allow` rules
   do not count.
 

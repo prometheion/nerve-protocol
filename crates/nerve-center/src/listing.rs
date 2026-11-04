@@ -591,6 +591,12 @@ fn reach_lines(r: Option<&Reach>) -> String {
                 r.folder_list()
             ));
         }
+        if r.no_network {
+            out.push_str(
+                "Network: none for its commands, the owner turned it off (no TCP connection, \
+                 no listening TCP port).\n",
+            );
+        }
     }
     out
 }
@@ -1207,6 +1213,38 @@ mod tests {
                                               "access": "rwx", "own": true},
                                              {"path": "/tmp", "access": "rwx", "own": true,
                                               "shared": true}]})
+    }
+
+    /// Where the owner turned the network off for the center's folder-mode
+    /// commands, `list(node)` says so after the folders, and the details of
+    /// `exec.run` tell the model, not those of the file calls.
+    #[test]
+    fn list_node_says_the_commands_have_no_network() {
+        let mut d = box_node().descriptor.unwrap();
+        let mut access = folder_access();
+        access["no_network"] = json!(true);
+        d.access = Some(serde_json::from_value(access).unwrap());
+        let node = record("box-1", Some(d));
+        let got = units(&offer(&node, true));
+        assert!(
+            got.text.contains(&format!(
+                "{FOLDERS}\nNetwork: none for its commands, the owner turned it off (no TCP \
+                 connection, no listening TCP port).\n"
+            )),
+            "{}",
+            got.text
+        );
+        assert_eq!(got.data["result"]["access"]["no_network"], true);
+        let said = " Its commands have no network: the owner turned it off, so they can open no \
+                    TCP connection and listen on no TCP port.";
+        let o = offer(&node, true);
+        let run = details(&o, &["exec.run".into()]);
+        assert!(run.text.contains(said), "{}", run.text);
+        let read = details(&o, &["fs.read".into()]);
+        assert!(!read.text.contains("no network"), "{}", read.text);
+        // Without it nothing is said.
+        let got = units(&offer(&box_node(), true));
+        assert!(!got.text.contains("Network:"), "{}", got.text);
     }
 
     /// Where the node reads as the command account, `list(node)` says that

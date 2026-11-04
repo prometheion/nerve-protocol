@@ -880,6 +880,13 @@ fn client_only(
             ));
         }
     }
+    // The network switch holds the commands back; taking it away lets them
+    // reach the network again.
+    if o.no_network && !n.no_network {
+        return Err(
+            "policy.no_network: only the owner can let the commands back on the network".into(),
+        );
+    }
     if n.protected.allow != o.protected.allow {
         // Releasing a protected path is the owner's call; adding more is fine.
         return Err("policy.protected.allow: only the owner can release protected paths".into());
@@ -1572,6 +1579,29 @@ mod tests {
             s.config().center("home").unwrap().policy.protected.extra,
             ["~/secret", "~/more"]
         );
+    }
+
+    /// The owner's network switch holds the commands back: a center may turn
+    /// it on for itself, never off.
+    #[test]
+    fn a_center_cannot_take_its_commands_back_on_the_network() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = store(d.path(), SettingsGrant::Write);
+        let v = s.version();
+        let mut new = doc(&s);
+        new["policy"]["no_network"] = json!(true);
+        s.set_center_document("home", new, v, |_| false, unix, &|_, _| None)
+            .unwrap();
+        assert!(s.config().center("home").unwrap().policy.no_network);
+        let v = s.version();
+        let mut new = doc(&s);
+        new["policy"]["no_network"] = json!(false);
+        let e = s.set_center_document("home", new, v, |_| false, unix, &|_, _| None);
+        assert!(
+            matches!(&e, Err(SetError::Forbidden(m)) if m.contains("policy.no_network")),
+            "{e:?}"
+        );
+        assert!(s.config().center("home").unwrap().policy.no_network);
     }
 
     /// A folder at or inside a protected entry releases it, so adding one is

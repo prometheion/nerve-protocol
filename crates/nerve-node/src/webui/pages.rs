@@ -82,6 +82,19 @@ pub(super) async fn api(ctx: &Call<'_>, req: &Request, b: &Value) -> Option<ApiR
             a.push(mode.into());
             run(ctx, a, None).await
         }
+        // The network switch of the center's folder-mode commands.
+        ("POST", "/api/network") => match center(b) {
+            Ok(c) => {
+                let state = if b["off"] == true { "off" } else { "on" };
+                run(
+                    ctx,
+                    args(&["folder", "network"], &[("center", c)], &[state]),
+                    None,
+                )
+                .await
+            }
+            Err(e) => Err(e),
+        },
         ("POST", "/api/folders/add") => match (center(b), folder(b)) {
             (Ok(c), Ok(p)) => {
                 let mut rights: Vec<&str> = Vec::new();
