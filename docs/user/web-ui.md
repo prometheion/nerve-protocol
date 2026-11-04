@@ -27,7 +27,8 @@ allow, so a harness token never logs in here.
 - You may write a token of your own into the file: one word of 20 to 200
   characters. A shorter one, or a file without a token, stops the center
   when its web UI is on (`--ui off` only warns), and the file is left as it
-  is.
+  is. It must not also be a harness token: one that is both is refused
+  at the login, and a center with a web UI does not start on it.
 - The owner token keeps an agent out of this UI only when the agent cannot
   read the center's state folder. That holds for the
   [service](center.md#run-it-as-a-service), which runs as its own account.

@@ -72,7 +72,8 @@ Get the programs from
    ```
 
    It is the one secret of the web UI. The harness's own token never logs
-   in there. `nerve-center owner-token --new` makes a new one
+   in there, and a token you write into the file must not be one.
+   `nerve-center owner-token --new` makes a new one
    ([web UI](docs/user/web-ui.md#log-in)). This center runs as you, so an
    agent with file or shell tools can read the file too; to keep the agent
    out of the web UI, run the center as the

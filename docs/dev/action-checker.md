@@ -172,9 +172,11 @@ either). A pattern, `cmd-re:` or `re:` rule covers only a `plain` command
 the base name only; for `re:` that is all it checks of the program, the
 regex sees the text.
 `Parsed::redirected` marks a line in which the parser reads a redirection
-(`Command::redirects`); `for_allow` is empty for it. The splitter keeps a `>`
-and its file among a command's arguments and the parser takes them out, so the
-two readings of that command differ, which alone kept it from a rule; but
+(`Command::redirects`) or text the command reads as input (`Command::input`:
+a here-string or here-document); `for_allow` is empty for it. The splitter
+keeps a `>` and its file, or a `<<<` and its text, among a command's
+arguments and the parser takes them out, so the two readings of that command
+differ, which alone kept it from a rule; but
 `parse` dedupes the readings as a set, and a second, plain copy of the command
 in the line hid the difference. Only an `exact:` rule covers such a line, as
 the node's allowlist covers no wildcard line with `<` or `>`.

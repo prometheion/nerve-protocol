@@ -173,10 +173,12 @@ pub struct Parsed {
     /// splitter found and what the parser read before it gave out, which may
     /// be less than the line runs.
     pub unread: bool,
-    /// A command of the line has a redirection (`> file`, `2>> log`). The
-    /// splitter has no notion of one and keeps the `>` and the file among
-    /// the command's arguments, so a rule that takes any argument would
-    /// cover a write to a file.
+    /// A command of the line has a redirection (`> file`, `2>> log`) or
+    /// reads text written in the line (`<<< text`, a here-document). The
+    /// splitter has no notion of either and keeps the `>` and the file, or
+    /// the `<<<` and the text, among the command's arguments, so a rule that
+    /// takes any argument would cover a write to a file or the agent's own
+    /// text as the command's input.
     pub redirected: bool,
 }
 
@@ -193,9 +195,9 @@ impl Parsed {
     /// a line in which the parser found a command the splitter did not
     /// (a runner the splitter does not know, such as `timeout` or `eval`,
     /// or a wrapper's flags it reads otherwise), and a line with a
-    /// redirection ([`Parsed::redirected`]: a second, plain copy of the
-    /// command in the line would hide that the two readers differ about
-    /// it, so the line is marked on its own).
+    /// redirection or text of its own to read ([`Parsed::redirected`]: a
+    /// second, plain copy of the command in the line would hide that the two
+    /// readers differ about it, so the line is marked on its own).
     pub fn for_allow(&self) -> &[Command] {
         if self.nested
             || self.wrapped
@@ -337,7 +339,7 @@ pub fn parse(line: &str, shell: Shell) -> Parsed {
         if out.overflow.is_some() {
             return;
         }
-        if !s.commands[i].redirects.is_empty() {
+        if !s.commands[i].redirects.is_empty() || !s.commands[i].input.is_empty() {
             out.redirected = true;
         }
         let Some(run) = command::run(&s.commands[i], s.shell) else {

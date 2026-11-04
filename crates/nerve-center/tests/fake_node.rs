@@ -1070,7 +1070,7 @@ fn owner_login(r: &Running) -> nerve_transport::http::Request {
 
 /// `/api/overview` as the web UI's page reads it.
 async fn overview(r: &Running) -> Value {
-    let ui = nerve_center::ui::Ui::new(&r.center, false, true);
+    let ui = nerve_center::ui::Ui::new(&r.center, None, true);
     let resp = ui.request(owner_login(r)).await;
     let v: Value = serde_json::from_slice(&resp.body).unwrap();
     let session = v["session"].as_str().expect("a session");
@@ -2455,7 +2455,7 @@ async fn audit_targets_are_cut_and_the_audit_feed_is_bounded() {
         "{}",
         feed.len()
     );
-    let ui = nerve_center::ui::Ui::new(&r.center, false, true);
+    let ui = nerve_center::ui::Ui::new(&r.center, None, true);
     let resp = ui.request(owner_login(&r)).await;
     let v: Value = serde_json::from_slice(&resp.body).unwrap();
     let session = v["session"].as_str().expect("a session");

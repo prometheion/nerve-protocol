@@ -212,6 +212,43 @@ fn a_broken_owner_token_stops_only_a_center_with_a_web_ui() {
     );
 }
 
+/// An owner token that is also the harness token of the settings stops a
+/// center with a web UI: one secret for both would let the agent's own token
+/// into the UI (review round 7 of the center's sign-in).
+#[test]
+fn an_owner_token_that_is_a_harness_token_stops_a_center_with_a_web_ui() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared = "nrv_shared-by-both-by-mistake";
+    std::fs::write(nerve_center::owner::path(dir.path()), shared).unwrap();
+    let run = |ui: &str, harness: &str| {
+        Command::new(env!("CARGO_BIN_EXE_nerve-center"))
+            .env_clear()
+            .env("NERVE_STATE_DIR", dir.path())
+            .env("NERVE_LISTEN", "127.0.0.1:0")
+            .env("NERVE_PLAIN_LOOPBACK", "true")
+            .env("NERVE_UI", ui)
+            .env("NERVE_HARNESS_TOKEN", harness)
+            .env("NERVE_LOG", "warn")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let refused = run("127.0.0.1:0", shared);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("also a harness token"));
+    // A harness token of its own, or no web UI, starts.
+    assert!(
+        run("127.0.0.1:0", "nrv_another-one-entirely")
+            .status
+            .success()
+    );
+    assert!(run("off", shared).status.success());
+    assert_eq!(
+        std::fs::read_to_string(nerve_center::owner::path(dir.path())).unwrap(),
+        shared
+    );
+}
+
 /// Starts a center with the level in `NERVE_LOG`, lets one harness session
 /// come and go, and gives back what the center put on stderr.
 fn one_session(state: &std::path::Path, level: &str) -> String {

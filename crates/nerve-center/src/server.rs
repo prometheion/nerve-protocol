@@ -76,7 +76,7 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
     center.set_call_wait(args.call_wait);
     // Whatever else a message carries, this token is never in the log.
     center.log().set_secret("harness-token", token.as_deref());
-    owner_token(&center, ui_addr.is_some())?;
+    owner_token(&center, token.as_deref(), ui_addr.is_some())?;
 
     let mut tasks = Vec::new();
 
@@ -92,7 +92,7 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
         let server = Server::bind(&a, &center, !tls).await?;
         ui = Some(server.local_addr());
         tasks.push(tokio::spawn(
-            Ui::new(&center, token.is_some(), !tls).serve(server),
+            Ui::new(&center, token.as_deref(), !tls).serve(server),
         ));
     }
 
@@ -171,7 +171,7 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
 ///
 /// A token file the owner broke stops a center with a web UI, which nobody
 /// could log in to; without one it is only told.
-fn owner_token(center: &Center, ui: bool) -> Result<(), String> {
+fn owner_token(center: &Center, harness: Option<&str>, ui: bool) -> Result<(), String> {
     let (token, made) = match crate::owner::ensure(center.dir()) {
         Ok(t) => t,
         Err(e) if !ui => {
@@ -186,6 +186,13 @@ fn owner_token(center: &Center, ui: bool) -> Result<(), String> {
     };
     let file = crate::owner::path(center.dir());
     center.log().set_secret("owner-token", Some(&token));
+    // One secret for both would let the agent's own token into the web UI.
+    if ui && crate::mcp::token_ok(center, harness, &token) {
+        return Err(format!(
+            "the owner token in {} is also a harness token; make a new one with `nerve-center owner-token --new`",
+            file.display()
+        ));
+    }
     if made {
         if !stderr_is_journal() {
             eprintln!(

@@ -36,6 +36,7 @@ const INDEX: &str = include_str!("ui/index.html");
 const APP_JS: &str = include_str!("ui/app.js");
 
 const WRONG_TOKEN: &str = "Wrong owner token.";
+const SHARED_TOKEN: &str = "This owner token is also a harness token, so it is refused. Make a new one with `nerve-center owner-token --new`.";
 
 const API_BODY: usize = 1024 * 1024;
 /// How many log entries a view gets unless it asks for another number, and
@@ -45,9 +46,10 @@ const LOG_PAGE_MAX: usize = 1000;
 
 pub struct Ui {
     center: Center,
-    /// Whether a harness token comes from the environment or a flag: the
-    /// Tokens page names it, though it cannot delete it.
-    env_token: bool,
+    /// The harness token from the environment or a flag: the Tokens page
+    /// names it, though it cannot delete it, and the login refuses an owner
+    /// token that is also a harness token.
+    env_token: Option<String>,
     /// Whether the UI listens on loopback, where the `Host` must name it.
     loopback: bool,
     owner: OwnerToken,
@@ -56,13 +58,13 @@ pub struct Ui {
 }
 
 impl Ui {
-    /// `env_token` says whether a harness token comes from the environment
-    /// or a flag; `loopback` whether the UI listens on loopback. The owner
+    /// `env_token` is the harness token from the environment or a flag, if
+    /// any; `loopback` says whether the UI listens on loopback. The owner
     /// token is the one in the center's state folder.
-    pub fn new(center: &Center, env_token: bool, loopback: bool) -> Arc<Ui> {
+    pub fn new(center: &Center, env_token: Option<&str>, loopback: bool) -> Arc<Ui> {
         Arc::new(Ui {
             center: center.clone(),
-            env_token,
+            env_token: env_token.map(str::to_string),
             loopback,
             owner: OwnerToken::new(center.dir()),
             sessions: Sessions::new(),
@@ -201,25 +203,32 @@ impl Ui {
     fn login(&self, req: &Request) -> Response {
         let log = self.center.log();
         let given = webui::posted_secret(req);
-        if given.is_empty() || !self.owner.ok(&given) {
+        // A secret that also opens /mcp would give the agent's own token
+        // the way into this UI (review round 7 of the center's sign-in).
+        let why = if given.is_empty() || !self.owner.ok(&given) {
+            Some(("wrong owner token", WRONG_TOKEN))
+        } else if crate::mcp::token_ok(&self.center, self.env_token.as_deref(), &given) {
+            Some(("the owner token is also a harness token", SHARED_TOKEN))
+        } else {
+            None
+        };
+        if let Some((why, answer)) = why {
             // The token that was tried is not logged: a typo of a good one is
             // as good as the token.
             match self.wrong.note() {
                 Some(1) => log.record(
                     Level::Warn,
                     None,
-                    "a web UI sign-in was refused: wrong owner token",
+                    &format!("a web UI sign-in was refused: {why}"),
                 ),
                 Some(n) => log.record(
                     Level::Warn,
                     None,
-                    &format!(
-                        "{n} web UI sign-ins were refused in the last minute: wrong owner token"
-                    ),
+                    &format!("{n} web UI sign-ins were refused in the last minute: {why}"),
                 ),
                 None => {}
             }
-            return Response::json(401, &json!({"error": WRONG_TOKEN}));
+            return Response::json(401, &json!({"error": answer}));
         }
         let token = self
             .sessions
@@ -418,6 +427,7 @@ impl Ui {
             ("GET", "/api/tokens") => Ok(c.read(|st| {
                 let env = self
                     .env_token
+                    .is_some()
                     .then(|| json!({"id": "", "label": "NERVE_HARNESS_TOKEN", "settings": true}));
                 json!(
                     env.into_iter()
@@ -733,7 +743,7 @@ mod tests {
     #[tokio::test]
     async fn the_pairing_card_offers_the_command_and_the_bare_link() {
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), false, true);
+        let ui = Ui::new(&center(d.path()), None, true);
         let h = ("Host", "127.0.0.1:7480");
         let session = owner_login(&ui, h).await;
         let ck = session_token(&session);
@@ -756,7 +766,7 @@ mod tests {
     async fn the_help_page_lists_every_node_command() {
         use clap::CommandFactory;
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), false, true);
+        let ui = Ui::new(&center(d.path()), None, true);
         let h = ("Host", "127.0.0.1:7480");
         let session = owner_login(&ui, h).await;
         let ck = session_token(&session);
@@ -810,7 +820,7 @@ mod tests {
         }
         assert_eq!(listed.len(), cli.len());
         // The help is for a signed-in browser like every other API.
-        let ui = Ui::new(&center(d.path()), true, true);
+        let ui = Ui::new(&center(d.path()), Some("settings-harness-token"), true);
         let r = ui.request(req("GET", "/api/help", &[h], "")).await;
         assert_eq!(r.status, 401);
     }
@@ -845,7 +855,7 @@ mod tests {
     async fn the_pairing_status_says_when_a_code_is_used_up() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, false, true);
+        let ui = Ui::new(&c, None, true);
         let code = new_code(&ui).await;
         assert_eq!(pair_status(&ui, &code).await["open"], true);
         // Asking, even with wrong codes, uses up nothing.
@@ -865,7 +875,7 @@ mod tests {
     async fn a_code_names_only_the_machine_it_paired() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, false, true);
+        let ui = Ui::new(&c, None, true);
         // Two cards open (two tabs): another code pairs a machine.
         let mine = new_code(&ui).await;
         let other = new_code(&ui).await;
@@ -892,7 +902,7 @@ mod tests {
     async fn a_pairing_that_is_refused_leaves_its_code_open() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, false, true);
+        let ui = Ui::new(&c, None, true);
         let first = new_code(&ui).await;
         assert_eq!(c.pair(&pair_body(&first, "box-1", 7)).0, 200);
         // The same key again with a new code: refused with 409. The page
@@ -918,7 +928,7 @@ mod tests {
     #[tokio::test]
     async fn the_page_closes_the_pairing_card_when_the_code_is_used() {
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), false, true);
+        let ui = Ui::new(&center(d.path()), None, true);
         let h = ("Host", "127.0.0.1:7480");
         let session = owner_login(&ui, h).await;
         let ck = session_token(&session);
@@ -974,7 +984,7 @@ mod tests {
             );
         }
         store.save(d.path()).unwrap();
-        let ui = Ui::new(&center(d.path()), false, true);
+        let ui = Ui::new(&center(d.path()), None, true);
         let h = ("Host", "127.0.0.1:7480");
         let session = owner_login(&ui, h).await;
         let ck = session_token(&session);
@@ -1013,7 +1023,7 @@ mod tests {
     async fn the_pairing_code_lifetime_is_a_setting_of_1_to_1440_minutes() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, false, true);
+        let ui = Ui::new(&c, None, true);
         // Ten minutes unless the owner changes it.
         let got = center_settings(&ui, None).await.unwrap();
         assert_eq!(got["pair_code_minutes"], 10);
@@ -1052,7 +1062,7 @@ mod tests {
             .unwrap();
         drop(ui);
         drop(c);
-        let ui = Ui::new(&center(d.path()), false, true);
+        let ui = Ui::new(&center(d.path()), None, true);
         let got = center_settings(&ui, None).await.unwrap();
         assert_eq!(got["pair_code_minutes"], 1440);
         assert_eq!(got["retention_days"], 5);
@@ -1234,7 +1244,7 @@ mod tests {
     #[tokio::test]
     async fn the_capabilities_tab_checks_its_form_before_the_node_does() {
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), false, true);
+        let ui = Ui::new(&center(d.path()), None, true);
         let good = json!({"name": "say.back", "summary": "Says it back.", "effect": "read",
                           "command": "echo {word}",
                           "params": r#"{"type": "object", "properties": {"word": {"type": "string"}}, "required": ["word"]}"#,
@@ -1352,7 +1362,7 @@ mod tests {
             n.set_descriptor(desc("n1", vec![lamp]));
             s.nodes.insert("n1".into(), n);
         });
-        let ui = Ui::new(&c, false, true);
+        let ui = Ui::new(&c, None, true);
         let allow = async |body: Value| {
             ui.api(&req("POST", "/api/checker/allow", &[], ""), &body)
                 .await
@@ -1893,7 +1903,7 @@ mod tests {
     #[tokio::test]
     async fn a_loopback_ui_needs_a_loopback_host_and_a_session() {
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), false, true);
+        let ui = Ui::new(&center(d.path()), None, true);
         let h = ("Host", "127.0.0.1:7480");
         // A rebound name is refused, the login too.
         let r = ui
@@ -1951,7 +1961,7 @@ mod tests {
     fn locked(dir: &std::path::Path) -> Arc<Ui> {
         let c = center(dir);
         std::fs::write(crate::owner::path(dir), TOKEN).unwrap();
-        Ui::new(&c, false, false)
+        Ui::new(&c, None, false)
     }
 
     fn header<'a>(r: &'a Response, name: &str) -> Option<&'a str> {
@@ -2082,7 +2092,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
         std::fs::write(crate::owner::path(d.path()), "p&w=d%-of-twenty-chars").unwrap();
-        let ui = Ui::new(&c, false, false);
+        let ui = Ui::new(&c, None, false);
         let form = |t: &str| {
             req(
                 "POST",
@@ -2214,7 +2224,7 @@ mod tests {
     #[tokio::test]
     async fn a_loopback_ui_hands_out_no_session_without_a_login() {
         let d = tempfile::tempdir().unwrap();
-        let ui = Ui::new(&center(d.path()), false, true);
+        let ui = Ui::new(&center(d.path()), None, true);
         let h = ("Host", "127.0.0.1:7480");
         let r = ui.request(req("GET", "/api/session", &[h], "")).await;
         let v = json(&r);
@@ -2242,7 +2252,7 @@ mod tests {
     async fn a_harness_token_never_logs_in() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, false, true);
+        let ui = Ui::new(&c, None, true);
         let h = ("Host", "127.0.0.1:7480");
         let ck = session_token(&owner_login(&ui, h).await);
         let r = ui
@@ -2265,7 +2275,7 @@ mod tests {
         assert_eq!(ui.request(posted(&harness)).await.status, 401);
         // The Tokens page names the one of the settings, which no button
         // deletes.
-        let ui = Ui::new(&c, true, true);
+        let ui = Ui::new(&c, Some("settings-harness-token"), true);
         let ck = session_token(&owner_login(&ui, h).await);
         let r = ui
             .request(req("GET", "/api/tokens", &[h, (SESSION, &ck)], ""))
@@ -2274,6 +2284,36 @@ mod tests {
         assert_eq!(listed[0]["settings"], true, "{listed}");
         assert_eq!(listed[0]["label"], "NERVE_HARNESS_TOKEN");
         assert_eq!(listed[1]["label"], "a");
+    }
+
+    /// An owner token that is also a harness token, the stored one or the
+    /// settings', does not log in, so the agent's own secret never opens
+    /// this UI; an ordinary owner token still does (review round 7 of the
+    /// center's sign-in).
+    #[tokio::test]
+    async fn an_owner_token_that_is_a_harness_token_does_not_log_in() {
+        let d = tempfile::tempdir().unwrap();
+        let c = center(d.path());
+        let stored = "nrv_stored-harness-token-1234";
+        c.update_saved(|st| {
+            st.harness_tokens.push(TokenRecord {
+                id: "t1".into(),
+                label: "a".into(),
+                hash: util::sha256_hex(stored.as_bytes()),
+                created_ms: now_ms(),
+            });
+            Ok(())
+        })
+        .unwrap();
+        let ui = Ui::new(&c, Some("nrv_settings-harness-token-12"), false);
+        for shared in [stored, "nrv_settings-harness-token-12"] {
+            std::fs::write(crate::owner::path(d.path()), shared).unwrap();
+            let r = sign_in(&ui, shared).await;
+            assert_eq!(r.status, 401, "{shared}");
+            assert!(body(&r).contains("also a harness token"), "{}", body(&r));
+        }
+        std::fs::write(crate::owner::path(d.path()), TOKEN).unwrap();
+        assert_eq!(sign_in(&ui, TOKEN).await.status, 200);
     }
 
     /// A new owner token works at once and ends the sessions of the old
@@ -2314,7 +2354,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, false, true);
+        let ui = Ui::new(&c, None, true);
         let h = ("Host", "127.0.0.1:7480");
         let ck = session_token(&owner_login(&ui, h).await);
         let r = ui
@@ -2350,7 +2390,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, false, true);
+        let ui = Ui::new(&c, None, true);
         let h = ("Host", "127.0.0.1:7480");
         let ck = session_token(&owner_login(&ui, h).await);
         let mut changes = c.subscribe();
@@ -2392,7 +2432,7 @@ mod tests {
     async fn a_checker_save_from_a_stale_page_is_refused() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, false, true);
+        let ui = Ui::new(&c, None, true);
         let get = async || {
             ui.api(&req("GET", "/api/checker", &[], ""), &json!({}))
                 .await
@@ -2431,7 +2471,7 @@ mod tests {
     async fn tokens_are_shown_once_and_kept_hashed() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, false, true);
+        let ui = Ui::new(&c, None, true);
         let h = ("Host", "localhost:7480");
         let r = owner_login(&ui, h).await;
         let ck = session_token(&r);
@@ -2465,7 +2505,7 @@ mod tests {
     /// with a few nodes' entries in it.
     async fn with_a_log(dir: &std::path::Path) -> (Center, Arc<Ui>, String) {
         let c = center(dir);
-        let ui = Ui::new(&c, false, true);
+        let ui = Ui::new(&c, None, true);
         // A session as the login hands it out, without the login's own line.
         crate::owner::ensure(c.dir()).unwrap();
         let cookie = ui.sessions.start(ui.owner.hash());
@@ -2693,7 +2733,7 @@ mod tests {
     async fn the_log_level_is_set_in_the_center_settings() {
         let d = tempfile::tempdir().unwrap();
         let c = center(d.path());
-        let ui = Ui::new(&c, false, true);
+        let ui = Ui::new(&c, None, true);
         let got = center_settings(&ui, None).await.unwrap();
         assert_eq!(got["log_level"], "info");
         assert_eq!(got["log_level_pinned"], false);
@@ -2785,7 +2825,7 @@ mod tests {
             log_level: Some(Level::Warn),
         })
         .unwrap();
-        let ui = Ui::new(&c, false, true);
+        let ui = Ui::new(&c, None, true);
         let got = center_settings(&ui, None).await.unwrap();
         assert_eq!(got["log_level"], "debug");
         assert_eq!(got["log_level_now"], "warn");
@@ -2874,7 +2914,7 @@ mod tests {
                 },
             );
         });
-        let ui = Ui::new(&c, false, true);
+        let ui = Ui::new(&c, None, true);
         let h = ("Host", "127.0.0.1:7480");
         let r = owner_login(&ui, h).await;
         let ck = session_token(&r);

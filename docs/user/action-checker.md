@@ -302,9 +302,11 @@ meets the rule, and nothing in the line runs inside another command:
   the like) is covered by no pattern: `exec.run:make *` does not cover
   `timeout 600 make test`, and `exec.run:timeout *` does not cover
   `timeout 5 bash -c …`.
-- A line with a redirection (`> file`, `2>> log`) is covered by no pattern or
-  regex, only by an exact rule: `exec.run:make *` does not cover `make test >
-  out.log`, also when the line has a plain `make test` as well.
+- A line with a redirection (`> file`, `2>> log`) or text written into it as
+  the command's input (`<<< text`, a here-document) is covered by no pattern
+  or regex, only by an exact rule: `exec.run:make *` does not cover `make test
+  > out.log` or `make test <<< 'x'`, also when the line has a plain `make
+  test` as well.
 - A line the guard's parser cannot read whole is covered by no pattern,
   only by an exact rule: a quote or here-document left open, a shell that
   reads its script from a pipe, a line past the parser's bounds, and a

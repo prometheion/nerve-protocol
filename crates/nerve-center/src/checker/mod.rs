@@ -1662,11 +1662,11 @@ mod tests {
         }
     }
 
-    /// A line with a redirection is covered by no pattern or regex, whether
-    /// or not the same command stands in it once more without: the parser
-    /// reads the redirected command without its file, so a plain copy would
-    /// hide that the two readers differ (review round 6 of the center's
-    /// sign-in). Only an `exact:` rule covers it.
+    /// A line with a redirection, or a here-string, is covered by no pattern
+    /// or regex, whether or not the same command stands in it once more
+    /// without: the parser reads the command without its file or its text, so
+    /// a plain copy would hide that the two readers differ (review rounds 6
+    /// and 7 of the center's sign-in). Only an `exact:` rule covers it.
     #[tokio::test]
     async fn an_allow_rule_does_not_cover_a_line_with_a_redirection() {
         let args = Map::new();
@@ -1693,6 +1693,9 @@ mod tests {
             "make test > out.log; make test",
             "make test; make test > out.log",
             "make test 2>> out.log && make test",
+            "make test <<< 'x'",
+            "make test; make test <<< 'x'",
+            "make test <<< 'x'; make test",
         ];
         for line in lines {
             // The parser reads the redirection, so the test keeps its teeth.
