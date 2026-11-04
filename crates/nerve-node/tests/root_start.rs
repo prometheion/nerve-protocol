@@ -51,6 +51,7 @@ fn opts(account: &Account, root: AsRoot) -> RunOptions {
         sudo: None,
         account: Some(account.clone()),
         separate: false,
+        pass_env: Vec::new(),
         own: Vec::new(),
         root: Some(root),
         limits: None,

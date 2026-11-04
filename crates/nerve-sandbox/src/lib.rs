@@ -21,7 +21,7 @@
 //! runs each command in a cgroup of its own for that (`nerve-node`'s
 //! `cgroup` module).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -216,11 +216,42 @@ pub fn shim_main() -> i32 {
     }
 }
 
+/// The lowest Landlock ABI a node run by hand confines commands with. Below
+/// it the kernel does not handle `truncate(2)` (ABI 3, Linux 6.2), so a
+/// command held to its folders could still cut any file of the owner's
+/// outside them to nothing: such a node takes that Landlock as none and
+/// runs no command of folder mode ([`Confinement::by_hand`]). The installed
+/// node keeps it: without Landlock its commands would run as its account
+/// with no confinement at all.
+pub const LANDLOCK_FLOOR: i32 = 3;
+
+/// The Landlock ABI the node asks for (Linux 6.12): from it every guard the
+/// node sets is held, and the commands of the installed node's pairings, all
+/// of one account, are kept apart from each other.
+pub const LANDLOCK_WANTED: i32 = 6;
+
+/// What Landlock at `abi` does not guard of what the node asks for
+/// ([`LANDLOCK_WANTED`]): empty from that ABI on.
+pub fn landlock_gaps(abi: i32) -> Vec<&'static str> {
+    let mut gaps = Vec::new();
+    if abi < 3 {
+        gaps.push("truncating files");
+    }
+    if abi < 5 {
+        gaps.push("device ioctls");
+    }
+    if abi < 6 {
+        gaps.push("signals to other processes of the account");
+        gaps.push("abstract unix sockets");
+    }
+    gaps
+}
+
 /// How this machine can confine commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Confinement {
     /// The kernel's Landlock ABI version; `None` when Landlock is missing or
-    /// off.
+    /// off, and on a node run by hand below [`LANDLOCK_FLOOR`].
     pub landlock_abi: Option<i32>,
     /// Windows: commands run in an AppContainer. Every Windows the node
     /// runs on (10 and later) has them.
@@ -232,6 +263,15 @@ impl Confinement {
         Confinement {
             landlock_abi: landlock_abi(),
             appcontainer: cfg!(windows),
+        }
+    }
+
+    /// This confinement as a node run by hand takes it: Landlock below
+    /// [`LANDLOCK_FLOOR`] counts as none.
+    pub fn by_hand(self) -> Confinement {
+        Confinement {
+            landlock_abi: self.landlock_abi.filter(|v| *v >= LANDLOCK_FLOOR),
+            ..self
         }
     }
 
@@ -273,10 +313,59 @@ pub fn system_dirs() -> Vec<PathBuf> {
     .collect()
 }
 
-/// Files every confined command may write: the null and terminal devices,
-/// nothing else outside its folders.
+/// The terminals of the machine's users under `/dev`: the pseudo-terminals
+/// (`pts`), the console and every device the kernel's tty layer lists
+/// (`/sys/class/tty`: the text consoles and serial lines, but also the
+/// hypervisor consoles `hvc*`, which are no `tty*`). A command of a node
+/// run by hand runs as the owner, who owns the terminal they work in, so it
+/// must not read these by name: what the owner types there would reach the
+/// command. A program that makes a terminal of its own needs none of them:
+/// `ptmx` stays, and a pseudo-terminal's slave is reached through the
+/// master's descriptor.
+pub fn terminal_devices() -> Vec<PathBuf> {
+    terminals_in(Path::new("/dev"), Path::new("/sys/class/tty"))
+}
+
+/// [`terminal_devices`] for a `/dev` and the kernel's list of tty devices.
+/// A name that starts with `tty` counts also where the list does not have
+/// it. The list writes `/dev/3270/tty1` as `3270!tty1`.
+fn terminals_in(dev: &Path, tty_class: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = ["pts", "console"]
+        .iter()
+        .map(|n| dev.join(n))
+        .filter(|p| p.exists())
+        .collect();
+    let mut named: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dev) {
+        named.extend(
+            entries
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with("tty"))
+                .map(|e| e.path()),
+        );
+    }
+    if let Ok(entries) = std::fs::read_dir(tty_class) {
+        named.extend(
+            entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().replace('!', "/"))
+                .filter(|n| n != "ptmx")
+                .map(|n| dev.join(n))
+                .filter(|p| p.exists()),
+        );
+    }
+    named.sort();
+    named.dedup();
+    let seen = out.clone();
+    out.extend(named.into_iter().filter(|p| !seen.contains(p)));
+    out
+}
+
+/// Files every confined command may write: the null devices, nothing else
+/// outside its folders. Not `/dev/tty`: a confined command has no
+/// controlling terminal, and the one it had would be the owner's.
 pub fn system_writable() -> Vec<PathBuf> {
-    ["/dev/null", "/dev/zero", "/dev/tty", "/dev/full"]
+    ["/dev/null", "/dev/zero", "/dev/full"]
         .iter()
         .map(PathBuf::from)
         .filter(|p| p.exists())
@@ -2642,6 +2731,75 @@ pub mod appcontainer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A confined command may not write a terminal: it has none of its own,
+    /// and the one it could reach would be the owner's.
+    #[test]
+    fn no_terminal_is_writable() {
+        assert!(!system_writable().iter().any(|p| p.starts_with("/dev/tty")));
+        // Windows has no such files; the list is empty there.
+        assert_eq!(
+            system_writable().contains(&PathBuf::from("/dev/null")),
+            cfg!(unix)
+        );
+    }
+
+    /// The terminals under `/dev` are named for the read sets to leave out.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_terminals_are_named() {
+        let t = terminal_devices();
+        assert!(t.contains(&PathBuf::from("/dev/pts")), "{t:?}");
+        assert!(!t.contains(&PathBuf::from("/dev/null")), "{t:?}");
+        assert!(!t.contains(&PathBuf::from("/dev/ptmx")), "{t:?}");
+        assert!(t.iter().all(|p| p.starts_with("/dev")), "{t:?}");
+    }
+
+    /// A terminal that has no `tty` name, such as a hypervisor console, is
+    /// named by the kernel's list of tty devices; `ptmx` is not left out of
+    /// the commands' reach by it.
+    #[test]
+    fn a_terminal_without_a_tty_name_is_left_out_too() {
+        let d = tempfile::tempdir().unwrap();
+        let (dev, class) = (d.path().join("dev"), d.path().join("class"));
+        std::fs::create_dir_all(dev.join("3270")).unwrap();
+        std::fs::create_dir_all(&class).unwrap();
+        for f in ["hvc0", "ttyS0", "ptmx", "null", "3270/tty1"] {
+            std::fs::write(dev.join(f), "").unwrap();
+        }
+        for f in ["hvc0", "ptmx", "3270!tty1", "gone0"] {
+            std::fs::create_dir(class.join(f)).unwrap();
+        }
+        let t = terminals_in(&dev, &class);
+        assert_eq!(
+            t,
+            [dev.join("3270/tty1"), dev.join("hvc0"), dev.join("ttyS0")],
+            "{t:?}"
+        );
+    }
+
+    /// Landlock below ABI 3 does not guard truncate(2): a node run by hand
+    /// takes it as none. From ABI 6 on nothing the node asks for is missing.
+    #[test]
+    fn landlock_below_the_floor_counts_as_none_by_hand() {
+        let at = |abi| Confinement {
+            landlock_abi: abi,
+            appcontainer: false,
+        };
+        assert_eq!(at(Some(2)).by_hand().landlock_abi, None);
+        assert_eq!(at(Some(3)).by_hand().landlock_abi, Some(3));
+        assert_eq!(at(None).by_hand().landlock_abi, None);
+        assert!(landlock_gaps(2).contains(&"truncating files"));
+        assert!(!landlock_gaps(3).contains(&"truncating files"));
+        assert_eq!(
+            landlock_gaps(5),
+            [
+                "signals to other processes of the account",
+                "abstract unix sockets"
+            ]
+        );
+        assert!(landlock_gaps(6).is_empty());
+    }
 
     #[test]
     fn spec_round_trips_strictly() {

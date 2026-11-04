@@ -66,7 +66,13 @@ center reads, or the node refuses the whole change and names the field.
 3. `panic` and `unlock`. A center with the grant may pause. Only the owner
    unpauses or unlocks.
 4. Machine settings: `machine.shell`, `machine.allow_root`,
-   `machine.sudo_path`, `machine.secret_storage`, `machine.user` (Windows).
+   `machine.sudo_path`, `machine.secret_storage`, `machine.user` (Windows),
+   `machine.command_env` (the installed Linux node: the variables of the
+   service's environment a command of `nerve-run` gets besides `PATH`,
+   `LANG`, `TERM` and `TMPDIR`). An owner may set `machine.command_env`
+   (it is not in `owner::ROOT_ONLY`): a command as the owner gets the whole
+   service environment already, so naming a variable gives `nerve-run`'s
+   commands nothing the owner could not read.
 5. The sudo password. The node never returns it. A center only passes it on,
    sealed, when it switches sudo on.
 6. The proxy and its credentials, and the relay for other nodes with its

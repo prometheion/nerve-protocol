@@ -500,6 +500,10 @@ pub enum FolderCmd {
         #[command(flatten)]
         center: CenterArg,
     },
+    /// Give nerve-run its access to everything in the folders of every
+    /// center again, also what was moved into them (the installed node on
+    /// Linux): a pass over every granted folder.
+    Sync,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2286,7 +2290,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                         .into(),
                 );
             }
-            tell_grants(&paths, out).await;
+            tell_grants(&paths, true, out).await;
             Ok(())
         }
         Cmd::Folder(FolderCmd::Rm { path, center }) => {
@@ -2296,9 +2300,10 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             })
             .await?;
             w(out, format!("{}: removed {}", a.center, a.path));
-            tell_grants(&paths, out).await;
+            tell_grants(&paths, false, out).await;
             Ok(())
         }
+        Cmd::Folder(FolderCmd::Sync) => sync_folders(&paths, out).await,
         Cmd::Folder(FolderCmd::Ls { center }) => {
             let (cfg, _) = read_config(&paths).await?;
             let name = pick_center(&cfg, &center)?;
@@ -2926,6 +2931,9 @@ fn status_lines(v: &Value) -> Vec<String> {
     if let Some(h) = v["home_warning"]["warning"].as_str() {
         lines.push(format!("warning: {h}"));
     }
+    if let Some(l) = v["landlock_warning"].as_str() {
+        lines.push(format!("warning: {l}"));
+    }
     lines.extend(
         grant_lines(&v["folder_grants"])
             .into_iter()
@@ -3467,23 +3475,92 @@ async fn add_folder(
             ),
         );
     }
-    tell_grants(paths, out).await;
+    tell_grants(paths, false, out).await;
     Ok(())
 }
 
 /// Tells what the running installed Linux node did not manage after a
 /// change of the folders: a grant `nerve-run` did not get, or an entry that
 /// did not come off (crate::acl). The node brings them in line before it
-/// answers. Nothing without such a node.
-async fn tell_grants(paths: &NodePaths, out: &mut dyn Write) {
+/// answers, with `every` walking every grant. Nothing without such a node.
+async fn tell_grants(paths: &NodePaths, every: bool, out: &mut dyn Write) {
     #[cfg(target_os = "linux")]
-    if let Ok(v) = nerve_transport::ctl::call(&paths.ctl_socket(), "folder.grants", json!({})).await
+    match nerve_transport::ctl::call(
+        &paths.ctl_socket(),
+        "folder.grants",
+        json!({ "every": every }),
+    )
+    .await
     {
-        tell_grants_of(&v, out);
+        Ok(v) => tell_grants_of(&v, out),
+        Err(e) => {
+            if let Some(line) = walk_goes_on(&e) {
+                let _ = writeln!(out, "{line}");
+            }
+        }
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = (paths, out);
+    let _ = (paths, every, out);
 }
+
+/// What to tell when the node did not answer a walk of the folders in time:
+/// on a large tree the walk takes longer than the wait, and it goes on. A
+/// second call would only queue another walk.
+#[cfg(target_os = "linux")]
+fn walk_goes_on(error: &str) -> Option<String> {
+    (error == nerve_transport::ctl::NO_ANSWER).then(|| {
+        "the node is still walking the folders and goes on; do not run this again, `nerve-node status` shows what it left"
+            .to_string()
+    })
+}
+
+/// What `folder sync` tells when the call to the node failed.
+#[cfg(target_os = "linux")]
+fn sync_failed(error: String) -> String {
+    if error == nerve_transport::ctl::NOT_RUNNING {
+        return "the node does not run; it walks the folders when it starts".to_string();
+    }
+    walk_goes_on(&error).unwrap_or(error)
+}
+
+/// `folder sync`: the running installed Linux node walks every grant now,
+/// as it does at its start, and says what that left.
+async fn sync_folders(paths: &NodePaths, out: &mut dyn Write) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let v = nerve_transport::ctl::call(
+            &paths.ctl_socket(),
+            "folder.grants",
+            json!({ "every": true }),
+        )
+        .await
+        .map_err(sync_failed)?;
+        if v["service"] != true {
+            let _ = writeln!(out, "{FOLDERS_WITHOUT_ACL}");
+            return Ok(());
+        }
+        let warned = !grant_lines(&v).is_empty();
+        tell_grants_of(&v, out);
+        if !warned {
+            let _ = writeln!(
+                out,
+                "nerve-run has its access to everything in the folders given to it"
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = paths;
+        let _ = writeln!(out, "{FOLDERS_WITHOUT_ACL}");
+        Ok(())
+    }
+}
+
+/// What `folder sync` says where no ACL gives the folders: a node run by
+/// hand runs its commands as its own user, and Windows gives them otherwise.
+const FOLDERS_WITHOUT_ACL: &str =
+    "nothing to sync: only the installed node on Linux gives nerve-run its folders by their ACLs";
 
 /// What [`tell_grants`] says of the node's answer `v`, and adds to `--json`:
 /// `grant_errors` and `grant_stale`.
@@ -4687,9 +4764,13 @@ async fn tell_folder_commands(paths: &NodePaths, cfg: &NodeConfig, out: &mut dyn
             return;
         }
     }
-    if keyring_turns_commands_off(nerve_sandbox::Confinement::detect(), || {
-        node_command_account(paths, cfg)
-    }) {
+    // A node run by hand takes an old Landlock as none, as it would.
+    let detected = nerve_sandbox::Confinement::detect();
+    let c = match crate::service::is_service_node(paths) {
+        true => detected,
+        false => detected.by_hand(),
+    };
+    if keyring_turns_commands_off(c, || node_command_account(paths, cfg)) {
         let _ = writeln!(out, "{}", folder_commands_off());
     }
 }
@@ -6791,6 +6872,7 @@ mod tests {
             "confinement": "landlock abi 6",
             "owner": "alice",
             "home_warning": {"warning": "Without Landlock, nerve-run can read every file in your home /home/alice"},
+            "landlock_warning": "this kernel's Landlock is ABI 4, which does not guard device ioctls",
             "folder_grants": {
                 "stale": ["/home/alice/gone", "/var/lib/nerve/state/acl.json"],
                 "errors": [
@@ -6813,6 +6895,10 @@ mod tests {
             has(
                 "warning: Without Landlock, nerve-run can read every file in your home /home/alice"
             ),
+            "{lines:#?}"
+        );
+        assert!(
+            has("warning: this kernel's Landlock is ABI 4, which does not guard device ioctls"),
             "{lines:#?}"
         );
         assert!(
@@ -7670,6 +7756,143 @@ mod tests {
         assert_eq!(writes.load(Ordering::SeqCst), 5);
         assert_eq!(std::fs::read(paths.config_file()).unwrap(), before);
         assert!(!load(&paths).locked);
+    }
+
+    /// A node whose `folder.grants` answers `answer` and keeps the requests
+    /// it got.
+    #[cfg(target_os = "linux")]
+    fn grants_node(
+        paths: &NodePaths,
+        answer: Value,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>> {
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (sock, kept) = (paths.ctl_socket(), got.clone());
+        tokio::spawn(async move {
+            let _ = nerve_transport::ctl::serve(&sock, move |req, _| {
+                let (answer, kept) = (answer.clone(), kept.clone());
+                async move {
+                    kept.lock().unwrap().push((req.method.clone(), req.params));
+                    nerve_transport::ctl::Reply::Ok(answer)
+                }
+            })
+            .await;
+        });
+        while !paths.ctl_socket().exists() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        got
+    }
+
+    /// `folder sync` asks the node to walk every grant, and tells the owner
+    /// what that left, or that there is nothing to sync where no ACL gives the
+    /// folders. `folder set` asks the same; `folder rm` only for the changed
+    /// grants.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn folder_sync_walks_every_grant_and_tells_what_it_left() {
+        let (_d, paths) = setup(&["home"]);
+        let mut out = Vec::new();
+        let e = sync_folders(&paths, &mut out).await.unwrap_err();
+        assert!(e.contains("does not run"), "{e}");
+
+        let got = grants_node(&paths, json!({"service": true, "errors": [], "stale": []}));
+        let mut out = Vec::new();
+        sync_folders(&paths, &mut out).await.unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("nerve-run has its access"), "{out}");
+        assert_eq!(
+            got.lock().unwrap().last().unwrap(),
+            &("folder.grants".to_string(), json!({"every": true}))
+        );
+        for (every, want) in [(true, true), (false, false)] {
+            tell_grants(&paths, every, &mut Vec::new()).await;
+            assert_eq!(got.lock().unwrap().last().unwrap().1["every"], want);
+        }
+    }
+
+    /// A walk that outlasts the wait for the node's answer goes on: the
+    /// owner is told not to ask again, which would queue one more walk.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_walk_longer_than_the_wait_is_said_to_go_on() {
+        let line = walk_goes_on(nerve_transport::ctl::NO_ANSWER).unwrap();
+        assert!(
+            line.contains("still walking") && !line.contains("try again"),
+            "{line}"
+        );
+        assert_eq!(walk_goes_on(nerve_transport::ctl::NOT_RUNNING), None);
+        assert_eq!(sync_failed(nerve_transport::ctl::NO_ANSWER.into()), line);
+        assert!(sync_failed(nerve_transport::ctl::NOT_RUNNING.into()).contains("does not run"));
+        assert_eq!(sync_failed("other".into()), "other");
+    }
+
+    /// `folder set` walks every grant of the running node, as `folder sync`
+    /// does (what was moved into a folder gets its entries with the change);
+    /// `folder rm` only what changed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn folder_set_asks_the_node_for_a_walk_of_every_grant() {
+        use nerve_transport::ctl::{Reply, serve};
+        let (d, paths) = setup(&["home"]);
+        let folder = d.path().join("srv");
+        std::fs::create_dir(&folder).unwrap();
+        let folder = folder.display().to_string();
+        run(&paths, &["folder", "add", &folder, "+r"]).unwrap();
+        let text = std::fs::read_to_string(paths.config_file()).unwrap();
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (sock, kept) = (paths.ctl_socket(), asked.clone());
+        rt.spawn(async move {
+            let _ = serve(&sock, move |req, _| {
+                let (text, kept) = (text.clone(), kept.clone());
+                async move {
+                    match req.method.as_str() {
+                        "config.read" => Reply::Ok(json!({"config": text, "version": 7})),
+                        "folder.grants" => {
+                            kept.lock().unwrap().push(req.params["every"].clone());
+                            Reply::Ok(json!({"service": true}))
+                        }
+                        _ => Reply::Ok(json!({})),
+                    }
+                }
+            })
+            .await;
+        });
+        while !paths.ctl_socket().exists() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        run(&paths, &["folder", "set", &folder, "+w"]).unwrap();
+        run(&paths, &["folder", "rm", &folder]).unwrap();
+        assert_eq!(*asked.lock().unwrap(), [json!(true), json!(false)]);
+    }
+
+    /// `folder sync` does not say `nerve-run` has its access where the node
+    /// gave nothing, or where a grant did not come whole.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn folder_sync_does_not_claim_access_that_was_not_given() {
+        let (_d, paths) = setup(&["home"]);
+        grants_node(&paths, json!({"service": false}));
+        let mut out = Vec::new();
+        sync_folders(&paths, &mut out).await.unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("nothing to sync"), "{out}");
+        assert!(!out.contains("has its access"), "{out}");
+
+        let (_d, paths) = setup(&["home"]);
+        grants_node(
+            &paths,
+            json!({"service": true, "errors": ["/srv/x: no access"], "stale": []}),
+        );
+        let mut out = Vec::new();
+        sync_folders(&paths, &mut out).await.unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("did not get every folder"), "{out}");
+        assert!(!out.contains("has its access"), "{out}");
     }
 
     /// The callers that only ask whether a node runs take a busy one for a

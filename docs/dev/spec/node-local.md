@@ -58,6 +58,13 @@ directory when the call names none; one of `nerve-run` also gets
 `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME`
 below its home, `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` removed, and
 git's `safe.directory = *` as command-line configuration (`GIT_CONFIG_COUNT`).
+Of the service's own environment a command of `nerve-run` keeps only `PATH`,
+`LANG`, `TERM` and `TMPDIR` (`exec::KEPT_ENV`) and the names in
+`machine.command_env`, with the service's values; the rest (`NERVE_NODE_OWNER`,
+what systemd and the unit's `Environment=` set) is cleared before the
+variables above are set, so naming `HOME` or `XDG_RUNTIME_DIR` there passes
+nothing of the node's on. A command as the owner, and every command of a node
+a person runs, gets the node's environment.
 The `~` of folders, rules and the protected list is the owner's home. A
 command of `nerve-run` is confined by Landlock in `allowlist` mode as well
 (where the kernel has it), to its folders and the built-in `/tmp`,
@@ -1137,7 +1144,29 @@ grant or not.
   node run by hand refuses every command of folder mode and offers no `exec`
   action (unless the sudo allow list has an entry), while the installed
   Linux node runs them as `nerve-run` without Landlock, held back by that
-  account alone, and offers `exec` (`daemon::folder_refusal`). On Windows a command runs in an AppContainer
+  account alone, and offers `exec` (`daemon::folder_refusal`). A node run by
+  hand also takes Landlock below ABI 3 (`nerve_sandbox::LANDLOCK_FLOOR`,
+  Linux 6.2), which does not guard `truncate(2)`, as none
+  (`Confinement::by_hand`), and its status says `confinement none`; the
+  installed node confines with it, since without it nothing but the account
+  would hold its commands. Below ABI 6 (`LANDLOCK_WANTED`, Linux 6.12) the
+  installed node's `status` carries `landlock_warning` (null otherwise, and
+  on a node run by hand), and `install` prints the same line: the guards the
+  kernel's Landlock lacks (`nerve_sandbox::landlock_gaps`: truncating files
+  below 3, device ioctls below 5, signals and abstract unix sockets below 6)
+  and that the pairings' commands, all of `nerve-run`, are kept apart from
+  each other only from ABI 6.
+  On Linux a command that runs through the shim (every `folder` mode
+  command, and every command of `nerve-run`) starts in a session of its own
+  (`setsid` before anything else in the child), so it has no controlling
+  terminal, and outside its `w` folders it may write only `/dev/null`,
+  `/dev/zero` and `/dev/full` (`nerve_sandbox::system_writable`), not
+  `/dev/tty`. `/dev` stays in the read and exec sets but for the terminals
+  (`nerve_sandbox::terminal_devices`: `/dev/pts`, `/dev/console`, and every device in `/sys/class/tty` but `ptmx` (`hvc*`, `tty*`, serial lines)),
+  which `exec::landlock_spec` leaves out as it does the node's own folders, so
+  `/dev` is given as its other entries (not its links, which a rule cannot
+  follow to a pipe or a socket); a command of a node run by hand, which runs as the
+  owner, cannot read the owner's terminals by name. On Windows a command runs in an AppContainer
   of its pairing (named from the state folder and the pairing's `node_id`,
   so a later pairing, also of the same center or under the same name, runs
   in another one and finds none of its entries), which reaches the system folders Windows opens to every
@@ -1545,12 +1574,14 @@ below):
 | Socket | Who is served | Mode | Places | For |
 |---|---|---|---|---|
 | `<state>/run/ctl.sock` | the node's own user and root, each request with the token | 0600, in a 0700 folder | 64 | the CLI; a provider of a node run by hand (§7) |
-| `/run/nerve-node/owner.sock` (installed node, Linux) | every account; `cli` an owner's only | 0666, in the unit's runtime folder | 64 | the owner's commands (below) |
+| `/run/nerve-node/owner.sock` (installed node, Linux) | every account; `cli` an owner's only | 0666, in the unit's runtime folder | 64 for root and the owner; any other account 4, all of them 16, told by its uid at `accept` | the owner's commands (below) |
 | `/run/nerve-node/provider.sock` (installed node, Linux) | an owner (root always is one), told as it connects | 0666, in the unit's runtime folder | 16 | capability providers (§7) |
 
 Each socket has its places of its own: a connection held on one never takes
 one of another's, so providers, which hold theirs while they are attached,
-and the owner's commands never starve each other.
+and the owner's commands never starve each other. On the owner socket the
+other accounts have places of their own too, so a command of `nerve-run`
+that holds connections open never keeps the owner out.
 
 `<state>/run/ctl.sock` (Unix; Windows has the control pipe below). One
 JSON object per line: the client sends
@@ -1609,7 +1640,7 @@ Methods:
 | `config.accept` | | takes `node.toml` as it is after it was refused, and signs it (§1); an action that came to sense or actuate in it is switched off, in the same write, for each center whose earlier switch or allow rule covered it: `{version, held: [[center, action]]}` |
 | `folder.add` | `center`, `path`, `access` | `folder add`, done by the node so that it is judged as the owner (`exec::settle`): the path is followed a link at a time and must resolve to itself, the folder is stored at that place with `access` (replacing the entry there) and recorded in `policy.places`; `{stored, recorded, mode, counts}` (`counts`: whether the
 center's folders hold its commands, in folder mode or as `nerve-run`). An error, with nothing changed, when the path crosses a link inside a `w` folder of any center, leads nowhere, or changed while it was looked at. Where the node cannot tell either (a folder it may not look into, or a `w` folder it cannot resolve) the folder is stored as given, `recorded` is false, and a record it had stays. The CLI uses it whenever a node runs |
-| `folder.grants` | | the installed Linux node brings the folder ACLs in line at once (§Folder ACLs) and answers what that left: `{errors, stale, failed, skipped}`; `null` elsewhere. `folder add`, `set` and `rm` ask it |
+| `folder.grants` | `every` (bool) | the installed Linux node brings the folder ACLs in line at once (§Folder ACLs), with `every` walking every grant, and answers what that left, and whether this is the installed node: `{errors, stale, failed, skipped, service}`; `null` on Windows. `folder add` and `rm` ask it, `folder set` and `folder sync` with `every` |
 | `reload` | | rereads `node.toml`; only a file the node signed is applied (§1) |
 | `sudo.status` | | `{sudo: "on"|"off"}` |
 | `sudo.on` | `password` | checks it with `sudo -v` and turns the switch on (§4) |
@@ -1790,8 +1821,13 @@ whose path a link now crosses, is taken off by a walk of the outer grant,
 if that walk saw all of it: one that skipped a folder on another file system
 or one the owner may not list leaves the inner grant `stale`, until its own
 walk goes through.
-A sync runs at the start (also for failed grants), on each config version,
-on `folder.grants`, and before a call of `nerve-run` (`exec.run`, `fs`),
+A walk holds the walk lock (`Shared::acl_walk`) only: the last report
+(`Shared::acl`), which `status` and the refusal read, is free meanwhile, and a
+sync that finds the record not behind returns before it waits for a walk.
+A sync runs at the start (there it walks every grant, also an unchanged one,
+so what was moved into a granted folder gets its entries), on each config
+version, on `folder.grants` (with `{"every": true}`, from `folder set` and
+`folder sync`, every grant too), and before a call of `nerve-run` (`exec.run`, `fs`),
 where a failed grant is tried again at most once a minute (`ACL_RETRY`).
 The call is refused while an entry that should have come off is left
 (`stale`), for every pairing of `nerve-run`. `uninstall` takes every

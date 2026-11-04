@@ -45,10 +45,8 @@ exec "$@"
 "#;
 
 fn fake_sudo(dir: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let p = dir.join("fake-sudo");
-    std::fs::write(&p, FAKE_SUDO.replace("RIGHT", RIGHT)).unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    nerve_transport::files::write_program(&p, &FAKE_SUDO.replace("RIGHT", RIGHT)).unwrap();
     p
 }
 

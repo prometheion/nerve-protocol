@@ -1206,6 +1206,7 @@ async fn a_program_runs_whole_through_the_shim_under_landlock() {
         sudo: None,
         account: None,
         separate: false,
+        pass_env: Vec::new(),
         own: Vec::new(),
         root: None,
         limits: None,
