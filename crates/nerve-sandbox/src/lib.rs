@@ -537,12 +537,16 @@ pub mod landlock_rules {
         }
         // No TCP connection or listening port, with no rule to allow one.
         // Not best effort: a kernel that cannot refuse them refuses the
-        // ruleset, and the command does not run.
+        // ruleset, and the command does not run. The level goes back to best
+        // effort after it, as the ruleset passes it on to its rules: the file
+        // rights of a later ABI than the kernel's (IoctlDev on ABI 4) would
+        // fail every rule otherwise.
         if spec.no_network {
             rs = rs
                 .set_compatibility(CompatLevel::HardRequirement)
                 .handle_access(AccessNet::from_all(ABI::V4))
-                .map_err(e)?;
+                .map_err(e)?
+                .set_compatibility(CompatLevel::BestEffort);
         }
         rs.create()
             .map_err(e)?
@@ -3967,5 +3971,139 @@ mod tests {
         assert!(!connect(&off));
         // The files stay as the folders say.
         assert!(confined_sh(&off, "cat /etc/passwd > /dev/null"));
+    }
+
+    /// The switch works on the first kernels with Landlock's network rules
+    /// (ABI 4, Linux 6.7 to 6.9), whose file rights are fewer than the node
+    /// asks for, and a kernel without them (ABI 3) refuses it. The kernel
+    /// here is told to say it is of that ABI ([`at_abi`]). Skipped where it
+    /// has no network rules itself, or no bash to connect with.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_network_switch_holds_from_the_first_abi_with_network_rules() {
+        if landlock_rules::abi_version().is_none_or(|v| v < LANDLOCK_NETWORK)
+            || !std::path::Path::new("/bin/bash").exists()
+        {
+            eprintln!("no Landlock network rules or no bash here; skipped");
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let off = LandlockSpec {
+            read: system_dirs(),
+            write: system_writable(),
+            exec: system_dirs(),
+            no_network: true,
+        };
+        let connect = format!("/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}'");
+        let Some((reached, read)) = at_abi(LANDLOCK_NETWORK, || {
+            (
+                confined_sh(&off, &connect),
+                confined_sh(&off, "cat /etc/passwd > /dev/null"),
+            )
+        }) else {
+            eprintln!("no seccomp listener here; skipped");
+            return;
+        };
+        assert!(!reached);
+        assert!(read);
+        let refused = at_abi(LANDLOCK_NETWORK - 1, || {
+            landlock_rules::prepare(&off).map(|_| ())
+        })
+        .unwrap();
+        assert!(refused.is_err());
+    }
+
+    /// Runs `f` on a thread of its own where the kernel says its Landlock
+    /// ABI is `abi`: a seccomp filter hands the version query to this
+    /// thread, which answers it. Every other call reaches the kernel as it
+    /// is, so the rules made there are those a kernel of that ABI gets.
+    /// `None` where the kernel has no seccomp listener.
+    #[cfg(target_os = "linux")]
+    fn at_abi<T: Send>(abi: i32, f: impl FnOnce() -> T + Send) -> Option<T> {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        let stmt = |code: u32, k: u32| libc::sock_filter {
+            code: code as u16,
+            jt: 0,
+            jf: 0,
+            k,
+        };
+        let jeq = |k: u32, jf: u8| libc::sock_filter {
+            code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+            jt: 0,
+            jf,
+            k,
+        };
+        let nr = std::mem::offset_of!(libc::seccomp_data, nr) as u32;
+        // The low half of the third argument (the flags) on these
+        // little-endian machines.
+        let flags = (std::mem::offset_of!(libc::seccomp_data, args) + 2 * 8) as u32;
+        let load = libc::BPF_LD | libc::BPF_W | libc::BPF_ABS;
+        let mut filter = [
+            stmt(load, nr),
+            jeq(libc::SYS_landlock_create_ruleset as u32, 3),
+            stmt(load, flags),
+            // LANDLOCK_CREATE_RULESET_VERSION
+            jeq(1, 1),
+            stmt(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_USER_NOTIF),
+            stmt(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_ALLOW),
+        ];
+        let prog = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_mut_ptr(),
+        };
+        let prog = &prog as *const libc::sock_fprog as usize;
+        let (tx, rx) = std::sync::mpsc::channel::<Option<OwnedFd>>();
+        std::thread::scope(|s| {
+            let worker = s.spawn(move || {
+                // SAFETY: the filter outlives the call, and binds this thread
+                // alone (and what it starts), which ends with the test.
+                let fd = unsafe {
+                    libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+                    libc::syscall(
+                        libc::SYS_seccomp,
+                        libc::SECCOMP_SET_MODE_FILTER,
+                        libc::SECCOMP_FILTER_FLAG_NEW_LISTENER,
+                        prog as *const libc::sock_fprog,
+                    )
+                };
+                if fd < 0 {
+                    let _ = tx.send(None);
+                    return None;
+                }
+                // SAFETY: the kernel gave this descriptor to this thread.
+                let _ = tx.send(Some(unsafe { OwnedFd::from_raw_fd(fd as i32) }));
+                Some(f())
+            });
+            let listener = rx.recv().ok().flatten()?;
+            while !worker.is_finished() {
+                let mut p = libc::pollfd {
+                    fd: listener.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: plain calls on our descriptor with structs of ours;
+                // the kernel wants the notification zeroed.
+                unsafe {
+                    if libc::poll(&mut p, 1, 20) <= 0 || p.revents & libc::POLLIN == 0 {
+                        continue;
+                    }
+                    let mut n: libc::seccomp_notif = std::mem::zeroed();
+                    if libc::ioctl(listener.as_raw_fd(), libc::SECCOMP_IOCTL_NOTIF_RECV, &mut n)
+                        != 0
+                    {
+                        continue;
+                    }
+                    let mut r = libc::seccomp_notif_resp {
+                        id: n.id,
+                        val: abi.into(),
+                        error: 0,
+                        flags: 0,
+                    };
+                    libc::ioctl(listener.as_raw_fd(), libc::SECCOMP_IOCTL_NOTIF_SEND, &mut r);
+                }
+            }
+            worker.join().unwrap()
+        })
     }
 }
