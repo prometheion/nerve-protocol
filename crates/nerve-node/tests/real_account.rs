@@ -2023,10 +2023,13 @@ async fn argument_rules_decide_a_config_capability_on_the_installed_node() {
 /// folder of their own below `/var/lib/nerve-run` (#167): their commands'
 /// `HOME` and `TMPDIR`, made 0700 as `nerve-run`, deleted with the pairing.
 /// With Landlock one pairing's command cannot read the other's home;
-/// without it it can, as the docs say. With a pairing's network turned off,
-/// a kernel without Landlock's network rules runs none of its folder-mode
-/// commands and says why; one with them runs them without TCP. For a test
-/// machine only, as root.
+/// without it it can, as the docs say, and the second pairing, `status` and
+/// its JSON say that nothing keeps the pairings apart. With a pairing's
+/// network turned off, its commands run under the node's filter, Landlock
+/// or not, and open no TCP or UDP socket, which the other pairing's open;
+/// no command of its sudo list runs meanwhile, while the other's does.
+/// Where the node has no filter its commands do not run, and it says why.
+/// For a test machine only, as root.
 ///
 /// `NERVE_NODE_REAL=<the nerve-node to install> NERVE_REAL_OWNER=<an account
 /// with a home, the owner> cargo test -p nerve-node --test real_account --
@@ -2044,7 +2047,23 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
     let abi = nerve_sandbox::Confinement::detect().landlock_abi;
     let landlock = abi.is_some();
-    let net_rules = abi.is_some_and(|v| v >= nerve_sandbox::LANDLOCK_NETWORK);
+    let filter = nerve_sandbox::net_filter::available();
+    // The owner has a password and sudo, for the sudo list below.
+    let mut pw = Command::new("chpasswd");
+    pw.stdin(std::process::Stdio::piped());
+    let mut child = pw.spawn().unwrap();
+    {
+        use std::io::Write;
+        let line = format!("{owner}:pass-167\n");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(line.as_bytes())
+            .unwrap();
+    }
+    assert!(child.wait().unwrap().success());
+    assert!(sh(Command::new("usermod").args(["-aG", "sudo", &owner])).0);
     let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
     assert!(ok, "{said}");
     let (ok, said) = as_owner_typing(&owner, &["setup"], "real-167\n\n\n");
@@ -2082,6 +2101,13 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
         let link = center.link().render();
         let (ok, said) = as_owner(&owner, &["center", "add", &link, "--yes", "--name", name]);
         assert!(ok, "{said}");
+        // The second pairing of nerve-run (a new one is in folder mode) is
+        // told that nothing keeps it apart from the first without Landlock.
+        assert_eq!(
+            said.contains("Warning: Without Landlock nothing keeps the pairings apart"),
+            name == "home" && !landlock,
+            "{name}: {said}"
+        );
         for args in [
             &["mode", "set", "folder", "--center", name][..],
             &[
@@ -2308,47 +2334,95 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
         let (ok, said) = as_owner(&owner, args);
         assert!(ok, "{args:?}: {said}");
     }
-    // `status` names both centers' switch and whether the machine has the
-    // network rules.
+    // `status` says whether the machine has the filter that holds the
+    // switch, and, without Landlock, that nothing keeps the pairings apart.
     let (_, st) = as_owner(&owner, &["--json", "status"]);
     let st: Value = serde_json::from_str(&st).unwrap();
-    assert_eq!(st["network_rules"], net_rules, "{st}");
+    assert_eq!(st["network_rules"], filter, "{st}");
+    assert_eq!(
+        st["pairings_warning"]
+            .as_str()
+            .is_some_and(|w| w.contains("nothing keeps the pairings apart") && w.contains("lab")),
+        !landlock,
+        "{st}"
+    );
+    let (_, text) = as_owner(&owner, &["status"]);
+    assert_eq!(
+        text.contains("warning: Without Landlock nothing keeps the pairings apart"),
+        !landlock,
+        "{text}"
+    );
 
-    // The lab's network off: without Landlock's network rules its folder
-    // commands are refused, with why; the other pairing's still run.
+    // The sudo switch on, and `id -un` on both pairings' sudo lists.
+    let (ok, said) = typing(Command::new(BIN).args(["sudo", "on"]), "pass-167\n");
+    assert!(ok, "{said}");
+    for name in ["lab", "home"] {
+        let (ok, said) = as_owner(&owner, &["rule", "add", "sudo", "id -un", "--center", name]);
+        assert!(ok, "{said}");
+    }
+
+    // The lab's network off: held by the node's filter with or without
+    // Landlock, so its commands run but open no TCP or UDP socket, which the
+    // other pairing's still do, and no command of its sudo list runs. Without
+    // the filter none of its commands runs, and the node says why.
     let (ok, said) = as_owner(&owner, &["folder", "network", "off", "--center", "lab"]);
     assert!(ok, "{said}");
     assert_eq!(
         said.contains("warning: the owner turned the network off"),
-        !net_rules,
+        !filter,
         "{said}"
     );
     let (_, ls) = as_owner(&owner, &["folder", "ls", "--center", "lab"]);
-    assert!(
-        ls.contains("its folder-mode commands have no network"),
-        "{ls}"
-    );
-    let mut refused = Err(String::new());
+    assert!(ls.contains("its commands have no network"), "{ls}");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let udp_port = udp.local_addr().unwrap().port();
+    let tcp = format!("/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}' && echo open");
+    let send = format!("/bin/bash -c 'exec 3<>/dev/udp/127.0.0.1/{udp_port}' && echo open");
+    let opened = |r: &Result<Value, String>| {
+        r.as_ref()
+            .is_ok_and(|v| out(v) == "open\n" && v["exit_code"] == 0)
+    };
+    // The node reads the owner's change a moment later.
+    let mut first = Err(String::new());
     for _ in 0..50 {
         let (_, work, conn, _) = &mut links[0];
-        refused = run(conn, work, "echo ran").await;
-        if refused.is_err() || net_rules {
+        first = run(conn, work, &tcp).await;
+        if !opened(&first) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    if net_rules {
-        assert_eq!(out(&refused.unwrap()), "ran\n");
-    } else {
-        let e = refused.unwrap_err();
+    if filter {
+        assert!(first.is_ok() && !opened(&first), "{first:?}");
+        let (_, work, conn, _) = &mut links[0];
+        let r = run(conn, work, &send).await;
+        assert!(r.is_ok() && !opened(&r), "{r:?}");
+        let r = run(conn, work, "echo ran").await.unwrap();
+        assert_eq!(out(&r), "ran\n");
+        let e = run(conn, work, "sudo id -un").await.unwrap_err();
         assert!(
-            e.contains("cannot keep them off it") && e.contains("Landlock's network rules"),
+            e.contains("a command on the sudo list runs outside what keeps them off it"),
+            "{e}"
+        );
+    } else {
+        let e = first.unwrap_err();
+        assert!(
+            e.contains("cannot keep them off it") && e.contains("seccomp filters"),
             "{e}"
         );
     }
     let (_, work, conn, _) = &mut links[1];
+    for probe in [&tcp, &send] {
+        let r = run(conn, work, probe).await;
+        assert!(opened(&r), "{probe}: {r:?}");
+    }
     let r = run(conn, work, "echo ran").await.unwrap();
     assert_eq!(out(&r), "ran\n");
+    let r = run(conn, work, "sudo id -un").await.unwrap();
+    assert_eq!(out(&r), "root\n", "{r}");
+    drop((listener, udp));
 
     // The pairing goes, and its folders with what they hold; the other's
     // stay.

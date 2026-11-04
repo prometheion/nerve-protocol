@@ -256,9 +256,13 @@ switches are on [Capabilities](#capabilities).
 On **Permissions**, the **Mode** names who runs the commands: in folder
 mode `nerve-run`, in user mode you; in allowlist mode **Run them as you**
 switches between `nerve-run` and you (`mode set allowlist --as-owner`). In
-folder mode **No network for its commands** keeps them off the network
-(`folder network off`); on a machine without Landlock's network rules the
-page then says that folder mode runs none of that center's commands.
+every mode **No network for its commands** keeps them off the network
+(`folder network off`); in a mode where they run as you, or on a machine
+where the node cannot keep them off it, the page then says that none of
+that center's commands runs, and it says that no command of its sudo list
+runs meanwhile. On **Centers**, a banner says when nothing keeps the
+pairings apart: the installed Linux node without Landlock, with two or more
+pairings whose commands run as `nerve-run`.
 Where root is the node's owner ([service](service.md#root-as-the-owner)),
 the Overview says so, user mode and the chip say **as root**, and the mode
 shows **Its commands run as root** while they do. On **Centers**, a center's

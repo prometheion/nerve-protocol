@@ -120,9 +120,9 @@ and nothing more.
 
 | Page | Does |
 |---|---|
-| **Overview** | Status, the centers and their links, the root-as-owner warning, **Panic** and **Unlock** |
+| **Overview** | Status, the centers and their links, the root-as-owner warning, the warning that nothing keeps the pairings apart (the installed node without Landlock, with two or more pairings as `nerve-run`; on **Centers** too), **Panic** and **Unlock** |
 | **Centers** | Pair from a pasted link (it goes to the node as the command's input, never in a command line), pause and resume, the settings grant, a new key, remove |
-| **Permissions** | Mode (also for some hours, and as the owner), in folder mode **No network for its commands** (`folder network off`), folders (a whole path), allow, deny and sudo rules, the guard, sudo off |
+| **Permissions** | Mode (also for some hours, and as the owner), **No network for its commands** (`folder network off`, in every mode), folders (a whole path), allow, deny and sudo rules, the guard, sudo off |
 | **Audit** | What the node allowed and refused, refused only, Live; **Allow**, **Allow as wildcard** and **Deny** show the rule each one stores, made by the same code as `rule add`, and the list it goes to (the sudo list for a sudo command), with hidden characters written out; a wildcard is wider than the entry (`python3 *` for a `python3` call, the whole folder for a file), and the preview says so |
 | **Log** | Problems only, Live, clear |
 | **Capabilities** | A center's switches (on, off, hidden), your own capabilities (add, edit and remove, with the same checks as the desktop app's form), the programs that may add capabilities |

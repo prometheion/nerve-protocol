@@ -59,10 +59,10 @@ No grant lets a center change:
 - the release of a [protected path](protected-paths.md). A center may add paths
   to protect, never remove one, and its folders cannot open a protected place
   that yours do not
-- the network of its `folder` mode commands once you turned it off
-  ([no network](modes.md#no-network-for-folder-mode-commands)): a center may
-  turn its own off, never on again, and while it is off it cannot change its
-  mode or its time limit (the switch holds in `folder` mode only)
+- the network of its commands once you turned it off
+  ([no network](modes.md#no-network-for-a-centers-commands)): a center may
+  turn its own off, never on again; it may change its mode meanwhile, as the
+  switch holds in every mode
 - the audit log
 - the programs that may add capabilities ([providers](providers.md))
 - turning on a [program's capability](providers.md) or a

@@ -535,7 +535,7 @@ old_pin = { pin = "<pin>", until_ms = 1790000000000 }  # after the center rotate
 [center.policy]
 mode = "folder"             # allowlist | folder | user (a new pairing: folder; a file without it: allowlist)
 as_owner = false            # allowlist only: its commands run as the owner, not as nerve-run
-no_network = false          # folder only: its commands get no TCP; only the owner sets it false again
+no_network = false          # every mode: its commands get no socket but unix ones; only the owner sets it false again
 until = 1790000000000  # optional, folder and user: ms since the epoch; then allowlist
 folders = [{ path = "/home/u/proj", access = "rwx" }]  # folder mode; r w x in any mix, "" for none
 places = ["/home/u/proj"]  # folders `folder add` recorded at their real place; the owner's, a center's write keeps it
@@ -1212,25 +1212,33 @@ grant or not.
   sets: a folder that holds one is granted as its other entries, level by
   level down to it, so the command can neither list those levels nor make
   new entries right in them.
-- **`no_network`** (folder mode only, #167): the pairing's `exec.run`
-  commands and the config capabilities it calls get Landlock's network
-  rules with no rule that allows anything (`AccessNet` `BindTcp` and
-  `ConnectTcp`, ABI 4, as a hard requirement in the shim): no TCP
-  connection, no listening TCP port. Where the node cannot hold that
-  (`Shared::network_held`: Landlock ABI 4 or later and the shim's host;
-  never on Windows) a folder-mode command of that pairing is refused with
-  `daemon::NETWORK_NOT_HELD` (through the gate's `unconfined`, so it is
-  audited; a config capability of any effect after the gate), its
-  descriptor offers no command (`confined` false, no `x`), and the access
-  block carries `no_network` either way. A sudo command, a program's action
-  and the other modes are not held by it. The owner sets it (`folder
-  network off|on`, the app, the node web UI); a center's settings may set
-  it, never clear it (`policy.no_network: only the owner can let the
-  commands back on the network`); while it is on, a center's settings also
-  cannot change `mode` or `until`, except into folder mode for good (no
-  `until`), so the switch cannot be shed by leaving folder mode
-  (`settings::client_only`). `status` has each center's `no_network`
-  and the machine's `network_rules`.
+- **`no_network`** (every mode, #167): the pairing's `exec.run` commands
+  and the config capabilities it calls run under the node's seccomp filter
+  (`nerve_sandbox::net_filter`, Linux x86_64 and aarch64, put on last in
+  the child after the account switch and `no_new_privs`): `socket` and
+  `socketpair` of every domain but `AF_UNIX` fail with `EACCES`, the
+  io_uring calls with `ENOSYS`, a call of another architecture ends the
+  process. Landlock's network rules (`BindTcp`, `ConnectTcp`, ABI 4) are a
+  second layer, best effort, and from ABI 9 `ResolveUnix` limits unix
+  sockets by path to the pairing's own and granted folders and
+  `nerve_sandbox::kept_sockets` (the system bus, `/dev/log`,
+  systemd-resolved's and nscd's sockets), never the shared `/tmp` and
+  `/var/tmp` of `nerve-run`. The switch holds where the commands are apart
+  from the owner's (`Shared::network_apart`: as `nerve-run`, or folder mode
+  under the sandbox on a node run by hand); where they run as the owner
+  (user mode, allowlist mode as the owner, allowlist mode run by hand) a
+  command is refused with `daemon::NETWORK_AS_OWNER`, and where the node
+  has no filter (`Shared::network_held`; never on Windows) with
+  `daemon::NETWORK_NOT_HELD`; a sudo command with `daemon::NETWORK_SUDO`.
+  All are audited `forbidden`. A config capability runs as `nerve-run` in
+  every mode, so it is refused only where the filter is missing. The
+  descriptor's access block carries `no_network` (`held`, `as_owner`,
+  `not_held`) in every mode, and no `sudo` while it is on. A program's
+  action is not held by it. The owner sets it (`folder network off|on`, the
+  app, the node web UI); a center's settings may set it, never clear it
+  (`policy.no_network: only the owner can let the commands back on the
+  network`); the mode stays the center's to change. `status` has each
+  center's `no_network` and the machine's `network_rules` (the filter).
 - **user**: full access as the user, protected paths aside. `allow` rules
   do not count.
 

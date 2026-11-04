@@ -347,10 +347,12 @@ hold the network or what a command reaches through it:
   services on loopback (`127.0.0.1`) and your local network included, and
   listen on a port. What it may read it can send away.
 - Unix sockets by path: Landlock rules connecting to one only from ABI 9,
-  which the node does not ask for, so a command can connect to every socket
-  its account may write to by its modes, wherever it lies, not only in its
-  folders. On the installed node those are the sockets open to every account
-  (the system bus, a service's socket in `/run` with mode 0777) and every
+  and the node asks for that only for a center whose [network is
+  off](#no-network-for-a-centers-commands), so a command can connect to
+  every socket its account may write to by its modes, wherever it lies,
+  not only in its folders. On the installed node those are the sockets open
+  to every account (the system bus, a service's socket in `/run` with mode
+  0777) and every
   socket of `nerve-run`, other pairings' included: a program of one pairing
   that listens on a socket in its home or temporary folder (a credential
   cache, a key agent) can be reached by every other pairing's commands, so
@@ -360,46 +362,71 @@ hold the network or what a command reaches through it:
 - Below Landlock ABI 6, abstract unix sockets and signals to the other
   processes of its account ([versions](#landlock-versions)).
 
-### No network for folder mode commands
+### No network for a center's commands
 
-`nerve-node folder network off --center lab` keeps that center's `folder`
-mode commands off the network: they can make no TCP connection, to this
-machine or any other, and listen on no TCP port. It holds for `exec.run`
-and for the [capabilities of your `node.toml`](config-capabilities.md) that
-center calls, as both are commands of its pairing, and is stored as
-`no_network = true` in the center's policy in `node.toml`.
-`nerve-node folder network on` lets them on the network again; `folder ls`
-says when it is off. The app's and the node web UI's **Permissions** page
-have it as **No network for its commands**. The agent is told, in `list`,
-that its commands have no network. A center that may change its own
-settings ([settings grant](settings-grant.md)) can turn its own network
-off, never on again: only you can. While it is off, such a center cannot
-change its mode or its time limit either (it may only go into `folder` mode
-for good), since the switch holds in `folder` mode only. `folder network off`
-and `folder ls` say when the center is in another mode now.
+`nerve-node folder network off --center lab` keeps that center's commands
+off the network, in every mode: they can open no network socket, TCP, UDP,
+raw or of any other kind, to this machine or any other, only unix ones. It
+holds for `exec.run` and for the [capabilities of your
+`node.toml`](config-capabilities.md) that center calls, as both are
+commands of its pairing, and is stored as `no_network = true` in the
+center's policy in `node.toml`. `nerve-node folder network on` lets them on
+the network again; `folder ls` and `status` say when it is off. The app's
+and the node web UI's **Permissions** page have it as **No network for its
+commands**. The agent is told, in `list`, that its commands have no network.
+A center that may change its own settings ([settings grant](settings-grant.md))
+can turn its own network off, never on again: only you can. It may change
+its mode while it is off, as no mode escapes the switch.
 
-It needs Landlock's network rules, ABI 4 (Linux 6.7) or later. Where the
-kernel has none, or no Landlock at all, or on Windows, the node cannot hold
-a command to it, so while the switch is off it runs none of that center's
-`folder` mode commands and says why (`the owner turned the network off for
-this center's folder-mode commands, and this machine cannot keep them off
-it: …`); `folder network off` warns of that there, and the agent is
-offered no command.
+What holds it is a seccomp filter of the node's own, on Linux on x86_64 and
+aarch64: a command under it gets "permission denied" for every socket but a
+unix one, and its io_uring calls fail too (a program then makes plain calls).
+It needs no Landlock, so it holds on kernels without Landlock as well. Where
+Landlock has its network rules (ABI 4, Linux 6.7), they shut TCP once more
+under it. Where the node cannot set the filter (another architecture, a
+kernel without seccomp filters), or on Windows, it cannot hold a command to
+it, so while the switch is off it runs none of that center's commands and
+says why (`the owner turned the network off for this center's commands, and
+this machine cannot keep them off it: …`); `folder network off` warns of
+that there, and the agent is offered no command.
+
+The switch holds where the center's commands run as `nerve-run` (on the
+installed Linux node: `folder` mode, and `allowlist` mode without
+`--as-owner`), and in `folder` mode on a node you run yourself, under the
+sandbox. Where they run as you with nothing around them (`user` mode,
+`allowlist` mode with `--as-owner`, and `allowlist` mode on a node you run
+yourself), your own programs would reach the network for them (your
+session's service manager, a key agent), so while the switch is off the
+node runs none of them and says why (`… in this mode they run as the owner,
+which nothing keeps off the network, so the node runs none of them …`).
+`folder network off` and `folder ls` say when the center is in such a mode
+now. Nor does any command on your [sudo list](sudo.md) run for that center
+while it is off: it would run outside the filter, with full rights
+(`… a command on the sudo list runs outside what keeps them off it …`).
+`list` tells the agent both.
+
+With Landlock ABI 9 (Linux 7.1) or later, a command whose network is off
+reaches a unix socket by its path only in its pairing's own and granted
+folders and at these places of the system: the system bus (where
+`DBUS_SYSTEM_BUS_ADDRESS` puts it, else `/run/dbus/system_bus_socket`), the
+system log (`/dev/log`), and the sockets of systemd-resolved and nscd,
+which look up names and accounts. Not one in the node's own folders or
+another pairing's, nor, on the installed node, one in `/tmp` and
+`/var/tmp`, which every account shares. Abstract unix sockets are closed to
+it from ABI 6 (Linux 6.12).
 
 What it does not cover:
 
-- UDP, raw and the other kinds of socket that are not TCP: Landlock has
-  no rules for them, so a command can still send DNS queries and other UDP
-  packets.
-- Unix sockets by path, wherever they lie (see [above](#what-it-does-not-stop-linux)),
-  and abstract unix sockets, which only Landlock ABI 6 (Linux 6.12) closes.
-  Through a service that listens on one (a local proxy) a command can still
-  reach the network.
-- A command on your [sudo list](sudo.md), which runs outside the sandbox;
-  a program's action ([providers](providers.md)), which runs as you; and
-  every command of `allowlist` and `user` mode.
-- What the machine itself does for a command: a name lookup through a
-  local resolver socket, a proxy you set for its programs.
+- Below Landlock ABI 9, unix sockets by path, wherever they lie (see
+  [above](#what-it-does-not-stop-linux)), and below ABI 6 abstract ones as
+  well: through a program that listens on one (a local proxy, a session's
+  service manager) a command can still reach the network. Without Landlock
+  that is every socket its account may write to.
+- The sockets kept at every ABI: through the system bus a command can ask
+  the system's services, and a name lookup through systemd-resolved or nscd
+  still asks the name servers for it.
+- A socket another process hands to the command.
+- A program's action ([providers](providers.md)), which runs as you.
 
 ## The account `nerve-run` (Linux)
 
@@ -556,7 +583,10 @@ says `as nerve-run, without Landlock` (the app says **Without Landlock**). What 
 another's is then gone, as the account is one for all of them, the
 pairings' own homes and temporary folders included (they are 0700, which
 keeps out other accounts, not another pairing), and so is the narrower set
-Landlock gives (`w` without `r`, `x` without listing). A
+Landlock gives (`w` without `r`, `x` without listing). Once a second
+pairing's commands run as `nerve-run` there, `status`, `center add`, the
+pairing in `setup`, the app's **Centers** page and the node web UI warn of
+it (`warning: Without Landlock nothing keeps the pairings apart: …`). A
 node you run yourself refuses every `folder` mode command without Landlock,
 and a line `folder mode runs no command: …` says why.
 
@@ -569,9 +599,10 @@ Each kernel version adds guards to Landlock (its ABI). The node asks for ABI
 |---|---|---|
 | 1, 2 | 5.13, 5.19 | Files and folders. These do not guard truncating a file (`truncate`), so a command can cut any file it may write outside its folders to nothing. A node you run yourself takes them as no Landlock and runs no `folder` mode command; the installed node uses them |
 | 3 | 6.2 | Truncating files: from here on a node you run yourself uses Landlock |
-| 4 | 6.7 | Network rules: TCP connections and listening ports, which the node shuts only for a center whose network you turned off ([no network](#no-network-for-folder-mode-commands)) |
+| 4 | 6.7 | Network rules: TCP connections and listening ports, which the node shuts for a center whose network you turned off, under its own filter ([no network](#no-network-for-a-centers-commands)) |
 | 5 | 6.10 | Device ioctls |
 | 6 | 6.12 | Signals to other processes and abstract unix sockets: the commands of the installed node's pairings, all of `nerve-run`, are kept apart from each other only from here on |
+| 9 | 7.1 | Unix sockets by path, which the node shuts for a center whose network you turned off, but those in its folders and the system's ([no network](#no-network-for-a-centers-commands)) |
 
 Below ABI 6 a command can still signal other processes of its account, reach
 abstract unix sockets and (below 5) send ioctls to the devices it may open.
@@ -870,7 +901,7 @@ planned.
   can listen on a port (checked). Whether another machine gets through to it
   is the Windows Firewall's say: with the firewall on and no rule for the
   port it did not, with a rule for the port it did (checked). The node adds
-  no firewall rule (code). The [network switch](#no-network-for-folder-mode-commands)
+  no firewall rule (code). The [network switch](#no-network-for-a-centers-commands)
   has no rule to hold here: with a center's network off, Windows runs none
   of its `folder` mode commands.
 - **The environment.** The command starts with the node's environment: the node

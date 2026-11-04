@@ -179,9 +179,14 @@ the `result` of the envelope described below.
   be shown on one line`); with none of either, `Folders: none granted yet`,
   which with `sudo` adds that a command on the sudo list still runs, as
   the node sends `sudo` only while its sudo switch is on and `exec.run` is
-  callable); with `no_network`, after the folders a line `Network: none
-  for its commands, the owner turned it off (no TCP connection, no
-  listening TCP port).`; with `reads_by_account`, before the folders a line `Reads: in
+  callable); with `no_network`, after the folders (in every mode) a line
+  by its value: `held` `Network: none for its commands, the owner turned it
+  off (no socket but unix ones; no command of the sudo list runs
+  meanwhile).`, `as_owner` `Network: the owner turned it off for its
+  commands, and they run as the owner in this mode, where nothing keeps
+  them off it: none of them runs.`, `not_held` `Network: the owner turned it
+  off for its commands, and this machine cannot keep them off it: none of
+  them runs.`; with `reads_by_account`, before the folders a line `Reads: in
   the folders marked r, and outside every folder what is open to every
   account on the machine; writes and commands keep to the folders.`, and with no folder `Folders:
   none granted yet` names writes, not file calls, as refused; a
@@ -239,9 +244,12 @@ the `result` of the envelope described below.
   `confined` the machine's sandbox holds what a command reaches to these
   folders (and the system's files), without it the machine does not and
   a command reaches what its account may reach; `exec.run`'s advice says,
-  with `no_network`, that its commands have no
-  network, as the owner turned it off, so they can open no TCP connection
-  and listen on no TCP port; with `sudo`, a command on
+  with `no_network` (in every mode), that its commands have no network, as
+  the owner turned it off, so they can open no network socket, only unix
+  ones, and a command on the owner's sudo list does not run meanwhile
+  (`held`), or that none of them runs, as in this mode they run as the
+  owner (`as_owner`) or the machine cannot keep them off it (`not_held`);
+  with `sudo`, a command on
   the owner's sudo list runs by that list alone, with full rights, in any
   folder and beyond the folders and the sandbox; a folder marked as having
   folders below it that allow less holds folders, not named, that allow
