@@ -3118,6 +3118,24 @@ impl Link {
             .get("command")
             .and_then(Value::as_str)
             .is_some_and(|c| nerve_policy::sudo_command(c).is_some());
+        // The owner's network switch holds every command of the pairing, in
+        // every mode. Where the node cannot hold one to it (it would run as
+        // the owner, or the machine has no filter), none runs; nor does a
+        // command on the sudo list, which runs outside the filter.
+        let off_net = self.shared.network_refusal(&entry.policy).or_else(|| {
+            (sudo_call && entry.policy.no_network).then_some(crate::daemon::NETWORK_SUDO)
+        });
+        if let Some(why) = off_net {
+            let target = inv.args.get("command").and_then(Value::as_str);
+            self.audit(
+                inv,
+                target.unwrap_or_default(),
+                "forbidden",
+                Some("forbidden"),
+                Some(why),
+            );
+            return Err(RpcError::forbidden(why));
+        }
         let as_root = sudo_call && cfg!(target_os = "linux") && self.shared.separate(&entry.policy);
         let account = if as_root {
             Ok(Some(root_account()))
@@ -3210,12 +3228,7 @@ impl Link {
         // judged. A command of `nerve-run` is confined in every mode.
         let by_folders = entry.policy.mode_at(crate::now_ms()) == Mode::Folder;
         let separate = self.shared.separate(&entry.policy) && !sudo_call;
-        // Where the owner turned the pairing's network off and the machine
-        // cannot hold that, folder mode runs none of its commands.
-        let unconfined = self
-            .shared
-            .unconfined_as(cfg, || known.clone())
-            .or_else(|| self.shared.network_refusal(&entry.policy));
+        let unconfined = self.shared.unconfined_as(cfg, || known.clone());
         // Its refusal names the `cwd` given as given, as a program's paths
         // are; the default one the center did not name.
         let named: Vec<(String, String)> = inv
@@ -3301,16 +3314,15 @@ impl Link {
                 }
                 _ => exec::landlock_spec(&entry.policy, &home, &own, &writable),
             };
-            // The owner's switch, Landlock's layer of it: no TCP for a
-            // folder-mode command, where the kernel has the rules.
-            spec.no_network = folder && entry.policy.no_network;
+            // The owner's switch, Landlock's layer of it: no TCP, where the
+            // kernel has the rules.
+            spec.no_network = entry.policy.no_network;
             spec
         });
-        // The owner's switch: a folder-mode command makes no socket but a
-        // unix one, held by the node's filter. It runs only where the node
-        // has the filter (the gate took `unconfined` with the network
-        // refusal in).
-        let no_network = folder && entry.policy.no_network;
+        // The owner's switch: the command makes no socket but a unix one,
+        // held by the node's filter, in every mode. It got here only where
+        // the filter holds it (refused above otherwise).
+        let no_network = entry.policy.no_network;
         // Counted while it runs, so the keys do not move into the keyring
         // meanwhile, and not started when they moved after `cfg` was taken.
         let open = crate::daemon::reaches_bus(landlock.as_ref(), || account.clone())
@@ -3421,12 +3433,16 @@ impl Link {
         // command as it runs, the call's values in it, holds the owner's own
         // words and stays in the node's own log.
         let ran = nerve_policy::config::ConfigCapability::line(&argv);
-        // A command of a folder-mode pairing whose network the owner turned
-        // off runs only where the machine can hold it to that, whatever its
-        // effect.
-        let off_net = self.shared.network_refusal(&entry.policy);
+        // A capability of the config is a command of `nerve-run` in every
+        // mode: where the owner turned the pairing's network off, it runs
+        // only where the machine can hold it to that, whatever its effect.
+        if entry.policy.no_network && !self.shared.network_held() {
+            let why = crate::daemon::NETWORK_NOT_HELD;
+            self.audit(inv, &target, "forbidden", Some("forbidden"), Some(why));
+            return Err(RpcError::forbidden(why));
+        }
         let unconfined = (effect == Effect::Execute)
-            .then(|| self.shared.unconfined_as(cfg, || known.clone()).or(off_net))
+            .then(|| self.shared.unconfined_as(cfg, || known.clone()))
             .flatten();
         self.gate(
             &entry,
@@ -3443,9 +3459,6 @@ impl Link {
         )
         .await
         .map_err(|e| as_given(e, &named))?;
-        if let Some(why) = off_net {
-            return Err(RpcError::forbidden(why));
-        }
         // A missing account stops the call once it is decided and audited.
         let account = runs_as.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
         // Only the installed Linux node has `nerve-run`, and only it offers
@@ -3475,9 +3488,8 @@ impl Link {
         let home = self.shared.rules_home(cfg);
         let own = self.shared.own(cfg);
         // Held off the network like the pairing's commands, by the node's
-        // filter (refused above where it has none).
-        let no_network =
-            entry.policy.no_network && entry.policy.mode_at(crate::now_ms()) == Mode::Folder;
+        // filter, in every mode (refused above where it has none).
+        let no_network = entry.policy.no_network;
         let landlock = (self.shared.exe.is_some()
             && self.shared.confinement.landlock_abi.is_some())
         .then(|| {

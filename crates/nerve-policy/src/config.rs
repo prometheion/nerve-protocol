@@ -1029,10 +1029,12 @@ pub struct CenterPolicy {
     /// folders' sandbox ([`CenterPolicy::runs_as_owner`]).
     #[serde(default, skip_serializing_if = "is_false")]
     pub as_owner: bool,
-    /// `folder` mode only: its commands get no network (no TCP connection
-    /// or listening port), held by Landlock's network rules; a node that
-    /// cannot hold them runs none of that pairing's folder-mode commands.
-    /// Only the owner turns it off again.
+    /// In every mode: its commands get no network (no socket but a unix
+    /// one), held by the node's seccomp filter where they run apart from the
+    /// owner (as `nerve-run`, or in folder mode under the sandbox); where
+    /// they would run as the owner, or the node has no filter, none of them
+    /// runs, and no command of the sudo list runs while it is on. Only the
+    /// owner turns it off again.
     #[serde(default, skip_serializing_if = "is_false")]
     pub no_network: bool,
     /// `cap` or `cap.action` → setting; `cap.action` wins over `cap`.

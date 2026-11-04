@@ -154,8 +154,8 @@ impl Ctl {
         self.perm_change(args, None, said, |_| {}, |c, e| c.toast(e, Tone::Danger));
     }
 
-    /// The center's folder-mode commands off the network
-    /// (`folder network off`), or on it again.
+    /// The center's commands off the network (`folder network off`), or on
+    /// it again.
     fn no_network_set(self: &Rc<Self>, off: bool) {
         let center = self.perm_center();
         let args = vec![
@@ -164,9 +164,9 @@ impl Ctl {
             if off { "off" } else { "on" }.into(),
         ];
         let said = if off {
-            format!("{center}'s folder-mode commands have no network.")
+            format!("{center}'s commands have no network.")
         } else {
-            format!("{center}'s folder-mode commands may use the network.")
+            format!("{center}'s commands may use the network.")
         };
         self.perm_change(args, None, said, |_| {}, |c, e| c.toast(e, Tone::Danger));
     }

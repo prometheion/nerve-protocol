@@ -18,7 +18,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use nerve_proto::descriptor::{
-    Access, AccessMode, Exposure, FolderAccess, bad_member_name, plain_line,
+    Access, AccessMode, Exposure, FolderAccess, NetworkOff, bad_member_name, plain_line,
 };
 use nerve_proto::schema::{self, Role};
 use nerve_proto::{Descriptor, Effect, UnitKind};
@@ -68,10 +68,10 @@ pub struct Reach {
     /// as far as that account may read ([`Access::reads_by_account`]).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub reads_by_account: bool,
-    /// In folder mode the owner turned the network off for this center's
-    /// commands ([`Access::no_network`]).
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub no_network: bool,
+    /// In every mode: the owner turned the network off for this center's
+    /// commands, and how that stands ([`Access::no_network`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_network: Option<NetworkOff>,
     pub folders: Vec<FolderAccess>,
     /// The folders past [`FOLDERS_MAX`], not named.
     pub more_folders: usize,
@@ -236,8 +236,37 @@ impl Reach {
         self.advice_on(true, true)
     }
 
+    /// What the advice of a command says of the owner's network switch, in
+    /// every mode: that its commands have no network, or why none of them
+    /// runs.
+    fn network_advice(&self) -> Option<&'static str> {
+        Some(match self.no_network? {
+            NetworkOff::Held => {
+                "Its commands have no network: the owner turned it off, so they can open no \
+                 network socket, only unix ones, and a command on the owner's sudo list does not \
+                 run while it is off."
+            }
+            NetworkOff::AsOwner => {
+                "Its commands do not run: the owner turned their network off, and in this mode \
+                 they run as the owner, which nothing keeps off it. They run again once the owner \
+                 turns the network back on, or has them run as the node's own account (folder \
+                 mode, or allowlist mode not as the owner)."
+            }
+            NetworkOff::NotHeld => {
+                "Its commands do not run: the owner turned their network off, and this machine \
+                 cannot keep them off it. They run again once the owner turns the network back \
+                 on."
+            }
+        })
+    }
+
     fn advice_on(&self, files: bool, commands: bool) -> Option<String> {
-        self.note()?;
+        // Outside folder mode a command's advice is the network switch's
+        // alone, where it is on.
+        let network = self.network_advice().filter(|_| commands);
+        if self.note().is_none() {
+            return network.map(Into::into);
+        }
         // Where the node reads as the command account, the folders hold
         // only what a call writes, where a command starts and what a call
         // that is no read reads; outside them a read reads what every
@@ -346,13 +375,11 @@ impl Reach {
                  runs commands, they reach what the account they run as may reach."
             });
         }
-        // Only a command is held off the network; a sudo command, by the
-        // sentence after, by nothing.
-        if commands && self.no_network {
-            out.push_str(
-                " Its commands have no network: the owner turned it off, so they can open no TCP \
-                 connection and listen on no TCP port.",
-            );
+        // Only a command is held off the network; a sudo command does not
+        // run meanwhile.
+        if let Some(n) = network {
+            out.push(' ');
+            out.push_str(n);
         }
         if commands && self.sudo {
             out.push_str(

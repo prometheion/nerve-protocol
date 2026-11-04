@@ -37,7 +37,7 @@
         "confined": {"type": "boolean"},
         "sudo": {"type": "boolean", "default": false},
         "reads_by_account": {"type": "boolean", "default": false},
-        "no_network": {"type": "boolean", "default": false},
+        "no_network": {"enum": ["held", "as_owner", "not_held"]},
         "unnamed": {"type": "integer", "minimum": 0, "default": 0},
         "folders": {
           "type": "array",

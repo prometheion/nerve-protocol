@@ -224,6 +224,33 @@ impl AccessMode {
     }
 }
 
+/// How the owner's network switch for a center's commands stands
+/// ([`Access::no_network`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkOff {
+    /// Its commands run, and open no socket but a unix one; a command on
+    /// the sudo list does not run while it is off.
+    Held,
+    /// Its commands run as the owner in this mode, which nothing keeps off
+    /// the network: the node runs none of them.
+    AsOwner,
+    /// This machine cannot keep a command off the network: the node runs
+    /// none of them (in `folder` mode `confined` is false and no folder is
+    /// marked `x`).
+    NotHeld,
+}
+
+impl NetworkOff {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NetworkOff::Held => "held",
+            NetworkOff::AsOwner => "as_owner",
+            NetworkOff::NotHeld => "not_held",
+        }
+    }
+}
+
 /// What one center may do on the node now, for that center only: its mode,
 /// until when, the account its commands run as, and in `folder` mode the
 /// folders it may use. No other center's grants are in it.
@@ -262,13 +289,11 @@ pub struct Access {
     /// the node's own files stay closed either way.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reads_by_account: bool,
-    /// In `folder` mode: the owner turned the network off for this
-    /// center's commands. They can make no TCP connection and listen on no
-    /// TCP port; other kinds of socket are not ruled by it. Where the node
-    /// cannot hold a command to that it runs none (`confined` is false and
-    /// no folder is marked `x`).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub no_network: bool,
+    /// In every mode: the owner turned the network off for this center's
+    /// commands, and how that stands ([`NetworkOff`]). Absent while the
+    /// network is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_network: Option<NetworkOff>,
     /// In `folder` mode: the folders the center's file calls and commands
     /// may use. Only folder mode names them: in `allowlist` mode as
     /// `nerve-run` they still hold the allowed commands, which this block
@@ -652,6 +677,14 @@ mod tests {
             .map(|m| json!(m.as_str()))
             .collect();
         assert_eq!(access["properties"]["mode"]["enum"], json!(modes));
+        let offs: Vec<Value> = [NetworkOff::Held, NetworkOff::AsOwner, NetworkOff::NotHeld]
+            .iter()
+            .map(|n| {
+                assert_eq!(serde_json::to_value(n).unwrap(), json!(n.as_str()));
+                json!(n.as_str())
+            })
+            .collect();
+        assert_eq!(access["properties"]["no_network"]["enum"], json!(offs));
         for m in &modes {
             let read: AccessMode = serde_json::from_value(m.clone()).unwrap();
             assert_eq!(json!(read.as_str()), *m);
@@ -668,7 +701,7 @@ mod tests {
             confined: true,
             sudo: true,
             reads_by_account: true,
-            no_network: true,
+            no_network: Some(NetworkOff::Held),
             folders: vec![FolderAccess {
                 path: "/a".into(),
                 access: "r".into(),

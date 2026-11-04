@@ -28,6 +28,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use nerve_proto::UnitKind;
+use nerve_proto::descriptor::NetworkOff;
 
 use crate::catalog::{self, Reach, Unit};
 use crate::store::NodeRecord;
@@ -591,12 +592,24 @@ fn reach_lines(r: Option<&Reach>) -> String {
                 r.folder_list()
             ));
         }
-        if r.no_network {
-            out.push_str(
-                "Network: none for its commands, the owner turned it off (no TCP connection, \
-                 no listening TCP port).\n",
-            );
-        }
+    }
+    // The owner's network switch holds the commands in every mode, or keeps
+    // them from running.
+    if let Some(n) = r.no_network {
+        out.push_str(match n {
+            NetworkOff::Held => {
+                "Network: none for its commands, the owner turned it off (no socket but unix \
+                 ones; no command of the sudo list runs meanwhile).\n"
+            }
+            NetworkOff::AsOwner => {
+                "Network: the owner turned it off for its commands, and they run as the owner in \
+                 this mode, where nothing keeps them off it: none of them runs.\n"
+            }
+            NetworkOff::NotHeld => {
+                "Network: the owner turned it off for its commands, and this machine cannot keep \
+                 them off it: none of them runs.\n"
+            }
+        });
     }
     out
 }
@@ -1215,36 +1228,81 @@ mod tests {
                                               "shared": true}]})
     }
 
-    /// Where the owner turned the network off for the center's folder-mode
-    /// commands, `list(node)` says so after the folders, and the details of
-    /// `exec.run` tell the model, not those of the file calls.
+    /// Where the owner turned the network off for the center's commands,
+    /// `list(node)` says so after the folders, in every mode: that they have
+    /// none, or why none of them runs; and the details of `exec.run` tell
+    /// the model, not those of the file calls.
     #[test]
     fn list_node_says_the_commands_have_no_network() {
-        let mut d = box_node().descriptor.unwrap();
-        let mut access = folder_access();
-        access["no_network"] = json!(true);
-        d.access = Some(serde_json::from_value(access).unwrap());
-        let node = record("box-1", Some(d));
-        let got = units(&offer(&node, true));
-        assert!(
-            got.text.contains(&format!(
-                "{FOLDERS}\nNetwork: none for its commands, the owner turned it off (no TCP \
-                 connection, no listening TCP port).\n"
-            )),
-            "{}",
-            got.text
-        );
-        assert_eq!(got.data["result"]["access"]["no_network"], true);
-        let said = " Its commands have no network: the owner turned it off, so they can open no \
-                    TCP connection and listen on no TCP port.";
-        let o = offer(&node, true);
-        let run = details(&o, &["exec.run".into()]);
-        assert!(run.text.contains(said), "{}", run.text);
-        let read = details(&o, &["fs.read".into()]);
-        assert!(!read.text.contains("no network"), "{}", read.text);
+        let held = "Network: none for its commands, the owner turned it off (no socket but unix \
+                    ones; no command of the sudo list runs meanwhile).\n";
+        let said_held = " Its commands have no network: the owner turned it off, so they can open \
+                         no network socket, only unix ones, and a command on the owner's sudo \
+                         list does not run while it is off.";
+        let as_owner = "Network: the owner turned it off for its commands, and they run as the \
+                        owner in this mode, where nothing keeps them off it: none of them runs.\n";
+        let said_as_owner = "Its commands do not run: the owner turned their network off, and in \
+                             this mode they run as the owner, which nothing keeps off it.";
+        let not_held = "Network: the owner turned it off for its commands, and this machine \
+                        cannot keep them off it: none of them runs.\n";
+        let said_not_held = "Its commands do not run: the owner turned their network off, and \
+                             this machine cannot keep them off it.";
+        let allowlist = json!({"mode": "allowlist", "account": "nerve-run"});
+        let user = json!({"mode": "user", "account": "me"});
+        for (access, off, line, said) in [
+            (
+                folder_access(),
+                NetworkOff::Held,
+                format!("{FOLDERS}\n{held}"),
+                said_held,
+            ),
+            (
+                allowlist.clone(),
+                NetworkOff::Held,
+                held.to_string(),
+                said_held.trim_start(),
+            ),
+            (
+                user,
+                NetworkOff::AsOwner,
+                as_owner.to_string(),
+                said_as_owner,
+            ),
+            (
+                allowlist,
+                NetworkOff::NotHeld,
+                not_held.to_string(),
+                said_not_held,
+            ),
+            (
+                folder_access(),
+                NetworkOff::NotHeld,
+                format!("{FOLDERS}\n{not_held}"),
+                said_not_held,
+            ),
+        ] {
+            let mut d = box_node().descriptor.unwrap();
+            let mut access = access;
+            access["no_network"] = json!(off.as_str());
+            d.access = Some(serde_json::from_value(access.clone()).unwrap());
+            let node = record("box-1", Some(d));
+            let got = units(&offer(&node, true));
+            assert!(got.text.contains(&line), "{access}: {}", got.text);
+            assert_eq!(got.data["result"]["access"]["no_network"], off.as_str());
+            let o = offer(&node, true);
+            let run = details(&o, &["exec.run".into()]);
+            assert!(run.text.contains(said), "{access}: {}", run.text);
+            let read = details(&o, &["fs.read".into()]);
+            assert!(!read.text.contains("network"), "{access}: {}", read.text);
+        }
         // Without it nothing is said.
         let got = units(&offer(&box_node(), true));
         assert!(!got.text.contains("Network:"), "{}", got.text);
+        let mut d = box_node().descriptor.unwrap();
+        d.access = Some(serde_json::from_value(json!({"mode": "user"})).unwrap());
+        let o = offer(&record("box-1", Some(d)), true);
+        let run = details(&o, &["exec.run".into()]);
+        assert!(!run.text.contains("network"), "{}", run.text);
     }
 
     /// Where the node reads as the command account, `list(node)` says that

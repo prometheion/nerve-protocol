@@ -887,17 +887,6 @@ fn client_only(
             "policy.no_network: only the owner can let the commands back on the network".into(),
         );
     }
-    // It holds in folder mode only, so leaving that mode, or setting it to
-    // run out, would let them back on it as well. Going into folder mode for
-    // good is fine.
-    let for_good = n.mode == crate::config::Mode::Folder && n.until.is_none();
-    if o.no_network && (n.mode != o.mode || n.until != o.until) && !for_good {
-        return Err(
-            "policy.mode: while the owner keeps this center's commands off the network, only the \
-             owner can change its mode or its time limit"
-                .into(),
-        );
-    }
     if n.protected.allow != o.protected.allow {
         // Releasing a protected path is the owner's call; adding more is fine.
         return Err("policy.protected.allow: only the owner can release protected paths".into());
@@ -1615,10 +1604,11 @@ mod tests {
         assert!(s.config().center("home").unwrap().policy.no_network);
     }
 
-    /// The switch holds in folder mode only: while it is on, a center may
-    /// go into folder mode for good, but not leave it or set it to run out.
+    /// The switch holds the commands in every mode, or keeps them from
+    /// running: while it is on, a center may change its mode and time limit
+    /// as before, and the switch stays on.
     #[test]
-    fn a_center_without_network_cannot_leave_folder_mode() {
+    fn a_center_without_network_may_change_its_mode() {
         let d = tempfile::tempdir().unwrap();
         let mut s = store(d.path(), SettingsGrant::Write);
         let set = |s: &mut SettingsStore, f: &dyn Fn(&mut Value)| {
@@ -1635,13 +1625,10 @@ mod tests {
             &|n: &mut Value| n["policy"]["until"] = json!(nerve_proto::msg::now_ms() + 3_600_000),
         ] as [&dyn Fn(&mut Value); 3]
         {
-            let e = set(&mut s, change);
-            assert!(
-                matches!(&e, Err(SetError::Forbidden(m)) if m.contains("policy.mode")),
-                "{e:?}"
-            );
+            set(&mut s, change).unwrap();
+            assert!(s.config().center("home").unwrap().policy.no_network);
         }
-        assert_eq!(s.config().center("home").unwrap().policy.mode, Mode::Folder);
+        assert_eq!(s.config().center("home").unwrap().policy.mode, Mode::User);
     }
 
     /// A folder at or inside a protected entry releases it, so adding one is

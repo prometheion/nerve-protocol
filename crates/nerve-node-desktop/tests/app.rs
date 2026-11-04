@@ -573,7 +573,7 @@ fn the_app_drives_the_cli_end_to_end() {
             ],
             "stale": ["/removed/folder", "/var/lib/nerve/state/acl.json"],
         });
-        ctl.show_status(Ok(st));
+        ctl.show_status(Ok(st.clone()));
         if cfg!(target_os = "linux") {
             assert!(perm.get_separate(), "{owner}");
             assert_eq!(perm.get_account(), "nerve-run");
@@ -593,6 +593,22 @@ fn the_app_drives_the_cli_end_to_end() {
             assert!(!perm.get_landlock());
             // Its network is off, which this machine cannot hold.
             assert!(perm.get_no_network() && !perm.get_network_rules());
+            // Its commands run as the owner in user mode and in allowlist
+            // mode as the owner, where none of them runs while the network
+            // is off; the page says so in every mode.
+            for (mode, as_owner, owner_runs) in [
+                ("folder", false, false),
+                ("allowlist", false, false),
+                ("allowlist", true, true),
+                ("user", false, true),
+            ] {
+                let mut st = st.clone();
+                st["centers"][0]["mode"] = serde_json::json!(mode);
+                st["centers"][0]["as_owner"] = serde_json::json!(as_owner);
+                ctl.show_status(Ok(st));
+                assert_eq!(perm.get_runs_as_owner(), owner_runs, "{mode} {as_owner}");
+            }
+            ctl.show_status(Ok(st.clone()));
             assert!(perm.get_home_warning().contains("mode 755"));
         } else {
             assert!(!perm.get_separate());

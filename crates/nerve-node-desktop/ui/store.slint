@@ -174,11 +174,13 @@ export global Perm {
     in-out property <bool> separate;
     in-out property <string> account;
     in-out property <bool> as-owner;
-    // The owner turned the network off for this center's folder-mode
-    // commands, and whether this machine can hold them to that (the node's
-    // seccomp filter); where it cannot, folder mode runs none of them.
+    // The owner turned the network off for this center's commands, and
+    // whether this machine can hold them to that (the node's seccomp
+    // filter); where it cannot, or they run as the owner in this mode, the
+    // node runs none of them.
     in-out property <bool> no-network;
     in-out property <bool> network-rules: true;
+    out property <bool> runs-as-owner: mode == "user" || (mode == "allowlist" && (as-owner || !separate));
     // Root is the owner (#151): what runs as the owner runs as root.
     in-out property <bool> owner-is-root;
     in-out property <string> built-in;

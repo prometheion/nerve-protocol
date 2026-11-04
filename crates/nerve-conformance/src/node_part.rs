@@ -963,10 +963,28 @@ fn check_access(v: &Value) -> Result<(), String> {
             format!("access unnamed {n} in {mode} mode"),
         )?;
     }
+    // The owner's network switch, in every mode: held where the commands
+    // run apart from the owner (never in user mode), refused as the owner's
+    // (never in folder mode, which never runs as the owner), or not held by
+    // the machine (then folder mode confines nothing). No sudo command runs
+    // while it is off.
     if let Some(n) = a.get("no_network") {
+        let n = n.as_str().unwrap_or_default();
         ensure(
-            n.as_bool().is_some_and(|n| !n || mode == "folder"),
+            matches!(n, "held" | "as_owner" | "not_held"),
+            format!("access no_network {:?}", a.get("no_network")),
+        )?;
+        ensure(
+            !(n == "held" && mode == "user" || n == "as_owner" && mode == "folder"),
             format!("access no_network {n} in {mode} mode"),
+        )?;
+        ensure(
+            a.get("sudo") != Some(&Value::Bool(true)),
+            "access sudo true while the network is off",
+        )?;
+        ensure(
+            n != "not_held" || a.get("confined") != Some(&Value::Bool(true)),
+            "access confined true while the node cannot keep the commands off the network",
         )?;
     }
     let folders = match a.get("folders") {
@@ -1142,7 +1160,7 @@ mod tests {
     fn the_access_block_must_be_well_formed() {
         let good = json!({"mode": "folder", "until_ms": 5, "account": "nerve-run",
                           "confined": true, "sudo": true, "reads_by_account": true,
-                          "unnamed": 2, "no_network": true,
+                          "unnamed": 2,
                           "folders": [{"path": "/home/me/proj", "access": "rw",
                                        "closed_below": true},
                                       {"path": "/c/Users/me", "access": "rwx"},
@@ -1154,8 +1172,19 @@ mod tests {
         check_descriptor(&d, "node-id", 1).unwrap();
         d["access"] = json!({"mode": "user", "account": "me"});
         check_descriptor(&d, "node-id", 1).unwrap();
+        for off in [
+            json!({"mode": "user", "no_network": "as_owner"}),
+            json!({"mode": "allowlist", "account": "nerve-run", "no_network": "held"}),
+            json!({"mode": "allowlist", "no_network": "not_held"}),
+            json!({"mode": "folder", "confined": true, "no_network": "held"}),
+            json!({"mode": "folder", "confined": false, "no_network": "not_held"}),
+        ] {
+            d["access"] = off;
+            check_descriptor(&d, "node-id", 1).unwrap();
+        }
+        d["access"] = good.clone();
         type Edit = fn(&mut Value);
-        let cases: [(Edit, &str); 29] = [
+        let cases: [(Edit, &str); 33] = [
             (|a| a["mode"] = json!("later"), "access mode"),
             (|a| a["until_ms"] = json!(-1), "access until_ms"),
             (|a| a["account"] = json!("me\nyou"), "access account"),
@@ -1200,20 +1229,38 @@ mod tests {
                     a["reads_by_account"] = json!(false);
                     a["unnamed"] = json!(0)
                 },
-                "access no_network true in user mode",
+                "access names folders in user mode",
+            ),
+            (
+                |a| a["no_network"] = json!(1),
+                "access no_network Some(Number(1))",
+            ),
+            (
+                |a| a["no_network"] = json!(true),
+                "access no_network Some(Bool(true))",
+            ),
+            (
+                |a| *a = json!({"mode": "user", "no_network": "held"}),
+                "access no_network held in user mode",
             ),
             (
                 |a| {
-                    a["mode"] = json!("user");
-                    a["confined"] = json!(false);
                     a["sudo"] = json!(false);
-                    a["reads_by_account"] = json!(false);
-                    a["unnamed"] = json!(0);
-                    a["no_network"] = json!(false)
+                    a["no_network"] = json!("as_owner")
                 },
-                "access names folders in user mode",
+                "access no_network as_owner in folder mode",
             ),
-            (|a| a["no_network"] = json!(1), "access no_network 1"),
+            (
+                |a| a["no_network"] = json!("held"),
+                "access sudo true while the network is off",
+            ),
+            (
+                |a| {
+                    a["sudo"] = json!(false);
+                    a["no_network"] = json!("not_held")
+                },
+                "access confined true while the node cannot keep the commands off the network",
+            ),
             (|a| a["sudo"] = json!("yes"), "access sudo"),
             (
                 |a| a["reads_by_account"] = json!("yes"),

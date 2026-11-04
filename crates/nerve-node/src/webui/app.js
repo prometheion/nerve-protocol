@@ -179,7 +179,7 @@ function pagePermissions() {
       state.permCenter = o.centers[i].name; state.perm = null; draw(true); loadPerm().then(() => draw(true)).catch((e) => notify(e.message, "error"));
     }) : null,
     section("Mode", entry.until ? `Until ${when(entry.until)}` : null, null, modeForm(c, entry)),
-    entry.mode === "folder" ? section("Network", "Whether its folder-mode commands may open TCP connections and listen on TCP ports.", null, networkForm(c, entry, o)) : null,
+    section("Network", "Whether its commands may open network sockets, in every mode.", null, networkForm(c, entry, o)),
     p ? foldersSection(c, p.folders.folders || []) : loading(),
     p ? rulesSection(c, p.rules) : null,
     p ? section("Sudo", "Turning sudo on is done at the CLI: sudo nerve-node sudo on.", null,
@@ -206,8 +206,14 @@ function networkForm(c, entry, o) {
   return el("div", { class: "card" },
     el("label", { class: "check" }, off, el("span", {}, "No network for its commands")),
     entry.no_network && o.network_rules === false
-      ? el("p", { class: "meta" }, "This machine cannot keep commands off the network (the node's seccomp filter cannot be used here), so folder mode runs none of this center's commands while this is on.")
+      ? el("p", { class: "meta" }, "This machine cannot keep commands off the network (the node's seccomp filter cannot be used here), so the node runs none of this center's commands while this is on.")
       : null,
+    // Its commands run as the owner in user mode and in allowlist mode as
+    // the owner, which nothing keeps off the network.
+    entry.no_network && o.network_rules !== false && (entry.mode === "user" || (entry.mode === "allowlist" && entry.account !== "nerve-run"))
+      ? el("p", { class: "meta" }, "In this mode its commands run as you, which nothing keeps off the network, so the node runs none of them while this is on. Folder mode, or allowlist mode as nerve-run, runs them.")
+      : null,
+    entry.no_network ? el("p", { class: "meta" }, "No command on the sudo list runs while this is on.") : null,
     el("div", { class: "actions" }, btn("Save", "primary", act(() => api("POST", "/api/network", { center: c, off: off.checked })), "check", `network:${c}:set`)));
 }
 

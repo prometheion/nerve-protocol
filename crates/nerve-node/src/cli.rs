@@ -504,9 +504,10 @@ pub enum FolderCmd {
     /// center again, also what was moved into them (the installed node on
     /// Linux): a pass over every granted folder.
     Sync,
-    /// Keep a center's folder-mode commands off the network, or let them on
-    /// it again: `off` refuses them every TCP connection and listening TCP
-    /// port (Landlock 4, Linux 6.7); a machine that cannot runs none of them.
+    /// Keep a center's commands off the network, or let them on it again:
+    /// `off` lets them open no socket but a unix one, in every mode, and no
+    /// sudo-list command runs; where they run as you (user mode, allowlist
+    /// --as-owner) or the machine cannot hold them, none of them runs.
     Network {
         /// `off` or `on`.
         state: String,
@@ -2329,7 +2330,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             if policy.no_network {
                 w(out, format!("{name}: {NO_NETWORK_LINE}"));
             }
-            if let Some(note) = network_mode_note(policy) {
+            if let Some(note) = network_mode_note(policy, crate::service::is_service_node(&paths)) {
                 w(out, note);
             }
             Ok(())
@@ -3390,11 +3391,12 @@ async fn set_mode(
 /// What `folder network off` and `folder ls` say of a center whose network
 /// is off.
 const NO_NETWORK_LINE: &str =
-    "its folder-mode commands have no network (no TCP connection, no listening TCP port)";
+    "its commands have no network (no socket but unix ones), and its sudo-list commands do not run";
 
-/// `folder network`: the pairing's network switch for its folder-mode
-/// commands (`policy.no_network`). Where this machine cannot hold them to
-/// it, the node runs none of them, and this says so.
+/// `folder network`: the pairing's network switch for its commands
+/// (`policy.no_network`), in every mode. Where this machine cannot hold
+/// them to it, or they run as the owner in the mode the pairing is in, the
+/// node runs none of them, and this says so.
 async fn set_network(
     paths: &NodePaths,
     state: &str,
@@ -3417,28 +3419,48 @@ async fn set_network(
         if off {
             NO_NETWORK_LINE
         } else {
-            "its folder-mode commands may use the network"
+            "its commands may use the network"
         }
     );
     if off && !network_rules_here() {
         let _ = writeln!(out, "warning: {}", crate::daemon::NETWORK_NOT_HELD);
     }
     let (cfg, _) = read_config(paths).await?;
-    if let Some(note) = cfg.center(&name).and_then(|c| network_mode_note(&c.policy)) {
+    let installed = crate::service::is_service_node(paths);
+    if let Some(note) = cfg
+        .center(&name)
+        .and_then(|c| network_mode_note(&c.policy, installed))
+    {
         let _ = writeln!(out, "{note}");
     }
     Ok(())
 }
 
-/// What `folder network off` and `folder ls` add where the center is not
-/// in folder mode now: the switch holds there only, and its commands keep
-/// the network in the other modes.
-fn network_mode_note(policy: &nerve_policy::config::CenterPolicy) -> Option<String> {
+/// What `folder network off` and `folder ls` add where the center's
+/// commands run as the owner in the mode it is in now: user mode, allowlist
+/// mode as the owner, and on a node run by hand every mode but folder mode
+/// (`installed` says which). The switch does not hold such a command, so
+/// the node runs none of them while it is on.
+fn network_mode_note(
+    policy: &nerve_policy::config::CenterPolicy,
+    installed: bool,
+) -> Option<String> {
     let mode = policy.mode_at(crate::now_ms());
-    (policy.no_network && mode != Mode::Folder).then(|| {
+    let as_owner = if installed {
+        policy.runs_as_owner(crate::now_ms())
+    } else {
+        mode != Mode::Folder
+    };
+    let whom = if policy.as_owner && mode == Mode::Allowlist {
+        " as you"
+    } else {
+        ""
+    };
+    (policy.no_network && as_owner).then(|| {
         format!(
-            "note: it is in {} mode now, where its commands keep the network; the switch holds \
-             in folder mode only",
+            "note: it is in {} mode{whom} now, where its commands run as you, so the node runs \
+             none of them while their network is off; folder mode, or allowlist mode without \
+             --as-owner, runs them as nerve-run on the installed node",
             mode.as_str()
         )
     })
@@ -6065,18 +6087,33 @@ mod tests {
         assert!(e.contains("unknown setting"), "{e}");
     }
 
-    /// `folder network off` keeps the center's folder-mode commands off the
-    /// network, `on` lets them on it again, `folder ls` says which, and a
-    /// machine without Landlock's network rules is warned of.
+    /// `folder network off` keeps the center's commands off the network,
+    /// `on` lets them on it again, `folder ls` says which, and a machine
+    /// without the node's network filter is warned of; so is a mode in
+    /// which the commands run as the owner, where none of them runs.
     #[test]
     fn folder_network_switches_the_folder_commands_network() {
         let (_d, paths) = setup(&["home"]);
         let policy = || load(&paths).centers[0].policy.clone();
-        // Outside folder mode it is said that the switch does not hold.
-        let note = "note: it is in allowlist mode now, where its commands keep the network";
+        // A node by hand runs allowlist commands as the owner.
+        let note = "note: it is in allowlist mode now, where its commands run as you, so the \
+                    node runs none of them while their network is off";
         let out = run(&paths, &["folder", "network", "off"]).unwrap();
         assert!(out.contains(note), "{out}");
         assert!(run(&paths, &["folder", "ls"]).unwrap().contains(note));
+        // The installed node runs them as nerve-run, unless as the owner.
+        let mut p = policy();
+        assert!(network_mode_note(&p, true).is_none());
+        p.as_owner = true;
+        assert!(
+            network_mode_note(&p, true).is_some_and(|n| n.contains("allowlist mode as you now")),
+            "{p:?}"
+        );
+        p.mode = Mode::User;
+        assert!(network_mode_note(&p, true).is_some_and(|n| n.contains("user mode now")));
+        p.mode = Mode::Folder;
+        assert!(network_mode_note(&p, true).is_none());
+        assert!(network_mode_note(&p, false).is_none());
         run(&paths, &["mode", "set", "folder"]).unwrap();
         let out = run(&paths, &["folder", "network", "off"]).unwrap();
         assert!(!out.contains("note:"), "{out}");
@@ -6090,7 +6127,7 @@ mod tests {
         assert!(ls.ends_with(&format!("home: {NO_NETWORK_LINE}\n")), "{ls}");
         let out = run(&paths, &["folder", "network", "on"]).unwrap();
         assert!(
-            out.starts_with("home: its folder-mode commands may use the network\n"),
+            out.starts_with("home: its commands may use the network\n"),
             "{out}"
         );
         assert!(!policy().no_network);

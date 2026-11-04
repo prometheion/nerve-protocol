@@ -30,10 +30,11 @@ command = ["/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/$0 && echo open", "{po
 params = '{"type": "object", "properties": {"port": {"type": "integer"}}, "required": ["port"]}'
 "#;
 
-/// Pairs with `center` as `lab` in folder mode, with `work` to run in and
-/// the network switch `off`, and starts the daemon as `confinement` and
+/// Pairs with `center` as `lab` in `mode`, with `work` to run in and the
+/// network switch `off`, and starts the daemon as `confinement` and
 /// `filter` say (`None`: the kernel's own).
-async fn node(
+async fn node_in(
+    mode: Mode,
     root: &Path,
     work: &Path,
     center: &FakeCenter,
@@ -58,8 +59,9 @@ async fn node(
         c.capabilities = NodeConfig::parse(PROBE).expect("a capability").capabilities;
         let p = &mut c.centers[0].policy;
         p.caps.insert("probe".into(), CapSetting::On);
-        p.mode = Mode::Folder;
+        p.mode = mode;
         p.no_network = off;
+        p.sudo_allow = vec!["sudo true".into()];
         p.folders = vec![Folder {
             path: work.display().to_string(),
             access: Access::ALL,
@@ -69,6 +71,18 @@ async fn node(
     .await
     .expect("the owner's edit");
     Daemon::start(o).await.expect("start")
+}
+
+/// [`node_in`] folder mode.
+async fn node(
+    root: &Path,
+    work: &Path,
+    center: &FakeCenter,
+    off: bool,
+    confinement: Option<nerve_sandbox::Confinement>,
+    filter: Option<bool>,
+) -> Daemon {
+    node_in(Mode::Folder, root, work, center, off, confinement, filter).await
 }
 
 async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
@@ -163,8 +177,8 @@ async fn a_folder_command_without_network_opens_no_tcp_connection() {
             .unwrap()
             .unwrap();
         assert_eq!(
-            d["access"].get("no_network").is_some_and(|v| v == true),
-            off,
+            d["access"].get("no_network"),
+            off.then(|| json!("held")).as_ref(),
             "{d}"
         );
         daemon.stop().await;
@@ -211,7 +225,7 @@ async fn a_node_that_cannot_keep_commands_off_the_network_runs_none() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(d["access"]["no_network"], true, "{d}");
+    assert_eq!(d["access"]["no_network"], "not_held", "{d}");
     assert_eq!(d["access"]["confined"], false, "{d}");
     let folders = d["access"]["folders"].as_array().unwrap();
     assert!(
@@ -220,5 +234,79 @@ async fn a_node_that_cannot_keep_commands_off_the_network_runs_none() {
             .all(|f| !f["access"].as_str().unwrap().contains('x')),
         "{d}"
     );
+    daemon.stop().await;
+}
+
+/// The switch holds in every mode, or keeps the commands from running: a
+/// node run by hand runs its allowlist and user mode commands as the owner,
+/// with nothing around them, so while the network is off it runs none of
+/// them and says why, and the descriptor says so; a capability of the
+/// config, which stands for `nerve-run` here, still runs, held. In folder
+/// mode no command of the sudo list runs while it is off.
+#[tokio::test(flavor = "multi_thread")]
+async fn commands_that_would_run_as_the_owner_do_not_run_without_network() {
+    if !nerve_sandbox::net_filter::available() || !Path::new("/bin/bash").exists() {
+        eprintln!("skipped: no seccomp filters or no bash here");
+        return;
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    for mode in [Mode::Allowlist, Mode::User] {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let mut center = FakeCenter::start(false).await.unwrap();
+        let daemon = node_in(mode, &root, &work, &center, true, None, None).await;
+        let mut conn = linked(&mut center).await;
+        let e = run(&mut conn, "echo ran", &work)
+            .await
+            .expect_err("refused");
+        assert!(
+            e.message.contains("in this mode they run as the owner")
+                && e.message.contains("nerve-node folder network on"),
+            "{mode:?}: {}",
+            e.message
+        );
+        let d = conn
+            .call("describe", json!({"detail": "full"}), WAIT)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(d["access"]["no_network"], "as_owner", "{mode:?}: {d}");
+        // A capability of the config is not run as the owner: it runs, held
+        // (in user mode, where no allow rule is needed), and its socket is
+        // refused.
+        if mode == Mode::User {
+            let e = invoke(&mut conn, "probe.connect", json!({"port": port}))
+                .await
+                .expect_err("no connection");
+            let stderr = e.data.as_ref().and_then(|d| d["stderr"].as_str());
+            assert!(
+                stderr.is_some_and(|t| t.contains("socket")),
+                "{mode:?}: {e:?}"
+            );
+        }
+        daemon.stop().await;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(d.path()).unwrap();
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let daemon = node(&root, &work, &center, true, None, None).await;
+    let mut conn = linked(&mut center).await;
+    let e = run(&mut conn, "sudo true", &work)
+        .await
+        .expect_err("refused");
+    assert!(
+        e.message
+            .contains("a command on the sudo list runs outside what keeps them off it"),
+        "{}",
+        e.message
+    );
+    // Another command still runs.
+    let r = run(&mut conn, "echo ran", &work).await.expect("runs");
+    assert_eq!(r["stdout"], "ran\n", "{r}");
     daemon.stop().await;
 }

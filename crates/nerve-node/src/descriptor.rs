@@ -9,7 +9,7 @@ use nerve_policy::config::{CapSetting, CenterPolicy, Folder, Mode, SettingsGrant
 use nerve_policy::{CenterEntry, Need, NodeConfig, PathArgs, effect_rule, rules};
 use nerve_proto::descriptor::{
     Access, AccessMode, Action, Capability, Descriptor, Direction, Effect, EventDecl, Exposure,
-    FolderAccess, NodeInfo, Software, StateDecl, StreamDecl, StreamKind,
+    FolderAccess, NetworkOff, NodeInfo, Software, StateDecl, StreamDecl, StreamKind,
 };
 use nerve_proto::schema::PathMark;
 
@@ -643,10 +643,12 @@ pub struct Reach {
     /// goes as far as that account may read ([`nerve_policy::decide::Reads`]).
     /// Set by the daemon.
     pub reads_by_account: bool,
-    /// The owner turned the network off for this center's folder-mode
-    /// commands ([`CenterPolicy::no_network`]); where the machine cannot
-    /// hold that, `confined` is false and folder mode offers no command.
-    pub no_network: bool,
+    /// The owner turned the network off for this center's commands
+    /// ([`CenterPolicy::no_network`]), and how that stands: held, or none
+    /// of them runs (where the machine cannot hold that, `confined` is false
+    /// and folder mode offers no command). Held by default; set by the
+    /// daemon ([`crate::daemon::Shared::network_off`]).
+    pub no_network: Option<NetworkOff>,
     /// The folders the owner granted this center.
     pub folders: Vec<Folder>,
     /// The built-in folders of `nerve-run` where its commands run as that
@@ -682,7 +684,7 @@ impl Reach {
                     entry.policy.cap_setting("exec", Some("run")),
                     Some(CapSetting::Hidden | CapSetting::Off)
                 ),
-            no_network: entry.policy.no_network,
+            no_network: entry.policy.no_network.then_some(NetworkOff::Held),
             folders: entry.policy.folders.clone(),
             own: own.map(crate::account::built_in).unwrap_or_default(),
         }
@@ -804,7 +806,9 @@ impl Reach {
             confined: folder && self.confined && !self.held_by_account,
             sudo: folder && self.sudo,
             reads_by_account: folder && self.reads_by_account,
-            no_network: folder && self.no_network,
+            // In every mode: the switch holds the commands in all of them,
+            // or keeps them from running.
+            no_network: self.no_network,
             folders: folders
                 .into_iter()
                 .zip(closed_below)
