@@ -313,7 +313,9 @@ sudo nerve-node uninstall --purge   # deletes them too
 ACL entry of `nerve-run` off your folders, gives what `nerve-run` made in
 them to you (not a file with more than one name, which may also lie
 outside them; it says how many it left), deletes what `nerve-run`'s commands
-left in `/tmp`, `/var/tmp` and `/dev/shm`, removes `nerve-run` with its home, the polkit files and the helper, the user `nerve` and
+left in `/tmp`, `/var/tmp` and `/dev/shm` (a folder there it does not look
+into, more than 64 levels deep or changed while it looked, is named, and what
+is in it stays), removes `nerve-run` with its home, the polkit files and the helper, the user `nerve` and
 `/usr/local/bin/nerve-node`. If an ACL entry cannot be taken off, it stops
 before it removes anything and says which: a uid nobody has must not keep
 them. A session that a keyring gave `nerve` is ended first. Without

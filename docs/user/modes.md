@@ -268,7 +268,12 @@ The node confines commands with Landlock:
 - The node's own folders are in none of these sets.
 - A command has no controlling terminal: it runs in a session of its own.
   On a node you run yourself in a terminal that terminal is yours, and a
-  command cannot write to it or type into it.
+  command cannot write to it or type into it. It can still open your
+  terminals under `/dev/pts` for reading, as it runs as you and `/dev` is in
+  the read set (a program that makes a terminal of its own needs it): what
+  you type in one of them can reach the command instead of the shell there.
+  The installed node's commands cannot: `nerve-run` may not open your
+  terminals.
 - `/tmp`, `/var/tmp` and the home of `nerve-run` are in every set of a
   `nerve-run` command, to read, write and run programs in
   ([below](#the-account-nerve-run-linux)).
@@ -437,8 +442,8 @@ Each kernel version adds guards to Landlock (its ABI). The node asks for ABI
 
 | ABI | Linux | What it adds |
 |---|---|---|
-| 1, 2 | 5.13, 5.19 | Files and folders. These do not guard truncating a file (`truncate`), so a command could cut any file it may write outside its folders to nothing: the node takes them as no Landlock |
-| 3 | 6.2 | Truncating files: from here on the node uses Landlock |
+| 1, 2 | 5.13, 5.19 | Files and folders. These do not guard truncating a file (`truncate`), so a command can cut any file it may write outside its folders to nothing. A node you run yourself takes them as no Landlock and runs no `folder` mode command; the installed node uses them |
+| 3 | 6.2 | Truncating files: from here on a node you run yourself uses Landlock |
 | 4 | 6.7 | Network rules (the node sets none) |
 | 5 | 6.10 | Device ioctls |
 | 6 | 6.12 | Signals to other processes and abstract unix sockets: the commands of the installed node's pairings, all of `nerve-run`, are kept apart from each other only from here on |
@@ -448,8 +453,12 @@ abstract unix sockets and (below 5) send ioctls to the devices it may open.
 On the installed node that means one pairing's commands can stop another's.
 `install` and `status` say so (`warning: this kernel's Landlock is ABI 4,
 which does not guard device ioctls, signals to other processes of the
-account, abstract unix sockets: …`). On ABI 1 or 2 they say the node takes it
-as none, and the node behaves as without Landlock (above).
+account, abstract unix sockets: …`). On ABI 1 or 2 they name truncating
+files too: the installed node still holds each command to its folders, but
+a command can cut a file `nerve-run` may write outside them to nothing. A
+node you run yourself runs no `folder` mode command there and `status`
+says `confinement none`. These are the stock kernels of Ubuntu 22.04 (5.15,
+ABI 1) and Debian 12 (6.1, ABI 2); Ubuntu 24.04 (6.8) has ABI 4.
 
 ### Your home and other accounts
 

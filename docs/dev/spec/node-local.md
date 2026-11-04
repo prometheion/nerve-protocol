@@ -58,6 +58,13 @@ directory when the call names none; one of `nerve-run` also gets
 `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME`
 below its home, `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` removed, and
 git's `safe.directory = *` as command-line configuration (`GIT_CONFIG_COUNT`).
+Of the service's own environment a command of `nerve-run` keeps only `PATH`,
+`LANG`, `TERM` and `TMPDIR` (`exec::KEPT_ENV`) and the names in
+`machine.command_env`, with the service's values; the rest (`NERVE_NODE_OWNER`,
+what systemd and the unit's `Environment=` set) is cleared before the
+variables above are set, so naming `HOME` or `XDG_RUNTIME_DIR` there passes
+nothing of the node's on. A command as the owner, and every command of a node
+a person runs, gets the node's environment.
 The `~` of folders, rules and the protected list is the owner's home. A
 command of `nerve-run` is confined by Landlock in `allowlist` mode as well
 (where the kernel has it), to its folders and the built-in `/tmp`,
@@ -1137,7 +1144,26 @@ grant or not.
   node run by hand refuses every command of folder mode and offers no `exec`
   action (unless the sudo allow list has an entry), while the installed
   Linux node runs them as `nerve-run` without Landlock, held back by that
-  account alone, and offers `exec` (`daemon::folder_refusal`). On Windows a command runs in an AppContainer
+  account alone, and offers `exec` (`daemon::folder_refusal`). A node run by
+  hand also takes Landlock below ABI 3 (`nerve_sandbox::LANDLOCK_FLOOR`,
+  Linux 6.2), which does not guard `truncate(2)`, as none
+  (`Confinement::by_hand`), and its status says `confinement none`; the
+  installed node confines with it, since without it nothing but the account
+  would hold its commands. Below ABI 6 (`LANDLOCK_WANTED`, Linux 6.12) the
+  installed node's `status` carries `landlock_warning` (null otherwise, and
+  on a node run by hand), and `install` prints the same line: the guards the
+  kernel's Landlock lacks (`nerve_sandbox::landlock_gaps`: truncating files
+  below 3, device ioctls below 5, signals and abstract unix sockets below 6)
+  and that the pairings' commands, all of `nerve-run`, are kept apart from
+  each other only from ABI 6.
+  On Linux a command that runs through the shim (every `folder` mode
+  command, and every command of `nerve-run`) starts in a session of its own
+  (`setsid` before anything else in the child), so it has no controlling
+  terminal, and outside its `w` folders it may write only `/dev/null`,
+  `/dev/zero` and `/dev/full` (`nerve_sandbox::system_writable`), not
+  `/dev/tty`. `/dev` stays in the read set, so a command of a node run by
+  hand, which runs as the owner, can still open the owner's terminals under
+  `/dev/pts` by name to read. On Windows a command runs in an AppContainer
   of its pairing (named from the state folder and the pairing's `node_id`,
   so a later pairing, also of the same center or under the same name, runs
   in another one and finds none of its entries), which reaches the system folders Windows opens to every
