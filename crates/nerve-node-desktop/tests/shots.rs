@@ -599,7 +599,7 @@ fn every_page_light_and_dark() {
     // folder grant that failed (issue #142).
     perm.set_separate(true);
     perm.set_account("nerve-run".into());
-    perm.set_built_in("/tmp, /var/tmp and its home /var/lib/nerve-run".into());
+    perm.set_built_in("/var/lib/nerve-run/home/home and /var/lib/nerve-run/home/tmp, its own home and temporary folder, and /tmp and /var/tmp, shared with every center and account".into());
     perm.set_mode("folder".into());
     shots.take_full("permissions-nerve-run", 2150);
     perm.set_grant_errors("/home/alex/usb-stick: its file system does not support POSIX ACLs, so nerve-run cannot be given it; give a folder on another file system (ext4, xfs, btrfs and tmpfs have them)".into());

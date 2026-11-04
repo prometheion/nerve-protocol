@@ -73,10 +73,17 @@ impl Ctl {
                     .into_iter()
                     .flatten()
                     .any(|c| c["account"] == run));
+        // Its own home and temporary folder (#167), and the two every
+        // center shares.
         let built_in = if cfg!(target_os = "linux") && account == run {
+            let own = nerve_node::account::Own::of(
+                std::path::Path::new(nerve_node::account::RUN_HOME),
+                &center,
+            );
             format!(
-                "/tmp, /var/tmp and its home {}",
-                nerve_node::account::RUN_HOME
+                "{} and {}, its own home and temporary folder, and /tmp and /var/tmp, shared with every center and account",
+                own.home.display(),
+                own.temp.display()
             )
         } else {
             String::new()

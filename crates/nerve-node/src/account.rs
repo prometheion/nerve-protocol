@@ -10,7 +10,7 @@
 //! the account the service keeps CAP_SETUID and CAP_SETGID, the one
 //! privilege it has, and every command it starts drops both before it runs.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use nerve_policy::config::{Access, Folder};
 
@@ -25,27 +25,67 @@ pub const RUN_USER: &str = "nerve-run";
 /// leaves it.
 pub const RUN_MARK: &str = "Nerve commands";
 
-/// The home of [`RUN_USER`], which `install` makes: its own, writable, where
-/// tool caches and configs go.
+/// The home of [`RUN_USER`], which `install` makes: its own, closed to
+/// others. No command has it as its home: each pairing's commands have a
+/// home and a temporary folder of their own below it ([`Own`]).
 pub const RUN_HOME: &str = "/var/lib/nerve-run";
 
+/// The folders of one pairing's commands of [`RUN_USER`] (#167): a home,
+/// where its programs keep their settings and caches, and a temporary
+/// folder, both below the account's home and both that pairing's alone.
+/// One center's agent then cannot leave a `.gitconfig`, `.bashrc` or
+/// script there that another center's commands would run. Where Landlock
+/// is there a command reaches only its own pairing's two; without it they
+/// are 0700 like the rest of the account's files, which keeps nothing apart
+/// from another pairing's commands of the same account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Own {
+    pub home: PathBuf,
+    pub temp: PathBuf,
+}
+
+impl Own {
+    /// The folders of the pairing `center` (a center name: no `/`, no
+    /// `.`), below `run_home`, the account's home.
+    pub fn of(run_home: &Path, center: &str) -> Own {
+        let root = run_home.join(center);
+        Own {
+            home: root.join("home"),
+            temp: root.join("tmp"),
+        }
+    }
+}
+
 /// The folders a command of [`RUN_USER`] has besides those of its pairing,
-/// whatever they say: `/tmp`, `/var/tmp` and the account's home, to read,
+/// whatever they say: its pairing's home and temporary folder ([`Own`]),
+/// and `/tmp` and `/var/tmp` for the programs that insist on them, which
+/// every pairing and every account on the machine shares. All to read,
 /// write and run programs in. Under its own uid the owner's sockets and
 /// folders in `/tmp` stay closed to it by their modes.
-pub fn built_in(home: &Path) -> Vec<Folder> {
+pub fn built_in(own: &Own) -> Vec<Folder> {
     let all = Access {
         read: true,
         write: true,
         execute: true,
     };
-    [Path::new("/tmp"), Path::new("/var/tmp"), home]
-        .iter()
-        .map(|p| Folder {
-            path: p.display().to_string(),
-            access: all,
-        })
-        .collect()
+    [
+        Path::new("/tmp"),
+        Path::new("/var/tmp"),
+        own.home.as_path(),
+        own.temp.as_path(),
+    ]
+    .iter()
+    .map(|p| Folder {
+        path: p.display().to_string(),
+        access: all,
+    })
+    .collect()
+}
+
+/// Whether `path` (a folder of [`built_in`]) is one every pairing shares:
+/// `/tmp` and `/var/tmp`.
+pub fn shared_folder(path: &str) -> bool {
+    matches!(path, "/tmp" | "/var/tmp")
 }
 
 /// What a command of the installed node gets that would run as the owner
@@ -1027,10 +1067,24 @@ mod tests {
     }
 
     #[test]
-    fn the_built_in_folders_are_the_temporary_ones_and_the_home() {
-        let b = built_in(Path::new(RUN_HOME));
+    fn the_built_in_folders_are_the_temporary_ones_and_the_pairings_own() {
+        let b = built_in(&Own::of(Path::new(RUN_HOME), "home-lab"));
         let paths: Vec<&str> = b.iter().map(|f| f.path.as_str()).collect();
-        assert_eq!(paths, ["/tmp", "/var/tmp", RUN_HOME]);
+        assert_eq!(
+            paths,
+            [
+                "/tmp",
+                "/var/tmp",
+                "/var/lib/nerve-run/home-lab/home",
+                "/var/lib/nerve-run/home-lab/tmp"
+            ]
+        );
+        assert!(
+            paths
+                .iter()
+                .all(|p| !shared_folder(p) || p.ends_with("tmp"))
+        );
+        assert!(shared_folder("/tmp") && !shared_folder(paths[3]));
         assert!(
             b.iter()
                 .all(|f| f.access.read && f.access.write && f.access.execute)

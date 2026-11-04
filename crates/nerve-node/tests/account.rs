@@ -41,7 +41,7 @@ fn opts(policy: &CenterPolicy, account: &Account, own: &[PathBuf]) -> RunOptions
         timeouts: Default::default(),
         sudo: None,
         account: Some(account.clone()),
-        separate: false,
+        separate: None,
         pass_env: Vec::new(),
         own: own.to_vec(),
         root: None,
@@ -149,12 +149,14 @@ async fn a_folder_mode_command_of_the_account_stays_in_its_folders_and_off_the_k
 }
 
 /// A command of `nerve-run` (the test's own account stands in for it) has
-/// its built-in folders in Landlock's set as in the gate's, `/tmp`,
-/// `/var/tmp` and its home, and the environment of its home: its XDG
-/// folders, no session of anyone's, and git trusting the repositories it
-/// reaches (issue #142).
+/// its built-in folders in Landlock's set as in the gate's: `/tmp`,
+/// `/var/tmp` and its pairing's own home and temporary folder (issue #167),
+/// and the environment of that home: HOME, TMPDIR and its XDG folders
+/// there, no session of anyone's, and git trusting the repositories it
+/// reaches (issue #142). Another pairing's home and temporary folder, below
+/// the same account's home, it can neither read nor write.
 #[tokio::test]
-async fn a_command_of_nerve_run_has_its_home_and_the_temporary_folders() {
+async fn a_command_of_nerve_run_has_its_pairings_home_and_the_temporary_folders() {
     if !nerve_sandbox::Confinement::detect().available() {
         eprintln!("skipped: Landlock is not available here");
         return;
@@ -165,17 +167,26 @@ async fn a_command_of_nerve_run_has_its_home_and_the_temporary_folders() {
     // keep the command from making a file there, as from every folder that
     // holds one. It need not be there: only its protected entries count.
     let owner_home = Path::new("/nonexistent-owner-of-nerve-142");
-    let d = tempfile::tempdir().unwrap();
+    // Outside `/tmp` and `/var/tmp`, whose rules would let every pairing in,
+    // as the account's real home is.
+    let d = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let root = std::fs::canonicalize(d.path()).unwrap();
     let run_home = root.join("run-home");
     let work = root.join("work");
-    std::fs::create_dir_all(&run_home).unwrap();
     std::fs::create_dir_all(&work).unwrap();
+    let mine = nerve_node::account::Own::of(&run_home, "lab");
+    let other = nerve_node::account::Own::of(&run_home, "home");
+    for o in [&mine, &other] {
+        std::fs::create_dir_all(&o.home).unwrap();
+        std::fs::create_dir_all(&o.temp).unwrap();
+    }
+    std::fs::write(other.home.join(".gitconfig"), "[core]\n").unwrap();
+    std::fs::write(other.temp.join("left"), "x").unwrap();
     let mut folders = vec![Folder {
         path: work.display().to_string(),
         access: Access::ALL,
     }];
-    folders.extend(nerve_node::account::built_in(&run_home));
+    folders.extend(nerve_node::account::built_in(&mine));
     let policy = CenterPolicy {
         mode: Mode::Folder,
         folders,
@@ -189,15 +200,21 @@ async fn a_command_of_nerve_run_has_its_home_and_the_temporary_folders() {
         assert!(spec.write.iter().any(|w| w == Path::new(t)), "{spec:?}");
     }
     o.landlock = Some(spec);
-    o.separate = true;
+    o.separate = Some(mine.clone());
     // Of the node's environment only PATH and the few others it keeps, and
     // the names the owner adds: here two that cargo gives the test.
     o.pass_env = vec!["CARGO_PKG_NAME".into()];
     let tmp = format!("/tmp/nerve-142-{}", std::process::id());
+    let (oh, ot) = (other.home.display(), other.temp.display());
     let probe = format!(
-        "echo \"$HOME|$XDG_CONFIG_HOME|$XDG_CACHE_HOME|${{XDG_RUNTIME_DIR-none}}|${{DBUS_SESSION_BUS_ADDRESS-none}}\"; \
+        "echo \"$HOME|$TMPDIR|$XDG_CONFIG_HOME|$XDG_CACHE_HOME|${{XDG_RUNTIME_DIR-none}}|${{DBUS_SESSION_BUS_ADDRESS-none}}\"; \
          echo t > {tmp} && cat {tmp} && rm {tmp}; \
          echo h > \"$HOME/h\" && cat \"$HOME/h\"; \
+         echo p > \"$TMPDIR/p\" && cat \"$TMPDIR/p\"; \
+         cat {oh}/.gitconfig 2>/dev/null || echo no-read; \
+         echo x 2>/dev/null > {oh}/.bashrc || echo no-write; \
+         ls {ot} 2>/dev/null || echo no-list; \
+         echo x 2>/dev/null > {ot}/mine || echo no-temp; \
          echo $GIT_CONFIG_KEY_0=$GIT_CONFIG_VALUE_0; \
          echo \"${{CARGO_MANIFEST_DIR-none}}|${{CARGO_PKG_NAME-none}}|${{PATH:+path}}\""
     );
@@ -210,12 +227,16 @@ async fn a_command_of_nerve_run_has_its_home_and_the_temporary_folders() {
     };
     let r = exec::run(&call, &o, |_| {}).await.unwrap();
     let out = r["stdout"].as_str().unwrap();
-    let h = run_home.display();
+    let (h, t) = (mine.home.display(), mine.temp.display());
     let pkg = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "none".into());
     assert_eq!(
         out,
-        format!("{h}|{h}/.config|{h}/.cache|none|none\nt\nh\nsafe.directory=*\nnone|{pkg}|path\n"),
+        format!(
+            "{h}|{t}|{h}/.config|{h}/.cache|none|none\nt\nh\np\nno-read\nno-write\nno-list\nno-temp\nsafe.directory=*\nnone|{pkg}|path\n"
+        ),
         "{}",
         r["stderr"]
     );
+    assert!(!other.home.join(".bashrc").exists());
+    assert!(!other.temp.join("mine").exists());
 }

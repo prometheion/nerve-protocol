@@ -1138,10 +1138,11 @@ pub struct RunOptions {
     /// The account the command runs as (the installed node, every mode,
     /// crate::account); `None` runs it as the node's own user.
     pub account: Option<crate::service::Account>,
-    /// Whether that account is `nerve-run`, whose command gets the
-    /// environment of its own home ([`separate_env`]) and of the node's
-    /// only what [`kept_env`] keeps.
-    pub separate: bool,
+    /// Set where that account is `nerve-run`: the pairing's own home and
+    /// temporary folder (crate::account::Own), whose environment the
+    /// command gets ([`separate_env`]), and of the node's only what
+    /// [`kept_env`] keeps.
+    pub separate: Option<crate::account::Own>,
     /// The names of the node's variables a command of `nerve-run` gets
     /// besides [`KEPT_ENV`] (`machine.command_env`).
     pub pass_env: Vec<String>,
@@ -1166,9 +1167,9 @@ pub struct RunOptions {
 /// unit names (the owner, and whatever an operator put there, such as a
 /// proxy URL with its password), and systemd's own. A command of
 /// `nerve-run` gets none of it but these and the names the owner adds
-/// (`machine.command_env`); HOME, USER, LOGNAME and its XDG and git
-/// variables the node sets itself ([`separate_env`]).
-pub const KEPT_ENV: [&str; 4] = ["PATH", "LANG", "TERM", "TMPDIR"];
+/// (`machine.command_env`); HOME, USER, LOGNAME, TMPDIR and its XDG and
+/// git variables the node sets itself ([`separate_env`]).
+pub const KEPT_ENV: [&str; 3] = ["PATH", "LANG", "TERM"];
 
 /// What of `env`, the node's environment, a command of `nerve-run` keeps:
 /// [`KEPT_ENV`] and the names in `more`.
@@ -1184,17 +1185,21 @@ pub fn kept_env(
         .collect()
 }
 
-/// The environment of a command of `nerve-run` besides HOME, USER and
-/// LOGNAME: what it sets, and what it takes away. Its tools keep their
-/// configs and caches in its own `home` (the XDG folders), it has no session
+/// The environment of a command of `nerve-run` besides USER and LOGNAME:
+/// what it sets, and what it takes away. Its home and temporary folder are
+/// its pairing's own (`own`, #167): its tools keep their configs and caches
+/// there (HOME and the XDG folders), and its temporary files in TMPDIR, so
+/// what another pairing's commands leave does not steer it. It has no session
 /// of anyone's to talk to, and git trusts the repositories it reaches: they
 /// belong to the owner, whose folders it was given, and git refuses them as
 /// another account's otherwise ("dubious ownership"). The setting goes in as
 /// git's command-line configuration (`GIT_CONFIG_COUNT`, git 2.31 on), the
 /// one place besides the account's own files it honours `safe.directory`.
-pub fn separate_env(home: &Path) -> (Vec<(String, String)>, Vec<&'static str>) {
-    let under = |p: &str| home.join(p).display().to_string();
+pub fn separate_env(own: &crate::account::Own) -> (Vec<(String, String)>, Vec<&'static str>) {
+    let under = |p: &str| own.home.join(p).display().to_string();
     let set = vec![
+        ("HOME".into(), own.home.display().to_string()),
+        ("TMPDIR".into(), own.temp.display().to_string()),
         ("XDG_CONFIG_HOME".into(), under(".config")),
         ("XDG_CACHE_HOME".into(), under(".cache")),
         ("XDG_DATA_HOME".into(), under(".local/share")),
@@ -1853,15 +1858,15 @@ pub async fn run(
             // one of nerve-run's only the few variables it keeps.
             if opts.root.is_some() {
                 cmd.env_clear().env("PATH", ROOT_PATH);
-            } else if opts.separate {
+            } else if opts.separate.is_some() {
                 cmd.env_clear()
                     .envs(kept_env(std::env::vars_os(), &opts.pass_env));
             }
             cmd.env("HOME", &a.home)
                 .env("USER", &a.name)
                 .env("LOGNAME", &a.name);
-            if opts.separate {
-                let (set, unset) = separate_env(&a.home);
+            if let Some(own) = &opts.separate {
+                let (set, unset) = separate_env(own);
                 cmd.envs(set);
                 for k in unset {
                     cmd.env_remove(k);
@@ -2254,10 +2259,11 @@ mod tests {
                 .map(|(k, _)| k.to_string_lossy().into_owned())
                 .collect()
         };
-        assert_eq!(kept(&[]), ["PATH", "LANG", "TERM", "TMPDIR"]);
+        // TMPDIR is the pairing's own, never the node's (separate_env).
+        assert_eq!(kept(&[]), ["PATH", "LANG", "TERM"]);
         assert_eq!(
             kept(&["https_proxy".into()]),
-            ["PATH", "LANG", "TERM", "TMPDIR", "https_proxy"]
+            ["PATH", "LANG", "TERM", "https_proxy"]
         );
     }
 
@@ -2271,7 +2277,7 @@ mod tests {
             timeouts: Timeouts::default(),
             sudo: None,
             account: None,
-            separate: false,
+            separate: None,
             pass_env: Vec::new(),
             own: Vec::new(),
             root: None,
@@ -3731,7 +3737,7 @@ mod windows_tests {
             timeouts: Timeouts::default(),
             sudo: None,
             account: None,
-            separate: false,
+            separate: None,
             pass_env: Vec::new(),
             own: Vec::new(),
             root: None,

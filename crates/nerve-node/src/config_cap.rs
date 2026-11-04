@@ -557,16 +557,17 @@ pub fn entry(c: &ConfigCapability) -> Value {
 /// `nerve-run`, from the pairing's `policy` (with the account's own folders
 /// where the link added them): where the pairing's commands run as
 /// `nerve-run` (`separate`), its folders; where they run as the owner, the
-/// folders are the owner's and not `nerve-run`'s, so only the account's own
-/// (`home` its home, none without one).
+/// folders are the owner's and not `nerve-run`'s, so only the account's
+/// built-in ones, with the pairing's own home and temporary folder (`own`,
+/// none without the account).
 pub fn confined(
     policy: &nerve_policy::CenterPolicy,
     separate: bool,
-    home: Option<&std::path::Path>,
+    own: Option<&crate::account::Own>,
 ) -> nerve_policy::CenterPolicy {
     let mut policy = policy.clone();
     if !separate {
-        policy.folders = home.map(crate::account::built_in).unwrap_or_default();
+        policy.folders = own.map(crate::account::built_in).unwrap_or_default();
     }
     policy
 }
@@ -986,7 +987,7 @@ platform = "linux"
             path: "/srv/proj".into(),
             access: Access::parse("rw").unwrap(),
         };
-        let home = Path::new("/var/lib/nerve-run");
+        let home = &crate::account::Own::of(Path::new("/var/lib/nerve-run"), "lab");
         let mut folders = vec![proj.clone()];
         folders.extend(crate::account::built_in(home));
         let policy = nerve_policy::CenterPolicy {

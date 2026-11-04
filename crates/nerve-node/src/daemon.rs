@@ -777,8 +777,9 @@ impl Shared {
     }
 
     /// The built-in folders of a pairing whose commands run as `nerve-run`
-    /// ([`crate::account::built_in`]) added to `entry`'s, for the gate and
-    /// the sandbox; the config keeps only those the owner gave.
+    /// ([`crate::account::built_in`]: its own home and temporary folder,
+    /// `/tmp` and `/var/tmp`) added to `entry`'s, for the gate and the
+    /// sandbox; the config keeps only those the owner gave.
     pub fn with_built_in(
         &self,
         cfg: &NodeConfig,
@@ -787,12 +788,45 @@ impl Shared {
         if self.separate(&entry.policy)
             && let Ok(Some(a)) = self.command_account(cfg, &entry.policy)
         {
-            entry
-                .policy
-                .folders
-                .extend(crate::account::built_in(&a.home));
+            let own = crate::account::Own::of(&a.home, &entry.name);
+            entry.policy.folders.extend(crate::account::built_in(&own));
         }
         entry
+    }
+
+    /// The home and temporary folder of the pairing `center` for a command
+    /// that runs as `run` (`nerve-run`), made where they are missing
+    /// (crate::own_dirs): the node makes them as the pairing comes, and a
+    /// command that finds them gone gets them again. Only the installed
+    /// Linux node makes them; elsewhere they are named alone.
+    pub fn own_ready(
+        &self,
+        run: &crate::service::Account,
+        center: &str,
+    ) -> Result<crate::account::Own, String> {
+        #[cfg(target_os = "linux")]
+        if self.service {
+            return crate::own_dirs::make(run, center);
+        }
+        Ok(crate::account::Own::of(&run.home, center))
+    }
+
+    /// Brings the pairings' home and temporary folders in line with `cfg`
+    /// (crate::own_dirs::sync), on the installed Linux node: a new
+    /// pairing's are made, those of a pairing that went are deleted. What
+    /// failed is logged; the next change of the config tries again.
+    #[cfg(target_os = "linux")]
+    pub fn sync_own_dirs(&self, cfg: &NodeConfig) {
+        if !self.service {
+            return;
+        }
+        let Ok(Some(run)) = self.run_account(cfg) else {
+            return;
+        };
+        let file = crate::own_dirs::record_file(&self.paths);
+        for e in crate::own_dirs::sync(&run, cfg, &file) {
+            tracing::warn!("pairing folders: {e}");
+        }
     }
 
     /// What the center `entry` (the config's, as it is) may do now, for its
@@ -806,17 +840,17 @@ impl Shared {
         entry: &nerve_policy::CenterEntry,
     ) -> crate::descriptor::Reach {
         let now = crate::now_ms();
-        let run_home = self
+        let own = self
             .separate(&entry.policy)
             .then(|| self.account_seen(cfg, &entry.policy))
             .flatten()
-            .map(|a| a.home);
+            .map(|a| crate::account::Own::of(&a.home, &entry.name));
         let mut reach = crate::descriptor::Reach::of(
             entry,
             now,
             self.account_name(cfg, &entry.policy),
             self.confined(cfg),
-            run_home.as_deref(),
+            own.as_ref(),
         );
         // Without a sandbox, a folder-mode command that runs at all runs as
         // `nerve-run`, held back by that account alone ([`folder_refusal`]).
@@ -2089,7 +2123,11 @@ async fn supervise(shared: Arc<Shared>) {
             let walk = start_walk(acl_synced);
             acl_synced = Some(cfg.version);
             let (s, c) = (shared.clone(), cfg.clone());
-            tokio::task::spawn_blocking(move || s.sync_acls(&c, walk));
+            tokio::task::spawn_blocking(move || {
+                // A pairing's own folders come and go with it (#167).
+                s.sync_own_dirs(&c);
+                s.sync_acls(&c, walk)
+            });
         }
         // The level follows the config, whoever changed it and however.
         if let Some(log) = &shared.log {
@@ -3675,8 +3713,8 @@ mod tests {
 
     /// What each pairing's descriptor tells of the account and the folders,
     /// as the link builds it: on the installed Linux node a folder pairing
-    /// runs as `nerve-run`, whose home, `/tmp` and `/var/tmp` it names as
-    /// that account's own; an allowlist pairing as `nerve-run` names the
+    /// runs as `nerve-run`, and names its own home and temporary folder
+    /// below that account's home (#167), `/tmp` and `/var/tmp`; an allowlist pairing as `nerve-run` names the
     /// account and no folder; a user pairing and an allowlist pairing as
     /// the owner run as the owner, with no built-in folder. A node run by
     /// hand runs everything as its own user, with no built-in folder.
@@ -3765,7 +3803,8 @@ mod tests {
                             proj.clone(),
                             "/tmp rwx own".into(),
                             "/var/tmp rwx own".into(),
-                            format!("{} rwx own", run_home.display()),
+                            format!("{} rwx own", run_home.join("c/home").display()),
+                            format!("{} rwx own", run_home.join("c/tmp").display()),
                         ]
                     ),
                     "{what}"

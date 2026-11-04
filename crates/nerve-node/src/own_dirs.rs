@@ -1,0 +1,547 @@
+//! The home and temporary folder of each pairing's commands of `nerve-run`
+//! on the installed Linux node (#167, [`crate::account::Own`]). The node
+//! makes them when the pairing comes and deletes them, with what they hold,
+//! when it goes. It does both as `nerve-run` ([`crate::account::FsAs`]):
+//! the folders are that account's, below its home, which the node's own
+//! user may not enter. A record in the node's state folder names the
+//! pairings it made folders for, each with the node's id at that center,
+//! so that a pairing made again under the same name gets new folders, and
+//! nothing else in the account's home is ever taken for a pairing's.
+
+use std::collections::BTreeMap;
+use std::ffi::{CStr, CString};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::path::{Path, PathBuf};
+
+use nerve_policy::NodeConfig;
+
+use crate::account::{FsAs, Own};
+use crate::paths::NodePaths;
+use crate::service::Account;
+
+/// The record of the pairings whose folders the node made: center name ->
+/// the node's id at that center.
+pub fn record_file(paths: &NodePaths) -> PathBuf {
+    paths.state_dir.join("own-folders.json")
+}
+
+fn read_record(file: &Path) -> BTreeMap<String, String> {
+    std::fs::read(file)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn write_record(file: &Path, r: &BTreeMap<String, String>) -> Result<(), String> {
+    let json = serde_json::to_vec_pretty(r).map_err(|e| e.to_string())?;
+    nerve_transport::files::write_private(file, &json)
+        .map_err(|e| format!("{}: {e}", file.display()))
+}
+
+/// Brings the pairings' folders in line with `cfg`, as `run` (`nerve-run`,
+/// whose home holds them): those of a pairing that is gone, or was made
+/// again under its name, are deleted with what they hold, and every
+/// pairing's are made where missing. What failed is said, and the record
+/// keeps a pairing whose folders could not all be deleted, so the next
+/// sync tries again.
+pub fn sync(run: &Account, cfg: &NodeConfig, file: &Path) -> Vec<String> {
+    let mut errors = Vec::new();
+    let mut record = read_record(file);
+    let now: BTreeMap<&str, &str> = cfg
+        .centers
+        .iter()
+        .map(|c| (c.name.as_str(), c.node_id.as_str()))
+        .collect();
+    let gone: Vec<String> = record
+        .iter()
+        .filter(|(name, id)| now.get(name.as_str()) != Some(&id.as_str()))
+        .map(|(name, _)| name.clone())
+        .collect();
+    for name in gone {
+        match remove(run, &name) {
+            Ok(()) => {
+                record.remove(&name);
+                tracing::info!("deleted the home and temporary folder of the pairing {name}");
+            }
+            Err(e) => errors.push(e),
+        }
+    }
+    for (name, id) in now {
+        if record.contains_key(name) {
+            // Made again only where a command found them gone.
+            continue;
+        }
+        match make(run, name) {
+            Ok(_) => {
+                record.insert(name.to_string(), id.to_string());
+            }
+            Err(e) => errors.push(e),
+        }
+    }
+    if let Err(e) = write_record(file, &record) {
+        errors.push(e);
+    }
+    errors
+}
+
+/// Makes the folders of the pairing `center` where they are missing, as
+/// `run`, each 0700: its folder below the account's home, and in it `home`
+/// and `tmp`. A command of the pairing may have opened its home to others
+/// (`chmod`), which closes again here. Something else under one of those
+/// names (a file, a link, another account's folder) is refused, not
+/// followed.
+pub fn make(run: &Account, center: &str) -> Result<Own, String> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let own = Own::of(&run.home, center);
+    let root = own.home.parent().unwrap_or(&run.home).to_path_buf();
+    let _as = act_as(run)?;
+    for dir in [&root, &own.home, &own.temp] {
+        let err = |e: std::io::Error| format!("{}: {e}", dir.display());
+        match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(err(e)),
+        }
+        let m = std::fs::symlink_metadata(dir).map_err(err)?;
+        if !m.is_dir() || m.uid() != run.uid {
+            return Err(format!(
+                "{} is not a folder of {}, so the pairing {center} has no home of its own; delete it",
+                dir.display(),
+                run.name
+            ));
+        }
+        if m.mode() & 0o7777 != 0o700 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(err)?;
+        }
+    }
+    Ok(own)
+}
+
+/// How many folder levels [`remove`] holds open at once: each holds a
+/// descriptor, and a command can make a tree deeper than the descriptors a
+/// process may have. A folder deeper than this is moved up to the
+/// pairing's folder and deleted from there.
+const WALK_DEPTH: usize = 64;
+
+/// Deletes the folder of the pairing `center` below `run`'s home, with
+/// everything in it, as `run`. It goes through descriptors and follows no
+/// link, and stays on the folder's own file system: what a command of the
+/// pairing put there points nowhere the walk goes. A folder the account
+/// made closed (`chmod 0`) is opened up first. Gone already is fine.
+pub fn remove(run: &Account, center: &str) -> Result<(), String> {
+    let shown = run.home.join(center);
+    let _as = act_as(run)?;
+    let home = open_dir(libc::AT_FDCWD, &cstr(run.home.as_os_str())?)
+        .map_err(|e| format!("{}: {e}", run.home.display()))?;
+    let name = cstr(std::ffi::OsStr::new(center))?;
+    let top = match open_or_open_up(&home, &name) {
+        Ok(Some(fd)) => fd,
+        // Not a folder: its name alone goes.
+        Ok(None) => {
+            return unlink(&home, &name, false).map_err(|e| format!("{}: {e}", shown.display()));
+        }
+        Err(e) if e.raw_os_error() == Some(libc::ENOENT) => return Ok(()),
+        Err(e) => return Err(format!("{}: {e}", shown.display())),
+    };
+    let dev = stat_fd(&top)
+        .map_err(|e| format!("{}: {e}", shown.display()))?
+        .st_dev;
+    let mut errors = Vec::new();
+    let mut moved = 0usize;
+    // A pass that moved a deep folder up has more to do.
+    loop {
+        let before = moved;
+        empty(&top, &top, &shown, dev, 0, &mut moved, &mut errors);
+        if moved == before || !errors.is_empty() {
+            break;
+        }
+    }
+    if errors.is_empty()
+        && let Err(e) = unlink(&home, &name, true)
+    {
+        errors.push(format!("{}: {e}", shown.display()));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "the folders of the pairing {center} were not all deleted: {}",
+            errors.join("; ")
+        ))
+    }
+}
+
+/// The node's file access as `run` on this thread; none needed where the
+/// node is that account already (a test).
+fn act_as(run: &Account) -> Result<Option<FsAs>, String> {
+    if run.uid == nerve_transport::net::euid() {
+        return Ok(None);
+    }
+    FsAs::new(run)
+        .map(Some)
+        .map_err(|e| format!("cannot act as {}: {e}", run.name))
+}
+
+fn cstr(s: &std::ffi::OsStr) -> Result<CString, String> {
+    use std::os::unix::ffi::OsStrExt;
+    CString::new(s.as_bytes()).map_err(|e| e.to_string())
+}
+
+fn last() -> std::io::Error {
+    std::io::Error::last_os_error()
+}
+
+/// The folder `name` in `at`, opened to read and never followed.
+fn open_dir(at: libc::c_int, name: &CStr) -> std::io::Result<OwnedFd> {
+    // SAFETY: a valid C string; the descriptor returned is ours alone.
+    let fd = unsafe {
+        libc::openat(
+            at,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(last());
+    }
+    // SAFETY: just opened, owned by nothing else.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn stat_fd(fd: &OwnedFd) -> std::io::Result<libc::stat> {
+    // SAFETY: fstat into a zeroed struct of the right type.
+    unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        if libc::fstat(fd.as_raw_fd(), &mut st) != 0 {
+            return Err(last());
+        }
+        Ok(st)
+    }
+}
+
+fn stat_at(dir: &OwnedFd, name: &CStr) -> std::io::Result<libc::stat> {
+    // SAFETY: fstatat of a valid C string into a zeroed struct, no link
+    // followed.
+    unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        if libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        ) != 0
+        {
+            return Err(last());
+        }
+        Ok(st)
+    }
+}
+
+fn is_dir(st: &libc::stat) -> bool {
+    st.st_mode & libc::S_IFMT == libc::S_IFDIR
+}
+
+/// `fchmodat2` (Linux 6.6), whose `AT_SYMLINK_NOFOLLOW` refuses a link:
+/// the same number on every architecture the node is built for.
+const SYS_FCHMODAT2: libc::c_long = 452;
+
+/// The folder `name` in `dir`, opened; one its account closed to itself is
+/// opened up (0700) first. `None` where `name` is no folder. The folder is
+/// changed by name without following a link where the kernel can
+/// (`fchmodat2`); an older one follows a link that a command put in its
+/// place since it was looked at, which can only change the mode of a file
+/// of the same account.
+fn open_or_open_up(dir: &OwnedFd, name: &CStr) -> std::io::Result<Option<OwnedFd>> {
+    let st = stat_at(dir, name)?;
+    if !is_dir(&st) {
+        return Ok(None);
+    }
+    let fd = match open_dir(dir.as_raw_fd(), name) {
+        Ok(fd) => fd,
+        Err(e) if e.raw_os_error() == Some(libc::EACCES) => {
+            // SAFETY: plain system calls with a valid C string.
+            let r = unsafe {
+                let r = libc::syscall(
+                    SYS_FCHMODAT2,
+                    dir.as_raw_fd(),
+                    name.as_ptr(),
+                    0o700 as libc::mode_t,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                );
+                if r != 0 && last().raw_os_error() == Some(libc::ENOSYS) {
+                    libc::fchmodat(dir.as_raw_fd(), name.as_ptr(), 0o700, 0) as libc::c_long
+                } else {
+                    r
+                }
+            };
+            if r != 0 {
+                return Err(last());
+            }
+            open_dir(dir.as_raw_fd(), name)?
+        }
+        Err(e)
+            if e.raw_os_error() == Some(libc::ENOTDIR) || e.raw_os_error() == Some(libc::ELOOP) =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+    // The folder looked at, not one swapped in since.
+    let now = stat_fd(&fd)?;
+    if now.st_ino != st.st_ino || now.st_dev != st.st_dev {
+        return Err(std::io::Error::from_raw_os_error(libc::EAGAIN));
+    }
+    // Its entries can be deleted only while it may be written.
+    // SAFETY: fchmod of a descriptor we hold.
+    if now.st_mode & 0o700 != 0o700 && unsafe { libc::fchmod(fd.as_raw_fd(), 0o700) } != 0 {
+        return Err(last());
+    }
+    Ok(Some(fd))
+}
+
+fn unlink(dir: &OwnedFd, name: &CStr, folder: bool) -> std::io::Result<()> {
+    let flag = if folder { libc::AT_REMOVEDIR } else { 0 };
+    // SAFETY: a valid C string, relative to the open folder `dir`.
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), flag) } != 0 {
+        let e = last();
+        if e.raw_os_error() != Some(libc::ENOENT) {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// The names in the open folder `dir` but `.` and `..`, read through a
+/// copy of its descriptor (no `/proc`, which the node may not read while
+/// it acts as another account).
+fn names(dir: &OwnedFd) -> std::io::Result<Vec<CString>> {
+    // SAFETY: a copy of a descriptor we hold, given to fdopendir, which
+    // owns it from then on and closes it with closedir; readdir's entries
+    // are read before the next call.
+    unsafe {
+        let copy = libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0);
+        if copy < 0 {
+            return Err(last());
+        }
+        let d = libc::fdopendir(copy);
+        if d.is_null() {
+            let e = last();
+            libc::close(copy);
+            return Err(e);
+        }
+        libc::rewinddir(d);
+        let mut out = Vec::new();
+        loop {
+            *libc::__errno_location() = 0;
+            let e = libc::readdir(d);
+            if e.is_null() {
+                let err = *libc::__errno_location();
+                libc::closedir(d);
+                if err != 0 {
+                    return Err(std::io::Error::from_raw_os_error(err));
+                }
+                return Ok(out);
+            }
+            let name = CStr::from_ptr((*e).d_name.as_ptr());
+            if name.to_bytes() != b"." && name.to_bytes() != b".." {
+                out.push(name.to_owned());
+            }
+        }
+    }
+}
+
+/// Deletes what the open folder `dir` (shown as `shown`, `depth` levels
+/// below `top`) holds. A folder at [`WALK_DEPTH`] is moved up into `top`
+/// under a new name and counted in `moved`, for the next pass.
+fn empty(
+    dir: &OwnedFd,
+    top: &OwnedFd,
+    shown: &Path,
+    dev: libc::dev_t,
+    depth: usize,
+    moved: &mut usize,
+    errors: &mut Vec<String>,
+) {
+    use std::os::unix::ffi::OsStrExt;
+    let list = match names(dir) {
+        Ok(n) => n,
+        Err(e) => {
+            errors.push(format!("{}: {e}", shown.display()));
+            return;
+        }
+    };
+    for name in list {
+        let here = shown.join(std::ffi::OsStr::from_bytes(name.to_bytes()));
+        let st = match stat_at(dir, &name) {
+            Ok(st) => st,
+            Err(e) if e.raw_os_error() == Some(libc::ENOENT) => continue,
+            Err(e) => {
+                errors.push(format!("{}: {e}", here.display()));
+                continue;
+            }
+        };
+        if is_dir(&st) {
+            // Another file system mounted here is not the pairing's.
+            if st.st_dev != dev {
+                errors.push(format!(
+                    "{}: another file system is mounted there",
+                    here.display()
+                ));
+                continue;
+            }
+            if depth + 1 >= WALK_DEPTH {
+                let up = CString::new(format!(".deeper-{}-{}", std::process::id(), *moved))
+                    .expect("no NUL in the name");
+                // SAFETY: valid C strings, relative to descriptors we hold.
+                let r = unsafe {
+                    libc::renameat(dir.as_raw_fd(), name.as_ptr(), top.as_raw_fd(), up.as_ptr())
+                };
+                if r != 0 {
+                    errors.push(format!("{}: {}", here.display(), last()));
+                } else {
+                    *moved += 1;
+                }
+                continue;
+            }
+            match open_or_open_up(dir, &name) {
+                Ok(Some(sub)) => empty(&sub, top, &here, dev, depth + 1, moved, errors),
+                Ok(None) => {}
+                Err(e) => {
+                    errors.push(format!("{}: {e}", here.display()));
+                    continue;
+                }
+            }
+        }
+        if let Err(e) = unlink(dir, &name, is_dir(&st)) {
+            // A folder moved up from below it is deleted in the next pass.
+            if !(is_dir(&st) && e.raw_os_error() == Some(libc::ENOTEMPTY) && *moved > 0) {
+                errors.push(format!("{}: {e}", here.display()));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    fn me(home: &Path) -> Account {
+        // SAFETY: plain getters.
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        Account {
+            name: "nerve-run".into(),
+            uid,
+            gid,
+            comment: String::new(),
+            home: home.to_path_buf(),
+            groups: vec![gid],
+        }
+    }
+
+    fn mode(p: &Path) -> u32 {
+        std::fs::symlink_metadata(p).unwrap().mode() & 0o7777
+    }
+
+    #[test]
+    fn a_pairing_gets_a_closed_home_and_temporary_folder_of_its_own() {
+        let d = tempfile::tempdir().unwrap();
+        let run = me(d.path());
+        let own = make(&run, "lab").unwrap();
+        assert_eq!(own, Own::of(d.path(), "lab"));
+        for p in [d.path().join("lab"), own.home.clone(), own.temp.clone()] {
+            assert!(p.is_dir(), "{}", p.display());
+            assert_eq!(mode(&p), 0o700, "{}", p.display());
+        }
+        // A home its command opened to others closes again.
+        std::fs::set_permissions(&own.home, std::fs::Permissions::from_mode(0o755)).unwrap();
+        make(&run, "lab").unwrap();
+        assert_eq!(mode(&own.home), 0o700);
+        // A link in the home's place is refused, not followed.
+        std::fs::remove_dir(&own.temp).unwrap();
+        std::os::unix::fs::symlink(d.path(), &own.temp).unwrap();
+        let e = make(&run, "lab").unwrap_err();
+        assert!(e.contains("is not a folder of nerve-run"), "{e}");
+    }
+
+    #[test]
+    fn removing_a_pairing_deletes_what_its_folders_hold_and_nothing_else() {
+        let d = tempfile::tempdir().unwrap();
+        let run = me(&d.path().join("run"));
+        std::fs::create_dir(&run.home).unwrap();
+        let own = make(&run, "lab").unwrap();
+        let other = make(&run, "home").unwrap();
+        let outside = d.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("keep"), "x").unwrap();
+        std::fs::write(other.home.join(".gitconfig"), "x").unwrap();
+        // What a command leaves: files, a closed folder, links out, a deep
+        // tree.
+        std::fs::write(own.home.join(".gitconfig"), "x").unwrap();
+        std::fs::create_dir_all(own.temp.join("a/b")).unwrap();
+        std::fs::write(own.temp.join("a/b/f"), "x").unwrap();
+        std::fs::set_permissions(own.temp.join("a/b"), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+        std::fs::set_permissions(own.temp.join("a"), std::fs::Permissions::from_mode(0o500))
+            .unwrap();
+        std::os::unix::fs::symlink(&outside, own.home.join("out")).unwrap();
+        std::os::unix::fs::symlink(&other.home, own.home.join("other")).unwrap();
+        let mut deep = own.home.join("deep");
+        for _ in 0..WALK_DEPTH + 10 {
+            deep.push("d");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("f"), "x").unwrap();
+        remove(&run, "lab").unwrap();
+        assert!(!run.home.join("lab").exists());
+        assert!(outside.join("keep").exists());
+        assert!(other.home.join(".gitconfig").exists());
+        // Gone already is fine.
+        remove(&run, "lab").unwrap();
+    }
+
+    #[test]
+    fn a_sync_deletes_the_folders_of_a_pairing_that_went_or_was_made_again() {
+        let d = tempfile::tempdir().unwrap();
+        let run = me(&d.path().join("run"));
+        std::fs::create_dir(&run.home).unwrap();
+        let file = d.path().join("own-folders.json");
+        // What the account's home held before: never a pairing's.
+        std::fs::create_dir(run.home.join("bin")).unwrap();
+        let center = |name: &str, id: &str| nerve_policy::CenterEntry {
+            name: name.into(),
+            url: "https://c".into(),
+            pin: None,
+            center_id: "c".into(),
+            node_id: id.into(),
+            settings: Default::default(),
+            paused: false,
+            revoked: false,
+            unknown: false,
+            public_key: None,
+            key_rotations: 0,
+            pin_rotations: 0,
+            old_pin: None,
+            policy: Default::default(),
+            capabilities: Vec::new(),
+        };
+        let mut cfg = NodeConfig {
+            centers: vec![center("lab", "n1"), center("home", "n2")],
+            ..Default::default()
+        };
+        assert!(sync(&run, &cfg, &file).is_empty());
+        let lab = Own::of(&run.home, "lab");
+        assert!(lab.home.is_dir() && Own::of(&run.home, "home").temp.is_dir());
+        std::fs::write(lab.home.join(".bashrc"), "x").unwrap();
+        // Paired again under the same name: a new id, empty folders.
+        cfg.centers = vec![center("lab", "n3")];
+        assert!(sync(&run, &cfg, &file).is_empty());
+        assert!(lab.home.is_dir() && !lab.home.join(".bashrc").exists());
+        assert!(!run.home.join("home").exists());
+        assert!(run.home.join("bin").is_dir());
+        cfg.centers.clear();
+        assert!(sync(&run, &cfg, &file).is_empty());
+        assert!(!run.home.join("lab").exists());
+        assert!(read_record(&file).is_empty());
+    }
+}

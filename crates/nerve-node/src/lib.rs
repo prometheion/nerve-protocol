@@ -34,6 +34,8 @@ pub mod keyring_setup;
 mod link;
 #[cfg(target_os = "linux")]
 mod localnet;
+#[cfg(target_os = "linux")]
+pub mod own_dirs;
 pub mod owner;
 pub mod pair;
 pub mod paths;

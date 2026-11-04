@@ -3075,10 +3075,19 @@ impl Link {
         } else {
             known.clone()
         };
-        let start_in = looks_as
+        // A command of `nerve-run` starts in its pairing's own home
+        // (crate::account::Own), not the account's.
+        let pairing = known
             .as_ref()
-            .map_or(&self.shared.home, |a| &a.home)
-            .clone();
+            .filter(|_| self.shared.separate(&entry.policy) && !sudo_call)
+            .map(|a| crate::account::Own::of(&a.home, &entry.name));
+        let start_in = match &pairing {
+            Some(o) => o.home.clone(),
+            None => looks_as
+                .as_ref()
+                .map_or(&self.shared.home, |a| &a.home)
+                .clone(),
+        };
         // `~` of the folders and rules: the owner's.
         let home = self.shared.rules_home(cfg);
         // `nerve-run` sees the folders once their ACLs are on.
@@ -3173,11 +3182,21 @@ impl Link {
         } else {
             None
         };
+        // Its pairing's folders are there before it starts, made as the
+        // account where the pairing's sync has not made them yet.
+        let separate = match (separate, &account) {
+            (true, Some(a)) => Some(
+                self.shared
+                    .own_ready(a, &entry.name)
+                    .map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?,
+            ),
+            _ => None,
+        };
         let guard = Running::start(self, id.clone(), cfg.limits.max_running as usize)?;
         // A sudo command's output is not streamed (exec::run leaves it out).
         let tap = guard.tap(sudo.is_none() && root.is_none());
         let own = self.shared.own(cfg);
-        let confine = folder || separate && self.shared.exe.is_some();
+        let confine = folder || separate.is_some() && self.shared.exe.is_some();
         let landlock = (confine && self.shared.confinement.landlock_abi.is_some()).then(|| {
             // The folders' entries are listed as the account.
             let _as = act_as(known.as_ref()).ok().flatten();
@@ -3330,10 +3349,16 @@ impl Link {
                 ),
             ));
         }
-        // It starts in the account's home (the node's own by hand).
-        let start_in = account
+        // It starts in its pairing's own home (the node's own by hand),
+        // made where it is missing.
+        let pairing = account
             .as_ref()
-            .map_or_else(|| self.shared.home.clone(), |a| a.home.clone());
+            .map(|a| self.shared.own_ready(a, &entry.name))
+            .transpose()
+            .map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
+        let start_in = pairing
+            .as_ref()
+            .map_or_else(|| self.shared.home.clone(), |o| o.home.clone());
         let home = self.shared.rules_home(cfg);
         let own = self.shared.own(cfg);
         let landlock = (self.shared.exe.is_some()
@@ -3342,7 +3367,7 @@ impl Link {
             let policy = crate::config_cap::confined(
                 &entry.policy,
                 self.shared.separate(&entry.policy),
-                account.as_ref().map(|a| a.home.as_path()),
+                pairing.as_ref(),
             );
             // The folders' entries are listed as the account.
             let _as = act_as(account.as_ref()).ok().flatten();
@@ -3371,7 +3396,7 @@ impl Link {
             timeouts,
             sudo: None,
             account,
-            separate: true,
+            separate: pairing,
             pass_env: cfg.machine.command_env.clone(),
             own,
             root: None,

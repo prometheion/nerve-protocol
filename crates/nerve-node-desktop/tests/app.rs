@@ -571,7 +571,8 @@ fn the_app_drives_the_cli_end_to_end() {
             assert!(perm.get_separate(), "{owner}");
             assert_eq!(perm.get_account(), "nerve-run");
             assert!(
-                perm.get_built_in().contains("/var/lib/nerve-run"),
+                perm.get_built_in()
+                    .contains("/var/lib/nerve-run/home/home and /var/lib/nerve-run/home/tmp"),
                 "{owner}"
             );
             let errors = perm.get_grant_errors();
