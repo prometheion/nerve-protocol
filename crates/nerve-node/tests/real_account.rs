@@ -1982,6 +1982,17 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     let (ok, said) = as_owner_typing(&owner, &["setup"], "real-167\n\n\n");
     assert!(ok, "{said}");
     let run_home = Path::new("/var/lib/nerve-run");
+    // What an earlier version's command left under a center's name: never
+    // taken for that pairing's home.
+    let left = run_home.join("home/home");
+    std::fs::create_dir_all(&left).unwrap();
+    std::fs::write(left.join(".bashrc"), "planted\n").unwrap();
+    assert!(
+        sh(Command::new("chown")
+            .args(["-R", "nerve-run:nerve-run"])
+            .arg(run_home.join("home")))
+        .0
+    );
     // A folder of the owner's for each center, outside the owner's home.
     let mut links = Vec::new();
     for name in ["lab", "home"] {
@@ -2019,6 +2030,14 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
             .expect("handshake");
         links.push((name, work, inc.conn, center));
     }
+    // The home pairing's commands do not run until it is gone.
+    {
+        let (_, work, conn, _) = &mut links[1];
+        let e = run(conn, work, "echo ran").await.unwrap_err();
+        assert!(e.contains("the node did not make it"), "{e}");
+        assert!(left.join(".bashrc").exists());
+    }
+    assert!(sh(Command::new("rm").arg("-rf").arg(run_home.join("home"))).0);
     // Each command has its pairing's own home and temporary folder, and
     // leaves a file in each.
     for (name, work, conn, _) in &mut links {
@@ -2073,6 +2092,27 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     .await
     .unwrap();
     assert_eq!(out(&r) == "mine\n", !landlock, "{r}");
+    // Opened to every account (a command of any pairing may change the
+    // modes), it stays closed to the other pairing's file calls; the lab's
+    // next command closes it again.
+    for p in [run_home, &run_home.join("lab"), &run_home.join("lab/home")] {
+        assert!(sh(Command::new("chmod").arg("755").arg(p)).0);
+    }
+    assert!(sh(Command::new("chmod").arg("644").arg(&lab_config)).0);
+    let e = fs_call(
+        conn,
+        "read",
+        json!({"path": lab_config.display().to_string()}),
+    )
+    .await
+    .unwrap_err();
+    assert!(e.contains("another pairing's"), "{e}");
+    let (_, work, conn, _) = &mut links[0];
+    run(conn, work, "true").await.unwrap();
+    for p in [run_home, &run_home.join("lab"), &run_home.join("lab/home")] {
+        let (_, st) = sh(Command::new("stat").args(["-c", "%U %a"]).arg(p));
+        assert_eq!(st.trim(), "nerve-run 700", "{}", p.display());
+    }
     // `status` names both centers' switch and whether the machine has the
     // network rules.
     let (_, st) = as_owner(&owner, &["--json", "status"]);
