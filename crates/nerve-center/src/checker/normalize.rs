@@ -167,6 +167,12 @@ pub struct Parsed {
     /// gives the command words it reads at run time (`xargs`) or a program
     /// it fetches (`npx`). A bare `sudo`, `env`, `nohup`, … does not.
     pub wrapped: bool,
+    /// The parser could not read the line with confidence (a quote or
+    /// here-document left open, a shell fed from a pipe, an encoded
+    /// PowerShell command, a bound it hit). `commands` then holds what the
+    /// splitter found and what the parser read before it gave out, which may
+    /// be less than the line runs.
+    pub unread: bool,
 }
 
 impl Parsed {
@@ -174,14 +180,16 @@ impl Parsed {
     /// splitter's, and none for a line whose commands the rule cannot see
     /// whole. That is a line that runs a command inside another (what a
     /// substitution or a `-c` body runs is no command the rule names,
-    /// however the outer one reads), a line with a wrapper that does more
+    /// however the outer one reads), a line the parser could not read
+    /// ([`Parsed::unread`]: the splitter alone would decide what an allow
+    /// rule skips the model for), a line with a wrapper that does more
     /// than run its command ([`Parsed::wrapped`]: `env -S` is a `-c` body by
     /// another name, `env GIT_CONFIG_…=…` changes what the command does),
     /// and a line in which the parser found a command the splitter did not
     /// (a runner the splitter does not know, such as `timeout` or `eval`,
     /// or a wrapper's flags it reads otherwise).
     pub fn for_allow(&self) -> &[Command] {
-        if self.nested || self.wrapped || self.commands.len() > self.walked {
+        if self.nested || self.wrapped || self.unread || self.commands.len() > self.walked {
             &[]
         } else {
             &self.commands[..self.walked]
@@ -307,7 +315,10 @@ pub fn parse(line: &str, shell: Shell) -> Parsed {
     let mut seen: HashSet<_> = out.commands.iter().map(same).collect();
     let script = match command::parse(line, shell.policy()) {
         Ok(script) => script,
-        Err(gave_out) => gave_out.read,
+        Err(gave_out) => {
+            out.unread = true;
+            gave_out.read
+        }
     };
     script.visit(&mut |s, i| {
         if out.overflow.is_some() {
@@ -363,6 +374,7 @@ fn walk(line: &str, shell: Shell) -> Parsed {
         overflow: w.overflow,
         nested: w.nested,
         wrapped: w.wrapped,
+        unread: false,
     }
 }
 

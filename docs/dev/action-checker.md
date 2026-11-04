@@ -167,9 +167,15 @@ exactly one command. As an allow rule a structured pattern also takes no
 flag or operand it does not name (`CmdPattern::covers`), unless it has a
 bare `*`; a long flag it spells `--name=value` takes that value only, and a
 short flag only in the case it spells it (`matches`, the blocklist's, takes
-either). A pattern or `re:` rule covers only a `plain` command
+either). A pattern, `cmd-re:` or `re:` rule covers only a `plain` command
 (`Command::plain`: the program word has no folder), since `program` keeps
-the base name only. On a POSIX line `Command::written` keeps the word as it
+the base name only; for `re:` that is all it checks of the program, the
+regex sees the text.
+`Parsed::unread` marks a line nerve-policy's parser gave up on (`Err`: an
+open quote or here-document, a shell fed from a pipe, an encoded PowerShell
+command, a bound hit). `for_allow` is empty for it, as for `nested`: the
+splitter alone would otherwise decide what skips the model, and it does not
+decode `-EncodedCommand`. The blocklist still reads `commands`. On a POSIX line `Command::written` keeps the word as it
 was written, and a pattern compares its program with that in its case
 (`CmdPattern::program_as_written`), so `Rscript *` covers `Rscript x.R` and
 not `rscript x.R`, `Cat` or `cat.exe` for `cat`; a `cmd-re:` rule meets the
@@ -179,8 +185,10 @@ name (`./env`, `NOHUP`) marks the line `wrapped`. A word that starts with `-`
 and that the pattern does not name is no operand (`covers`), as
 `Command::operands` has it. The parser's duplicate of a command does not
 replace the splitter's, which saw the word.
-The node's allowlist draws the same line
-(`nerve-policy/src/decide.rs`: a wildcard never covers a chained line).
+The node's allowlist is stricter
+(`nerve-policy/src/decide.rs`: a wildcard never covers a chained line, a
+line with a shell control character, or one with a word such as `powershell`
+or `-encodedcommand`).
 
 The splitter splits on separators and subshell parentheses, pulls `$( )`,
 backticks, process substitution, `sh -c` (`c` anywhere in the flag word:
@@ -329,7 +337,10 @@ then does it check that the server answers `/v1/models` with 401 to a key it
 was not given, and send the real one. Calls wait for the same check (`ReadBudget::vet_calls`, `vetted`,
 cleared when a process ends): in the window after the server ended on a call
 they are refused as lost without a connection, so the old port, which a
-process may have taken, sees neither the key nor the text. A process that
+process may have taken, sees neither the key nor the text. That holds for a
+call already waiting for the slot too: `ask_local` looks at the budget's
+marks and `may_send` again once it has the slot (the call before it marks the
+end before it frees the slot). A process that
 took the port is so never sent the key, short of one that may share a port with the server
 (Windows lets a process do that by choice); the check is a guard against a
 mistake, not a boundary. Either way it gets a random key

@@ -736,6 +736,9 @@ async fn ask_local(
         Err(e) => return Err(e),
     };
     drop(counting);
+    // What marked the server from here on ended it, or a connection to it,
+    // while this call waited for the slot.
+    let after_count = budget.marks();
     budget.admit(tokens, timeout_ms)?;
     let slot = match budget.slot.clone().try_acquire_owned() {
         Ok(slot) => {
@@ -761,6 +764,16 @@ async fn ask_local(
             slot
         }
     };
+    // The call that held the slot may have ended the server: it marks the
+    // process before it frees the slot, so a call woken by that end finds the
+    // mark. Whatever took the old port meanwhile is sent nothing, not the
+    // key and not the text; this is the gate at the top for a call that was
+    // already past it.
+    if budget.marks() != after_count || !budget.may_send() {
+        return Err(ModelError::Lost(
+            "the model ended while it read an earlier call and is starting again".into(),
+        ));
+    }
     let (done, answer) = tokio::sync::oneshot::channel();
     tokio::spawn(read_alone(
         endpoint.clone(),
@@ -1752,6 +1765,37 @@ mod tests {
         socket.restart();
         ask(&ep, &cfg, json!({})).await.expect("sent");
         assert_eq!(asked.load(Ordering::SeqCst), 1);
+    }
+
+    /// A call that waits for the slot behind the one that ends the server
+    /// is sent nothing once it has it: the end is marked before the slot is
+    /// free, and whatever took the old port meanwhile sees neither the key
+    /// nor the text (review round 5 of the center's sign-in).
+    #[tokio::test]
+    async fn a_call_waiting_for_the_slot_is_not_sent_once_the_server_ended_on_the_call_before() {
+        let budget = Arc::new(linear(12_288, 0.1));
+        let (ep, asked) = fake::server(100, Duration::ZERO);
+        let ep = Endpoint {
+            budget: Some(budget.clone()),
+            ..ep
+        };
+        budget.vet_calls();
+        budget.restart();
+        budget.vetted();
+        budget.became_ready();
+        let reading = budget.hold_slot();
+        let cfg = with_timeout(5000);
+        let (waiting, ()) = tokio::join!(ask(&ep, &cfg, json!({"command": "second"})), async {
+            // The count has been answered and the call waits for the slot.
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            // The call in the server lost its connection: the mark first,
+            // then the slot, as `read_alone` does it.
+            budget.die_on_call();
+            drop(reading);
+        });
+        let e = waiting.unwrap_err();
+        assert!(matches!(e, ModelError::Lost(_)), "{e}");
+        assert_eq!(asked.load(Ordering::SeqCst), 0, "nothing was sent");
     }
 
     /// A count clears only a mark that was there when it began, and only

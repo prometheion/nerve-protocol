@@ -1577,6 +1577,91 @@ mod tests {
         }
     }
 
+    /// A line the guard's parser cannot read is covered by no pattern and no
+    /// regex, only by an `exact:` rule: the splitter alone would decide what
+    /// skips the model, and an encoded PowerShell command is a body nobody
+    /// reads. A regex also needs a program written without a folder.
+    #[tokio::test]
+    async fn an_allow_rule_does_not_cover_a_line_the_parser_cannot_read() {
+        let args = Map::new();
+        let checker_with = |rule: &str| {
+            let mut cfg = CheckerConfig::default();
+            cfg.allow_rules.push(AllowRule {
+                rule: rule.into(),
+                node_id: None,
+            });
+            Checker::build(cfg, None)
+        };
+        let covered = async |checker: &Checker, os: &str, line: &str| {
+            let info = CallInfo {
+                os,
+                ..call("exec", "run", Effect::Execute, line, &args)
+            };
+            matches!(
+                checker.check(&info, None).await,
+                Decision::Allowed {
+                    layer: Layer::AllowRule,
+                    ..
+                }
+            )
+        };
+        let lines = [
+            ("linux", "powershell -NoProfile -EncodedCommand QQBCAEMA"),
+            ("linux", "pwsh -NoProfile -enc QQBCAEMA"),
+            ("windows", "powershell -NoProfile -EncodedCommand QQBCAEMA"),
+            ("windows", "pwsh -ec QQBCAEMA"),
+            ("linux", "make test \"left open"),
+            ("windows", "make test \"left open"),
+        ];
+        for (os, line) in lines {
+            let shell = normalize::Shell::for_os(os);
+            assert!(
+                normalize::parse(line, shell).unread,
+                "the parser reads {line}"
+            );
+        }
+        for rule in [
+            "exec.run:powershell *",
+            "exec.run:pwsh *",
+            "exec.run:make *",
+            "exec.run:cmd-re:^(powershell|pwsh|make) ",
+            "exec.run:re:^(powershell|pwsh|make) ",
+        ] {
+            let checker = checker_with(rule);
+            for (os, line) in lines {
+                assert!(
+                    !covered(&checker, os, line).await,
+                    "{rule} covers {line} on {os}"
+                );
+            }
+        }
+        // Only the exact line is covered, which the Audit page's **Allow**
+        // saves.
+        let checker = checker_with("exec.run:exact:make test \"left open");
+        assert!(covered(&checker, "linux", "make test \"left open").await);
+        // The same rules cover a line the parser reads.
+        for (rule, os, line) in [
+            (
+                "exec.run:powershell *",
+                "windows",
+                "powershell -NoProfile -File build.ps1",
+            ),
+            ("exec.run:make *", "linux", "make test"),
+        ] {
+            assert!(
+                covered(&checker_with(rule), os, line).await,
+                "{rule} does not cover {line}"
+            );
+        }
+        // A regex alone decides which program it names, and a program with
+        // a folder is a file of the agent's.
+        let checker = checker_with("exec.run:re:git status$");
+        assert!(covered(&checker, "linux", "git status").await);
+        for line in ["/tmp/git status", "./git status", "../x/git status"] {
+            assert!(!covered(&checker, "linux", line).await, "re: covers {line}");
+        }
+    }
+
     /// The model is told the call's effect and what the node says the
     /// capability does, cut to a few sentences, beside the call itself.
     #[test]

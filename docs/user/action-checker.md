@@ -302,9 +302,18 @@ meets the rule, and nothing in the line runs inside another command:
   the like) is covered by no pattern: `exec.run:make *` does not cover
   `timeout 600 make test`, and `exec.run:timeout *` does not cover
   `timeout 5 bash -c …`.
+- A line the guard's parser cannot read whole is covered by no pattern,
+  only by an exact rule: a quote or here-document left open, a shell that
+  reads its script from a pipe, a line past the parser's bounds, and a
+  PowerShell command written with its encoded-command switch (`-enc`), which
+  nobody can read. So `exec.run:powershell *` covers `powershell -File
+  build.ps1` and not `powershell -EncodedCommand …`.
 - An `exec.run:re:` rule matches the whole line, so as an allow rule it
   covers a line of one command only, with nothing run inside it:
-  `exec.run:re:^git status` covers `git status`, not `git status; …`.
+  `exec.run:re:^git status` covers `git status`, not `git status; …`. The
+  regex alone decides which program it names, so anchor it at the start
+  (`^git`): an unanchored one is still not applied to a program written
+  with a folder (`/tmp/git status`).
 
 The Audit page has **Allow** and **Allow as wildcard** buttons on a model
 refusal, which save an allow rule for that machine for you. **Allow** saves

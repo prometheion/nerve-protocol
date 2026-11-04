@@ -242,9 +242,12 @@ impl Rule {
             Matcher::CmdRegex(re) if !deny => all(&|c| c.written_lower() && re.is_match(&c.line())),
             // A regex over the whole line cannot tell which command it
             // matched, so as an allow rule it covers a line of one command
-            // only, with nothing run inside it.
+            // only, with nothing run inside it, and not one whose program
+            // is written with a folder (the regex sees the text, not the
+            // program).
             Matcher::Regex(re) if !deny => {
-                allowed(&|c: &[Command]| c.len() == 1) && re.is_match(&collapse_ws(call.target))
+                allowed(&|c: &[Command]| c.len() == 1 && c[0].plain)
+                    && re.is_match(&collapse_ws(call.target))
             }
             Matcher::Exact(line) => call.target.trim() == line,
             Matcher::Command(p) => match commands {
