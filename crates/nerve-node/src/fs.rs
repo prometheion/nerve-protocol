@@ -676,7 +676,7 @@ impl FsCall {
     /// through, which they may still do to reach a readable folder inside it.
     pub fn run(self, skip: &dyn Fn(&Path, bool) -> bool) -> Result<Value, RpcError> {
         match self {
-            FsCall::Stat(p) => stat(&p.given),
+            FsCall::Stat(p) => stat(&p.real),
             FsCall::List(p) => list(&p.real, skip),
             FsCall::Read {
                 path,
@@ -699,44 +699,82 @@ impl FsCall {
     }
 }
 
-fn type_of(ft: std::fs::FileType) -> &'static str {
-    if ft.is_symlink() {
-        "link"
-    } else if ft.is_dir() {
-        "dir"
-    } else if ft.is_file() {
-        "file"
-    } else {
-        "other"
+/// What `stat`, `list` and a walk learn of an entry, asked without
+/// following it: a link is a link.
+struct Entry {
+    kind: &'static str,
+    size: u64,
+    mtime_ms: u64,
+}
+
+impl Entry {
+    #[cfg(unix)]
+    fn of(st: &libc::stat) -> Entry {
+        let kind = match st.st_mode & libc::S_IFMT {
+            libc::S_IFLNK => "link",
+            libc::S_IFDIR => "dir",
+            libc::S_IFREG => "file",
+            _ => "other",
+        };
+        let ms = (st.st_mtime as i128) * 1000 + (st.st_mtime_nsec as i128) / 1_000_000;
+        Entry {
+            kind,
+            size: st.st_size as u64,
+            mtime_ms: u64::try_from(ms).unwrap_or(0),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn of(m: &std::fs::Metadata) -> Entry {
+        let ft = m.file_type();
+        let kind = if ft.is_symlink() {
+            "link"
+        } else if ft.is_dir() {
+            "dir"
+        } else if ft.is_file() {
+            "file"
+        } else {
+            "other"
+        };
+        let mtime_ms = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        Entry {
+            kind,
+            size: m.len(),
+            mtime_ms,
+        }
     }
 }
 
-fn mtime_ms(m: &std::fs::Metadata) -> u64 {
-    m.modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
+/// The resolved path the policy judged, asked through its folder's handle
+/// ([`Dir`]): a link swapped in above it since fails the call, and one put
+/// in its stead is shown as the link it is, never followed.
 fn stat(path: &Path) -> Result<Value, RpcError> {
-    let m = std::fs::symlink_metadata(path).map_err(io_error)?;
-    Ok(json!({"type": type_of(m.file_type()), "size": m.len(), "mtime_ms": mtime_ms(&m)}))
+    let e = match split(path) {
+        Ok((dir, name)) => Dir::open(dir).and_then(|d| d.entry(name)),
+        Err(_) => Dir::open(path).and_then(|d| d.entry(".".as_ref())),
+    }
+    .map_err(|e| open_error(path, e))?;
+    Ok(json!({"type": e.kind, "size": e.size, "mtime_ms": e.mtime_ms}))
 }
 
 fn list(path: &Path, skip: &dyn Fn(&Path, bool) -> bool) -> Result<Value, RpcError> {
+    let dir = Dir::listed(path).map_err(|e| open_error(path, e))?;
     let mut entries = Vec::new();
-    for e in std::fs::read_dir(path).map_err(io_error)? {
-        let e = e.map_err(io_error)?;
+    for name in dir.names().map_err(io_error)? {
         // A listed folder shows its name, so it is judged like a read.
-        if skip(&e.path(), false) {
+        if skip(&path.join(&name), false) {
             continue;
         }
-        let m = e.metadata().map_err(io_error)?;
+        let e = dir.entry(&name).map_err(io_error)?;
         entries.push(json!({
-            "name": e.file_name().to_string_lossy(),
-            "type": type_of(m.file_type()),
-            "size": m.len(),
+            "name": name.to_string_lossy(),
+            "type": e.kind,
+            "size": e.size,
         }));
         if entries.len() >= LIST_MAX {
             break;
@@ -816,41 +854,51 @@ fn read(path: &Path, offset: u64, length: Option<u64>) -> Result<Value, RpcError
 }
 
 /// Visits files below `root` (or `root` itself), depth first, sorted, never
-/// following symlinks, leaving out what `skip` names. `each` returns false to
-/// stop. Returns whether the walk was cut short.
+/// following symlinks, leaving out what `skip` names. `each` gets a file's
+/// path, its folder's handle and its name there, to open it by. It returns
+/// false to stop. Returns whether the walk was cut short.
+/// Each folder is opened from `/` a part at a time without following a
+/// link ([`Dir::listed`]), and each entry asked through its folder's handle:
+/// `skip` judges the names the walk builds, so a folder swapped for a link
+/// after it was listed (by a command that may write there) is left out,
+/// not followed to where the names no longer say.
 fn walk(
     root: &Path,
     skip: &dyn Fn(&Path, bool) -> bool,
-    each: &mut dyn FnMut(&Path) -> bool,
+    each: &mut dyn FnMut(&Path, &Dir, &std::ffi::OsStr) -> bool,
 ) -> Result<bool, RpcError> {
-    let m = std::fs::metadata(root).map_err(io_error)?;
-    if m.is_file() {
-        each(root);
-        return Ok(false);
+    if let Ok((up, name)) = split(root) {
+        let up = Dir::open(up).map_err(|e| open_error(root, e))?;
+        if up.entry(name).map_err(|e| open_error(root, e))?.kind == "file" {
+            each(root, &up, name);
+            return Ok(false);
+        }
     }
     let mut stack = vec![root.to_path_buf()];
     let mut visited = 0usize;
-    while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
+    while let Some(path) = stack.pop() {
+        let Ok(dir) = Dir::listed(&path) else {
             continue;
         };
-        let mut names: Vec<_> = rd.filter_map(Result::ok).collect();
-        names.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
+        let Ok(mut names) = dir.names() else {
+            continue;
+        };
+        names.sort_by(|a, b| b.cmp(a));
         let mut files = Vec::new();
-        for e in names {
+        for name in names {
             visited += 1;
             if visited > WALK_LIMIT {
                 return Ok(true);
             }
-            let p = e.path();
-            match e.file_type() {
-                Ok(t) if t.is_dir() && !skip(&p, true) => stack.push(p),
-                Ok(t) if t.is_file() && !skip(&p, false) => files.push(p),
+            let p = path.join(&name);
+            match dir.entry(&name).map(|e| e.kind) {
+                Ok("dir") if !skip(&p, true) => stack.push(p),
+                Ok("file") if !skip(&p, false) => files.push((p, name)),
                 _ => {}
             }
         }
-        for f in files.iter().rev() {
-            if !each(f) {
+        for (p, name) in files.iter().rev() {
+            if !each(p, &dir, name) {
                 return Ok(true);
             }
         }
@@ -872,16 +920,18 @@ fn grep(
 ) -> Result<Value, RpcError> {
     let mut matches = Vec::new();
     let mut truncated = false;
-    let cut = walk(root, skip, &mut |p| {
+    let cut = walk(root, skip, &mut |p, dir, name| {
         if glob.is_some_and(|g| !relative_glob_match(g, root, p)) {
             return true;
         }
-        let small = std::fs::metadata(p).is_ok_and(|m| m.len() <= GREP_FILE_MAX);
-        let Some(text) = small
-            .then(|| std::fs::read(p).ok())
-            .flatten()
-            .and_then(|b| String::from_utf8(b).ok())
-        else {
+        // Opened through its folder's handle, never through a link (one
+        // swapped in since it was listed fails the open).
+        let text = dir.open_file(name).ok().flatten().and_then(|mut f| {
+            let small = f.metadata().is_ok_and(|m| m.len() <= GREP_FILE_MAX);
+            let mut bytes = Vec::new();
+            (small && f.read_to_end(&mut bytes).is_ok()).then_some(bytes)
+        });
+        let Some(text) = text.and_then(|b| String::from_utf8(b).ok()) else {
             // Binary, unreadable or huge files are not searched.
             return true;
         };
@@ -908,7 +958,7 @@ fn find(
 ) -> Result<Value, RpcError> {
     let mut paths = Vec::new();
     let mut truncated = false;
-    let cut = walk(root, skip, &mut |p| {
+    let cut = walk(root, skip, &mut |p, _, _| {
         if relative_glob_match(glob, root, p) {
             if paths.len() >= max {
                 truncated = true;
@@ -974,6 +1024,52 @@ pub fn open_folder(path: &Path) -> std::io::Result<std::os::fd::OwnedFd> {
     Dir::open(path).map(|d| d.fd)
 }
 
+/// The names in the open folder `dir` but `.` and `..`, read through a
+/// copy of its descriptor (no `/proc`, which the node may not read while
+/// it acts as another account).
+#[cfg(unix)]
+pub(crate) fn names(dir: &std::os::fd::OwnedFd) -> std::io::Result<Vec<std::ffi::CString>> {
+    #[cfg(target_os = "linux")]
+    use libc::__errno_location as errno;
+    #[cfg(not(target_os = "linux"))]
+    use libc::__error as errno;
+    use std::os::fd::AsRawFd;
+    let last = std::io::Error::last_os_error;
+    // SAFETY: a copy of a descriptor we hold, given to fdopendir, which
+    // owns it from then on and closes it with closedir; readdir's entries
+    // are read before the next call.
+    unsafe {
+        let copy = libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0);
+        if copy < 0 {
+            return Err(last());
+        }
+        let d = libc::fdopendir(copy);
+        if d.is_null() {
+            let e = last();
+            libc::close(copy);
+            return Err(e);
+        }
+        libc::rewinddir(d);
+        let mut out = Vec::new();
+        loop {
+            *errno() = 0;
+            let e = libc::readdir(d);
+            if e.is_null() {
+                let err = *errno();
+                libc::closedir(d);
+                if err != 0 {
+                    return Err(std::io::Error::from_raw_os_error(err));
+                }
+                return Ok(out);
+            }
+            let name = std::ffi::CStr::from_ptr((*e).d_name.as_ptr());
+            if name.to_bytes() != b"." && name.to_bytes() != b".." {
+                out.push(name.to_owned());
+            }
+        }
+    }
+}
+
 /// The folder a `read` or `write` works in. On Unix it is opened one
 /// component at a time from `/` without following a symlink, and every later
 /// step works relative to that handle, never through a symlink either: the
@@ -1036,6 +1132,61 @@ impl Dir {
             }
         }
         Ok(Dir { fd })
+    }
+
+    /// The resolved folder `path` to list: opened as [`Dir::open`] opens
+    /// one, and its last part for reading. A file there is no folder.
+    fn listed(path: &Path) -> std::io::Result<Dir> {
+        let read = libc::O_DIRECTORY | libc::O_RDONLY;
+        let Some(up) = path.parent() else {
+            return Dir::at(None, "/".as_ref(), read).map(|fd| Dir { fd });
+        };
+        let name = path
+            .file_name()
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOTDIR))?;
+        let up = Dir::open(up)?;
+        match Dir::at(Some(&up.fd), name, read) {
+            // A link there fails as one in the way does (the path changed
+            // since it was judged); a file is no folder to list.
+            Err(e) if e.raw_os_error() == Some(libc::ENOTDIR) => match up.entry(name) {
+                Ok(e) if e.kind == "link" => Err(std::io::Error::from_raw_os_error(libc::ELOOP)),
+                _ => Err(std::io::Error::other("not a folder")),
+            },
+            other => other.map(|fd| Dir { fd }),
+        }
+    }
+
+    /// The names in the folder, but `.` and `..`.
+    fn names(&self) -> std::io::Result<Vec<std::ffi::OsString>> {
+        use std::os::unix::ffi::OsStringExt;
+        let names = names(&self.fd)?;
+        Ok(names
+            .into_iter()
+            .map(|n| std::ffi::OsString::from_vec(n.into_bytes()))
+            .collect())
+    }
+
+    /// What `name` in the folder is, without following it.
+    fn entry(&self, name: &std::ffi::OsStr) -> std::io::Result<Entry> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        // SAFETY: fstatat of a valid C string in the folder the handle
+        // holds, into a zeroed struct, no link followed.
+        unsafe {
+            let mut st: libc::stat = std::mem::zeroed();
+            if libc::fstatat(
+                self.fd.as_raw_fd(),
+                name.as_ptr(),
+                &mut st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            ) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(Entry::of(&st))
+        }
     }
 
     /// `name` for reading, if it is a file (`None` if it is something
@@ -1110,6 +1261,20 @@ impl Dir {
         Ok(Dir {
             path: path.to_path_buf(),
         })
+    }
+
+    fn listed(path: &Path) -> std::io::Result<Dir> {
+        Dir::open(path)
+    }
+
+    fn names(&self) -> std::io::Result<Vec<std::ffi::OsString>> {
+        std::fs::read_dir(&self.path)?
+            .map(|e| e.map(|e| e.file_name()))
+            .collect()
+    }
+
+    fn entry(&self, name: &std::ffi::OsStr) -> std::io::Result<Entry> {
+        std::fs::symlink_metadata(self.path.join(name)).map(|m| Entry::of(&m))
     }
 
     fn open_file(&self, name: &std::ffi::OsStr) -> std::io::Result<Option<std::fs::File>> {
@@ -1983,6 +2148,79 @@ mod tests {
             std::fs::read_to_string(outside.join("note")).unwrap(),
             "outside secret"
         );
+    }
+
+    /// `list`, `stat`, `grep` and `find` go by handles as `read` does: a
+    /// folder swapped for a link after the policy judged the path, or after
+    /// the walk listed it, and a file swapped for one before `grep` reads
+    /// it, are not followed to where the names no longer say.
+    #[cfg(unix)]
+    #[test]
+    fn a_walk_follows_no_link_swapped_in_after_the_check() {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let (work, outside) = (root.join("work"), root.join("outside"));
+        let sub = work.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(sub.join("mine"), "needle mine\n").unwrap();
+        std::fs::write(outside.join("mine"), "needle of the other, longer\n").unwrap();
+        std::fs::write(outside.join("theirs"), "needle theirs\n").unwrap();
+        // `at` (`sub` or `sub/mine`) put aside and a link to the same name
+        // in `outside` put in its stead, and back again.
+        let swap = |at: &Path| {
+            std::fs::rename(at, work.join("aside")).unwrap();
+            let to = outside.join(at.strip_prefix(&sub).unwrap_or(Path::new("")));
+            std::os::unix::fs::symlink(to, at).unwrap();
+        };
+        let back = |at: &Path| {
+            std::fs::remove_file(at).unwrap();
+            std::fs::rename(work.join("aside"), at).unwrap();
+        };
+        let reached =
+            |v: &Value| v.to_string().contains("theirs") || v.to_string().contains("other");
+
+        // Swapped after the gate judged the path.
+        let list = FsCall::parse("list", &args(json!({"path": wire(&sub)}))).unwrap();
+        let stat = FsCall::parse("stat", &args(json!({"path": wire(&sub.join("mine"))}))).unwrap();
+        let find = FsCall::parse("find", &args(json!({"path": wire(&sub), "glob": "*"}))).unwrap();
+        swap(&sub);
+        for (what, call) in [("list", list), ("stat", stat), ("find", find)] {
+            match call.run(&|_, _| false) {
+                Ok(v) => assert!(!reached(&v) && !v.to_string().contains("27"), "{what}: {v}"),
+                Err(e) => assert!(e.to_string().contains("changed"), "{what}: {e}"),
+            }
+        }
+        back(&sub);
+
+        // Swapped while the walk is under way: as it lists `work`, or as it
+        // lists `sub` for `grep`.
+        for (at, action) in [
+            (sub.clone(), "grep"),
+            (sub.clone(), "find"),
+            (sub.join("mine"), "grep"),
+        ] {
+            let done = std::cell::Cell::new(false);
+            let skip = |p: &Path, _: bool| {
+                if p == at && !done.replace(true) {
+                    swap(&at);
+                }
+                false
+            };
+            let a = json!({"path": wire(&work), "pattern": "needle", "glob": "**"});
+            let a = if action == "find" {
+                json!({"path": wire(&work), "glob": "**"})
+            } else {
+                a
+            };
+            let v = FsCall::parse(action, &args(a)).unwrap().run(&skip).unwrap();
+            assert!(done.get(), "{action} {}", at.display());
+            assert!(!reached(&v), "{action} through {}: {v}", at.display());
+            back(&at);
+        }
+        // And without a swap the walk sees what is there.
+        let g = run("grep", json!({"path": wire(&work), "pattern": "needle"})).unwrap();
+        assert!(g.to_string().contains("needle mine"), "{g}");
     }
 
     #[test]

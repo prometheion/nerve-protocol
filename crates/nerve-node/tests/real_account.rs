@@ -1363,6 +1363,28 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     );
     let (ok, said) = as_owner(&owner, &["folder", "rm", "/var/lib"]);
     assert!(ok, "{said}");
+    // In allowlist mode a rule covers places the folders do not give: a
+    // link in the handed folder into another pairing's home refuses the
+    // call all the same (the program would follow it), one that stays in
+    // the folder does not.
+    for args in [
+        &["mode", "set", "allowlist"][..],
+        &["rule", "add", "allow", "files.open"],
+    ] {
+        let (ok, said) = as_owner(&owner, args);
+        assert!(ok, "{said}");
+    }
+    let e = files_call(&mut conn, "open", linked).await.unwrap_err();
+    assert!(
+        e.contains("another pairing") && e.contains("nrv167-link/to"),
+        "{e}"
+    );
+    std::fs::remove_file(linked.join("to")).unwrap();
+    std::fs::write(linked.join("f"), "f\n").unwrap();
+    chmod(&linked.join("f"), "644");
+    std::os::unix::fs::symlink(linked.join("f"), linked.join("to")).unwrap();
+    let r = files_call(&mut conn, "open", linked).await.unwrap();
+    assert_eq!(r["names"], json!(["f", "to"]), "{r}");
     let _ = std::fs::remove_dir_all(linked);
 
     // A process of a command the node runs (user mode, as the owner) is

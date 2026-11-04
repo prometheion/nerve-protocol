@@ -2660,20 +2660,24 @@ impl Link {
         };
         // The policy looks at the paths as the account (crate::account::FsAs);
         // the audit entry below is the node's own again.
-        let decision = {
+        let (decision, fence) = {
             let _as = act_as(account)?;
             let decision = judged.with(|env| nerve_policy::decide(&entry.policy, env, &call));
-            // Whatever the mode and the rules say, a pairing whose commands
-            // run as `nerve-run` gets no other pairing's folders: the node
-            // opens the paths as that account, which owns them all.
-            match (decision, account) {
-                (Decision::Allow, Some(run)) if self.shared.separate(&entry.policy) => {
-                    let (run_home, mine) = crate::account::pairing_view(&run.home, &entry.name);
-                    crate::account::other_pairings(targets, &run_home, &mine, program.is_some())
+            // Whatever the mode and the rules say, a call of a pairing whose
+            // commands run as `nerve-run`, made as that account, gets no
+            // other pairing's folders: the node opens the paths as that
+            // account, which owns them all.
+            let fence = account
+                .filter(|_| self.shared.separate(&entry.policy))
+                .and_then(|run| crate::account::fence(run, &entry.name));
+            let decision = match (decision, &fence) {
+                (Decision::Allow, Some((run_home, mine))) => {
+                    crate::account::other_pairings(targets, run_home, mine, program.is_some())
                         .map_or(Decision::Allow, Decision::Forbidden)
                 }
                 (decision, _) => decision,
-            }
+            };
+            (decision, fence)
         };
         // A program handed a folder follows the links in it: where they
         // lead is judged too, once the call is allowed, so a folder the
@@ -2712,7 +2716,21 @@ impl Link {
                     let _as = act_as(account.as_ref())?;
                     Ok::<_, RpcError>(judged.with(|env| {
                         let check = nerve_policy::LinkCheck::new(&policy, env, &call);
-                        let mut judge = |l: &nerve_policy::Link| check.refuse(l);
+                        // The policy does not know the other pairings'
+                        // folders: in allowlist mode a rule may cover a
+                        // link's place there, so the fence judges it too.
+                        let mut judge = |l: &nerve_policy::Link| {
+                            check.refuse(l).or_else(|| {
+                                fence.as_ref().and_then(|(run_home, mine)| {
+                                    crate::account::link_to_other_pairings(
+                                        l,
+                                        &targets[l.handed].path,
+                                        run_home,
+                                        mine,
+                                    )
+                                })
+                            })
+                        };
                         match crate::fs::links_below(
                             &targets,
                             crate::fs::LINKS_LIMIT,

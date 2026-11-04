@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use nerve_policy::NodeConfig;
 
 use crate::account::{FsAs, Own};
+use crate::fs::names;
 use crate::paths::NodePaths;
 use crate::service::Account;
 
@@ -447,45 +448,6 @@ fn unlink(dir: &OwnedFd, name: &CStr, folder: bool) -> std::io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// The names in the open folder `dir` but `.` and `..`, read through a
-/// copy of its descriptor (no `/proc`, which the node may not read while
-/// it acts as another account).
-fn names(dir: &OwnedFd) -> std::io::Result<Vec<CString>> {
-    // SAFETY: a copy of a descriptor we hold, given to fdopendir, which
-    // owns it from then on and closes it with closedir; readdir's entries
-    // are read before the next call.
-    unsafe {
-        let copy = libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0);
-        if copy < 0 {
-            return Err(last());
-        }
-        let d = libc::fdopendir(copy);
-        if d.is_null() {
-            let e = last();
-            libc::close(copy);
-            return Err(e);
-        }
-        libc::rewinddir(d);
-        let mut out = Vec::new();
-        loop {
-            *libc::__errno_location() = 0;
-            let e = libc::readdir(d);
-            if e.is_null() {
-                let err = *libc::__errno_location();
-                libc::closedir(d);
-                if err != 0 {
-                    return Err(std::io::Error::from_raw_os_error(err));
-                }
-                return Ok(out);
-            }
-            let name = CStr::from_ptr((*e).d_name.as_ptr());
-            if name.to_bytes() != b"." && name.to_bytes() != b".." {
-                out.push(name.to_owned());
-            }
-        }
-    }
 }
 
 /// Numbers the folders [`remove`] moves up, for the whole process: a tree

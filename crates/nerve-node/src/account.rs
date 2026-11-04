@@ -122,6 +122,36 @@ pub fn pairing_view(run_home: &Path, center: &str) -> (PathBuf, Own) {
     (home, own)
 }
 
+/// The command account's home and the pairing `center`'s own folders in it
+/// ([`pairing_view`]), to which the gate holds a call that acts as that
+/// account ([`other_pairings`]). `None` for another account: a sudo command
+/// of the pairing runs as root and is looked at as the owner, whose home
+/// holds no pairing's folders, and the sudo allow list names what it does.
+pub fn fence(account: &Account, center: &str) -> Option<(PathBuf, Own)> {
+    (account.name == RUN_USER).then(|| pairing_view(&account.home, center))
+}
+
+/// Why a program may not be handed the folder `handed` with `link` below
+/// it: the link leads into another pairing's folders, or to a folder that
+/// holds them ([`other_pairings`]), and the program follows it. Named by
+/// the link, as the policy's own refusal of a link is
+/// (nerve_policy::LinkCheck), not by where it leads.
+pub fn link_to_other_pairings(
+    link: &nerve_policy::Link,
+    handed: &Path,
+    run_home: &Path,
+    mine: &Own,
+) -> Option<String> {
+    other_pairings(std::slice::from_ref(&link.to), run_home, mine, true).map(|_| {
+        format!(
+            "{} holds a link ({}) that leads into the home or temporary folder of another \
+             pairing; no mode, folder or rule gives a pairing those",
+            nerve_policy::paths::to_wire(handed),
+            nerve_policy::paths::to_wire(&link.at)
+        )
+    })
+}
+
 /// Whether `path` (resolved) lies in `run_home`, the command account's
 /// home, outside the pairing's own two folders `mine`: in another
 /// pairing's home or temporary folder, or in what the account keeps there
@@ -1251,6 +1281,62 @@ mod tests {
         ] {
             let skipped = in_other_pairings(Path::new(p), run_home, &mine, true);
             assert_eq!(skipped, !passes, "{p}");
+        }
+    }
+
+    /// The gate holds a pairing to its own folders only where a call acts
+    /// as the command account: a sudo command of the pairing is looked at
+    /// as the owner and may start in the owner's home. A link below a
+    /// handed folder that leads into another pairing's folders, or to one
+    /// that holds them, is refused by its own name; one that stays out of
+    /// them is not.
+    #[cfg(unix)]
+    #[test]
+    fn the_fence_holds_the_command_account_and_the_links_a_program_follows() {
+        use nerve_policy::{Link, PathAccess, Target};
+        let account = |name: &str, home: &str| Account {
+            name: name.into(),
+            uid: 4242,
+            gid: 4242,
+            comment: String::new(),
+            home: PathBuf::from(home),
+            groups: vec![4242],
+        };
+        let target = |p: &str, holds: bool| Target {
+            path: PathBuf::from(p),
+            access: PathAccess::Read,
+            holds,
+            arg: None,
+        };
+        assert!(fence(&account("alice", "/home/alice"), "lab").is_none());
+        let (run_home, mine) = fence(&account(RUN_USER, "/srv/nerve-run"), "lab").unwrap();
+        assert_eq!(mine.home, Path::new("/srv/nerve-run/lab/home"));
+        let refused = |to: &str, holds: bool| {
+            let link = Link {
+                handed: 0,
+                at: PathBuf::from("/srv/www/to"),
+                found_in: PathBuf::from("/srv/www"),
+                to: target(to, holds),
+            };
+            link_to_other_pairings(&link, Path::new("/srv/www"), &run_home, &mine)
+        };
+        for (to, holds) in [
+            ("/srv/nerve-run/other/home", true),
+            ("/srv/nerve-run/other/home/.gitconfig", false),
+            ("/srv/nerve-run/.ssh", true),
+            ("/srv", true),
+        ] {
+            let why = refused(to, holds).unwrap_or_default();
+            assert!(why.contains("/srv/www/to"), "{to}: {why}");
+            assert!(!why.contains("nerve-run"), "{to}: {why}");
+        }
+        for (to, holds) in [
+            ("/srv/nerve-run/lab/home/x", false),
+            ("/srv/www/f", false),
+            ("/srv", false),
+            ("/tmp", true),
+        ] {
+            assert_eq!(refused(to, holds), None, "{to}");
         }
     }
 
