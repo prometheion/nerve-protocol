@@ -426,11 +426,33 @@ pub fn landlock_spec(
 ) -> LandlockSpec {
     // Landlock is Linux's, so the list is the Unix one.
     let f = folder_sets(policy, home, own, &Platform::Unix, writable);
+    // `/dev` is read whole except the terminals: a command of a node run by
+    // hand runs as its owner and must not read the owner's terminals by name
+    // ([`nerve_sandbox::terminal_devices`]). What it loses: listing `/dev`.
+    let no_read = [own, &nerve_sandbox::terminal_devices()].concat();
     LandlockSpec {
-        read: leave_out(&[nerve_sandbox::system_dirs(), f.read].concat(), own),
+        read: dev_links_out(leave_out(
+            &[nerve_sandbox::system_dirs(), f.read].concat(),
+            &no_read,
+        )),
         write: leave_out(&[nerve_sandbox::system_writable(), f.write].concat(), own),
-        exec: leave_out(&[nerve_sandbox::system_dirs(), f.exec].concat(), own),
+        exec: dev_links_out(leave_out(
+            &[nerve_sandbox::system_dirs(), f.exec].concat(),
+            &no_read,
+        )),
     }
+}
+
+/// `paths` without the links directly in `/dev` (`stdin`, `fd`, `log`,
+/// ...), which [`leave_out`] lists among its other entries. A rule follows
+/// a link and the kernel refuses one on what a link of `/dev` leads to (a
+/// pipe, a socket), and what such a link leads to is under a rule of its
+/// own (`/proc`, the device) or none needs.
+fn dev_links_out(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths.retain(|p| {
+        p.parent() != Some(Path::new("/dev")) || !p.symlink_metadata().is_ok_and(|m| m.is_symlink())
+    });
+    paths
 }
 
 /// A center's folders by what its commands may do there, the system's
@@ -1117,8 +1139,12 @@ pub struct RunOptions {
     /// crate::account); `None` runs it as the node's own user.
     pub account: Option<crate::service::Account>,
     /// Whether that account is `nerve-run`, whose command gets the
-    /// environment of its own home ([`separate_env`]).
+    /// environment of its own home ([`separate_env`]) and of the node's
+    /// only what [`kept_env`] keeps.
     pub separate: bool,
+    /// The names of the node's variables a command of `nerve-run` gets
+    /// besides [`KEPT_ENV`] (`machine.command_env`).
+    pub pass_env: Vec<String>,
     /// The node's own folders, which the account must not reach.
     pub own: Vec<PathBuf>,
     /// Set only for an allowed sudo command of `nerve-run`, which runs as
@@ -1133,6 +1159,29 @@ pub struct RunOptions {
     /// Where the output goes as well as into the result, for the call's
     /// `output` stream (crate::tap); `None` keeps it in the result only.
     pub tap: Option<std::sync::Arc<crate::tap::Tap>>,
+}
+
+/// The variables of the node's environment every command of `nerve-run`
+/// keeps (#89). The installed node's environment is the service's: what its
+/// unit names (the owner, and whatever an operator put there, such as a
+/// proxy URL with its password), and systemd's own. A command of
+/// `nerve-run` gets none of it but these and the names the owner adds
+/// (`machine.command_env`); HOME, USER, LOGNAME and its XDG and git
+/// variables the node sets itself ([`separate_env`]).
+pub const KEPT_ENV: [&str; 4] = ["PATH", "LANG", "TERM", "TMPDIR"];
+
+/// What of `env`, the node's environment, a command of `nerve-run` keeps:
+/// [`KEPT_ENV`] and the names in `more`.
+pub fn kept_env(
+    env: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    more: &[String],
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    env.into_iter()
+        .filter(|(k, _)| {
+            k.to_str()
+                .is_some_and(|k| KEPT_ENV.contains(&k) || more.iter().any(|m| m == k))
+        })
+        .collect()
 }
 
 /// The environment of a command of `nerve-run` besides HOME, USER and
@@ -1736,6 +1785,13 @@ pub async fn run(
         })?),
         None => None,
     };
+    // A confined command gets a session of its own, so it has no
+    // controlling terminal: on a node run by hand in a terminal, that is the
+    // owner's, which it could write to and, on older kernels, type into
+    // (TIOCSTI). The new session is a new process group as well, which a
+    // stop ends as it ends any command's.
+    #[cfg(unix)]
+    let own_session = cfg!(target_os = "linux") && shim.is_some();
     // A command of another account takes its ids, drops the service's
     // capabilities and enters its folder in the child (crate::account);
     // any other drops the capabilities.
@@ -1762,6 +1818,9 @@ pub async fn run(
         // SAFETY: plain system calls on memory moved into the closure.
         unsafe {
             cmd.pre_exec(move || {
+                if own_session && libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 if let Some(fd) = join {
                     crate::cgroup::join(fd)?;
                 }
@@ -1790,9 +1849,13 @@ pub async fn run(
     }
     match &opts.account {
         Some(a) => {
-            // Root's command gets nothing of the node's environment.
+            // Root's command gets nothing of the node's environment, and
+            // one of nerve-run's only the few variables it keeps.
             if opts.root.is_some() {
                 cmd.env_clear().env("PATH", ROOT_PATH);
+            } else if opts.separate {
+                cmd.env_clear()
+                    .envs(kept_env(std::env::vars_os(), &opts.pass_env));
             }
             cmd.env("HOME", &a.home)
                 .env("USER", &a.name)
@@ -1812,8 +1875,11 @@ pub async fn run(
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // setsid makes the group itself, and fails in a process that leads one.
     #[cfg(unix)]
-    cmd.process_group(0);
+    if !own_session {
+        cmd.process_group(0);
+    }
     // The shell starts suspended and runs only once it is in its job, so
     // nothing it starts escapes the job. No console is needed for this, so
     // a node that runs as a service does the same. It gets a console of its
@@ -2166,6 +2232,35 @@ mod tests {
     use super::*;
     use nerve_policy::config::Access;
 
+    /// A command of nerve-run keeps of the node's environment only the few
+    /// variables it always gets and the names the owner adds: not what the
+    /// unit and systemd put there.
+    #[test]
+    fn nerve_run_keeps_only_the_named_variables() {
+        let env = [
+            ("PATH", "/usr/bin"),
+            ("LANG", "C.UTF-8"),
+            ("TERM", "dumb"),
+            ("TMPDIR", "/var/tmp"),
+            ("NERVE_NODE_OWNER", "alice"),
+            ("INVOCATION_ID", "x"),
+            ("https_proxy", "http://u:secret@proxy:3128"),
+            ("CORP_TOKEN", "t"),
+        ]
+        .map(|(k, v)| (k.into(), v.into()));
+        let kept = |more: &[String]| -> Vec<String> {
+            kept_env(env.clone(), more)
+                .into_iter()
+                .map(|(k, _)| k.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(kept(&[]), ["PATH", "LANG", "TERM", "TMPDIR"]);
+        assert_eq!(
+            kept(&["https_proxy".into()]),
+            ["PATH", "LANG", "TERM", "TMPDIR", "https_proxy"]
+        );
+    }
+
     fn opts(cap: usize) -> RunOptions {
         RunOptions {
             shell: None,
@@ -2177,6 +2272,7 @@ mod tests {
             sudo: None,
             account: None,
             separate: false,
+            pass_env: Vec::new(),
             own: Vec::new(),
             root: None,
             limits: None,
@@ -2823,6 +2919,28 @@ mod tests {
         assert!(spec.read.contains(&ssh), "{:?}", spec.read);
         assert!(!grants(&spec.write, &ssh), "{:?}", spec.write);
         assert!(!grants(&spec.exec, &ssh), "{:?}", spec.exec);
+    }
+
+    /// No rule of a command's read or exec set reaches a terminal of
+    /// `/dev`, and the rest of `/dev` stays readable.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_command_reads_no_terminal_under_dev() {
+        let h = tempfile::tempdir().unwrap();
+        let spec = landlock_spec(&CenterPolicy::default(), h.path(), &[], &[]);
+        let terminals = nerve_sandbox::terminal_devices();
+        assert!(!terminals.is_empty());
+        for set in [&spec.read, &spec.exec] {
+            for t in &terminals {
+                assert!(!set.iter().any(|r| t.starts_with(r)), "{t:?} in {set:?}");
+            }
+            assert!(set.contains(&PathBuf::from("/dev/null")), "{set:?}");
+            // A rule on what a link of `/dev` leads to (a pipe) is refused.
+            let link = |r: &&PathBuf| {
+                r.parent() == Some(Path::new("/dev")) && r.symlink_metadata().unwrap().is_symlink()
+            };
+            assert_eq!(set.iter().find(link), None, "{set:?}");
+        }
     }
 
     /// Every combination of the three flags puts a folder in exactly the
@@ -3614,6 +3732,7 @@ mod windows_tests {
             sudo: None,
             account: None,
             separate: false,
+            pass_env: Vec::new(),
             own: Vec::new(),
             root: None,
             limits: None,

@@ -495,27 +495,21 @@ pub fn forwarded_args(
     given: impl IntoIterator<Item = std::ffi::OsString>,
     cwd: Option<PathBuf>,
 ) -> Result<Vec<String>, String> {
-    let relative = match &cli.cmd {
-        Cmd::Folder(
-            FolderCmd::Add { path, .. } | FolderCmd::Set { path, .. } | FolderCmd::Rm { path, .. },
-        ) if path.is_relative() => Some(path.clone()),
-        // Only a name to the node, which never opens it, but the one it
-        // says it wrote.
-        Cmd::Backup { file, .. } | Cmd::Restore { file, .. } if file.is_relative() => {
-            Some(file.clone())
-        }
-        _ => None,
-    };
+    let given: Vec<std::ffi::OsString> = given.into_iter().collect();
+    // A backup's file is only a name to the node, which never opens it, but
+    // the one it says it wrote.
+    let relative = named_path(&cli.cmd)
+        .filter(|p| p.is_relative())
+        .and_then(|r| Some((path_word(&given, r)?, r)));
     // The passphrase comes from this process: the node may not read a file
     // of the owner's.
     let own_passphrase = FileJob::of(&cli.cmd, None).is_some();
     let mut out = Vec::new();
     let mut skip = false;
-    let mut made_whole = false;
     // After `--` the words are the command's own (`cap add NAME -- PROGRAM
     // ...`): they go as they are, flags of the same names too.
     let mut words = false;
-    for a in given {
+    for (i, a) in given.into_iter().enumerate() {
         if std::mem::take(&mut skip) {
             continue;
         }
@@ -525,6 +519,18 @@ pub fn forwarded_args(
                 a.to_string_lossy()
             ));
         };
+        // The path word is found by its place, so it is made whole also
+        // after `--` (`folder add -- srv +rw`): the node would take it from
+        // its own folder.
+        if let Some((at, r)) = relative
+            && at == i
+        {
+            let cwd = cwd
+                .as_ref()
+                .ok_or("give the folder by its full path: this folder cannot be read")?;
+            out.push(cwd.join(r).display().to_string());
+            continue;
+        }
         if words || s == "--" {
             words = true;
             out.push(s.to_string());
@@ -541,20 +547,39 @@ pub fn forwarded_args(
         {
             continue;
         }
-        if let Some(r) = &relative
-            && !made_whole
-            && Path::new(s) == r
-        {
-            let cwd = cwd
-                .as_ref()
-                .ok_or("give the folder by its full path: this folder cannot be read")?;
-            out.push(cwd.join(r).display().to_string());
-            made_whole = true;
-            continue;
-        }
         out.push(s.to_string());
     }
     Ok(out)
+}
+
+/// The folder or file `cmd` names, which the node gets as a whole path.
+fn named_path(cmd: &Cmd) -> Option<&PathBuf> {
+    match cmd {
+        Cmd::Folder(
+            FolderCmd::Add { path, .. } | FolderCmd::Set { path, .. } | FolderCmd::Rm { path, .. },
+        ) => Some(path),
+        Cmd::Backup { file, .. } | Cmd::Restore { file, .. } => Some(file),
+        _ => None,
+    }
+}
+
+/// Which word of `given` is the path `path` the command was parsed with:
+/// the one that, put in place by another, changes that path. A command word
+/// or another argument may be spelt like it (`folder add folder +rwx`).
+fn path_word(given: &[std::ffi::OsString], path: &Path) -> Option<usize> {
+    const OTHER: &str = "nerve-forwarded-path";
+    (0..given.len())
+        .filter(|&i| Path::new(&given[i]) == path)
+        .find(|&i| {
+            let mut other = given.to_vec();
+            other[i] = OTHER.into();
+            let parsed = <Cli as clap::Parser>::try_parse_from(
+                std::iter::once(std::ffi::OsString::from("nerve-node")).chain(other),
+            );
+            parsed
+                .ok()
+                .is_some_and(|c| named_path(&c.cmd).is_some_and(|p| p == Path::new(OTHER)))
+        })
 }
 
 /// What the CLI of someone who is no owner, or of an owner while the node
@@ -1669,10 +1694,12 @@ fn spawn<F: HandedFd>(
     } else {
         PathBuf::from("/")
     };
+    // The program may have been written a moment ago (an update's).
+    let start = |dir: &Path| nerve_transport::files::retry_busy(|| make(dir).spawn());
     match cwd.filter(|d| d.is_absolute()) {
         // A folder the node may not enter fails the start: then the root.
-        Some(d) => make(d).spawn().or_else(|_| make(&root).spawn()),
-        None => make(&root).spawn(),
+        Some(d) => start(d).or_else(|_| start(&root)),
+        None => start(&root),
     }
 }
 
@@ -1783,14 +1810,40 @@ pub(crate) async fn serve(
     let task = tokio::spawn(async move {
         let program = endpoint.program.clone();
         let owners = endpoint.owners.clone();
-        let r = nerve_transport::ctl::serve_anyone(listener, move |req, peer, mut files| {
+        // The owner's uid, for the places the socket keeps for it: an owner
+        // named by its account is looked up here once, as the socket must
+        // tell it at once for every connection, and again with each command
+        // of the owner's until it is known.
+        let owner_uid = std::sync::Arc::new(std::sync::OnceLock::new());
+        if let Owners::Named(n) = &owners {
+            let n = n.clone();
+            if let Ok(Ok(Some(a))) =
+                tokio::task::spawn_blocking(move || crate::account::lookup(&n)).await
+            {
+                let _ = owner_uid.set(a.uid);
+            }
+        }
+        let kept = {
+            let (owners, owner_uid) = (owners.clone(), owner_uid.clone());
+            move |uid: u32| match &owners {
+                Owners::Named(_) => owner_uid.get() == Some(&uid),
+                Owners::Uids(u) => u.contains(&uid),
+                Owners::Sids(_) => false,
+            }
+        };
+        let r = nerve_transport::ctl::serve_anyone(listener, kept, move |req, peer, mut files| {
             let s = shared.clone();
             let program = program.clone();
             let owners = owners.clone();
+            let owner_uid = owner_uid.clone();
             async move {
                 // Asked only for a command: the lookup runs programs.
                 let (who, from_command) = if req.method == "cli" {
-                    (owner_name(&owners, peer.uid), from_a_command(&s, peer.pid))
+                    let who = owner_name(&owners, peer.uid);
+                    if who.is_some() && peer.uid != 0 {
+                        let _ = owner_uid.set(peer.uid);
+                    }
+                    (who, from_a_command(&s, peer.pid))
                 } else {
                     (None, false)
                 };
@@ -2064,6 +2117,42 @@ mod win {
 
 #[cfg(test)]
 mod tests {
+    /// The program the node starts for the owner, written a moment ago and
+    /// still open for writing (#168), starts once it is closed: Linux says
+    /// "Text file busy" until then.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_owners_program_starts_once_it_is_closed() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let program = d.path().join("nerve-node");
+        let mut f = std::fs::File::create(&program).unwrap();
+        f.write_all(b"#!/bin/sh\necho started\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(f);
+        });
+        let paths = crate::paths::NodePaths::from_args(
+            Some(d.path().join("config")),
+            Some(d.path().join("state")),
+        );
+        let child = super::spawn(
+            &paths,
+            &program,
+            "alice",
+            &[],
+            None,
+            &[],
+            None::<std::os::fd::OwnedFd>,
+        )
+        .unwrap();
+        closer.join().unwrap();
+        let out = child.wait_with_output().await.unwrap();
+        assert_eq!(out.stdout, b"started\n");
+    }
+
     /// What needs more rights than an owner's: on Windows the app asks for
     /// them, and no terminal is named; elsewhere `sudo` (#176).
     #[test]
@@ -2384,6 +2473,29 @@ mod tests {
         );
         assert_eq!(FileJob::of(&c.cmd, None).unwrap().backup, None);
         assert!(FileJob::of(&cli(&["status"]).cmd, None).is_none());
+        // A command word spelt like the path stays a word: the path is
+        // the argument the command was parsed with.
+        for (given, at) in [
+            (vec!["folder", "add", "folder", "+rwx"], 2),
+            (vec!["folder", "add", "add", "+r"], 2),
+            (vec!["folder", "set", "set", "-w"], 2),
+            (vec!["folder", "rm", "rm"], 2),
+            (vec!["backup", "backup", "--overwrite"], 1),
+            (vec!["restore", "restore"], 1),
+            // After `--` too: the words there go as they are, the path
+            // among them not.
+            (vec!["folder", "add", "--", "srv", "+rw"], 3),
+            (vec!["folder", "rm", "--", "srv"], 3),
+            (vec!["folder", "set", "--", "srv", "-w"], 3),
+        ] {
+            let mut want: Vec<String> = given.iter().map(|w| w.to_string()).collect();
+            want[at] = home.join(given[at]).display().to_string();
+            assert_eq!(
+                forwarded_args(&cli(&given), os(&given), Some(home.clone())).unwrap(),
+                want,
+                "{given:?}"
+            );
+        }
         // The words of a command after `--` are its own, flags of the same
         // names too; one before it still goes.
         let given = [

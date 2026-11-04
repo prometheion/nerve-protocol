@@ -62,6 +62,7 @@ fn opts() -> RunOptions {
         sudo: None,
         account: None,
         separate: false,
+        pass_env: Vec::new(),
         own: Vec::new(),
         root: None,
         limits: None,

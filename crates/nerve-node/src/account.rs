@@ -132,6 +132,31 @@ pub fn no_landlock_warning() -> String {
     )
 }
 
+/// What `install` and `status` say where this kernel's Landlock (ABI
+/// `abi`) does not hold all the node asks for ([`nerve_sandbox::LANDLOCK_WANTED`]):
+/// which guards are missing, and that the pairings' commands, all of
+/// [`RUN_USER`], are kept apart from each other only from that ABI. Below
+/// [`nerve_sandbox::LANDLOCK_FLOOR`] also what that leaves of the files
+/// outside the folders: the installed node still confines its commands with
+/// such a Landlock, a node run by hand takes it as none. `None` from that
+/// ABI on, and without Landlock.
+#[cfg(unix)]
+pub fn landlock_warning(abi: Option<i32>) -> Option<String> {
+    use nerve_sandbox::{LANDLOCK_FLOOR, LANDLOCK_WANTED, landlock_gaps};
+    let abi = abi.filter(|v| *v < LANDLOCK_WANTED)?;
+    let gaps = landlock_gaps(abi).join(", ");
+    let apart = format!(
+        "the commands of one center can reach those of another, as all run as {RUN_USER}; they are kept apart from ABI {LANDLOCK_WANTED} (Linux 6.12) on"
+    );
+    Some(if abi < LANDLOCK_FLOOR {
+        format!(
+            "this kernel's Landlock is ABI {abi}, which does not guard {gaps}: a command can cut a file {RUN_USER} may write outside its folders to nothing, and {apart}; a node run by hand runs no command of folder mode below ABI {LANDLOCK_FLOOR} (Linux 6.2)"
+        )
+    } else {
+        format!("this kernel's Landlock is ABI {abi}, which does not guard {gaps}: {apart}")
+    })
+}
+
 /// What closes the reach of [`home_warning`].
 #[cfg(unix)]
 const LANDLOCK_ADVICE: &str =
@@ -209,6 +234,37 @@ mod home_tests {
         );
         assert_eq!(home_warning(home, None, &[]), None);
         assert!(no_landlock_warning().contains("umask 027"));
+    }
+
+    /// Landlock below ABI 6 is named with the guards it lacks, below ABI 3
+    /// with what that leaves of the files outside the folders; from ABI 6
+    /// and without Landlock nothing is said here.
+    #[test]
+    fn the_landlock_gaps_below_abi_6_are_named() {
+        assert_eq!(landlock_warning(None), None);
+        assert_eq!(landlock_warning(Some(6)), None);
+        assert_eq!(landlock_warning(Some(9)), None);
+        let four = landlock_warning(Some(4)).unwrap();
+        assert!(
+            four.contains("ABI 4")
+                && four.contains("device ioctls, signals to other processes of the account, abstract unix sockets")
+                && !four.contains("truncat")
+                && four.contains("kept apart from ABI 6"),
+            "{four}"
+        );
+        let five = landlock_warning(Some(5)).unwrap();
+        assert!(
+            !five.contains("ioctls") && five.contains("signals"),
+            "{five}"
+        );
+        let two = landlock_warning(Some(2)).unwrap();
+        assert!(
+            two.contains("truncating files")
+                && two.contains("cut a file nerve-run may write")
+                && two.contains("kept apart from ABI 6")
+                && !two.contains("takes it as none"),
+            "{two}"
+        );
     }
 }
 

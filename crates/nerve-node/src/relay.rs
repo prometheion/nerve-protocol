@@ -1827,7 +1827,6 @@ mod tests {
     /// The conformance suite's fake `sudo`: right password or `Sorry`.
     #[cfg(unix)]
     fn fake_sudo(root: &std::path::Path, right: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let script = root.join("fake-sudo");
         let body = format!(
             "#!/bin/sh\nv=\nwhile [ $# -gt 0 ]; do case \"$1\" in -S|-k) shift ;; -p) p=\"$2\"; shift 2 ;; \
@@ -1835,8 +1834,7 @@ mod tests {
              [ \"$pw\" = '{right}' ] || {{ echo 'Sorry, try again.' >&2; exit 1; }}\n\
              [ -n \"$v\" ] && exit 0\nexec \"$@\"\n"
         );
-        std::fs::write(&script, body).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        nerve_transport::files::write_program(&script, &body).unwrap();
         script
     }
 
@@ -2178,6 +2176,28 @@ mod tests {
         crate::pair::pair(&o.paths, &link, Some("home"))
             .await
             .unwrap();
+        // The pairing went through the relay too: a tunnel of its own,
+        // written once its exchange ended.
+        let tunnels = || {
+            nerve_policy::audit::AuditLog::new(j.daemon.paths().audit_log())
+                .read()
+                .unwrap()
+                .into_iter()
+                .filter(|v| v["kind"] == "relay")
+                .collect::<Vec<_>>()
+        };
+        let counted = |n: usize| async move {
+            let deadline = tokio::time::Instant::now() + WAIT;
+            loop {
+                let t = tunnels();
+                if t.len() >= n || tokio::time::Instant::now() >= deadline {
+                    return t;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        };
+        let t = counted(1).await;
+        assert_eq!(t.len(), 1, "the pairing's tunnel: {t:#?}");
         let paired = fake.paired().expect("paired");
         let node = Daemon::start(o.clone()).await.unwrap();
         let mut inc = fake
@@ -2187,7 +2207,11 @@ mod tests {
         fake_center::handshake(&mut inc.conn, &fake.center_id, &paired)
             .await
             .expect("handshake");
+        // The link's tunnel ends with both of its ends.
+        drop(inc);
         node.stop().await;
+        let t = counted(2).await;
+        assert_eq!(t.len(), 2, "the pairing's and the link's tunnels: {t:#?}");
         // The token is where the node's keys are: the keyring here.
         let entry = crate::secrets::Entry::proxy_login(&o.paths);
         assert_eq!(
@@ -2245,15 +2269,15 @@ mod tests {
         assert!(status.contains("400"), "{status}");
         assert!(fake.next_link(QUIET).await.is_none());
         node.stop().await;
-        assert!(
-            nerve_policy::audit::AuditLog::new(j.daemon.paths().audit_log())
-                .read()
-                .unwrap()
-                .iter()
-                .filter(|v| v["kind"] == "relay")
-                .count()
-                == 1,
-            "only the TLS tunnel is a tunnel"
+        // Neither the plain client nor the node that took the relay for an
+        // http:// proxy made a tunnel, also not one written late (a node
+        // that dialled again).
+        tokio::time::sleep(QUIET).await;
+        let t = tunnels();
+        assert_eq!(
+            t.len(),
+            2,
+            "only the pairing's and the link's are tunnels: {t:#?}"
         );
         j.daemon.stop().await;
     }

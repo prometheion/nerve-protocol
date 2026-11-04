@@ -45,6 +45,9 @@ pub struct Layout {
     pub home: PathBuf,
     /// The home of the account commands run as, `nerve-run` (Linux).
     pub run_home: PathBuf,
+    /// The folders every account may write in, where that account's files
+    /// are left behind: `/tmp`, `/var/tmp` and `/dev/shm` (Linux).
+    pub run_temp: Vec<PathBuf>,
     pub paths: NodePaths,
     /// Where `update` finds the programs of the latest release and their
     /// `SHA256SUMS`.
@@ -82,6 +85,7 @@ impl Layout {
                 paths: NodePaths::new(data.join("config"), data.join("state")),
                 home: data,
                 run_home: PathBuf::new(),
+                run_temp: Vec::new(),
                 release,
                 edition,
             };
@@ -91,6 +95,10 @@ impl Layout {
             bin: PathBuf::from("/usr/local/bin").join(program),
             home: "/var/lib/nerve".into(),
             run_home: crate::account::RUN_HOME.into(),
+            run_temp: ["/tmp", "/var/tmp", "/dev/shm"]
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
             paths: NodePaths::new("/etc/nerve", "/var/lib/nerve/state"),
             release,
             edition,
@@ -447,6 +455,10 @@ pub trait System {
     fn landlock(&self) -> bool {
         nerve_sandbox::Confinement::detect().landlock_abi.is_some()
     }
+    /// The kernel's Landlock ABI.
+    fn landlock_abi(&self) -> Option<i32> {
+        nerve_sandbox::Confinement::detect().landlock_abi
+    }
     /// What polkit takes here; the rules go to `rule`'s folder.
     fn polkit(&self, _rule: &Path) -> Polkit {
         Polkit::Missing
@@ -629,8 +641,8 @@ impl System for Host {
         }
         #[cfg(not(unix))]
         let _ = account;
-        let o = c
-            .output()
+        // The program `update` staged a moment ago.
+        let o = nerve_transport::files::retry_busy(|| c.output())
             .map_err(|e| format!("{}: {e}", program.display()))?;
         if !o.status.success() {
             return Err(format!("{} --version: {}", program.display(), failure(&o)));
@@ -1385,6 +1397,12 @@ fn owner_of_install(
             steps.did(format!("Warning: {w}"));
         }
     }
+    // A Landlock that does not hold all the node asks for is named, with
+    // what it leaves.
+    #[cfg(unix)]
+    if let Some(w) = crate::account::landlock_warning(sys.landlock_abi()) {
+        steps.did(format!("Warning: {w}"));
+    }
     #[cfg(not(unix))]
     let _ = account;
     Ok(Some(name.to_string()))
@@ -1642,6 +1660,46 @@ fn uninstall_steps(
     }
     match sys.account(crate::account::RUN_USER)? {
         Some(a) if a.comment == crate::account::RUN_MARK => {
+            // Also what its commands left in the folders every account may
+            // write in: they outlive the service.
+            #[cfg(target_os = "linux")]
+            {
+                let r = remove_files_of(a.uid, &layout.run_temp)?;
+                let n = r.n;
+                if n > 0 {
+                    let places: Vec<String> = layout
+                        .run_temp
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect();
+                    steps.did(format!(
+                        "deleted {n} {} of {} in {}",
+                        if n == 1 { "file" } else { "files" },
+                        crate::account::RUN_USER,
+                        places.join(", ")
+                    ));
+                }
+                if !r.left.is_empty() {
+                    let more = r.left.len().saturating_sub(3);
+                    let _ = writeln!(
+                        steps.out,
+                        "did not look into {} {}, too deep or changed meanwhile, so files of {} may be left there: {}{}",
+                        r.left.len(),
+                        if r.left.len() == 1 {
+                            "folder"
+                        } else {
+                            "folders"
+                        },
+                        crate::account::RUN_USER,
+                        r.left[..r.left.len().min(3)].join(", "),
+                        if more > 0 {
+                            format!(" and {more} more")
+                        } else {
+                            String::new()
+                        }
+                    );
+                }
+            }
             sys.remove_account(crate::account::RUN_USER)?;
             steps.did(format!("removed the account {}", crate::account::RUN_USER));
         }
@@ -1929,11 +1987,11 @@ pub fn hand_over_uninstall(app: &Path, purge: bool, out: &mut dyn Write) -> Resu
     if purge {
         cmd.arg("--purge");
     }
-    let mut child = cmd
-        .stdin(Stdio::inherit())
+    cmd.stdin(Stdio::inherit())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    // The app may have been written a moment ago.
+    let mut child = nerve_transport::files::retry_busy(|| cmd.spawn())
         .map_err(|e| format!("{}: {e}", app.display()))?;
     let stderr = child.stderr.take().expect("piped");
     let said = std::thread::spawn(move || {
@@ -2361,6 +2419,172 @@ fn chown_below(at: &Path, shown: &Path, uid: u32, gid: u32) -> Result<(), String
     Ok(())
 }
 
+/// How many folder levels [`remove_files_of`] goes down: each level holds
+/// a descriptor open, and any account can make a tree in `/tmp` deeper than
+/// the descriptors a process may have.
+#[cfg(target_os = "linux")]
+const WALK_DEPTH: usize = 64;
+
+/// What [`remove_files_of`] did.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default)]
+struct Removed {
+    /// Files and folders deleted.
+    n: usize,
+    /// Folders not looked into, deeper than [`WALK_DEPTH`] or changed while
+    /// they were looked at: files of the account may be left in them.
+    left: Vec<String>,
+    errors: Vec<String>,
+}
+
+/// Deletes what the account `uid` has in `dirs`, the folders every account
+/// may write in, as its uid is about to be freed. Each folder is walked
+/// through descriptors, on its own file system only, and no link below it
+/// is followed: what another account swaps in meanwhile is not walked. The
+/// folder itself is root's and may be a link of root's (`/var/tmp -> /tmp`,
+/// `/dev/shm -> /run/shm`), so it is followed, and walked once. A folder of
+/// `uid`'s that still holds another account's files is given to root.
+#[cfg(target_os = "linux")]
+fn remove_files_of(uid: u32, dirs: &[PathBuf]) -> Result<Removed, String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut walk = Removed::default();
+    let mut seen = Vec::new();
+    for dir in dirs {
+        let real = match std::fs::canonicalize(dir) {
+            Ok(r) => r,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                walk.errors.push(format!("{}: {e}", dir.display()));
+                continue;
+            }
+        };
+        if seen.contains(&real) {
+            continue;
+        }
+        seen.push(real.clone());
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&real);
+        let f = match f {
+            Ok(f) => f,
+            Err(e) => {
+                walk.errors.push(format!("{}: {e}", real.display()));
+                continue;
+            }
+        };
+        let dev = f
+            .metadata()
+            .map_err(|e| format!("{}: {e}", real.display()))?
+            .dev();
+        remove_below(&f, &real, uid, dev, 0, &mut walk);
+    }
+    if !walk.errors.is_empty() {
+        return Err(format!(
+            "the files {} left could not all be deleted, so the account stays: {}; run `sudo nerve-node uninstall` again once that is fixed",
+            crate::account::RUN_USER,
+            walk.errors.join("; ")
+        ));
+    }
+    Ok(walk)
+}
+
+/// [`remove_files_of`] below the open folder `dir`, shown as `shown`,
+/// `depth` levels below the folder it was given.
+#[cfg(target_os = "linux")]
+fn remove_below(
+    dir: &std::fs::File,
+    shown: &Path,
+    uid: u32,
+    dev: u64,
+    depth: usize,
+    walk: &mut Removed,
+) {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let fd = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()));
+    let names: Vec<std::ffi::OsString> = match std::fs::read_dir(&fd) {
+        Ok(r) => r.filter_map(|e| e.ok().map(|e| e.file_name())).collect(),
+        Err(e) => {
+            walk.errors.push(format!("{}: {e}", shown.display()));
+            return;
+        }
+    };
+    for name in names {
+        let at = fd.join(&name);
+        let here = shown.join(&name);
+        // Gone meanwhile: nothing to delete.
+        let Ok(m) = std::fs::symlink_metadata(&at) else {
+            continue;
+        };
+        // The folder as it was opened, its inode checked: it is given to
+        // root through this descriptor, not by its name.
+        let mut opened = None;
+        if m.is_dir() {
+            // Another file system mounted here is not this folder's.
+            if m.dev() != dev {
+                continue;
+            }
+            if depth >= WALK_DEPTH {
+                walk.left.push(here.display().to_string());
+                continue;
+            }
+            let sub = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&at);
+            match sub {
+                // The folder looked at, not one swapped in since.
+                Ok(sub) if sub.metadata().is_ok_and(|s| s.ino() == m.ino()) => {
+                    remove_below(&sub, &here, uid, dev, depth + 1, walk);
+                    opened = Some(sub);
+                }
+                _ => {
+                    walk.left.push(here.display().to_string());
+                    continue;
+                }
+            }
+        }
+        if m.uid() != uid {
+            continue;
+        }
+        let Ok(c) = std::ffi::CString::new(name.as_bytes()) else {
+            continue;
+        };
+        let flag = if m.is_dir() { libc::AT_REMOVEDIR } else { 0 };
+        // SAFETY: a valid C string, relative to the open folder `dir`.
+        if unsafe { libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), flag) } == 0 {
+            walk.n += 1;
+            continue;
+        }
+        let e = std::io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::ENOENT) => {}
+            // Another account's files are in it: the folder is root's.
+            // Whoever may rename entries in `dir` can have put something
+            // else under its name by now.
+            Some(libc::ENOTEMPTY | libc::EEXIST) => {
+                if let Some(sub) = &opened
+                    && let Err(e) = give_folder(sub, &here, (0, 0))
+                {
+                    walk.errors.push(e);
+                }
+            }
+            _ => walk.errors.push(format!("{}: {e}", here.display())),
+        }
+    }
+}
+
+/// Gives the folder open as `folder`, shown as `shown`, to `to` (uid, gid)
+/// through its descriptor: the folder that was walked, whatever its name
+/// leads to now.
+#[cfg(target_os = "linux")]
+fn give_folder(folder: &std::fs::File, shown: &Path, to: (u32, u32)) -> Result<(), String> {
+    std::os::unix::fs::fchown(folder, Some(to.0), Some(to.1))
+        .map_err(|e| format!("{}: {e}", shown.display()))
+}
+
 /// Gives the file or link at `at` (not followed) to `uid`:`gid`. A file
 /// with more than one name is refused: its other name can be anywhere on
 /// the same file system, as a hard link the node's user made to a file of
@@ -2567,6 +2791,8 @@ pub(crate) mod tests {
         pub(crate) pkexec_here: std::cell::Cell<bool>,
         /// Whether the kernel has Landlock.
         pub(crate) landlock: std::cell::Cell<bool>,
+        /// The kernel's Landlock ABI, for what `install` says of it.
+        pub(crate) landlock_abi: std::cell::Cell<Option<i32>>,
     }
 
     impl Fake {
@@ -2582,6 +2808,7 @@ pub(crate) mod tests {
                 root: std::cell::Cell::new(true),
                 pkexec_here: std::cell::Cell::new(true),
                 landlock: std::cell::Cell::new(true),
+                landlock_abi: std::cell::Cell::new(None),
             }
         }
 
@@ -2621,6 +2848,9 @@ pub(crate) mod tests {
         }
         fn landlock(&self) -> bool {
             self.landlock.get()
+        }
+        fn landlock_abi(&self) -> Option<i32> {
+            self.landlock_abi.get()
         }
         fn has_pkexec(&self) -> bool {
             self.pkexec_here.get()
@@ -2744,6 +2974,7 @@ pub(crate) mod tests {
             bin: root.join("usr/local/bin/nerve-node"),
             home: root.join("var/lib/nerve"),
             run_home: root.join("var/lib/nerve-run"),
+            run_temp: vec![root.join("tmp"), root.join("var/tmp"), root.join("dev/shm")],
             paths: NodePaths::new(root.join("etc/nerve"), root.join("var/lib/nerve/state")),
             release: "http://127.0.0.1:1/none".into(),
             edition: &crate::edition::NODE,
@@ -2813,6 +3044,47 @@ pub(crate) mod tests {
                 "{out}"
             );
             assert!(landlock || out.contains("umask 027"), "{out}");
+        }
+    }
+
+    /// `install` names what a Landlock below ABI 6 does not guard, below
+    /// ABI 3 truncating files too, which the installed node still confines
+    /// its commands with; from ABI 6 on it says nothing of it.
+    #[test]
+    fn install_names_the_guards_an_older_landlock_lacks() {
+        for (abi, landlock, said) in [
+            (
+                Some(4),
+                true,
+                Some("Landlock is ABI 4, which does not guard device ioctls"),
+            ),
+            (
+                Some(2),
+                true,
+                Some("Landlock is ABI 2, which does not guard truncating files"),
+            ),
+            (Some(6), true, None),
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            let sys = Fake::new();
+            sys.landlock.set(landlock);
+            sys.landlock_abi.set(abi);
+            let home = d.path().join("alice");
+            std::fs::create_dir(&home).unwrap();
+            sys.others.borrow_mut()[0].home = home;
+            let l = layout(d.path());
+            let exe = d.path().join("nerve-node");
+            std::fs::write(&exe, "nerve-node 1.0.0\n").unwrap();
+            let mut out = Vec::new();
+            install(&l, &sys, &exe, "alice", &mut out).unwrap();
+            let out = String::from_utf8(out).unwrap();
+            match said {
+                Some(s) => assert!(
+                    out.contains(&format!("Warning: this kernel's {s}")),
+                    "{out}"
+                ),
+                None => assert!(!out.contains("this kernel's Landlock"), "{out}"),
+            }
         }
     }
 
@@ -3925,6 +4197,169 @@ pub(crate) mod tests {
         );
     }
 
+    /// What nerve-run's commands left in the folders every account may
+    /// write in goes before its uid is freed: its files and folders, a link
+    /// of its but not what the link names, and nothing of another file
+    /// system or account.
+    #[test]
+    fn uninstall_deletes_what_nerve_run_left_in_the_temporary_folders() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        // The test's own files stand for nerve-run's here.
+        let mine = me().uid;
+        for a in sys.others.borrow_mut().iter_mut() {
+            if a.name == crate::account::RUN_USER {
+                a.uid = mine;
+            }
+        }
+        let outside = d.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("kept.txt"), "k").unwrap();
+        for t in &l.run_temp {
+            std::fs::create_dir_all(t.join("left/deeper")).unwrap();
+            std::fs::write(t.join("left/deeper/f"), "x").unwrap();
+            std::fs::write(t.join("file"), "x").unwrap();
+            std::os::unix::fs::symlink(&outside, t.join("link")).unwrap();
+        }
+        let mut out = Vec::new();
+        uninstall(&l, &sys, false, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        for t in &l.run_temp {
+            assert_eq!(std::fs::read_dir(t).unwrap().count(), 0, "{t:?}");
+        }
+        assert!(outside.join("kept.txt").exists());
+        assert!(
+            out.contains(&format!(
+                "deleted 15 files of nerve-run in {}",
+                l.run_temp[0].display()
+            )),
+            "{out}"
+        );
+        // Before the account goes.
+        let calls = sys.calls();
+        assert!(
+            calls.contains(&"userdel nerve-run".to_string()),
+            "{calls:?}"
+        );
+    }
+
+    /// The walk passes over files of other accounts and does not follow a
+    /// link put where a folder was.
+    #[test]
+    fn the_temporary_folders_lose_only_the_files_of_the_account() {
+        let d = tempfile::tempdir().unwrap();
+        let t = d.path().join("tmp");
+        std::fs::create_dir_all(t.join("dir")).unwrap();
+        std::fs::write(t.join("dir/f"), "x").unwrap();
+        // Not the test's account: nothing goes.
+        assert_eq!(
+            remove_files_of(me().uid + 1, std::slice::from_ref(&t))
+                .unwrap()
+                .n,
+            0
+        );
+        assert!(t.join("dir/f").exists());
+        // A folder missing is no error.
+        assert_eq!(
+            remove_files_of(me().uid, &[d.path().join("none"), t.clone()])
+                .unwrap()
+                .n,
+            2
+        );
+        assert!(!t.join("dir").exists());
+        // The folder itself may be a link (`/var/tmp -> /tmp`): it is
+        // followed, and walked once by either name.
+        let elsewhere = d.path().join("elsewhere");
+        std::os::unix::fs::symlink(&elsewhere, d.path().join("l")).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("f"), "x").unwrap();
+        let r = remove_files_of(me().uid, &[d.path().join("l"), elsewhere.clone()]).unwrap();
+        assert_eq!(r.n, 1);
+        assert!(!elsewhere.join("f").exists() && elsewhere.exists());
+        // A link inside a folder is deleted as a link, not walked into.
+        let outside = d.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("f"), "x").unwrap();
+        let inner = d.path().join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::os::unix::fs::symlink(&outside, inner.join("trap")).unwrap();
+        let r = remove_files_of(me().uid, std::slice::from_ref(&inner)).unwrap();
+        assert!(r.errors.is_empty() && r.left.is_empty(), "{r:?}");
+        assert!(inner.join("trap").symlink_metadata().is_err());
+        assert!(outside.join("f").exists());
+    }
+
+    /// A tree deeper than the walk goes is left as it is, and so is a
+    /// folder that cannot be opened; both are named, and neither keeps the
+    /// account from going.
+    #[test]
+    fn the_temporary_folders_name_what_the_walk_did_not_look_into() {
+        let d = tempfile::tempdir().unwrap();
+        let t = std::fs::canonicalize(d.path()).unwrap().join("tmp");
+        let mut deep = t.clone();
+        for _ in 0..WALK_DEPTH + 2 {
+            deep.push("a");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("f"), "x").unwrap();
+        // Another account's tree: nothing of it is deleted either way. A
+        // folder given twice is walked once.
+        let r = remove_files_of(me().uid + 1, &[t.clone(), t.clone()]).unwrap();
+        assert!(deep.join("f").exists());
+        let mut limit = t.clone();
+        for _ in 0..=WALK_DEPTH {
+            limit.push("a");
+        }
+        assert_eq!(r.left, [limit.display().to_string()]);
+        // Root opens every folder.
+        if nerve_transport::net::euid() == 0 {
+            return;
+        }
+        std::fs::remove_dir_all(t.join("a")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let shut = t.join("shut");
+        std::fs::create_dir(&shut).unwrap();
+        std::fs::write(shut.join("f"), "x").unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let r = remove_files_of(me().uid, std::slice::from_ref(&t));
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let r = r.unwrap();
+        assert_eq!(r.left, [shut.display().to_string()]);
+        assert!(shut.join("f").exists());
+    }
+
+    /// A folder is given away through the descriptor it was walked by: what
+    /// was put under its name since keeps its owner.
+    #[test]
+    fn a_folder_is_given_away_by_its_descriptor_not_its_name() {
+        use std::os::unix::fs::MetadataExt;
+        // A group of the test's account besides its own, which it may give
+        // its files to without being root.
+        let mut groups = vec![0 as libc::gid_t; 256];
+        // SAFETY: the buffer holds as many entries as it is told.
+        let n = unsafe { libc::getgroups(groups.len() as i32, groups.as_mut_ptr()) };
+        let d = tempfile::tempdir().unwrap();
+        let name = d.path().join("d");
+        std::fs::create_dir(&name).unwrap();
+        let folder = std::fs::File::open(&name).unwrap();
+        // Swapped meanwhile: the folder moved, a file of the same owner in
+        // its place.
+        std::fs::rename(&name, d.path().join("moved")).unwrap();
+        std::fs::write(&name, "x").unwrap();
+        let own = std::fs::symlink_metadata(&name).unwrap().gid();
+        let Some(&other) = groups[..n.max(0) as usize].iter().find(|g| **g != own) else {
+            eprintln!("skipped: the test's account has no other group");
+            return;
+        };
+        give_folder(&folder, &name, (me().uid, other)).unwrap();
+        assert_eq!(
+            std::fs::metadata(d.path().join("moved")).unwrap().gid(),
+            other
+        );
+        assert_eq!(std::fs::symlink_metadata(&name).unwrap().gid(), own);
+    }
+
     #[cfg(unix)]
     #[test]
     fn uninstall_writes_no_audit_entry_through_a_link_or_a_second_name() {
@@ -4519,13 +4954,49 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_link(&node.bin).unwrap(), other);
     }
 
+    /// A program still open for writing a moment after it was written
+    /// (#168), until the closer drops it: `f` holds it so for 100 ms.
+    #[cfg(unix)]
+    fn held_open(path: &Path, text: &str) -> std::thread::JoinHandle<()> {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(text.as_bytes()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(f);
+        })
+    }
+
+    /// The app's program, and the program `update` staged, start once they
+    /// are no longer open for writing: Linux says "Text file busy" until then.
+    #[cfg(unix)]
+    #[test]
+    fn a_program_written_a_moment_ago_starts_once_it_is_closed() {
+        let d = tempfile::tempdir().unwrap();
+        let app = d.path().join("nerve-node-desktop");
+        let closer = held_open(&app, "#!/bin/sh\necho \"asked: $*\"\n");
+        let mut out = Vec::new();
+        hand_over_uninstall(&app, false, &mut out).unwrap();
+        closer.join().unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("asked: uninstall"), "{out}");
+        let staged = d.path().join("nerve-node.new");
+        let closer = held_open(&staged, "#!/bin/sh\necho nerve-node 9.9.9\n");
+        assert_eq!(
+            Host.version_of(&staged, &me()).as_deref(),
+            Ok("nerve-node 9.9.9")
+        );
+        closer.join().unwrap();
+    }
+
     /// `nerve-node uninstall` of the node alone, after the app took the
     /// node over: the app's program, here a script that says what it was
     /// asked, does the uninstall, and what it says comes through.
     #[cfg(unix)]
     #[test]
     fn the_node_alone_hands_the_uninstall_of_a_takeover_to_the_app() {
-        use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let node = layout(d.path());
         let app = Layout {
@@ -4536,14 +5007,13 @@ pub(crate) mod tests {
         assert_eq!(app_beside(&node), None);
         std::fs::create_dir_all(app.bin.parent().unwrap()).unwrap();
         let script = |code: u8| {
-            std::fs::write(
+            nerve_transport::files::write_program(
                 &app.bin,
-                format!(
+                &format!(
                     "#!/bin/sh\necho \"removed the program, asked: $*\"\necho \"a log line\" >&2\nexit {code}\n"
                 ),
             )
             .unwrap();
-            std::fs::set_permissions(&app.bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         };
         script(0);
         assert_eq!(app_beside(&node).as_ref(), Some(&app.bin));
