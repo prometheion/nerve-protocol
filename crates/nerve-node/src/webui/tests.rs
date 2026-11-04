@@ -260,3 +260,22 @@ fn a_loopback_ui_answers_to_its_own_address_and_loopback_names_only() {
         true
     ));
 }
+
+/// The page's script parses: a bracket missing anywhere stops every page
+/// of the web UI. Checked with Node.js where it is installed, else skipped.
+#[test]
+fn the_pages_script_parses() {
+    let Ok(dir) = tempfile::tempdir() else {
+        return;
+    };
+    let file = dir.path().join("app.js");
+    std::fs::write(&file, APP_JS).unwrap();
+    match std::process::Command::new("node")
+        .arg("--check")
+        .arg(&file)
+        .output()
+    {
+        Ok(o) => assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr)),
+        Err(_) => eprintln!("skipped: no node here"),
+    }
+}
