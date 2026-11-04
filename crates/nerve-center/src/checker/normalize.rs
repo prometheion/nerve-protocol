@@ -1748,5 +1748,12 @@ mod tests {
             assert!(!p.wrapped, "{line}");
             assert_eq!(p.for_allow().len(), 1, "{line}");
         }
+        // PowerShell ignores case and `.exe` for a program, so a wrapper
+        // written that way is still the wrapper; a folder makes it a file.
+        for line in ["NOHUP make test", "Nohup.EXE make test"] {
+            let p = parse(line, Shell::PowerShell);
+            assert!(!p.wrapped, "{line}");
+        }
+        assert!(parse(r".\nohup make test", Shell::PowerShell).wrapped);
     }
 }
