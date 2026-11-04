@@ -736,9 +736,6 @@ async fn ask_local(
         Err(e) => return Err(e),
     };
     drop(counting);
-    // What marked the server from here on ended it, or a connection to it,
-    // while this call waited for the slot.
-    let after_count = budget.marks();
     budget.admit(tokens, timeout_ms)?;
     let slot = match budget.slot.clone().try_acquire_owned() {
         Ok(slot) => {
@@ -764,12 +761,15 @@ async fn ask_local(
             slot
         }
     };
-    // The call that held the slot may have ended the server: it marks the
-    // process before it frees the slot, so a call woken by that end finds the
-    // mark. Whatever took the old port meanwhile is sent nothing, not the
+    // A call that held the slot, or one answered while this call was
+    // counted, may have ended the server: it marks the process before it
+    // frees the slot, so a call woken by that end finds the mark. It is
+    // compared with the marks from before the count, not from after it: a
+    // mark set while the count was in flight is one this call has to see
+    // too. Whatever took the old port meanwhile is sent nothing, not the
     // key and not the text; this is the gate at the top for a call that was
     // already past it.
-    if budget.marks() != after_count || !budget.may_send() {
+    if budget.marks() != marks || !budget.may_send() {
         return Err(ModelError::Lost(
             "the model ended while it read an earlier call and is starting again".into(),
         ));
@@ -1794,6 +1794,34 @@ mod tests {
             drop(reading);
         });
         let e = waiting.unwrap_err();
+        assert!(matches!(e, ModelError::Lost(_)), "{e}");
+        assert_eq!(asked.load(Ordering::SeqCst), 0, "nothing was sent");
+    }
+
+    /// A call whose count is answered while the server ends on another call
+    /// is sent nothing, though the slot is free by the time it asks for it:
+    /// the mark that came during its own count counts too (review round 6 of
+    /// the center's sign-in).
+    #[tokio::test]
+    async fn a_call_is_not_sent_once_the_server_ended_on_a_call_during_its_count() {
+        let budget = Arc::new(linear(12_288, 0.1));
+        let (ep, asked) = fake::server_counting_slowly(100, Duration::from_millis(500));
+        let ep = Endpoint {
+            budget: Some(budget.clone()),
+            ..ep
+        };
+        budget.vet_calls();
+        budget.restart();
+        budget.vetted();
+        budget.became_ready();
+        let cfg = with_timeout(5000);
+        let (second, ()) = tokio::join!(ask(&ep, &cfg, json!({"command": "second"})), async {
+            // The count is in flight: another call, which has already freed
+            // the slot, marks the process as its connection ends.
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            budget.die_on_call();
+        });
+        let e = second.unwrap_err();
         assert!(matches!(e, ModelError::Lost(_)), "{e}");
         assert_eq!(asked.load(Ordering::SeqCst), 0, "nothing was sent");
     }

@@ -173,6 +173,11 @@ pub struct Parsed {
     /// splitter found and what the parser read before it gave out, which may
     /// be less than the line runs.
     pub unread: bool,
+    /// A command of the line has a redirection (`> file`, `2>> log`). The
+    /// splitter has no notion of one and keeps the `>` and the file among
+    /// the command's arguments, so a rule that takes any argument would
+    /// cover a write to a file.
+    pub redirected: bool,
 }
 
 impl Parsed {
@@ -185,11 +190,19 @@ impl Parsed {
     /// rule skips the model for), a line with a wrapper that does more
     /// than run its command ([`Parsed::wrapped`]: `env -S` is a `-c` body by
     /// another name, `env GIT_CONFIG_…=…` changes what the command does),
-    /// and a line in which the parser found a command the splitter did not
+    /// a line in which the parser found a command the splitter did not
     /// (a runner the splitter does not know, such as `timeout` or `eval`,
-    /// or a wrapper's flags it reads otherwise).
+    /// or a wrapper's flags it reads otherwise), and a line with a
+    /// redirection ([`Parsed::redirected`]: a second, plain copy of the
+    /// command in the line would hide that the two readers differ about
+    /// it, so the line is marked on its own).
     pub fn for_allow(&self) -> &[Command] {
-        if self.nested || self.wrapped || self.unread || self.commands.len() > self.walked {
+        if self.nested
+            || self.wrapped
+            || self.unread
+            || self.redirected
+            || self.commands.len() > self.walked
+        {
             &[]
         } else {
             &self.commands[..self.walked]
@@ -324,6 +337,9 @@ pub fn parse(line: &str, shell: Shell) -> Parsed {
         if out.overflow.is_some() {
             return;
         }
+        if !s.commands[i].redirects.is_empty() {
+            out.redirected = true;
+        }
         let Some(run) = command::run(&s.commands[i], s.shell) else {
             return;
         };
@@ -375,6 +391,7 @@ fn walk(line: &str, shell: Shell) -> Parsed {
         nested: w.nested,
         wrapped: w.wrapped,
         unread: false,
+        redirected: false,
     }
 }
 

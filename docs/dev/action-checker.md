@@ -171,6 +171,13 @@ either). A pattern, `cmd-re:` or `re:` rule covers only a `plain` command
 (`Command::plain`: the program word has no folder), since `program` keeps
 the base name only; for `re:` that is all it checks of the program, the
 regex sees the text.
+`Parsed::redirected` marks a line in which the parser reads a redirection
+(`Command::redirects`); `for_allow` is empty for it. The splitter keeps a `>`
+and its file among a command's arguments and the parser takes them out, so the
+two readings of that command differ, which alone kept it from a rule; but
+`parse` dedupes the readings as a set, and a second, plain copy of the command
+in the line hid the difference. Only an `exact:` rule covers such a line, as
+the node's allowlist covers no wildcard line with `<` or `>`.
 `Parsed::unread` marks a line nerve-policy's parser gave up on (`Err`: an
 open quote or here-document, a shell fed from a pipe, an encoded PowerShell
 command, a bound hit). `for_allow` is empty for it, as for `nested`: the
@@ -337,9 +344,14 @@ then does it check that the server answers `/v1/models` with 401 to a key it
 was not given, and send the real one. Calls wait for the same check (`ReadBudget::vet_calls`, `vetted`,
 cleared when a process ends): in the window after the server ended on a call
 they are refused as lost without a connection, so the old port, which a
-process may have taken, sees neither the key nor the text. That holds for a
-call already waiting for the slot too: `ask_local` looks at the budget's
-marks and `may_send` again once it has the slot (the call before it marks the
+process may have taken, sees neither the key nor the text. That holds from
+the moment the center sees the process end: `vetted` is cleared when the
+supervisor reaps the child, and a connection that ends first (the kernel closes
+the server's sockets before it tells its parent) leaves a gap of micro- to
+milliseconds in which a call is still sent to the old port. For a call already
+waiting for the slot, or counted while another call ended the server,
+`ask_local` looks at the budget's marks (compared with those from before its
+count) and `may_send` again once it has the slot (the call before it marks the
 end before it frees the slot). A process that
 took the port is so never sent the key, short of one that may share a port with the server
 (Windows lets a process do that by choice); the check is a guard against a

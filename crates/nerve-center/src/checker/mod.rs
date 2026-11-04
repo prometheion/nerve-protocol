@@ -1662,6 +1662,60 @@ mod tests {
         }
     }
 
+    /// A line with a redirection is covered by no pattern or regex, whether
+    /// or not the same command stands in it once more without: the parser
+    /// reads the redirected command without its file, so a plain copy would
+    /// hide that the two readers differ (review round 6 of the center's
+    /// sign-in). Only an `exact:` rule covers it.
+    #[tokio::test]
+    async fn an_allow_rule_does_not_cover_a_line_with_a_redirection() {
+        let args = Map::new();
+        let checker_with = |rule: &str| {
+            let mut cfg = CheckerConfig::default();
+            cfg.allow_rules.push(AllowRule {
+                rule: rule.into(),
+                node_id: None,
+            });
+            Checker::build(cfg, None)
+        };
+        let covered = async |checker: &Checker, line: &str| {
+            let info = call("exec", "run", Effect::Execute, line, &args);
+            matches!(
+                checker.check(&info, None).await,
+                Decision::Allowed {
+                    layer: Layer::AllowRule,
+                    ..
+                }
+            )
+        };
+        let lines = [
+            "make test > out.log",
+            "make test > out.log; make test",
+            "make test; make test > out.log",
+            "make test 2>> out.log && make test",
+        ];
+        for line in lines {
+            // The parser reads the redirection, so the test keeps its teeth.
+            assert!(
+                normalize::parse(line, normalize::Shell::Posix).redirected,
+                "the parser reads a redirection in {line}"
+            );
+        }
+        for rule in [
+            "exec.run:make *",
+            "exec.run:cmd-re:^make ",
+            "exec.run:re:^make ",
+        ] {
+            let checker = checker_with(rule);
+            assert!(covered(&checker, "make test").await, "{rule}");
+            for line in lines {
+                assert!(!covered(&checker, line).await, "{rule} covers {line}");
+            }
+        }
+        let checker = checker_with("exec.run:exact:make test > out.log; make test");
+        assert!(covered(&checker, "make test > out.log; make test").await);
+    }
+
     /// The model is told the call's effect and what the node says the
     /// capability does, cut to a few sentences, beside the call itself.
     #[test]
