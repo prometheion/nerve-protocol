@@ -145,6 +145,12 @@ struct Flights {
     /// too: one that ends the process has the same effect as a read that
     /// does (review T6 of #178).
     counting: usize,
+    /// Calls go to the server only once the supervisor has checked that the
+    /// process answering is the one it started ([`ReadBudget::vet_calls`]):
+    /// on a port, where another process may answer.
+    vet: bool,
+    /// This process was checked to be the server's own.
+    vetted: bool,
 }
 
 impl Flights {
@@ -177,6 +183,28 @@ impl ReadBudget {
         s.started += 1;
         s.process += 1;
         s.ready = false;
+        s.vetted = false;
+    }
+
+    /// Calls are held back from now on until each process is
+    /// [`vetted`](Self::vetted): the server listens on a port, where a
+    /// process that took it after a crash would be sent the key and the
+    /// text of every call the window of a restart lets through.
+    pub(super) fn vet_calls(&self) {
+        self.state.lock().unwrap().vet = true;
+    }
+
+    /// The process answering is the server's own (it refuses a key it was
+    /// not given, and said it listens): calls may be sent to it.
+    pub(super) fn vetted(&self) {
+        self.state.lock().unwrap().vetted = true;
+    }
+
+    /// Whether a call may be sent: always, but on a port it has to wait for
+    /// the current process to be [`vetted`](Self::vetted).
+    fn may_send(&self) -> bool {
+        let s = self.state.lock().unwrap();
+        !s.vet || s.vetted
     }
 
     /// Whether the server went away while it read a call, and its
@@ -207,6 +235,7 @@ impl ReadBudget {
     pub(super) fn ended(&self) {
         let mut s = self.state.lock().unwrap();
         s.ready = false;
+        s.vetted = false;
         if self.reading() || s.counting > 0 {
             s.mark();
         }
@@ -220,6 +249,7 @@ impl ReadBudget {
     /// (review T3 and T4 of #178).
     pub(super) fn ended_before_ready(&self) {
         let mut s = self.state.lock().unwrap();
+        s.vetted = false;
         if self.reading() || s.counting > 0 {
             s.mark();
         } else if s.marked_in < s.process {
@@ -245,7 +275,9 @@ impl ReadBudget {
     /// off meets a model that is down, not one that failed (review T6 of
     /// #178). A call in it marks itself.
     pub(super) fn stopped(&self) {
-        self.state.lock().unwrap().ready = false;
+        let mut s = self.state.lock().unwrap();
+        s.ready = false;
+        s.vetted = false;
     }
 
     /// A count is in flight until the returned guard drops.
@@ -652,6 +684,20 @@ async fn ask_local(
     timeout: Duration,
     timeout_ms: u64,
 ) -> Result<f64, ModelError> {
+    // On a port nothing is sent, not even the count, before the supervisor
+    // has checked who answers: the window of a restart would otherwise hand
+    // the key and the call's text to whatever took the port.
+    if !budget.may_send() {
+        let why = "the new server is not known to be the center's own yet, so nothing is sent"
+            .to_string();
+        return Err(if budget.died_on_call() {
+            ModelError::Lost(format!(
+                "the model ended while it read an earlier call and is starting again ({why})"
+            ))
+        } else {
+            ModelError::Unreachable(why)
+        });
+    }
     // The timeout covers the wait for the slot as well as the read.
     let deadline = tokio::time::Instant::now() + timeout;
     // The count is also the probe of a server marked as ended on a call: one
@@ -1662,6 +1708,50 @@ mod tests {
         let _ = ask(&ep, &with_timeout(2000), json!({})).await.unwrap();
         assert_eq!(asked.load(Ordering::SeqCst), 1);
         assert!(budget.died_on_call());
+    }
+
+    /// On a port nothing is sent to a process the supervisor has not checked
+    /// is the server's own: not the count, not the call. The window after an
+    /// end on a call is refused as lost without a connection, and a process
+    /// that ends loses the check again.
+    #[tokio::test]
+    async fn on_a_port_a_call_waits_for_the_process_to_be_vetted() {
+        let budget = Arc::new(linear(12_288, 0.1));
+        let (ep, asked) = fake::server(100, Duration::ZERO);
+        let ep = Endpoint {
+            budget: Some(budget.clone()),
+            ..ep
+        };
+        budget.vet_calls();
+        budget.restart();
+        budget.die_on_call();
+        let cfg = with_timeout(2000);
+        let e = ask(&ep, &cfg, json!({})).await.unwrap_err();
+        assert!(matches!(e, ModelError::Lost(_)), "{e}");
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+        // Unmarked, it is a server that is down.
+        budget.settled();
+        let e = ask(&ep, &cfg, json!({})).await.unwrap_err();
+        assert!(matches!(e, ModelError::Unreachable(_)), "{e}");
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+        budget.vetted();
+        ask(&ep, &cfg, json!({})).await.expect("vetted: sent");
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        // The process ends: the next one is checked again.
+        budget.ended();
+        let e = ask(&ep, &cfg, json!({})).await.unwrap_err();
+        assert!(matches!(e, ModelError::Unreachable(_)), "{e}");
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        // On a socket nothing waits.
+        let socket = Arc::new(linear(12_288, 0.1));
+        let (ep, asked) = fake::server(100, Duration::ZERO);
+        let ep = Endpoint {
+            budget: Some(socket.clone()),
+            ..ep
+        };
+        socket.restart();
+        ask(&ep, &cfg, json!({})).await.expect("sent");
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
     }
 
     /// A count clears only a mark that was there when it began, and only

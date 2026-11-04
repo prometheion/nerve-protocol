@@ -69,15 +69,25 @@ pub struct Command {
     /// The arguments as written (not expanded), for the patterns that look at
     /// words such as PowerShell's `-Recurse`.
     pub raw: Vec<String>,
-    /// Whether the program is written as its base name: no folder, and for a
-    /// POSIX shell not in another case or with `.exe`, since there `Git`,
-    /// `git.exe` and `/tmp/git` are other programs than `git`. An allow rule
+    /// Whether the program is written without a folder. An allow rule
     /// covers only a plain program, so a file of that name somewhere else
     /// does not run under it.
     pub plain: bool,
+    /// For a POSIX shell, the program as written (`Rscript`, `git.exe`):
+    /// there `Git` and `git.exe` are other programs than `git`, so an allow
+    /// rule compares it in its case. `None` for PowerShell, which ignores
+    /// case and `.exe`.
+    pub written: Option<String>,
 }
 
 impl Command {
+    /// Whether the program is written without a folder and, for a POSIX
+    /// shell, in lower case and without `.exe`, as [`Command::program`] has
+    /// it.
+    pub fn written_lower(&self) -> bool {
+        self.plain && self.written.as_deref().is_none_or(|w| w == self.program)
+    }
+
     /// The short flags the command carries, each as one letter (`-rf -v` →
     /// `r`, `f`, `v`). Long flags (`--force`) are not here.
     pub fn short_flags(&self) -> Vec<char> {
@@ -311,7 +321,8 @@ pub fn parse(line: &str, shell: Shell) -> Parsed {
             program: base_name(&run.name),
             args: raw.iter().flat_map(|a| expand_flags(a)).collect(),
             raw,
-            plain: is_plain(&run.name, shell),
+            plain: !has_folder(&run.name),
+            written: written(&run.name, shell),
         };
         if seen.contains(&same(&c)) {
             return;
@@ -410,7 +421,7 @@ impl Walk {
             self.overflow = Some(Overflow::Commands);
             return;
         }
-        let Some((i, bare)) = program_at(words) else {
+        let Some((i, bare)) = program_at(words, shell) else {
             return;
         };
         self.wrapped |= !bare;
@@ -422,7 +433,8 @@ impl Walk {
             program: program.clone(),
             args,
             raw: rest.to_vec(),
-            plain: is_plain(&words[i], shell),
+            plain: !has_folder(&words[i]),
+            written: written(&words[i], shell),
         });
 
         // A nested shell: its `-c` / `/c` / `-Command` body is another
@@ -460,14 +472,16 @@ impl Walk {
 /// The index of the program in a command's words: past the leading shell
 /// keywords and wrappers (with a wrapper's own arguments: `env A=B`,
 /// `nice -n 5`, `sudo -u user`, `xargs -0`).
-fn program_index(words: &[String]) -> Option<usize> {
-    program_at(words).map(|(i, _)| i)
+fn program_index(words: &[String], shell: Shell) -> Option<usize> {
+    program_at(words, shell).map(|(i, _)| i)
 }
 
 /// [`program_index`], and whether every wrapper before the program stood
 /// bare: no word of its own, and none that adds to what the program is
-/// given ([`Parsed::wrapped`]).
-fn program_at(words: &[String]) -> Option<(usize, bool)> {
+/// given ([`Parsed::wrapped`]). A wrapper written with a folder or in
+/// another case than its name is a file of the agent's, not the wrapper,
+/// and counts as a word of its own.
+fn program_at(words: &[String], shell: Shell) -> Option<(usize, bool)> {
     let mut i = 0;
     let mut bare = true;
     while i < words.len() {
@@ -479,7 +493,7 @@ fn program_at(words: &[String]) -> Option<(usize, bool)> {
         if !WRAPPERS.contains(&w.as_str()) {
             break;
         }
-        bare &= !RUN_TIME_WRAPPERS.contains(&w.as_str());
+        bare &= !RUN_TIME_WRAPPERS.contains(&w.as_str()) && is_base_name(&words[i], shell);
         i += 1;
         let first = i;
         while i < words.len() {
@@ -505,7 +519,7 @@ fn program_at(words: &[String]) -> Option<(usize, bool)> {
 /// shell.
 fn segment_program(segment: &str, shell: Shell) -> Option<String> {
     let words = tokenize(segment, shell)?;
-    let i = program_index(&words)?;
+    let i = program_index(&words, shell)?;
     Some(base_name(&words[i]))
 }
 
@@ -1057,9 +1071,23 @@ fn base_name(word: &str) -> String {
     }
 }
 
-/// Whether the program `word` is written as its base name ([`Command::plain`]).
-fn is_plain(word: &str, shell: Shell) -> bool {
-    !word.contains(['/', '\\'])
+/// Whether the program `word` is written with a folder.
+fn has_folder(word: &str) -> bool {
+    word.contains(['/', '\\'])
+}
+
+/// [`Command::written`] of the program `word`.
+fn written(word: &str, shell: Shell) -> Option<String> {
+    match shell {
+        Shell::Posix => Some(word.rsplit(['/', '\\']).next().unwrap_or(word).to_string()),
+        Shell::PowerShell => None,
+    }
+}
+
+/// Whether the program `word` is written as its base name: no folder, and
+/// for a POSIX shell not in another case or with `.exe`.
+fn is_base_name(word: &str, shell: Shell) -> bool {
+    !has_folder(word)
         && match shell {
             // PowerShell and Windows programs ignore case and `.exe`.
             Shell::PowerShell => true,
@@ -1620,25 +1648,40 @@ mod tests {
         assert_eq!(parse(&script, Shell::Posix).overflow, None);
     }
 
-    /// A program written with a folder is not plain; nor, for a POSIX shell,
-    /// one in another case or with `.exe`. PowerShell ignores case and
-    /// `.exe`, but a folder still makes another program.
+    /// A program written with a folder is not plain. For a POSIX shell the
+    /// program is kept as written, so a rule can tell `Rscript` from
+    /// `rscript` and `git.exe` from `git`; PowerShell ignores both.
     #[test]
-    fn a_program_is_plain_when_written_as_its_base_name() {
-        for (line, shell, plain) in [
-            ("git status", Shell::Posix, true),
-            ("/usr/bin/git status", Shell::Posix, false),
-            ("./git status", Shell::Posix, false),
-            ("Git status", Shell::Posix, false),
-            ("git.exe status", Shell::Posix, false),
-            ("git status", Shell::PowerShell, true),
-            ("Git.EXE status", Shell::PowerShell, true),
-            (".\\git status", Shell::PowerShell, false),
-            ("C:\\tools\\git.exe status", Shell::PowerShell, false),
+    fn a_program_is_plain_without_a_folder_and_kept_as_written() {
+        for (line, shell, plain, written, lower) in [
+            ("git status", Shell::Posix, true, Some("git"), true),
+            (
+                "/usr/bin/git status",
+                Shell::Posix,
+                false,
+                Some("git"),
+                false,
+            ),
+            ("./git status", Shell::Posix, false, Some("git"), false),
+            ("Rscript x.R", Shell::Posix, true, Some("Rscript"), false),
+            ("git.exe status", Shell::Posix, true, Some("git.exe"), false),
+            ("git status", Shell::PowerShell, true, None, true),
+            ("Git.EXE status", Shell::PowerShell, true, None, true),
+            (".\\git status", Shell::PowerShell, false, None, false),
+            (
+                "C:\\tools\\git.exe status",
+                Shell::PowerShell,
+                false,
+                None,
+                false,
+            ),
         ] {
             let p = parse(line, shell);
             assert_eq!(p.commands.len(), 1, "{line}: {:?}", p.commands);
-            assert_eq!(p.commands[0].plain, plain, "{line}");
+            let c = &p.commands[0];
+            assert_eq!(c.plain, plain, "{line}");
+            assert_eq!(c.written.as_deref(), written, "{line}");
+            assert_eq!(c.written_lower(), lower, "{line}");
         }
     }
 
@@ -1663,6 +1706,9 @@ mod tests {
             "nice git -n 5 status && nice -n 5 git status",
             "xargs git status",
             "npx git status",
+            "./env make test",
+            "/usr/bin/nohup make test",
+            "NOHUP make test",
         ] {
             assert!(parse(line, Shell::Posix).wrapped, "{line}");
         }

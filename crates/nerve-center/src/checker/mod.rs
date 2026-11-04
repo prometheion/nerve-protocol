@@ -1521,6 +1521,51 @@ mod tests {
                 "{rule} does not cover {line}"
             );
         }
+        // A program with a capital in its name is covered as the rule writes
+        // it, and only so; the rule that **Allow as wildcard** saves from a
+        // line covers that line.
+        let checker = checker_with("exec.run:Rscript *");
+        assert!(covered(&checker, "Rscript x.R").await);
+        for line in ["rscript x.R", "RSCRIPT x.R", "/tmp/Rscript x.R"] {
+            assert!(!covered(&checker, line).await, "Rscript * covers {line}");
+        }
+        for line in ["VBoxManage list vms", "MP4Box -add a.mp4 b.mp4"] {
+            let rule = nerve_policy::rules::rule_for("exec", "run", line, true, None).unwrap();
+            assert!(
+                covered(&checker_with(&rule), line).await,
+                "{rule} does not cover {line}"
+            );
+        }
+        // A wrapper written with a folder, or in another case, is a file of
+        // the agent's: what it is given is not covered.
+        for rule in ["exec.run:make test", "exec.run:make *"] {
+            let checker = checker_with(rule);
+            for line in [
+                "./env make test",
+                "/usr/bin/nohup make test",
+                "./time make test",
+                "./sudo make test",
+                "./command make test",
+                "Env make test",
+                "SUDO make test",
+            ] {
+                assert!(!covered(&checker, line).await, "{rule} covers {line}");
+            }
+            for line in ["env make test", "sudo make test", "nohup make test"] {
+                assert!(
+                    covered(&checker, line).await,
+                    "{rule} does not cover {line}"
+                );
+            }
+        }
+        // A flag word the rule does not name is no operand, whatever its end
+        // looks like: a short flag with its value attached stays out of a
+        // rule that has an operand glob and no bare `*`.
+        let checker = checker_with("exec.run:prog -v *.txt");
+        assert!(covered(&checker, "prog -v a.txt").await);
+        for line in ["prog -v -ofile.txt a.txt", "prog -v a.txt -o=b.txt"] {
+            assert!(!covered(&checker, line).await, "covers {line}");
+        }
         // A long flag's value is part of the rule.
         let checker = checker_with("exec.run:kubectl get pods --namespace=dev");
         assert!(covered(&checker, "kubectl get pods --namespace=dev").await);

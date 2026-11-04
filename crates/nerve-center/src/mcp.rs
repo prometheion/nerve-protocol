@@ -172,7 +172,11 @@ impl Engine {
                     None => return None,
                 }
             }
-            _ => error(id, -32601, &format!("unknown method {method}")),
+            _ => error(
+                id,
+                -32601,
+                &format!("unknown method {}", util::clip(method, 64)),
+            ),
         })
     }
 
@@ -221,7 +225,10 @@ impl Engine {
             EXECUTE_TOOL => Ok(self.execute(args).await),
             _ => Err((
                 -32602,
-                format!("unknown tool {name}; the tools are list and execute"),
+                format!(
+                    "unknown tool {}; the tools are list and execute",
+                    util::clip(name, 64)
+                ),
             )),
         }
     }
@@ -2547,6 +2554,29 @@ mod tests {
             assert_eq!(r["error"]["code"], -32600, "{r}");
             assert!(r.to_string().len() < 400, "{r}");
         }
+    }
+
+    /// A method or a tool name the engine does not know is repeated in the
+    /// error, cut short: a reply is no larger than the tools' own caps
+    /// whatever the request carried.
+    #[tokio::test]
+    async fn an_unknown_name_is_cut_short_in_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = Engine::new(&open(dir.path()), "test");
+        let long = "x".repeat(100_000);
+        let r = e
+            .handle(json!({"jsonrpc": "2.0", "id": 1, "method": long}))
+            .await
+            .unwrap();
+        assert_eq!(r["error"]["code"], -32601, "{r}");
+        assert!(r.to_string().len() < 400, "{}", r.to_string().len());
+        let r = e
+            .handle(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": long, "arguments": {}}}))
+            .await
+            .unwrap();
+        assert_eq!(r["error"]["code"], -32602, "{r}");
+        assert!(r.to_string().len() < 400, "{}", r.to_string().len());
     }
 
     /// A reply a peer does not read is still a request in flight: the

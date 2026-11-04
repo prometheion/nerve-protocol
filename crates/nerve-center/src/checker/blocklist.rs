@@ -14,7 +14,7 @@
 //! one that meets them all. A `cap` or `cap.action` without a pattern
 //! matches that whole scope.
 
-use globset::{GlobBuilder, GlobMatcher};
+use globset::{Glob, GlobBuilder, GlobMatcher};
 use nerve_policy::conditions::{Arg, Conditions, PathStyle};
 use nerve_proto::schema::PathMark;
 use regex::Regex;
@@ -237,7 +237,9 @@ impl Rule {
         };
         match &self.matcher {
             Matcher::Command(p) if !deny => all(&|c| c.plain && p.covers(c)),
-            Matcher::CmdRegex(re) if !deny => all(&|c| c.plain && re.is_match(&c.line())),
+            // The regex meets the program lower-cased, so only a program
+            // written that way is the one it names.
+            Matcher::CmdRegex(re) if !deny => all(&|c| c.written_lower() && re.is_match(&c.line())),
             // A regex over the whole line cannot tell which command it
             // matched, so as an allow rule it covers a line of one command
             // only, with nothing run inside it.
@@ -276,6 +278,9 @@ impl Rule {
 /// `-v` added; as an allow rule they do ([`CmdPattern::covers`]).
 struct CmdPattern {
     program: GlobMatcher,
+    /// The program glob in the case it is written, for an allow rule on a
+    /// POSIX line ([`Command::written`]).
+    program_as_written: GlobMatcher,
     short: Vec<char>,
     long: Vec<String>,
     /// The long flags as the pattern spells them, with the value of a
@@ -292,6 +297,9 @@ impl CmdPattern {
         let program = words.next().ok_or("the pattern names no program")?;
         // The program is matched in any case (it is lower-cased on the
         // command), so `Format-Volume` is written as PowerShell writes it.
+        let program_as_written = Glob::new(program)
+            .map_err(|e| e.to_string())?
+            .compile_matcher();
         let program = GlobBuilder::new(program)
             .case_insensitive(true)
             .build()
@@ -331,6 +339,7 @@ impl CmdPattern {
         }
         Ok(CmdPattern {
             program,
+            program_as_written,
             short,
             long,
             long_words,
@@ -352,6 +361,13 @@ impl CmdPattern {
         if !self.matches_in(c, false) {
             return false;
         }
+        // On a POSIX line the program is compared as written: `Rscript` is
+        // not `rscript`.
+        if let Some(w) = &c.written
+            && !self.program_as_written.is_match(w)
+        {
+            return false;
+        }
         if self.rest {
             return true;
         }
@@ -370,6 +386,11 @@ impl CmdPattern {
             {
                 let f = a.as_bytes()[1] as char;
                 self.short.contains(&f)
+            } else if a.len() > 1 && a.starts_with('-') {
+                // A flag word the pattern does not name (a short flag with
+                // its value attached, say) is not an operand, whatever its
+                // end looks like.
+                false
             } else {
                 self.operands.iter().any(|g| g.is_match(norm_operand(a)))
             }

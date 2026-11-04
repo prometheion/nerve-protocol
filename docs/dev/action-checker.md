@@ -168,9 +168,17 @@ flag or operand it does not name (`CmdPattern::covers`), unless it has a
 bare `*`; a long flag it spells `--name=value` takes that value only, and a
 short flag only in the case it spells it (`matches`, the blocklist's, takes
 either). A pattern or `re:` rule covers only a `plain` command
-(`Command::plain`: the program word has no folder, and for POSIX not another
-case or `.exe`), since the command keeps the base name only; the parser's
-duplicate of a command does not replace the splitter's, which saw the word.
+(`Command::plain`: the program word has no folder), since `program` keeps
+the base name only. On a POSIX line `Command::written` keeps the word as it
+was written, and a pattern compares its program with that in its case
+(`CmdPattern::program_as_written`), so `Rscript *` covers `Rscript x.R` and
+not `rscript x.R`, `Cat` or `cat.exe` for `cat`; a `cmd-re:` rule meets the
+lower-cased line and so needs a word that is already lower case
+(`Command::written_lower`). A wrapper word that is not written as its base
+name (`./env`, `NOHUP`) marks the line `wrapped`. A word that starts with `-`
+and that the pattern does not name is no operand (`covers`), as
+`Command::operands` has it. The parser's duplicate of a command does not
+replace the splitter's, which saw the word.
 The node's allowlist draws the same line
 (`nerve-policy/src/decide.rs`: a wildcard never covers a chained line).
 
@@ -318,8 +326,11 @@ the server from one that refuses a key too, so the supervisor asks nothing
 until the server's own log (stderr) says `listening on http://127.0.0.1:<port>`:
 a server whose port was taken cannot bind, never says so and ends. Only
 then does it check that the server answers `/v1/models` with 401 to a key it
-was not given, and send the real one. A process that took the port is so
-never sent the key, short of one that may share a port with the server
+was not given, and send the real one. Calls wait for the same check (`ReadBudget::vet_calls`, `vetted`,
+cleared when a process ends): in the window after the server ended on a call
+they are refused as lost without a connection, so the old port, which a
+process may have taken, sees neither the key nor the text. A process that
+took the port is so never sent the key, short of one that may share a port with the server
 (Windows lets a process do that by choice); the check is a guard against a
 mistake, not a boundary. Either way it gets a random key
 per start in `LLAMA_API_KEY` (its environment, not its command line, which

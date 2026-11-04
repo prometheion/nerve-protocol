@@ -283,9 +283,13 @@ meets the rule, and nothing in the line runs inside another command:
   somewhere else could use. (On Windows with PowerShell, case and `.exe`
   do not matter, but a folder still does.) A short flag is covered in the
   case the pattern has it: `exec.run:grep -r x` does not cover `grep -R x`.
+  A flag the pattern does not name is not covered either when its value is
+  attached (`-ofile.txt`), even if the word ends like an operand the pattern
+  names (`*.txt`).
 - A wrapper with words of its own is covered by no pattern, with or without
   `*`: `env NAME=value …`, `env -S '…'`, `sudo -u other …`, `nice -n 5 …`.
-  What it adds (another environment, another account, a whole command line)
+  A wrapper written with a folder (`./env make test`) or in another case is
+  a file of that name, not the wrapper, and counts the same way. What it adds (another environment, another account, a whole command line)
   is nothing the rule names. Nor is `xargs …` or `npx …`, which give the
   command words or a program the line does not show.
 - A line with `$( )`, backticks, `<( )`, a shell's `-c` body (`sh -c`,

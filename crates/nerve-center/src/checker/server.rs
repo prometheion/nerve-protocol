@@ -171,6 +171,9 @@ impl LocalServer {
         let shutdown = Arc::new(tokio::sync::Notify::new());
         let exited = Arc::new(tokio::sync::Notify::new());
         let budget = Arc::new(ReadBudget::new(context, pin.read_ms, pin.read_growth));
+        if matches!(listen, Listen::Port(_)) {
+            budget.vet_calls();
+        }
         let listen = Arc::new(Mutex::new(listen));
         let task = tokio::spawn(supervise(
             bin,
@@ -505,7 +508,9 @@ async fn run_once(
                 // Who answers is checked before the real key is sent: a
                 // process that took the port must not learn it.
                 match ours(listen, &listening, endpoint, timeout).await {
-                    Some(true) => {}
+                    // Vetted with the phase, under its lock, as every step
+                    // that changes what a call may do.
+                    Some(true) => set(inner, |_| budget.vetted()),
                     Some(false) => {
                         set(inner, |i| {
                             i.phase = Some(Phase::Failed);
@@ -1049,8 +1054,89 @@ mod tests {
         };
         assert_ne!(now, port);
         assert!(model::is_decision_model(&server.endpoint()).await.unwrap());
+        // Once the process is vetted, calls are sent to it.
+        let config = crate::checker::config::ModelConfig::default();
+        model::ask(
+            &server.endpoint(),
+            &config,
+            serde_json::json!({"command": "x"}),
+        )
+        .await
+        .expect("a call to the vetted server is sent");
         server.stop().await;
         drop(taken);
+    }
+
+    /// On a port, the calls of the window after the server ended on a call
+    /// are refused as lost without being sent: the port is the old one until
+    /// the supervisor picks a new one, and a process that took it must not
+    /// be handed the key or the call. The "server" here is a process that
+    /// never listens, with a squatter on its port that records what it hears.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_calls_of_a_restart_window_on_a_port_reach_nobody() {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let squatter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = squatter.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(String::new()));
+        let heard = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut io, _)) = squatter.accept().await {
+                let heard = heard.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = io.read(&mut buf).await.unwrap_or(0);
+                    heard
+                        .lock()
+                        .unwrap()
+                        .push_str(&String::from_utf8_lossy(&buf[..n]));
+                    let body = r#"{"tokens":[1,2,3]}"#;
+                    let _ = io
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                });
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("llama-server");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\necho $$ > \"$(dirname \"$0\")/pid\"\nexec sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let model = dir.path().join("model.gguf");
+        std::fs::write(&model, b"x").unwrap();
+        let pin = crate::checker::install::model_pin(crate::checker::config::LocalModel::D1_2b);
+        let server =
+            LocalServer::start_at(bin, model, Listen::Port(port), false, 5000, pin).expect("start");
+        let pid = dir.path().join("pid");
+        until(&server, "started", &|| pid.exists()).await;
+        // The process ends with a call in it, before it was ever ready.
+        let reading = server.budget.hold_slot();
+        kill_fake(dir.path());
+        until(&server, "marked", &|| server.died_on_call()).await;
+        drop(reading);
+        assert!(server.takes_calls());
+        let config = crate::checker::config::ModelConfig::default();
+        let e = model::ask(
+            &server.endpoint(),
+            &config,
+            serde_json::json!({"command": "x"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(e, model::ModelError::Lost(_)), "{e}");
+        let heard = seen.lock().unwrap().clone();
+        assert!(heard.is_empty(), "the squatter heard: {heard}");
+        server.stop().await;
     }
 
     /// A server that is still loading its model (503) says neither that it
