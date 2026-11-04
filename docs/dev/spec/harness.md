@@ -170,8 +170,10 @@ the `result` of the envelope described below.
   `access` block, a line with the mode, its end and the account
   (`Mode: folder until …; commands run as nerve-run.`) and, in folder mode,
   one with the folders and their flags (`Folders (r read, w write, x run
-  commands; own: the command account's own): /home/me/proj (rw, some
-  folders below allow less), /tmp (rwx, own)`; at most 64 folders, the
+  commands; own: the command account's own; shared: every pairing's):
+  /home/me/proj (rw, some folders below allow less),
+  /var/lib/nerve-run/box-1/home (rwx, own), /tmp (rwx, own, shared)`, the
+  legend naming `shared` only where a folder is; at most 64 folders, the
   account's own ones kept first and the rest counted, and the folders the
   node left out for their names counted apart (`N more whose names cannot
   be shown on one line`); with none of either, `Folders: none granted yet`,
@@ -197,7 +199,7 @@ the `result` of the envelope described below.
   `stream`; none for an action), with the names shown, `summary` only when
   the text has it, and the counts of those not shown; `access` is `{mode,
   until_ms?, account?, confined, sudo?, reads_by_account?, folders: [{path,
-  access, own?, closed_below?}], more_folders, unnamed?}`.
+  access, own?, shared?, closed_below?}], more_folders, unnamed?}`.
 - `list(node, capability)`: `capability` is a list of at most 32 names (a
   single name as a string is accepted too, though the schema declares the
   array).
@@ -244,13 +246,19 @@ the `result` of the envelope described below.
   run as an account of their own), that files made in the other folders
   should stay readable for the machine's owner, whose access goes through
   the group bits (0640 or 0660 for files, 0750 or 0770 for folders, not 0600
-  or 0700 unless asked), and that an `own` folder marked `w` is for
-  throwaway files only: every pairing whose commands run as that account
-  shares it (`/tmp` also every account on the machine), with the settings
-  and caches its programs keep there, so what one pairing leaves there can
-  change what another one's commands do; nothing secret stays there, and no
-  program's settings are changed there unless asked. Where the commands run as
-  the owner it says neither. The same advice is under `center` as `{"folders": …}` in
+  or 0700 unless asked); where an `own` folder without `shared` is marked
+  `w`, that those are the pairing's own home and temporary folder, where its
+  programs keep their settings and caches, and (`exec.run`'s advice and
+  the joined one) that the sandbox keeps every other pairing's commands out
+  of them; where a `shared` one is marked `w`, that every pairing of that
+  account and every account on the machine shares it, with the settings and
+  caches programs keep there, so what one leaves there can change what
+  another one's commands do: it is for throwaway files only, nothing secret
+  stays there, and no program's settings are changed there unless asked.
+  Without `confined`, the advice of a command says instead that every
+  pairing whose commands run as that account reaches all the `own` folders,
+  the unshared ones too, so all of them are for throwaway files only. Where
+  the commands run as the owner it says neither. The same advice is under `center` as `{"folders": …}` in
   `structuredContent`. Details are given whole: those that would take the
   answer past 240 KiB (in the text or in `structuredContent`) are named, whole,
   in a line `Not detailed, this answer is full: …` and in `later`, for another

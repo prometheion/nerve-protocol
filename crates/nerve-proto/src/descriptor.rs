@@ -287,14 +287,21 @@ pub struct FolderAccess {
     /// `r` (read), `w` (write) and `x` (run commands), each at most once,
     /// in that order, at least one.
     pub access: String,
-    /// One of the command account's own folders (its home, `/tmp`,
-    /// `/var/tmp`), which the node adds where the commands run as an
-    /// account of their own, not as the owner. Every pairing whose commands
-    /// run as that account shares them, the settings and caches its
-    /// programs keep there included, so they are a place for throwaway
-    /// files only.
+    /// One of the command account's own folders, which the node adds where
+    /// the commands run as an account of their own, not as the owner: the
+    /// pairing's own home and temporary folder, and `/tmp` and `/var/tmp`
+    /// ([`FolderAccess::shared`]). A program's action, which runs with the
+    /// owner's rights, has none of them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub own: bool,
+    /// An `own` folder that every pairing whose commands run as that
+    /// account shares, and every account on the machine (`/tmp`,
+    /// `/var/tmp`): what one leaves there can change what another one's
+    /// programs do, so it is a place for throwaway files only. An `own`
+    /// folder without it is this pairing's alone where a sandbox holds the
+    /// commands ([`Access::confined`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
     /// Some folder below this one, not named, allows the center less than
     /// this one (where folders nest the deepest one decides): one the owner
     /// gave no rights, which the node's file calls hide too, or one left
@@ -658,6 +665,7 @@ mod tests {
                 path: "/a".into(),
                 access: "r".into(),
                 own: true,
+                shared: true,
                 closed_below: true,
             }],
             unnamed: 1,
@@ -704,6 +712,7 @@ mod tests {
                 path: "/a".into(),
                 access: a.clone(),
                 own: false,
+                shared: false,
                 closed_below: false,
             };
             assert_eq!(f.flags().is_some(), schema_takes(&a), "{a:?}");
@@ -760,7 +769,7 @@ mod tests {
                              "confined": true, "x-later": 1,
                              "folders": [{"path": "/c/Users/x", "access": "rw"},
                                          {"path": "/tmp", "access": "rwx", "own": true,
-                                          "closed_below": true}]});
+                                          "shared": true, "closed_below": true}]});
         let d: Descriptor = serde_json::from_value(v.clone()).unwrap();
         let a = d.access.clone().unwrap();
         assert_eq!(a.mode, AccessMode::Folder);
@@ -769,12 +778,15 @@ mod tests {
         assert!(a.confined);
         assert_eq!(a.folders[0].flags(), Some((true, true, false)));
         assert!(!a.folders[0].own && a.folders[1].own);
+        assert!(!a.folders[0].shared && a.folders[1].shared);
         assert!(!a.folders[0].closed_below && a.folders[1].closed_below);
         let back = serde_json::to_value(&d).unwrap();
         assert_eq!(back["access"]["folders"][0]["path"], "/c/Users/x");
         // `own` is sent only where it holds.
         assert!(back["access"]["folders"][0].get("own").is_none());
         assert_eq!(back["access"]["folders"][1]["own"], true);
+        assert!(back["access"]["folders"][0].get("shared").is_none());
+        assert_eq!(back["access"]["folders"][1]["shared"], true);
         assert!(back["access"]["folders"][0].get("closed_below").is_none());
         assert_eq!(back["access"]["folders"][1]["closed_below"], true);
         for bad in [
@@ -802,6 +814,7 @@ mod tests {
                 path: "/a".into(),
                 access: a.into(),
                 own: false,
+                shared: false,
                 closed_below: false,
             }
             .flags()

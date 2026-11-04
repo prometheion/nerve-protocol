@@ -3787,7 +3787,14 @@ mod tests {
                 let folders: Vec<String> = a
                     .folders
                     .iter()
-                    .map(|f| format!("{} {}{}", f.path, f.access, if f.own { " own" } else { "" }))
+                    .map(|f| {
+                        let own = match (f.own, f.shared) {
+                            (true, true) => " own shared",
+                            (true, false) => " own",
+                            _ => "",
+                        };
+                        format!("{} {}{own}", f.path, f.access)
+                    })
                     .collect();
                 (a.account, folders)
             };
@@ -3801,8 +3808,8 @@ mod tests {
                         Some(crate::account::RUN_USER.to_string()),
                         vec![
                             proj.clone(),
-                            "/tmp rwx own".into(),
-                            "/var/tmp rwx own".into(),
+                            "/tmp rwx own shared".into(),
+                            "/var/tmp rwx own shared".into(),
                             format!("{} rwx own", run_home.join("c/home").display()),
                             format!("{} rwx own", run_home.join("c/tmp").display()),
                         ]

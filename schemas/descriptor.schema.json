@@ -47,6 +47,7 @@
               "path": {"type": "string"},
               "access": {"type": "string", "pattern": "^r?w?x?$", "minLength": 1},
               "own": {"type": "boolean", "default": false},
+              "shared": {"type": "boolean", "default": false},
               "closed_below": {"type": "boolean", "default": false}
             }
           }

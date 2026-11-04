@@ -807,10 +807,13 @@ impl Reach {
                 // control character or separator, a blank at either end)
                 // would be shown changed, which names another place.
                 .filter(|(_, named)| *named)
-                .map(|(((_, path, a, own), closed_below), _)| FolderAccess {
+                .map(|(((native, path, a, own), closed_below), _)| FolderAccess {
                     path,
                     access: a.to_string(),
                     own,
+                    // Every pairing and account shares these; the pairing's
+                    // own home and temporary folder are its own (#167).
+                    shared: own && crate::account::shared_folder(native),
                     closed_below,
                 })
                 .collect(),
@@ -2053,7 +2056,12 @@ mod tests {
             .map(|f| {
                 (
                     f.path.clone(),
-                    format!("{}{}", f.access, if f.own { " own" } else { "" }),
+                    format!(
+                        "{}{}{}",
+                        f.access,
+                        if f.own { " own" } else { "" },
+                        if f.shared { " shared" } else { "" }
+                    ),
                 )
             })
             .collect()
@@ -2095,8 +2103,8 @@ mod tests {
     }
 
     /// The built-in folders of `nerve-run` are named where the commands run
-    /// as that account, with every flag and marked as its own, together
-    /// with a grant of the same place; folders are named in folder mode
+    /// as that account, with every flag and marked as its own, `/tmp` and
+    /// `/var/tmp` as shared too, together with a grant of the same place; folders are named in folder mode
     /// only, and one with no flag outside every granted one grants nothing.
     #[test]
     fn built_in_folders_only_when_separate() {
@@ -2118,8 +2126,8 @@ mod tests {
             )),
             pairs(&[
                 ("/srv/data", "r"),
-                ("/tmp", "rwx own"),
-                ("/var/tmp", "rwx own"),
+                ("/tmp", "rwx own shared"),
+                ("/var/tmp", "rwx own shared"),
                 ("/var/lib/nerve-run/lab/home", "rwx own"),
                 ("/var/lib/nerve-run/lab/tmp", "rwx own"),
             ])

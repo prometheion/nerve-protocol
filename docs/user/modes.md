@@ -72,8 +72,9 @@ closed to `nerve-run`, nor the node's own process under `/proc`. Writing,
 commands, and a path a write or a run reads stay in the folders. A program
 that reads a path for a call ([provider](providers.md)) gets the call outside
 the folders only for a file open to every account, never for a folder, since
-it would read below it with your rights. `nerve-run`'s own folders (its home,
-`/tmp`, `/var/tmp`, marked `own`) are no folders for a program: it runs with
+it would read below it with your rights. `nerve-run`'s own folders (the
+pairing's home and temporary folder, `/tmp`, `/var/tmp`, marked `own`) are
+no folders for a program: it runs with
 your rights, so only the folders you gave count for it. A [capability of
 your `node.toml`](config-capabilities.md#the-account-it-runs-as) runs as
 `nerve-run` and is read like a command of that account instead: its own
@@ -149,21 +150,26 @@ A change of the folders, the mode or the account reaches the center at once.
 Another center's folders are never shown. In `allowlist` mode the folders
 are not shown, though they still hold the commands that run as `nerve-run`.
 
-The folders of `nerve-run` marked as its own (its home, `/tmp`,
-`/var/tmp`) are shared by every pairing whose commands run as `nerve-run`,
-and so are the settings and caches its programs keep in its home. What one
-such pairing writes there can change what the next command of another one
-does, inside that other pairing's folders. The agent is told to keep only
-throwaway files there and to change no program's settings there unless
-asked, but its programs read those settings by themselves. So do not give
-a center you trust less `folder` mode, or `allowlist` mode as `nerve-run`,
-beside a pairing whose folders are worth more: no mode on one machine keeps
-the two apart while they share that home. Give such a center a machine of
-its own. The closest second best is `allowlist` mode as `nerve-run` with
-exact rules, for programs that keep no settings in its home. Not
-`--as-owner`: that runs the allowed commands as you (as root where root is
-the owner), outside the sandbox, so they reach all your folders and
-credentials ([the account `nerve-run`](#the-account-nerve-run-linux)).
+The folders of `nerve-run` marked as its own are, for each pairing whose
+commands run as `nerve-run`, a home and a temporary folder of that pairing
+alone (`/var/lib/nerve-run/<center>/home` and `…/tmp`, where `HOME`, the
+`XDG_*` folders and `TMPDIR` of its commands point), and `/tmp` and
+`/var/tmp`, marked `shared` as well: every pairing and every account on the
+machine shares those two. With Landlock a command reaches its own pairing's
+home and temporary folder and no other pairing's, so the settings and
+caches its programs keep in its home are its own: what another center's
+agent leaves in its own home cannot steer this one's `git status` or `npm
+test`. What it leaves in `/tmp` or `/var/tmp` can, for programs that look
+there by themselves; the agent is told to keep nothing secret there and to
+change no program's settings there unless asked. Without Landlock the
+folders are closed (0700) to other accounts, but every pairing's commands
+run as the one account `nerve-run`, so nothing keeps one pairing out of
+another's home: a center you trust less then needs a machine of its own.
+Even with Landlock the pairings share more than `/tmp`: see [the account
+`nerve-run`](#the-account-nerve-run-linux) for what it does not keep apart.
+Not `--as-owner` either: that runs the allowed commands as you (as root
+where root is the owner), outside the sandbox, so they reach all your
+folders and credentials.
 
 | Command | Does |
 |---|---|
@@ -273,9 +279,10 @@ The node confines commands with Landlock:
   what it may read (the rest of `/dev` stays, but it cannot list `/dev`).
   The installed node's commands run as `nerve-run`, which may not open your
   terminals either.
-- `/tmp`, `/var/tmp` and the home of `nerve-run` are in every set of a
-  `nerve-run` command, to read, write and run programs in
-  ([below](#the-account-nerve-run-linux)).
+- The pairing's own home and temporary folder, `/tmp` and `/var/tmp` are in
+  every set of a `nerve-run` command, to read, write and run programs in
+  ([below](#the-account-nerve-run-linux)). Another pairing's home and
+  temporary folder are in none.
 - A command with `w` on a folder can put a link in place of a folder inside
   it, and a link would give that folder's rights in a place you never named.
   So a folder is left out of the sets, and the node logs a warning, when its
@@ -314,9 +321,14 @@ The node confines commands with Landlock:
 
 The node installed as a service runs `folder` mode commands, and
 `allowlist` mode commands unless you set `--as-owner`, as `nerve-run`.
-`install` makes it, with a home of its own, `/var/lib/nerve-run`, no login
-and no other groups; `uninstall` removes both, and what its commands left
-in `/tmp`, `/var/tmp` and `/dev/shm`.
+`install` makes it, with its home `/var/lib/nerve-run`, no login and no
+other groups; `uninstall` removes both, and what its commands left in
+`/tmp`, `/var/tmp` and `/dev/shm`. Its home is no command's home: the node
+makes in it a folder for each pairing, `/var/lib/nerve-run/<center>`, with
+that pairing's own `home` and `tmp` (each 0700, made as `nerve-run` when the
+pairing comes or its first command runs), and deletes it with everything in
+it when the pairing goes (`center rm`, or a pairing made again under the
+same name). Other files in `/var/lib/nerve-run` it leaves alone.
 
 - It is not you. Your session's programs (the service manager, the session
   bus, tmux, a container engine) take requests from your own account only,
@@ -344,9 +356,9 @@ in `/tmp`, `/var/tmp` and `/dev/shm`.
   gave yourself there; a folder that had none has none again. `ls -l` shows a `+` on such files, and their group bits show
   the ACL's mask. The account is one for all pairings, so its entries are the
   union of the folders of every pairing whose commands run as `nerve-run`;
-  Landlock holds each command to its own pairing's folders and to
-  `nerve-run`'s own ones, which all those pairings share, the settings of
-  their programs included (below). A file call keeps to its own pairing's
+  Landlock holds each command to its own pairing's folders, its own home and
+  temporary folder, and `/tmp` and `/var/tmp`, which all those pairings
+  share (below). A file call keeps to its own pairing's
   folders by their flags, and reads another pairing's only where they are
   open to every account. A pairing in `user` mode,
   or in `allowlist` mode as you, gives `nerve-run` none of its folders.
@@ -365,24 +377,30 @@ in `/tmp`, `/var/tmp` and `/dev/shm`.
   ACLs) is named by `folder add` and `folder set` and in `nerve-node status`,
   also after a restart, and is tried again: at the node's start, with the
   next change of the folders, and at most once a minute before a command.
-- Of the service's environment its commands get only `PATH`, `LANG`, `TERM`
-  and `TMPDIR`, and `HOME`, `USER`, `LOGNAME` and the `XDG_*` and git
-  variables the node sets for its home: not `NERVE_NODE_OWNER`, nor what
+- Of the service's environment its commands get only `PATH`, `LANG` and
+  `TERM`, and `HOME`, `TMPDIR`, `USER`, `LOGNAME` and the `XDG_*` and git
+  variables the node sets for the pairing's own home and temporary folder:
+  not `NERVE_NODE_OWNER`, nor what
   systemd adds, nor what you put into the unit with `Environment=` (a proxy
   URL with its password, a token). To pass one on, name it:
   `nerve-node config add machine.command_env HTTPS_PROXY`; its value is the
   service's. Do not put secrets into the unit that commands should not see.
-- It always has `/tmp`, `/var/tmp` and its home, to read, write and run
-  programs in. Its tools keep their caches and configs in its home: `HOME`
-  and the `XDG_*` folders point there. Every pairing whose commands run as
-  `nerve-run` uses the same home, so a pairing that may write there can
-  change the settings the programs of another pairing's commands load, and
-  through them what those commands do in that pairing's folders. Give a
-  center you trust less a machine of its own rather than a pairing beside
-  one with folders worth more; the closest second best is `allowlist` mode
-  as `nerve-run` with exact rules, for programs that keep no settings in its
-  home. `--as-owner` is no way out: it runs the allowed commands as you (as
-  root where root is the owner), outside the sandbox.
+- It always has its pairing's own home and temporary folder, `/tmp` and
+  `/var/tmp`, to read, write and run programs in. Its tools keep their
+  caches and configs in that home: `HOME` and the `XDG_*` folders point
+  there, `TMPDIR` to the temporary folder. With Landlock no other pairing's
+  command reaches them. `/tmp` and `/var/tmp` stay shared, for programs
+  that use them whatever `TMPDIR` says: what one pairing leaves there
+  another one's programs may read by themselves. Full isolation needs
+  Landlock, ABI 6 or later ([versions](#landlock-versions)); without it the
+  pairings' commands are one account, and each reaches every other
+  pairing's home. Give a center you trust less a machine of its own where
+  the kernel has no Landlock.
+- What `/var/lib/nerve-run` held before the node gave each pairing its own
+  home (the shared `.cache`, `.config`, `.gitconfig` and the like of an
+  earlier version) is no command's any more. The node leaves it; delete
+  every entry there that is not named after one of your centers (`nerve-node
+  center ls`), such as `sudo rm -rf /var/lib/nerve-run/.cache`.
 - git trusts the repositories it reaches (`safe.directory`), so it works in
   your repositories although they are not its own.
 - It has no SSH keys or other credentials of yours, so `git push` and the
@@ -431,8 +449,10 @@ account alone holds it back, so it reaches the folders you give it and
 whatever other accounts may reach ([your
 home](#your-home-and-other-accounts)), and each pairing's line in `status`
 says `as nerve-run, without Landlock` (the app says **Without Landlock**). What sets one pairing's folders apart from
-another's is then gone, as the account is one for all of them, and so is
-the narrower set Landlock gives (`w` without `r`, `x` without listing). A
+another's is then gone, as the account is one for all of them, the
+pairings' own homes and temporary folders included (they are 0700, which
+keeps out other accounts, not another pairing), and so is the narrower set
+Landlock gives (`w` without `r`, `x` without listing). A
 node you run yourself refuses every `folder` mode command without Landlock,
 and a line `folder mode runs no command: …` says why.
 

@@ -54,12 +54,27 @@ it; `nerve-run`'s commands are unchanged. No other account with uid 0 is an
 owner. A center cannot turn sudo on while root is the owner (`forbidden`):
 `sudo -v` checks no password of root's. A command gets its account's ids and groups,
 `HOME`, `USER` and `LOGNAME` set to it, and its home as the working
-directory when the call names none; one of `nerve-run` also gets
+directory when the call names none. A command of `nerve-run` has its
+pairing's own home and temporary folder instead (#167, `account::Own`):
+`/var/lib/nerve-run/<center>/home` as `HOME` and working directory, and
+`…/<center>/tmp` as `TMPDIR`; it also gets
 `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME`
-below its home, `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` removed, and
+below that home, `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` removed, and
 git's `safe.directory = *` as command-line configuration (`GIT_CONFIG_COUNT`).
+The node makes `<center>`, `home` and `tmp` (0700) as `nerve-run`
+(`account::FsAs`) at the first config change that has the pairing and
+before each command where they are missing; a link or another account's
+folder in their place refuses the command. A record (`state/own-folders.json`,
+center name to `node_id`) names the pairings it made them for; at each
+config change the folders of a pairing that left the config, or came back
+under its name with another `node_id`, are deleted with what they hold, as
+`nerve-run`, through descriptors and without following a link or leaving
+the file system (folders made closed are opened first, deeper than 64
+levels moved up and walked again). A deletion that fails stays in the
+record and is tried at the next change. Nothing else in `nerve-run`'s home is
+touched, and nothing there is any command's home.
 Of the service's own environment a command of `nerve-run` keeps only `PATH`,
-`LANG`, `TERM` and `TMPDIR` (`exec::KEPT_ENV`) and the names in
+`LANG` and `TERM` (`exec::KEPT_ENV`) and the names in
 `machine.command_env`, with the service's values; the rest (`NERVE_NODE_OWNER`,
 what systemd and the unit's `Environment=` set) is cleared before the
 variables above are set, so naming `HOME` or `XDG_RUNTIME_DIR` there passes
@@ -68,7 +83,8 @@ a person runs, gets the node's environment.
 The `~` of folders, rules and the protected list is the owner's home. A
 command of `nerve-run` is confined by Landlock in `allowlist` mode as well
 (where the kernel has it), to its folders and the built-in `/tmp`,
-`/var/tmp` and its home (§Modes), and gets its pairing's folders as POSIX
+`/var/tmp` and its pairing's own home and temporary folder (§Modes), never
+another pairing's, and gets its pairing's folders as POSIX
 ACLs (§Folder ACLs). An account that is missing, `nerve-run` not made by
 `install` (another comment), root (unless it is the owner) or `nerve` runs no command
 (`unavailable`), after its call was decided and audited; without an owner,
@@ -595,7 +611,8 @@ node runs takes the file as it is, since nothing tells what it held before.
 run as `nerve-run` (protocol.md §6).
 
 A call is decided like a provider's (§7, Paths), then runs as `nerve-run`
-from its home. Its paths are judged as `nerve-run`, with the pairing's folders
+from the calling pairing's own home, with its `TMPDIR`, whatever that
+pairing's commands run as. Its paths are judged as `nerve-run`, with the pairing's folders
 and, where the pairing's commands run as `nerve-run`, its built-in ones; a read
 outside them by `nerve-run`'s own access; the link walk as that account. It
 runs under Landlock where present: the pairing's folders and the built-ins
@@ -1124,11 +1141,13 @@ grant or not.
 - **allowlist**: default deny. A call runs only when an `allow` rule lets it
   through. `folders` do not decide; on the installed Linux node, where its
   commands run as `nerve-run` (unless `as_owner`), they and the built-in
-  `/tmp`, `/var/tmp` and the account's home are its Landlock sandbox.
+  `/tmp`, `/var/tmp` and the pairing's own home and temporary folder are its
+  Landlock sandbox.
 - **folder** (the mode a new pairing starts in): reading, writing and
   commands inside the `folders` and, on the installed Linux node, the
-  built-in `/tmp`, `/var/tmp` and `nerve-run`'s home (and everything below
-  them), by their flags; where the node reads as `nerve-run` (the installed
+  built-in `/tmp`, `/var/tmp` and the pairing's own home and temporary
+  folder below `nerve-run`'s home (and everything below them), by their
+  flags; where the node reads as `nerve-run` (the installed
   Linux node), reading also, outside every folder, what every account may
   read (below).
   `access` is three independent flags, any combination
@@ -1461,8 +1480,9 @@ The descriptor also tells the center what it may do (protocol.md §6.2,
 `folder` mode its folders with their flags, in the center's path form. The
 link builds it from that center's entry alone, with the built-in folders of
 `nerve-run` added where its commands run as that account, as the gate and
-the sandbox see them, and marked `own`; no other pairing's folders are in
-it. A folder with no flag is never named, as the file calls hide its name
+the sandbox see them, and marked `own` (`/tmp` and `/var/tmp` also
+`shared`); no other pairing's folders, its own home and temporary folder
+included, are in it. A folder with no flag is never named, as the file calls hide its name
 (`fs.list` leaves it out, a refusal under it reads like any other): the
 deepest named folder around it is marked `closed_below` instead. A folder
 whose name would read otherwise on one line (a control character, U+2028 or
@@ -2027,8 +2047,9 @@ node like any other, deny rules and `caps` included. Its rule targets are the
 arguments its schema marks with `x-nerve-path` (top-level strings, `read` or
 `write`), each resolved as the command account sees it (`WirePath::parse`
 under `account::FsAs`), as an `fs` call's path is. Only the folders the owner
-granted count for them: the command account's own folders (its home, `/tmp`,
-`/var/tmp`, marked `own` in the access block) are that account's, while the
+granted count for them: the command account's own folders (the pairing's
+home and temporary folder, `/tmp`, `/var/tmp`, marked `own` in the access
+block) are that account's, while the
 program works with the owner's rights, so a path there is in no folder, and
 its read goes only where every account may read (Modes). The folders, the rules,
 the protected paths and the node's own folders judge them, and the audit

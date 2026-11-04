@@ -982,6 +982,7 @@ fn check_access(v: &Value) -> Result<(), String> {
             path: path.into(),
             access: f["access"].as_str().unwrap_or("?").into(),
             own: false,
+            shared: false,
             closed_below: false,
         };
         ensure(
@@ -991,6 +992,16 @@ fn check_access(v: &Value) -> Result<(), String> {
         ensure(
             f.get("own").is_none_or(Value::is_boolean),
             format!("access folder {path}: own {}", f["own"]),
+        )?;
+        // Only one of the command account's own folders is shared by every
+        // pairing of that account.
+        ensure(
+            f.get("shared").is_none_or(Value::is_boolean)
+                && (f["shared"] != true || f["own"] == true),
+            format!(
+                "access folder {path}: shared {} (own {})",
+                f["shared"], f["own"]
+            ),
         )?;
         ensure(
             f.get("closed_below").is_none_or(Value::is_boolean),
@@ -1130,14 +1141,15 @@ mod tests {
                                        "closed_below": true},
                                       {"path": "/c/Users/me", "access": "rwx"},
                                       {"path": "/srv/data\\2026", "access": "r"},
-                                      {"path": "/tmp", "access": "rwx", "own": true}]});
+                                      {"path": "/tmp", "access": "rwx", "own": true,
+                                       "shared": true}]});
         let mut d = echo();
         d["access"] = good.clone();
         check_descriptor(&d, "node-id", 1).unwrap();
         d["access"] = json!({"mode": "user", "account": "me"});
         check_descriptor(&d, "node-id", 1).unwrap();
         type Edit = fn(&mut Value);
-        let cases: [(Edit, &str); 25] = [
+        let cases: [(Edit, &str); 27] = [
             (|a| a["mode"] = json!("later"), "access mode"),
             (|a| a["until_ms"] = json!(-1), "access until_ms"),
             (|a| a["account"] = json!("me\nyou"), "access account"),
@@ -1229,6 +1241,14 @@ mod tests {
             (
                 |a| a["folders"][0]["own"] = json!("yes"),
                 "access folder /home/me/proj: own",
+            ),
+            (
+                |a| a["folders"][3]["shared"] = json!(1),
+                "access folder /tmp: shared 1",
+            ),
+            (
+                |a| a["folders"][0]["shared"] = json!(true),
+                "access folder /home/me/proj: shared true (own null)",
             ),
             (
                 |a| a["folders"][0]["closed_below"] = json!(1),
