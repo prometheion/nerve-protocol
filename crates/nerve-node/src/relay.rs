@@ -2270,7 +2270,9 @@ mod tests {
         assert!(fake.next_link(QUIET).await.is_none());
         node.stop().await;
         // Neither the plain client nor the node that took the relay for an
-        // http:// proxy made a tunnel.
+        // http:// proxy made a tunnel, also not one written late (a node
+        // that dialled again).
+        tokio::time::sleep(QUIET).await;
         let t = tunnels();
         assert_eq!(
             t.len(),

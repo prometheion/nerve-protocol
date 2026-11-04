@@ -216,10 +216,13 @@ pub fn shim_main() -> i32 {
     }
 }
 
-/// The lowest Landlock ABI the node confines commands with. Below it the
-/// kernel does not handle `truncate(2)` (ABI 3, Linux 6.2), so a command
-/// held to its folders could still cut any file its account may write
-/// outside them to nothing: the node takes such a Landlock as none.
+/// The lowest Landlock ABI a node run by hand confines commands with. Below
+/// it the kernel does not handle `truncate(2)` (ABI 3, Linux 6.2), so a
+/// command held to its folders could still cut any file of the owner's
+/// outside them to nothing: such a node takes that Landlock as none and
+/// runs no command of folder mode ([`Confinement::by_hand`]). The installed
+/// node keeps it: without Landlock its commands would run as its account
+/// with no confinement at all.
 pub const LANDLOCK_FLOOR: i32 = 3;
 
 /// The Landlock ABI the node asks for (Linux 6.12): from it every guard the
@@ -244,17 +247,11 @@ pub fn landlock_gaps(abi: i32) -> Vec<&'static str> {
     gaps
 }
 
-/// The kernel's Landlock ABI, also one below [`LANDLOCK_FLOOR`]; `None`
-/// when Landlock is missing or off.
-pub fn kernel_landlock_abi() -> Option<i32> {
-    landlock_abi()
-}
-
 /// How this machine can confine commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Confinement {
-    /// The kernel's Landlock ABI version; `None` when Landlock is missing,
-    /// off, or below [`LANDLOCK_FLOOR`].
+    /// The kernel's Landlock ABI version; `None` when Landlock is missing or
+    /// off, and on a node run by hand below [`LANDLOCK_FLOOR`].
     pub landlock_abi: Option<i32>,
     /// Windows: commands run in an AppContainer. Every Windows the node
     /// runs on (10 and later) has them.
@@ -262,16 +259,19 @@ pub struct Confinement {
 }
 
 impl Confinement {
-    /// Landlock below [`LANDLOCK_FLOOR`] counts as none.
     pub fn detect() -> Confinement {
-        Confinement::of_kernel(landlock_abi())
+        Confinement {
+            landlock_abi: landlock_abi(),
+            appcontainer: cfg!(windows),
+        }
     }
 
-    /// [`Confinement::detect`] on a kernel whose Landlock ABI is `abi`.
-    fn of_kernel(abi: Option<i32>) -> Confinement {
+    /// This confinement as a node run by hand takes it: Landlock below
+    /// [`LANDLOCK_FLOOR`] counts as none.
+    pub fn by_hand(self) -> Confinement {
         Confinement {
-            landlock_abi: abi.filter(|v| *v >= LANDLOCK_FLOOR),
-            appcontainer: cfg!(windows),
+            landlock_abi: self.landlock_abi.filter(|v| *v >= LANDLOCK_FLOOR),
+            ..self
         }
     }
 
@@ -2696,13 +2696,17 @@ mod tests {
         );
     }
 
-    /// Landlock below ABI 3 does not guard truncate(2): the node takes it as
-    /// none. From ABI 6 on nothing the node asks for is missing.
+    /// Landlock below ABI 3 does not guard truncate(2): a node run by hand
+    /// takes it as none. From ABI 6 on nothing the node asks for is missing.
     #[test]
-    fn landlock_below_the_floor_counts_as_none() {
-        assert_eq!(Confinement::of_kernel(Some(2)).landlock_abi, None);
-        assert_eq!(Confinement::of_kernel(Some(3)).landlock_abi, Some(3));
-        assert_eq!(Confinement::of_kernel(None).landlock_abi, None);
+    fn landlock_below_the_floor_counts_as_none_by_hand() {
+        let at = |abi| Confinement {
+            landlock_abi: abi,
+            appcontainer: false,
+        };
+        assert_eq!(at(Some(2)).by_hand().landlock_abi, None);
+        assert_eq!(at(Some(3)).by_hand().landlock_abi, Some(3));
+        assert_eq!(at(None).by_hand().landlock_abi, None);
         assert!(landlock_gaps(2).contains(&"truncating files"));
         assert!(!landlock_gaps(3).contains(&"truncating files"));
         assert_eq!(

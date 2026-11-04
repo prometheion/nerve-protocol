@@ -2114,6 +2114,42 @@ mod win {
 
 #[cfg(test)]
 mod tests {
+    /// The program the node starts for the owner, written a moment ago and
+    /// still open for writing (#168), starts once it is closed: Linux says
+    /// "Text file busy" until then.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_owners_program_starts_once_it_is_closed() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let program = d.path().join("nerve-node");
+        let mut f = std::fs::File::create(&program).unwrap();
+        f.write_all(b"#!/bin/sh\necho started\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(f);
+        });
+        let paths = crate::paths::NodePaths::from_args(
+            Some(d.path().join("config")),
+            Some(d.path().join("state")),
+        );
+        let child = super::spawn(
+            &paths,
+            &program,
+            "alice",
+            &[],
+            None,
+            &[],
+            None::<std::os::fd::OwnedFd>,
+        )
+        .unwrap();
+        closer.join().unwrap();
+        let out = child.wait_with_output().await.unwrap();
+        assert_eq!(out.stdout, b"started\n");
+    }
+
     /// What needs more rights than an owner's: on Windows the app asks for
     /// them, and no terminal is named; elsewhere `sudo` (#176).
     #[test]

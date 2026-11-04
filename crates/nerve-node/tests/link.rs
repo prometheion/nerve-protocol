@@ -1114,7 +1114,7 @@ async fn passes_the_conformance_node_checks() {
 #[tokio::test(flavor = "multi_thread")]
 async fn folder_mode_confines_commands_to_their_folders() {
     // Every Windows has AppContainers; Linux may lack Landlock.
-    if !cfg!(windows) && !nerve_sandbox::Confinement::detect().available() {
+    if !cfg!(windows) && !nerve_sandbox::Confinement::detect().by_hand().available() {
         eprintln!("skipped: Landlock is not available here");
         return;
     }
@@ -1346,7 +1346,7 @@ async fn a_new_pairing_refuses_commands_that_drive_the_node_itself() {
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn folder_mode_gives_no_rule_where_a_command_linked_a_nested_folder() {
-    if !nerve_sandbox::Confinement::detect().available() {
+    if !nerve_sandbox::Confinement::detect().by_hand().available() {
         eprintln!("skipped: Landlock is not available here");
         return;
     }
@@ -1404,14 +1404,20 @@ async fn folder_mode_gives_no_rule_where_a_command_linked_a_nested_folder() {
 }
 
 /// A folder mode command gets no controlling terminal. On a node run by hand
-/// in a terminal that is the owner's, which the command must neither read
-/// nor write. The test runs itself again in a session of its own whose
-/// controlling terminal is a new pty, as a node started in a terminal has.
+/// in a terminal that is the owner's, which the command must not reach
+/// through `/dev/tty` (it may still open the pty by its name to read, as the
+/// owner; docs/user/modes.md). The test runs itself again in a session of
+/// its own whose controlling terminal is a new pty, as a node started in a
+/// terminal has.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_folder_command_does_not_get_the_nodes_terminal() {
     const NAME: &str = "a_folder_command_does_not_get_the_nodes_terminal";
-    if nerve_sandbox::Confinement::detect().landlock_abi.is_none() {
+    if nerve_sandbox::Confinement::detect()
+        .by_hand()
+        .landlock_abi
+        .is_none()
+    {
         eprintln!("skipped: Landlock is not available here");
         return;
     }

@@ -94,7 +94,7 @@ fn rewrite_behind_the_node(file: &Path, f: impl Fn(&mut NodeConfig)) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_command_cannot_write_the_config_or_read_its_key() {
-    if !nerve_sandbox::Confinement::detect().available() {
+    if !nerve_sandbox::Confinement::detect().by_hand().available() {
         eprintln!("skipped: Landlock is not available here");
         return;
     }
@@ -396,7 +396,7 @@ async fn an_owner_change_through_the_local_interface_is_applied_and_signed() {
 /// run programs from: a command can then use the CLI to talk to the socket,
 /// as any program of the user can. `None` where Landlock is missing.
 async fn folder_node(dir: &Path) -> Option<(FakeCenter, NodeOptions)> {
-    if !nerve_sandbox::Confinement::detect().available() {
+    if !nerve_sandbox::Confinement::detect().by_hand().available() {
         eprintln!("skipped: Landlock is not available here");
         return None;
     }

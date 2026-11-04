@@ -537,10 +537,16 @@ impl CenterState {
 /// Windows service runs every command as another account (crate::win_user),
 /// and the AppContainer is not wired for that account yet (its profile and
 /// window station are made for the user the shim runs as), so there folder
-/// mode has no confinement and runs no command.
-fn confinement_for(detected: Confinement, service: bool) -> Confinement {
+/// mode has no confinement and runs no command. A node run by hand takes a
+/// Landlock below the floor as none and so refuses folder mode's commands
+/// (nerve_sandbox::LANDLOCK_FLOOR); the installed node keeps it, as its
+/// commands would run as `nerve-run` without it, held by nothing else.
+pub(crate) fn confinement_for(detected: Confinement, service: bool) -> Confinement {
+    if !service {
+        return detected.by_hand();
+    }
     Confinement {
-        appcontainer: detected.appcontainer && !service,
+        appcontainer: false,
         ..detected
     }
 }
@@ -1113,15 +1119,11 @@ impl Shared {
 
     /// What this kernel's Landlock does not guard of what the node asks for,
     /// on the installed node, whose pairings' commands all run as
-    /// `nerve-run` (crate::account::landlock_warning): one below the floor
-    /// is told too, as the node takes it as none.
+    /// `nerve-run` (crate::account::landlock_warning).
     fn landlock_warning(&self) -> Option<String> {
         #[cfg(unix)]
         if self.service {
-            let abi = self.confinement.landlock_abi.or_else(|| {
-                nerve_sandbox::kernel_landlock_abi().filter(|v| *v < nerve_sandbox::LANDLOCK_FLOOR)
-            });
-            return crate::account::landlock_warning(abi);
+            return crate::account::landlock_warning(self.confinement.landlock_abi);
         }
         None
     }
@@ -3507,6 +3509,47 @@ mod tests {
                 w.contains(&format!("ABI {abi}, which does not guard device ioctls")),
                 told,
                 "service {service}, ABI {abi}: {st}"
+            );
+            daemon.stop().await;
+        }
+    }
+
+    /// Landlock below ABI 3 confines the installed node's commands still,
+    /// which without it would run as nerve-run held by nothing else; a node
+    /// run by hand takes it as none and runs no command of folder mode.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn only_a_node_run_by_hand_takes_an_old_landlock_as_none() {
+        let two = Confinement {
+            landlock_abi: Some(2),
+            appcontainer: false,
+        };
+        let folder = nerve_policy::config::CenterPolicy {
+            mode: nerve_policy::Mode::Folder,
+            ..Default::default()
+        };
+        for (service, held) in [(true, true), (false, false)] {
+            let log = Log::new(Level::Info);
+            let d = tempfile::tempdir().unwrap();
+            let mut o = options(&d, &log);
+            o.full_rights = Some(false);
+            o.exe = Some("/bin/true".into());
+            o.service = Some(service);
+            o.confinement = Some(two);
+            let daemon = Daemon::start(o).await.unwrap();
+            let shared = &daemon.shared;
+            assert_eq!(shared.landlock_for(&folder), held, "service {service}");
+            let refused = shared.unconfined_as(&shared.config(), || None);
+            assert_eq!(
+                refused,
+                (!held).then_some(NOT_CONFINED),
+                "service {service}"
+            );
+            let st = daemon.status();
+            assert_eq!(
+                st["confinement"],
+                if held { "landlock v2" } else { "none" },
+                "service {service}: {st}"
             );
             daemon.stop().await;
         }

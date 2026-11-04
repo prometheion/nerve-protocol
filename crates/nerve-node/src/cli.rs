@@ -4744,9 +4744,13 @@ async fn tell_folder_commands(paths: &NodePaths, cfg: &NodeConfig, out: &mut dyn
             return;
         }
     }
-    if keyring_turns_commands_off(nerve_sandbox::Confinement::detect(), || {
-        node_command_account(paths, cfg)
-    }) {
+    // A node run by hand takes an old Landlock as none, as it would.
+    let detected = nerve_sandbox::Confinement::detect();
+    let c = match crate::service::is_service_node(paths) {
+        true => detected,
+        false => detected.by_hand(),
+    };
+    if keyring_turns_commands_off(c, || node_command_account(paths, cfg)) {
         let _ = writeln!(out, "{}", folder_commands_off());
     }
 }
