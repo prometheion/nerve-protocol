@@ -153,7 +153,7 @@ async fn folder_mode_runs_as_nerve_run_on_this_machine() {
         std::env::var_os("NERVE_NODE_REAL").map(PathBuf::from),
         std::env::var("NERVE_REAL_OWNER").ok(),
     ) else {
-        eprintln!("NERVE_NODE_REAL or NERVE_REAL_OWNER is not set");
+        eprintln!("skipped: NERVE_NODE_REAL or NERVE_REAL_OWNER is not set");
         return;
     };
     assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
@@ -921,7 +921,7 @@ async fn the_installed_node_with_its_keys_in_the_keyring_runs_folder_commands_as
         std::env::var("NERVE_REAL_OWNER").ok(),
         std::env::var_os("NERVE_REAL_KEYRING"),
     ) else {
-        eprintln!("NERVE_REAL_KEYRING or NERVE_REAL_OWNER is not set");
+        eprintln!("skipped: NERVE_REAL_KEYRING or NERVE_REAL_OWNER is not set");
         return;
     };
     assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
@@ -1135,7 +1135,7 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
         std::env::var("NERVE_REAL_OWNER").ok(),
         std::env::var("NERVE_REAL_OTHER").ok(),
     ) else {
-        eprintln!("NERVE_NODE_REAL, NERVE_REAL_OWNER or NERVE_REAL_OTHER is not set");
+        eprintln!("skipped: NERVE_NODE_REAL, NERVE_REAL_OWNER or NERVE_REAL_OTHER is not set");
         return;
     };
     assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
@@ -1392,7 +1392,7 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
         std::env::var_os("NERVE_NODE_REAL").map(PathBuf::from),
         std::env::var("NERVE_REAL_OWNER").ok(),
     ) else {
-        eprintln!("NERVE_NODE_REAL or NERVE_REAL_OWNER is not set");
+        eprintln!("skipped: NERVE_NODE_REAL or NERVE_REAL_OWNER is not set");
         return;
     };
     assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
@@ -1766,7 +1766,7 @@ async fn argument_rules_decide_a_config_capability_on_the_installed_node() {
         std::env::var_os("NERVE_NODE_REAL").map(PathBuf::from),
         std::env::var("NERVE_REAL_OWNER").ok(),
     ) else {
-        eprintln!("NERVE_NODE_REAL or NERVE_REAL_OWNER is not set");
+        eprintln!("skipped: NERVE_NODE_REAL or NERVE_REAL_OWNER is not set");
         return;
     };
     assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
@@ -1945,4 +1945,153 @@ async fn argument_rules_decide_a_config_capability_on_the_installed_node() {
 
     let (ok, said) = sh(Command::new(BIN).args(["uninstall", "--purge"]));
     assert!(ok, "{said}");
+}
+
+/// The limits per command on the installed node (docs/user/limits.md): the
+/// service's cgroup is delegated to it, so a folder mode command of
+/// `nerve-run` runs in a cgroup of its own below the service, with the
+/// memory, CPU and processes its call asked for; one past its memory is
+/// killed by the kernel and its result says so; a call that asks for more
+/// than the most is refused. For a test machine only, as root: it installs
+/// the node and removes it again.
+///
+/// `NERVE_NODE_REAL=<the nerve-node to install> NERVE_REAL_OWNER=<an account
+/// with a home, the owner> cargo test -p nerve-node --test real_account --
+/// --ignored --exact a_command_is_held_to_its_limits_on_the_installed_node`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "installs the node on this machine; NERVE_NODE_REAL and NERVE_REAL_OWNER name it"]
+async fn a_command_is_held_to_its_limits_on_the_installed_node() {
+    let (Some(exe), Some(owner)) = (
+        std::env::var_os("NERVE_NODE_REAL").map(PathBuf::from),
+        std::env::var("NERVE_REAL_OWNER").ok(),
+    ) else {
+        eprintln!("skipped: NERVE_NODE_REAL or NERVE_REAL_OWNER is not set");
+        return;
+    };
+    assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
+    let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
+    assert!(ok, "{said}");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "real-limits\n\n\n");
+    assert!(ok, "{said}");
+    // `status` says the service's cgroup holds all three.
+    let (_, st) = as_owner(&owner, &["--json", "status"]);
+    let st: Value = serde_json::from_str(&st[st.find('{').unwrap()..]).unwrap();
+    let st = st.get("data").unwrap_or(&st).clone();
+    let limits = &st["command_limits"];
+    assert!(limits["off"].is_null(), "{limits}");
+    assert!(
+        limits["cgroup"]
+            .as_str()
+            .is_some_and(|c| c.contains("nerve-node.service")),
+        "{limits}"
+    );
+    assert_eq!(
+        limits["enforced"],
+        json!(["memory", "cpu", "processes"]),
+        "{limits}"
+    );
+
+    // The owner's folder, to give to the center.
+    let work = PathBuf::from("/srv/nrv-limits");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    assert!(sh(Command::new("chown").arg(format!("{owner}:")).arg(&work)).0);
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let link = center.link().render();
+    let (ok, said) = as_owner(&owner, &["center", "add", &link, "--yes"]);
+    assert!(ok, "{said}");
+    let (ok, said) = as_owner(&owner, &["folder", "add", work.to_str().unwrap(), "+rwx"]);
+    assert!(ok, "{said}");
+    let paired = center.paired().expect("paired");
+    let mut inc = center.next_link(WAIT).await.expect("the node dials");
+    fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
+        .await
+        .expect("handshake");
+    let mut conn = inc.conn;
+    let run_with = |command: &str, limits: Value| {
+        let mut args = json!({"command": command, "cwd": work.display().to_string()});
+        args.as_object_mut()
+            .unwrap()
+            .extend(limits.as_object().unwrap().clone());
+        args
+    };
+
+    // Its own cgroup, with what the call asked for. The cgroup's files are
+    // the node's, so the test reads them while the command waits.
+    let wait = "cut -d: -f3 /proc/self/cgroup > cgroup.txt; i=0; \
+                while [ ! -e release ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done";
+    let call = conn
+        .request(
+            "invoke",
+            json!({"cap": "exec", "action": "run", "args": run_with(wait,
+                json!({"memory_mb": 64, "cpu_percent": 50, "processes": 32}))}),
+        )
+        .await
+        .unwrap();
+    until("the command's cgroup is written", || {
+        std::fs::read_to_string(work.join("cgroup.txt")).is_ok_and(|t| t.ends_with('\n'))
+    });
+    let cgroup = std::fs::read_to_string(work.join("cgroup.txt")).unwrap();
+    let cgroup = cgroup.trim();
+    assert!(
+        cgroup.contains("/nerve-node.service/")
+            && cgroup
+                .rsplit('/')
+                .next()
+                .is_some_and(|c| c.starts_with("cmd-")),
+        "not a cgroup of its own below the service: {cgroup}"
+    );
+    let file = |f: &str| {
+        std::fs::read_to_string(Path::new("/sys/fs/cgroup").join(&cgroup[1..]).join(f))
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    assert_eq!(file("memory.max"), (64u64 << 20).to_string());
+    assert_eq!(file("cpu.max"), "50000 100000");
+    assert_eq!(file("pids.max"), "32");
+    std::fs::write(work.join("release"), b"").unwrap();
+    let r = conn
+        .answer(call, WAIT, &mut Vec::new())
+        .await
+        .unwrap()
+        .expect("the command ran");
+    assert_eq!(r["exit_code"], 0, "{r}");
+
+    // Past its memory the kernel kills it, and the result says why.
+    let r = conn
+        .call(
+            "invoke",
+            json!({"cap": "exec", "action": "run", "args": run_with(
+                "x=$(head -c 268435456 /dev/zero | tr '\\0' a); echo survived",
+                json!({"memory_mb": 64}))}),
+            WAIT,
+        )
+        .await
+        .expect("an answer")
+        .expect("it ran");
+    assert_eq!(r["killed"], "memory", "{r}");
+    assert_eq!(
+        r["reason"], "the command went past its memory limit of 64 MiB and was killed",
+        "{r}"
+    );
+    assert!(!out(&r).contains("survived"), "{r}");
+
+    // More than the most is refused before anything runs.
+    let e = conn
+        .call(
+            "invoke",
+            json!({"cap": "exec", "action": "run", "args": run_with(
+                "touch ran", json!({"memory_mb": 1 << 20}))}),
+            WAIT,
+        )
+        .await
+        .expect("an answer")
+        .expect_err("more than the most ran");
+    assert!(e.message.contains("16384"), "{}", e.message);
+    assert!(!work.join("ran").exists());
+
+    let (ok, said) = sh(Command::new(BIN).args(["uninstall", "--purge"]));
+    assert!(ok, "{said}");
+    std::fs::remove_dir_all(&work).unwrap();
 }

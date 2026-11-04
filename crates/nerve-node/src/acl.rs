@@ -1312,6 +1312,11 @@ pub fn remove_all(file: &Path, heir: &dyn Fn(u32) -> (u32, u32)) -> Report {
     report
 }
 
+/// The re-run of a test in a namespace, with its skips said again.
+#[cfg(test)]
+#[path = "../tests/common/ns.rs"]
+mod ns;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2185,14 +2190,13 @@ mod tests {
             return false;
         }
         let test = format!("{}::{name}", module_path!().split_once("::").unwrap().1);
-        let status = Command::new("unshare")
-            .args(args)
-            .arg(std::env::current_exe().unwrap())
-            .args(["--exact", &test, "--nocapture", "--test-threads=1"])
-            .env("NERVE_TEST_IN_NS", "1")
-            .status()
-            .unwrap();
-        assert!(status.success(), "in the namespace: {status}");
+        super::ns::run_saying_skips(
+            Command::new("unshare")
+                .args(args)
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", &test, "--nocapture", "--test-threads=1"])
+                .env("NERVE_TEST_IN_NS", "1"),
+        );
         false
     }
 

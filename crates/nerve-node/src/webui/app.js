@@ -320,7 +320,7 @@ function pageCaps() {
             btn("Remove", "danger-soft", act(async () => {
               const yes = await modal({ title: `Remove ${d.name}?`, confirm: "Remove", danger: true });
               if (yes) await api("POST", "/api/caps/remove", { name: d.name }).then(loadCaps);
-            }), "trash", `own:${d.name}:remove`))))) : empty("None yet.", "terminal"),
+            }), "trash", `own:${d.name}:remove`)))))) : empty("None yet.", "terminal"),
       capForm((v.config || []).find((d) => d.name === state.editing))),
     section("Programs", "Local programs that may add capabilities to the node.", null,
       (v.programs || []).length ? el("div", { class: "stack" }, v.programs.map((p) => el("div", { class: "card" },

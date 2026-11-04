@@ -3535,6 +3535,7 @@ pub(crate) mod tests {
         // all come off, so the owner stays alice and the service runs again.
         // Root opens any folder, so only as another account.
         if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: the unreadable folder below the grant, as root opens any folder");
             return;
         }
         use std::os::unix::fs::PermissionsExt;

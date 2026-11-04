@@ -1,0 +1,20 @@
+# The tests each CI job may skip, and why (.github/scripts/skips.py reads it).
+# A test that cannot run on a machine returns early and prints why
+# ("skipped: ..."); a job fails on a skip this list does not give it, so a
+# runner that loses Landlock, user namespaces or its systemd user session
+# fails instead of passing with less tested. A name here that did not skip
+# is only noted. One line per test: <job> <test name as cargo prints it> <why>.
+#
+# Jobs: linux (ci.yml, the runner's account), linux-root (the same runner,
+# the tests that need root run as root), windows (ci.yml). The other jobs
+# run their tests one by one and fail on their own.
+
+# Root, or root of a user namespace that may change owners and mount: the
+# runner's account is neither, and ubuntu-24.04 restricts user namespaces
+# with AppArmor. They run in the linux-root step.
+linux acl::tests::remove_all_gives_what_nerve_run_made_to_the_owner needs root; runs as root in the next step
+linux acl::tests::remove_all_gives_no_file_with_a_second_name needs a mount namespace; runs as root in the next step
+linux acl::tests::a_revoked_inner_grant_on_another_file_system_stays_stale needs a mount namespace; runs as root in the next step
+linux acl::tests::a_revoked_inner_grant_the_owner_cannot_reach_stays_stale needs a mount namespace; runs as root in the next step
+linux the_backup_file_is_opened_as_the_user_who_asked needs root or a user namespace; runs as root in the next step
+linux root_starts_in_a_folder_only_its_owner_may_enter needs root or a user namespace; runs as root in the next step

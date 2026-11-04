@@ -34,7 +34,7 @@ fn service(runner: &Runner) -> serde_json::Value {
 #[ignore = "installs Nerve on this machine; NERVE_DESKTOP_REAL names the program"]
 fn install_control_update_and_uninstall_on_this_machine() {
     let Some(exe) = std::env::var_os("NERVE_DESKTOP_REAL").map(PathBuf::from) else {
-        eprintln!("NERVE_DESKTOP_REAL is not set");
+        eprintln!("skipped: NERVE_DESKTOP_REAL is not set");
         return;
     };
     nerve_node::edition::set(&EDITION);
