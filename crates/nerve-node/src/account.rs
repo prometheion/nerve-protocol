@@ -1197,6 +1197,12 @@ mod tests {
     fn grants_are_cut_around_the_account_home_and_kept_otherwise() {
         let d = tempfile::tempdir().unwrap();
         let top = std::fs::canonicalize(d.path()).unwrap();
+        // The cut paths come back as the policy compares them, without the
+        // `\\?\` prefix a resolved Windows path carries.
+        #[cfg(windows)]
+        let top = PathBuf::from(nerve_policy::paths::win::strip_verbatim(
+            &top.to_string_lossy(),
+        ));
         let run_home = top.join("srv/nerve-run");
         for dir in ["srv/nerve-run/c/home", "srv/www", "owner/work"] {
             std::fs::create_dir_all(top.join(dir)).unwrap();
