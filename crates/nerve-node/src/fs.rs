@@ -766,6 +766,7 @@ fn list(path: &Path, skip: &dyn Fn(&Path, bool) -> bool) -> Result<Value, RpcErr
     let dir = Dir::listed(path).map_err(|e| open_error(path, e))?;
     let mut entries = Vec::new();
     for name in dir.names().map_err(io_error)? {
+        let name = name.map_err(io_error)?;
         // A listed folder shows its name, so it is judged like a read.
         if skip(&path.join(&name), false) {
             continue;
@@ -880,7 +881,10 @@ fn walk(
         let Ok(dir) = Dir::listed(&path) else {
             continue;
         };
-        let Ok(mut names) = dir.names() else {
+        let Ok(mut names) = dir
+            .names()
+            .and_then(|n| n.collect::<std::io::Result<Vec<_>>>())
+        else {
             continue;
         };
         names.sort_by(|a, b| b.cmp(a));
@@ -1029,15 +1033,28 @@ pub fn open_folder(path: &Path) -> std::io::Result<std::os::fd::OwnedFd> {
 /// it acts as another account).
 #[cfg(unix)]
 pub(crate) fn names(dir: &std::os::fd::OwnedFd) -> std::io::Result<Vec<std::ffi::CString>> {
-    #[cfg(target_os = "linux")]
-    use libc::__errno_location as errno;
-    #[cfg(not(target_os = "linux"))]
-    use libc::__error as errno;
+    read_names(dir)?.collect()
+}
+
+/// The names of `names`, one `readdir` at a time, so a caller with a cap
+/// stops reading at it (a folder may hold millions).
+#[cfg(unix)]
+pub(crate) struct Names(*mut libc::DIR);
+
+#[cfg(unix)]
+impl Drop for Names {
+    fn drop(&mut self) {
+        // SAFETY: the stream fdopendir made, closed once.
+        unsafe { libc::closedir(self.0) };
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn read_names(dir: &std::os::fd::OwnedFd) -> std::io::Result<Names> {
     use std::os::fd::AsRawFd;
     let last = std::io::Error::last_os_error;
     // SAFETY: a copy of a descriptor we hold, given to fdopendir, which
-    // owns it from then on and closes it with closedir; readdir's entries
-    // are read before the next call.
+    // owns it from then on and closes it with closedir (`Names::drop`).
     unsafe {
         let copy = libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0);
         if copy < 0 {
@@ -1050,25 +1067,44 @@ pub(crate) fn names(dir: &std::os::fd::OwnedFd) -> std::io::Result<Vec<std::ffi:
             return Err(e);
         }
         libc::rewinddir(d);
-        let mut out = Vec::new();
+        Ok(Names(d))
+    }
+}
+
+#[cfg(unix)]
+impl Iterator for Names {
+    type Item = std::io::Result<std::ffi::CString>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        #[cfg(target_os = "linux")]
+        use libc::__errno_location as errno;
+        #[cfg(not(target_os = "linux"))]
+        use libc::__error as errno;
         loop {
-            *errno() = 0;
-            let e = libc::readdir(d);
-            if e.is_null() {
-                let err = *errno();
-                libc::closedir(d);
-                if err != 0 {
-                    return Err(std::io::Error::from_raw_os_error(err));
+            #[cfg(test)]
+            READDIRS.with(|c| c.set(c.get() + 1));
+            // SAFETY: the stream is open until drop; the entry is read
+            // before the next call.
+            unsafe {
+                *errno() = 0;
+                let e = libc::readdir(self.0);
+                if e.is_null() {
+                    let err = *errno();
+                    return (err != 0).then(|| Err(std::io::Error::from_raw_os_error(err)));
                 }
-                return Ok(out);
-            }
-            let name = std::ffi::CStr::from_ptr((*e).d_name.as_ptr());
-            if name.to_bytes() != b"." && name.to_bytes() != b".." {
-                out.push(name.to_owned());
+                let name = std::ffi::CStr::from_ptr((*e).d_name.as_ptr());
+                if name.to_bytes() != b"." && name.to_bytes() != b".." {
+                    return Some(Ok(name.to_owned()));
+                }
             }
         }
     }
 }
+
+// How many entries `Names` read on this thread (tests tell a capped read
+// from one of the whole folder).
+#[cfg(all(unix, test))]
+thread_local!(static READDIRS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 
 /// The folder a `read` or `write` works in. On Unix it is opened one
 /// component at a time from `/` without following a symlink, and every later
@@ -1156,14 +1192,10 @@ impl Dir {
         }
     }
 
-    /// The names in the folder, but `.` and `..`.
-    fn names(&self) -> std::io::Result<Vec<std::ffi::OsString>> {
+    /// The names in the folder, but `.` and `..`, read as the caller asks.
+    fn names(&self) -> std::io::Result<impl Iterator<Item = std::io::Result<std::ffi::OsString>>> {
         use std::os::unix::ffi::OsStringExt;
-        let names = names(&self.fd)?;
-        Ok(names
-            .into_iter()
-            .map(|n| std::ffi::OsString::from_vec(n.into_bytes()))
-            .collect())
+        Ok(read_names(&self.fd)?.map(|n| n.map(|n| std::ffi::OsString::from_vec(n.into_bytes()))))
     }
 
     /// What `name` in the folder is, without following it.
@@ -1267,10 +1299,8 @@ impl Dir {
         Dir::open(path)
     }
 
-    fn names(&self) -> std::io::Result<Vec<std::ffi::OsString>> {
-        std::fs::read_dir(&self.path)?
-            .map(|e| e.map(|e| e.file_name()))
-            .collect()
+    fn names(&self) -> std::io::Result<impl Iterator<Item = std::io::Result<std::ffi::OsString>>> {
+        Ok(std::fs::read_dir(&self.path)?.map(|e| e.map(|e| e.file_name())))
     }
 
     fn entry(&self, name: &std::ffi::OsStr) -> std::io::Result<Entry> {
@@ -2060,6 +2090,21 @@ mod tests {
         let bin = run("read", json!({"path": p})).unwrap();
         assert_eq!(bin["encoding"], "base64");
         assert_eq!(bin["content"], "AP8=");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_list_stops_reading_a_folder_at_its_cap() {
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..LIST_MAX + 300 {
+            std::fs::File::create(d.path().join(format!("f{i}"))).unwrap();
+        }
+        READDIRS.with(|c| c.set(0));
+        let l = list(d.path(), &|_, _| false).unwrap();
+        assert_eq!(l["entries"].as_array().unwrap().len(), LIST_MAX);
+        // `.` and `..` come as entries too; the rest of the folder is not read.
+        let read = READDIRS.with(|c| c.get());
+        assert!(read <= LIST_MAX + 3, "{read} entries read for {LIST_MAX}");
     }
 
     #[test]

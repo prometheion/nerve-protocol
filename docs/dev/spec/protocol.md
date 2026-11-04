@@ -787,6 +787,10 @@ the wire form `/c/Users/…`.
 | `find` | read | `{path, glob, max?}` → `{paths, truncated}` |
 | `write` | write | `{path, content, encoding?, if_match?}` → `{etag, size}` |
 
+`stat` reports the place the path resolves to (links followed, as the policy
+judges it); `"link"` is what `list` shows for a link, and what `stat` tells
+only for a link swapped in after the policy judged the path.
+
 `etag` is the hex SHA-256 of the file's bytes. A `write` with an `if_match`
 that no longer matches fails with `conflict`. fs and exec calls run
 concurrently.
