@@ -1802,7 +1802,7 @@ impl Daemon {
             owner: opts.owner,
             own_user: crate::account::own_name(),
             #[cfg(target_os = "linux")]
-            acl: Mutex::default(),
+            acl: Mutex::new(crate::acl::remembered(&crate::acl::record_file(&paths))),
             #[cfg(target_os = "linux")]
             acl_walk: Mutex::default(),
             #[cfg(target_os = "linux")]
@@ -3328,6 +3328,77 @@ mod tests {
         let (n, stored) = seen_rx.recv().unwrap();
         assert_eq!(n, 0, "a walk used the config it was called with");
         assert_eq!(stored, ["stored"]);
+    }
+
+    /// What an earlier owner left is refused from the first moment after a
+    /// start: while the start walk runs, a command finds nothing behind
+    /// (`left` counts only for a retry that is due), and reads the report the
+    /// node started with.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn what_an_earlier_owner_left_is_refused_while_the_start_walk_runs() {
+        use std::sync::mpsc;
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let state = d.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let file = state.join("acl.json");
+        let left = d.path().join("earlier");
+        let record = crate::acl::Record {
+            uid: 1,
+            owner: 2,
+            left: vec![crate::acl::Left {
+                path: left.clone(),
+                run: 7,
+                owner: 8,
+            }],
+            ..Default::default()
+        };
+        std::fs::write(&file, serde_json::to_vec(&record).unwrap()).unwrap();
+        let daemon = Daemon::start(options(&d, &log)).await.unwrap();
+        let s = daemon.shared.clone();
+        let who = crate::acl::Who { run: 1, owner: 2 };
+        let (started, started_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let walker = {
+            let (s, file) = (s.clone(), file.clone());
+            std::thread::spawn(move || {
+                s.walk_acls(
+                    &file,
+                    &[],
+                    who,
+                    AclWalk::Every,
+                    &|| Some(vec![]),
+                    &|_, _| {
+                        started.send(()).unwrap();
+                        let _ = release_rx.recv();
+                        crate::acl::Report::default()
+                    },
+                );
+            })
+        };
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let (done, done_rx) = mpsc::channel();
+        {
+            let (s, file) = (s.clone(), file.clone());
+            std::thread::spawn(move || {
+                s.walk_acls(
+                    &file,
+                    &[],
+                    who,
+                    AclWalk::IfBehind,
+                    &|| Some(vec![]),
+                    &|_, _| panic!("the running walk does this"),
+                );
+                let _ = done.send(lock(&s.acl).refusal());
+            });
+        }
+        let refusal = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a command waits for the start walk");
+        assert!(refusal.unwrap().contains("earlier"), "no refusal");
+        release.send(()).unwrap();
+        walker.join().unwrap();
     }
 
     /// The walk at the start is every grant; the one a later config version

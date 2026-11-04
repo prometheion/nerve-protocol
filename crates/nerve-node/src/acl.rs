@@ -1181,6 +1181,24 @@ pub fn behind(file: &Path, want: &[Granted], who: Who, retry: bool) -> bool {
     }
 }
 
+/// What the record in `file` says is left from an earlier run: the report
+/// the node starts with, so that a command which finds nothing behind while
+/// the start walk runs is still refused for what earlier accounts left
+/// ([`Record::left`]). Only `left` counts here, as `behind` looks at no other
+/// entry that a walk could not take off.
+pub fn remembered(file: &Path) -> Report {
+    let mut report = Report::default();
+    if let Ok(Some(r)) = read_record(file)
+        && !r.left.is_empty()
+    {
+        report
+            .errors
+            .push("an earlier walk left them, and the walk of this start has not finished".into());
+        report.stale = r.left.into_iter().map(|l| l.path).collect();
+    }
+    report
+}
+
 /// The accounts the record in `file` names entries for, and whether it
 /// keeps entries of earlier ones ([`Record::left`]): `None` without a
 /// record, with one that names none, and with one that cannot be read,
