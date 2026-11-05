@@ -593,7 +593,10 @@ fn log_update(layout: &Layout, steps: &[String], r: &Result<bool, String>, out: 
     };
     let written = as_owner_of(&layout.state).and_then(|_owner| {
         let log = nerve_transport::log::Log::new(Level::Info);
-        log.attach_file(nerve_transport::log::file_in(&layout.state))
+        // No size limit: this writer lives for one line, and the running
+        // center keeps its own handle on the file, so it must not move the
+        // file aside under it.
+        log.attach_file_with_limit(nerve_transport::log::file_in(&layout.state), u64::MAX)
             .map_err(|e| e.to_string())?;
         log.record(level, None, &what);
         Ok(())
@@ -1236,6 +1239,36 @@ mod tests {
         // What the program itself says is the unit `install` writes.
         let said: serde_json::Value = serde_json::from_str(&service_files_text(&l)).unwrap();
         assert_eq!(said, serde_json::json!({"unit": l.unit_text()}));
+    }
+
+    /// The entry of `update` is written after the restart, when the running
+    /// center has the file open: the second writer must not move a nearly
+    /// full file aside under it.
+    #[test]
+    fn the_update_entry_does_not_move_the_log_under_the_running_center() {
+        let d = tempfile::tempdir().unwrap();
+        let l = layout(d.path());
+        std::fs::create_dir_all(&l.state).unwrap();
+        let path = nerve_transport::log::file_in(&l.state);
+        let log = nerve_transport::log::Log::new(Level::Info);
+        log.attach_file(&path).unwrap();
+        let line = "x".repeat(900);
+        while std::fs::metadata(&path).unwrap().len() + 1200 < nerve_transport::log::MAX_BYTES {
+            log.record(Level::Info, None, &line);
+        }
+        // Then in small steps, until the update's line no longer fits.
+        while std::fs::metadata(&path).unwrap().len() + 300 < nerve_transport::log::MAX_BYTES {
+            log.record(Level::Info, None, "y");
+        }
+        drop(log);
+        let mut out = Vec::new();
+        log_update(&l, &["a step".repeat(100)], &Ok(true), &mut out);
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+        let mut old = path.clone().into_os_string();
+        old.push(".1");
+        assert!(!Path::new(&old).exists(), "the log was moved aside");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("update: a stepa step"));
     }
 
     #[tokio::test]

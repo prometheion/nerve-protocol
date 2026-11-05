@@ -167,6 +167,7 @@ impl System for Fake {
             (Some("--version"), Some(a)) => {
                 assert_eq!(a.comment, self.mark, "run as the service's user")
             }
+            (Some("--version"), None) => panic!("--version run as root"),
             (Some("service-files"), Some(a)) => {
                 panic!("service-files run as {}, not as root", a.name)
             }

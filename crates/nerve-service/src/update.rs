@@ -202,8 +202,9 @@ struct Before {
 }
 
 /// Replaces the program `p` with the new one and restarts its service, with
-/// the service's files as the new program has them (`service-files`, run as
-/// the service's user). `started` waits until the restarted service
+/// the service's files as the new program has them (`service-files`, asked of
+/// it as root with an empty environment; `--version` runs as the service's
+/// user). `started` waits until the restarted service
 /// answers. `Ok(false)`: the installed program is that one already, its
 /// files are as it has them, and nothing changed.
 pub async fn update(

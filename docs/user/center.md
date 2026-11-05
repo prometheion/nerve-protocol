@@ -287,7 +287,7 @@ yourself.
 
 `update` also writes the service unit as the new program has it, so a
 release that changes it needs no `install` again, and its steps go to the
-center's [log](logs.md). It asks the new program for the unit, run as root
+center's [log](logs.md) file. The running center reads that file only when it starts, so the entry reaches the Log page at the center's next start; the file download has it at once. It asks the new program for the unit, run as root
 with an empty environment; the same program again still brings the unit it
 has, so a second `update` repairs a unit that is behind. The unit is written
 as a whole, so a line of your own in it is replaced: local changes belong in
