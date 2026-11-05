@@ -141,11 +141,14 @@ component ModeSection inherits Section {
             tone: Tone.danger;
             text: "In this mode " + Perm.center + "'s commands run as " + (Perm.owner-is-root ? "root" : "you") + ", which nothing keeps off the network, so the node runs none of them while this is on. Folder mode, or allowlist mode as nerve-run, runs them.";
         }
-        if Perm.no-network: Text {
-            text: "No command on the sudo list runs while this is on.";
-            color: Theme.text-muted;
-            font-size: Type.small;
-            wrap: word-wrap;
+        Reveal {
+            shown: Perm.no-network;
+            Text {
+                text: "No command on the sudo list runs while this is on.";
+                color: Theme.text-muted;
+                font-size: Type.small;
+                wrap: word-wrap;
+            }
         }
     }
     Reveal {
