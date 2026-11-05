@@ -1,18 +1,34 @@
 //! `nerve-center`: started by a harness from its MCP configuration. Logs go to
 //! stderr and to the log file in the state folder, never to stdout, which
 //! carries MCP. `install`, `update` and `uninstall` (as root on Linux) say
-//! their steps on stdout instead.
+//! their steps on stdout instead, as `owner-token` says the token.
 
 use clap::{CommandFactory, FromArgMatches};
 
 fn main() -> std::process::ExitCode {
     let matches = nerve_center::config::Args::command().get_matches();
     let args = nerve_center::config::Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
-    // `backup` and `restore` are the owner's, run by hand: no log, no server.
+    // `backup`, `restore` and `owner-token` are the owner's, run by hand: no
+    // log, no server.
     if let Some(cmd) = args.cmd.as_ref().filter(|c| !c.is_service()) {
         let state = args.state_dir();
         let settle = nerve_center::service::settle_user;
-        return match nerve_center::backup::run(&state, cmd, &settle, &mut std::io::stdout()) {
+        let mut out = std::io::stdout();
+        let done = match cmd {
+            // What `update` asks the new program (or, when it is the same
+            // one, the installed one), which it runs as root with an
+            // empty environment: the files of its service.
+            nerve_center::config::Cmd::ServiceFiles => {
+                let layout = nerve_center::service::Layout::system();
+                println!("{}", nerve_center::service::service_files_text(&layout));
+                Ok(())
+            }
+            nerve_center::config::Cmd::OwnerToken { new } => {
+                settle(&state).and_then(|_| nerve_center::owner::run(&state, *new, &mut out))
+            }
+            _ => nerve_center::backup::run(&state, cmd, &settle, &mut out),
+        };
+        return match done {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("nerve-center: {e}");

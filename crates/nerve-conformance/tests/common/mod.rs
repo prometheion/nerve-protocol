@@ -134,8 +134,6 @@ impl HttpCenter {
                 ("NERVE_MCP", "http"),
                 ("NERVE_MCP_LISTEN", &mcp_addr),
                 ("NERVE_HARNESS_TOKEN", token),
-                // The UI is open on loopback for the test to pair through.
-                ("NERVE_UI_NO_LOGIN", "true"),
                 ("NERVE_CALL_WAIT", &wait),
             ],
         );
@@ -150,6 +148,7 @@ impl HttpCenter {
             child,
             ui: Ui {
                 addr: ui,
+                state: state.to_path_buf(),
                 session: Arc::new(Mutex::new(None)),
             },
             mcp_addr,
@@ -211,6 +210,7 @@ impl Mcp {
             notes: Vec::new(),
             ui: Ui {
                 addr: ui,
+                state: state.to_path_buf(),
                 session: Arc::new(Mutex::new(None)),
             },
             node_port,
@@ -363,17 +363,22 @@ impl Drop for Mcp {
 #[derive(Clone)]
 pub struct Ui {
     pub addr: String,
+    /// The center's state folder, which holds its owner token.
+    state: std::path::PathBuf,
     session: Arc<Mutex<Option<String>>>,
 }
 
 impl Ui {
-    /// A web UI API call (the open loopback UI: a session from
-    /// `/api/session`, sent as a header with every call).
+    /// A web UI API call (a session from the login with the center's owner
+    /// token, sent as a header with every call).
     pub fn api(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
         let session = {
             let mut c = self.session.lock().unwrap();
             if c.is_none() {
-                let (status, _, body) = http(&self.addr, "GET", "/api/session", &[], "");
+                let token = std::fs::read_to_string(self.state.join("owner-token"))
+                    .expect("the center made its owner token");
+                let login = json!({ "token": token.trim() }).to_string();
+                let (status, _, body) = http(&self.addr, "POST", "/login", &[], &login);
                 assert_eq!(status, 200, "{body}");
                 let v: Value = serde_json::from_str(&body).unwrap();
                 *c = Some(v["session"].as_str().expect("a session").to_string());

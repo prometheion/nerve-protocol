@@ -100,7 +100,9 @@ The center has five commands of its own, which a harness never runs:
 ## For programs: `--json`
 
 A program that drives `nerve-node`, such as a script, adds `--json` and reads
-one JSON value from stdout:
+one JSON value from stdout. Fields are only ever added: one is renamed or
+removed only with a change of the format, which the changelog names under
+"Breaks". A script ignores the fields it does not know.
 
 - The read commands print their data: `status`, `center ls`, `folder ls`,
   `rule ls` (the lists, and `stale`: each rule whose arguments the action no

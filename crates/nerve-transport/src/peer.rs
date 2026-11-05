@@ -1,5 +1,6 @@
-//! Who is at the other end of a web UI connection, before a byte of it is
-//! read. A peer on this machine has a socket in the kernel's table of TCP
+//! Who is at the other end of a local TCP connection, before a byte of it
+//! is read: the node's web UI lets only its owner and root in, the center
+//! counts its local peers' connections by account (Linux). A peer on this machine has a socket in the kernel's table of TCP
 //! sockets, in the node's network namespace, with the account that made it:
 //! the kernel looks the one socket up ([`Lookup::Kernel`]), or, where it
 //! cannot, the whole table is read (`/proc/self/net/tcp` and `tcp6`). Only
@@ -16,9 +17,11 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+mod localnet;
+
 /// What the check decided of a peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Verdict {
+pub enum Verdict {
     /// A socket of this machine, of the account with this uid, which is
     /// one let in.
     Local(u32),
@@ -31,7 +34,7 @@ pub(crate) enum Verdict {
 
 /// One line of `/proc/net/tcp{,6}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Entry {
+pub struct Entry {
     pub local: SocketAddr,
     pub remote: SocketAddr,
     pub state: u8,
@@ -43,7 +46,7 @@ pub(crate) struct Entry {
 const ESTABLISHED: u8 = 0x01;
 
 /// The entries of one table's text; lines it cannot read are left out.
-pub(crate) fn parse(text: &str) -> Vec<Entry> {
+pub fn parse(text: &str) -> Vec<Entry> {
     text.lines()
         .skip(1)
         .filter_map(|line| {
@@ -115,7 +118,7 @@ fn same(a: SocketAddr, b: SocketAddr) -> bool {
 /// Judges the peer `peer` of a connection to `local` by the table
 /// `entries`. `allowed` are the accounts let in, `own` this machine's
 /// addresses.
-pub(crate) fn judge(
+pub fn judge(
     peer: SocketAddr,
     local: SocketAddr,
     entries: &[Entry],
@@ -152,8 +155,8 @@ pub(crate) fn judge(
 
 /// How the check finds a peer's socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Lookup {
-    /// The kernel looks the one socket up (crate::localnet::tcp_socket): the
+pub enum Lookup {
+    /// The kernel looks the one socket up (localnet::tcp_socket): the
     /// cost does not grow with the sockets of the machine, which a command
     /// that is closed at once can make many of, nor with how often it tries.
     Kernel,
@@ -166,7 +169,7 @@ impl Lookup {
     /// The way that works here, tried on the listener at `at` itself: the
     /// kernel says "no such entry" also when it cannot look sockets up, and
     /// a check that took that for a peer that left would close every one.
-    pub(crate) fn for_listener(at: SocketAddr) -> Lookup {
+    pub fn for_listener(at: SocketAddr) -> Lookup {
         let any = SocketAddr::new(
             if at.is_ipv4() {
                 Ipv4Addr::UNSPECIFIED.into()
@@ -175,7 +178,7 @@ impl Lookup {
             },
             0,
         );
-        match crate::localnet::tcp_socket(at, any) {
+        match localnet::tcp_socket(at, any) {
             Ok(Some(e)) if e.local.port() == at.port() => Lookup::Kernel,
             _ => Lookup::Tables,
         }
@@ -184,24 +187,8 @@ impl Lookup {
 
 /// [`judge`] with the peer's socket and the addresses of this machine as
 /// they are now.
-pub(crate) fn judge_now(
-    peer: SocketAddr,
-    local: SocketAddr,
-    allowed: &[u32],
-    how: Lookup,
-) -> Verdict {
-    let entries = match how {
-        Lookup::Kernel => match crate::localnet::tcp_socket(plain(peer), plain(local)) {
-            Ok(found) => found.into_iter().collect(),
-            Err(e) => {
-                tracing::debug!(
-                    "web UI: the kernel did not look the peer up ({e}); reading the tables"
-                );
-                tables()
-            }
-        },
-        Lookup::Tables => tables(),
-    };
+pub fn judge_now(peer: SocketAddr, local: SocketAddr, allowed: &[u32], how: Lookup) -> Verdict {
+    let entries = entries_now(peer, local, how);
     // A local peer is placed by its entry; the machine's addresses are
     // only needed for a peer that may be another machine.
     let found = entries
@@ -214,6 +201,37 @@ pub(crate) fn judge_now(
         own_addresses()
     };
     judge(peer, local, &entries, allowed, &own)
+}
+
+/// The account whose live socket on this machine is the peer `peer` of a
+/// connection to `local`, if one is: the center counts the connections of
+/// local peers by account, since on loopback they all have one address
+/// (or any of 127.0.0.0/8 they bind). None for another machine, a peer that
+/// closed already, or two entries that claim to be the peer.
+pub fn account_of(peer: SocketAddr, local: SocketAddr, how: Lookup) -> Option<u32> {
+    let entries = entries_now(peer, local, how);
+    let found: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| same(e.local, peer) && same(e.remote, local))
+        .collect();
+    match found[..] {
+        [e] if e.state == ESTABLISHED && e.inode != 0 => Some(e.uid),
+        _ => None,
+    }
+}
+
+/// The entries that may be the peer's socket, looked up as `how` says.
+fn entries_now(peer: SocketAddr, local: SocketAddr, how: Lookup) -> Vec<Entry> {
+    match how {
+        Lookup::Kernel => match localnet::tcp_socket(plain(peer), plain(local)) {
+            Ok(found) => found.into_iter().collect(),
+            Err(e) => {
+                tracing::debug!("the kernel did not look a peer up ({e}); reading the tables");
+                tables()
+            }
+        },
+        Lookup::Tables => tables(),
+    }
 }
 
 /// Both tables of /proc, in the node's network namespace.
@@ -243,7 +261,7 @@ fn own_addresses() -> Vec<IpAddr> {
     match &*read {
         Some((at, own)) if at.elapsed() < std::time::Duration::from_secs(1) => own.clone(),
         _ => {
-            let own = crate::localnet::addresses();
+            let own = localnet::addresses();
             *read = Some((std::time::Instant::now(), own.clone()));
             own
         }

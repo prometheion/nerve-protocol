@@ -74,6 +74,7 @@ points the node at a fake `sudo` (`machine.sudo_path`) for this.
 | 4.2 | the first frame is a challenge |
 | 4.2 | a wrong signature closes the link |
 | 1 | a version mismatch closes with `unsupported_version` |
+| 1.1 | a hello without `features` closes with `protocol_error` |
 | 4.2 | a good hello gets a welcome for version "0" |
 | 4.2 | the center fetches the descriptor after welcome |
 
@@ -234,7 +235,7 @@ its end), all `read`, with allow rules for `echo.level`, `echo.ping` and
 
 ## Not covered
 
-Binary frames and blobs (§5.4), limits (§5.5), the duplicate-link rule (§4.3),
+Binary frames (§5.4), limits (§5.5), the duplicate-link rule (§4.3),
 liveness timing (§4.4), back-off (§4.6), proxies (§4.7), relays (§4.8) and
 the resume of a dropped link (§4.9) have tests in the implementations but no
 conformance checks of their own. `nerve-node`'s relay tests run the node part

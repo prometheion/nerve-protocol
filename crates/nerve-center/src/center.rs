@@ -42,12 +42,23 @@ pub const NEXT_IDENTITY_FILE: &str = "tls.next.pem";
 pub use crate::audit::{AUDIT_KEEP, AUDIT_MAX_BYTES};
 const ALERTS_KEEP: usize = 50;
 
+/// Why a Save of the Action checker page was refused: the config changed
+/// since the page loaded it.
+pub const CHECKER_STALE: &str = "the action checker's settings changed since this page loaded them (another tab, or an allow rule from the Audit page); reload the page and make the change again";
+
+/// How the error of a save through [`Center::update_saved`] that could not
+/// be written begins.
+pub(crate) const UNWRITABLE: &str = "the center cannot write its state file";
+
 /// What changed, for whoever subscribed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
     Nodes,
     Audit,
     Sessions,
+    /// A harness token was made or deleted: the HTTP sessions it opened
+    /// end with it.
+    Tokens,
 }
 
 /// Everything the center needs to start.
@@ -807,6 +818,18 @@ impl Center {
     /// the state unlocked, so a slow disk holds up no reader (issue #150);
     /// it holds this change, or a later one, when this returns.
     pub fn update<T>(&self, f: impl FnOnce(&mut Store) -> T) -> T {
+        self.update_kept(f).0
+    }
+
+    /// [`update`](Self::update), and whether the state file took the change
+    /// (a failed save's error starts with [`UNWRITABLE`]). For a removal the
+    /// center makes at once, whatever the disk says (a token or a node that
+    /// goes must stop working now), but must not answer as kept while the
+    /// file still holds what it removed: that comes back at the next start.
+    pub(crate) fn update_kept<T>(
+        &self,
+        f: impl FnOnce(&mut Store) -> T,
+    ) -> (T, Result<(), String>) {
         let (out, snap) = {
             let mut s = self.store.lock().unwrap();
             let out = f(&mut s);
@@ -814,13 +837,17 @@ impl Center {
             (out, self.snapshot(&s))
         };
         if let Err(e) = self.write_snapshot(snap) {
+            // The next flush tries again, so the change is not lost once the
+            // disk takes it.
+            self.dirty.store(true, Ordering::SeqCst);
             self.log.record(
                 Level::Error,
                 None,
                 &format!("cannot write the state file: {e}"),
             );
+            return (out, Err(format!("{UNWRITABLE}: {e}")));
         }
-        out
+        (out, Ok(()))
     }
 
     /// The state file's text for the state `s`, locked by the caller, with
@@ -884,8 +911,9 @@ impl Center {
 
     /// Runs `f` on the stored state and saves it, all or nothing: when `f`
     /// fails or the save does, the state stays as it was and the error is
-    /// returned. For a change the center may not tell before it is kept.
-    fn update_saved<T>(
+    /// returned (a failed save's starts with [`UNWRITABLE`]). For a change
+    /// the center may not tell before it is kept.
+    pub(crate) fn update_saved<T>(
         &self,
         f: impl FnOnce(&mut Store) -> Result<T, String>,
     ) -> Result<T, String> {
@@ -901,7 +929,7 @@ impl Center {
         // Written under the lock: nobody sees the change before it is kept.
         if let Err(e) = self.write_snapshot(self.snapshot(&s)) {
             *s = before;
-            return Err(format!("the center cannot write its state file: {e}"));
+            return Err(format!("{UNWRITABLE}: {e}"));
         }
         self.dirty.store(false, Ordering::SeqCst);
         Ok(out)
@@ -951,6 +979,7 @@ impl Center {
                 self.snapshot(&s)
             };
             if let Err(e) = self.write_snapshot(snap) {
+                self.dirty.store(true, Ordering::SeqCst);
                 self.log.record(
                     Level::Error,
                     None,
@@ -1131,20 +1160,23 @@ impl Center {
             );
         };
         let node_id = nerve_transport::keys::node_id(&pk);
-        let out = self.update(|s| {
+        // Kept before it is told: a node told it is paired stores the center
+        // and dials it, and a pairing that is only in memory is gone at the
+        // next start.
+        let out = self.update_saved(|s| {
             if s.nodes.contains_key(&node_id) || s.node_by_key(&req.public_key).is_some() {
-                return Err("this key is already paired");
+                return Err("this key is already paired".to_string());
             }
             if s.node_by_name(&req.name).is_some() {
-                return Err("another node already has this name");
+                return Err("another node already has this name".to_string());
             }
             // `list` and `execute` find a node by its id or its name, so a
             // name is never a node's id: it would point at that node.
             if s.nodes.contains_key(&req.name) || req.name == node_id {
-                return Err("this name is a node's id");
+                return Err("this name is a node's id".to_string());
             }
             if s.node_by_name(&node_id).is_some() {
-                return Err("another node is named like this node's id");
+                return Err("another node is named like this node's id".to_string());
             }
             s.nodes.insert(
                 node_id.clone(),
@@ -1189,12 +1221,17 @@ impl Center {
             }
             Err(why) => {
                 self.codes.lock().unwrap().fail(taken);
+                let unwritable = why.starts_with(UNWRITABLE);
                 self.log.record(
-                    Level::Warn,
+                    if unwritable {
+                        Level::Error
+                    } else {
+                        Level::Warn
+                    },
                     None,
                     &format!("pairing refused for the name {}: {why}", req.name),
                 );
-                (409, json!({ "error": why }))
+                (if unwritable { 500 } else { 409 }, json!({ "error": why }))
             }
         }
     }
@@ -1378,7 +1415,7 @@ impl Center {
             .lock()
             .unwrap()
             .values()
-            .filter(|l| l.rotate() && !l.is_closed())
+            .filter(|l| !l.is_closed())
             .cloned()
             .collect();
         for l in &links {
@@ -1770,15 +1807,20 @@ impl Center {
             // A parked link has no connection for the bye; its calls end.
             l.fail_all();
         }
-        self.forget(node_id, "removed by the owner; its link got bye revoked");
-        Ok(())
+        self.forget(node_id, "removed by the owner; its link got bye revoked")
+            .map_err(|e| {
+                format!(
+                    "{e}; the node is removed now, but it is paired again when the center starts unless the state file can be written by then"
+                )
+            })
     }
 
     /// Drops a node's record (a remove, or the node's `bye unpaired`); `why`
-    /// goes to the log.
-    pub fn forget(&self, node_id: &str, why: &str) {
+    /// goes to the log. An error says the state file did not take it
+    /// ([`Center::update_kept`]).
+    pub fn forget(&self, node_id: &str, why: &str) -> Result<(), String> {
         let name = self.node_name(node_id);
-        let had = self.update(|s| {
+        let (had, saved) = self.update_kept(|s| {
             s.stats.remove(node_id);
             s.nodes.remove(node_id).is_some()
         });
@@ -1791,6 +1833,7 @@ impl Center {
             );
             self.changed(Change::Nodes);
         }
+        saved
     }
 
     pub fn alert(&self, node_id: &str, text: &str) {
@@ -1877,6 +1920,11 @@ impl Center {
                 return;
             }
             links.remove(&old.node_id);
+        }
+        // A link that dropped while the center pinged it was told as a
+        // drop then, and is not a second one.
+        if old.is_parked() {
+            return;
         }
         let silent = old.silent_for();
         let gone = Instant::now()
@@ -2165,6 +2213,16 @@ impl Center {
                 let name = self.node_name(&node);
                 let mut e = ev.data.clone();
                 if let Some(o) = e.as_object_mut() {
+                    // The action checker's marker is the center's own: from a
+                    // node it would draw a refusal of the center's model, with
+                    // Allow buttons that save a center rule the node chose.
+                    o.remove("checker");
+                    if o.get("by")
+                        .and_then(Value::as_str)
+                        .is_some_and(|b| b.trim().eq_ignore_ascii_case("action checker"))
+                    {
+                        o.remove("by");
+                    }
                     o.insert("node_id".into(), json!(node));
                     o.insert("node".into(), json!(name));
                     o.entry("ts").or_insert(json!(ev.ts));
@@ -3655,6 +3713,7 @@ impl Center {
                     LocalServer::start(
                         bin,
                         model,
+                        &self.dir,
                         cfg.model.local_gpu,
                         cfg.model.timeout_ms,
                         checker::install::model_pin(cfg.model.local_model),
@@ -3728,7 +3787,27 @@ impl Center {
     /// saves it, rebuilds the checker and tells the UI. `clear_taint` clears
     /// every session's taint mark, for when taint is switched off.
     pub fn set_checker_config(&self, cfg: CheckerConfig, clear_taint: bool) {
-        self.update(|s| s.checker = cfg);
+        self.store_checker_config(cfg, clear_taint, None)
+            .expect("a save without a version is never stale");
+    }
+
+    /// [`set_checker_config`](Self::set_checker_config), refused with
+    /// [`CHECKER_STALE`] when `if_version` is given and the stored config is
+    /// at another version: checked and written under one lock of the store.
+    fn store_checker_config(
+        &self,
+        mut cfg: CheckerConfig,
+        clear_taint: bool,
+        if_version: Option<u64>,
+    ) -> Result<(), String> {
+        self.update(|s| {
+            if if_version.is_some_and(|v| v != s.checker.version) {
+                return Err(CHECKER_STALE.to_string());
+            }
+            cfg.version = s.checker.version + 1;
+            s.checker = cfg;
+            Ok(())
+        })?;
         if clear_taint {
             for s in self.sessions.lock().unwrap().values() {
                 s.tainted.store(false, Ordering::SeqCst);
@@ -3737,6 +3816,7 @@ impl Center {
         self.rebuild_checker();
         self.changed(Change::Nodes);
         self.changed(Change::Sessions);
+        Ok(())
     }
 
     /// What the web UI's Action checker page reads: the config (no token),
@@ -3776,7 +3856,18 @@ impl Center {
     /// with the chosen device. Refused while an install is already running.
     /// Validates a posted checker config and, if it holds, saves it. Taint
     /// switched off clears every session's mark.
-    pub fn apply_checker_config(&self, mut cfg: CheckerConfig) -> Result<(), String> {
+    pub fn apply_checker_config(&self, cfg: CheckerConfig) -> Result<(), String> {
+        self.apply_checker_config_if(cfg, None)
+    }
+
+    /// [`apply_checker_config`](Self::apply_checker_config) for the page's
+    /// Save: refused with [`CHECKER_STALE`] unless the stored config is
+    /// still at `if_version`, the version the page loaded.
+    pub fn apply_checker_config_if(
+        &self,
+        mut cfg: CheckerConfig,
+        if_version: Option<u64>,
+    ) -> Result<(), String> {
         // A rule the config adds has its conditions checked against the
         // schemas the machines publish; one it keeps stays, flagged where
         // its argument went since (`stale` in checker_json).
@@ -3851,8 +3942,7 @@ impl Center {
         // Keep in memory what a restart reads back from the stored part.
         cfg.settle_blocklist();
         let clear_taint = self.read(|s| s.checker.taint_on) && !cfg.taint_on;
-        self.set_checker_config(cfg, clear_taint);
-        Ok(())
+        self.store_checker_config(cfg, clear_taint, if_version)
     }
 
     /// Adds a saved allow rule, built for an audit button's `cap.action` and
@@ -3867,17 +3957,32 @@ impl Center {
         pin: Option<(&str, &Value)>,
         node_id: Option<String>,
     ) -> Result<String, String> {
-        let rule = audit_rule("allow", cap, action, target, wildcard, pin)?;
+        let mut rule = audit_rule("allow", cap, action, target, wildcard, pin)?;
+        // **Allow** saves the command line it was shown, and covers that line
+        // alone: a pattern would also take more flags, operands or commands.
+        if (cap, action) == ("exec", "run") && !wildcard && pin.is_none() {
+            rule = format!("exec.run:exact:{}", target.trim());
+        }
         self.read(|s| checker_typed(&rule, node_id.as_deref(), &s.nodes))?;
-        let mut cfg = self.read(|s| s.checker.clone());
         let entry = AllowRule {
             rule: rule.clone(),
             node_id,
         };
-        if !cfg.allow_rules.contains(&entry) {
-            cfg.allow_rules.push(entry);
+        // Added to the stored config under its lock: a read, a push and a
+        // write of the whole config would lose a change saved in between.
+        let added = self.update(|s| {
+            let new = !s.checker.allow_rules.contains(&entry);
+            if new {
+                s.checker.allow_rules.push(entry);
+                s.checker.version += 1;
+            }
+            new
+        });
+        if added {
+            self.rebuild_checker();
+            self.changed(Change::Nodes);
+            self.changed(Change::Sessions);
         }
-        self.set_checker_config(cfg, false);
         Ok(rule)
     }
 
@@ -3981,7 +4086,10 @@ impl Center {
                         "the action checker's GPU build found no device; running the model on the CPU. Reinstall on CPU to keep it off the GPU.",
                     );
                 }
-                self.update(|s| s.checker.local_installed(use_gpu, model));
+                self.update(|s| {
+                    s.checker.local_installed(use_gpu, model);
+                    s.checker.version += 1;
+                });
                 checker::install::finish(&self.install, &r);
                 if gpu && !use_gpu {
                     self.install.lock().unwrap().message =
@@ -4043,6 +4151,7 @@ impl Center {
         // by its own setting, which would otherwise refuse its every call
         // with no model to ask (fail closed).
         self.update(|s| {
+            s.checker.version += 1;
             if s.checker.model.source == ModelSource::Local {
                 s.checker.model_on = false;
                 for n in s.checker.nodes.values_mut() {
@@ -4887,6 +4996,85 @@ pub(crate) mod tests {
         );
     }
 
+    /// A pairing the center cannot keep is refused, and nothing in memory
+    /// says it was made: the code stays open, and pairing works once the
+    /// disk takes it.
+    #[cfg(unix)]
+    #[test]
+    fn a_pairing_that_cannot_be_written_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let code = c.new_pairing()["code"].as_str().unwrap().to_string();
+        let body = json!({
+            "code": code, "name": "box-1", "platform": "linux", "arch": "x86_64",
+            "public_key": msg::hex(&[7; 32]),
+        })
+        .to_string();
+        let mode = |m| std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(m));
+        mode(0o500).unwrap();
+        let (status, v) = c.pair(body.as_bytes());
+        mode(0o700).unwrap();
+        assert_eq!(status, 500, "{v}");
+        assert!(v["error"].as_str().unwrap().starts_with(UNWRITABLE), "{v}");
+        assert!(c.read(|s| s.nodes.is_empty()));
+        assert_eq!(c.pairing_status(&code)["open"], true);
+        assert_eq!(c.pair(body.as_bytes()).0, 200);
+        assert_eq!(Store::load(dir.path()).unwrap().unwrap().nodes.len(), 1);
+    }
+
+    /// A node removed while the state file cannot be written is gone at
+    /// once, but the answer says it is not kept yet; the next flush keeps it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_that_cannot_be_written_is_said() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        c.update(|s| {
+            s.nodes.insert("n1".into(), node_record("n1", "linux"));
+        });
+        let mode = |m| std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(m));
+        mode(0o500).unwrap();
+        let e = c.remove("n1").await.unwrap_err();
+        mode(0o700).unwrap();
+        assert!(e.starts_with(UNWRITABLE), "{e}");
+        assert!(!c.knows("n1"));
+        assert!(
+            Store::load(dir.path())
+                .unwrap()
+                .unwrap()
+                .nodes
+                .contains_key("n1")
+        );
+        c.flush();
+        assert!(Store::load(dir.path()).unwrap().unwrap().nodes.is_empty());
+    }
+
+    /// A change whose write failed is written by the next flush: it is not
+    /// only in memory until a later change happens to write the file.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_write_is_tried_again_by_the_next_flush() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let mode = |m| std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(m));
+        mode(0o500).unwrap();
+        c.update(|s| s.center_name = "kept".into());
+        c.flush();
+        mode(0o700).unwrap();
+        assert_ne!(
+            Store::load(dir.path()).unwrap().unwrap().center_name,
+            "kept"
+        );
+        c.flush();
+        assert_eq!(
+            Store::load(dir.path()).unwrap().unwrap().center_name,
+            "kept"
+        );
+    }
+
     /// The same race through `update_saved`: a change it reports as kept
     /// (a node's new key, say) is in the file, or it fails and is undone.
     #[cfg(unix)]
@@ -5483,6 +5671,42 @@ pub(crate) mod tests {
         assert!(why.contains("cannot tell the home"), "{stale:?}");
     }
 
+    /// **Allow** on an audited command saves that line exactly: its rule
+    /// covers no other line. **Allow as wildcard** saves the program and
+    /// `*`.
+    #[test]
+    fn the_allow_button_saves_the_exact_command_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(dir.path(), None);
+        let rule = c
+            .add_checker_allow("exec", "run", "  git status  ", false, None, None)
+            .unwrap();
+        assert_eq!(rule, "exec.run:exact:git status");
+        let rule = c
+            .add_checker_allow("exec", "run", "git status", true, None, None)
+            .unwrap();
+        assert_eq!(rule, "exec.run:git *");
+        let saved: Vec<String> = c.read(|s| {
+            s.checker
+                .allow_rules
+                .iter()
+                .map(|a| a.rule.clone())
+                .collect()
+        });
+        assert_eq!(saved, ["exec.run:exact:git status", "exec.run:git *"]);
+        let exact = Rule::parse("exec.run:exact:git status").unwrap();
+        let at = |line: &'static str| crate::checker::blocklist::Call {
+            cap: "exec",
+            action: "run",
+            target: line,
+            args: None,
+            marked: &[],
+        };
+        assert!(exact.matches(&at("git status")));
+        assert!(!exact.matches(&at("git status; rm -rf ~")));
+        assert!(Rule::parse("exec.run:exact:  ").is_err());
+    }
+
     /// A checker rule with conditions is checked against the schema the
     /// machines publish as it is written: an argument the action does not
     /// take, a value not of its type, or an action no machine (or not the
@@ -5933,7 +6157,7 @@ pub(crate) mod tests {
         let kept = c.read(|s| s.checker.nodes.clone());
         assert_eq!(kept.keys().collect::<Vec<_>>(), ["n1", "n2"]);
         // Unpaired and paired again, the machine has its note back.
-        c.forget("n1", "test");
+        c.forget("n1", "test").unwrap();
         assert_eq!(notes().len(), 1);
         assert_eq!(
             c.read(|s| s.checker.nodes["n1"].note.clone()),

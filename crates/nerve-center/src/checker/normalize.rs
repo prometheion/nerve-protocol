@@ -69,9 +69,25 @@ pub struct Command {
     /// The arguments as written (not expanded), for the patterns that look at
     /// words such as PowerShell's `-Recurse`.
     pub raw: Vec<String>,
+    /// Whether the program is written without a folder. An allow rule
+    /// covers only a plain program, so a file of that name somewhere else
+    /// does not run under it.
+    pub plain: bool,
+    /// For a POSIX shell, the program as written (`Rscript`, `git.exe`):
+    /// there `Git` and `git.exe` are other programs than `git`, so an allow
+    /// rule compares it in its case. `None` for PowerShell, which ignores
+    /// case and `.exe`.
+    pub written: Option<String>,
 }
 
 impl Command {
+    /// Whether the program is written without a folder and, for a POSIX
+    /// shell, in lower case and without `.exe`, as [`Command::program`] has
+    /// it.
+    pub fn written_lower(&self) -> bool {
+        self.plain && self.written.as_deref().is_none_or(|w| w == self.program)
+    }
+
     /// The short flags the command carries, each as one letter (`-rf -v` →
     /// `r`, `f`, `v`). Long flags (`--force`) are not here.
     pub fn short_flags(&self) -> Vec<char> {
@@ -142,6 +158,58 @@ pub struct Parsed {
     /// The walk hit a bound and could not take the whole line apart. The
     /// checker treats this as "cannot see" and refuses.
     pub overflow: Option<Overflow>,
+    /// The line runs a command inside another: a substitution (`$( )`,
+    /// backticks, `<( )`), a shell's `-c` body (`cmd /c`, PowerShell's
+    /// `-Command`), or a program `Start-Process` starts.
+    pub nested: bool,
+    /// A wrapper before a command does more than run it: it carries words
+    /// of its own (`env A=B`, `env -S '…'`, `sudo -u user`, `nice -n 5`), or
+    /// gives the command words it reads at run time (`xargs`) or a program
+    /// it fetches (`npx`). A bare `sudo`, `env`, `nohup`, … does not.
+    pub wrapped: bool,
+    /// The parser could not read the line with confidence (a quote or
+    /// here-document left open, a shell fed from a pipe, an encoded
+    /// PowerShell command, a bound it hit). `commands` then holds what the
+    /// splitter found and what the parser read before it gave out, which may
+    /// be less than the line runs.
+    pub unread: bool,
+    /// A command of the line has a redirection (`> file`, `2>> log`) or
+    /// reads text written in the line (`<<< text`, a here-document). The
+    /// splitter has no notion of either and keeps the `>` and the file, or
+    /// the `<<<` and the text, among the command's arguments, so a rule that
+    /// takes any argument would cover a write to a file or the agent's own
+    /// text as the command's input.
+    pub redirected: bool,
+}
+
+impl Parsed {
+    /// The commands a saved allow rule is matched against: the text
+    /// splitter's, and none for a line whose commands the rule cannot see
+    /// whole. That is a line that runs a command inside another (what a
+    /// substitution or a `-c` body runs is no command the rule names,
+    /// however the outer one reads), a line the parser could not read
+    /// ([`Parsed::unread`]: the splitter alone would decide what an allow
+    /// rule skips the model for), a line with a wrapper that does more
+    /// than run its command ([`Parsed::wrapped`]: `env -S` is a `-c` body by
+    /// another name, `env GIT_CONFIG_…=…` changes what the command does),
+    /// a line in which the parser found a command the splitter did not
+    /// (a runner the splitter does not know, such as `timeout` or `eval`,
+    /// or a wrapper's flags it reads otherwise), and a line with a
+    /// redirection or text of its own to read ([`Parsed::redirected`]: a
+    /// second, plain copy of the command in the line would hide that the two
+    /// readers differ about it, so the line is marked on its own).
+    pub fn for_allow(&self) -> &[Command] {
+        if self.nested
+            || self.wrapped
+            || self.unread
+            || self.redirected
+            || self.commands.len() > self.walked
+        {
+            &[]
+        } else {
+            &self.commands[..self.walked]
+        }
+    }
 }
 
 /// Wrapper programs that run another command: stripped so the real program is
@@ -165,6 +233,10 @@ const WRAPPERS: &[&str] = &[
     "nocorrect",
     "noglob",
 ];
+
+/// Wrappers that give the program more than the line names, even bare:
+/// `xargs` its operands read at run time, `npx` a package it may fetch.
+const RUN_TIME_WRAPPERS: &[&str] = &["xargs", "npx", "pnpx"];
 
 /// Shell words that may stand before a command and are not the program
 /// (`if rm …`, `then rm …`, `! rm …`, `{ rm …; }`).
@@ -251,14 +323,24 @@ pub fn parse(line: &str, shell: Shell) -> Parsed {
     if out.overflow.is_some() {
         return out;
     }
-    let mut seen: HashSet<Command> = out.commands.iter().cloned().collect();
+    // The parser reads a program by its base name only, so `plain` is not
+    // part of what makes two commands the same: the splitter's, which saw
+    // the word as written, stays.
+    let same = |c: &Command| (c.program.clone(), c.args.clone(), c.raw.clone());
+    let mut seen: HashSet<_> = out.commands.iter().map(same).collect();
     let script = match command::parse(line, shell.policy()) {
         Ok(script) => script,
-        Err(gave_out) => gave_out.read,
+        Err(gave_out) => {
+            out.unread = true;
+            gave_out.read
+        }
     };
     script.visit(&mut |s, i| {
         if out.overflow.is_some() {
             return;
+        }
+        if !s.commands[i].redirects.is_empty() || !s.commands[i].input.is_empty() {
+            out.redirected = true;
         }
         let Some(run) = command::run(&s.commands[i], s.shell) else {
             return;
@@ -268,15 +350,17 @@ pub fn parse(line: &str, shell: Shell) -> Parsed {
             program: base_name(&run.name),
             args: raw.iter().flat_map(|a| expand_flags(a)).collect(),
             raw,
+            plain: !has_folder(&run.name),
+            written: written(&run.name, shell),
         };
-        if seen.contains(&c) {
+        if seen.contains(&same(&c)) {
             return;
         }
         if out.commands.len() >= MAX_COMMANDS {
             out.overflow = Some(Overflow::Commands);
             return;
         }
-        seen.insert(c.clone());
+        seen.insert(same(&c));
         out.commands.push(c);
     });
     out
@@ -298,12 +382,18 @@ fn walk(line: &str, shell: Shell) -> Parsed {
     let mut w = Walk {
         commands: Vec::new(),
         overflow: None,
+        nested: false,
+        wrapped: false,
     };
     w.collect(line, shell, 0);
     Parsed {
         walked: w.commands.len(),
         commands: w.commands,
         overflow: w.overflow,
+        nested: w.nested,
+        wrapped: w.wrapped,
+        unread: false,
+        redirected: false,
     }
 }
 
@@ -312,6 +402,10 @@ fn walk(line: &str, shell: Shell) -> Parsed {
 struct Walk {
     commands: Vec<Command>,
     overflow: Option<Overflow>,
+    /// A command was found inside another ([`Parsed::nested`]).
+    nested: bool,
+    /// A wrapper did more than run its command ([`Parsed::wrapped`]).
+    wrapped: bool,
 }
 
 impl Walk {
@@ -336,6 +430,7 @@ impl Walk {
             }
         }
         for body in subs {
+            self.nested = true;
             self.collect(&body, shell, depth + 1);
             if self.overflow.is_some() {
                 return;
@@ -357,9 +452,10 @@ impl Walk {
             self.overflow = Some(Overflow::Commands);
             return;
         }
-        let Some(i) = program_index(words) else {
+        let Some((i, bare)) = program_at(words, shell) else {
             return;
         };
+        self.wrapped |= !bare;
         let program = base_name(&words[i]);
         let rest = &words[i + 1..];
 
@@ -368,6 +464,8 @@ impl Walk {
             program: program.clone(),
             args,
             raw: rest.to_vec(),
+            plain: !has_folder(&words[i]),
+            written: written(&words[i], shell),
         });
 
         // A nested shell: its `-c` / `/c` / `-Command` body is another
@@ -383,6 +481,7 @@ impl Walk {
             None
         };
         if let Some((body, inner)) = body {
+            self.nested = true;
             self.collect(&body, inner, depth + 1);
             if self.overflow.is_some() {
                 return;
@@ -395,6 +494,7 @@ impl Walk {
         if STARTERS.contains(&program.as_str())
             && let Some(started) = started_program(rest)
         {
+            self.nested = true;
             self.parse_command(&started, shell, depth + 1);
         }
     }
@@ -403,8 +503,18 @@ impl Walk {
 /// The index of the program in a command's words: past the leading shell
 /// keywords and wrappers (with a wrapper's own arguments: `env A=B`,
 /// `nice -n 5`, `sudo -u user`, `xargs -0`).
-fn program_index(words: &[String]) -> Option<usize> {
+fn program_index(words: &[String], shell: Shell) -> Option<usize> {
+    program_at(words, shell).map(|(i, _)| i)
+}
+
+/// [`program_index`], and whether every wrapper before the program stood
+/// bare: no word of its own, and none that adds to what the program is
+/// given ([`Parsed::wrapped`]). A wrapper written with a folder or in
+/// another case than its name is a file of the agent's, not the wrapper,
+/// and counts as a word of its own.
+fn program_at(words: &[String], shell: Shell) -> Option<(usize, bool)> {
     let mut i = 0;
+    let mut bare = true;
     while i < words.len() {
         let w = base_name(&words[i]);
         if KEYWORDS.contains(&words[i].as_str()) {
@@ -414,7 +524,9 @@ fn program_index(words: &[String]) -> Option<usize> {
         if !WRAPPERS.contains(&w.as_str()) {
             break;
         }
+        bare &= !RUN_TIME_WRAPPERS.contains(&w.as_str()) && is_base_name(&words[i], shell);
         i += 1;
+        let first = i;
         while i < words.len() {
             let a = &words[i];
             if a.contains('=') && !a.starts_with('-') {
@@ -429,15 +541,16 @@ fn program_index(words: &[String]) -> Option<usize> {
                 break;
             }
         }
+        bare &= i == first;
     }
-    (i < words.len()).then_some(i)
+    (i < words.len()).then_some((i, bare))
 }
 
 /// The program a segment runs, for telling whether a here-string is fed to a
 /// shell.
 fn segment_program(segment: &str, shell: Shell) -> Option<String> {
     let words = tokenize(segment, shell)?;
-    let i = program_index(&words)?;
+    let i = program_index(&words, shell)?;
     Some(base_name(&words[i]))
 }
 
@@ -987,6 +1100,30 @@ fn base_name(word: &str) -> String {
         Some(b) if !b.is_empty() => b.to_string(),
         _ => w,
     }
+}
+
+/// Whether the program `word` is written with a folder.
+fn has_folder(word: &str) -> bool {
+    word.contains(['/', '\\'])
+}
+
+/// [`Command::written`] of the program `word`.
+fn written(word: &str, shell: Shell) -> Option<String> {
+    match shell {
+        Shell::Posix => Some(word.rsplit(['/', '\\']).next().unwrap_or(word).to_string()),
+        Shell::PowerShell => None,
+    }
+}
+
+/// Whether the program `word` is written as its base name: no folder, and
+/// for a POSIX shell not in another case or with `.exe`.
+fn is_base_name(word: &str, shell: Shell) -> bool {
+    !has_folder(word)
+        && match shell {
+            // PowerShell and Windows programs ignore case and `.exe`.
+            Shell::PowerShell => true,
+            Shell::Posix => word == base_name(word),
+        }
 }
 
 /// The body a shell's `-c` carries. As in bash, the `c` may be anywhere in a
@@ -1540,5 +1677,83 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(parse(&script, Shell::Posix).overflow, None);
+    }
+
+    /// A program written with a folder is not plain. For a POSIX shell the
+    /// program is kept as written, so a rule can tell `Rscript` from
+    /// `rscript` and `git.exe` from `git`; PowerShell ignores both.
+    #[test]
+    fn a_program_is_plain_without_a_folder_and_kept_as_written() {
+        for (line, shell, plain, written, lower) in [
+            ("git status", Shell::Posix, true, Some("git"), true),
+            (
+                "/usr/bin/git status",
+                Shell::Posix,
+                false,
+                Some("git"),
+                false,
+            ),
+            ("./git status", Shell::Posix, false, Some("git"), false),
+            ("Rscript x.R", Shell::Posix, true, Some("Rscript"), false),
+            ("git.exe status", Shell::Posix, true, Some("git.exe"), false),
+            ("git status", Shell::PowerShell, true, None, true),
+            ("Git.EXE status", Shell::PowerShell, true, None, true),
+            (".\\git status", Shell::PowerShell, false, None, false),
+            (
+                "C:\\tools\\git.exe status",
+                Shell::PowerShell,
+                false,
+                None,
+                false,
+            ),
+        ] {
+            let p = parse(line, shell);
+            assert_eq!(p.commands.len(), 1, "{line}: {:?}", p.commands);
+            let c = &p.commands[0];
+            assert_eq!(c.plain, plain, "{line}");
+            assert_eq!(c.written.as_deref(), written, "{line}");
+            assert_eq!(c.written_lower(), lower, "{line}");
+        }
+    }
+
+    /// A program `Start-Process` starts is a command inside another: no
+    /// allow rule covers the line, whatever it names.
+    #[test]
+    fn a_started_program_is_nested() {
+        let p = parse("Start-Process notepad.exe -Verb RunAs", Shell::PowerShell);
+        assert!(p.nested);
+        assert!(p.for_allow().is_empty());
+        assert!(p.commands.iter().any(|c| c.program == "notepad"));
+    }
+
+    /// A wrapper with words of its own, or one that adds to its command at
+    /// run time, marks the line; a bare one does not.
+    #[test]
+    fn a_wrapper_that_does_more_than_run_its_command_is_marked() {
+        for line in [
+            "env A=B git status",
+            "env -S 'x y' git status",
+            "sudo -u other git status",
+            "nice git -n 5 status && nice -n 5 git status",
+            "xargs git status",
+            "npx git status",
+            "./env make test",
+            "/usr/bin/nohup make test",
+            "NOHUP make test",
+        ] {
+            assert!(parse(line, Shell::Posix).wrapped, "{line}");
+        }
+        for line in ["sudo git status", "env git status", "nohup nice git status"] {
+            let p = parse(line, Shell::Posix);
+            assert!(!p.wrapped, "{line}");
+            assert_eq!(p.for_allow().len(), 1, "{line}");
+        }
+        // PowerShell ignores case and `.exe` for a program, so a wrapper
+        // written that way is still the wrapper; a folder makes it a file.
+        for line in ["NOHUP make test", "Nohup.EXE make test"] {
+            let p = parse(line, Shell::PowerShell);
+            assert!(!p.wrapped, "{line}");
+        }
+        assert!(parse(r".\nohup make test", Shell::PowerShell).wrapped);
     }
 }

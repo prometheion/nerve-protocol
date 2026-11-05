@@ -12,6 +12,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use nerve_proto::Descriptor;
+use nerve_transport::files::Format;
 use nerve_transport::log::Level;
 
 use crate::catalog::Catalog;
@@ -26,8 +27,16 @@ pub const PAIR_CODE_MINUTES: u32 = 10;
 pub const PAIR_CODE_MAX_MINUTES: u32 = 1440;
 const DAY_MS: u64 = 86_400_000;
 
+/// Unknown fields are refused, here and in the center's own records below,
+/// as the node does with its files: a field this version does not know
+/// would be dropped at its next save, quietly. A newer version that changes
+/// the file in a way this one cannot read says so with a higher `format`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Store {
+    /// The file's format (`nerve_transport::files::Format`).
+    #[serde(default)]
+    pub format: Format,
     pub center_id: String,
     pub center_name: String,
     #[serde(default)]
@@ -67,6 +76,7 @@ fn is_zero(n: &u32) -> bool {
 /// A rotation of the center's TLS key: what `center.rotate` tells the
 /// nodes, and how far it got.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KeyRotation {
     pub started_ms: u64,
     /// When the center serves the new key at the latest.
@@ -93,6 +103,7 @@ fn d_pair_code_minutes() -> u32 {
 impl Store {
     pub fn new(center_id: String, center_name: String) -> Store {
         Store {
+            format: Format::CURRENT,
             center_id,
             center_name,
             nodes: BTreeMap::new(),
@@ -109,25 +120,34 @@ impl Store {
 
     pub fn load(dir: &Path) -> std::io::Result<Option<Store>> {
         match std::fs::read(dir.join(FILE)) {
-            Ok(b) => {
-                let mut s: Store = serde_json::from_slice(&b).map_err(|e| {
-                    std::io::Error::other(format!("{} is not valid: {e}", dir.join(FILE).display()))
-                })?;
-                // The catalogs are not in the file: they come from the
-                // cached descriptors, so capabilities stay listed while a node is
-                // offline.
-                for n in s.nodes.values_mut() {
-                    n.catalog = n
-                        .descriptor
-                        .as_ref()
-                        .map(Catalog::build)
-                        .unwrap_or_default();
-                }
-                Ok(Some(s))
-            }
+            Ok(b) => Store::parse(&b)
+                .map(Some)
+                .map_err(|e| std::io::Error::other(format!("{} {e}", dir.join(FILE).display()))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// Reads the text of a state file. The error reads after the file's
+    /// name.
+    pub fn parse(text: &[u8]) -> Result<Store, String> {
+        // Before the typed parse: a newer version's file is refused for its
+        // format, not for a field this version does not know.
+        Format::of_json(text)
+            .check()
+            .map_err(|e| format!("is not valid: {e}"))?;
+        let mut s: Store =
+            serde_json::from_slice(text).map_err(|e| format!("is not valid: {e}"))?;
+        // The catalogs are not in the file: they come from the cached
+        // descriptors, so capabilities stay listed while a node is offline.
+        for n in s.nodes.values_mut() {
+            n.catalog = n
+                .descriptor
+                .as_ref()
+                .map(Catalog::build)
+                .unwrap_or_default();
+        }
+        Ok(s)
     }
 
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
@@ -180,6 +200,7 @@ impl Store {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeRecord {
     pub id: String,
     /// The center's name for the node; unique among this center's nodes.
@@ -228,6 +249,7 @@ impl NodeRecord {
 
 /// A node's replaced key and the end of its grace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OldKey {
     pub public_key: String,
     /// Milliseconds since the Unix epoch; from then on the key is refused.
@@ -235,6 +257,7 @@ pub struct OldKey {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TokenRecord {
     pub id: String,
     pub label: String,
@@ -244,6 +267,7 @@ pub struct TokenRecord {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeStats {
     /// Day number (days since the Unix epoch) to that day's numbers.
     #[serde(default)]
@@ -252,6 +276,7 @@ pub struct NodeStats {
 
 /// One node's numbers for one day. Counts and timings only.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DayStats {
     #[serde(default)]
     pub online_ms: u64,
@@ -269,6 +294,7 @@ pub struct DayStats {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CallStats {
     pub count: u64,
     pub errors: u64,
@@ -396,6 +422,40 @@ mod tests {
         let back = Store::load(dir.path()).unwrap().unwrap();
         assert!(!back.nodes["a"].disabled);
         assert!(back.nodes["b"].disabled);
+    }
+
+    /// `state.json` is written with `format: 1`; a file without it is at
+    /// format 1; one of a newer version is refused for its format, also
+    /// when it has fields this version does not know; and an unknown field
+    /// at format 1 is refused rather than dropped at the next save.
+    #[test]
+    fn the_state_file_has_a_format_and_a_newer_one_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        Store::new("c".into(), "home".into())
+            .save(dir.path())
+            .unwrap();
+        let text = std::fs::read_to_string(dir.path().join(FILE)).unwrap();
+        assert!(text.starts_with("{\n  \"format\": 1,\n"), "{text}");
+        assert_eq!(Store::load(dir.path()).unwrap().unwrap().format, Format(1));
+        let none = r#"{"center_id": "c", "center_name": "home"}"#;
+        assert_eq!(Store::parse(none.as_bytes()).unwrap().format, Format(1));
+        for newer in [
+            r#"{"format": 2, "center_id": "c", "center_name": "home"}"#,
+            r#"{"format": 2, "center_id": "c", "center_name": "home", "later": {}}"#,
+        ] {
+            std::fs::write(dir.path().join(FILE), newer).unwrap();
+            let e = Store::load(dir.path()).unwrap_err().to_string();
+            assert!(e.contains("format 2") && e.contains("newer version"), "{e}");
+            assert!(e.contains(FILE), "{e}");
+        }
+        for unknown in [
+            r#"{"center_id": "c", "center_name": "home", "later": 1}"#,
+            r#"{"center_id": "c", "center_name": "home", "harness_tokens": [{"id": "t",
+                "label": "l", "hash": "00", "created_ms": 1, "later": 1}]}"#,
+        ] {
+            let e = Store::parse(unknown.as_bytes()).unwrap_err();
+            assert!(e.contains("unknown field `later`"), "{e}");
+        }
     }
 
     #[test]

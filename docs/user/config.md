@@ -122,7 +122,9 @@ effect = "read"
 command = ["echo", "{word}"]
 ```
 
-The file also holds a `version` that grows with every write, `locked`
+The file also holds its `format` (1; a newer version's file is refused, see
+[settings and config](../dev/settings-and-config.md#the-format-of-stored-files)),
+a `version` that grows with every write, `locked`
 (set by `panic`), and per center the `url`, `pin`, `center_id` and `node_id`
 the pairing filled in, and the capabilities that center added with the
 settings grant (`[[center.capability]]`; `cap ls` lists them, `cap rm NAME

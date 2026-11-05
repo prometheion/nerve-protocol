@@ -34,7 +34,9 @@ as its owner. A new pairing is in `folder` mode: its commands run as
 it ([modes](docs/user/modes.md#the-account-nerve-run-linux)). On Windows the
 node is the desktop app ([below](#install-the-desktop-app)). The center is
 `nerve-center-x86_64-linux` (or `-aarch64-linux`, `-x86_64-windows.exe`)
-from the same release.
+from the same release; `sudo ./nerve-center-x86_64-linux install` runs it as
+a service and prints the owner token its web UI asks for
+([center](docs/user/center.md#run-it-as-a-service)).
 
 ## Install the desktop app
 
@@ -61,15 +63,30 @@ Get the programs from
    {"mcpServers": {"nerve": {"command": "nerve-center"}}}
    ```
 
-2. Open `http://127.0.0.1:7480`, press **Pair a machine**, and run the command
-   it shows on the machine:
+2. Open `http://127.0.0.1:7480` and log in with the **owner token**. The
+   center made it at its first start, printed it, and keeps it in a file of
+   yours (mode 0600):
+
+   ```sh
+   cat ~/.local/state/nerve-center/owner-token
+   ```
+
+   It is the one secret of the web UI. The harness's own token never logs
+   in there, and a token you write into the file must not be one.
+   `nerve-center owner-token --new` makes a new one
+   ([web UI](docs/user/web-ui.md#log-in)). This center runs as you, so an
+   agent with file or shell tools can read the file too; to keep the agent
+   out of the web UI, run the center as the
+   [service](docs/user/center.md#run-it-as-a-service).
+
+3. Press **Pair a machine**, and run the command it shows on the machine:
 
    ```sh
    nerve-node center add 'nerve://pair?center=...&code=...&pin=...'
    nerve-node run
    ```
 
-3. A new pairing is in `folder` mode: it writes and runs nothing of yours
+4. A new pairing is in `folder` mode: it writes and runs nothing of yours
    until you give it a folder (on the installed node it may read what every
    account may read). Give it one:
 
@@ -93,3 +110,23 @@ decide. Set it up on the **Action checker** page of the web UI
 | Running Nerve: install, pairing, rules and modes, the web UI, troubleshooting | [docs/user/](docs/user/README.md) |
 | Building, changing and releasing Nerve: architecture, policy engine, checks | [docs/dev/](docs/dev/README.md) |
 | The protocol and the conformance suite | [docs/dev/spec/](docs/dev/spec/README.md), [schemas/](schemas), [crates/nerve-conformance](crates/nerve-conformance) |
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md): how to build and check a change, and what a pull request brings.
+
+## Security
+
+Report a security hole privately, through **Report a vulnerability** on the
+repository's Security tab (without that button, open an issue that says only
+that you have a report, and no more). [SECURITY.md](SECURITY.md) says how, what is in
+scope, what `update` trusts (the releases are not signed yet), and the known
+limits.
+
+## Licence
+
+Nerve is under the [Apache License 2.0](LICENSE). The desktop app
+`nerve-node-desktop` is drawn with [Slint](https://slint.dev), which it uses
+under Slint's Royalty-free license 2.0: the app shows Slint's notice in its
+About dialog ([its licence](crates/nerve-node-desktop/LICENSE.md)).
+[NOTICE](NOTICE) lists the works Nerve includes.

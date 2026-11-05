@@ -14,6 +14,11 @@ same way and so the owner knows what each setting does.
 With `machine.secret_storage = "keyring"` the keys are in the system keyring
 instead of `keys/` and `config.key` ([where the keys are](#where-the-keys-are)).
 
+`node.toml`, `acl.json` and `grants.json` carry a `format` (1; a file without
+it is at format 1). A node refuses a file with a higher format, naming the
+format and that a newer version wrote it, and a file with a field it does not
+know ([settings and config](../settings-and-config.md#the-format-of-stored-files)).
+
 A node that `nerve-node install` put on a Linux machine
 ([service](../../user/service.md)) runs as the system user `nerve` with
 `/etc/nerve` and `/var/lib/nerve/state`; without `--config-dir`,

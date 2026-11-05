@@ -1,14 +1,14 @@
 //! This machine's own addresses, and the kernel's answer for one TCP
-//! socket, for the web UI's check of who connects (crate::webui::peer).
+//! socket, for the web UI's check of who connects (crate::peer).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-use crate::webui::peer::Entry;
+use super::Entry;
 
 /// The addresses of every interface of this machine, in the node's network
 /// namespace; none when they cannot be read.
-pub(crate) fn addresses() -> Vec<IpAddr> {
+pub(super) fn addresses() -> Vec<IpAddr> {
     let mut out = Vec::new();
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: getifaddrs fills `list` with a list it allocated, which is
@@ -56,7 +56,7 @@ const ANSWER_LEN: usize = 16 + 72;
 /// machine has. Both addresses are of one family. `Ok(None)` when there is
 /// none, or when the kernel cannot answer such questions at all (both say
 /// "no such entry"); an error when the question could not be asked.
-pub(crate) fn tcp_socket(local: SocketAddr, remote: SocketAddr) -> Result<Option<Entry>, String> {
+pub(super) fn tcp_socket(local: SocketAddr, remote: SocketAddr) -> Result<Option<Entry>, String> {
     let family = if local.is_ipv4() {
         libc::AF_INET
     } else {

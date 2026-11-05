@@ -21,8 +21,8 @@ use nerve_policy::settings::SettingsStore;
 
 use crate::paths::NodePaths;
 use crate::service::{
-    Account, Layout, ServiceAction, ServiceState, Steps, USER, USER_MARK, Version, asset_name,
-    audit, fetch_release, put_parts, uninstall_parts, write_file,
+    Account, Layout, ServiceAction, ServiceState, Steps, USER, USER_MARK, asset_name, audit,
+    fetch_release, put_parts, uninstall_parts, write_file,
 };
 
 /// The name the service is registered under.
@@ -712,12 +712,12 @@ async fn update_steps(
     write_file(&new_path, &new, 0o755)?;
     let checked = (|| {
         let said = sys.version_of(&new_path)?;
-        let new_v = Version::of_program(layout, &said)
+        let new_v = crate::service::program_version(layout, &said)
             .ok_or_else(|| format!("the new program is not {program}: it says {said:?}"))?;
         let old_v = sys
             .version_of(bin)
             .ok()
-            .and_then(|s| Version::of_program(layout, &s));
+            .and_then(|s| crate::service::program_version(layout, &s));
         if let Some(o) = old_v
             && new_v < o
         {

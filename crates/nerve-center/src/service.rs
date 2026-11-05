@@ -1,6 +1,7 @@
 //! The center as a service (docs/user/center.md, "Run it as a service"):
 //! `install`, `update` and `uninstall`, on Linux with systemd, as the node
-//! has them ([`nerve_node::service`]). The service runs `nerve-center` with
+//! has them: what both do the same way, `update` among it, is
+//! [`nerve_service`]'s. The service runs `nerve-center` with
 //! MCP over HTTP under a user of its own, `nerve-center`, which owns the
 //! center's state folder and nothing else. Its settings are the `NERVE_*`
 //! variables in a file of root's that the unit reads, so the center cannot
@@ -13,7 +14,9 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use nerve_node::service::{Account, Version, as_owner_of, set_mode, write_file};
+use nerve_service::{Account, Steps, as_owner_of, set_mode, write_file};
+
+use nerve_transport::log::Level;
 
 use crate::config::Cmd;
 
@@ -98,6 +101,7 @@ ExecStart={bin} --state-dir {state}
 Restart=on-failure
 RestartSec=5
 UMask=0077
+LimitNOFILE=65536
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 ProtectSystem=strict
@@ -108,7 +112,7 @@ PrivateDevices=yes
 InaccessiblePaths=-/dev/shm
 RemoveIPC=yes
 RestrictNamespaces=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
@@ -136,8 +140,8 @@ WantedBy=multi-user.target
     }
 
     /// The settings file `install` writes when there is none: the harness
-    /// token, which the web UI asks for from the start, and the other
-    /// settings as comments with their defaults.
+    /// token of the HTTP MCP endpoint, and the other settings as comments
+    /// with their defaults.
     pub fn settings_text(token: &str) -> String {
         format!(
             "# The settings of the installed center, read by the service at its start:
@@ -145,8 +149,9 @@ WantedBy=multi-user.target
 # wrote this file once and keeps it. Each variable is a flag of
 # `nerve-center --help`.
 #
-# The harness token: the web UI logs in with it, and harnesses send it to the
-# HTTP MCP endpoint. More can be made in the web UI.
+# The harness token: harnesses send it to the HTTP MCP endpoint. It does not
+# log in to the web UI, which asks for the owner token in
+# /var/lib/nerve-center/owner-token. More can be made in the web UI.
 NERVE_HARNESS_TOKEN={token}
 #NERVE_NAME=nerve-center
 #NERVE_LISTEN=0.0.0.0:7443
@@ -160,75 +165,57 @@ NERVE_HARNESS_TOKEN={token}
 }
 
 /// What install, update and uninstall do to the machine besides writing the
-/// center's files.
-pub trait System {
-    fn is_root(&self) -> bool;
-    /// Whether systemd runs this machine.
-    fn has_systemd(&self) -> bool;
-    fn account(&self, name: &str) -> Result<Option<Account>, String>;
-    /// Makes a system user with a group of the same name, the home given
-    /// (not created) and no login, marked with [`USER_MARK`].
-    fn add_account(&self, name: &str, home: &Path) -> Result<(), String>;
-    /// Removes the user and its group.
-    fn remove_account(&self, name: &str) -> Result<(), String>;
-    fn systemctl(&self, args: &[&str]) -> Result<(), String>;
-    /// Gives `path` and everything below it to `uid`:`gid`.
-    fn give(&self, path: &Path, uid: u32, gid: u32) -> Result<(), String>;
+/// center's files: what the node's service asks of it too
+/// ([`nerve_service::System`]), and the center's own.
+pub trait System: nerve_service::System {
     /// Waits until the center the service started answers on the harness
     /// socket of its state folder.
     fn wait_running(&self, state: &Path) -> Result<(), String>;
-    /// What `<program> --version` prints, run as `account`.
-    fn version_of(&self, program: &Path, account: &Account) -> Result<String, String>;
 }
 
-/// This machine. What the node's service does the same way is the node's
-/// own code ([`nerve_node::service::Host`]).
+/// This machine.
 pub struct Host;
 
-impl System for Host {
+impl nerve_service::System for Host {
     fn is_root(&self) -> bool {
-        node::System::is_root(&node::Host)
+        nerve_service::Host.is_root()
     }
 
     fn has_systemd(&self) -> bool {
-        node::System::has_systemd(&node::Host)
+        nerve_service::Host.has_systemd()
     }
 
     fn account(&self, name: &str) -> Result<Option<Account>, String> {
-        node::System::account(&node::Host, name)
+        nerve_service::Host.account(name)
     }
 
-    fn add_account(&self, name: &str, home: &Path) -> Result<(), String> {
-        node::run(
-            "useradd",
-            &[
-                "--system",
-                "--user-group",
-                "--home-dir",
-                &home.display().to_string(),
-                "--no-create-home",
-                "--shell",
-                node::no_login(),
-                "--comment",
-                USER_MARK,
-                "--",
-                name,
-            ],
-        )
+    fn add_account(&self, name: &str, home: &Path, mark: &str) -> Result<(), String> {
+        nerve_service::Host.add_account(name, home, mark)
     }
 
     fn remove_account(&self, name: &str) -> Result<(), String> {
-        node::System::remove_account(&node::Host, name)
+        nerve_service::Host.remove_account(name)
     }
 
     fn systemctl(&self, args: &[&str]) -> Result<(), String> {
-        node::System::systemctl(&node::Host, args)
+        nerve_service::Host.systemctl(args)
     }
 
     fn give(&self, path: &Path, uid: u32, gid: u32) -> Result<(), String> {
-        node::System::give(&node::Host, path, uid, gid)
+        nerve_service::Host.give(path, uid, gid)
     }
 
+    fn output_of(
+        &self,
+        program: &Path,
+        account: Option<&Account>,
+        args: &[&str],
+    ) -> Result<String, String> {
+        nerve_service::Host.output_of(program, account, args)
+    }
+}
+
+impl System for Host {
     fn wait_running(&self, state: &Path) -> Result<(), String> {
         let socket = crate::attach::socket_path(state);
         for _ in 0..60 {
@@ -242,14 +229,6 @@ impl System for Host {
             socket.display()
         ))
     }
-
-    fn version_of(&self, program: &Path, account: &Account) -> Result<String, String> {
-        node::System::version_of(&node::Host, program, account)
-    }
-}
-
-mod node {
-    pub use nerve_node::service::{Host, System, no_login, run};
 }
 
 /// Whether a center takes a connection on the harness socket `socket`. The
@@ -288,12 +267,12 @@ fn supported(sys: &dyn System, what: &str) -> Result<(), String> {
 /// Run first in `main` for `backup` and `restore`, while the process has one
 /// thread: root's command on a state folder that belongs to another user,
 /// as the installed center's belongs to `nerve-center`, runs as that user
-/// ([`nerve_node::service::become_owner`], as the node's commands do). Root
+/// ([`nerve_service::become_owner`], as the node's commands do). Root
 /// then follows no link that user put there, and what it writes stays the
 /// center's, so the service starts on it. Says whether it switched.
 pub fn settle_user(state: &Path) -> Result<bool, String> {
     let before = nerve_transport::net::euid();
-    nerve_node::service::become_owner(&nerve_node::NodePaths::new(state, state), false)?;
+    nerve_service::become_owner(&[state], false)?;
     Ok(nerve_transport::net::euid() != before)
 }
 
@@ -302,34 +281,43 @@ fn did(out: &mut dyn Write, step: impl std::fmt::Display) {
     let _ = writeln!(out, "{step}");
 }
 
+/// What `service-files` prints: the unit, which `update` of an earlier
+/// program writes so that the new program runs under its own unit
+/// ([`update`]).
+pub fn service_files_text(layout: &Layout) -> String {
+    nerve_service::files_text(&[("unit", Some(layout.unit_text()))])
+}
+
 /// Runs `install`, `update` or `uninstall` on this machine. As the node's
 /// own, none of them may be run by a command the installed node runs for a
-/// center ([`nerve_node::cli::owner_check`]): an agent cannot replace or
+/// center ([`nerve_service::owner_check`]): an agent cannot replace or
 /// remove its center either.
 /// `given` are the center's settings the owner gave with the command
 /// ([`crate::config::settings_given`]): none of them reaches the service,
 /// whose settings are in its settings file, so they are refused.
 pub async fn execute(cmd: Cmd, given: &[String], out: &mut dyn Write) -> Result<(), String> {
-    let node = nerve_node::service::Layout::system().paths;
+    let node = PathBuf::from(nerve_service::NODE_CTL_SOCKET);
     execute_on(cmd, given, &Layout::system(), &Host, &node, out).await
 }
 
-/// [`execute`] on `layout`, with `node` the installed node's folders.
+/// [`execute`] on `layout`, with `node` the installed node's control socket.
 async fn execute_on(
     cmd: Cmd,
     given: &[String],
     layout: &Layout,
     sys: &dyn System,
-    node: &nerve_node::NodePaths,
+    node: &Path,
     out: &mut dyn Write,
 ) -> Result<(), String> {
     let what = match &cmd {
         Cmd::Install => "install",
         Cmd::Update { .. } => "update",
         Cmd::Uninstall { .. } => "uninstall",
-        // `main` gives these to crate::backup.
-        Cmd::Backup { .. } | Cmd::Restore { .. } => {
-            return Err("backup and restore are not service commands".into());
+        // `main` gives these to crate::backup and crate::owner.
+        Cmd::Backup { .. } | Cmd::Restore { .. } | Cmd::OwnerToken { .. } | Cmd::ServiceFiles => {
+            return Err(
+                "backup, restore, owner-token and service-files are not service commands".into(),
+            );
         }
     };
     if !given.is_empty() {
@@ -344,7 +332,7 @@ async fn execute_on(
     // socket either, and would be told about that instead of about sudo.
     // Nothing changes before either check.
     supported(sys, what)?;
-    nerve_node::cli::owner_check(&[node]).await?;
+    nerve_service::owner_check(&[node.to_path_buf()]).await?;
     match cmd {
         Cmd::Install => {
             let exe = std::env::current_exe().map_err(|e| format!("this program: {e}"))?;
@@ -352,7 +340,9 @@ async fn execute_on(
         }
         Cmd::Update { from } => update(layout, sys, from.as_deref(), out).await,
         Cmd::Uninstall { purge } => uninstall(layout, sys, purge, out),
-        Cmd::Backup { .. } | Cmd::Restore { .. } => unreachable!("refused above"),
+        Cmd::Backup { .. } | Cmd::Restore { .. } | Cmd::OwnerToken { .. } | Cmd::ServiceFiles => {
+            unreachable!("refused above")
+        }
     }
 }
 
@@ -366,67 +356,60 @@ pub fn install(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     supported(sys, "install")?;
-    let account = match sys.account(USER)? {
-        Some(a) if a.comment == USER_MARK => {
-            did(out, format!("the user {USER} is there already"));
-            a
-        }
-        Some(_) => {
-            return Err(format!(
-                "a user {USER} exists already, and nerve-center install did not make it; the center needs a user of its own"
-            ));
-        }
-        None => {
-            sys.add_account(USER, &layout.state)?;
-            let a = sys
-                .account(USER)?
-                .ok_or_else(|| format!("useradd made no user {USER}"))?;
-            did(out, format!("made the user {USER} (uid {})", a.uid));
-            a
-        }
-    };
+    let mut steps = Steps::new(out);
+    let account = nerve_service::system_account(
+        sys,
+        USER,
+        &layout.state,
+        USER_MARK,
+        "the user",
+        "nerve-center install",
+        &mut steps,
+    )?;
     let state = &layout.state;
     nerve_transport::files::create_private_dir(state)
         .map_err(|e| format!("{}: {e}", state.display()))?;
-    {
+    // The owner token is made here, before the service first starts, so
+    // that install can say it; one an earlier install made is kept.
+    let owner_token = {
         // An earlier install's folder may hold what its user put there; it
-        // is changed as that user, and a link in its place is refused.
+        // is changed and read as that user, and a link in its place is
+        // refused.
         let _owner = as_owner_of(state)?;
         set_mode(state, 0o700)?;
-    }
+        crate::owner::ensure(state)?.0
+    };
     // The folder may be left from an earlier install, whose user had
     // another uid: everything in it is given to this one.
     sys.give(state, account.uid, account.gid)?;
-    did(out, format!("{} belongs to {USER}", state.display()));
-    settings(layout, sys, out)?;
+    steps.did(format!("{} belongs to {USER}", state.display()));
+    settings(layout, sys, steps.out)?;
     let real = |p: &Path| std::fs::canonicalize(p).ok();
     if real(exe).is_some() && real(exe) == real(&layout.bin) {
-        did(
-            out,
-            format!("the program is at {} already", layout.bin.display()),
-        );
+        steps.did(format!(
+            "the program is at {} already",
+            layout.bin.display()
+        ));
     } else {
         let program = std::fs::read(exe).map_err(|e| format!("{}: {e}", exe.display()))?;
         write_file(&layout.bin, &program, 0o755)?;
-        did(out, format!("put the program at {}", layout.bin.display()));
+        steps.did(format!("put the program at {}", layout.bin.display()));
     }
-    write_file(&layout.unit, layout.unit_text().as_bytes(), 0o644)?;
-    did(
-        out,
-        format!("wrote the service unit {}", layout.unit.display()),
-    );
-    sys.systemctl(&["daemon-reload"])?;
-    sys.systemctl(&["enable", UNIT_NAME])?;
-    sys.systemctl(&["restart", UNIT_NAME])?;
-    sys.wait_running(state)?;
-    did(
-        out,
-        format!("the service {UNIT_NAME} runs as {USER} and starts with the machine"),
-    );
+    nerve_service::start_unit(
+        sys,
+        &layout.unit,
+        &layout.unit_text(),
+        UNIT_NAME,
+        USER,
+        &|| sys.wait_running(state),
+        &mut steps,
+    )?;
     let _ = writeln!(
-        out,
-        "Next: open the web UI (http://127.0.0.1:7480 unless {} says otherwise) and log in with its harness token: `sudo grep NERVE_HARNESS_TOKEN {}`.",
+        steps.out,
+        "Next: open the web UI (http://127.0.0.1:7480 unless {} says otherwise) and log in with the owner token:\n\n    {owner_token}\n\nIt is kept in {} (`sudo cat` it, or `sudo nerve-center --state-dir {} owner-token --new` makes a new one). Harnesses use the HTTP MCP endpoint with the harness token in that settings file: `sudo grep NERVE_HARNESS_TOKEN {}`.",
         layout.settings().display(),
+        crate::owner::path(state).display(),
+        state.display(),
         layout.settings().display()
     );
     Ok(())
@@ -543,11 +526,12 @@ pub fn uninstall(
 }
 
 /// `update`: the new program (the latest release, checked against its
-/// `SHA256SUMS`, or a file the owner gives) replaces the installed one, and
-/// the service restarts. The state folder and the settings are not
-/// touched. A program that does not run here, or is older than the
-/// installed one, is refused; one that does not start is replaced by the
-/// old one again.
+/// `SHA256SUMS`, or a file the owner gives) replaces the installed one, its
+/// unit is written as the new program has it, and the service restarts
+/// ([`nerve_service::update`], the node's too). The state folder and the
+/// settings are not touched. A program that does not run here, or is older
+/// than the installed one, is refused; one that does not start is replaced
+/// by the old one again, its unit too. The steps go to the center's log.
 pub async fn update(
     layout: &Layout,
     sys: &dyn System,
@@ -561,88 +545,65 @@ pub async fn update(
                 .into(),
         );
     }
-    let account = sys
-        .account(USER)?
-        .filter(|a| a.comment == USER_MARK)
-        .ok_or_else(|| {
-            format!("the user {USER} is missing; `sudo nerve-center install` makes it again")
-        })?;
-    let new = match from {
-        Some(f) => {
-            let b = std::fs::read(f).map_err(|e| format!("{}: {e}", f.display()))?;
-            did(out, format!("read the new program from {}", f.display()));
-            b
-        }
-        None => {
-            let asset = asset_name()?;
-            let b = nerve_node::service::fetch_release(&layout.release, &asset).await?;
-            did(
-                out,
-                format!(
-                    "downloaded {asset} from {} and checked it against its SHA256SUMS",
-                    layout.release
-                ),
-            );
-            b
-        }
+    let p = nerve_service::Program {
+        name: "nerve-center",
+        bin: &layout.bin,
+        release: &layout.release,
+        asset: asset_name(),
+        user: USER,
+        mark: USER_MARK,
+        unit: UNIT_NAME,
+        install: "sudo nerve-center install",
+        files_args: Vec::new(),
+        places: vec![nerve_service::Place {
+            role: "unit",
+            path: layout.unit.clone(),
+            mode: 0o644,
+        }],
     };
-    let old = std::fs::read(&layout.bin).map_err(|e| format!("{}: {e}", layout.bin.display()))?;
-    if new == old {
-        did(
+    let mut steps = Steps::new(out);
+    let started = || sys.wait_running(&layout.state);
+    let r = nerve_service::update(&p, sys, from, &started, &mut steps).await;
+    log_update(layout, &steps.done, &r, steps.out);
+    if r? {
+        // A center installed before the owner token got one at this start,
+        // and its web UI no longer takes the harness token.
+        let _ = writeln!(
             out,
-            "the installed program is that one already; nothing to update",
+            "The web UI logs in with the owner token kept in {} (`sudo cat` it).",
+            crate::owner::path(&layout.state).display()
         );
-        return Ok(());
     }
-    // Staged beside the program, so the rename that puts it in place does
-    // not cross file systems.
-    let staged = layout.bin.with_file_name(".nerve-center.new");
-    write_file(&staged, &new, 0o755)?;
-    let checked = (|| {
-        let said = sys.version_of(&staged, &account)?;
-        let new_v = Version::parse_of("nerve-center", &said)
-            .ok_or_else(|| format!("the new program is not nerve-center: it says {said:?}"))?;
-        let old_v = sys
-            .version_of(&layout.bin, &account)
-            .ok()
-            .and_then(|s| Version::parse_of("nerve-center", &s));
-        if let Some(o) = old_v
-            && new_v < o
-        {
-            return Err(format!(
-                "the new program is nerve-center {new_v}, older than the installed {o}; nothing changed"
-            ));
-        }
-        Ok((old_v, new_v))
-    })();
-    let (old_v, new_v) = match checked {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = std::fs::remove_file(&staged);
-            return Err(e);
-        }
-    };
-    std::fs::rename(&staged, &layout.bin).map_err(|e| format!("{}: {e}", layout.bin.display()))?;
-    let old_v = old_v.map_or_else(|| "?".to_string(), |v| v.to_string());
-    did(out, format!("replaced nerve-center {old_v} with {new_v}"));
-    let started = sys
-        .systemctl(&["restart", UNIT_NAME])
-        .and_then(|()| sys.wait_running(&layout.state));
-    if let Err(e) = started {
-        write_file(&layout.bin, &old, 0o755)?;
-        let back = sys
-            .systemctl(&["restart", UNIT_NAME])
-            .and_then(|()| sys.wait_running(&layout.state));
-        did(out, format!("put nerve-center {old_v} back"));
-        return Err(match back {
-            Ok(()) => format!("the new program did not start ({e}); the old one runs again"),
-            Err(e2) => format!(
-                "the new program did not start ({e}), and the old one does not either ({e2})"
-            ),
-        });
-    }
-    did(out, format!("restarted the service {UNIT_NAME}"));
     Ok(())
+}
+
+/// Writes what `update` did to the center's log, as the state folder's
+/// owner ([`as_owner_of`]): root does not write through a link the center's
+/// user put there.
+fn log_update(layout: &Layout, steps: &[String], r: &Result<bool, String>, out: &mut dyn Write) {
+    if !layout.state.is_dir() {
+        return;
+    }
+    let (level, what) = match r {
+        Ok(_) => (Level::Info, format!("update: {}", steps.join("; "))),
+        Err(e) => (
+            Level::Warn,
+            format!("update failed ({e}): {}", steps.join("; ")),
+        ),
+    };
+    // One line appended, nothing read: the log file is the center's
+    // account's, and root must not load or wait on what it put there.
+    let written = as_owner_of(&layout.state).and_then(|_owner| {
+        nerve_transport::log::Log::append_entry(
+            &nerve_transport::log::file_in(&layout.state),
+            level,
+            &what,
+        )
+        .map_err(|e| e.to_string())
+    });
+    if let Err(e) = written {
+        let _ = writeln!(out, "the center's log cannot be written: {e}");
+    }
 }
 
 /// The release file of this machine's program.
@@ -660,109 +621,75 @@ fn asset_name() -> Result<String, String> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use std::cell::{Cell, RefCell};
 
-    /// A machine in a temporary folder: the user is the test's own, and
-    /// systemctl and the center's start are recorded.
-    struct Fake {
-        user: RefCell<Option<Account>>,
-        calls: RefCell<Vec<String>>,
-        /// The folders given to another user, and to whom.
-        given: RefCell<Vec<(PathBuf, u32)>>,
-        /// Whether a center started by the service answers.
-        starts: Cell<bool>,
-        /// Whether the next start answers, before `starts` holds again:
-        /// the old program that goes back starts where the new one did not.
-        next_start: Cell<Option<bool>>,
+    /// The machine of the node's service tests too
+    /// ([`nerve_service::fake::Fake`]), with the center's user.
+    struct Fake(nerve_service::fake::Fake);
+
+    impl std::ops::Deref for Fake {
+        type Target = nerve_service::fake::Fake;
+        fn deref(&self) -> &nerve_service::fake::Fake {
+            &self.0
+        }
     }
 
     impl Fake {
         fn new() -> Fake {
-            Fake {
-                user: RefCell::new(None),
-                calls: RefCell::new(Vec::new()),
-                given: RefCell::new(Vec::new()),
-                starts: Cell::new(true),
-                next_start: Cell::new(None),
-            }
-        }
-
-        fn calls(&self) -> Vec<String> {
-            self.calls.borrow().clone()
+            Fake(nerve_service::fake::Fake::new(
+                USER,
+                USER_MARK,
+                "/var/lib/nerve-center",
+            ))
         }
     }
 
     fn me() -> Account {
-        // SAFETY: plain getters.
-        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
-        Account {
-            name: USER.into(),
-            uid,
-            gid,
-            comment: USER_MARK.into(),
-            home: "/var/lib/nerve-center".into(),
-            groups: vec![gid],
+        Fake::new().me()
+    }
+
+    impl nerve_service::System for Fake {
+        fn is_root(&self) -> bool {
+            self.0.is_root()
+        }
+        fn has_systemd(&self) -> bool {
+            self.0.has_systemd()
+        }
+        fn account(&self, name: &str) -> Result<Option<Account>, String> {
+            assert_eq!(name, USER);
+            self.0.account(name)
+        }
+        fn add_account(&self, name: &str, home: &Path, mark: &str) -> Result<(), String> {
+            self.0.add_account(name, home, mark)
+        }
+        fn remove_account(&self, name: &str) -> Result<(), String> {
+            self.0.remove_account(name)
+        }
+        fn systemctl(&self, args: &[&str]) -> Result<(), String> {
+            self.0.systemctl(args)
+        }
+        fn give(&self, path: &Path, uid: u32, gid: u32) -> Result<(), String> {
+            self.0.give(path, uid, gid)
+        }
+        fn output_of(
+            &self,
+            program: &Path,
+            account: Option<&Account>,
+            args: &[&str],
+        ) -> Result<String, String> {
+            self.0.output_of(program, account, args)
         }
     }
 
     impl System for Fake {
-        fn is_root(&self) -> bool {
-            true
-        }
-        fn has_systemd(&self) -> bool {
-            true
-        }
-        fn account(&self, name: &str) -> Result<Option<Account>, String> {
-            assert_eq!(name, USER);
-            Ok(self.user.borrow().clone())
-        }
-        fn add_account(&self, name: &str, home: &Path) -> Result<(), String> {
-            self.calls
-                .borrow_mut()
-                .push(format!("useradd {name} {}", home.display()));
-            *self.user.borrow_mut() = Some(me());
-            Ok(())
-        }
-        fn remove_account(&self, name: &str) -> Result<(), String> {
-            self.calls.borrow_mut().push(format!("userdel {name}"));
-            *self.user.borrow_mut() = None;
-            Ok(())
-        }
-        fn systemctl(&self, args: &[&str]) -> Result<(), String> {
-            self.calls
-                .borrow_mut()
-                .push(format!("systemctl {}", args.join(" ")));
-            Ok(())
-        }
-        /// The test may give files to itself only; giving them to anyone
-        /// else is recorded.
-        fn give(&self, path: &Path, uid: u32, gid: u32) -> Result<(), String> {
-            if uid == me().uid {
-                node::System::give(&node::Host, path, uid, gid)
-            } else {
-                self.given.borrow_mut().push((path.to_path_buf(), uid));
-                Ok(())
-            }
-        }
         fn wait_running(&self, _state: &Path) -> Result<(), String> {
-            let starts = self.next_start.take().unwrap_or(self.starts.get());
-            if starts {
-                Ok(())
-            } else {
-                Err("the center does not answer".into())
-            }
-        }
-        /// A program here is a text file whose first line is what it says.
-        fn version_of(&self, program: &Path, account: &Account) -> Result<String, String> {
-            assert_eq!(account.comment, USER_MARK);
-            let text = std::fs::read_to_string(program).map_err(|e| e.to_string())?;
-            Ok(text.lines().next().unwrap_or_default().to_string())
+            self.started()
+                .map_err(|_| "the center does not answer".to_string())
         }
     }
 
     /// A machine where the caller is not root.
     struct NotRoot;
-    impl System for NotRoot {
+    impl nerve_service::System for NotRoot {
         fn is_root(&self) -> bool {
             false
         }
@@ -772,7 +699,7 @@ mod tests {
         fn account(&self, _: &str) -> Result<Option<Account>, String> {
             unreachable!()
         }
-        fn add_account(&self, _: &str, _: &Path) -> Result<(), String> {
+        fn add_account(&self, _: &str, _: &Path, _: &str) -> Result<(), String> {
             unreachable!()
         }
         fn remove_account(&self, _: &str) -> Result<(), String> {
@@ -784,10 +711,12 @@ mod tests {
         fn give(&self, _: &Path, _: u32, _: u32) -> Result<(), String> {
             unreachable!()
         }
-        fn wait_running(&self, _: &Path) -> Result<(), String> {
+        fn output_of(&self, _: &Path, _: Option<&Account>, _: &[&str]) -> Result<String, String> {
             unreachable!()
         }
-        fn version_of(&self, _: &Path, _: &Account) -> Result<String, String> {
+    }
+    impl System for NotRoot {
+        fn wait_running(&self, _: &Path) -> Result<(), String> {
             unreachable!()
         }
     }
@@ -841,6 +770,17 @@ mod tests {
         assert!(out.contains("made the user nerve-center"), "{out}");
         assert!(out.contains("with a new harness token"), "{out}");
         assert!(out.contains("sudo grep NERVE_HARNESS_TOKEN"), "{out}");
+        // The owner token is made before the service starts, kept private in
+        // the state folder, and said with where it is.
+        let owner = crate::owner::read(&l.state)
+            .unwrap()
+            .expect("an owner token");
+        assert!(owner.starts_with(crate::owner::PREFIX), "{owner}");
+        let owner_file = crate::owner::path(&l.state);
+        assert_eq!(mode(&owner_file), 0o600);
+        assert!(out.contains(&format!("\n    {owner}\n")), "{out}");
+        assert!(out.contains(&owner_file.display().to_string()), "{out}");
+        assert!(out.contains("owner-token --new"), "{out}");
         // The user, made once with the state folder as its home.
         assert_eq!(
             sys.calls(),
@@ -881,7 +821,11 @@ mod tests {
             &format!("ReadWritePaths={}", l.state.display()),
             "InaccessiblePaths=-/dev/shm",
             "RestrictNamespaces=yes",
-            "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+            // Netlink is how the kernel names the account of a loopback
+            // peer; without it every connection reads the TCP tables.
+            "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+            // A harness's waiting requests each hold a file.
+            "LimitNOFILE=65536",
             "SystemCallFilter=@system-service",
             "MemoryDenyWriteExecute=yes",
         ] {
@@ -905,12 +849,14 @@ mod tests {
         install(&l, &sys, &exe, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(
-            out.contains("the user nerve-center is there already"),
+            out.contains("the user nerve-center, is there already"),
             "{out}"
         );
         assert!(out.contains("kept the settings"), "{out}");
         assert_eq!(std::fs::read(&l.bin).unwrap(), b"nerve-center 1.0.1\n");
         assert_eq!(token(&l), first);
+        assert_eq!(crate::owner::read(&l.state).unwrap(), Some(owner.clone()));
+        assert!(out.contains(&owner), "{out}");
         assert_eq!(
             sys.calls()
                 .iter()
@@ -925,7 +871,7 @@ mod tests {
     }
 
     /// The settings file the unit reads gives the center a harness token
-    /// that its flags take, so the web UI asks for it from the start.
+    /// that its flags take, for the HTTP MCP endpoint.
     #[test]
     fn the_settings_hold_a_token_the_center_takes() {
         use clap::Parser;
@@ -987,14 +933,26 @@ mod tests {
         }
     }
 
+    /// The socket the center asks whether a node's command runs it is the
+    /// socket the installed node listens on: if the node's state folder or
+    /// socket moved and this did not, the question would go to nobody and
+    /// every command would pass.
+    #[test]
+    fn the_node_s_socket_is_where_the_node_listens() {
+        assert_eq!(
+            PathBuf::from(nerve_service::NODE_CTL_SOCKET),
+            nerve_node::service::Layout::system().paths.ctl_socket()
+        );
+    }
+
     /// A caller without root is told so first, also where an installed
     /// node's control socket, which it may not open, is there to ask.
     #[tokio::test]
     async fn without_root_the_commands_say_so_before_they_ask_the_node() {
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
-        let node = nerve_node::NodePaths::new(d.path().join("etc/nerve"), d.path().join("state"));
-        let run = node.ctl_socket().parent().unwrap().to_path_buf();
+        let node = d.path().join("state/run/ctl.sock");
+        let run = node.parent().unwrap().to_path_buf();
         std::fs::create_dir_all(&run).unwrap();
         std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o000)).unwrap();
         let l = layout(d.path());
@@ -1024,7 +982,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let sys = Fake::new();
         let l = layout(d.path());
-        let node = nerve_node::NodePaths::new(d.path().join("etc/nerve"), d.path().join("node"));
+        let node = d.path().join("node/run/ctl.sock");
         let given = ["--public-url".to_string(), "--state-dir".to_string()];
         let e = execute_on(Cmd::Install, &given, &l, &sys, &node, &mut Vec::new())
             .await
@@ -1169,6 +1127,11 @@ mod tests {
             out.contains("replaced nerve-center 1.0.0 with 1.2.0"),
             "{out}"
         );
+        let token = crate::owner::path(&l.state).display().to_string();
+        assert!(
+            out.contains(&format!("owner token kept in {token}")),
+            "{out}"
+        );
         assert_eq!(std::fs::read(&l.bin).unwrap(), b"nerve-center 1.2.0\n");
         assert_eq!(mode(&l.bin), 0o755);
         assert_eq!(
@@ -1239,6 +1202,98 @@ mod tests {
             .unwrap_err();
         assert!(e.contains("the old one does not either"), "{e}");
         assert_eq!(std::fs::read(&l.bin).unwrap(), b"nerve-center 1.2.0\n");
+    }
+
+    /// `update` writes the unit as the new program has it, and the old one
+    /// back with the old program when the new one does not start; the
+    /// steps go to the center's log.
+    #[tokio::test]
+    async fn update_brings_the_unit_up_to_date() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let unit = std::fs::read_to_string(&l.unit).unwrap();
+        let new_unit = unit.replace("[Service]\n", "[Service]\nNice=5\n");
+        assert_ne!(new_unit, unit);
+        let new = d.path().join("new");
+        let files = nerve_service::files_text(&[("unit", Some(new_unit.clone()))]);
+        std::fs::write(&new, format!("nerve-center 1.1.0\n{files}\n")).unwrap();
+        sys.next_start.set(Some(false));
+        let e = update(&l, &sys, Some(&new), &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(e.contains("the old one runs again"), "{e}");
+        assert_eq!(std::fs::read_to_string(&l.unit).unwrap(), unit);
+        update(&l, &sys, Some(&new), &mut Vec::new()).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&l.unit).unwrap(), new_unit);
+        assert!(sys.runs.borrow().iter().any(|r| r == "service-files"));
+        let log = std::fs::read_to_string(nerve_transport::log::file_in(&l.state)).unwrap();
+        assert!(
+            log.contains("update failed (the new program did not start"),
+            "{log}"
+        );
+        assert!(
+            log.contains("replaced nerve-center 1.0.0 with 1.1.0"),
+            "{log}"
+        );
+        // What the program itself says is the unit `install` writes.
+        let said: serde_json::Value = serde_json::from_str(&service_files_text(&l)).unwrap();
+        assert_eq!(said, serde_json::json!({"unit": l.unit_text()}));
+    }
+
+    /// The entry of `update` is written after the restart, when the running
+    /// center has the file open: the second writer must not move a nearly
+    /// full file aside under it.
+    #[test]
+    fn the_update_entry_does_not_move_the_log_under_the_running_center() {
+        let d = tempfile::tempdir().unwrap();
+        let l = layout(d.path());
+        std::fs::create_dir_all(&l.state).unwrap();
+        let path = nerve_transport::log::file_in(&l.state);
+        let log = nerve_transport::log::Log::new(Level::Info);
+        log.attach_file(&path).unwrap();
+        let line = "x".repeat(900);
+        while std::fs::metadata(&path).unwrap().len() + 1200 < nerve_transport::log::MAX_BYTES {
+            log.record(Level::Info, None, &line);
+        }
+        // Then in small steps, until the update's line no longer fits.
+        while std::fs::metadata(&path).unwrap().len() + 300 < nerve_transport::log::MAX_BYTES {
+            log.record(Level::Info, None, "y");
+        }
+        drop(log);
+        let mut out = Vec::new();
+        log_update(&l, &["a step".repeat(100)], &Ok(true), &mut out);
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+        let mut old = path.clone().into_os_string();
+        old.push(".1");
+        assert!(!Path::new(&old).exists(), "the log was moved aside");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("update: a stepa step"));
+    }
+
+    #[test]
+    fn the_update_entry_does_not_wait_on_a_pipe_in_place_of_the_log() {
+        use std::os::unix::ffi::OsStrExt;
+        let d = tempfile::tempdir().unwrap();
+        let l = layout(d.path());
+        std::fs::create_dir_all(&l.state).unwrap();
+        let path = nerve_transport::log::file_in(&l.state);
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            log_update(&l, &["a step".into()], &Ok(true), &mut out);
+            let _ = tx.send(out);
+        });
+        let out = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the update waited on the pipe");
+        assert!(
+            String::from_utf8_lossy(&out).contains("cannot be written"),
+            "{}",
+            String::from_utf8_lossy(&out)
+        );
     }
 
     #[tokio::test]

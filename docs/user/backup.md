@@ -141,6 +141,10 @@ hashes of the harness tokens, the statistics, the settings of the
 [key rotation](center.md#rotate-the-key) it also holds the new key,
 `tls.next.pem`, which the machines already trust. Not the [log](logs.md).
 
+Not the [owner token](web-ui.md#log-in) (`owner-token`): a restored center
+makes a new one at its next start, so after a restore on another machine
+log in to the web UI with that one (`nerve-center owner-token` says it).
+
 Not the action checker's endpoint token (`checker-model.token`), which is a
 secret, and not its local model (the `checker/` folder), which is downloaded
 again. After a restore on another machine, enter the token again, or install

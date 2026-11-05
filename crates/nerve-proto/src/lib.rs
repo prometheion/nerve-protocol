@@ -50,11 +50,10 @@ pub fn connect_message(center_id: &str, nonce: &[u8]) -> Vec<u8> {
     m
 }
 
-/// The feature of key rotation (docs/dev/spec/protocol.md §1.1, §4.10), named
-/// in `hello.features` and `welcome.features`.
-pub const FEATURE_ROTATE: &str = "rotate";
-/// The features this implementation speaks.
-pub const FEATURES: &[&str] = &[FEATURE_ROTATE];
+/// The features this implementation speaks (docs/dev/spec/protocol.md
+/// §1.1), named in `hello.features` and `welcome.features`: none beyond the
+/// baseline yet. Key rotation and resume are part of the baseline.
+pub const FEATURES: &[&str] = &[];
 
 /// How long a replaced key stays valid after a rotation (§4.10): seven days.
 pub const ROTATE_GRACE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
@@ -97,7 +96,6 @@ pub fn rotate_center_message(center_id: &str, new_pin: &[u8]) -> Vec<u8> {
 /// announces otherwise.
 pub mod limits {
     pub const MESSAGE_BYTES: u64 = 4 * 1024 * 1024;
-    pub const BLOB_BYTES: u64 = 64 * 1024 * 1024;
     pub const CALLS: u32 = 64;
     pub const STREAMS: u32 = 16;
     /// Frames each side queues before a reliable stream waits.

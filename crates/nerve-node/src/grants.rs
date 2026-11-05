@@ -49,6 +49,7 @@ pub use nerve_sandbox::acl::Found;
 use nerve_sandbox::acl::{Untouched, untouched_by};
 #[cfg(any(windows, test))]
 use nerve_sandbox::inherit::Walked;
+use nerve_transport::files::Format;
 use serde::{Deserialize, Serialize};
 
 use crate::paths::NodePaths;
@@ -311,16 +312,36 @@ pub struct Look {
     pub granted: bool,
 }
 
+/// The record's file: its format and the grants.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordFile<G> {
+    #[serde(default)]
+    format: Format,
+    #[serde(default)]
+    grants: G,
+}
+
 fn read_record(file: &Path) -> Result<Vec<Grant>, String> {
     match std::fs::read(file) {
-        Ok(b) => serde_json::from_slice(&b).map_err(|e| format!("{}: {e}", file.display())),
+        Ok(b) => Format::of_json(&b)
+            .check()
+            .and_then(|()| {
+                serde_json::from_slice::<RecordFile<Vec<Grant>>>(&b).map_err(|e| e.to_string())
+            })
+            .map(|r| r.grants)
+            .map_err(|e| format!("{}: {e}", file.display())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(format!("{}: {e}", file.display())),
     }
 }
 
 fn write_record(file: &Path, grants: &[Grant]) -> Result<(), String> {
-    let json = serde_json::to_vec_pretty(grants).expect("grants serialise");
+    let record = RecordFile {
+        format: Format::CURRENT,
+        grants,
+    };
+    let json = serde_json::to_vec_pretty(&record).expect("grants serialise");
     nerve_transport::files::write_private(file, &json).map_err(|e| {
         format!(
             "cannot write the record of the folder grants {}: {e}",
@@ -1607,6 +1628,34 @@ mod tests {
             id: None,
             unfinished: false,
             toward: Vec::new(),
+        }
+    }
+
+    /// `grants.json` is written as an object with `format: 1` and the
+    /// grants; a file without the format is at format 1; one of a newer
+    /// version is refused for its format, also when it has fields this
+    /// version does not know.
+    #[test]
+    fn the_record_has_a_format_and_a_newer_one_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("grants.json");
+        let g = grant("c1", "/w/a", "rw");
+        write_record(&file, std::slice::from_ref(&g)).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            text.starts_with("{\n  \"format\": 1,\n  \"grants\": ["),
+            "{text}"
+        );
+        assert_eq!(read_record(&file).unwrap(), [g]);
+        std::fs::write(&file, r#"{"grants": []}"#).unwrap();
+        assert!(read_record(&file).unwrap().is_empty());
+        for newer in [
+            r#"{"format": 2}"#,
+            r#"{"format": 2, "grants": [], "later": 1}"#,
+        ] {
+            std::fs::write(&file, newer).unwrap();
+            let e = read_record(&file).unwrap_err();
+            assert!(e.contains("format 2") && e.contains("newer version"), "{e}");
         }
     }
 

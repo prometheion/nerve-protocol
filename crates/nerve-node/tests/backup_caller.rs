@@ -12,6 +12,9 @@
 
 #![cfg(target_os = "linux")]
 
+#[path = "common/ns.rs"]
+mod ns;
+
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::Command;
@@ -123,14 +126,13 @@ fn the_backup_file_is_opened_as_the_user_who_asked() {
             );
             return;
         }
-        let status = Command::new("unshare")
-            .args(unshare)
-            .arg(std::env::current_exe().unwrap())
-            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
-            .env("NERVE_TEST_IN_USERNS", "1")
-            .status()
-            .unwrap();
-        assert!(status.success(), "in the namespace: {status}");
+        ns::run_saying_skips(
+            Command::new("unshare")
+                .args(unshare)
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+                .env("NERVE_TEST_IN_USERNS", "1"),
+        );
         return;
     }
     let asker = asker();

@@ -155,7 +155,7 @@ async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
 #[ignore = "installs the node on this machine as root; NERVE_NODE_REAL names it"]
 async fn root_is_the_owner_only_when_it_says_so() {
     let Some(exe) = std::env::var_os("NERVE_NODE_REAL").map(PathBuf::from) else {
-        eprintln!("NERVE_NODE_REAL is not set");
+        eprintln!("skipped: NERVE_NODE_REAL is not set");
         return;
     };
     assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
@@ -530,7 +530,7 @@ fn started(user: Option<&str>, args: &[&str]) -> (Started, String) {
 #[ignore = "installs the node on this machine as root; NERVE_NODE_REAL names it"]
 async fn a_program_of_root_attaches_as_a_provider() {
     let Some(exe) = std::env::var_os("NERVE_NODE_REAL").map(PathBuf::from) else {
-        eprintln!("NERVE_NODE_REAL is not set");
+        eprintln!("skipped: NERVE_NODE_REAL is not set");
         return;
     };
     assert_eq!(nerve_transport::net::euid(), 0, "run it as root");

@@ -300,10 +300,28 @@ GitHub (`nerve-node-x86_64-linux` or `nerve-node-aarch64-linux`, the names
 in place as `/usr/local/bin/nerve-node` and restarts the service. `HTTPS_PROXY` is used when it is set.
 `--from <file>` takes a program you downloaded and checked yourself.
 
+`update` also writes the service unit, the polkit files and the helper that
+starts and stops the service as the new program has them, for the owner the
+unit names: a release that changes them needs no `install` again. It asks the
+new program for them, run as root with an empty environment, before it takes
+the old one's place. The same program again still brings the files it has,
+so a second `update` repairs a unit that is behind.
+
+The unit is written as a whole, so a line of your own in it is replaced.
+Local changes, an `Environment=` line for a proxy for one, belong in a
+drop-in, `sudo systemctl edit nerve-node`, which `update` and `install`
+leave alone.
+
+This holds for an update done by a release that has it. The update that
+brings a release is done by the program already installed, which replaces
+only the program; the first time after such a release (the notes say when)
+run `sudo nerve-node install` once, or `update` again, for the new unit and
+polkit files.
+
 The config, the keys, the accounts and the audit log are not touched.
 `update` refuses a file that is not `nerve-node` and a program older than the
-installed one. If the new program does not start, the old one is put back and
-started again.
+installed one. If the new program does not start, the old one is put back
+with the old unit and polkit files, and started again.
 
 ## Uninstall
 

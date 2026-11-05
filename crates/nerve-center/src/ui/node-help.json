@@ -1,0 +1,1171 @@
+{
+  "about": "Links this machine to its Nerve centers.",
+  "common": [
+    {
+      "about": "Which center, when more than one is paired",
+      "name": "--center <CENTER>",
+      "optional": true
+    }
+  ],
+  "global": [
+    {
+      "about": "Where node.toml and the keys live [env: NERVE_CONFIG_DIR] [default: ~/.config/nerve, or /etc/nerve when installed as a service]",
+      "name": "--config-dir <CONFIG_DIR>",
+      "optional": true
+    },
+    {
+      "about": "Where the control socket and the audit log live [env: NERVE_STATE_DIR] [default: ~/.local/state/nerve, or /var/lib/nerve/state when installed as a service]",
+      "name": "--state-dir <STATE_DIR>",
+      "optional": true
+    },
+    {
+      "about": "Print JSON for programs instead of text: the read commands their data, the others the lines they print, an error {\"error\": ...}",
+      "name": "--json",
+      "optional": true
+    }
+  ],
+  "sections": [
+    {
+      "about": "Run the node as a service under a user of its own (Linux with sudo, Windows as administrator), set it up, keep it current, and back it up or move it.",
+      "cards": [
+        {
+          "about": "",
+          "holds": [],
+          "name": "install / uninstall",
+          "shared_args": [],
+          "verbs": [
+            {
+              "about": "Install the node as a service that starts with the machine and runs under a user of its own, make the account nerve-run for its commands and take you as the owner (Linux with sudo from your own account, Windows as administrator)",
+              "args": [
+                {
+                  "about": "Run by root itself (Linux): `root` makes root the owner, so that user mode, and allowlist mode as the owner, run commands as root, with every right on the machine and over Nerve; needs --accept-root-owner. At a terminal install asks instead, and an owner root confirmed before stays. `none` leaves the node without an owner, root or another",
+                  "name": "--owner <ACCOUNT>",
+                  "optional": true
+                },
+                {
+                  "about": "Confirms --owner=root: you accept that nothing in Nerve holds those commands back",
+                  "name": "--accept-root-owner",
+                  "optional": true
+                }
+              ],
+              "name": "install",
+              "usage": "nerve-node install [OPTIONS]"
+            },
+            {
+              "about": "Stop and remove the service, nerve-run and its entries on your folders, the node's user and the program; the config and state folders stay",
+              "args": [
+                {
+                  "about": "Delete the config and state folders too: the keys, the pairings and the audit log",
+                  "name": "--purge",
+                  "optional": true
+                }
+              ],
+              "name": "uninstall",
+              "usage": "nerve-node uninstall [OPTIONS]"
+            }
+          ]
+        },
+        {
+          "about": "Start, stop or restart the installed service, or show its state",
+          "holds": [
+            "service"
+          ],
+          "name": "service",
+          "shared_args": [],
+          "verbs": [
+            {
+              "about": "Start the installed service; the owner needs no root or administrator for it",
+              "args": [],
+              "name": "service start",
+              "usage": "nerve-node service start [OPTIONS]"
+            },
+            {
+              "about": "Stop it: the node ends its links and runs nothing until it starts again, at the latest with the machine",
+              "args": [],
+              "name": "service stop",
+              "usage": "nerve-node service stop [OPTIONS]"
+            },
+            {
+              "about": "Stop it and start it again, so the node takes every change in node.toml",
+              "args": [],
+              "name": "service restart",
+              "usage": "nerve-node service restart [OPTIONS]"
+            },
+            {
+              "about": "Show whether the node is installed as a service, whether it runs, and the program it runs with its version",
+              "args": [],
+              "name": "service status",
+              "usage": "nerve-node service status [OPTIONS]"
+            }
+          ]
+        },
+        {
+          "about": "",
+          "holds": [],
+          "name": "setup",
+          "shared_args": [],
+          "verbs": [
+            {
+              "about": "Name the node, choose where it keeps its keys, pair the first center and choose its mode and folder, one question at a time",
+              "args": [],
+              "name": "setup",
+              "usage": "nerve-node setup [OPTIONS]"
+            }
+          ]
+        },
+        {
+          "about": "",
+          "holds": [],
+          "name": "update",
+          "shared_args": [],
+          "verbs": [
+            {
+              "about": "Replace the installed program with the latest release and restart the service; config, keys and audit log stay",
+              "args": [
+                {
+                  "about": "Take the new program from this file instead of downloading the latest release",
+                  "name": "--from <FILE>",
+                  "optional": true
+                }
+              ],
+              "name": "update",
+              "usage": "nerve-node update [OPTIONS]"
+            }
+          ]
+        },
+        {
+          "about": "",
+          "holds": [],
+          "name": "backup / restore",
+          "shared_args": [
+            {
+              "about": "Read the passphrase from the first line of this file instead of asking",
+              "name": "--passphrase-file <FILE>",
+              "optional": true
+            }
+          ],
+          "verbs": [
+            {
+              "about": "Write the config and the keys to a file that a passphrase protects, to keep or to move the node to another machine",
+              "args": [
+                {
+                  "about": "The file to write. It is private to you (mode 0600)",
+                  "name": "<FILE>",
+                  "optional": false
+                },
+                {
+                  "about": "Also take the keys that are in the system keyring into the file; without it they stay there and are left out",
+                  "name": "--include-keyring",
+                  "optional": true
+                },
+                {
+                  "about": "Replace the file when it exists",
+                  "name": "--overwrite",
+                  "optional": true
+                }
+              ],
+              "name": "backup",
+              "usage": "nerve-node backup [OPTIONS] <FILE>"
+            },
+            {
+              "about": "Put the config and keys of a backup in place of this node's. The node must not run",
+              "args": [
+                {
+                  "about": "The backup file",
+                  "name": "<FILE>",
+                  "optional": false
+                },
+                {
+                  "about": "Replace a node here that is not the one the backup is of",
+                  "name": "--replace",
+                  "optional": true
+                },
+                {
+                  "about": "Keep the keys in `file` or in the system `keyring` here, whatever the backup's config says",
+                  "name": "--secret-storage <file|keyring>",
+                  "optional": true
+                },
+                {
+                  "about": "Leave the proxy out of the restored config, with its password and header values; set it again on this machine",
+                  "name": "--without-proxy",
+                  "optional": true
+                }
+              ],
+              "name": "restore",
+              "usage": "nerve-node restore [OPTIONS] <FILE>"
+            }
+          ]
+        }
+      ],
+      "name": "Install and set up"
+    },
+    {
+      "about": "Link this machine to centers and choose how it reaches them.",
+      "cards": [
+        {
+          "about": "Pair this machine with centers and decide what each one may change",
+          "holds": [
+            "center"
+          ],
+          "name": "center",
+          "shared_args": [],
+          "verbs": [
+            {
+              "about": "Pair this machine with a center, using the pairing link it showed",
+              "args": [
+                {
+                  "about": "The pairing link",
+                  "name": "<LINK>",
+                  "optional": true
+                },
+                {
+                  "about": "Read the pairing link from the first line of stdin: it holds the pairing code, and never shows in the process list",
+                  "name": "--link-stdin",
+                  "optional": true
+                },
+                {
+                  "about": "The name to use for the center here (the center's own name if left out)",
+                  "name": "--name <NAME>",
+                  "optional": true
+                },
+                {
+                  "about": "Do not ask before pairing",
+                  "name": "--yes",
+                  "optional": true
+                }
+              ],
+              "name": "center add",
+              "usage": "nerve-node center add [OPTIONS] [LINK]"
+            },
+            {
+              "about": "Forget a center and delete its key",
+              "args": [],
+              "name": "center rm",
+              "usage": "nerve-node center rm [OPTIONS]"
+            },
+            {
+              "about": "List the paired centers and how they are set",
+              "args": [],
+              "name": "center ls",
+              "usage": "nerve-node center ls [OPTIONS]"
+            },
+            {
+              "about": "Stop the link to a center until you resume it",
+              "args": [],
+              "name": "center pause",
+              "usage": "nerve-node center pause [OPTIONS]"
+            },
+            {
+              "about": "Link to a paused center again",
+              "args": [],
+              "name": "center resume",
+              "usage": "nerve-node center resume [OPTIONS]"
+            },
+            {
+              "about": "Give this machine a new key for a center; the center takes the old one for 7 more days. Needs the running node, linked to that center",
+              "args": [
+                {
+                  "about": "End the 7 days now: the center takes only the new key from then on",
+                  "name": "--end-grace",
+                  "optional": true
+                }
+              ],
+              "name": "center rotate-key",
+              "usage": "nerve-node center rotate-key [OPTIONS]"
+            },
+            {
+              "about": "Let a center change its own rights on this machine, up to user mode and sudo, or take that right away",
+              "args": [
+                {
+                  "about": "What to grant; only `settings` exists",
+                  "name": "<WHAT>",
+                  "optional": false
+                },
+                {
+                  "about": "`off`, or `write`: the center may then set everything this machine lets it do",
+                  "name": "<VALUE>",
+                  "optional": false
+                }
+              ],
+              "name": "center grant",
+              "usage": "nerve-node center grant [OPTIONS] <WHAT> <VALUE>"
+            }
+          ]
+        },
+        {
+          "about": "Choose the proxy the node uses to reach centers",
+          "holds": [
+            "proxy"
+          ],
+          "name": "proxy",
+          "shared_args": [],
+          "verbs": [
+            {
+              "about": "Reach centers through an HTTP proxy. Header values and a password are kept in the system keyring, never in node.toml; the installed node on Windows takes neither",
+              "args": [
+                {
+                  "about": "The proxy, http://host:port, or http://user:password@host:port when it wants a login; https://... for another proxy reached over TLS; or the nerve://relay link a relay showed, which holds its address, pin and this node's token",
+                  "name": "<URL>",
+                  "optional": false
+                },
+                {
+                  "about": "The pin of an https:// proxy's certificate (a relay's: `nerve-node relay ls` there shows it); without it the system's roots check it",
+                  "name": "--pin <PIN>",
+                  "optional": true
+                },
+                {
+                  "about": "A header for the proxy, `Name: value`; can be given more than once. The value goes into the system keyring",
+                  "name": "--header <NAME: VALUE>",
+                  "optional": true
+                },
+                {
+                  "about": "Read the proxy's password from the first line of stdin, for a URL with a user name and no password (http://user@host:port); it never shows in the process list",
+                  "name": "--password-stdin",
+                  "optional": true
+                },
+                {
+                  "about": "Read headers from stdin, one `Name: value` a line, after the password with --password-stdin",
+                  "name": "--headers-stdin",
+                  "optional": true
+                }
+              ],
+              "name": "proxy set",
+              "usage": "nerve-node proxy set [OPTIONS] <URL>"
+            },
+            {
+              "about": "Reach centers directly again, and delete the proxy's values from the system keyring",
+              "args": [],
+              "name": "proxy rm",
+              "usage": "nerve-node proxy rm [OPTIONS]"
+            },
+            {
+              "about": "Show the proxy that is set and the names of its headers, never their values",
+              "args": [],
+              "name": "proxy ls",
+              "usage": "nerve-node proxy ls [OPTIONS]"
+            }
+          ]
+        },
+        {
+          "about": "Let nodes that cannot reach a center themselves reach this node's centers through it",
+          "holds": [
+            "relay"
+          ],
+          "name": "relay",
+          "shared_args": [
+            {
+              "about": "The relayed node's name",
+              "name": "<NAME>",
+              "optional": false
+            }
+          ],
+          "verbs": [
+            {
+              "about": "Turn the relay on: listen for other nodes at ADDRESS, like 0.0.0.0:7490. A node reaches only this node's own https centers through it",
+              "args": [
+                {
+                  "about": "The address and port to listen on, like 0.0.0.0:7490 or [::]:7490",
+                  "name": "<ADDRESS>",
+                  "optional": false
+                },
+                {
+                  "about": "Tunnels at once, over every relayed node (16 unless set)",
+                  "name": "--max-links <N>",
+                  "optional": true
+                },
+                {
+                  "about": "Tunnels at once of one relayed node (4 unless set)",
+                  "name": "--max-links-per-node <N>",
+                  "optional": true
+                },
+                {
+                  "about": "Tunnels one relayed node may open a minute, every node alike (30 unless set; for a relay behind this one, use `relay set-limits <name>`)",
+                  "name": "--max-opens-per-minute <N>",
+                  "optional": true
+                }
+              ],
+              "name": "relay set",
+              "usage": "nerve-node relay set [OPTIONS] <ADDRESS>"
+            },
+            {
+              "about": "Turn the relay off: stop listening and end every tunnel. The nodes and their tokens stay",
+              "args": [],
+              "name": "relay off",
+              "usage": "nerve-node relay off [OPTIONS]"
+            },
+            {
+              "about": "Let a node use the relay: makes its token and shows it once, in a link the other node pastes. Without --center its tunnels may go to every https center of this node",
+              "args": [
+                {
+                  "about": "The relayed node's name here, 1 to 32 of a-z, 0-9 and -, starting and ending with a letter or digit",
+                  "name": "<NAME>",
+                  "optional": false
+                },
+                {
+                  "about": "A center of this node the relayed node may reach; can be given more than once. Without it, every one",
+                  "name": "--center <CENTER>",
+                  "optional": true
+                },
+                {
+                  "about": "Where the other node reaches this machine, HOST or HOST:PORT, for its link (without it: the address the relay listens on, else this machine's host name)",
+                  "name": "--address <HOST[:PORT]>",
+                  "optional": true
+                }
+              ],
+              "name": "relay add",
+              "usage": "nerve-node relay add [OPTIONS] <NAME>"
+            },
+            {
+              "about": "Change which centers of this node a relayed node may reach; without --center, every one. Its tunnels to others end",
+              "args": [
+                {
+                  "about": "A center of this node the relayed node may reach; can be given more than once",
+                  "name": "--center <CENTER>",
+                  "optional": true
+                }
+              ],
+              "name": "relay set-centers",
+              "usage": "nerve-node relay set-centers [OPTIONS] <NAME>"
+            },
+            {
+              "about": "Give a relayed node limits of its own, in place of the relay's --max-links-per-node and --max-opens-per-minute: for a relay behind this one, which carries many nodes. A flag not given keeps that limit; without either flag, the relay's limits again",
+              "args": [
+                {
+                  "about": "Its tunnels at once",
+                  "name": "--max-links <N>",
+                  "optional": true
+                },
+                {
+                  "about": "The tunnels it may open a minute",
+                  "name": "--max-opens-per-minute <N>",
+                  "optional": true
+                }
+              ],
+              "name": "relay set-limits",
+              "usage": "nerve-node relay set-limits [OPTIONS] <NAME>"
+            },
+            {
+              "about": "Give a relayed node a new token and end the tunnels of the old one; its centers and limits stay. Shows the token once, in a link the other node pastes",
+              "args": [
+                {
+                  "about": "Where the other node reaches this machine, HOST or HOST:PORT, for its link (as for `relay add`)",
+                  "name": "--address <HOST[:PORT]>",
+                  "optional": true
+                }
+              ],
+              "name": "relay token",
+              "usage": "nerve-node relay token [OPTIONS] <NAME>"
+            },
+            {
+              "about": "Take a node's token away and end its tunnels",
+              "args": [],
+              "name": "relay rm",
+              "usage": "nerve-node relay rm [OPTIONS] <NAME>"
+            },
+            {
+              "about": "Show the relay, the nodes that may use it and, on a running node, who is connected",
+              "args": [],
+              "name": "relay ls",
+              "usage": "nerve-node relay ls [OPTIONS]"
+            }
+          ]
+        },
+        {
+          "about": "Turn the node's web UI on or off, and make the tokens that log in to it (the installed node on Linux; off unless turned on)",
+          "holds": [],
+          "name": "ui",
+          "shared_args": [],
+          "verbs": [
+            {
+              "about": "Turn the node's web UI on or off, and make the tokens that log in to it (the installed node on Linux; off unless turned on)",
+              "args": [],
+              "name": "ui",
+              "usage": "nerve-node ui [OPTIONS]"
+            },
+            {
+              "about": "Show whether the web UI is on, where it listens, and the labels of its tokens",
+              "args": [],
+              "name": "ui status",
+              "usage": "nerve-node ui status [OPTIONS]"
+            },
+            {
+              "about": "Turn the web UI on. With no token yet, makes one named `first` and shows it once. Beyond loopback it is served over TLS with a certificate of its own, made the first time; compare its fingerprint with the one the browser shows",
+              "args": [
+                {
+                  "about": "The address and port to listen on (127.0.0.1:7470 unless set). Any address but loopback, like 0.0.0.0:7470, makes the UI reachable from the network",
+                  "name": "--listen <ADDRESS>",
+                  "optional": true
+                },
+                {
+                  "about": "A host name the certificate names besides this machine's own and the address; can be given more than once",
+                  "name": "--name <HOST>",
+                  "optional": true
+                },
+                {
+                  "about": "Make a new certificate: every session ends, and the browser asks about it again",
+                  "name": "--new-cert",
+                  "optional": true
+                }
+              ],
+              "name": "ui on",
+              "usage": "nerve-node ui on [OPTIONS]"
+            },
+            {
+              "about": "Turn the web UI off: it stops listening and every session ends. Its tokens stay",
+              "args": [],
+              "name": "ui off",
+              "usage": "nerve-node ui off [OPTIONS]"
+            }
+          ]
+        },
+        {
+          "about": "Make, list and revoke the tokens that log in to the web UI",
+          "holds": [
+            "ui token"
+          ],
+          "name": "ui token",
+          "shared_args": [],
+          "verbs": [
+            {
+              "about": "Make a token and show it once",
+              "args": [
+                {
+                  "about": "Its label, 1 to 32 of a-z, 0-9 and -",
+                  "name": "<LABEL>",
+                  "optional": false
+                }
+              ],
+              "name": "ui token add",
+              "usage": "nerve-node ui token add [OPTIONS] <LABEL>"
+            },
+            {
+              "about": "List the tokens by label, never the tokens",
+              "args": [],
+              "name": "ui token ls",
+              "usage": "nerve-node ui token ls [OPTIONS]"
+            },
+            {
+              "about": "Revoke a token; the sessions it opened end at once",
+              "args": [
+                {
+                  "about": "The token's label",
+                  "name": "<LABEL>",
+                  "optional": false
+                }
+              ],
+              "name": "ui token rm",
+              "usage": "nerve-node ui token rm [OPTIONS] <LABEL>"
+            }
+          ]
+        }
+      ],
+      "name": "Pair and connect"
+    },
+    {
+      "about": "Every center has its own rights on this machine. `config` reaches any setting by its name.",
+      "cards": [
+        {
+          "about": "Choose how much a center may do: only what allow rules name, what each folder allows (as nerve-run, an account of its own), or all you can do (as you)",
+          "holds": [
+            "mode"
+          ],
+          "name": "mode",
+          "shared_args": [],
+          "verbs": [
+            {
+              "about": "Pick allowlist, folder or user mode",
+              "args": [
+                {
+                  "about": "`allowlist` (only what an allow rule names, as nerve-run), `folder` (what each folder's rights allow, as nerve-run, the default; on the installed node a file call may also read what every account may read) or `user` (anything you could do yourself, as you, protected files aside)",
+                  "name": "<MODE>",
+                  "optional": false
+                },
+                {
+                  "about": "Go back to allowlist after this many hours (folder and user mode otherwise stay until you change them)",
+                  "name": "--for <HOURS>",
+                  "optional": true
+                },
+                {
+                  "about": "With allowlist: run the allowed commands as you instead of as nerve-run, outside the folders' sandbox (installed node, Linux)",
+                  "name": "--as-owner",
+                  "optional": true
+                }
+              ],
+              "name": "mode set",
+              "usage": "nerve-node mode set [OPTIONS] <MODE>"
+            }
+          ]
+        },
+        {
+          "about": "Choose the folders a center may use and what it may do in each",
+          "holds": [
+            "folder"
+          ],
+          "name": "folder",
+          "shared_args": [
+            {
+              "about": "The folder",
+              "name": "<PATH>",
+              "optional": false
+            }
+          ],
+          "verbs": [
+            {
+              "about": "Let a center use a folder; name at least one right: +r, +w or +x",
+              "args": [
+                {
+                  "about": "The rights: +r reads, +w writes, +x runs commands (`+r +x`, `+rw`)",
+                  "name": "<+r|+w|+x>",
+                  "optional": false
+                }
+              ],
+              "name": "folder add",
+              "usage": "nerve-node folder add [OPTIONS] <PATH> <+r|+w|+x>..."
+            },
+            {
+              "about": "Change what a center may do in a folder it already has",
+              "args": [
+                {
+                  "about": "The changes, applied left to right: `=rwx` sets exactly these rights, `+x` adds one, `-w` takes one away",
+                  "name": "<=rwx|+x|-w>",
+                  "optional": false
+                }
+              ],
+              "name": "folder set",
+              "usage": "nerve-node folder set [OPTIONS] <PATH> <=rwx|+x|-w>..."
+            },
+            {
+              "about": "Take a folder away from a center",
+              "args": [],
+              "name": "folder rm",
+              "usage": "nerve-node folder rm [OPTIONS] <PATH>"
+            },
+            {
+              "about": "Show a center's folders and their rights",
+              "args": [],
+              "name": "folder ls",
+              "usage": "nerve-node folder ls [OPTIONS]"
+            },
+            {
+              "about": "Give nerve-run its access to everything in the folders of every center again, also what was moved into them (the installed node on Linux): a pass over every granted folder",
+              "args": [],
+              "name": "folder sync",
+              "usage": "nerve-node folder sync [OPTIONS]"
+            }
+          ]
+        },
+        {
+          "about": "Keep the lists of commands that are allowed, forbidden or run with sudo",
+          "holds": [
+            "rule"
+          ],
+          "name": "rule",
+          "shared_args": [
+            {
+              "about": "The list: `allow`, `deny` or `sudo`",
+              "name": "<LIST>",
+              "optional": false
+            }
+          ],
+          "verbs": [
+            {
+              "about": "Put a command on a list",
+              "args": [
+                {
+                  "about": "The list: `allow` (may run in allowlist mode), `deny` (a command line that matches never runs, in any mode) or `sudo` (may run with sudo while sudo is on)",
+                  "name": "<LIST>",
+                  "optional": false
+                },
+                {
+                  "about": "The command line",
+                  "name": "<COMMAND>",
+                  "optional": false
+                },
+                {
+                  "about": "Cover every command that starts with the same program",
+                  "name": "--wildcard",
+                  "optional": true
+                },
+                {
+                  "about": "Make the rule of an audit entry of this action instead, as the audit buttons do: `fs.read` takes a path and covers its folder with --wildcard, an action without a target takes \"\" and covers its capability",
+                  "name": "--action <CAP.ACTION>",
+                  "optional": true
+                },
+                {
+                  "about": "With --action: hold the rule to one argument of the call, as the audit buttons do: `--pin room=office` makes `lamp.set:room=office`",
+                  "name": "--pin <FIELD=VALUE>",
+                  "optional": true
+                }
+              ],
+              "name": "rule add",
+              "usage": "nerve-node rule add [OPTIONS] <LIST> <COMMAND>"
+            },
+            {
+              "about": "Take a command off a list",
+              "args": [
+                {
+                  "about": "The command line, or an entry as `ls` shows it",
+                  "name": "<COMMAND>",
+                  "optional": false
+                },
+                {
+                  "about": "The entry was added with --wildcard",
+                  "name": "--wildcard",
+                  "optional": true
+                },
+                {
+                  "about": "The entry was added with this --action",
+                  "name": "--action <CAP.ACTION>",
+                  "optional": true
+                },
+                {
+                  "about": "The entry was added with this --pin",
+                  "name": "--pin <FIELD=VALUE>",
+                  "optional": true
+                }
+              ],
+              "name": "rule rm",
+              "usage": "nerve-node rule rm [OPTIONS] <LIST> <COMMAND>"
+            },
+            {
+              "about": "Show one list, or all three",
+              "args": [
+                {
+                  "about": "The list; all three if left out",
+                  "name": "<LIST>",
+                  "optional": true
+                }
+              ],
+              "name": "rule ls",
+              "usage": "nerve-node rule ls [OPTIONS] [LIST]"
+            },
+            {
+              "about": "Change one entry of a list in place, as one change: the entry as `ls` shows it, and what it becomes",
+              "args": [
+                {
+                  "about": "The entry as `ls` shows it",
+                  "name": "<ENTRY>",
+                  "optional": false
+                },
+                {
+                  "about": "What it becomes: an entry as `ls` shows them (`exec.run:git status`, `fs.read:~/notes/*`; on the sudo list a sudo command's pattern), or a plain command line, which becomes the rule `add` makes of it",
+                  "name": "<NEW>",
+                  "optional": false
+                }
+              ],
+              "name": "rule edit",
+              "usage": "nerve-node rule edit [OPTIONS] <LIST> <ENTRY> <NEW>"
+            },
+            {
+              "about": "Put the deny rules that keep a center's commands off this node itself (its programs, service, socket and folders) on the deny list, as a new pairing has them, in place of their older texts. They catch mistakes, not someone who hides the name",
+              "args": [],
+              "name": "rule guard",
+              "usage": "nerve-node rule guard [OPTIONS]"
+            }
+          ]
+        },
+        {
+          "about": "Turn capabilities and single actions on or off, declare capabilities of your own in node.toml, and allow the programs that add capabilities",
+          "holds": [
+            "cap"
+          ],
+          "name": "cap",
+          "shared_args": [
+            {
+              "about": "What it does: read, write, execute, sense or actuate. Sense and actuate need your `cap set NAME on` for a center",
+              "name": "--effect <EFFECT>",
+              "optional": true
+            },
+            {
+              "about": "One line for the agent: what it does",
+              "name": "--summary <SUMMARY>",
+              "optional": true
+            },
+            {
+              "about": "The JSON Schema of its arguments, an object; `none` takes no arguments. A property marked \"x-nerve-path\": \"read\" or \"write\" is a path the node holds to the folders",
+              "name": "--params <JSON>",
+              "optional": true
+            },
+            {
+              "about": "Read the arguments' schema from stdin instead",
+              "name": "--params-stdin",
+              "optional": true
+            },
+            {
+              "about": "What it returns: `text`, what the command prints (the default), or a JSON Schema the printed JSON must fit",
+              "name": "--result <text|JSON>",
+              "optional": true
+            },
+            {
+              "about": "Read the result's schema from stdin instead",
+              "name": "--result-stdin",
+              "optional": true
+            },
+            {
+              "about": "How long it may run, in seconds, up to limits.max_timeout_secs; `default` for the node's default",
+              "name": "--timeout <SECS>",
+              "optional": true
+            },
+            {
+              "about": "Where it runs: any (the default), linux or windows. A node offers only those of its platform",
+              "name": "--platform <PLATFORM>",
+              "optional": true
+            },
+            {
+              "about": "The capability, `cap.action`",
+              "name": "<NAME>",
+              "optional": false
+            }
+          ],
+          "verbs": [
+            {
+              "about": "Set a capability (`fs`) or one action (`exec.run`) to on, off or hidden",
+              "args": [
+                {
+                  "about": "The capability (`fs`) or action (`exec.run`)",
+                  "name": "<CAP>",
+                  "optional": false
+                },
+                {
+                  "about": "`on`, `off` or `hidden`",
+                  "name": "<SETTING>",
+                  "optional": false
+                }
+              ],
+              "name": "cap set",
+              "usage": "nerve-node cap set [OPTIONS] <CAP> <SETTING>"
+            },
+            {
+              "about": "Show every capability: the node's own, those of node.toml and those of the programs you allow, each action with what it does (its effect), where it comes from, and how each center has it set. A stopped node shows its own and those of node.toml, and lists the programs you allow without their capabilities",
+              "args": [
+                {
+                  "about": "Only this center's settings",
+                  "name": "--center <CENTER>",
+                  "optional": true
+                }
+              ],
+              "name": "cap ls",
+              "usage": "nerve-node cap ls [OPTIONS]"
+            },
+            {
+              "about": "Declare a capability of your own, NAME (`cap.action`, like sensors.read), that runs a fixed command: the words after `--`, the program first. A word written `{field}` is the call's argument `field`, as one whole argument; no shell reads it. It runs as nerve-run on the installed Linux node, held to the folders; a node run by hand offers none",
+              "args": [
+                {
+                  "about": "`cap.action`, like sensors.read",
+                  "name": "<NAME>",
+                  "optional": false
+                },
+                {
+                  "about": "The program and its arguments, after `--`",
+                  "name": "<COMMAND>",
+                  "optional": false
+                }
+              ],
+              "name": "cap add",
+              "usage": "nerve-node cap add [OPTIONS] <NAME> -- <COMMAND>..."
+            },
+            {
+              "about": "Change a capability you declared: what you give replaces what it has, and a command after `--` its command",
+              "args": [
+                {
+                  "about": "The program and its arguments, after `--`",
+                  "name": "<COMMAND>",
+                  "optional": true
+                }
+              ],
+              "name": "cap edit",
+              "usage": "nerve-node cap edit [OPTIONS] <NAME> [-- <COMMAND>...]"
+            },
+            {
+              "about": "Remove a capability you declared; it leaves every center at once. With --center, remove one that center added itself (settings grant write); `cap set NAME off --center` turns it off instead",
+              "args": [
+                {
+                  "about": "The center that added it, for a capability a center added",
+                  "name": "--center <CENTER>",
+                  "optional": true
+                }
+              ],
+              "name": "cap rm",
+              "usage": "nerve-node cap rm [OPTIONS] <NAME>"
+            }
+          ]
+        },
+        {
+          "about": "Allow a program on this machine to add capabilities (a provider), remove it, or list them",
+          "holds": [
+            "cap provider"
+          ],
+          "name": "cap provider",
+          "shared_args": [],
+          "verbs": [
+            {
+              "about": "Let the program EXE attach as the provider NAME; it replaces the program allowed under that name. The node checks that the program that attaches runs this very file",
+              "args": [
+                {
+                  "about": "The provider's name, which its capabilities carry: 1 to 32 of a-z, 0-9 and `-`",
+                  "name": "<NAME>",
+                  "optional": false
+                },
+                {
+                  "about": "The full path of the program's executable",
+                  "name": "<EXE>",
+                  "optional": false
+                }
+              ],
+              "name": "cap provider allow",
+              "usage": "nerve-node cap provider allow [OPTIONS] <NAME> <EXE>"
+            },
+            {
+              "about": "Remove the program allowed as NAME; its capabilities leave at once",
+              "args": [
+                {
+                  "about": "The provider's name",
+                  "name": "<NAME>",
+                  "optional": false
+                }
+              ],
+              "name": "cap provider rm",
+              "usage": "nerve-node cap provider rm [OPTIONS] <NAME>"
+            },
+            {
+              "about": "Show the programs you allow, and on a running node whether each is attached",
+              "args": [],
+              "name": "cap provider ls",
+              "usage": "nerve-node cap provider ls [OPTIONS]"
+            }
+          ]
+        },
+        {
+          "about": "Use sudo for the commands on the sudo list",
+          "holds": [
+            "sudo"
+          ],
+          "name": "sudo",
+          "shared_args": [],
+          "verbs": [
+            {
+              "about": "Turn sudo on; asks for your sudo password and keeps it in memory only (on Windows the password of the account commands run as, kept with DPAPI)",
+              "args": [],
+              "name": "sudo on",
+              "usage": "nerve-node sudo on [OPTIONS]"
+            },
+            {
+              "about": "Turn sudo off and forget the password",
+              "args": [],
+              "name": "sudo off",
+              "usage": "nerve-node sudo off [OPTIONS]"
+            },
+            {
+              "about": "Show whether sudo is on",
+              "args": [],
+              "name": "sudo status",
+              "usage": "nerve-node sudo status [OPTIONS]"
+            }
+          ]
+        },
+        {
+          "about": "Read or change any setting in node.toml by its name",
+          "holds": [
+            "config"
+          ],
+          "name": "config",
+          "shared_args": [
+            {
+              "about": "The dotted key of the setting, like `center.<name>.policy.mode`",
+              "name": "<KEY>",
+              "optional": false
+            },
+            {
+              "about": "The dotted key of a list, like `center.<name>.policy.allow`",
+              "name": "<KEY>",
+              "optional": false
+            }
+          ],
+          "verbs": [
+            {
+              "about": "Print one setting",
+              "args": [],
+              "name": "config get",
+              "usage": "nerve-node config get [OPTIONS] <KEY>"
+            },
+            {
+              "about": "Change one setting",
+              "args": [
+                {
+                  "about": "The new value",
+                  "name": "<VALUE>",
+                  "optional": false
+                }
+              ],
+              "name": "config set",
+              "usage": "nerve-node config set [OPTIONS] <KEY> <VALUE>"
+            },
+            {
+              "about": "Remove one setting (its default applies again)",
+              "args": [],
+              "name": "config unset",
+              "usage": "nerve-node config unset [OPTIONS] <KEY>"
+            },
+            {
+              "about": "Append a value to a list",
+              "args": [
+                {
+                  "about": "The value to append",
+                  "name": "<VALUE>",
+                  "optional": false
+                }
+              ],
+              "name": "config add",
+              "usage": "nerve-node config add [OPTIONS] <KEY> <VALUE>"
+            },
+            {
+              "about": "Remove a value from a list",
+              "args": [
+                {
+                  "about": "The value to remove",
+                  "name": "<VALUE>",
+                  "optional": false
+                }
+              ],
+              "name": "config remove",
+              "usage": "nerve-node config remove [OPTIONS] <KEY> <VALUE>"
+            },
+            {
+              "about": "Trust node.toml as it is now, after the node refused it for a change made outside nerve-node. Read the file first",
+              "args": [],
+              "name": "config accept",
+              "usage": "nerve-node config accept [OPTIONS]"
+            }
+          ]
+        }
+      ],
+      "name": "What a center may do"
+    },
+    {
+      "about": "Start the node, see what it did, and stop it.",
+      "cards": [
+        {
+          "about": "",
+          "holds": [],
+          "name": "run",
+          "shared_args": [],
+          "verbs": [
+            {
+              "about": "Run the node in the foreground",
+              "args": [],
+              "name": "run",
+              "usage": "nerve-node run [OPTIONS]"
+            }
+          ]
+        },
+        {
+          "about": "",
+          "holds": [],
+          "name": "status",
+          "shared_args": [],
+          "verbs": [
+            {
+              "about": "Show whether the node runs and which centers it is paired with",
+              "args": [],
+              "name": "status",
+              "usage": "nerve-node status [OPTIONS]"
+            }
+          ]
+        },
+        {
+          "about": "Show what the node allowed and refused",
+          "holds": [],
+          "name": "audit",
+          "shared_args": [],
+          "verbs": [
+            {
+              "about": "Show what the node allowed and refused",
+              "args": [
+                {
+                  "about": "Keep running and print new entries as they arrive",
+                  "name": "--follow",
+                  "optional": true
+                },
+                {
+                  "about": "Show only the calls that were refused",
+                  "name": "--denied",
+                  "optional": true
+                },
+                {
+                  "about": "Show only the newest N entries (with --follow, then the new ones)",
+                  "name": "--last <N>",
+                  "optional": true
+                }
+              ],
+              "name": "audit",
+              "usage": "nerve-node audit [OPTIONS]"
+            },
+            {
+              "about": "Start the audit log afresh. The entries so far become its one older file (audit.jsonl.1, in place of the one before), and the new log begins with an entry of who cleared it",
+              "args": [],
+              "name": "audit clear",
+              "usage": "nerve-node audit clear [OPTIONS]"
+            }
+          ]
+        },
+        {
+          "about": "Show the node's log: its starts and stops, its links, and what went wrong",
+          "holds": [],
+          "name": "log",
+          "shared_args": [],
+          "verbs": [
+            {
+              "about": "Show the node's log: its starts and stops, its links, and what went wrong",
+              "args": [
+                {
+                  "about": "Keep running and print new lines as they arrive",
+                  "name": "--follow",
+                  "optional": true
+                },
+                {
+                  "about": "Show only the newest N lines (with --follow, then the new ones)",
+                  "name": "--last <N>",
+                  "optional": true
+                },
+                {
+                  "about": "Show only errors and warnings (with --last, the newest N of them)",
+                  "name": "--problems",
+                  "optional": true
+                }
+              ],
+              "name": "log",
+              "usage": "nerve-node log [OPTIONS]"
+            },
+            {
+              "about": "Empty the node's log and its older file. The new log begins with a line of who cleared it",
+              "args": [],
+              "name": "log clear",
+              "usage": "nerve-node log clear [OPTIONS]"
+            }
+          ]
+        },
+        {
+          "about": "",
+          "holds": [],
+          "name": "panic / unlock",
+          "shared_args": [],
+          "verbs": [
+            {
+              "about": "Stop everything at once; nothing runs until `unlock`",
+              "args": [],
+              "name": "panic",
+              "usage": "nerve-node panic [OPTIONS]"
+            },
+            {
+              "about": "Let the node work again after `panic`",
+              "args": [],
+              "name": "unlock",
+              "usage": "nerve-node unlock [OPTIONS]"
+            }
+          ]
+        }
+      ],
+      "name": "Run and watch"
+    }
+  ]
+}

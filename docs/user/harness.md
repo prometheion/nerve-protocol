@@ -30,12 +30,20 @@ then uses TLS with the center's self-signed certificate.
 
 ## Tokens
 
-A harness token is the bearer token of the HTTP endpoint. The same secret logs
-in to the [web UI](web-ui.md).
+A harness token is the bearer token of the HTTP endpoint, and nothing more:
+it does not log in to the [web UI](web-ui.md), which asks for the
+[owner token](web-ui.md#log-in). An agent may read its harness's settings,
+token included; with it, it reaches `/mcp` and no further, as long as it
+cannot read the center's state folder either. A center your harness starts
+runs as you, and so does an agent with file or shell tools: it can read the
+owner token there too. When the harness gives the agent such tools, run the
+center as the [service](center.md#run-it-as-a-service), which keeps its
+folder to its own account.
 
 - Give one with `--harness-token` or `NERVE_HARNESS_TOKEN`.
 - Or make more in the web UI: Settings, Harness tokens. The token is shown
-  once. Delete it there to stop it.
+  once. Delete it there to stop it. The one of the settings is listed there
+  too; remove it from the settings.
 
 ## The tools the model gets
 
@@ -324,3 +332,22 @@ Each MCP connection is one session. The center tells the machines a session
 used when it ends, and they stop that session's commands; its jobs stop
 and its streams go too.
 End a session by hand in the web UI, Overview, Sessions.
+
+Over stdio a session ends with the harness. Over HTTP it ends when the
+harness sends `DELETE /mcp`, which many harnesses never do, after 30 minutes
+without a request, and at once when the harness token that opened it is
+deleted: what an agent with a leaked token started stops with it. A harness
+that comes back after 30 minutes gets `404` and opens a new session; a job
+it polls with `job.status` keeps its session going.
+
+An HTTP session answers only the token that opened it: another token gets
+`404` for it, though the id is no secret. One token keeps 32 sessions open
+at most; the 33rd ends that token's session that had no request for the
+longest, with its jobs and streams, even if its other sessions are busy
+(a harness that needs more opens a second token). One token also has at most
+128 requests in flight at once, waiting calls included, and a reply the
+harness has not read yet is still in flight; one past that gets `503` with
+`Retry-After`. A harness library may not wait and try again (the common MCP
+client library fails that call with the `503`), so a harness that needs more
+at once uses a second token. A request id is a number or a string of at most
+256 bytes; the reply repeats it.

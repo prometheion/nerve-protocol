@@ -43,6 +43,12 @@ pub struct CheckerConfig {
     /// were per-node settings.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub nodes: BTreeMap<String, NodeSettings>,
+    /// How many times the config was changed. The Action checker page
+    /// sends back the one it loaded with its Save, which is refused when a
+    /// change came in between (an allow rule from the Audit page, another
+    /// tab): the page saves the whole config, and would undo it.
+    #[serde(default)]
+    pub version: u64,
 }
 
 impl Default for CheckerConfig {
@@ -55,6 +61,7 @@ impl Default for CheckerConfig {
             allow_rules: Vec::new(),
             model: ModelConfig::default(),
             nodes: BTreeMap::new(),
+            version: 0,
         }
     }
 }

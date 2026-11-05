@@ -21,7 +21,6 @@ use serde_json::{Map, Value, json};
 use tokio::net::TcpStream;
 
 const WAIT: Duration = Duration::from_secs(15);
-const ROTATE: &[&str] = &["rotate"];
 
 fn options(root: &Path) -> NodeOptions {
     let mut o = NodeOptions::new(NodePaths::new(root.join("config"), root.join("state")));
@@ -57,13 +56,8 @@ async fn node_with(
     Daemon::start(o).await.expect("start")
 }
 
-/// Accepts the node's next link and runs the handshake against `public_key`,
-/// with `features` in the welcome.
-async fn link(
-    center: &mut FakeCenter,
-    public_key: &str,
-    features: Option<&[&str]>,
-) -> Conn<TcpStream> {
+/// Accepts the node's next link and runs the handshake against `public_key`.
+async fn link(center: &mut FakeCenter, public_key: &str) -> Conn<TcpStream> {
     let paired = center.paired().expect("paired");
     let mut inc = center.next_link(WAIT).await.expect("the node dials");
     // The node id stays the one of the pairing, whatever key signs.
@@ -73,11 +67,11 @@ async fn link(
         &center.center_id,
         &paired.node_id,
         public_key,
-        features,
     )
     .await
     .expect("handshake");
-    assert_eq!(hello.features, ["rotate"]);
+    // Key rotation is part of the baseline: no feature names it.
+    assert!(hello.features.is_empty());
     inc.conn
 }
 
@@ -195,7 +189,7 @@ async fn the_node_takes_its_new_key_once_the_center_took_it() {
     let daemon = node(dir.path(), &center, None).await;
     let paths = daemon.paths().clone();
     let old = paired(&center).request.public_key;
-    let mut conn = link(&mut center, &old, Some(ROTATE)).await;
+    let mut conn = link(&mut center, &old).await;
 
     let run = rotate(&paths, &[]);
     let p = next(&mut conn, method::KEY_ROTATE)
@@ -228,7 +222,7 @@ async fn the_node_takes_its_new_key_once_the_center_took_it() {
 
     // The next link is signed with the new key, under the same node id.
     conn.bye("shutdown").await;
-    let mut conn = link(&mut center, &new, Some(ROTATE)).await;
+    let mut conn = link(&mut center, &new).await;
 
     // The owner ends the grace of the old key; the current key signs that.
     let run = rotate(&paths, &["--end-grace"]);
@@ -259,7 +253,7 @@ async fn a_refused_rotation_keeps_the_old_key() {
     let daemon = node(dir.path(), &center, None).await;
     let paths = daemon.paths().clone();
     let old = paired(&center).request.public_key;
-    let mut conn = link(&mut center, &old, Some(ROTATE)).await;
+    let mut conn = link(&mut center, &old).await;
 
     let run = rotate(&paths, &[]);
     let p = next(&mut conn, method::KEY_ROTATE)
@@ -281,32 +275,13 @@ async fn a_refused_rotation_keeps_the_old_key() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_center_older_than_rotation_keeps_the_key() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut center = FakeCenter::start(false).await.unwrap();
-    let daemon = node(dir.path(), &center, None).await;
-    let paths = daemon.paths().clone();
-    let old = paired(&center).request.public_key;
-    // A welcome without features: a center older than rotation.
-    let _conn = link(&mut center, &old, None).await;
-    let e = rotate(&paths, &[])
-        .await
-        .unwrap()
-        .expect_err("not without the feature");
-    assert!(e.contains("does not speak key rotation"), "{e}");
-    assert_eq!(key(&paths).public_hex(), old);
-    assert!(!paths.next_key_file("lab").exists());
-    drop(daemon);
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn an_unanswered_rotation_is_sent_again_on_the_next_link() {
     let dir = tempfile::tempdir().unwrap();
     let mut center = FakeCenter::start(false).await.unwrap();
     let daemon = node(dir.path(), &center, None).await;
     let paths = daemon.paths().clone();
     let old = paired(&center).request.public_key;
-    let mut conn = link(&mut center, &old, Some(ROTATE)).await;
+    let mut conn = link(&mut center, &old).await;
 
     let run = rotate(&paths, &[]);
     let p = next(&mut conn, method::KEY_ROTATE)
@@ -323,7 +298,7 @@ async fn an_unanswered_rotation_is_sent_again_on_the_next_link() {
 
     // The next link is still signed with the old key, and sends the same new
     // key again by itself.
-    let mut conn = link(&mut center, &old, Some(ROTATE)).await;
+    let mut conn = link(&mut center, &old).await;
     let p = next(&mut conn, method::KEY_ROTATE)
         .await
         .expect("sent again");
@@ -344,7 +319,7 @@ async fn a_late_answer_settles_the_rotation() {
     let daemon = node(dir.path(), &center, None).await;
     let paths = daemon.paths().clone();
     let old = paired(&center).request.public_key;
-    let mut conn = link(&mut center, &old, Some(ROTATE)).await;
+    let mut conn = link(&mut center, &old).await;
 
     let run = rotate(&paths, &[]);
     let p = next(&mut conn, method::KEY_ROTATE)
@@ -372,7 +347,7 @@ async fn a_refused_hello_is_tried_with_the_new_key_kept_aside() {
     let daemon = node(dir.path(), &center, None).await;
     let paths = daemon.paths().clone();
     let old = paired(&center).request.public_key;
-    let mut conn = link(&mut center, &old, Some(ROTATE)).await;
+    let mut conn = link(&mut center, &old).await;
 
     let run = rotate(&paths, &[]);
     let p = next(&mut conn, method::KEY_ROTATE)
@@ -385,18 +360,12 @@ async fn a_refused_hello_is_tried_with_the_new_key_kept_aside() {
     // The center holds only the new key now: the old key's hello is refused.
     let paired = paired(&center);
     let mut inc = center.next_link(WAIT).await.expect("the node dials");
-    let refused = fake_center::handshake_with(
-        &mut inc.conn,
-        &center.center_id,
-        &paired.node_id,
-        &new,
-        Some(ROTATE),
-    )
-    .await;
+    let refused =
+        fake_center::handshake_with(&mut inc.conn, &center.center_id, &paired.node_id, &new).await;
     assert!(refused.is_err(), "signed with the old key");
     drop(inc);
     // The next hello is signed with the new key, under the same node id.
-    let _conn = link(&mut center, &new, Some(ROTATE)).await;
+    let _conn = link(&mut center, &new).await;
     settled(&paths, &new).await;
     drop(daemon);
 }
@@ -420,7 +389,7 @@ async fn an_old_pin_whose_time_is_over_is_dropped() {
     .await;
     let paths = daemon.paths().clone();
     let old = paired(&center).request.public_key;
-    let _conn = link(&mut center, &old, Some(ROTATE)).await;
+    let _conn = link(&mut center, &old).await;
     let (cfg, _) = nerve_node::cli::read_config(&paths).await.unwrap();
     assert_eq!(cfg.centers[0].old_pin, None);
     assert_eq!(cfg.centers[0].pin, Some(b.pin()));
@@ -459,7 +428,7 @@ async fn the_node_follows_a_center_key_its_old_key_signed() {
     let daemon = node(dir.path(), &center, Some(a.pin())).await;
     let paths = daemon.paths().clone();
     let old = paired(&center).request.public_key;
-    let mut conn = link(&mut center, &old, Some(ROTATE)).await;
+    let mut conn = link(&mut center, &old).await;
     let pins = || {
         let (cfg, _) = futures_block(nerve_node::cli::read_config(&paths)).unwrap();
         let c = cfg.centers[0].clone();
@@ -538,7 +507,7 @@ async fn a_new_key_node_toml_cannot_record_is_settled_on_the_next_link() {
     let daemon = node(dir.path(), &center, None).await;
     let paths = daemon.paths().clone();
     let old = paired(&center).request.public_key;
-    let mut conn = link(&mut center, &old, Some(ROTATE)).await;
+    let mut conn = link(&mut center, &old).await;
     let mode = |m| {
         std::fs::set_permissions(&paths.config_dir, std::fs::Permissions::from_mode(m)).unwrap()
     };
@@ -565,7 +534,7 @@ async fn a_new_key_node_toml_cannot_record_is_settled_on_the_next_link() {
 
     // The next link sends it again, and the center answers it the same.
     drop(conn);
-    let mut conn = link(&mut center, &old, Some(ROTATE)).await;
+    let mut conn = link(&mut center, &old).await;
     let p = next(&mut conn, method::KEY_ROTATE)
         .await
         .expect("sent again");
@@ -630,7 +599,7 @@ async fn a_link_under_an_old_pin_ends_when_its_time_is_over() {
     })
     .await;
     let old = paired(&center).request.public_key;
-    let mut conn = link(&mut center, &old, Some(ROTATE)).await;
+    let mut conn = link(&mut center, &old).await;
     assert!(
         nerve_proto::msg::now_ms() < until,
         "the link came up within the old pin's time"
@@ -665,7 +634,7 @@ async fn a_padded_pin_links_and_stays_linked() {
     })
     .await;
     let old = paired(&center).request.public_key;
-    let mut conn = link(&mut center, &old, Some(ROTATE)).await;
+    let mut conn = link(&mut center, &old).await;
     assert!(
         conn.ends_within(Duration::from_secs(7)).await.is_none(),
         "the link under the padded pin stays"

@@ -4,6 +4,7 @@ description = "The Nerve center as an MCP server: pairs nodes, holds their links
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 rust-version.workspace = true
 
 [[bin]]
@@ -13,8 +14,8 @@ path = "src/main.rs"
 [dependencies]
 nerve-proto.workspace = true
 nerve-transport.workspace = true
-# The help page reads the node's command list from its CLI definition.
-nerve-node.workspace = true
+# Accounts, systemd and update, as the node's service has them.
+nerve-service.workspace = true
 # The audit buttons write rules in the node's own rule syntax.
 nerve-policy.workspace = true
 # io-std for MCP over stdio; process/time/sync/signal for the action checker's
@@ -41,5 +42,8 @@ libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# The tests run a real node against the center, and check the node's
+# descriptor as the center reads it.
+nerve-node.workspace = true
 # The paused clock, for the ten minutes a job's result is kept (no new crate).
 tokio = { workspace = true, features = ["test-util"] }

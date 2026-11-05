@@ -67,14 +67,6 @@ async fn start(paths: &NodePaths, home: &std::path::Path) -> Daemon {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "writes to the system keyring"]
 async fn the_keys_move_into_the_system_keyring_and_back() {
-    // Below Landlock ABI 9 the node keeps its keys in files, whatever is
-    // asked (docs/user/config.md).
-    if let Some(v) = nerve_sandbox::Confinement::detect().landlock_abi
-        && v < 9
-    {
-        eprintln!("skipped: Landlock ABI {v} here, below 9, keeps the keys in files");
-        return;
-    }
     let d = tempfile::tempdir().unwrap();
     let root = d.path().to_path_buf();
     let paths = NodePaths::new(root.join("config"), root.join("state"));

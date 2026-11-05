@@ -19,20 +19,18 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 ### 1.1 Features
 
-Additive parts of version `"0"` are named features. A side uses a feature's
-messages only when both sides named it; a peer older than a feature keeps
-working without it.
+Everything this document describes is the baseline of version `"0"`: every
+node and center speaks all of it, key rotation (§4.10) and the resume of a
+dropped link (§4.9) included. A part added to version `"0"` later is a named
+feature. A side uses a feature's messages only when both sides named it; a
+peer without the feature keeps working without it.
 
-- A node lists the features it speaks in `hello.features` (§4.2). A node
-  older than features sends no such field.
-- The center answers in `welcome.features` with those of them it speaks too,
-  and only when the hello had the field: a node is strict about the welcome
-  (§5.2), and an older one would refuse a field it does not know.
+- A node lists the features it speaks in `hello.features` (§4.2), and the
+  center answers in `welcome.features` with those of them it speaks too. Both
+  fields are required, also when the list is empty: a hello or a welcome
+  without `features` is refused with `bye {reason: "protocol_error"}`.
 - A feature name a side does not know is ignored.
-
-| Feature | Since | Section |
-|---|---|---|
-| `rotate` | nerve 0.0.4 | key rotation, §4.10 |
+- No feature is named yet.
 
 ## 2. Identity
 
@@ -134,18 +132,17 @@ without knowing.
    ```json
    {"node_id": "…", "auth": {"sig": "<128 hex>"}, "versions": ["0"],
     "software": {"name": "nerve-node", "version": "…"},
-    "limits": {"message_bytes": 4194304, "blob_bytes": 67108864, "calls": 64, "streams": 16},
-    "rev": 7, "features": ["rotate"], "resume": {"link": "<32 hex>", "got": 0}}
+    "limits": {"message_bytes": 4194304, "calls": 64, "streams": 16},
+    "rev": 7, "features": [], "resume": {"link": "<32 hex>", "got": 0}}
    ```
    `sig` is the Ed25519 signature over the bytes
    `"nerve-connect/0" || center_id (UTF-8) || nonce (32 raw bytes)`, with
    the node's key for this center, or with its old key while the grace of a
-   rotation runs (§4.10). `features` is optional (§1.1). `resume` is
-   optional; a node that can resume links sends it (§4.9).
-3. Center → node, notification `welcome {version, limits, features?, resume?}`.
-   `features` is sent only when the hello had it (§1.1). `resume {resumed,
-   got}` answers the hello's `resume` and is sent only when the hello had one
-   (§4.9).
+   rotation runs (§4.10). `features` (§1.1) and `resume` (§4.9) are
+   required.
+3. Center → node, notification `welcome {version, limits, features, resume}`.
+   `features` names those of the hello's the center speaks (§1.1), `resume
+   {resumed, got}` answers the hello's `resume` (§4.9). Both are required.
 
 Before `welcome`, any other message is a protocol error: the receiver sends
 `bye {reason: "protocol_error"}` and closes. A wrong signature or a `node_id`
@@ -286,22 +283,18 @@ message layer: the relay carries bytes, never messages.
 
 A link that drops without a `bye` MAY be resumed on a new connection within a
 grace of 30 seconds: calls in flight on it go on, and their results and the
-events sent meanwhile arrive. Both sides must be able to; otherwise the link
-ends as in §4.5. A resume sends a frame again only when the other side's count
+events sent meanwhile arrive. A resume sends a frame again only when the other side's count
 shows it never read it, so a call that may have run never runs twice.
 
 Link ids and counts:
 
-- A node that can resume links sends `hello.resume {link, got}` on every
-  connection. `link` names the link the connection carries: 16 random bytes
+- A node sends `hello.resume {link, got}` on every connection. `link` names the link the connection carries: 16 random bytes
   as 32 lowercase hex characters, new for a new link. `got` is how many
   counted frames of that link the node read (0 for a new link).
-- A center that can resume links answers `welcome.resume {resumed, got}`,
-  and only to a hello with `resume` (a node is strict about `welcome`).
-  `resumed: true` carries the named link on, and `got` is how many counted
-  frames of it the center read. `resumed: false` starts a new link with that
-  id, with `got` 0. A welcome without `resume` means the center cannot resume
-  links; the node then treats the link as one that cannot resume.
+- The center answers `welcome.resume {resumed, got}`. `resumed: true`
+  carries the named link on, and `got` is how many counted frames of it the
+  center read. `resumed: false` starts a new link with that id, with `got`
+  0.
 - A hello whose `resume.link` is not 32 lowercase hex characters is refused
   with `bye {reason: "protocol_error"}`.
 - **Counted frames** are the text frames a side sends after `welcome`, except
@@ -310,15 +303,14 @@ Link ids and counts:
   Binary frames are not counted, so a stream ends with its connection on
   both sides: a resumed link carries no streams.
 
-Keeping and acknowledging, on a link that can resume:
+Keeping and acknowledging:
 
 - Each side keeps the counted frames it sent until the other side
   acknowledges them. The notification `ack {got}` (either direction) says the
   sender read the first `got` counted frames of the link. A side sends one at
   most every 5 seconds, when its count moved since its last `ack` or
   handshake. An `ack` whose `got` is below an earlier one or above what was
-  sent ends the link with `bye {reason: "protocol_error"}`; on a link that
-  cannot resume an `ack` is ignored.
+  sent ends the link with `bye {reason: "protocol_error"}`.
 - A side keeps at most 16 MiB of frames the other side has not acknowledged,
   dropping the oldest past that. While it lacks a frame the other side has
   not acknowledged, the link cannot resume.
@@ -377,7 +369,7 @@ Replay:
 
 ### 4.10 Key rotation
 
-Feature `rotate` (§1.1). Either key of a pairing can be replaced without
+Either key of a pairing can be replaced without
 pairing again: the node's key for the center, and the center's TLS key that
 nodes pin. The side whose key changes starts it, when its owner asks;
 nothing rotates on its own. The new key travels over the paired,
@@ -389,10 +381,6 @@ another one ends that other grace at once; the center refuses a rotation of
 its own key while one is in its grace, until the owner ends that grace. When
 the grace of a node's old key ends, in whatever way, a link that was opened
 with that key ends with `bye {reason: "replaced"}`.
-
-A peer that does not speak `rotate` cannot rotate. A node that does not
-speak it is not told of a center's new key, and after the center's grace it
-has to pair again.
 
 #### Node key
 
@@ -479,10 +467,9 @@ Errors carry a string code in `error.data.code` (§5.3).
 |---|---|---|---|---|
 | `challenge` | notification | C→N | `{nonce, center_id}` | |
 | `hello` | notification | N→C | see §4.2 | |
-| `welcome` | notification | C→N | `{version, limits}` | |
+| `welcome` | notification | C→N | `{version, limits, features, resume}` | |
 | `describe` | request | C→N | `{detail, cap?}` | descriptor (§6) |
-| `invoke` | request | C→N | `{cap, action, args, ctx, deadline_ms?, blobs?}` | action result |
-| `progress` | notification | N→C | `{id, data}` | |
+| `invoke` | request | C→N | `{cap, action, args, ctx, deadline_ms?}` | action result |
 | `cancel` | notification | C→N | `{id}` | |
 | `get` | request | C→N | `{cap, keys, ctx?}` | `{key: value}` |
 | `sub` / `unsub` | request | C→N | `{topics, ctx?}` | `{}` |
@@ -517,7 +504,7 @@ Errors carry a string code in `error.data.code` (§5.3).
   `limits.streams` open per link; one more is `busy`.
 - `deadline_ms` is a duration in milliseconds from receipt; past it the node
   fails the call with `timeout`.
-- `progress.id` and `cancel.id` are the `invoke` request id. An `invoke` id
+- `cancel.id` is the `invoke` request id. An `invoke` id
   is an integer of 0 or more, since `exec.signal` and the `exec/exit` event
   name a call by it (§7.3); a node refuses an `invoke` with a string id
   (`invalid_request`). Other requests may use either.
@@ -569,9 +556,7 @@ Binary WebSocket frames have a 10-byte header, big-endian:
 u8 kind | u8 flags | u32 id | u32 seq | payload (at most 65536 bytes)
 ```
 
-- kind 1: blob chunk. `id` is the blob id named as `{"$blob": id}` in a JSON
-  message and listed in `invoke.blobs`; `seq` counts from 0; flag bit 0 marks
-  the last chunk. A blob larger than `limits.blob_bytes` fails with `too_large`.
+- kind 1: not used; a frame of it is ignored.
 - kind 2: reliable stream data; `id` is the stream's `sid`, `seq` counts
   the stream's frames from 0. Flag bit 1 marks a gap: the sender dropped
   bytes of the stream there (the other side did not take them fast enough),
@@ -587,7 +572,7 @@ frame.
 ### 5.5 Limits
 
 `limits` in `hello` and `welcome` announce what each side accepts: message
-bytes (default 4 MiB), blob bytes (64 MiB), concurrent calls (64), streams (16).
+bytes (default 4 MiB), concurrent calls (64), streams (16).
 A message over the receiver's limit closes the link with `protocol_error`; a
 call over the call limit fails with `busy`. A node does not send an answer
 over the center's message limit: the call fails with `too_large` instead.

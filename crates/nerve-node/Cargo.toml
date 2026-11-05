@@ -4,6 +4,7 @@ description = "The Nerve node: links a machine to its centers under the owner's 
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 rust-version.workspace = true
 
 [[bin]]
@@ -15,6 +16,7 @@ nerve-proto.workspace = true
 nerve-transport.workspace = true
 nerve-policy.workspace = true
 nerve-sandbox.workspace = true
+nerve-service.workspace = true
 tokio.workspace = true
 futures-util.workspace = true
 tokio-tungstenite.workspace = true

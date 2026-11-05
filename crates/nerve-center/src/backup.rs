@@ -74,7 +74,7 @@ pub fn backup(
         let next = std::fs::read_to_string(state.join(NEXT_IDENTITY_FILE)).ok();
         let identity = read(IDENTITY_FILE)?;
         let state_text = read(store::FILE)?;
-        let rotating = serde_json::from_str::<Store>(&state_text)
+        let rotating = Store::parse(state_text.as_bytes())
             .ok()
             .and_then(|s| s.key_rotation)
             .filter(|r| r.finished_ms.is_none());
@@ -159,8 +159,8 @@ pub fn parse(contents: Contents) -> Result<Parsed, String> {
     identity
         .server_config()
         .map_err(|_| "the key in the backup does not go with its certificate".to_string())?;
-    let store: Store = serde_json::from_str(&state_text)
-        .map_err(|e| format!("the state in the backup is not valid: {e}"))?;
+    let store =
+        Store::parse(state_text.as_bytes()).map_err(|e| format!("the state in the backup {e}"))?;
     if store.center_id.is_empty() {
         return Err("the state in the backup has no center id".into());
     }
@@ -562,7 +562,7 @@ pub fn run(
             if settle(state)? {
                 as_owner_may_reach(state, file, passphrase_file.as_deref())?;
             }
-            let pass = nerve_node::prompt::passphrase(passphrase_file.as_deref(), out, true)?;
+            let pass = nerve_service::prompt::passphrase(passphrase_file.as_deref(), out, true)?;
             let r = backup(state, file, &pass, *overwrite, backup::ITERATIONS)?;
             print_backup(&r, file, out);
         }
@@ -579,15 +579,23 @@ pub fn run(
                     kind.word()
                 ));
             }
-            let pass = nerve_node::prompt::passphrase(passphrase_file.as_deref(), out, false)?;
+            let pass = nerve_service::prompt::passphrase(passphrase_file.as_deref(), out, false)?;
             let parsed = open(&bytes, &pass)?;
             settle(state)?;
             let r = restore(state, &parsed, *replace)?;
             print_restore(&r, &parsed, out);
         }
-        // `main` gives these to the service (crate::service::execute).
-        Cmd::Install | Cmd::Update { .. } | Cmd::Uninstall { .. } => {
-            return Err("install, update and uninstall are not backup commands".into());
+        // `main` gives these to the service (crate::service::execute) and
+        // to crate::owner.
+        Cmd::Install
+        | Cmd::Update { .. }
+        | Cmd::Uninstall { .. }
+        | Cmd::OwnerToken { .. }
+        | Cmd::ServiceFiles => {
+            return Err(
+                "install, update, uninstall, owner-token and service-files are not backup commands"
+                    .into(),
+            );
         }
     }
     Ok(())

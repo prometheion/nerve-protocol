@@ -4,6 +4,7 @@ description = "Nerve Protocol transport: TLS pinning, loopback rule, CONNECT pro
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 rust-version.workspace = true
 
 [dependencies]

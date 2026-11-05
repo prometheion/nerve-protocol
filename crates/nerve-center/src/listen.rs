@@ -1,11 +1,26 @@
 //! Listening sockets: plain TCP on loopback or TLS with the center's
 //! identity, and the node endpoints on them (spec §3 pairing, §4 connect).
+//!
+//! Every listener takes each connection at once and decides on it before a
+//! byte is read: a connection that is not decided yet holds one of
+//! [`UNDECIDED`] slots and one of its peer's [`PER_PEER`] places (and of its
+//! IPv6 /64's [`PER_PREFIX`]), or it is closed. One peer that opens many
+//! connections and sends nothing so fills only its own places, not the
+//! port. A node's link gives both back once its hello is verified, so the
+//! links of the paired nodes never count against a peer.
+//!
+//! A peer is its address, but on loopback every local process has one (or
+//! any of 127.0.0.0/8 it binds): there a peer is the account whose socket it
+//! is, so another account's connections never take the owner's places. On
+//! Linux the kernel names the account ([`nerve_transport::peer`]); where it
+//! cannot, all loopback peers are one.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
 
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_rustls::TlsAcceptor;
 
 use nerve_proto::{CONNECT_PATH, NODE_HEADER, PAIR_CHECK_PATH, PAIR_PATH};
@@ -14,8 +29,16 @@ use nerve_transport::net::BoxIo;
 
 use crate::center::Center;
 
-/// Open connections per listener; more wait for a free slot.
-const MAX_CONNECTIONS: usize = 256;
+/// Connections per listener that are not decided yet: a request that is
+/// read or answered, a TLS handshake, a link before its hello is verified.
+/// Past it a new connection is closed at once.
+pub const UNDECIDED: usize = 256;
+/// Of those, from one address. A browser opens six at once for a page, and
+/// many nodes behind one router link one by one.
+pub const PER_PEER: usize = 16;
+/// Of those, from one IPv6 /64 (link-local addresses aside): a machine that
+/// gives itself many addresses there cannot take them all.
+pub const PER_PREFIX: usize = 64;
 /// The largest pairing request body.
 const PAIR_BODY: usize = 16 * 1024;
 
@@ -34,8 +57,160 @@ pub struct Server {
     /// rotation of the key (docs/dev/spec/protocol.md §4.10) changes it
     /// while the listener runs.
     tls: Option<Center>,
-    /// Open connections at most ([`MAX_CONNECTIONS`]).
+    /// Undecided connections at most ([`UNDECIDED`]).
     slots: usize,
+    /// How a loopback peer's account is found.
+    accounts: Accounts,
+}
+
+/// How [`Server::run`] tells loopback peers apart.
+#[derive(Debug, Clone, Copy)]
+enum Accounts {
+    /// By the account the kernel names.
+    #[cfg(target_os = "linux")]
+    Kernel(nerve_transport::peer::Lookup),
+    /// Not at all: every loopback peer is one.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    None,
+    /// By address, as any other peer: a test's second address is another
+    /// peer.
+    #[cfg(test)]
+    ByAddress,
+}
+
+/// Whom a place is counted for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Peer {
+    /// Another machine (or a local peer that is not on loopback).
+    Addr(IpAddr),
+    /// A loopback peer of this account.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Account(u32),
+    /// A loopback peer whose account is not known.
+    Local,
+}
+
+impl Peer {
+    /// The peer a connection from `peer` to `local` is counted as.
+    fn of(peer: SocketAddr, local: SocketAddr, accounts: Accounts) -> Peer {
+        let ip = peer.ip().to_canonical();
+        if !ip.is_loopback() {
+            return Peer::Addr(ip);
+        }
+        match accounts {
+            #[cfg(target_os = "linux")]
+            Accounts::Kernel(how) => nerve_transport::peer::account_of(peer, local, how)
+                .map_or(Peer::Local, Peer::Account),
+            #[cfg(test)]
+            Accounts::ByAddress => Peer::Addr(ip),
+            Accounts::None => {
+                let _ = local;
+                Peer::Local
+            }
+        }
+    }
+
+    /// The /64 it is counted in besides itself.
+    fn prefix(self) -> Option<IpAddr> {
+        match self {
+            Peer::Addr(ip) => prefix_of(ip),
+            _ => None,
+        }
+    }
+}
+
+/// The places taken now, by peer and by /64.
+#[derive(Default)]
+struct Places {
+    peers: HashMap<Peer, usize>,
+    prefixes: HashMap<IpAddr, usize>,
+}
+
+/// An undecided connection's slot and its peer's place, given back when it
+/// is dropped (or when the handler calls [`Admitted::decided`]).
+pub struct Admitted {
+    /// The peer's address.
+    pub peer: SocketAddr,
+    held: Option<(OwnedSemaphorePermit, Arc<Mutex<Places>>, Peer)>,
+}
+
+impl Admitted {
+    /// The connection is decided (a node's verified link): its slot and
+    /// its peer's place are free for others.
+    pub fn decided(&mut self) {
+        self.give_back();
+    }
+
+    fn give_back(&mut self) {
+        let Some((_permit, places, who)) = self.held.take() else {
+            return;
+        };
+        let mut p = places.lock().unwrap_or_else(|e| e.into_inner());
+        fn give<K: std::hash::Hash + Eq>(map: &mut HashMap<K, usize>, key: K) {
+            if let Some(n) = map.get_mut(&key) {
+                *n -= 1;
+                if *n == 0 {
+                    map.remove(&key);
+                }
+            }
+        }
+        give(&mut p.peers, who);
+        if let Some(prefix) = who.prefix() {
+            give(&mut p.prefixes, prefix);
+        }
+    }
+
+    /// One that holds nothing, for a test that calls a handler itself.
+    #[doc(hidden)]
+    pub fn for_test(peer: SocketAddr) -> Admitted {
+        Admitted { peer, held: None }
+    }
+}
+
+impl Drop for Admitted {
+    fn drop(&mut self) {
+        self.give_back();
+    }
+}
+
+/// The /64 an IPv6 address is counted in besides itself; none for IPv4,
+/// loopback and link-local addresses (their scope is not in the address, so
+/// one /64 there would be every link).
+fn prefix_of(ip: IpAddr) -> Option<IpAddr> {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) if !v6.is_loopback() && (v6.segments()[0] & 0xffc0) != 0xfe80 => {
+            let mut o = v6.octets();
+            o[8..].fill(0);
+            Some(IpAddr::V6(o.into()))
+        }
+        _ => None,
+    }
+}
+
+/// A slot and a place for a connection of `peer`, counted as `who`, if
+/// both are free.
+fn admit(
+    slots: &Arc<Semaphore>,
+    places: &Arc<Mutex<Places>>,
+    peer: SocketAddr,
+    who: Peer,
+) -> Option<Admitted> {
+    let prefix = who.prefix();
+    let mut p = places.lock().unwrap_or_else(|e| e.into_inner());
+    if p.peers.get(&who).copied().unwrap_or(0) >= PER_PEER
+        || prefix.is_some_and(|x| p.prefixes.get(&x).copied().unwrap_or(0) >= PER_PREFIX)
+    {
+        return None;
+    }
+    let permit = slots.clone().try_acquire_owned().ok()?;
+    *p.peers.entry(who).or_insert(0) += 1;
+    if let Some(x) = prefix {
+        *p.prefixes.entry(x).or_insert(0) += 1;
+    }
+    Some(Admitted {
+        peer,
+        held: Some((permit, places.clone(), who)),
+    })
 }
 
 impl Server {
@@ -59,17 +234,30 @@ impl Server {
             ));
         }
         let tls = (!plain).then(|| center.clone());
+        #[cfg(target_os = "linux")]
+        let accounts = Accounts::Kernel(nerve_transport::peer::Lookup::for_listener(local));
+        #[cfg(not(target_os = "linux"))]
+        let accounts = Accounts::None;
         Ok(Server {
             listener,
             tls,
-            slots: MAX_CONNECTIONS,
+            slots: UNDECIDED,
+            accounts,
         })
     }
 
-    /// Fewer open connections, so a test can fill them.
+    /// Fewer undecided connections, so a test can fill them.
     #[cfg(test)]
     fn with_slots(mut self, n: usize) -> Server {
         self.slots = n;
+        self
+    }
+
+    /// Loopback peers by address, so a test's second address is another
+    /// peer.
+    #[cfg(test)]
+    fn by_address(mut self) -> Server {
+        self.accounts = Accounts::ByAddress;
         self
     }
 
@@ -79,18 +267,26 @@ impl Server {
             .expect("a bound listener has an address")
     }
 
-    /// Accepts connections until the task is dropped.
+    /// The peer a connection `tcp` from `peer` is counted as. The kernel
+    /// knows the peer's socket by the address it connected to, which on a
+    /// listener bound to `0.0.0.0` or `[::]` is not the listener's own.
+    fn peer_of(&self, tcp: &tokio::net::TcpStream, peer: SocketAddr) -> Peer {
+        let local = tcp.local_addr().unwrap_or_else(|_| self.local_addr());
+        Peer::of(peer, local, self.accounts)
+    }
+
+    /// Accepts connections until the task is dropped. Each one is admitted
+    /// first ([`UNDECIDED`], [`PER_PEER`], [`PER_PREFIX`]) or closed at once;
+    /// the handler gets its slot with it, and may give it back early.
     pub async fn run<F, Fut>(self, handler: F)
     where
-        F: Fn(BoxIo, SocketAddr) -> Fut + Send + Sync + 'static,
+        F: Fn(BoxIo, Admitted) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let handler = Arc::new(handler);
         let slots = Arc::new(Semaphore::new(self.slots));
+        let places = Arc::new(Mutex::new(Places::default()));
         loop {
-            let Ok(permit) = slots.clone().acquire_owned().await else {
-                return;
-            };
             let (tcp, peer) = match self.listener.accept().await {
                 Ok(c) => c,
                 Err(e) => {
@@ -99,11 +295,15 @@ impl Server {
                     continue;
                 }
             };
+            let who = self.peer_of(&tcp, peer);
+            let Some(admitted) = admit(&slots, &places, peer, who) else {
+                tracing::debug!("closed a connection from {peer}: no free place for it");
+                continue;
+            };
             let _ = tcp.set_nodelay(true);
             let tls = self.tls.clone();
             let handler = handler.clone();
             tokio::spawn(async move {
-                let _permit = permit;
                 let io: BoxIo = match tls {
                     None => Box::new(tcp),
                     Some(center) => {
@@ -115,7 +315,7 @@ impl Server {
                         }
                     }
                 };
-                handler(io, peer).await;
+                handler(io, admitted).await;
             });
         }
     }
@@ -124,14 +324,14 @@ impl Server {
 /// Serves the node endpoints on `server`.
 pub async fn serve_nodes(center: Center, server: Server) {
     server
-        .run(move |io, _peer| {
+        .run(move |io, admitted| {
             let center = center.clone();
-            async move { node_conn(center, io).await }
+            async move { node_conn(center, io, admitted).await }
         })
         .await
 }
 
-async fn node_conn(center: Center, mut io: BoxIo) {
+async fn node_conn(center: Center, mut io: BoxIo, admitted: Admitted) {
     let req = match http::read_request(&mut io, PAIR_BODY).await {
         Ok(r) => r,
         Err(_) => {
@@ -148,14 +348,14 @@ async fn node_conn(center: Center, mut io: BoxIo) {
             let (status, body) = center.pair_check(&req.body);
             let _ = Response::json(status, &body).write(&mut io).await;
         }
-        ("GET", CONNECT_PATH) if req.is_upgrade() => connect(center, io, req).await,
+        ("GET", CONNECT_PATH) if req.is_upgrade() => connect(center, io, req, admitted).await,
         _ => {
             let _ = Response::text(404, "not found").write(&mut io).await;
         }
     }
 }
 
-async fn connect(center: Center, mut io: BoxIo, req: Request) {
+async fn connect(center: Center, mut io: BoxIo, req: Request, admitted: Admitted) {
     let node_id = req.header(NODE_HEADER).unwrap_or("").to_string();
     if !center.knows(&node_id) {
         // Anyone can send this, so it is detail; a node removed here and
@@ -179,7 +379,7 @@ async fn connect(center: Center, mut io: BoxIo, req: Request) {
         return;
     }
     match nerve_transport::ws::accept(io, &req, nerve_proto::limits::MESSAGE_BYTES as usize).await {
-        Ok(ws) => crate::link::run(center, ws, node_id).await,
+        Ok(ws) => crate::link::run(center, ws, node_id, admitted).await,
         Err(e) => center.log().record(
             nerve_transport::log::Level::Debug,
             None,
@@ -193,6 +393,182 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn center(dir: &std::path::Path) -> Center {
+        nerve_transport::init_crypto();
+        Center::open(crate::center::Options {
+            state_dir: dir.to_path_buf(),
+            name: None,
+            public_url: "http://127.0.0.1:7443".into(),
+            log: None,
+            log_level: None,
+        })
+        .unwrap()
+    }
+
+    /// One peer that opens more connections than the port has slots, and
+    /// sends nothing on them, holds only its own places: another peer's
+    /// pair check is answered at once, and the peer's extra connections are
+    /// closed at once instead of waiting. Before, it held the port shut.
+    #[tokio::test]
+    async fn one_peer_cannot_hold_the_node_port_shut() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = center(dir.path());
+        let server = Server::bind("127.0.0.1:0", &c, true)
+            .await
+            .unwrap()
+            .by_address();
+        let addr = server.local_addr();
+        let task = tokio::spawn(serve_nodes(c.clone(), server));
+        let mut idle = Vec::new();
+        for _ in 0..UNDECIDED + 8 {
+            idle.push(tokio::net::TcpStream::connect(addr).await.unwrap());
+        }
+        // Past its places, a connection of that peer is closed unread.
+        let mut last = idle.pop().unwrap();
+        let mut buf = [0u8; 1];
+        let n = tokio::time::timeout(Duration::from_secs(5), last.read(&mut buf))
+            .await
+            .expect("the extra connection was held open")
+            .unwrap_or(0);
+        assert_eq!(n, 0);
+        // Another address of this machine is another peer.
+        let other = tokio::net::TcpSocket::new_v4().unwrap();
+        other.bind("127.0.0.2:0".parse().unwrap()).unwrap();
+        let mut io = other.connect(addr).await.unwrap();
+        let body = r#"{"code":"nope"}"#;
+        io.write_all(
+            format!(
+                "POST {PAIR_CHECK_PATH} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut answer = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), io.read_to_end(&mut answer))
+            .await
+            .expect("the pair check was not answered")
+            .unwrap();
+        assert!(answer.starts_with(b"HTTP/1.1 200"), "{answer:?}");
+        drop(idle);
+        task.abort();
+    }
+
+    /// The places of an IPv4 peer, an IPv6 peer and its /64.
+    #[test]
+    fn places_are_by_address_and_by_64() {
+        let slots = Arc::new(Semaphore::new(UNDECIDED));
+        let places = Arc::new(Mutex::new(Places::default()));
+        let at = |s: &str| -> SocketAddr { s.parse().unwrap() };
+        let local = at("192.0.2.9:7443");
+        let admit = |slots: &Arc<Semaphore>, places: &Arc<Mutex<Places>>, peer: SocketAddr| {
+            admit(slots, places, peer, Peer::of(peer, local, Accounts::None))
+        };
+        let held: Vec<Admitted> = (0..PER_PEER)
+            .map(|_| admit(&slots, &places, at("192.0.2.1:1")).unwrap())
+            .collect();
+        assert!(admit(&slots, &places, at("192.0.2.1:2")).is_none());
+        // An IPv4 address that IPv6 carries is that address.
+        assert!(admit(&slots, &places, at("[::ffff:192.0.2.1]:3")).is_none());
+        assert!(admit(&slots, &places, at("192.0.2.2:1")).is_some());
+        // Many addresses of one /64 share its places; another /64 has its own.
+        let mut prefix = Vec::new();
+        for i in 0..PER_PREFIX {
+            prefix.push(
+                admit(
+                    &slots,
+                    &places,
+                    at(&format!("[2001:db8:1:2::{:x}]:1", i + 1)),
+                )
+                .unwrap(),
+            );
+        }
+        assert!(admit(&slots, &places, at("[2001:db8:1:2::ffff]:1")).is_none());
+        assert!(admit(&slots, &places, at("[2001:db8:1:3::1]:1")).is_some());
+        // A decided connection gives its place back.
+        let mut one = prefix.pop().unwrap();
+        one.decided();
+        assert!(admit(&slots, &places, at("[2001:db8:1:2::ffff]:1")).is_some());
+        drop((held, prefix, one));
+        let p = places.lock().unwrap();
+        assert!(p.peers.is_empty() && p.prefixes.is_empty());
+    }
+
+    /// On loopback a peer is its account: another account that fills its
+    /// places takes none of the owner's, and one account's connections from
+    /// many loopback addresses are counted together. Where the account is
+    /// not known, every loopback peer is one, whatever address it binds.
+    #[test]
+    fn loopback_peers_are_counted_by_account() {
+        let slots = Arc::new(Semaphore::new(UNDECIDED));
+        let places = Arc::new(Mutex::new(Places::default()));
+        let at = |s: &str| -> SocketAddr { s.parse().unwrap() };
+        let other: Vec<Admitted> = (0..PER_PEER)
+            .map(|i| {
+                let peer = at(&format!("127.0.0.{}:1", i + 2));
+                admit(&slots, &places, peer, Peer::Account(990)).unwrap()
+            })
+            .collect();
+        assert!(admit(&slots, &places, at("127.0.9.9:1"), Peer::Account(990)).is_none());
+        assert!(admit(&slots, &places, at("127.0.0.1:1"), Peer::Account(1000)).is_some());
+        let unknown = at("127.0.0.1:7443");
+        for ip in ["127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.3"] {
+            let peer = SocketAddr::new(ip.parse().unwrap(), 1);
+            assert_eq!(Peer::of(peer, unknown, Accounts::None), Peer::Local, "{ip}");
+        }
+        drop(other);
+    }
+
+    /// The kernel names the account of a real loopback peer, so this
+    /// test's connections from two loopback addresses share its places.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn one_account_is_one_peer_whatever_loopback_address_it_binds() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = center(dir.path());
+        let server = Server::bind("127.0.0.1:0", &c, true).await.unwrap();
+        let addr = server.local_addr();
+        let task = tokio::spawn(serve_nodes(c.clone(), server));
+        let from = |ip: &str| {
+            let s = tokio::net::TcpSocket::new_v4().unwrap();
+            s.bind(format!("{ip}:0").parse().unwrap()).unwrap();
+            s.connect(addr)
+        };
+        let mut idle = Vec::new();
+        for i in 0..PER_PEER {
+            idle.push(from(&format!("127.0.0.{}", i + 2)).await.unwrap());
+        }
+        let mut extra = from("127.0.1.1").await.unwrap();
+        let mut buf = [0u8; 1];
+        let n = tokio::time::timeout(Duration::from_secs(5), extra.read(&mut buf))
+            .await
+            .expect("another loopback address got more places")
+            .unwrap_or(0);
+        assert_eq!(n, 0);
+        drop(idle);
+        task.abort();
+    }
+
+    /// A listener bound to every address still names the account of a
+    /// loopback peer: the node port's default is `0.0.0.0`.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_listener_on_every_address_names_a_loopback_peers_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = center(dir.path());
+        let server = Server::bind("0.0.0.0:0", &c, false).await.unwrap();
+        let port = server.local_addr().port();
+        let client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let (tcp, peer) = server.listener.accept().await.unwrap();
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        assert_eq!(server.peer_of(&tcp, peer), Peer::Account(uid));
+        drop(client);
+    }
 
     /// A peer that asks for an answer and reads none of it gives its
     /// connection back after the write's timeout, so the next one is
@@ -217,7 +593,7 @@ mod tests {
         let addr = server.local_addr();
         // More than the kernel buffers of both ends hold.
         let big = Arc::new(vec![b'x'; 32 * 1024 * 1024]);
-        let task = tokio::spawn(server.run(move |mut io, _| {
+        let task = tokio::spawn(server.run(move |mut io, _admitted| {
             let big = big.clone();
             async move {
                 let Ok(req) = http::read_request(&mut io, 0).await else {

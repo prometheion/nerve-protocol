@@ -5,6 +5,7 @@ members = [
     "crates/nerve-transport",
     "crates/nerve-policy",
     "crates/nerve-sandbox",
+    "crates/nerve-service",
     "crates/nerve-node",
     "crates/nerve-node-desktop",
     "crates/nerve-center",
@@ -15,6 +16,9 @@ members = [
 version = "0.0.7"
 edition = "2024"
 repository = "https://github.com/prometheion/nerve-protocol"
+# The workspace is under the Apache License 2.0 (LICENSE); the desktop app
+# adds Slint's terms (crates/nerve-node-desktop/LICENSE.md).
+license = "Apache-2.0"
 rust-version = "1.88"
 
 [workspace.dependencies]
@@ -22,6 +26,7 @@ nerve-proto = { path = "crates/nerve-proto", version = "0.0.7" }
 nerve-transport = { path = "crates/nerve-transport", version = "0.0.7" }
 nerve-policy = { path = "crates/nerve-policy", version = "0.0.7" }
 nerve-sandbox = { path = "crates/nerve-sandbox", version = "0.0.7" }
+nerve-service = { path = "crates/nerve-service", version = "0.0.7" }
 nerve-node = { path = "crates/nerve-node", version = "0.0.7" }
 nerve-center = { path = "crates/nerve-center", version = "0.0.7" }
 

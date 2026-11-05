@@ -1,5 +1,5 @@
 //! Asking the owner for the passphrase of a backup file. Used by `backup` and
-//! `restore` of both programs (the center takes this module from here).
+//! `restore` of both programs.
 //!
 //! The passphrase comes from a terminal without echo, from the first line of
 //! a file (`--passphrase-file`), or, when stdin is not a terminal, from one

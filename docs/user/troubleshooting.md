@@ -40,7 +40,7 @@ names its reason. One the machine gave reads
 | `the command was not run: the access of nerve-run to … could not be taken off`, `nerve-run keeps its access to …, which it should have lost` (`status`, `folder rm`), **nerve-run keeps access it should have lost** (app) | The node could not take `nerve-run`'s ACL entry off a folder you removed, or could not read its record of them, so no command of `nerve-run` runs, for any pairing, and `uninstall` stops | See the reason in `status`; fix it (`getfacl`, `setfacl -x u:nerve-run <path>`), the node tries again before each command |
 | `commands cannot be confined on this machine while the node's keys are in the system keyring: …` | `folder` mode with `machine.secret_storage = "keyring"`, where a command could reach the keyring: a Linux node you run yourself (commands run as you). The node logs `folder mode runs no command: …` and `status` says so | `nerve-node config set machine.secret_storage file`, as the message says (Linux; the Windows service keeps its keys in files). See [keys](config.md#where-the-node-keeps-its-keys) |
 | `... keeps a grant for this center's commands that its folders no longer give` | Windows: the node could not take a removed folder's grant off, or a granted folder was moved or renamed and the node could not take its entry off where it is now (the message names its old path) | Check that you may change that folder's permissions. For a moved or renamed folder, the node's log names the reason, often hard links: see the row on hard links below (a built Rust project needs `cargo clean`). The node tries again before each command |
-| `the node cannot tell which folders carry grants for the commands` | Windows: the record of the folder grants (`grants.json` in the state folder) cannot be read, so no `folder` command runs | See the reason. If the file is damaged: `icacls <folder>` lists a folder's grants as `S-1-15-2-…` entries, `icacls <folder> /remove *S-1-15-2-…` takes one off. Once none is left, delete the file |
+| `the node cannot tell which folders carry grants for the commands` | Windows: the record of the folder grants (`grants.json` in the state folder) cannot be read, so no `folder` command runs | See the reason. If the file is damaged, or is a list (written by a version before the record had a format): `icacls <folder>` lists a folder's grants as `S-1-15-2-…` entries, `icacls <folder> /remove *S-1-15-2-…` takes one off. Once none is left, delete the file |
 | `the node puts no grant on it, since …` | Windows: a folder granted inside another folder with `w` is now a junction or link to elsewhere, a file with a second name, or has permissions that do not inherit ([modes](modes.md#what-a-command-can-reach-in-folder-mode-windows)) | Put a plain folder there again (remove the junction; `icacls <path> /reset` makes its permissions inherit), or take the folder off the pairing. The node grants it at its next sync |
 | `folder … left out of the command's sandbox: it was added at its own place and its path leads to … now` | The folder was added with `folder add`, and a link or junction now stands in its path (a command with `w` on the folder above may have put it there). The node keeps the folder out until the path leads to the place you added again ([modes](modes.md#a-folder-keeps-the-place-you-added)) | Look at the link (`ls -l`, `dir /AL`). If you did not mean it, remove it. If the new place is the one you want, `nerve-node folder rm <path>` (the path `folder ls` shows; the one you gave to `folder add` too, except on the installed node when it went through a link) and `folder add` the place the path leads to now |
 | `the node does not change the permissions of …, since … below it has … names (hard links)`, or `… below it has … names (hard links), and the change would reach them all; it stopped there` | Windows: a file below a folder the commands may write in has a second name, and the change of the folder's permissions would reach it under every name ([modes](modes.md#what-a-command-can-reach-in-folder-mode-windows)) | `fsutil hardlink list <file>` shows its names. Links between names in `target` folders of the same folder, under the same grants, pass where no pairing has `w` without `r` on that folder or one above or inside it, except in a sync after a granted folder was moved or renamed: a built Rust project you renamed or moved needs `cargo clean` first. Others do not pass. Build tools make such links: pnpm's `node_modules` to its store, uv's `.venv` to its cache, a local `git clone`. Remove them (delete `node_modules` or `.venv`) or keep them out of the folder (pnpm `package-import-method=copy`, `UV_LINK_MODE=copy`, `git clone --no-hardlinks`) ([modes](modes.md#what-a-command-can-reach-in-folder-mode-windows)). A refused removal stops the pairing's commands until then. The node tries again before each command |
@@ -147,6 +147,7 @@ calls.
 | `another node already has this name` | Two machines have the same name | `nerve-node config set node.name <other>`, then pair again |
 | `this name is a node's id` | The machine's name is a paired machine's id (or its own), which the agent could mistake for that machine | `nerve-node config set node.name <other>`, then pair again |
 | `another node is named like this node's id` | A paired machine's name is this machine's id | Rename that machine in the web UI, then pair again |
+| `the center cannot write its state file: …` | The center's disk is full, or its state folder is read-only | Free the disk or fix the folder, then pair again with the same link: the code is still valid |
 | `this center is paired already as …` | The machine already has a pairing with this center | Use it, or `nerve-node center rm` it first |
 | `a center named … is paired already` | You already use this local name | Pass `--name <other>` |
 | A link or TLS error | The address in the link does not reach the center, or the center's certificate changed | Check `--public-url` and the port. Make a new link |
@@ -175,6 +176,11 @@ Through a [relay](relay.md), `status` names what the relay answered:
 | `the proxy refused the tunnel to …: 503 …` | The relay is off, locked, carries as many tunnels as it may (all of them, or this node's), or this node opened as many as it may in a minute | On the relay, `nerve-node relay ls` and `status`, and its log: the node sees only `503`, the relay's log says which limit |
 | `the proxy refused the tunnel to …: 502 …` | The relay cannot reach the center, or the relay's own proxy or relay refused it (in a chain, the outer relay's limits for the inner one) | Check the relay's own link and its log; in a chain, give the inner relay limits of its own on the outer relay with `relay set-limits` ([relay](relay.md#limits)) |
 
+`nerve-node center ls` says ``handshake failed: invalid params: missing field
+`features` `` when the center is older than the node: update the center
+first. The center's log says ``the handshake failed: the hello has no `resume` ``
+(or `features`) for a node older than 0.0.6: update the node.
+
 If `status` says `daemon: not running`, start `nerve-node run`. On a node
 [installed as a service](service.md), start the service instead:
 `sudo systemctl start nerve-node`. A node started there by hand lacks the
@@ -192,6 +198,7 @@ the app restarts it.
 | `refusing to run as root; set machine.allow_root = true to allow it` | Run as a normal user, or set `machine.allow_root` (Linux; on Windows the node runs only as its service) |
 | `node.toml is refused: its MAC does not match …` | Look at the file, then `nerve-node config accept`. See [config](config.md) |
 | `node.toml is refused: its version … is older than the last this node accepted …` | An earlier `node.toml` is back, from a backup or a sync tool. Look at it, then `nerve-node config accept`. See [config](config.md#an-older-file-put-back) |
+| `…/node.toml: format 2: a newer version of Nerve wrote this file …` | A newer `nerve-node` wrote the file (the same for `acl.json` and `grants.json` in the state folder). Run that version again, or restore a backup of this version |
 | `… config.version holds no version number` | The record of the last version in the state folder is damaged. Delete it, or take the file with `nerve-node config accept`. See [config](config.md#an-older-file-put-back) |
 | `machine.secret_storage is "keyring", but the system keyring cannot be reached …` | The keys are in a keyring that does not answer. Start it, or run `nerve-node setup`, which offers to install one on a Linux without a desktop. See [keys](config.md#where-the-node-keeps-its-keys) |
 | `… this running node found no keyring and does not look again until it is restarted …` | The node asked for a keyring before one answered. Restart the node (`nerve-node service restart`), then change the setting again. `setup` run without sudo stops here and asks for that restart, then for `nerve-node setup` again; `sudo nerve-node setup` restarts the installed node itself |
@@ -209,10 +216,19 @@ from the source `nerve-node` under **Windows Logs > Application**, and
 | Message | Cause | Fix |
 |---|---|---|
 | `another nerve-center already runs the center in …` | Another center uses this state folder, and this one is not `--mcp stdio` | Use another `--state-dir`, or stop the other center |
-| `the web UI at … is beyond loopback and logs in with a harness token, but there is none` | `--ui` is not on loopback | Set `--harness-token`, or use `--ui 127.0.0.1:7480` |
-| `… always needs a login; drop --ui-no-login …` | `--ui-no-login` with a UI beyond loopback | Drop `--ui-no-login` |
+| `…/state.json is not valid: format 2: a newer version of Nerve wrote this file …` | A newer `nerve-center` wrote it | Run that version again, or restore a backup of this version |
+| ``…/state.json is not valid: unknown field `…` …`` | A newer `nerve-center` added the field, or it was edited by hand | Run that version again, or remove the field |
 | The MCP endpoint refuses every client | No harness token yet | Set `--harness-token`, or make one in the web UI |
 | ``…/state.json is not valid: unknown variant `d1-3b` …`` | The center was last run before d1-2B replaced d1-3B as the local model | In `state.json` change `"d1-3b"` to `"d1-2b"`; with the local model also set `"threshold"` to 0.75 and `"timeout_ms"` to 12000. Then start the center and install the model again on the Action checker page |
+
+## The center's web UI does not let you in
+
+| Message | Cause | Fix |
+|---|---|---|
+| `Wrong owner token.` | The token is not the one in `owner-token` in the center's state folder. A harness token never logs in | `nerve-center owner-token` prints it (`sudo nerve-center --state-dir /var/lib/nerve-center owner-token` for the service) |
+| `This owner token is also a harness token, so it is refused. …` at the login, or at the start `the owner token in … is also a harness token; …` | The `owner-token` file holds the same word as a harness token, so a leaked harness token would open the web UI | `nerve-center owner-token --new` writes a new owner token |
+| `… holds no owner token; …` | The file `owner-token` is empty or holds more than one word | `nerve-center owner-token --new` writes a new one |
+| `no center has run in … yet …` | `owner-token` was run on a state folder without a center, often without `--state-dir` | Give the center's `--state-dir` |
 
 ## The node's web UI does not answer
 

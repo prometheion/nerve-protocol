@@ -109,22 +109,144 @@ fn stdio_and_a_second_instance_that_attaches() {
     assert!(owner.wait().unwrap().success());
 }
 
+/// The first start says the owner token on stderr at once, whatever the
+/// level, and where it is kept; a later start says nothing of it.
 #[test]
-fn a_ui_beyond_loopback_without_a_harness_token_does_not_start() {
+fn the_first_start_says_the_owner_token_on_stderr() {
     let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_nerve-center"))
-        .env_clear()
-        .env("NERVE_STATE_DIR", dir.path())
-        .env("NERVE_LISTEN", "127.0.0.1:0")
-        .env("NERVE_PLAIN_LOOPBACK", "true")
-        .env("NERVE_UI", "0.0.0.0:0")
-        .env("NERVE_LOG", "warn")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("NERVE_HARNESS_TOKEN"), "{err}");
+    let run = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_nerve-center"))
+            .env_clear()
+            .env("NERVE_STATE_DIR", dir.path())
+            .env("NERVE_LISTEN", "127.0.0.1:0")
+            .env("NERVE_PLAIN_LOOPBACK", "true")
+            .env("NERVE_UI", "127.0.0.1:0")
+            .env("NERVE_LOG", "warn")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let err = run();
+    let token = nerve_center::owner::read(dir.path()).unwrap().unwrap();
+    assert!(err.contains(&format!("\n{token}\n")), "{err}");
+    let file = nerve_center::owner::path(dir.path());
+    assert!(err.contains(&file.display().to_string()), "{err}");
+    let err = run();
+    assert!(!err.contains(&token), "{err}");
+}
+
+/// Under systemd stderr goes to the journal, which more accounts read than
+/// the token file: there the first start keeps the token off stderr.
+/// systemd names the journal's stream in `JOURNAL_STREAM`, and the variable
+/// is also inherited by what a user service starts (a terminal): there
+/// stderr is not the journal, and the token is shown.
+#[cfg(unix)]
+#[test]
+fn under_systemd_the_owner_token_stays_off_stderr() {
+    use std::os::unix::fs::MetadataExt;
+    let start = |journal: Option<bool>| {
+        let dir = tempfile::tempdir().unwrap();
+        let err = std::fs::File::create(dir.path().join("stderr")).unwrap();
+        let meta = err.metadata().unwrap();
+        let stream = match journal {
+            Some(true) => format!("{}:{}", meta.dev(), meta.ino()),
+            Some(false) => format!("{}:{}", meta.dev(), meta.ino() + 1),
+            None => String::new(),
+        };
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_nerve-center"));
+        cmd.env_clear()
+            .env("NERVE_STATE_DIR", &state)
+            .env("NERVE_LISTEN", "127.0.0.1:0")
+            .env("NERVE_PLAIN_LOOPBACK", "true")
+            .env("NERVE_UI", "127.0.0.1:0")
+            .env("NERVE_LOG", "info")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(err);
+        if journal.is_some() {
+            cmd.env("JOURNAL_STREAM", stream).env("INVOCATION_ID", "x");
+        }
+        assert!(cmd.status().unwrap().success());
+        let token = nerve_center::owner::read(&state).unwrap().unwrap();
+        let err = std::fs::read_to_string(dir.path().join("stderr")).unwrap();
+        err.contains(&token)
+    };
+    assert!(!start(Some(true)), "the token went to the journal");
+    assert!(start(Some(false)), "a terminal under a user service");
+    assert!(start(None), "no systemd");
+}
+
+/// A token file that holds no token stops a center with a web UI, and only
+/// warns one without.
+#[test]
+fn a_broken_owner_token_stops_only_a_center_with_a_web_ui() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(nerve_center::owner::path(dir.path()), "short").unwrap();
+    let run = |ui: &str| {
+        Command::new(env!("CARGO_BIN_EXE_nerve-center"))
+            .env_clear()
+            .env("NERVE_STATE_DIR", dir.path())
+            .env("NERVE_LISTEN", "127.0.0.1:0")
+            .env("NERVE_PLAIN_LOOPBACK", "true")
+            .env("NERVE_UI", ui)
+            .env("NERVE_LOG", "warn")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let off = run("off");
+    assert!(
+        off.status.success(),
+        "{}",
+        String::from_utf8_lossy(&off.stderr)
+    );
+    assert!(String::from_utf8_lossy(&off.stderr).contains("owner-token --new"));
+    assert!(!run("127.0.0.1:0").status.success());
+    assert_eq!(
+        std::fs::read_to_string(nerve_center::owner::path(dir.path())).unwrap(),
+        "short"
+    );
+}
+
+/// An owner token that is also the harness token of the settings stops a
+/// center with a web UI: one secret for both would let the agent's own token
+/// into the UI (review round 7 of the center's sign-in).
+#[test]
+fn an_owner_token_that_is_a_harness_token_stops_a_center_with_a_web_ui() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared = "nrv_shared-by-both-by-mistake";
+    std::fs::write(nerve_center::owner::path(dir.path()), shared).unwrap();
+    let run = |ui: &str, harness: &str| {
+        Command::new(env!("CARGO_BIN_EXE_nerve-center"))
+            .env_clear()
+            .env("NERVE_STATE_DIR", dir.path())
+            .env("NERVE_LISTEN", "127.0.0.1:0")
+            .env("NERVE_PLAIN_LOOPBACK", "true")
+            .env("NERVE_UI", ui)
+            .env("NERVE_HARNESS_TOKEN", harness)
+            .env("NERVE_LOG", "warn")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let refused = run("127.0.0.1:0", shared);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("also a harness token"));
+    // A harness token of its own, or no web UI, starts.
+    assert!(
+        run("127.0.0.1:0", "nrv_another-one-entirely")
+            .status
+            .success()
+    );
+    assert!(run("off", shared).status.success());
+    assert_eq!(
+        std::fs::read_to_string(nerve_center::owner::path(dir.path())).unwrap(),
+        shared
+    );
 }
 
 /// Starts a center with the level in `NERVE_LOG`, lets one harness session
@@ -170,7 +292,9 @@ fn the_log_goes_to_stderr_and_the_state_folder_and_follows_the_level() {
     let err = one_session(dir.path(), "info");
     let file = lines(dir.path());
     let msgs: Vec<&str> = file.iter().map(|e| e["msg"].as_str().unwrap()).collect();
-    assert!(msgs[0].starts_with("nerve-center "), "{msgs:?}");
+    // The first start makes the owner token and says where it is.
+    assert!(msgs[0].starts_with("made the owner token"), "{msgs:?}");
+    assert!(msgs[1].starts_with("nerve-center "), "{msgs:?}");
     assert!(
         msgs.iter()
             .any(|m| m.starts_with("a harness session started over stdio"))

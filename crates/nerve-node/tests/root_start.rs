@@ -10,6 +10,9 @@
 
 #![cfg(target_os = "linux")]
 
+#[path = "common/ns.rs"]
+mod ns;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -301,14 +304,13 @@ fn root_starts_in_a_folder_only_its_owner_may_enter() {
             );
             return;
         }
-        let status = Command::new("unshare")
-            .args(unshare)
-            .arg(std::env::current_exe().unwrap())
-            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
-            .env("NERVE_TEST_IN_USERNS", "1")
-            .status()
-            .unwrap();
-        assert!(status.success(), "in the namespace: {status}");
+        ns::run_saying_skips(
+            Command::new("unshare")
+                .args(unshare)
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+                .env("NERVE_TEST_IN_USERNS", "1"),
+        );
         return;
     }
     // The owner's closed home, and a folder in it with an odd name, both

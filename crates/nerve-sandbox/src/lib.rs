@@ -4047,7 +4047,7 @@ mod tests {
     #[test]
     fn landlock_confines_writes() {
         if landlock_rules::abi_version().is_none() {
-            eprintln!("no Landlock here; skipped");
+            eprintln!("skipped: no Landlock here");
             return;
         }
         let tmp = std::env::temp_dir();
@@ -4128,7 +4128,7 @@ mod tests {
     #[test]
     fn landlock_write_without_read_and_execute_without_read() {
         if landlock_rules::abi_version().is_none() {
-            eprintln!("no Landlock here; skipped");
+            eprintln!("skipped: no Landlock here");
             return;
         }
         let tmp = std::env::temp_dir();

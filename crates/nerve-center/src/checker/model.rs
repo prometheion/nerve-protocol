@@ -10,6 +10,7 @@
 //! `state`, so a call cannot rephrase what is asked.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -31,6 +32,10 @@ pub struct Endpoint {
     /// timeout, so a call it cannot read in time is not sent. An endpoint
     /// has none, as the center does not know its machine.
     pub budget: Option<Arc<ReadBudget>>,
+    /// For the center's own local server on Unix: the socket it listens on,
+    /// in the state folder, in place of `url`'s address (which then only
+    /// names the `Host`).
+    pub socket: Option<PathBuf>,
 }
 
 impl Endpoint {
@@ -46,6 +51,7 @@ impl Endpoint {
             token: token.filter(|t| !t.is_empty()),
             model: model.filter(|m| !m.is_empty()),
             budget: None,
+            socket: None,
         })
     }
 }
@@ -139,6 +145,12 @@ struct Flights {
     /// too: one that ends the process has the same effect as a read that
     /// does (review T6 of #178).
     counting: usize,
+    /// Calls go to the server only once the supervisor has checked that the
+    /// process answering is the one it started ([`ReadBudget::vet_calls`]):
+    /// on a port, where another process may answer.
+    vet: bool,
+    /// This process was checked to be the server's own.
+    vetted: bool,
 }
 
 impl Flights {
@@ -171,6 +183,28 @@ impl ReadBudget {
         s.started += 1;
         s.process += 1;
         s.ready = false;
+        s.vetted = false;
+    }
+
+    /// Calls are held back from now on until each process is
+    /// [`vetted`](Self::vetted): the server listens on a port, where a
+    /// process that took it after a crash would be sent the key and the
+    /// text of every call the window of a restart lets through.
+    pub(super) fn vet_calls(&self) {
+        self.state.lock().unwrap().vet = true;
+    }
+
+    /// The process answering is the server's own (it refuses a key it was
+    /// not given, and said it listens): calls may be sent to it.
+    pub(super) fn vetted(&self) {
+        self.state.lock().unwrap().vetted = true;
+    }
+
+    /// Whether a call may be sent: always, but on a port it has to wait for
+    /// the current process to be [`vetted`](Self::vetted).
+    fn may_send(&self) -> bool {
+        let s = self.state.lock().unwrap();
+        !s.vet || s.vetted
     }
 
     /// Whether the server went away while it read a call, and its
@@ -201,6 +235,7 @@ impl ReadBudget {
     pub(super) fn ended(&self) {
         let mut s = self.state.lock().unwrap();
         s.ready = false;
+        s.vetted = false;
         if self.reading() || s.counting > 0 {
             s.mark();
         }
@@ -214,6 +249,7 @@ impl ReadBudget {
     /// (review T3 and T4 of #178).
     pub(super) fn ended_before_ready(&self) {
         let mut s = self.state.lock().unwrap();
+        s.vetted = false;
         if self.reading() || s.counting > 0 {
             s.mark();
         } else if s.marked_in < s.process {
@@ -239,7 +275,9 @@ impl ReadBudget {
     /// off meets a model that is down, not one that failed (review T6 of
     /// #178). A call in it marks itself.
     pub(super) fn stopped(&self) {
-        self.state.lock().unwrap().ready = false;
+        let mut s = self.state.lock().unwrap();
+        s.ready = false;
+        s.vetted = false;
     }
 
     /// A count is in flight until the returned guard drops.
@@ -646,6 +684,20 @@ async fn ask_local(
     timeout: Duration,
     timeout_ms: u64,
 ) -> Result<f64, ModelError> {
+    // On a port nothing is sent, not even the count, before the supervisor
+    // has checked who answers: the window of a restart would otherwise hand
+    // the key and the call's text to whatever took the port.
+    if !budget.may_send() {
+        let why = "the new server is not known to be the center's own yet, so nothing is sent"
+            .to_string();
+        return Err(if budget.died_on_call() {
+            ModelError::Lost(format!(
+                "the model ended while it read an earlier call and is starting again ({why})"
+            ))
+        } else {
+            ModelError::Unreachable(why)
+        });
+    }
     // The timeout covers the wait for the slot as well as the read.
     let deadline = tokio::time::Instant::now() + timeout;
     // The count is also the probe of a server marked as ended on a call: one
@@ -709,6 +761,19 @@ async fn ask_local(
             slot
         }
     };
+    // A call that held the slot, or one answered while this call was
+    // counted, may have ended the server: it marks the process before it
+    // frees the slot, so a call woken by that end finds the mark. It is
+    // compared with the marks from before the count, not from after it: a
+    // mark set while the count was in flight is one this call has to see
+    // too. Whatever took the old port meanwhile is sent nothing, not the
+    // key and not the text; this is the gate at the top for a call that was
+    // already past it.
+    if budget.marks() != marks || !budget.may_send() {
+        return Err(ModelError::Lost(
+            "the model ended while it read an earlier call and is starting again".into(),
+        ));
+    }
     let (done, answer) = tokio::sync::oneshot::channel();
     tokio::spawn(read_alone(
         endpoint.clone(),
@@ -848,14 +913,7 @@ async fn request(
     max_body: usize,
 ) -> Result<Value, ModelError> {
     let url = &endpoint.url;
-    let proxy = if url.tls {
-        nerve_transport::net::Proxy::from_env(&url.host).map_err(ModelError::Unreachable)?
-    } else {
-        None
-    };
-    let mut io = nerve_transport::net::open(url, None, proxy.as_ref())
-        .await
-        .map_err(ModelError::Unreachable)?;
+    let mut io = connect(endpoint).await.map_err(ModelError::Unreachable)?;
     let path = format!("{}{path}", url.base);
     let req = request_bytes(&url.authority(), &path, endpoint.token.as_deref(), body);
     use tokio::io::AsyncWriteExt;
@@ -889,6 +947,68 @@ async fn request(
         )),
         s => Err(ModelError::Bad(format!("HTTP {s}"))),
     }
+}
+
+/// Opens a connection to the endpoint: its socket, or its address.
+async fn connect(endpoint: &Endpoint) -> Result<nerve_transport::net::BoxIo, String> {
+    #[cfg(unix)]
+    if let Some(p) = &endpoint.socket {
+        let s = tokio::net::UnixStream::connect(p)
+            .await
+            .map_err(|e| format!("{}: {e}", p.display()))?;
+        return Ok(Box::new(s));
+    }
+    let url = &endpoint.url;
+    let proxy = if url.tls {
+        nerve_transport::net::Proxy::from_env(&url.host)?
+    } else {
+        None
+    };
+    nerve_transport::net::open(url, None, proxy.as_ref()).await
+}
+
+/// `GET /v1/models`, with `token` as the bearer token when given.
+async fn get_models(
+    endpoint: &Endpoint,
+    token: Option<&str>,
+) -> Result<nerve_transport::http::ClientResponse, ModelError> {
+    let url = &endpoint.url;
+    let mut io = connect(endpoint).await.map_err(ModelError::Unreachable)?;
+    let auth = token
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let req = format!(
+        "GET {}/v1/models HTTP/1.1\r\nHost: {}\r\nAccept: */*\r\n{auth}Connection: close\r\nUser-Agent: nerve/{}\r\n\r\n",
+        url.base,
+        url.authority(),
+        env!("CARGO_PKG_VERSION")
+    );
+    use tokio::io::AsyncWriteExt;
+    io.write_all(req.as_bytes())
+        .await
+        .map_err(|e| ModelError::Unreachable(e.to_string()))?;
+    nerve_transport::http::read_client_response(
+        &mut io,
+        MAX_BODY,
+        nerve_transport::http::HEAD_TIMEOUT,
+    )
+    .await
+    .map_err(ModelError::Unreachable)
+}
+
+/// Whether the server at `endpoint` refuses `/v1/models` to a token it was
+/// not given: the center's own server, started with a key of its own, does.
+/// One that answers anyone is not that server, but a process that took its
+/// port. A server that is still loading (503) says neither yet.
+pub async fn refuses_other_keys(endpoint: &Endpoint) -> Result<bool, ModelError> {
+    let other = nerve_transport::keys::random_token(32);
+    let resp = get_models(endpoint, Some(&other)).await?;
+    if resp.status == 503 {
+        return Err(ModelError::Unreachable(
+            "the server is still loading".into(),
+        ));
+    }
+    Ok(resp.status == 401)
 }
 
 /// The HTTP/1.1 request text, with the bearer token when there is one.
@@ -926,19 +1046,7 @@ fn parse_noul(v: &Value) -> Result<f64, ModelError> {
 /// (`architecture.output_modalities` contains `"decisions"`). Used before the
 /// center trusts a local or endpoint model.
 pub async fn is_decision_model(endpoint: &Endpoint) -> Result<bool, ModelError> {
-    let url = &endpoint.url;
-    let proxy = if url.tls {
-        nerve_transport::net::Proxy::from_env(&url.host).map_err(ModelError::Unreachable)?
-    } else {
-        None
-    };
-    let mut io = nerve_transport::net::open(url, None, proxy.as_ref())
-        .await
-        .map_err(ModelError::Unreachable)?;
-    let target = format!("{}/v1/models", url.base);
-    let resp = nerve_transport::http::get(&mut io, &url.authority(), &target, MAX_BODY)
-        .await
-        .map_err(ModelError::Unreachable)?;
+    let resp = get_models(endpoint, endpoint.token.as_deref()).await?;
     if resp.status != 200 {
         return Err(ModelError::Bad(format!(
             "/v1/models answered HTTP {}",
@@ -1613,6 +1721,109 @@ mod tests {
         let _ = ask(&ep, &with_timeout(2000), json!({})).await.unwrap();
         assert_eq!(asked.load(Ordering::SeqCst), 1);
         assert!(budget.died_on_call());
+    }
+
+    /// On a port nothing is sent to a process the supervisor has not checked
+    /// is the server's own: not the count, not the call. The window after an
+    /// end on a call is refused as lost without a connection, and a process
+    /// that ends loses the check again.
+    #[tokio::test]
+    async fn on_a_port_a_call_waits_for_the_process_to_be_vetted() {
+        let budget = Arc::new(linear(12_288, 0.1));
+        let (ep, asked) = fake::server(100, Duration::ZERO);
+        let ep = Endpoint {
+            budget: Some(budget.clone()),
+            ..ep
+        };
+        budget.vet_calls();
+        budget.restart();
+        budget.die_on_call();
+        let cfg = with_timeout(2000);
+        let e = ask(&ep, &cfg, json!({})).await.unwrap_err();
+        assert!(matches!(e, ModelError::Lost(_)), "{e}");
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+        // Unmarked, it is a server that is down.
+        budget.settled();
+        let e = ask(&ep, &cfg, json!({})).await.unwrap_err();
+        assert!(matches!(e, ModelError::Unreachable(_)), "{e}");
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+        budget.vetted();
+        ask(&ep, &cfg, json!({})).await.expect("vetted: sent");
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        // The process ends: the next one is checked again.
+        budget.ended();
+        let e = ask(&ep, &cfg, json!({})).await.unwrap_err();
+        assert!(matches!(e, ModelError::Unreachable(_)), "{e}");
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        // On a socket nothing waits.
+        let socket = Arc::new(linear(12_288, 0.1));
+        let (ep, asked) = fake::server(100, Duration::ZERO);
+        let ep = Endpoint {
+            budget: Some(socket.clone()),
+            ..ep
+        };
+        socket.restart();
+        ask(&ep, &cfg, json!({})).await.expect("sent");
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+    }
+
+    /// A call that waits for the slot behind the one that ends the server
+    /// is sent nothing once it has it: the end is marked before the slot is
+    /// free, and whatever took the old port meanwhile sees neither the key
+    /// nor the text (review round 5 of the center's sign-in).
+    #[tokio::test]
+    async fn a_call_waiting_for_the_slot_is_not_sent_once_the_server_ended_on_the_call_before() {
+        let budget = Arc::new(linear(12_288, 0.1));
+        let (ep, asked) = fake::server(100, Duration::ZERO);
+        let ep = Endpoint {
+            budget: Some(budget.clone()),
+            ..ep
+        };
+        budget.vet_calls();
+        budget.restart();
+        budget.vetted();
+        budget.became_ready();
+        let reading = budget.hold_slot();
+        let cfg = with_timeout(5000);
+        let (waiting, ()) = tokio::join!(ask(&ep, &cfg, json!({"command": "second"})), async {
+            // The count has been answered and the call waits for the slot.
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            // The call in the server lost its connection: the mark first,
+            // then the slot, as `read_alone` does it.
+            budget.die_on_call();
+            drop(reading);
+        });
+        let e = waiting.unwrap_err();
+        assert!(matches!(e, ModelError::Lost(_)), "{e}");
+        assert_eq!(asked.load(Ordering::SeqCst), 0, "nothing was sent");
+    }
+
+    /// A call whose count is answered while the server ends on another call
+    /// is sent nothing, though the slot is free by the time it asks for it:
+    /// the mark that came during its own count counts too (review round 6 of
+    /// the center's sign-in).
+    #[tokio::test]
+    async fn a_call_is_not_sent_once_the_server_ended_on_a_call_during_its_count() {
+        let budget = Arc::new(linear(12_288, 0.1));
+        let (ep, asked) = fake::server_counting_slowly(100, Duration::from_millis(500));
+        let ep = Endpoint {
+            budget: Some(budget.clone()),
+            ..ep
+        };
+        budget.vet_calls();
+        budget.restart();
+        budget.vetted();
+        budget.became_ready();
+        let cfg = with_timeout(5000);
+        let (second, ()) = tokio::join!(ask(&ep, &cfg, json!({"command": "second"})), async {
+            // The count is in flight: another call, which has already freed
+            // the slot, marks the process as its connection ends.
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            budget.die_on_call();
+        });
+        let e = second.unwrap_err();
+        assert!(matches!(e, ModelError::Lost(_)), "{e}");
+        assert_eq!(asked.load(Ordering::SeqCst), 0, "nothing was sent");
     }
 
     /// A count clears only a mark that was there when it began, and only
