@@ -1,4 +1,5 @@
-//! Writing state files: atomically, and readable by the owner only.
+//! Writing state files: atomically, and readable by the owner only; and the
+//! format they are in.
 
 use std::io::Write;
 use std::path::Path;
@@ -102,9 +103,83 @@ pub fn write_program(path: &Path, text: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The format of a file the node or the center keeps for itself (`format`
+/// in `node.toml`, `state.json`, `acl.json`, `grants.json`): it counts the
+/// changes an earlier version cannot read. A file without it is at format
+/// 1, the first. Not the `version` of `node.toml`, which counts its saves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Format(pub u64);
+
+impl Format {
+    /// The format this version reads and writes, the same for every file
+    /// so far.
+    pub const CURRENT: Format = Format(1);
+
+    /// Refuses a format this version does not read: a higher one comes from
+    /// a newer version, and reading it could drop what that version keeps.
+    pub fn check(self) -> Result<(), String> {
+        let (n, current) = (self.0, Format::CURRENT.0);
+        match n {
+            n if n == current => Ok(()),
+            n if n > current => Err(format!(
+                "format {n}: a newer version of Nerve wrote this file; this version reads format {current}"
+            )),
+            n => Err(format!(
+                "format {n}: not a format of this file; this version reads format {current}"
+            )),
+        }
+    }
+
+    /// The format a JSON file names, read before its typed parse, so that a
+    /// file of a newer version is refused for its format and not for a
+    /// field this version does not know. A file this cannot read (not JSON,
+    /// not an object, a `format` that is no number) reads as format 1: its
+    /// typed parse says what is wrong.
+    pub fn of_json(bytes: &[u8]) -> Format {
+        #[derive(serde::Deserialize)]
+        struct Peek {
+            #[serde(default)]
+            format: Format,
+        }
+        serde_json::from_slice::<Peek>(bytes)
+            .map(|p| p.format)
+            .unwrap_or_default()
+    }
+}
+
+impl Default for Format {
+    fn default() -> Format {
+        Format(1)
+    }
+}
+
+impl std::fmt::Display for Format {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Format 1 is read, and a file without one is at format 1; a higher
+    /// one is refused as a newer version's, also when the file has fields
+    /// this version does not know.
+    #[test]
+    fn a_newer_format_is_refused_and_none_is_format_one() {
+        assert_eq!(Format::default(), Format::CURRENT);
+        assert_eq!(Format::of_json(br#"{"a": 1}"#), Format(1));
+        assert_eq!(Format::of_json(br#"{"format": 1}"#), Format(1));
+        assert_eq!(Format::of_json(br#"{"format": 2, "new": [1]}"#), Format(2));
+        assert_eq!(Format::of_json(b"[1, 2]"), Format(1));
+        assert_eq!(Format::of_json(b"not json"), Format(1));
+        assert!(Format(1).check().is_ok());
+        let e = Format(2).check().unwrap_err();
+        assert!(e.contains("format 2") && e.contains("newer version"), "{e}");
+        assert!(Format(0).check().unwrap_err().contains("format 0"));
+    }
 
     /// A program open for writing elsewhere a moment longer than its start
     /// takes runs once it is closed; another error is given at once.

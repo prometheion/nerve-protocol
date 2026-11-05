@@ -74,7 +74,7 @@ pub fn backup(
         let next = std::fs::read_to_string(state.join(NEXT_IDENTITY_FILE)).ok();
         let identity = read(IDENTITY_FILE)?;
         let state_text = read(store::FILE)?;
-        let rotating = serde_json::from_str::<Store>(&state_text)
+        let rotating = Store::parse(state_text.as_bytes())
             .ok()
             .and_then(|s| s.key_rotation)
             .filter(|r| r.finished_ms.is_none());
@@ -159,8 +159,8 @@ pub fn parse(contents: Contents) -> Result<Parsed, String> {
     identity
         .server_config()
         .map_err(|_| "the key in the backup does not go with its certificate".to_string())?;
-    let store: Store = serde_json::from_str(&state_text)
-        .map_err(|e| format!("the state in the backup is not valid: {e}"))?;
+    let store =
+        Store::parse(state_text.as_bytes()).map_err(|e| format!("the state in the backup {e}"))?;
     if store.center_id.is_empty() {
         return Err("the state in the backup has no center id".into());
     }

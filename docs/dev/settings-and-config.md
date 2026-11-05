@@ -23,6 +23,22 @@ The node has one config file and one way to change it. Details:
   the owner asks (`SIGHUP`, or `reload` on the socket). It never rereads it on
   a timer.
 
+## The format of stored files
+
+The files the node and the center keep for themselves carry a `format`:
+`node.toml`, `acl.json` and (on Windows) `grants.json` of the node,
+`state.json` of the center. It counts the changes an earlier version cannot
+read; every file is at format 1 now, and a file without it reads as format 1.
+
+- A file with a higher format is refused, with the format and that a newer
+  version wrote it: reading it could drop what that version keeps. The node or
+  the center does not start, or the command stops, and the file stays as it is.
+- Unknown fields are refused in all four files, so a field of a newer version
+  is never dropped at the next save.
+- `format` is not the `version` of `node.toml`. That one counts saves, for
+  `if_version` and for `config.version`.
+- Backups carry a format of their own ([backup](backup.md)).
+
 ## The signature
 
 Every file the node writes starts with `# mac hmac-sha256 <hex> …`, an HMAC
