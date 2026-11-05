@@ -36,7 +36,7 @@ use nerve_transport::log::{Level, call_line, span};
 use nerve_transport::net::Proxy;
 use nerve_transport::ws::{self, ConnectError, WsMessage};
 
-use crate::daemon::{CenterState, LinkHandle, Shared, lock};
+use crate::daemon::{CenterState, HoldAt, LinkHandle, Shared, lock};
 use crate::descriptor;
 use crate::exec::{self, RunCall, RunOptions, Sig, SignalArgs};
 use crate::fs::{FsCall, WirePath, conflict};
@@ -167,12 +167,33 @@ fn stop_reason(cfg: &NodeConfig, name: &str) -> Option<ByeReason> {
 }
 
 /// Resolves once the config ends center `name`'s link ([`stop_reason`]),
-/// or the daemon is going away.
-async fn halted(shared: &Shared, name: &str, changed: &mut watch::Receiver<u64>) {
-    while stop_reason(&shared.config(), name).is_none() {
+/// or the daemon is going away. Meanwhile it looks after the commands of the
+/// link that dropped (`parked`), which no `serve` looks after: if the owner
+/// turned the network off, those that have it are ended now, not when the
+/// center resumes the link or its grace ends.
+async fn halted(
+    shared: &Shared,
+    name: &str,
+    changed: &mut watch::Receiver<u64>,
+    parked: Option<Arc<Link>>,
+) {
+    loop {
+        if stop_reason(&shared.config(), name).is_some() {
+            return;
+        }
+        if let Some(link) = &parked {
+            link.end_commands_without_network("(running commands)");
+        }
         if changed.changed().await.is_err() {
             return;
         }
+    }
+}
+
+impl Parked {
+    /// The link, for [`halted`], which cannot borrow the slot it waits for.
+    fn link_of(parked: &Option<Parked>) -> Option<Arc<Link>> {
+        parked.as_ref().map(|p| p.link().clone())
     }
 }
 
@@ -219,7 +240,7 @@ pub(crate) async fn run_center(shared: Arc<Shared>, name: String) {
         let read = {
             let (s, n) = (shared.clone(), name.clone());
             let read = tokio::task::spawn_blocking(move || load_keys(&s, &n));
-            let halt = halted(&shared, &name, &mut changed);
+            let halt = halted(&shared, &name, &mut changed, Parked::link_of(&parked));
             dropping_at(read, &mut parked, grace, halt).await
         };
         let (key, next) = match read.unwrap_or_else(|e| Err(format!("the key read stopped: {e}"))) {
@@ -239,7 +260,7 @@ pub(crate) async fn run_center(shared: Arc<Shared>, name: String) {
             }
         };
         let grace = parked.as_ref().map(|p| p.until);
-        let halt = halted(&shared, &name, &mut changed);
+        let halt = halted(&shared, &name, &mut changed, Parked::link_of(&parked));
         let proxy = match dropping_at(
             proxy_for(&shared.paths, &cfg, &url),
             &mut parked,
@@ -271,13 +292,8 @@ pub(crate) async fn run_center(shared: Arc<Shared>, name: String) {
                 limits::MESSAGE_BYTES as usize,
             );
             let grace = parked.as_ref().map(|p| p.until);
-            dropping_at(
-                connect,
-                &mut parked,
-                grace,
-                halted(&shared, &name, &mut changed),
-            )
-            .await
+            let halt = halted(&shared, &name, &mut changed, Parked::link_of(&parked));
+            dropping_at(connect, &mut parked, grace, halt).await
         };
         let outcome = match dialled {
             Err(ConnectError::Unknown) => {
@@ -362,6 +378,11 @@ pub(crate) async fn run_center(shared: Arc<Shared>, name: String) {
                     let cfg = shared.config();
                     if cfg.locked || !cfg.center(&name).is_some_and(CenterEntry::dials) {
                         return;
+                    }
+                    // The commands of the link that dropped have no `serve`
+                    // to end them when the owner turns the network off.
+                    if let Some(link) = Parked::link_of(&parked) {
+                        link.end_commands_without_network("(running commands)");
                     }
                 }
             }
@@ -566,7 +587,7 @@ async fn session(
         // The grace, a lock or a pause may come while the challenge is
         // awaited; the parked link's calls end on time then.
         let grace = parked.as_ref().map(|p| p.until);
-        let halt = halted(shared, &entry.name, &mut *changed);
+        let halt = halted(shared, &entry.name, &mut *changed, Parked::link_of(&parked));
         let step = handshake_step(&mut stream, method::CHALLENGE);
         let ch: Challenge = dropping_at(step, &mut parked, grace, halt).await?;
         // A parked link is offered while its grace lasts and it still keeps
@@ -624,7 +645,7 @@ async fn session(
             .await
             .map_err(|e| (None, format!("send: {e}")))?;
         // An offered link waits for the answer, but not past a lock or pause.
-        let halt = halted(shared, &entry.name, &mut *changed);
+        let halt = halted(shared, &entry.name, &mut *changed, Parked::link_of(&parked));
         let step = handshake_step(&mut stream, method::WELCOME);
         let w: Welcome = dropping_at(step, &mut parked, None, halt).await?;
         if w.version != PROTOCOL_VERSION {
@@ -710,13 +731,12 @@ async fn session(
                 takes: AtomicU64::new(takes),
                 handle,
                 calls: Mutex::default(),
-                commands: Mutex::default(),
+                commands: Commands::default(),
                 taps: Mutex::default(),
                 streams: Mutex::default(),
                 next_sid: AtomicU32::new(1),
                 last_status: Mutex::new("online"),
                 seen_pin: Mutex::new(None),
-                no_network: AtomicBool::new(entry.policy.no_network),
             });
             Ok((link, None))
         }
@@ -915,11 +935,9 @@ struct Link {
     handle: Arc<LinkHandle>,
     /// Calls in flight; whoever removes an entry sends its reply.
     calls: Mutex<HashMap<Id, InFlight>>,
-    /// Running `exec.run` calls → what ends them.
-    commands: Mutex<HashMap<Id, exec::Ender>>,
-    /// The pairing's network switch as the link last saw it, to end the
-    /// commands that run when it goes on.
-    no_network: AtomicBool,
+    /// Running `exec.run` calls → what ends them, and whether the owner's
+    /// network switch holds them.
+    commands: Commands<exec::Ender>,
     /// Running `exec.run` calls → their output, for `exec`'s `output`
     /// stream; `None` for a sudo command, whose output is not streamed.
     taps: Mutex<HashMap<Id, Option<Arc<crate::tap::Tap>>>>,
@@ -1089,7 +1107,7 @@ impl Link {
                     self.check_rev(&mut rev);
                     // A mode whose time limit passed takes what it gave.
                     self.recheck_streams().await;
-                    self.end_commands_without_network();
+                    self.end_commands_without_network("(running commands)");
                     self.check_status();
                     crate::rotate::drop_old_pin(&self.shared, &self.name);
                     if self.under_a_pin_that_stopped() {
@@ -1125,7 +1143,7 @@ impl Link {
                     }
                     self.check_rev(&mut rev);
                     self.recheck_streams().await;
-                    self.end_commands_without_network();
+                    self.end_commands_without_network("(running commands)");
                     if cfg.version != version {
                         version = cfg.version;
                         if entry.settings == SettingsGrant::Write {
@@ -1180,27 +1198,24 @@ impl Link {
         }
     }
 
-    /// Ends this center's running commands when its network switch went on
-    /// since the last look: a command that started with the network keeps it
-    /// (the filter goes on at its start), and could pass it to the later
-    /// commands, which the switch holds, through a socket it listens on in
-    /// the pairing's own folders. Audited as the node's decision. Whoever
-    /// turned it on: the owner, or the center for itself. A command still
-    /// being set up is not in `commands` yet: [`Running::started`] ends it.
-    fn end_commands_without_network(&self) {
-        let Some((_, entry)) = self.entry() else {
-            return;
-        };
-        let now = entry.policy.no_network;
-        if self.no_network.swap(now, Ordering::SeqCst) || !now {
+    /// Ends this center's running commands that have the network while its
+    /// switch is on: a command that started with the network keeps it (the
+    /// filter goes on at its start), and could pass it to the later commands,
+    /// which the switch holds, through a socket it listens on in the
+    /// pairing's own folders. It goes by each command, not by the switch
+    /// going on: the owner may turn it on, off and on again between two
+    /// looks. Audited as the node's decision, with `target` for where it
+    /// looked. Whoever turned it on: the owner, or the center for itself.
+    fn end_commands_without_network(&self, target: &str) {
+        if !self.network_off_now() {
             return;
         }
-        let running: Vec<exec::Ender> = lock(&self.commands).values().cloned().collect();
-        if running.is_empty() {
+        let ended = self.commands.end_unheld();
+        if ended.is_empty() {
             return;
         }
-        self.audit_ended_without_network("(running commands)");
-        for ender in running {
+        self.audit_ended_without_network(target);
+        for ender in ended {
             ender.signal(Sig::Kill);
         }
     }
@@ -3148,9 +3163,9 @@ impl Link {
         let sig = Sig::parse(&s.signal)
             .ok_or_else(|| RpcError::invalid_args("signal must be term, kill or int"))?;
         let id = Id::Num(s.call);
-        let ender = lock(&self.commands)
+        let ender = self
+            .commands
             .get(&id)
-            .cloned()
             .ok_or_else(|| RpcError::invalid_args(format!("no running command {id}")))?;
         ender.signal(sig);
         Ok(json!({}))
@@ -3392,6 +3407,7 @@ impl Link {
         // may be on since the call was decided, and the mode it went by may
         // have ended since (the clock was read more than once), so the
         // command would run without the filter, or as the owner.
+        self.shared.held_at(HoldAt::BeforeLastLook).await;
         if let Some(why) = crate::daemon::late_network_refusal(
             no_network,
             self.network_off_now(),
@@ -3401,6 +3417,7 @@ impl Link {
             self.audit(inv, &command, "forbidden", Some("forbidden"), Some(why));
             return Err(RpcError::forbidden(why));
         }
+        self.shared.held_at(HoldAt::AfterLastLook).await;
         let opts = RunOptions {
             shell: cfg.machine.shell.clone(),
             landlock,
@@ -3594,12 +3611,14 @@ impl Link {
         let timeouts = exec::Timeouts::from_limits(&cfg.limits);
         // The owner's switch may be on since the call was decided
         // (`exec_run` has the same look).
+        self.shared.held_at(HoldAt::BeforeLastLook).await;
         if let Some(why) =
             crate::daemon::late_network_refusal(no_network, self.network_off_now(), true, true)
         {
             self.audit(inv, &target, "forbidden", Some("forbidden"), Some(why));
             return Err(RpcError::forbidden(why));
         }
+        self.shared.held_at(HoldAt::AfterLastLook).await;
         let opts = RunOptions {
             shell: None,
             landlock,
@@ -3981,6 +4000,65 @@ fn settings_result(r: Result<u64, SetError>) -> Result<Value, RpcError> {
     }
 }
 
+/// A link's running `exec.run` calls: what ends each (`E`, the command's
+/// [`exec::Ender`]) and whether the owner's network switch holds it. The
+/// switch is checked against this, not against its own changes: whether a
+/// command has the network is a fact about the command.
+struct Commands<E> {
+    by_call: Mutex<HashMap<Id, Command<E>>>,
+}
+
+struct Command<E> {
+    ender: E,
+    /// It started under the switch (the node's filter is on it).
+    held: bool,
+    /// The switch ended it already, so it is not ended and audited again
+    /// while its process goes away.
+    ended: bool,
+}
+
+impl<E> Default for Commands<E> {
+    fn default() -> Commands<E> {
+        Commands {
+            by_call: Mutex::default(),
+        }
+    }
+}
+
+impl<E: Clone> Commands<E> {
+    fn add(&self, id: Id, ender: E, held: bool) {
+        lock(&self.by_call).insert(
+            id,
+            Command {
+                ender,
+                held,
+                ended: false,
+            },
+        );
+    }
+
+    fn get(&self, id: &Id) -> Option<E> {
+        lock(&self.by_call).get(id).map(|c| c.ender.clone())
+    }
+
+    fn remove(&self, id: &Id) {
+        lock(&self.by_call).remove(id);
+    }
+
+    /// What ends the commands that have the network and were not ended for
+    /// it yet, which the caller is to end now (the switch is on).
+    fn end_unheld(&self) -> Vec<E> {
+        lock(&self.by_call)
+            .values_mut()
+            .filter(|c| !c.held && !c.ended)
+            .map(|c| {
+                c.ended = true;
+                c.ender.clone()
+            })
+            .collect()
+    }
+}
+
 /// Counts a running command and remembers its process group, so a control
 /// request from below it is refused and `exec.signal` can find it.
 struct Running<'a> {
@@ -4030,12 +4108,9 @@ impl<'a> Running<'a> {
         let pid = ender.pid();
         *lock(&self.pid) = Some(pid);
         lock(&self.link.shared.commands).insert(pid, self.link.name.clone());
-        lock(&self.link.commands).insert(self.id.clone(), ender.clone());
-        if !held && self.link.network_off_now() {
-            self.link
-                .audit_ended_without_network("(a command being started)");
-            ender.signal(Sig::Kill);
-        }
+        self.link.commands.add(self.id.clone(), ender.clone(), held);
+        self.link
+            .end_commands_without_network("(a command being started)");
     }
 }
 
@@ -4044,7 +4119,7 @@ impl Drop for Running<'_> {
         if let Some(pid) = *lock(&self.pid) {
             lock(&self.link.shared.commands).remove(&pid);
         }
-        lock(&self.link.commands).remove(&self.id);
+        self.link.commands.remove(&self.id);
         // Its streams end once they sent what it printed.
         if let Some(Some(tap)) = lock(&self.link.taps).remove(&self.id) {
             tap.end();
@@ -4150,6 +4225,32 @@ mod tests {
         fn drop(&mut self) {
             *self.0.lock().unwrap() = Some(std::time::Instant::now());
         }
+    }
+
+    /// The owner's switch ends the commands that have the network, each
+    /// once, whatever happened to the switch between two looks: one that
+    /// started after it went off and on again is found by its own mark, not
+    /// by a change; one that started under it is never touched.
+    #[test]
+    fn the_switch_ends_the_commands_that_have_the_network_once() {
+        use nerve_proto::Id;
+        let commands = super::Commands::<u32>::default();
+        commands.add(Id::Num(1), 11, false);
+        commands.add(Id::Num(2), 22, true);
+        // Nothing records how often the switch changed: the first look at
+        // it while it is on finds the command without the filter.
+        assert_eq!(commands.end_unheld(), [11]);
+        // Not again while its process goes away.
+        assert!(commands.end_unheld().is_empty());
+        // One that starts later, after the switch went off and on again
+        // unseen, is found the same way; the held one never is.
+        commands.add(Id::Num(3), 33, false);
+        assert_eq!(commands.end_unheld(), [33]);
+        assert_eq!(commands.get(&Id::Num(2)), Some(22));
+        commands.remove(&Id::Num(1));
+        commands.remove(&Id::Num(3));
+        assert!(commands.get(&Id::Num(1)).is_none());
+        assert!(commands.end_unheld().is_empty());
     }
 
     /// A slow step of the dial loop (the keyring, a hanging dial) does not

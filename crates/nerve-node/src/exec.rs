@@ -652,6 +652,10 @@ pub fn folder_sets(
                 .and_then(|real| match replaced(policy, &x.path, &real) {
                     Some(why) => Err(why),
                     None => Ok(real),
+                })
+                .and_then(|real| match spelled_apart(policy, x, &path, &real) {
+                    Some(why) => Err(why),
+                    None => Ok(real),
                 });
             match real {
                 Ok(real) => Some((x.access, real)),
@@ -690,6 +694,29 @@ fn replaced(policy: &CenterPolicy, path: &str, real: &Path) -> Option<String> {
     (policy.is_placed(path) && !(within(real, at) && within(at, real))).then(|| {
         format!(
             "it was added at its own place and its path leads to {} now, through a link put there since; `folder rm` it and `folder add` the place you mean",
+            real.display()
+        )
+    })
+}
+
+/// Why a folder a command may write is not used while the owner's network
+/// switch is on, if it is not: the path is not the folder's real place. The
+/// settings rule that keeps a center from giving itself a place to write
+/// then (`nerve_policy::settings`) judges names as spelled, so it cannot
+/// tell a link of the owner above two spellings of one place. The node can:
+/// it takes a place to write only where it is. (`folder add` stores the real
+/// place, and [`replaced`] refuses a recorded one that leads elsewhere, so
+/// this is about the folders a center added.)
+fn spelled_apart(
+    policy: &CenterPolicy,
+    folder: &Folder,
+    path: &Path,
+    real: &Path,
+) -> Option<String> {
+    (policy.no_network && folder.access.write && !(within(real, path) && within(path, real)))
+        .then(|| {
+        format!(
+            "its path leads to {} through a link, and with the network off a place to write is only used at its real place; the owner `folder add`s the place to give it",
             real.display()
         )
     })
@@ -3647,6 +3674,57 @@ mod tests {
             "{spec:?}"
         );
         assert!(spec.read.contains(&deep), "{spec:?}");
+    }
+
+    /// While the network switch is on, a place to write that the center added
+    /// itself is used only at its real place (the settings rule judges names
+    /// as spelled, so it cannot see the owner's link above two spellings of
+    /// the folder it keeps a center from narrowing). A command with `w` on
+    /// `real/work` put a link at `real/work/sub`; the center narrows `work`
+    /// to `r` and keeps `alias/work/sub` with `w`, `alias` being the owner's
+    /// link to `real`. The folder, its link's target and its unix sockets
+    /// get no rule then; the folder at its real place does, and so does
+    /// the spelled one with the switch off.
+    #[test]
+    fn with_the_network_off_a_place_to_write_is_used_at_its_real_place_only() {
+        let d = tempfile::tempdir().unwrap();
+        let (home, _, docs) = nested_home(&d);
+        let real_work = home.join("real/work");
+        let sub = real_work.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::os::unix::fs::symlink(home.join("real"), home.join("alias")).unwrap();
+        let spelled = home.join("alias/work/sub");
+        let writable = [spelled.clone()];
+        let policy = |folders: Vec<Folder>, off: bool| CenterPolicy {
+            folders,
+            no_network: off,
+            ..Default::default()
+        };
+        let both = |f: &Path| vec![folder(&real_work, "r"), folder(f, "rw")];
+
+        // Where the folder is a plain folder at its real place, it is used.
+        let used = |p: &CenterPolicy| {
+            let spec = landlock_spec(p, &home, &[], &writable);
+            (spec.write.contains(&sub), spec.unix.contains(&sub))
+        };
+        assert_eq!(used(&policy(both(&sub), true)), (true, true));
+        // Spelled through the owner's link it is the same place: used with
+        // the switch off, not used with it on.
+        assert_eq!(used(&policy(both(&spelled), false)), (true, true));
+        assert_eq!(used(&policy(both(&spelled), true)), (false, false));
+        // A read-only folder is no place to write, so it stays.
+        let read = policy(vec![folder(&spelled, "r")], true);
+        assert!(landlock_spec(&read, &home, &[], &[]).read.contains(&sub));
+
+        // A command put a link in place of `sub`: with the switch on the
+        // spelled folder gives no rule where it leads.
+        std::fs::remove_dir(&sub).unwrap();
+        std::os::unix::fs::symlink(&docs, &sub).unwrap();
+        let off = landlock_spec(&policy(both(&spelled), false), &home, &[], &writable);
+        assert!(spec_reaches(&off, &docs), "{off:?}");
+        let on = landlock_spec(&policy(both(&spelled), true), &home, &[], &writable);
+        assert!(!spec_reaches(&on, &docs), "{on:?}");
+        assert!(!on.unix.contains(&docs), "{on:?}");
     }
 
     /// A recorded folder that did not exist yet is judged the same: a link

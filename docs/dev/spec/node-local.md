@@ -1250,12 +1250,21 @@ grant or not.
   an old one while an old `w` folder above it is narrowed or dropped, since
   the node follows a link a command put inside a `w` folder once no `w`
   folder holds it; names are compared as spelled, with their case kept on
-  Unix. When the switch goes on, the node ends the pairing's running
-  commands (`exec.run` and config capabilities), audited as `killed` with
-  `code: "no_network"`; a call that was decided with the switch off and
-  starts after it went on does not start (`daemon::NETWORK_SWITCHED_ON`), and
-  one that started between the two is ended. Whatever else a command left
-  running (a program it detached) is not tracked and keeps what it had. `status` has each
+  Unix. Names as spelled cannot see an owner's link above two spellings of
+  one folder, so the node judges that: while the switch is on, a folder with
+  `w` is used only at its real place (`exec::spelled_apart`; `folder add`
+  stores the real place, so this is about the folders a center added), and
+  is left out, with the reason in the log, where its path leads elsewhere.
+  While the switch is on, the node ends the pairing's running commands
+  (`exec.run` and config capabilities) that have the network, audited as
+  `killed` with `code: "no_network"`. It goes by each command (whether the
+  filter is on it), not by the switch going on, at every config change and
+  every 5 s, and also for the commands of a link that dropped and waits for
+  its resume, while the node waits to dial again or for the center's
+  answer. A call that was decided with the switch off and starts after it
+  went on does not start (`daemon::NETWORK_SWITCHED_ON`), and one that
+  started between the two is ended. Whatever else a command left running (a
+  program it detached) is not tracked and keeps what it had. `status` has each
   center's `no_network` and `network_off` (`held`, `as_owner`, `not_held`;
   `null` while the switch is on nowhere), `installed` (whether this is the
   installed node, with or without a recorded owner), the machine's

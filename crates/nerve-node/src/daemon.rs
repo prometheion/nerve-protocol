@@ -82,6 +82,36 @@ pub struct NodeOptions {
     /// starts again: an owner's restore ([`Daemon::run_until`] sets it).
     /// Without it the node refuses such work.
     pub aside: Option<tokio::sync::mpsc::UnboundedSender<Aside>>,
+    /// Holds a command's call at a point of its set-up, for a test that
+    /// changes the config there (the owner turns the network off while the
+    /// call waits).
+    pub hold: Option<Hold>,
+}
+
+/// Where a call to run a command can be held ([`NodeOptions::hold`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoldAt {
+    /// Just before the call's last look at the owner's network switch.
+    BeforeLastLook,
+    /// Just after it, before the command starts.
+    AfterLastLook,
+}
+
+/// What a test runs at each [`HoldAt`] of a command's call; the call goes on
+/// when it resolves.
+#[derive(Clone)]
+pub struct Hold(Arc<dyn Fn(HoldAt) -> Aside + Send + Sync>);
+
+impl Hold {
+    pub fn new(f: impl Fn(HoldAt) -> Aside + Send + Sync + 'static) -> Hold {
+        Hold(Arc::new(f))
+    }
+}
+
+impl std::fmt::Debug for Hold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Hold")
+    }
 }
 
 /// Work the node runs while it is stopped ([`NodeOptions::aside`]).
@@ -114,6 +144,7 @@ impl NodeOptions {
             resume_grace: resume::GRACE,
             program_wait: crate::link::PROGRAM_WAIT,
             aside: None,
+            hold: None,
         }
     }
 }
@@ -635,6 +666,8 @@ pub(crate) struct Shared {
     /// (nerve_sandbox::net_filter): Linux with seccomp filters, on x86_64 or
     /// aarch64.
     pub net_filter: bool,
+    /// Where a test holds a command's call ([`NodeOptions::hold`]).
+    pub hold: Option<Hold>,
     /// Whether the node runs with full rights (root, an elevated token): its
     /// commands then have them too, unless the installed node runs them as
     /// another account.
@@ -715,6 +748,13 @@ pub(crate) struct Shared {
 impl Shared {
     pub fn config(&self) -> NodeConfig {
         lock(&self.store).config().clone()
+    }
+
+    /// Waits for the test's hold at `at`, if it set one.
+    pub async fn held_at(&self, at: HoldAt) {
+        if let Some(h) = &self.hold {
+            (h.0)(at).await;
+        }
     }
 
     /// The account the commands of a pairing with `policy` run as
@@ -2046,6 +2086,7 @@ impl Daemon {
                 service,
             ),
             net_filter: opts.net_filter.unwrap_or_else(net_filter_here),
+            hold: opts.hold,
             full_rights,
             cgroups,
             store: Mutex::new(store),

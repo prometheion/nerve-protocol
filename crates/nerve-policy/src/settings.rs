@@ -901,7 +901,10 @@ fn client_only(
     // still holds that link. So a place to write inside an old `w` folder
     // stays only while every old `w` folder above it is still written: a
     // center may not narrow `w work` to `r work` and keep or add `w work/sub`,
-    // where `sub` is such a link.
+    // where `sub` is such a link. A link of the owner above two spellings of
+    // one folder is beyond names as spelled: the node uses a place to write
+    // that a center added only at its real place while the switch is on
+    // (`exec::spelled_apart` in nerve-node).
     if o.no_network || n.no_network {
         let prot = protected(&n.protected);
         let writes = |folders: &[Folder], path: &Path| {

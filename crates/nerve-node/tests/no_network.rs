@@ -10,11 +10,13 @@
 #![cfg(target_os = "linux")]
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use nerve_conformance::fake_center::{self, FakeCenter};
 use nerve_conformance::wire::Conn;
-use nerve_node::{Daemon, NodeOptions, NodePaths};
+use nerve_node::{Daemon, Hold, HoldAt, NodeOptions, NodePaths};
 use nerve_policy::NodeConfig;
 use nerve_policy::config::{Access, CapSetting, Folder, Mode};
 use serde_json::{Value, json};
@@ -32,7 +34,9 @@ params = '{"type": "object", "properties": {"port": {"type": "integer"}}, "requi
 
 /// Pairs with `center` as `lab` in `mode`, with `work` to run in and the
 /// network switch `off`, and starts the daemon as `confinement` and
-/// `filter` say (`None`: the kernel's own).
+/// `filter` say (`None`: the kernel's own), with `hold` for its command
+/// calls.
+#[allow(clippy::too_many_arguments)]
 async fn node_in(
     mode: Mode,
     root: &Path,
@@ -41,8 +45,10 @@ async fn node_in(
     off: bool,
     confinement: Option<nerve_sandbox::Confinement>,
     filter: Option<bool>,
+    hold: Option<Hold>,
 ) -> Daemon {
     let mut o = NodeOptions::new(NodePaths::new(root.join("config"), root.join("state")));
+    o.hold = hold;
     o.home = root.join("home");
     std::fs::create_dir_all(&o.home).unwrap();
     o.full_rights = Some(false);
@@ -82,7 +88,17 @@ async fn node(
     confinement: Option<nerve_sandbox::Confinement>,
     filter: Option<bool>,
 ) -> Daemon {
-    node_in(Mode::Folder, root, work, center, off, confinement, filter).await
+    node_in(
+        Mode::Folder,
+        root,
+        work,
+        center,
+        off,
+        confinement,
+        filter,
+        None,
+    )
+    .await
 }
 
 async fn linked(center: &mut FakeCenter) -> Conn<TcpStream> {
@@ -325,7 +341,7 @@ async fn commands_that_would_run_as_the_owner_do_not_run_without_network() {
         let work = root.join("work");
         std::fs::create_dir_all(&work).unwrap();
         let mut center = FakeCenter::start(false).await.unwrap();
-        let daemon = node_in(mode, &root, &work, &center, true, None, None).await;
+        let daemon = node_in(mode, &root, &work, &center, true, None, None, None).await;
         let mut conn = linked(&mut center).await;
         let e = run(&mut conn, "echo ran", &work)
             .await
@@ -463,4 +479,188 @@ async fn a_command_running_when_the_network_goes_off_is_ended() {
     let r = conn.answer(call, WAIT, &mut others).await.unwrap();
     assert!(started.elapsed() < Duration::from_secs(60), "{r:?}");
     daemon.stop().await;
+}
+
+/// The paths of the node that [`node_in`] starts under `root`.
+fn paths_in(root: &Path) -> NodePaths {
+    NodePaths::new(root.join("config"), root.join("state"))
+}
+
+/// A hold that turns the network off for `lab` as the owner does, the first
+/// time a command's call is at `at`; it then waits until the link has looked
+/// at the change, so what a test sees is the look of the call itself.
+fn turns_off_at(paths: NodePaths, at: HoldAt) -> Hold {
+    let armed = Arc::new(AtomicBool::new(true));
+    Hold::new(move |here| {
+        let (paths, armed) = (paths.clone(), armed.clone());
+        Box::pin(async move {
+            if here == at && armed.swap(false, Ordering::SeqCst) {
+                nerve_node::cli::edit(&paths, |c| {
+                    c.centers[0].policy.no_network = true;
+                    Ok(())
+                })
+                .await
+                .expect("the owner's edit");
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        })
+    })
+}
+
+/// The owner turns the network off after the node decided a call and before
+/// its command starts: the command does not start (it would run without the
+/// filter), for a command and for a capability of the config.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_decided_before_the_switch_went_on_does_not_start_after_it() {
+    if !Path::new("/bin/bash").exists() || !nerve_sandbox::net_filter::available() {
+        eprintln!("skipped: no seccomp filters or no bash here");
+        return;
+    }
+    for capability in [false, true] {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut center = FakeCenter::start(false).await.unwrap();
+        let hold = turns_off_at(paths_in(&root), HoldAt::BeforeLastLook);
+        let daemon = node_in(
+            Mode::Folder,
+            &root,
+            &work,
+            &center,
+            false,
+            None,
+            None,
+            Some(hold),
+        )
+        .await;
+        let mut conn = linked(&mut center).await;
+        let r = if capability {
+            invoke(&mut conn, "probe.connect", json!({"port": port})).await
+        } else {
+            run(&mut conn, "touch ran", &work).await
+        };
+        let e = r.expect_err("refused");
+        assert_eq!(
+            e.message,
+            nerve_node::daemon::NETWORK_SWITCHED_ON,
+            "capability {capability}"
+        );
+        assert!(!work.join("ran").exists(), "the command ran");
+        daemon.stop().await;
+    }
+}
+
+/// The owner turns the network off after the last look and before the
+/// command is up: the node ends it when it starts, not at its next look at
+/// the switch (up to 5 s later), and says so in the audit log.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_that_starts_into_the_switch_is_ended_as_it_starts() {
+    if !Path::new("/bin/bash").exists() || !nerve_sandbox::net_filter::available() {
+        eprintln!("skipped: no seccomp filters or no bash here");
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(d.path()).unwrap();
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let hold = turns_off_at(paths_in(&root), HoldAt::AfterLastLook);
+    let daemon = node_in(
+        Mode::Folder,
+        &root,
+        &work,
+        &center,
+        false,
+        None,
+        None,
+        Some(hold),
+    )
+    .await;
+    let mut conn = linked(&mut center).await;
+    let call = long(&mut conn, &work).await;
+    let mut others = Vec::new();
+    let r = conn.answer(call, WAIT, &mut others).await.unwrap();
+    // `sleep 60` was killed: not an exit by itself.
+    assert!(r.is_ok_and(|v| v["exit_code"] != 0), "ended by a signal");
+    let log = std::fs::read_to_string(daemon.paths().audit_log()).unwrap();
+    assert!(
+        log.contains("(a command being started)") && log.contains("no_network"),
+        "{log}"
+    );
+    daemon.stop().await;
+}
+
+/// Waits up to 5 s for process `pid` to end.
+async fn ends(pid: u32) -> bool {
+    let running = |pid: u32| {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+            s.rsplit_once(')')
+                .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
+        })
+    };
+    for _ in 0..100 {
+        if !running(pid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+/// A command of a link that dropped, which the center may still resume, is
+/// ended when the owner turns the network off, not when the link comes back
+/// or its grace (30 s) ends: the node does it while it waits to dial again
+/// and while it waits for the center's answer to a dial.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_of_a_dropped_link_is_ended_when_the_network_goes_off() {
+    if !Path::new("/bin/bash").exists() || !nerve_sandbox::net_filter::available() {
+        eprintln!("skipped: no seccomp filters or no bash here");
+        return;
+    }
+    // The node waits about a second before it dials again; after that it
+    // waits for the center, which this test never answers.
+    for (what, after) in [
+        ("waiting to dial", Duration::from_millis(100)),
+        ("waiting for the center", Duration::from_millis(2500)),
+    ] {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let mut center = FakeCenter::start(false).await.unwrap();
+        let daemon = node(&root, &work, &center, false, None, None).await;
+        let mut conn = linked(&mut center).await;
+        let args = json!({"command": "sleep 60 & echo $! > sleep.pid; wait",
+                          "cwd": work.display().to_string()});
+        conn.request(
+            "invoke",
+            json!({"cap": "exec", "action": "run", "args": args, "ctx": {}}),
+        )
+        .await
+        .unwrap();
+        let mut pid = None;
+        for _ in 0..200 {
+            if let Ok(t) = std::fs::read_to_string(work.join("sleep.pid"))
+                && let Ok(n) = t.trim().parse::<u32>()
+            {
+                pid = Some(n);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let pid = pid.expect("the command started");
+        drop(conn);
+        tokio::time::sleep(after).await;
+        nerve_node::cli::edit(daemon.paths(), |c| {
+            c.centers[0].policy.no_network = true;
+            Ok(())
+        })
+        .await
+        .expect("the owner's edit");
+        assert!(ends(pid).await, "the command of a dropped link, {what}");
+        daemon.stop().await;
+    }
 }

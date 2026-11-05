@@ -380,7 +380,9 @@ its mode while it is off, as no mode escapes the switch, but it can give
 itself no new folder to write while it is off (see below). A command that is
 running when you turn the switch off is ended by the node, and the audit log
 says so (`killed`, `no_network`): it started with the network, and could pass
-it on to the commands that follow through a socket it listens on. Commands
+it on to the commands that follow through a socket it listens on. That holds
+when you turn it off and on again quickly, and for the commands of a link
+that dropped and that the center may still resume. Commands
 that start afterwards run under the switch, and one that was being set up
 when you turned it off does not start without it: it is ended or refused.
 
@@ -452,6 +454,11 @@ What it does not cover:
   itself a place to write while its network is off: no new `w` folder, no
   `w` added to one, and no `w` folder inside one of yours while the folder
   above it is narrowed or dropped (a command may have put a link there).
+  The node also uses a place to write that the center added only where it
+  really is: one whose path leads elsewhere through a link of yours (a
+  `/home` that is a link to `/var/home`, say) is left out while the network
+  is off, and the log says so. Add such a place yourself with
+  `nerve-node folder add`, which stores the real place.
 - Without Landlock, a command that is running for another pairing of
   `nerve-run`, which has its network: nothing keeps the pairings apart
   there. `status` warns of that when two pairings share the account.
