@@ -436,20 +436,15 @@ pub fn landlock_spec(
     // (nerve_sandbox::kept_sockets).
     let unix = [leave_out(&f.write, own), nerve_sandbox::kept_sockets()].concat();
     let mut spec = LandlockSpec {
-        read: dev_links_out(leave_out(
-            &[nerve_sandbox::system_dirs(), f.read].concat(),
-            &no_read,
-        )),
+        read: leave_out(&[nerve_sandbox::system_dirs(), f.read].concat(), &no_read),
         write: leave_out(&[nerve_sandbox::system_writable(), f.write].concat(), own),
-        exec: dev_links_out(leave_out(
-            &[nerve_sandbox::system_dirs(), f.exec].concat(),
-            &no_read,
-        )),
+        exec: leave_out(&[nerve_sandbox::system_dirs(), f.exec].concat(), &no_read),
         // The caller sets it from the pairing's switch.
         no_network: false,
         unix,
     };
     without_shared_sockets(&mut spec);
+    without_links(&mut spec);
     spec
 }
 
@@ -483,6 +478,7 @@ pub fn pairing_spec(
         *set = leave_out(&rest, &around);
         set.extend(kept);
     }
+    without_links(&mut spec);
     spec
 }
 
@@ -575,16 +571,23 @@ pub fn config_spec(
     spec
 }
 
-/// `paths` without the links directly in `/dev` (`stdin`, `fd`, `log`,
-/// ...), which [`leave_out`] lists among its other entries. A rule follows
-/// a link and the kernel refuses one on what a link of `/dev` leads to (a
-/// pipe, a socket), and what such a link leads to is under a rule of its
-/// own (`/proc`, the device) or none needs.
-fn dev_links_out(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    paths.retain(|p| {
-        p.parent() != Some(Path::new("/dev")) || !p.symlink_metadata().is_ok_and(|m| m.is_symlink())
-    });
-    paths
+/// `spec` without the paths that are links themselves. The folders of a
+/// spec come resolved, so the links among them are the entries [`leave_out`]
+/// and [`leave_protected_out`] list when they split a folder (`/etc/localtime`,
+/// `/bin` on a merged `/usr`, the links directly in `/dev`: `stdin`, `fd`,
+/// `log`, ...). The shim opens a rule's path without following a link
+/// (`nerve_sandbox::landlock_rules`), so such a rule would give nothing, and
+/// it would print a line that is meant for a link which came after the node's
+/// look. What a link leads to is under a rule of its own where it is granted.
+fn without_links(spec: &mut LandlockSpec) {
+    for set in [
+        &mut spec.read,
+        &mut spec.write,
+        &mut spec.exec,
+        &mut spec.unix,
+    ] {
+        set.retain(|p| !p.symlink_metadata().is_ok_and(|m| m.is_symlink()));
+    }
 }
 
 /// A center's folders by what its commands may do there, the system's
@@ -3073,6 +3076,97 @@ mod tests {
         for set in [&spec.read, &spec.write, &spec.exec] {
             assert!(set.contains(&w.join("a")), "{set:?}");
             assert!(!set.iter().any(|p| own[0].starts_with(p)), "{set:?}");
+        }
+    }
+
+    /// A folder the node splits around its own gives the entries that are
+    /// links too, and the shim opens a rule's path without following a link
+    /// (it would say so on every command's stderr). No set holds such an
+    /// entry, in any set a split reaches.
+    #[test]
+    fn the_links_among_a_split_folders_entries_get_no_rule() {
+        let d = tempfile::tempdir().unwrap();
+        let w = std::fs::canonicalize(d.path()).unwrap();
+        for dir in ["a", "deep/cfg", "target"] {
+            std::fs::create_dir_all(w.join(dir)).unwrap();
+        }
+        std::fs::write(w.join("file.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(w.join("target"), w.join("to-dir")).unwrap();
+        std::os::unix::fs::symlink(w.join("file.txt"), w.join("to-file")).unwrap();
+        let own = [w.join("deep/cfg")];
+        let policy = CenterPolicy {
+            folders: vec![nerve_policy::config::Folder {
+                path: w.display().to_string(),
+                access: Access::ALL,
+            }],
+            ..Default::default()
+        };
+        let mine = crate::account::Own::of(&w.join("run"), "lab");
+        let specs = [
+            landlock_spec(&policy, &w, &own, std::slice::from_ref(&w)),
+            pairing_spec(
+                &policy,
+                &w,
+                &own,
+                std::slice::from_ref(&w),
+                &w.join("run"),
+                &mine,
+            ),
+        ];
+        for spec in specs {
+            for set in [&spec.read, &spec.write, &spec.exec] {
+                assert!(set.contains(&w.join("a")) && set.contains(&w.join("file.txt")));
+                assert!(
+                    !set.contains(&w.join("to-dir")) && !set.contains(&w.join("to-file")),
+                    "{set:?}"
+                );
+            }
+            for set in [&spec.read, &spec.write, &spec.exec, &spec.unix] {
+                for p in set {
+                    assert!(
+                        !p.symlink_metadata().is_ok_and(|m| m.is_symlink()),
+                        "{p:?}: {spec:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A config capability of a pairing whose commands run as the owner has
+    /// the pairing's own folders at the account's real home too, so the
+    /// network switch, which writes only at a folder's real place, keeps its
+    /// write there where passwd gives the home through a link.
+    #[test]
+    fn a_capability_off_the_network_writes_in_its_own_home_behind_a_link() {
+        let d = tempfile::tempdir().unwrap();
+        let w = std::fs::canonicalize(d.path()).unwrap();
+        std::fs::create_dir_all(w.join("disk/run/lab/home")).unwrap();
+        std::fs::create_dir_all(w.join("disk/run/lab/tmp")).unwrap();
+        std::os::unix::fs::symlink(w.join("disk"), w.join("lib")).unwrap();
+        let run_home = w.join("lib/run");
+        let mine = crate::account::Own::of(&run_home, "lab");
+        // Where the pairing's commands run as the account the folders are
+        // its policy's; where they run as the owner `confined` builds them.
+        let policy = CenterPolicy {
+            mode: nerve_policy::Mode::User,
+            no_network: true,
+            folders: crate::account::built_in(&mine),
+            ..Default::default()
+        };
+        for separate in [false, true] {
+            let spec = config_spec(
+                &policy,
+                separate,
+                Some(&mine),
+                Some(&run_home),
+                &w,
+                &[],
+                &[],
+                true,
+            );
+            for dir in [w.join("disk/run/lab/home"), w.join("disk/run/lab/tmp")] {
+                assert!(spec.write.contains(&dir), "{separate}: {spec:?}");
+            }
         }
     }
 

@@ -314,7 +314,10 @@ The node confines commands with Landlock:
   applied to the folder where it is at the moment the command starts: the
   shim opens each folder without following a link, so a link that replaces a
   folder between the node's look and the start gives that folder's rights
-  nowhere, and the command is told. A link of your
+  nowhere, and the command is told. A link that was there when the node
+  looked (the system's own, such as `/etc/localtime`, or one inside a folder
+  the node cuts around its own) gets no rule and no message; what it leads to
+  has the rules of the folder where it is granted. A link of your
   own above the `w` folder is followed. A folder you added with `folder add`
   is also left out when a link has replaced it since, and stays out after you
   take `w` off the folder above or remove the pairing that had it

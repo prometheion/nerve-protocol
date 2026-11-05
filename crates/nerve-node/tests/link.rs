@@ -1479,6 +1479,44 @@ async fn folder_mode_gives_no_rule_where_a_link_came_after_the_rules_were_built(
     node.stop().await;
 }
 
+/// The node splits a granted folder around its own and hands the shim the
+/// entries, links among them. The shim does not follow a link, and its line
+/// about one is for a link that came after the rules were built: a command
+/// whose folder holds only links the system and the owner made says nothing.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn folder_mode_says_nothing_of_the_links_that_were_there_before() {
+    if !nerve_sandbox::Confinement::detect().by_hand().available() {
+        eprintln!("skipped: Landlock is not available here");
+        return;
+    }
+    let dir = tempdir();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    // `root` holds the node's config and state, so it is split around them
+    // and its links go into the sets by their names.
+    std::os::unix::fs::symlink(&home, root.join("link-to-home")).unwrap();
+    std::os::unix::fs::symlink("/etc/hostname", root.join("link-to-file")).unwrap();
+    let node = paired_node_with(&root, &center, |p| {
+        p.mode = nerve_policy::Mode::Folder;
+        for (path, access) in [(&root, "rx"), (&home, "rwx")] {
+            p.folders.push(nerve_policy::config::Folder {
+                path: path.display().to_string(),
+                access: nerve_policy::config::Access::parse(access).unwrap(),
+            });
+        }
+    })
+    .await;
+    let mut conn = linked(&mut center).await;
+    let r = run_in(&mut conn, &home, "echo fine").await;
+    assert_eq!(r["exit_code"], 0, "{r}");
+    assert_eq!(r["stdout"], "fine\n", "{r}");
+    assert_eq!(r["stderr"], "", "{r}");
+    node.stop().await;
+}
+
 /// A folder mode command gets no controlling terminal. On a node run by hand
 /// in a terminal that is the owner's, which the command must not reach
 /// through `/dev/tty`, nor read the pty by its name under `/dev/pts`

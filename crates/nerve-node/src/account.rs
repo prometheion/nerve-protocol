@@ -49,8 +49,14 @@ pub struct Own {
 
 impl Own {
     /// The folders of the pairing `center` (a center name: no `/`, no
-    /// `.`), below `run_home`, the account's home.
+    /// `.`), below `run_home`, the account's home. On Unix at the home's
+    /// real place (passwd may give it through a link, a `/var/lib` moved to
+    /// another disk), as the owner's folders are stored: with the network
+    /// switch on the sandbox writes only at a folder's real place
+    /// (`exec::spelled_apart`), whoever built the folders.
     pub fn of(run_home: &Path, center: &str) -> Own {
+        #[cfg(unix)]
+        let run_home = &std::fs::canonicalize(run_home).unwrap_or_else(|_| run_home.to_path_buf());
         let root = run_home.join(center);
         Own {
             home: root.join("home"),
@@ -200,15 +206,7 @@ pub fn other_pairings(
 /// ([`around_pairings`]), then the pairing's built-in ones ([`built_in`]).
 /// `home` is the `~` of the folders.
 pub fn with_built_in(mut entry: CenterEntry, home: &Path, run: &Account) -> CenterEntry {
-    // The account's home at the place it is (passwd may give it through a
-    // link, a `/var/lib` moved to another disk), as the owner's folders are
-    // stored: with the network switch on the sandbox writes only at a
-    // folder's real place (`exec::spelled_apart`).
-    #[cfg(unix)]
-    let run_home = std::fs::canonicalize(&run.home).unwrap_or_else(|_| run.home.clone());
-    #[cfg(not(unix))]
-    let run_home = run.home.clone();
-    let own = Own::of(&run_home, &entry.name);
+    let own = Own::of(&run.home, &entry.name);
     entry.policy.folders = around_pairings(&entry.policy.folders, home, &run.home);
     entry.policy.folders.extend(built_in(&own));
     entry
