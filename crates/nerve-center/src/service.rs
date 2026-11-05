@@ -591,15 +591,15 @@ fn log_update(layout: &Layout, steps: &[String], r: &Result<bool, String>, out: 
             format!("update failed ({e}): {}", steps.join("; ")),
         ),
     };
+    // One line appended, nothing read: the log file is the center's
+    // account's, and root must not load or wait on what it put there.
     let written = as_owner_of(&layout.state).and_then(|_owner| {
-        let log = nerve_transport::log::Log::new(Level::Info);
-        // No size limit: this writer lives for one line, and the running
-        // center keeps its own handle on the file, so it must not move the
-        // file aside under it.
-        log.attach_file_with_limit(nerve_transport::log::file_in(&layout.state), u64::MAX)
-            .map_err(|e| e.to_string())?;
-        log.record(level, None, &what);
-        Ok(())
+        nerve_transport::log::Log::append_entry(
+            &nerve_transport::log::file_in(&layout.state),
+            level,
+            &what,
+        )
+        .map_err(|e| e.to_string())
     });
     if let Err(e) = written {
         let _ = writeln!(out, "the center's log cannot be written: {e}");
@@ -1269,6 +1269,31 @@ mod tests {
         assert!(!Path::new(&old).exists(), "the log was moved aside");
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("update: a stepa step"));
+    }
+
+    #[test]
+    fn the_update_entry_does_not_wait_on_a_pipe_in_place_of_the_log() {
+        use std::os::unix::ffi::OsStrExt;
+        let d = tempfile::tempdir().unwrap();
+        let l = layout(d.path());
+        std::fs::create_dir_all(&l.state).unwrap();
+        let path = nerve_transport::log::file_in(&l.state);
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            log_update(&l, &["a step".into()], &Ok(true), &mut out);
+            let _ = tx.send(out);
+        });
+        let out = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the update waited on the pipe");
+        assert!(
+            String::from_utf8_lossy(&out).contains("cannot be written"),
+            "{}",
+            String::from_utf8_lossy(&out)
+        );
     }
 
     #[tokio::test]
