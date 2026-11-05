@@ -180,8 +180,7 @@ object.
 |---|---|---|
 | `challenge`, `hello`, `welcome` | both | Handshake |
 | `describe {detail, cap?}` | center to node | Get the descriptor |
-| `invoke {cap, action, args, ctx, deadline_ms?, blobs?}` | center to node | Run an action |
-| `progress {id, data}` | node to center | Intermediate data for an invoke |
+| `invoke {cap, action, args, ctx, deadline_ms?}` | center to node | Run an action |
 | `cancel {id}` | center to node | Stop an invoke. One final reply still follows |
 | `get {cap, keys}` | center to node | Read state |
 | `sub {topics}`, `unsub {topics}` | center to node | Topics `<cap>/<event>`, `<cap>/state`, `<cap>/*` |

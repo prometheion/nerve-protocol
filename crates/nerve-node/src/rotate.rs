@@ -142,19 +142,13 @@ fn entry(shared: &Shared, center: &str) -> Result<(SecretStorage, CenterEntry), 
     Ok((cfg.machine.secret_storage, e))
 }
 
-/// The live link to `center`, which must speak key rotation.
+/// The live link to `center`.
 fn linked(shared: &Shared, center: &str) -> Result<Arc<LinkHandle>, String> {
-    let link = shared.center(center).link().ok_or_else(|| {
+    shared.center(center).link().ok_or_else(|| {
         format!(
             "the node has no link to center {center} now, and a key rotation goes over it; nothing was changed. Try again once `nerve-node status` shows the center connected"
         )
-    })?;
-    if !link.rotate() {
-        return Err(format!(
-            "center {center} does not speak key rotation (it is older than this node); nothing was changed. Update the center first"
-        ));
-    }
-    Ok(link)
+    })
 }
 
 /// The node's key for `center` and the new one of a rotation under way.
@@ -379,16 +373,7 @@ pub(crate) async fn adopt(shared: Arc<Shared>, center: String, public_key: Strin
 /// center names ends, at most [`ROTATE_GRACE_MS`]; a center that told the
 /// rotation before and names a shorter grace now (it serves the new key
 /// already) ends it.
-pub(crate) fn center_rotated(
-    shared: &Shared,
-    center: &str,
-    link: &LinkHandle,
-    p: &Map<String, Value>,
-) {
-    if !link.rotate() {
-        tracing::debug!("center {center}: center.rotate without the feature rotate; ignored");
-        return;
-    }
+pub(crate) fn center_rotated(shared: &Shared, center: &str, p: &Map<String, Value>) {
     let r: CenterRotate = match params(p) {
         Ok(r) => r,
         Err(e) => {

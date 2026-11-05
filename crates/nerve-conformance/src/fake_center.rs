@@ -223,18 +223,15 @@ pub async fn handshake(
 }
 
 /// [`handshake`] against the node key `public_key` (hex), which a rotation
-/// may have replaced since the pairing, answering with `features` in the
-/// welcome when given (docs/dev/spec/protocol.md §1.1); without, as a center
-/// older than features.
+/// may have replaced since the pairing.
 pub async fn handshake_with(
     conn: &mut Conn<TcpStream>,
     center_id: &str,
     node_id: &str,
     public_key: &str,
-    features: Option<&[&str]>,
 ) -> Result<Hello, String> {
     let hello = hello_with(conn, center_id, node_id, public_key).await?;
-    welcome_with(conn, None, features).await?;
+    welcome(conn, None).await?;
     Ok(hello)
 }
 
@@ -265,9 +262,13 @@ pub async fn hello_with(
         Recv::Msg(Message::Notification {
             method: m,
             params: p,
-        }) if m == method::HELLO => {
-            params::<Hello>(&p).map_err(|e| format!("bad hello: {}", e.message))?
-        }
+        }) if m == method::HELLO => match params::<Hello>(&p) {
+            Ok(h) => h,
+            Err(e) => {
+                conn.bye("protocol_error").await;
+                return Err(format!("bad hello: {}", e.message));
+            }
+        },
         other => {
             conn.bye("protocol_error").await;
             return Err(format!("expected hello, got {other:?}"));
@@ -286,28 +287,22 @@ pub async fn hello_with(
     Ok(hello)
 }
 
-/// The last handshake step: `welcome`, with `resume` when the center answers
-/// a node's resume offer (§4.9).
+/// The last handshake step: `welcome`, with no features (§1.1) and `resume`
+/// as given, else a new link (§4.9).
 pub async fn welcome(
     conn: &mut Conn<TcpStream>,
     resume: Option<msg::Resumed>,
 ) -> Result<(), String> {
-    welcome_with(conn, resume, None).await
-}
-
-/// [`welcome`], with `features` when given (§1.1).
-pub async fn welcome_with(
-    conn: &mut Conn<TcpStream>,
-    resume: Option<msg::Resumed>,
-    features: Option<&[&str]>,
-) -> Result<(), String> {
-    let mut w = json!({"version": PROTOCOL_VERSION, "limits": msg::Limits::default()});
-    if let Some(r) = resume {
-        w["resume"] = serde_json::to_value(r).map_err(|e| e.to_string())?;
-    }
-    if let Some(f) = features {
-        w["features"] = json!(f);
-    }
+    let resume = resume.unwrap_or(msg::Resumed {
+        resumed: false,
+        got: 0,
+    });
+    let w = json!({
+        "version": PROTOCOL_VERSION,
+        "limits": msg::Limits::default(),
+        "features": [],
+        "resume": resume,
+    });
     conn.notify(method::WELCOME, w).await
 }
 

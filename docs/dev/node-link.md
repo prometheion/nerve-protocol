@@ -13,13 +13,16 @@ gets HTTP 401. The node then stops dialling that center.
 
 1. The center sends `challenge {nonce, center_id}`. The nonce is 32 random
    bytes.
-2. The node answers `hello` with its versions, software, limits and descriptor
-   `rev`. It signs `"nerve-connect/0" || center_id || nonce` with its Ed25519
+2. The node answers `hello` with its versions, software, limits, descriptor
+   `rev`, the features it speaks (possibly none) and the link it carries for a
+   [resume](#resume). It signs `"nerve-connect/0" || center_id || nonce` with its Ed25519
    key for this center.
 3. The center checks the signature and sends `welcome` with the version it
-   picked and its limits, and the features of the hello it speaks too
-   (`rotate`, [key rotation](identity-and-pairing.md#key-rotation)), when
-   the hello named any.
+   picked, its limits, the features of the hello it speaks too, and whether
+   it carries the link on. Both sides refuse a hello or a welcome without
+   `features` or the resume: [key rotation](identity-and-pairing.md#key-rotation)
+   and the resume are part of every link, and only later additions are named
+   features.
 
 No other message is valid before `welcome`. Each side has 15 seconds per step.
 After `welcome` the center asks for the descriptor with `describe`.
@@ -60,8 +63,8 @@ A link that drops without a bye is kept by both sides for 30 seconds, so an
 address change or a short outage loses no output. Exact rules:
 [spec/protocol.md](spec/protocol.md) §4.9.
 
-- The node names its link in every hello (`resume {link, got}`); a center that
-  can resume answers `welcome.resume {resumed, got}`. Each `got` counts the
+- The node names its link in every hello (`resume {link, got}`); the center
+  answers `welcome.resume {resumed, got}`. Each `got` counts the
   text frames that side read of the link, `ack` and `bye` aside.
 - Both sides keep what they sent until the other side acknowledges it
   (`ack {got}`, every 5 seconds at most), up to 16 MiB.
@@ -77,8 +80,8 @@ address change or a short outage loses no output. Exact rules:
   link was down) goes as `withdrawn {id}` instead, so it does not run late.
 - What a frame carries of the sudo password is taken out once, when the frame
   is numbered; a kept frame does not wait for a later scrub.
-- A link not resumed within 30 seconds, one that ended with a bye, and a link
-  with a center or node that cannot resume end at once: the center fails the
+- A link not resumed within 30 seconds, one that ended with a bye, and one
+  whose kept frames passed 16 MiB end at once: the center fails the
   calls with `connection_lost`, and the node kills the commands started on
   that link.
 - A frame the receiver cannot take (over its limit, or broken) would come
@@ -131,13 +134,12 @@ and the audit log. `panic` and `unlock` act on every center at once.
 
 ## Messages and limits
 
-The messages are JSON-RPC 2.0 text frames. Binary frames carry blobs and
-reliable streams, with a 10-byte header and at most 64 KiB of payload.
+The messages are JSON-RPC 2.0 text frames. Binary frames carry reliable
+streams, with a 10-byte header and at most 64 KiB of payload.
 
 | Limit | Default |
 |---|---|
 | Message | 4 MiB |
-| Blob | 64 MiB |
 | Calls at once | 64 |
 | Streams | 16 |
 | Frames queued for sending | 64 per side |

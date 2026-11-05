@@ -16,6 +16,7 @@ nerve-proto.workspace = true
 nerve-transport.workspace = true
 nerve-policy.workspace = true
 nerve-sandbox.workspace = true
+nerve-service.workspace = true
 tokio.workspace = true
 futures-util.workspace = true
 tokio-tungstenite.workspace = true

@@ -117,6 +117,9 @@ pub enum Cmd {
         #[arg(long)]
         purge: bool,
     },
+    /// Print the files of the service this program installs besides itself, as JSON: `update` of the installed program runs the new one so, to put them in place with it.
+    #[command(hide = true)]
+    ServiceFiles,
 }
 
 impl Cmd {

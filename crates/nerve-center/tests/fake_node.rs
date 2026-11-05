@@ -139,7 +139,9 @@ async fn handshake(r: &Running, key: &NodeKey) -> (WebSocketStream<BoxIo>, Messa
     handshake_with(r, key, json!({})).await
 }
 
-/// [`handshake`] with the fields of `more` added to the hello.
+/// [`handshake`] with the fields of `more` added to the hello, or put in
+/// place of its own (no features, and a new link to resume); a field of
+/// `null` is left out.
 async fn handshake_with(
     r: &Running,
     key: &NodeKey,
@@ -161,9 +163,14 @@ async fn handshake_with(
         "versions": ["0"],
         "software": {"name": "fake-node", "version": "x.y.z"},
         "rev": 1,
+        "features": [],
+        "resume": {"link": msg::hex(&nerve_transport::keys::random_bytes(16)), "got": 0},
     });
     for (k, v) in more.as_object().unwrap() {
-        hello[k] = v.clone();
+        match v {
+            Value::Null => drop(hello.as_object_mut().unwrap().remove(k)),
+            _ => hello[k] = v.clone(),
+        }
     }
     send(&mut ws, Message::notification(method::HELLO, hello)).await;
     let next = text(&mut ws).await.expect("a reply to hello");
@@ -776,9 +783,14 @@ async fn pair_connect_describe_and_call() {
     };
     assert_eq!(m, method::WELCOME);
     assert_eq!(params["version"], "0");
-    // A node that offers no resume hears nothing of one: an older node
-    // refuses a welcome with fields it does not know.
-    assert!(params.get("resume").is_none(), "{params:?}");
+    // Features and resume are the welcome's baseline: a new link, none
+    // named.
+    assert_eq!(params["features"], json!([]), "{params:?}");
+    assert_eq!(
+        params["resume"],
+        json!({"resumed": false, "got": 0}),
+        "{params:?}"
+    );
     let mut seen = serve(ws, descriptor(&key, "box-1"));
 
     // The descriptor arrives; settings stays out of what is offered.
@@ -3045,6 +3057,54 @@ async fn a_node_that_comes_back_with_a_new_link_fails_the_old_calls() {
     r.stop().await;
 }
 
+/// `features` and `resume` are the hello's baseline (protocol.md §1.1): a
+/// hello without one is refused with `protocol_error`, and the center's log
+/// says which field is missing and that the node may be older.
+#[tokio::test]
+async fn a_hello_without_features_or_resume_is_refused_and_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(dir.path()).await;
+    let key = NodeKey::generate().unwrap();
+    assert_eq!(pair(&r, &key, "box-1").await.0, 200);
+    for field in ["features", "resume"] {
+        let mut more = json!({});
+        more[field] = Value::Null;
+        let (_ws, reply) = handshake_with(&r, &key, more).await;
+        let Message::Notification { method: m, params } = reply else {
+            panic!("{reply:?}")
+        };
+        assert_eq!(m, method::BYE, "{field}");
+        assert_eq!(params["reason"], "protocol_error", "{field}");
+        let said = log_lines(&r.center, &format!("the hello has no `{field}`"));
+        assert_eq!(said.len(), 1, "{field}: {said:?}");
+        assert!(said[0].contains("older than this center"), "{said:?}");
+    }
+    r.stop().await;
+}
+
+/// A hello is read before its signature is checked, so what the center logs
+/// of one it cannot read is a fixed text: a value of the wrong type is
+/// refused, and nothing of what the sender wrote reaches the log.
+#[tokio::test]
+async fn an_unreadable_hello_puts_none_of_its_text_in_the_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(dir.path()).await;
+    let key = NodeKey::generate().unwrap();
+    assert_eq!(pair(&r, &key, "box-1").await.0, 200);
+    r.center.log().set_level(nerve_transport::log::Level::Debug);
+    let (_ws, reply) =
+        handshake_with(&r, &key, json!({"features": "a-sentence-the-sender-chose"})).await;
+    let Message::Notification { method: m, params } = reply else {
+        panic!("{reply:?}")
+    };
+    assert_eq!(m, method::BYE);
+    assert_eq!(params["reason"], "protocol_error");
+    assert!(log_lines(&r.center, "a-sentence-the-sender-chose").is_empty());
+    assert!(log_lines(&r.center, "invalid type").is_empty());
+    assert_eq!(log_lines(&r.center, "the hello cannot be read").len(), 1);
+    r.stop().await;
+}
+
 /// A resume offer whose link id is not 32 hex characters is refused.
 #[tokio::test]
 async fn a_malformed_link_id_is_a_protocol_error() {
@@ -3314,6 +3374,8 @@ const WAIT: Duration = Duration::from_millis(100);
 async fn job_center(dir: &std::path::Path) -> Running {
     let r = center_with(dir, &["--call-wait", "100ms"]).await;
     assert_eq!(r.center.call_wait(), WAIT);
+    // A link the test drops ends at once instead of waiting for its resume.
+    r.center.set_resume_grace(Duration::ZERO);
     r
 }
 
@@ -4440,6 +4502,7 @@ async fn jobs_leave_the_node_room_for_the_owner_and_signals() {
 async fn a_resumed_link_keeps_its_jobs() {
     let dir = tempfile::tempdir().unwrap();
     let r = job_center(dir.path()).await;
+    r.center.set_resume_grace(nerve_proto::resume::GRACE);
     let key = NodeKey::generate().unwrap();
     assert_eq!(pair(&r, &key, "box-1").await.0, 200);
     let (mut ws, welcome) = handshake_with(
@@ -5134,7 +5197,7 @@ async fn a_dropped_link_ends_its_streams() {
     assert!(
         said(&got)
             .0
-            .contains("it ended (the link to the node ended)"),
+            .contains("it ended (the link to the node dropped)"),
         "{got}"
     );
     r.stop().await;

@@ -64,6 +64,7 @@ use std::rc::Rc;
 use nerve_policy::config::{Access, NodeConfig};
 use nerve_policy::paths::within;
 use nerve_policy::protected::Platform;
+use nerve_transport::files::Format;
 use serde::{Deserialize, Serialize};
 
 use crate::paths::NodePaths;
@@ -235,6 +236,9 @@ pub fn file_perm(access: Access, mode: u32) -> u16 {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
+    /// The file's format (`nerve_transport::files::Format`).
+    #[serde(default)]
+    pub format: Format,
     /// The uid the entries are for: the `nerve-run` of when they were put on.
     pub uid: u32,
     /// The owner whose files carry them.
@@ -299,7 +303,9 @@ pub fn record_file(paths: &NodePaths) -> PathBuf {
 
 fn read_record(file: &Path) -> Result<Option<Record>, String> {
     match std::fs::read(file) {
-        Ok(b) => serde_json::from_slice(&b)
+        Ok(b) => Format::of_json(&b)
+            .check()
+            .and_then(|()| serde_json::from_slice(&b).map_err(|e| e.to_string()))
             .map(Some)
             .map_err(|e| format!("{}: {e}", file.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -1427,6 +1433,34 @@ mod tests {
         assert_eq!(file_perm(a("rwx"), 0o644), R | W);
         assert_eq!(file_perm(a("rx"), 0o755), R | X);
         assert_eq!(file_perm(a("w"), 0o755), W);
+    }
+
+    /// `acl.json` is written with `format: 1`; a file without it is at
+    /// format 1; one of a newer version is refused for its format, also
+    /// when it has fields this version does not know.
+    #[test]
+    fn the_record_has_a_format_and_a_newer_one_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("acl.json");
+        let r = Record {
+            uid: 1,
+            owner: 2,
+            ..Record::default()
+        };
+        write_record(&file, &r).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.starts_with("{\n  \"format\": 1,\n"), "{text}");
+        assert_eq!(read_record(&file).unwrap(), Some(r));
+        std::fs::write(&file, r#"{"uid": 1}"#).unwrap();
+        assert_eq!(read_record(&file).unwrap().unwrap().format, Format(1));
+        for newer in [
+            r#"{"format": 2, "uid": 1}"#,
+            r#"{"format": 2, "uid": 1, "later": []}"#,
+        ] {
+            std::fs::write(&file, newer).unwrap();
+            let e = read_record(&file).unwrap_err();
+            assert!(e.contains("format 2") && e.contains("newer version"), "{e}");
+        }
     }
 
     /// The report is handed over before the record shows the walk as done:

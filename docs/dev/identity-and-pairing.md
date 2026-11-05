@@ -69,7 +69,7 @@ The center computes the `node_id` from the public key itself.
 ## Key rotation
 
 Both keys of a pairing can be replaced without pairing again
-([spec/protocol.md](spec/protocol.md) §4.10, feature `rotate`). The side whose
+([spec/protocol.md](spec/protocol.md) §4.10). The side whose
 key changes starts it on its owner's command; the new key goes over the
 live link, signed by the old one, and the old key stays valid for a grace of
 7 days.

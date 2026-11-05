@@ -12,13 +12,23 @@
 //!
 //! What these commands do to the machine beyond the node's files (the user,
 //! systemd, running a program) goes through [`System`], so the tests run
-//! every step on temporary folders.
+//! every step on temporary folders. What the center's service does the same
+//! way, `update` among it, is `nerve_service`'s.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use nerve_policy::audit::AuditLog;
 use nerve_policy::config::SecretStorage;
+
+use nerve_service::System as _;
+#[cfg(all(test, target_os = "linux"))]
+use nerve_service::chown_tree;
+use nerve_service::failure;
+pub use nerve_service::{
+    Account, Version, as_owner_of, fetch_release, no_login, run, set_mode, write_file,
+};
+pub(crate) use nerve_service::{Steps, system_account};
 
 use crate::paths::NodePaths;
 
@@ -29,10 +39,6 @@ pub const USER: &str = "nerve";
 pub const USER_MARK: &str = "Nerve node";
 /// The systemd unit.
 pub const UNIT_NAME: &str = "nerve-node.service";
-/// The largest program `update` downloads.
-const PROGRAM_MAX: usize = 256 * 1024 * 1024;
-/// The largest `SHA256SUMS` `update` downloads.
-const SUMS_MAX: usize = 64 * 1024;
 
 /// Where an installed node lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -408,39 +414,13 @@ pub fn is_service_node(paths: &NodePaths) -> bool {
     false
 }
 
-/// A user account.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Account {
-    pub name: String,
-    pub uid: u32,
-    pub gid: u32,
-    /// The comment field, where [`USER_MARK`] goes.
-    pub comment: String,
-    pub home: PathBuf,
-    /// Every group the account is in, its own included.
-    pub groups: Vec<u32>,
-}
-
 /// What install, update and uninstall do to the machine besides writing the
-/// node's files.
-pub trait System {
-    fn is_root(&self) -> bool;
-    /// Whether systemd runs this machine.
-    fn has_systemd(&self) -> bool;
-    fn account(&self, name: &str) -> Result<Option<Account>, String>;
-    /// Makes a system user with a group of the same name and no other, the
-    /// home given (not created) and no login, marked with `mark`.
-    fn add_account(&self, name: &str, home: &Path, mark: &str) -> Result<(), String>;
-    /// Removes the user and its group.
-    fn remove_account(&self, name: &str) -> Result<(), String>;
-    fn systemctl(&self, args: &[&str]) -> Result<(), String>;
-    /// Gives `path` and everything below it to `uid`:`gid`.
-    fn give(&self, path: &Path, uid: u32, gid: u32) -> Result<(), String>;
+/// node's files: what the center's service asks of it too
+/// ([`nerve_service::System`]), and the node's own.
+pub trait System: nerve_service::System {
     /// Waits until the node the service started answers on its control
     /// socket.
     fn wait_running(&self, paths: &NodePaths) -> Result<(), String>;
-    /// What `<program> --version` prints, run as `account`.
-    fn version_of(&self, program: &Path, account: &Account) -> Result<String, String>;
     /// The state of the installed unit: running, stopped, starting,
     /// stopping or failed, and whether it starts with the machine.
     fn unit_state(&self) -> Result<ServiceState, String>;
@@ -512,69 +492,47 @@ impl Host {
     }
 }
 
-impl System for Host {
+impl nerve_service::System for Host {
     fn is_root(&self) -> bool {
-        nerve_transport::net::euid() == 0
+        nerve_service::Host.is_root()
     }
 
     fn has_systemd(&self) -> bool {
-        Path::new("/run/systemd/system").is_dir()
+        nerve_service::Host.has_systemd()
     }
 
+    /// Also on Windows, where Windows is asked.
     fn account(&self, name: &str) -> Result<Option<Account>, String> {
         crate::account::lookup(name)
     }
 
     fn add_account(&self, name: &str, home: &Path, mark: &str) -> Result<(), String> {
-        let shell = no_login();
-        run(
-            "useradd",
-            &[
-                "--system",
-                "--user-group",
-                "--home-dir",
-                &home.display().to_string(),
-                "--no-create-home",
-                "--shell",
-                shell,
-                "--comment",
-                mark,
-                name,
-            ],
-        )
+        nerve_service::Host.add_account(name, home, mark)
     }
 
     fn remove_account(&self, name: &str) -> Result<(), String> {
-        run("userdel", &[name])?;
-        // userdel takes the group along where the system makes one group per
-        // user; elsewhere it stays behind.
-        let group = std::process::Command::new("getent")
-            .args(["group", name])
-            .output()
-            .is_ok_and(|o| o.status.success());
-        if group {
-            run("groupdel", &[name])?;
-        }
-        Ok(())
+        nerve_service::Host.remove_account(name)
     }
 
     fn systemctl(&self, args: &[&str]) -> Result<(), String> {
-        let mut c = std::process::Command::new("systemctl");
-        c.args(args);
-        // setup restarts the node after it installed a keyring.
-        regain_root(&mut c);
-        let o = c.output().map_err(|e| format!("systemctl: {e}"))?;
-        if o.status.success() {
-            Ok(())
-        } else {
-            Err(format!("systemctl {}: {}", args.join(" "), failure(&o)))
-        }
+        nerve_service::Host.systemctl(args)
     }
 
     fn give(&self, path: &Path, uid: u32, gid: u32) -> Result<(), String> {
-        chown_tree(path, uid, gid)
+        nerve_service::Host.give(path, uid, gid)
     }
 
+    fn output_of(
+        &self,
+        program: &Path,
+        account: Option<&Account>,
+        args: &[&str],
+    ) -> Result<String, String> {
+        nerve_service::Host.output_of(program, account, args)
+    }
+}
+
+impl System for Host {
     fn unit_state(&self) -> Result<ServiceState, String> {
         let o = std::process::Command::new("systemctl")
             .args(["show", "--property=ActiveState,UnitFileState", UNIT_NAME])
@@ -628,26 +586,6 @@ impl System for Host {
             let _ = paths;
             Err(LINUX_ONLY.into())
         }
-    }
-
-    fn version_of(&self, program: &Path, account: &Account) -> Result<String, String> {
-        let mut c = std::process::Command::new(program);
-        c.arg("--version");
-        // A downloaded program runs as the service's user, not as root.
-        #[cfg(unix)]
-        if self.is_root() {
-            use std::os::unix::process::CommandExt;
-            c.uid(account.uid).gid(account.gid);
-        }
-        #[cfg(not(unix))]
-        let _ = account;
-        // The program `update` staged a moment ago.
-        let o = nerve_transport::files::retry_busy(|| c.output())
-            .map_err(|e| format!("{}: {e}", program.display()))?;
-        if !o.status.success() {
-            return Err(format!("{} --version: {}", program.display(), failure(&o)));
-        }
-        Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
     }
 
     fn end_session(&self, name: &str) -> Result<bool, String> {
@@ -719,82 +657,7 @@ impl System for Host {
     }
 }
 
-/// The shell of an account that does not log in.
-pub fn no_login() -> &'static str {
-    ["/usr/sbin/nologin", "/sbin/nologin"]
-        .into_iter()
-        .find(|s| Path::new(s).exists())
-        .unwrap_or("/bin/false")
-}
-
 const LINUX_ONLY: &str = "works on Linux with systemd only; elsewhere run `nerve-node run` under your own service manager";
-
-/// Runs a system tool; its error output is the error.
-/// Lets `c` run as root where this process keeps root only as its saved id
-/// (setup on the installed node, [`become_owner`]); elsewhere it runs as
-/// this process does.
-fn regain_root(c: &mut std::process::Command) {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::process::CommandExt;
-        let (mut r, mut e, mut s) = (0, 0, 0);
-        // SAFETY: getresuid writes the three ids it is given.
-        unsafe { libc::getresuid(&mut r, &mut e, &mut s) };
-        if e == 0 || s != 0 {
-            return;
-        }
-        // SAFETY: plain system calls between fork and exec.
-        unsafe {
-            c.pre_exec(|| {
-                if libc::setresuid(0, 0, 0) != 0
-                    || libc::setresgid(0, 0, 0) != 0
-                    || libc::setgroups(0, std::ptr::null()) != 0
-                {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = c;
-}
-
-/// Runs a system tool; its error output is the error.
-pub fn run(program: &str, args: &[&str]) -> Result<(), String> {
-    let o = std::process::Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|e| format!("{program}: {e}"))?;
-    if o.status.success() {
-        Ok(())
-    } else {
-        Err(format!("{program} {}: {}", args.join(" "), failure(&o)))
-    }
-}
-
-fn failure(o: &std::process::Output) -> String {
-    let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
-    if err.is_empty() {
-        o.status.to_string()
-    } else {
-        err
-    }
-}
-
-/// The steps a command did, shown as they are done and audited at its end.
-pub(crate) struct Steps<'a> {
-    pub(crate) done: Vec<String>,
-    pub(crate) out: &'a mut dyn Write,
-}
-
-impl Steps<'_> {
-    pub(crate) fn did(&mut self, step: impl Into<String>) {
-        let step = step.into();
-        let _ = writeln!(self.out, "{step}");
-        self.done.push(step);
-    }
-}
 
 /// Whether `what` can run here: Linux, root and systemd.
 fn supported(sys: &dyn System, what: &str) -> Result<(), String> {
@@ -1069,13 +932,22 @@ fn install_steps(
         RootOwner::Ask if invoker == ROOT => Chosen::Root,
         RootOwner::Ask => Chosen::Keep,
     };
-    let account = system_account(sys, USER, &layout.home, USER_MARK, "the user", steps)?;
+    let account = system_account(
+        sys,
+        USER,
+        &layout.home,
+        USER_MARK,
+        "the user",
+        "nerve-node install",
+        steps,
+    )?;
     let run = system_account(
         sys,
         crate::account::RUN_USER,
         &layout.run_home,
         crate::account::RUN_MARK,
         "the account commands run as,",
+        "nerve-node install",
         steps,
     )?;
     let dirs = [
@@ -1167,16 +1039,15 @@ fn start_installed(
     steps: &mut Steps,
 ) -> Result<(), String> {
     put_polkit(layout, sys, owner, steps)?;
-    write_file(&layout.unit, layout.unit_text(owner).as_bytes(), 0o644)?;
-    steps.did(format!("wrote the service unit {}", layout.unit.display()));
-    sys.systemctl(&["daemon-reload"])?;
-    sys.systemctl(&["enable", UNIT_NAME])?;
-    sys.systemctl(&["restart", UNIT_NAME])?;
-    sys.wait_running(&layout.paths)?;
-    steps.did(format!(
-        "the service {UNIT_NAME} runs as {USER} and starts with the machine"
-    ));
-    Ok(())
+    nerve_service::start_unit(
+        sys,
+        &layout.unit,
+        &layout.unit_text(owner),
+        UNIT_NAME,
+        USER,
+        &|| sys.wait_running(&layout.paths),
+        steps,
+    )
 }
 
 /// Takes nerve-run's entries off every folder the record names, as root and
@@ -1252,36 +1123,6 @@ fn drop_earlier_grants(
         gave_to_owner(r.not_given)
     ));
     Ok(ran)
-}
-
-/// The system account `name` (`what` says what it is for), made with its
-/// `home` and `mark` when it is not there. One of that name that `install`
-/// did not make is refused: the node takes over no account.
-fn system_account(
-    sys: &dyn System,
-    name: &str,
-    home: &Path,
-    mark: &str,
-    what: &str,
-    steps: &mut Steps,
-) -> Result<Account, String> {
-    match sys.account(name)? {
-        Some(a) if a.comment == mark => {
-            steps.did(format!("{what} {name}, is there already"));
-            Ok(a)
-        }
-        Some(_) => Err(format!(
-            "an account {name} exists already, and nerve-node install did not make it; the node needs it for itself"
-        )),
-        None => {
-            sys.add_account(name, home, mark)?;
-            let a = sys
-                .account(name)?
-                .ok_or_else(|| format!("useradd made no account {name}"))?;
-            steps.did(format!("made {what} {name} (uid {})", a.uid));
-            Ok(a)
-        }
-    }
 }
 
 /// The owner an earlier install named in the unit of `layout`.
@@ -1738,37 +1579,11 @@ fn uninstall_steps(
     Ok(())
 }
 
-/// A version as `nerve-node --version` prints it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Version(u64, u64, u64);
-
-impl Version {
-    #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn parse(said: &str) -> Option<Version> {
-        Version::parse_of("nerve-node", said)
-    }
-
-    /// The version `layout`'s program says it has: the desktop app's line
-    /// starts with its own name, so neither program takes the other's place
-    /// in an update.
-    pub(crate) fn of_program(layout: &Layout, said: &str) -> Option<Version> {
-        Version::parse_of(layout.edition.program, said)
-    }
-
-    /// A version as `<program> --version` prints it, for another program of
-    /// the release (the center's service).
-    pub fn parse_of(program: &str, said: &str) -> Option<Version> {
-        let v = said.trim().strip_prefix(program)?.strip_prefix(' ')?;
-        let mut parts = v.split('.').map(|p| p.parse::<u64>().ok());
-        let v = Version(parts.next()??, parts.next()??, parts.next()??);
-        parts.next().is_none().then_some(v)
-    }
-}
-
-impl std::fmt::Display for Version {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}.{}.{}", self.0, self.1, self.2)
-    }
+/// The version `layout`'s program says it has: the desktop app's line
+/// starts with its own name, so neither program takes the other's place in
+/// an update.
+pub(crate) fn program_version(layout: &Layout, said: &str) -> Option<Version> {
+    Version::parse_of(layout.edition.program, said)
 }
 
 /// `update`: the new program (the latest release, checked against its
@@ -1806,84 +1621,85 @@ async fn update_steps(
     steps: &mut Steps<'_>,
 ) -> Result<(), String> {
     let program = layout.edition.program;
-    let account = sys
-        .account(USER)?
-        .filter(|a| a.comment == USER_MARK)
-        .ok_or_else(|| {
-            format!("the user {USER} is missing; `sudo nerve-node install` makes it again")
-        })?;
-    let new = match from {
-        Some(f) => {
-            let b = std::fs::read(f).map_err(|e| format!("{}: {e}", f.display()))?;
-            steps.did(format!("read the new program from {}", f.display()));
-            b
-        }
-        None => {
-            let asset = asset_name(layout.edition.program)?;
-            let b = fetch_release(&layout.release, &asset).await?;
-            steps.did(format!(
-                "downloaded {asset} from {} and checked it against its SHA256SUMS",
-                layout.release
-            ));
-            b
-        }
+    let install = format!("sudo {program} install");
+    // The files of the service the new program has, for the owner the unit
+    // names now and the polkit of this machine.
+    let files_args = files_args(unit_owner(layout), sys.polkit(&layout.polkit_rule()));
+    let p = nerve_service::Program {
+        name: program,
+        bin: &layout.bin,
+        release: &layout.release,
+        asset: asset_name(program),
+        user: USER,
+        mark: USER_MARK,
+        unit: UNIT_NAME,
+        install: &install,
+        files_args,
+        places: service_places(layout),
     };
-    let old = std::fs::read(&layout.bin).map_err(|e| format!("{}: {e}", layout.bin.display()))?;
-    if new == old {
-        steps.did("the installed program is that one already; nothing to update");
-        return Ok(());
+    let started = || sys.wait_running(&layout.paths);
+    if nerve_service::update(&p, sys, from, &started, steps).await? {
+        install_parts(layout, steps)?;
     }
-    // Staged beside the program, so the rename that puts it in place does
-    // not cross file systems.
-    let staged = layout
-        .bin
-        .with_file_name(format!(".{}.new", layout.edition.program));
-    write_file(&staged, &new, 0o755)?;
-    let checked = (|| {
-        let said = sys.version_of(&staged, &account)?;
-        let new_v = Version::of_program(layout, &said)
-            .ok_or_else(|| format!("the new program is not {program}: it says {said:?}"))?;
-        let old_v = sys
-            .version_of(&layout.bin, &account)
-            .ok()
-            .and_then(|s| Version::of_program(layout, &s));
-        if let Some(o) = old_v
-            && new_v < o
-        {
-            return Err(format!(
-                "the new program is {program} {new_v}, older than the installed {o}; nothing changed"
-            ));
-        }
-        Ok((old_v, new_v))
-    })();
-    let (old_v, new_v) = match checked {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = std::fs::remove_file(&staged);
-            return Err(e);
-        }
+    Ok(())
+}
+
+/// What `update` asks the new program besides `service-files`: the owner the
+/// unit names and the polkit of this machine. `nerve-node service-files`
+/// takes them (a test keeps the two in step).
+pub(crate) fn files_args(owner: Option<String>, polkit: Polkit) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(owner) = owner {
+        args.extend(["--owner".to_string(), owner]);
+    }
+    let polkit = match polkit {
+        Polkit::Rules => "rules",
+        Polkit::Old => "pkla",
+        Polkit::Missing => "none",
     };
-    std::fs::rename(&staged, &layout.bin).map_err(|e| format!("{}: {e}", layout.bin.display()))?;
-    let old_v = old_v.map_or_else(|| "?".to_string(), |v| v.to_string());
-    steps.did(format!("replaced {program} {old_v} with {new_v}"));
-    let started = sys
-        .systemctl(&["restart", UNIT_NAME])
-        .and_then(|()| sys.wait_running(&layout.paths));
-    if let Err(e) = started {
-        write_file(&layout.bin, &old, 0o755)?;
-        let back = sys
-            .systemctl(&["restart", UNIT_NAME])
-            .and_then(|()| sys.wait_running(&layout.paths));
-        steps.did(format!("put {program} {old_v} back"));
-        return Err(match back {
-            Ok(()) => format!("the new program did not start ({e}); the old one runs again"),
-            Err(e2) => format!(
-                "the new program did not start ({e}), and the old one does not either ({e2})"
-            ),
-        });
+    args.extend(["--polkit".to_string(), polkit.to_string()]);
+    args
+}
+
+/// Where the files `service-files` names go on `layout`.
+fn service_places(layout: &Layout) -> Vec<nerve_service::Place> {
+    let place = |role, path, mode| nerve_service::Place { role, path, mode };
+    vec![
+        place("unit", layout.unit.clone(), 0o644),
+        place("helper", layout.service_helper(), 0o755),
+        place("polkit_action", layout.polkit_action(), 0o644),
+        place("polkit_rule", layout.polkit_rule(), 0o644),
+        place("polkit_pkla", layout.polkit_pkla(), 0o644),
+    ]
+}
+
+/// What `service-files` prints: the unit for `owner` and, with an owner
+/// other than root, the polkit files `polkit` reads (`rules`, `pkla`; none
+/// for `none`, where polkit is missing), the others as gone; without an
+/// owner or for root, none of them. `update` of an earlier program writes
+/// them, so that the new program runs under its own unit ([`update`]).
+pub fn service_files_text(layout: &Layout, owner: Option<&str>, polkit: &str) -> String {
+    let mut files = vec![("unit", Some(layout.unit_text(owner)))];
+    let helper = layout.service_helper();
+    match owner {
+        Some(o) if o != ROOT && polkit != "none" => {
+            let rules = polkit == "rules";
+            files.extend([
+                ("helper", Some(service_helper_text())),
+                ("polkit_action", Some(polkit_action_text(&helper))),
+                ("polkit_rule", rules.then(|| polkit_rule_text(o))),
+                ("polkit_pkla", (!rules).then(|| polkit_pkla_text(o))),
+            ]);
+        }
+        Some(_) if polkit == "none" => {}
+        _ => files.extend([
+            ("helper", None),
+            ("polkit_action", None),
+            ("polkit_rule", None),
+            ("polkit_pkla", None),
+        ]),
     }
-    steps.did(format!("restarted the service {UNIT_NAME}"));
-    install_parts(layout, steps)
+    nerve_service::files_text(&files)
 }
 
 /// The release file of `program` for this machine. The desktop app comes
@@ -2154,7 +1970,7 @@ pub fn service_status(layout: &Layout, state: Option<&ServiceState>) -> serde_js
         })
         .flatten()
         .filter(|o| o.status.success())
-        .and_then(|o| Version::of_program(layout, &String::from_utf8_lossy(&o.stdout)))
+        .and_then(|o| program_version(layout, &String::from_utf8_lossy(&o.stdout)))
         .map(|v| v.to_string());
     serde_json::json!({
         "installed": state.is_some(),
@@ -2223,200 +2039,10 @@ pub fn control(
     Ok(())
 }
 
-/// Downloads `asset` from the release at `base` and checks it against the
-/// release's `SHA256SUMS`.
-pub async fn fetch_release(base: &str, asset: &str) -> Result<Vec<u8>, String> {
-    nerve_transport::init_crypto();
-    let sums = download(&format!("{base}/SHA256SUMS"), SUMS_MAX).await?;
-    let want = String::from_utf8_lossy(&sums)
-        .lines()
-        .find_map(|l| {
-            let (hash, name) = l.split_once(char::is_whitespace)?;
-            let name = name.trim_start();
-            let name = name.strip_prefix('*').unwrap_or(name);
-            (name == asset).then(|| hash.to_ascii_lowercase())
-        })
-        .ok_or_else(|| format!("the release's SHA256SUMS lists no {asset}"))?;
-    let program = download(&format!("{base}/{asset}"), PROGRAM_MAX).await?;
-    let got: String = ring::digest::digest(&ring::digest::SHA256, &program)
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    if got != want {
-        return Err(format!(
-            "the downloaded {asset} does not match its line in SHA256SUMS; nothing changed"
-        ));
-    }
-    Ok(program)
-}
-
-/// `GET url`, following redirects (never from https to http), through the
-/// proxy `HTTPS_PROXY` names: the download the center's one-click model
-/// install shares (`nerve_transport::download`). Errors name the host, not
-/// the whole address, which may hold a signed query.
-async fn download(url: &str, max: usize) -> Result<Vec<u8>, String> {
-    let mut body = Vec::new();
-    let opts = nerve_transport::download::Options {
-        max: max as u64,
-        idle: nerve_transport::http::HEAD_TIMEOUT,
-        // Five redirects, as the node's own loop followed before.
-        hops: 5,
-        cancel: None,
-    };
-    nerve_transport::download::fetch(url, &mut body, &opts, &mut |_, _| {}).await?;
-    Ok(body)
-}
-
 /// The server and the request target (path and query) of an http(s) URL.
 #[cfg(all(test, target_os = "linux"))]
 fn split_url(url: &str) -> Result<(nerve_proto::link::CenterUrl, String), String> {
     nerve_transport::download::split_url(url)
-}
-
-/// Writes `data` to `path` through a temporary file beside it and a rename,
-/// with `mode`.
-pub fn write_file(path: &Path, data: &[u8], mode: u32) -> Result<(), String> {
-    let at = |e: std::io::Error| format!("{}: {e}", path.display());
-    let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir).map_err(at)?;
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let tmp = dir.join(format!(
-        ".{name}.{}.tmp",
-        nerve_transport::keys::random_token(8)
-    ));
-    let r = (|| {
-        std::fs::write(&tmp, data)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
-        }
-        #[cfg(not(unix))]
-        let _ = mode;
-        std::fs::rename(&tmp, path)
-    })();
-    if r.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    r.map_err(at)
-}
-
-pub fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-            .map_err(|e| format!("{}: {e}", path.display()))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, mode);
-        Ok(())
-    }
-}
-
-/// Root's file access as the owner of `dir`, on this thread, while the
-/// result lives ([`crate::account::FsAs`]): what root writes into a folder
-/// of the node's user then cannot reach through a link that user made more
-/// than that user may. A link in place of `dir` is refused. Nothing changes
-/// for another caller than root, or a folder of root's.
-pub fn as_owner_of(dir: &Path) -> Result<Option<impl Drop>, String> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let m = std::fs::symlink_metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        if m.file_type().is_symlink() {
-            return Err(format!(
-                "{} is a link; the node's folders are folders, and root does not follow it",
-                dir.display()
-            ));
-        }
-        if nerve_transport::net::euid() != 0 || m.uid() == 0 {
-            return Ok(None);
-        }
-        let owner = Account {
-            name: format!("uid {}", m.uid()),
-            uid: m.uid(),
-            gid: m.gid(),
-            comment: String::new(),
-            home: dir.to_path_buf(),
-            groups: vec![m.gid()],
-        };
-        crate::account::FsAs::new(&owner)
-            .map(Some)
-            .map_err(|e| format!("cannot write as the owner of {}: {e}", dir.display()))
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = dir;
-        Ok(None::<NoDrop>)
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-struct NoDrop;
-#[cfg(not(target_os = "linux"))]
-impl Drop for NoDrop {
-    fn drop(&mut self) {}
-}
-
-#[cfg(not(target_os = "linux"))]
-fn chown(path: &Path, uid: u32, gid: u32) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::lchown(path, Some(uid), Some(gid))
-            .map_err(|e| format!("{}: {e}", path.display()))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, uid, gid);
-        Ok(())
-    }
-}
-
-/// Gives `path` and everything below it to `uid`:`gid`. Links are changed
-/// themselves and never followed. On Linux each folder is opened without
-/// following a link and read through its descriptor, so a folder that the
-/// node's user swaps for a link meanwhile is not walked.
-fn chown_tree(path: &Path, uid: u32, gid: u32) -> Result<(), String> {
-    #[cfg(target_os = "linux")]
-    {
-        chown_below(path, path, uid, gid)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        chown_tree_by_path(path, uid, gid)
-    }
-}
-
-/// [`chown_tree`] on Linux: `at` is the path to open (below a folder's
-/// descriptor), `shown` the one errors name.
-#[cfg(target_os = "linux")]
-fn chown_below(at: &Path, shown: &Path, uid: u32, gid: u32) -> Result<(), String> {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::fs::OpenOptionsExt;
-    let err = |e: std::io::Error| format!("{}: {e}", shown.display());
-    let dir = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(at);
-    let dir = match dir {
-        Ok(d) => d,
-        // A file or a link: changed itself, through a descriptor of the
-        // entry (not followed), so the file checked is the one changed.
-        Err(e) if matches!(e.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP)) => {
-            return chown_entry(at, uid, gid).map_err(|e| format!("{}: {e}", shown.display()));
-        }
-        Err(e) => return Err(err(e)),
-    };
-    std::os::unix::fs::fchown(&dir, Some(uid), Some(gid)).map_err(err)?;
-    let fd = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()));
-    for e in std::fs::read_dir(&fd).map_err(err)? {
-        let name = e.map_err(err)?.file_name();
-        chown_below(&fd.join(&name), &shown.join(&name), uid, gid)?;
-    }
-    Ok(())
 }
 
 /// How many folder levels [`remove_files_of`] goes down: each level holds
@@ -2585,144 +2211,18 @@ fn give_folder(folder: &std::fs::File, shown: &Path, to: (u32, u32)) -> Result<(
         .map_err(|e| format!("{}: {e}", shown.display()))
 }
 
-/// Gives the file or link at `at` (not followed) to `uid`:`gid`. A file
-/// with more than one name is refused: its other name can be anywhere on
-/// the same file system, as a hard link the node's user made to a file of
-/// root's.
-#[cfg(target_os = "linux")]
-fn chown_entry(at: &Path, uid: u32, gid: u32) -> Result<(), String> {
-    use std::os::fd::FromRawFd;
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::MetadataExt;
-    let path = std::ffi::CString::new(at.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
-    // Through libc, not `OpenOptions::custom_flags`: on musl, the C library
-    // of the released programs, the standard library takes O_PATH out of
-    // the flags (musl's O_ACCMODE holds it), and the entry would be opened
-    // for reading, which a socket refuses, a link fails and a FIFO waits on.
-    // SAFETY: a valid C string; the new descriptor is owned below.
-    let fd = unsafe {
-        libc::open(
-            path.as_ptr(),
-            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error().to_string());
-    }
-    // SAFETY: open returned a fresh descriptor nothing else owns.
-    let f = std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
-    let m = f.metadata().map_err(|e| e.to_string())?;
-    if m.nlink() > 1 {
-        return Err(
-            "it has another name (a hard link), which may be outside the node's folders; remove it and run this again".into(),
-        );
-    }
-    // SAFETY: an empty NUL-terminated path with AT_EMPTY_PATH on an open
-    // descriptor: the call changes that inode.
-    let r = unsafe {
-        libc::fchownat(
-            std::os::fd::AsRawFd::as_raw_fd(&f),
-            c"".as_ptr(),
-            uid,
-            gid,
-            libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if r != 0 {
-        return Err(std::io::Error::last_os_error().to_string());
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn chown_tree_by_path(path: &Path, uid: u32, gid: u32) -> Result<(), String> {
-    chown(path, uid, gid)?;
-    let meta = std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if meta.is_dir() {
-        let entries = std::fs::read_dir(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        for e in entries {
-            let e = e.map_err(|e| format!("{}: {e}", path.display()))?;
-            chown_tree_by_path(&e.path(), uid, gid)?;
-        }
-    }
-    Ok(())
-}
-
 /// A command root runs on a node whose folders belong to another user (the
 /// installed node's `nerve`) runs as that user, so that what it writes stays
-/// readable to the node. Called before anything else runs in the process:
-/// it changes the user of the calling thread only where the C library does
-/// not change every thread's. With `keep_root` (setup) root stays the saved
-/// id, so the process can get it back for one thing, making an account
-/// ([`System::add_user`]); a process of the node's user cannot trace or
-/// read it, since its ids are not all that user's.
+/// readable to the node ([`nerve_service::become_owner`]); with `keep_root`
+/// (setup) root stays the saved id.
 pub fn become_owner(paths: &NodePaths, keep_root: bool) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let Some(m) = owner_to_become(paths) else {
-            return Ok(());
-        };
-        #[cfg(target_os = "linux")]
-        let (setgid, setuid) = {
-            let saved = |id: u32| if keep_root { 0 } else { id };
-            (
-                // SAFETY: plain calls without pointers.
-                move |g: u32| unsafe { libc::setresgid(g, g, saved(g)) },
-                move |u: u32| unsafe { libc::setresuid(u, u, saved(u)) },
-            )
-        };
-        #[cfg(not(target_os = "linux"))]
-        let (setgid, setuid) = {
-            let _ = keep_root;
-            // SAFETY: plain calls without pointers.
-            (
-                |g: u32| unsafe { libc::setgid(g) },
-                |u: u32| unsafe { libc::setuid(u) },
-            )
-        };
-        // SAFETY: the empty group list; groups first, the user last, while
-        // root may still change both.
-        let failed = unsafe { libc::setgroups(0, std::ptr::null()) != 0 }
-            || setgid(m.gid()) != 0
-            || setuid(m.uid()) != 0;
-        if failed {
-            return Err(format!(
-                "cannot run as the owner (uid {}) of {}: {}",
-                m.uid(),
-                paths.config_dir.display(),
-                std::io::Error::last_os_error()
-            ));
-        }
-        // The session bus these name is the caller's, not the owner's: the
-        // system keyring is found in the owner's session (/run/user/<uid>).
-        // SAFETY: `main` calls this while the process has one thread.
-        unsafe {
-            std::env::remove_var("DBUS_SESSION_BUS_ADDRESS");
-            std::env::remove_var("XDG_RUNTIME_DIR");
-        }
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (paths, keep_root);
-        Ok(())
-    }
+    nerve_service::become_owner(&[&paths.config_dir, &paths.state_dir], keep_root)
 }
 
-/// The folders whose owner root's command becomes ([`become_owner`]): the
-/// first of them that is there, when this process is root and they are not
-/// root's.
+/// The folders whose owner root's command becomes ([`become_owner`]).
 #[cfg(unix)]
 fn owner_to_become(paths: &NodePaths) -> Option<std::fs::Metadata> {
-    use std::os::unix::fs::MetadataExt;
-    if nerve_transport::net::euid() != 0 {
-        return None;
-    }
-    [&paths.config_dir, &paths.state_dir]
-        .iter()
-        .find_map(|d| std::fs::metadata(d).ok())
-        .filter(|m| m.uid() != 0)
+    nerve_service::owner_to_become(&[&paths.config_dir, &paths.state_dir])
 }
 
 /// Whether [`become_owner`] makes this process another user.
@@ -2769,25 +2269,17 @@ pub fn check_access(paths: &NodePaths) -> Result<(), String> {
 pub(crate) mod tests {
     use super::*;
     use nerve_policy::settings::SettingsStore;
-    use std::cell::RefCell;
 
-    /// A machine in a temporary folder: the user is the test's own, and
-    /// systemctl and the node's start are recorded.
+    /// A machine in a temporary folder ([`nerve_service::fake::Fake`],
+    /// which the center's tests use too) with what the node asks of it
+    /// besides: polkit, pkexec, Landlock and a keyring's session.
     pub(crate) struct Fake {
-        user: RefCell<Option<Account>>,
-        /// The other accounts of the machine.
-        others: RefCell<Vec<Account>>,
-        calls: RefCell<Vec<String>>,
-        /// The folders given to another user, and to whom.
-        given: RefCell<Vec<(PathBuf, u32)>>,
-        /// Whether a node started by the service answers.
-        starts: std::cell::Cell<bool>,
+        machine: nerve_service::fake::Fake,
         /// Whether the node's user keeps a session (a keyring's linger).
         lingers: std::cell::Cell<bool>,
         /// What polkit takes here.
         pub(crate) polkit: std::cell::Cell<Polkit>,
-        /// Whether the command runs as root, and whether pkexec is there.
-        pub(crate) root: std::cell::Cell<bool>,
+        /// Whether pkexec is there.
         pub(crate) pkexec_here: std::cell::Cell<bool>,
         /// Whether the kernel has Landlock.
         pub(crate) landlock: std::cell::Cell<bool>,
@@ -2795,57 +2287,69 @@ pub(crate) mod tests {
         pub(crate) landlock_abi: std::cell::Cell<Option<i32>>,
     }
 
+    impl std::ops::Deref for Fake {
+        type Target = nerve_service::fake::Fake;
+        fn deref(&self) -> &nerve_service::fake::Fake {
+            &self.machine
+        }
+    }
+
     impl Fake {
         pub(crate) fn new() -> Fake {
+            let machine = nerve_service::fake::Fake::new(USER, USER_MARK, "/var/lib/nerve");
+            machine
+                .others
+                .replace(vec![other("alice", 4242), other("root", 0)]);
             Fake {
-                user: RefCell::new(None),
-                others: RefCell::new(vec![other("alice", 4242), other("root", 0)]),
-                calls: RefCell::new(Vec::new()),
-                given: RefCell::new(Vec::new()),
-                starts: std::cell::Cell::new(true),
+                machine,
                 lingers: std::cell::Cell::new(false),
                 polkit: std::cell::Cell::new(Polkit::Rules),
-                root: std::cell::Cell::new(true),
                 pkexec_here: std::cell::Cell::new(true),
                 landlock: std::cell::Cell::new(true),
                 landlock_abi: std::cell::Cell::new(None),
             }
         }
-
-        pub(crate) fn calls(&self) -> Vec<String> {
-            self.calls.borrow().clone()
-        }
     }
 
     fn me() -> Account {
-        // SAFETY: plain getters.
-        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
-        Account {
-            name: USER.into(),
-            uid,
-            gid,
-            comment: USER_MARK.into(),
-            home: "/var/lib/nerve".into(),
-            groups: vec![gid],
-        }
+        nerve_service::fake::Fake::new(USER, USER_MARK, "/var/lib/nerve").me()
     }
 
-    /// An account that is not the test's own.
-    fn other(name: &str, uid: u32) -> Account {
-        Account {
-            name: name.into(),
-            uid,
-            gid: uid,
-            comment: String::new(),
-            home: format!("/home/{name}").into(),
-            groups: vec![uid],
+    use nerve_service::fake::other;
+
+    impl nerve_service::System for Fake {
+        fn is_root(&self) -> bool {
+            self.machine.is_root()
+        }
+        fn has_systemd(&self) -> bool {
+            self.machine.has_systemd()
+        }
+        fn account(&self, name: &str) -> Result<Option<Account>, String> {
+            self.machine.account(name)
+        }
+        fn add_account(&self, name: &str, home: &Path, mark: &str) -> Result<(), String> {
+            self.machine.add_account(name, home, mark)
+        }
+        fn remove_account(&self, name: &str) -> Result<(), String> {
+            self.machine.remove_account(name)
+        }
+        fn systemctl(&self, args: &[&str]) -> Result<(), String> {
+            self.machine.systemctl(args)
+        }
+        fn give(&self, path: &Path, uid: u32, gid: u32) -> Result<(), String> {
+            self.machine.give(path, uid, gid)
+        }
+        fn output_of(
+            &self,
+            program: &Path,
+            account: Option<&Account>,
+            args: &[&str],
+        ) -> Result<String, String> {
+            self.machine.output_of(program, account, args)
         }
     }
 
     impl System for Fake {
-        fn is_root(&self) -> bool {
-            self.root.get()
-        }
         fn landlock(&self) -> bool {
             self.landlock.get()
         }
@@ -2861,52 +2365,6 @@ pub(crate) mod tests {
                 program.display(),
                 args.join(" ")
             ));
-            Ok(())
-        }
-        fn has_systemd(&self) -> bool {
-            true
-        }
-        fn account(&self, name: &str) -> Result<Option<Account>, String> {
-            if name == USER {
-                return Ok(self.user.borrow().clone());
-            }
-            Ok(self
-                .others
-                .borrow()
-                .iter()
-                .find(|a| a.name == name)
-                .cloned())
-        }
-        /// `nerve` is the test's own account; any other is another uid.
-        fn add_account(&self, name: &str, home: &Path, mark: &str) -> Result<(), String> {
-            self.calls
-                .borrow_mut()
-                .push(format!("useradd {name} {}", home.display()));
-            if name == USER {
-                *self.user.borrow_mut() = Some(me());
-            } else {
-                let uid = 5000 + self.others.borrow().len() as u32;
-                self.others.borrow_mut().push(Account {
-                    comment: mark.into(),
-                    home: home.into(),
-                    ..other(name, uid)
-                });
-            }
-            Ok(())
-        }
-        fn remove_account(&self, name: &str) -> Result<(), String> {
-            self.calls.borrow_mut().push(format!("userdel {name}"));
-            if name == USER {
-                *self.user.borrow_mut() = None;
-            } else {
-                self.others.borrow_mut().retain(|a| a.name != name);
-            }
-            Ok(())
-        }
-        fn systemctl(&self, args: &[&str]) -> Result<(), String> {
-            self.calls
-                .borrow_mut()
-                .push(format!("systemctl {}", args.join(" ")));
             Ok(())
         }
         /// Running after the last start or restart, until a stop.
@@ -2930,28 +2388,9 @@ pub(crate) mod tests {
                 enabled: Some(calls.iter().any(|c| c.starts_with("systemctl enable"))),
             })
         }
-        /// The test may give files to itself only; giving them to anyone
-        /// else is recorded.
-        fn give(&self, path: &Path, uid: u32, gid: u32) -> Result<(), String> {
-            if uid == me().uid {
-                chown_tree(path, uid, gid)
-            } else {
-                self.given.borrow_mut().push((path.to_path_buf(), uid));
-                Ok(())
-            }
-        }
         fn wait_running(&self, _paths: &NodePaths) -> Result<(), String> {
-            if self.starts.get() {
-                Ok(())
-            } else {
-                Err("the node does not answer".into())
-            }
-        }
-        /// A program here is a text file whose first line is what it says.
-        fn version_of(&self, program: &Path, account: &Account) -> Result<String, String> {
-            assert_eq!(account.comment, USER_MARK);
-            let text = std::fs::read_to_string(program).map_err(|e| e.to_string())?;
-            Ok(text.lines().next().unwrap_or_default().to_string())
+            self.started()
+                .map_err(|_| "the node does not answer".to_string())
         }
         fn end_session(&self, name: &str) -> Result<bool, String> {
             if !self.lingers.replace(false) {
@@ -4068,7 +3507,7 @@ pub(crate) mod tests {
         assert!(sys.calls().is_empty());
 
         struct NotRoot;
-        impl System for NotRoot {
+        impl nerve_service::System for NotRoot {
             fn is_root(&self) -> bool {
                 false
             }
@@ -4090,10 +3529,17 @@ pub(crate) mod tests {
             fn give(&self, _: &Path, _: u32, _: u32) -> Result<(), String> {
                 unreachable!()
             }
-            fn wait_running(&self, _: &NodePaths) -> Result<(), String> {
+            fn output_of(
+                &self,
+                _: &Path,
+                _: Option<&Account>,
+                _: &[&str],
+            ) -> Result<String, String> {
                 unreachable!()
             }
-            fn version_of(&self, _: &Path, _: &Account) -> Result<String, String> {
+        }
+        impl System for NotRoot {
+            fn wait_running(&self, _: &NodePaths) -> Result<(), String> {
                 unreachable!()
             }
             fn unit_state(&self) -> Result<ServiceState, String> {
@@ -4685,6 +4131,99 @@ pub(crate) mod tests {
         );
     }
 
+    /// `update` puts the unit, the polkit files and the helper in place as
+    /// the new program has them, for the owner the unit names and the
+    /// polkit here, and they go back with the old program when the new one
+    /// does not start.
+    #[tokio::test]
+    async fn update_brings_the_unit_and_the_polkit_files_up_to_date() {
+        let d = tempfile::tempdir().unwrap();
+        let sys = Fake::new();
+        let l = installed(d.path(), &sys, "1.0.0");
+        let unit = std::fs::read_to_string(&l.unit).unwrap();
+        let rule = std::fs::read_to_string(l.polkit_rule()).unwrap();
+        // The new release's unit has a line more, and its rule another text.
+        let files: serde_json::Value =
+            serde_json::from_str(&service_files_text(&l, Some("alice"), "rules")).unwrap();
+        let mut files = files.as_object().unwrap().clone();
+        let new_unit = unit.replace("[Service]\n", "[Service]\nNice=5\n");
+        assert_ne!(new_unit, unit);
+        files.insert("unit".into(), new_unit.clone().into());
+        files.insert("polkit_rule".into(), "// a newer rule\n".into());
+        let new = d.path().join("new");
+        std::fs::write(
+            &new,
+            format!(
+                "nerve-node 1.1.0\n{}\n",
+                serde_json::Value::Object(files.clone())
+            ),
+        )
+        .unwrap();
+        sys.next_start.set(Some(false));
+        let e = update(&l, &sys, Some(&new), &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(e.contains("the old one runs again"), "{e}");
+        assert_eq!(std::fs::read_to_string(&l.unit).unwrap(), unit);
+        assert_eq!(std::fs::read_to_string(l.polkit_rule()).unwrap(), rule);
+        assert!(
+            sys.runs
+                .borrow()
+                .iter()
+                .any(|r| r == "service-files --owner alice --polkit rules"),
+            "{:?}",
+            sys.runs.borrow()
+        );
+        let mut out = Vec::new();
+        update(&l, &sys, Some(&new), &mut out).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&l.unit).unwrap(), new_unit);
+        assert_eq!(
+            std::fs::read_to_string(l.polkit_rule()).unwrap(),
+            "// a newer rule\n"
+        );
+        let calls = sys.calls();
+        let n = calls.len();
+        assert_eq!(
+            calls[n - 2..],
+            [
+                "systemctl daemon-reload",
+                &format!("systemctl restart {UNIT_NAME}")
+            ]
+        );
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains(&format!("wrote {}", l.unit.display())),
+            "{out}"
+        );
+    }
+
+    /// What `service-files` says: the unit for the owner, and the polkit
+    /// files this polkit reads; none of them for root or without an owner,
+    /// and none touched where polkit is missing.
+    #[test]
+    fn the_service_files_follow_the_owner_and_polkit() {
+        let d = tempfile::tempdir().unwrap();
+        let l = layout(d.path());
+        let said = |owner, polkit| -> serde_json::Value {
+            serde_json::from_str(&service_files_text(&l, owner, polkit)).unwrap()
+        };
+        let v = said(Some("alice"), "rules");
+        assert_eq!(v["unit"], l.unit_text(Some("alice")));
+        assert_eq!(v["helper"], service_helper_text());
+        assert_eq!(v["polkit_rule"], polkit_rule_text("alice"));
+        assert!(v["polkit_pkla"].is_null() && v.get("polkit_pkla").is_some());
+        let v = said(Some("alice"), "pkla");
+        assert_eq!(v["polkit_pkla"], polkit_pkla_text("alice"));
+        assert!(v["polkit_rule"].is_null());
+        for v in [said(None, "rules"), said(Some(ROOT), "rules")] {
+            for role in ["helper", "polkit_action", "polkit_rule", "polkit_pkla"] {
+                assert!(v.get(role).is_some_and(|t| t.is_null()), "{role}: {v}");
+            }
+        }
+        let v = said(Some("alice"), "none");
+        assert_eq!(v.as_object().unwrap().len(), 1, "{v}");
+    }
+
     #[tokio::test]
     async fn update_needs_an_installed_node() {
         let d = tempfile::tempdir().unwrap();
@@ -4723,31 +4262,6 @@ pub(crate) mod tests {
     /// The release download follows five redirects, as the node's own loop
     /// did before it moved to the shared downloader, and refuses a sixth
     /// (review r3, finding 7).
-    #[tokio::test]
-    async fn the_download_follows_five_redirects_and_no_more() {
-        use nerve_transport::http::{Response, read_request};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        // `/rN` redirects to `/r(N+1)` up to `/r6`, which answers.
-        tokio::spawn(async move {
-            while let Ok((mut io, _)) = listener.accept().await {
-                let req = read_request(&mut io, 0).await.unwrap();
-                let n: u8 = req.path.trim_start_matches("/r").parse().unwrap_or(9);
-                let r = if n >= 6 {
-                    Response::text(200, "end")
-                } else {
-                    Response::new(302, "text/plain", "")
-                        .with_header("Location", &format!("/r{}", n + 1))
-                };
-                let _ = r.write(&mut io).await;
-            }
-        });
-        let url = |n: u8| format!("http://127.0.0.1:{port}/r{n}");
-        assert_eq!(download(&url(1), 1024).await.unwrap(), b"end");
-        let e = download(&url(0), 1024).await.unwrap_err();
-        assert!(e.contains("too many redirects"), "{e}");
-    }
-
     fn sha(b: &[u8]) -> String {
         ring::digest::digest(&ring::digest::SHA256, b)
             .as_ref()
@@ -4788,18 +4302,16 @@ pub(crate) mod tests {
 
     #[test]
     fn versions_and_addresses() {
-        assert_eq!(
-            Version::parse("nerve-node 0.10.2\n"),
-            Some(Version(0, 10, 2))
-        );
-        assert!(Version(0, 10, 0) > Version(0, 9, 9));
+        let v = |said: &str| Version::parse_of("nerve-node", said);
+        assert_eq!(v("nerve-node 0.10.2\n").unwrap().to_string(), "0.10.2");
+        assert!(v("nerve-node 0.10.0") > v("nerve-node 0.9.9"));
         for bad in [
             "nerve-center 1.0.0",
             "nerve-node 1.0",
             "nerve-node 1.0.0.1",
             "nerve-node x",
         ] {
-            assert_eq!(Version::parse(bad), None, "{bad}");
+            assert_eq!(Version::parse_of("nerve-node", bad), None, "{bad}");
         }
         let (at, target) = split_url("https://example.com/a/b?x=1").unwrap();
         assert_eq!(
@@ -5052,10 +4564,10 @@ pub(crate) mod tests {
             );
         }
         assert_eq!(
-            Version::of_program(&l, "nerve-node-desktop 0.2.0\n"),
-            Some(Version(0, 2, 0))
+            program_version(&l, "nerve-node-desktop 0.2.0\n").map(|v| v.to_string()),
+            Some("0.2.0".into())
         );
-        assert_eq!(Version::of_program(&l, "nerve-node 0.2.0"), None);
+        assert_eq!(program_version(&l, "nerve-node 0.2.0"), None);
     }
 
     #[test]

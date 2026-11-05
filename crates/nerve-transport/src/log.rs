@@ -259,6 +259,41 @@ impl Log {
         Ok(())
     }
 
+    /// Appends one entry to the log file `path` without attaching a `Log`:
+    /// nothing of the file is read, and it is never moved aside, so a
+    /// program that runs beside the center (the updater, as root) neither
+    /// waits on nor loads a file the center's account has swapped. A link
+    /// or a file that is not a regular one is refused. The message is
+    /// [`scrub`]bed.
+    pub fn append_entry(path: &Path, level: Level, msg: &str) -> std::io::Result<()> {
+        let mut o = std::fs::OpenOptions::new();
+        o.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // No wait on a pipe, no link followed.
+            o.mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let mut f = o.open(path)?;
+        if !f.metadata()?.is_file() {
+            return Err(std::io::Error::other(format!(
+                "{} is not a regular file",
+                path.display()
+            )));
+        }
+        let e = Entry {
+            ts: nerve_proto::msg::now_ms(),
+            level,
+            node: None,
+            node_id: None,
+            msg: scrub(msg),
+        };
+        let mut line = serde_json::to_string(&e).unwrap_or_default();
+        line.push('\n');
+        f.write_all(line.as_bytes())
+    }
+
     /// Makes an entry: below the level it is dropped. The message is cut and
     /// stripped of secrets. `node` is the node's name and id.
     pub fn record(&self, level: Level, node: Option<(&str, &str)>, msg: &str) {

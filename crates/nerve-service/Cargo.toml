@@ -1,0 +1,25 @@
+[package]
+name = "nerve-service"
+description = "What the Nerve node's and center's services share: accounts, systemd, the files root writes, the passphrase prompt, and update."
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nerve-transport.workspace = true
+nerve-policy.workspace = true
+serde_json.workspace = true
+ring.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# The passphrase prompt reads a line without echo from the console.
+windows-sys = { workspace = true, features = ["Win32_System_Console"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

@@ -119,8 +119,9 @@ async fn send(ws: &mut WebSocketStream<BoxIo>, m: Message) {
     ws.send(WsMessage::text(m.encode())).await.unwrap();
 }
 
-/// Connects as `node_id`, signing with `key`, with `features` in the hello,
-/// and runs the handshake up to `welcome` (or what came instead).
+/// Connects as `node_id`, signing with `key`, with `features` in the hello
+/// and a new link to resume, and runs the handshake up to `welcome` (or
+/// what came instead).
 async fn handshake(
     url: &CenterUrl,
     pins: &[&str],
@@ -137,16 +138,15 @@ async fn handshake(
     assert_eq!(m, method::CHALLENGE);
     let nonce = msg::unhex(params["nonce"].as_str().unwrap()).unwrap();
     let center_id = params["center_id"].as_str().unwrap().to_string();
-    let mut hello = json!({
+    let hello = json!({
         "node_id": node_id,
         "auth": {"sig": key.sign_connect(&center_id, &nonce)},
         "versions": ["0"],
         "software": {"name": "fake-node", "version": "x.y.z"},
         "rev": 1,
+        "features": features,
+        "resume": {"link": msg::hex(&nerve_transport::keys::random_bytes(16)), "got": 0},
     });
-    if !features.is_empty() {
-        hello["features"] = json!(features);
-    }
     send(&mut ws, Message::notification(method::HELLO, hello)).await;
     let next = text(&mut ws).await.expect("a reply to hello");
     Ok((ws, next))
@@ -204,7 +204,7 @@ fn rotate_params(center_id: &str, old: &NodeKey, new: &NodeKey) -> Value {
 }
 
 async fn welcomed(r: &Running, node_id: &str, key: &NodeKey) -> WebSocketStream<BoxIo> {
-    let (ws, w) = handshake(&url(r, false), &[], node_id, key, &["rotate"])
+    let (ws, w) = handshake(&url(r, false), &[], node_id, key, &[])
         .await
         .unwrap();
     assert_eq!(method_of(&w), method::WELCOME, "{w:?}");
@@ -221,8 +221,11 @@ async fn wait_for(mut f: impl FnMut() -> bool) {
     panic!("timed out")
 }
 
+/// The welcome names the features of the hello the center speaks too:
+/// none so far, whatever the node names. Key rotation needs none: it is
+/// part of the baseline, so a node that names no feature rotates its key.
 #[tokio::test]
-async fn features_go_only_to_a_node_that_names_them() {
+async fn the_welcome_names_known_features_and_rotation_needs_none() {
     let dir = tempfile::tempdir().unwrap();
     let r = center(dir.path(), false).await;
     let key = NodeKey::generate().unwrap();
@@ -230,10 +233,8 @@ async fn features_go_only_to_a_node_that_names_them() {
     let (ws, w) = handshake(&url(&r, false), &[], &id, &key, &["rotate", "x-later"])
         .await
         .unwrap();
-    assert_eq!(params_of(w)["features"], json!(["rotate"]));
+    assert_eq!(params_of(w)["features"], json!([]));
     drop(ws);
-    // An older node names none and gets none: it refuses a field it does not
-    // know in the welcome.
     let c = r.center.clone();
     wait_for(|| c.link(&id).is_none()).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -242,8 +243,7 @@ async fn features_go_only_to_a_node_that_names_them() {
         .unwrap();
     let w = params_of(w);
     assert_eq!(w["version"], "0");
-    assert!(w.get("features").is_none(), "{w}");
-    // Nor is its key rotated by a message it never sends.
+    assert_eq!(w["features"], json!([]), "{w}");
     let new = NodeKey::generate().unwrap();
     send(
         &mut ws,
@@ -253,8 +253,11 @@ async fn features_go_only_to_a_node_that_names_them() {
         ),
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(r.center.public_key(&id), Some(key.public_hex()));
+    let a = next(&mut ws, method::KEY_ROTATED)
+        .await
+        .expect("key.rotated");
+    assert_eq!(a["public_key"], new.public_hex(), "{a}");
+    assert!(a.get("error").is_none(), "{a}");
     r.stop().await;
 }
 
@@ -333,7 +336,7 @@ async fn a_node_key_signed_by_the_key_it_replaces_is_taken_and_the_old_one_has_a
             .unwrap()
             .until_ms = 1;
     });
-    let (_ws, reply) = handshake(&url(&r, false), &[], &id, &old, &["rotate"])
+    let (_ws, reply) = handshake(&url(&r, false), &[], &id, &old, &[])
         .await
         .unwrap();
     assert_eq!(method_of(&reply), method::BYE);
@@ -462,7 +465,7 @@ async fn the_node_ends_the_grace_and_a_link_of_the_old_key_ends_with_it() {
     drop(ws);
     let c = r.center.clone();
     wait_for(|| c.link(&id).is_none()).await;
-    let (_ws, reply) = handshake(&url(&r, false), &[], &id, &old, &["rotate"])
+    let (_ws, reply) = handshake(&url(&r, false), &[], &id, &old, &[])
         .await
         .unwrap();
     assert_eq!(method_of(&reply), method::BYE);
@@ -491,9 +494,7 @@ async fn the_center_rotates_its_key_tells_the_nodes_and_serves_it_after_the_grac
     let key = NodeKey::generate().unwrap();
     let id = pair_tls(&r, &key, "box-1").await;
     let tls = url(&r, true);
-    let (mut ws, w) = handshake(&tls, &[&old_pin], &id, &key, &["rotate"])
-        .await
-        .unwrap();
+    let (mut ws, w) = handshake(&tls, &[&old_pin], &id, &key, &[]).await.unwrap();
     assert_eq!(method_of(&w), method::WELCOME);
     let c = r.center.clone();
     wait_for(|| c.link(&id).is_some()).await;
@@ -526,9 +527,7 @@ async fn the_center_rotates_its_key_tells_the_nodes_and_serves_it_after_the_grac
     wait_for(|| c.link(&id).is_none()).await;
 
     // A node that links during the grace, with the old pin only, is told.
-    let (mut ws, _) = handshake(&tls, &[&old_pin], &id, &key, &["rotate"])
-        .await
-        .unwrap();
+    let (mut ws, _) = handshake(&tls, &[&old_pin], &id, &key, &[]).await.unwrap();
     let n = next(&mut ws, method::CENTER_ROTATE)
         .await
         .expect("told on link");
@@ -544,14 +543,8 @@ async fn the_center_rotates_its_key_tells_the_nodes_and_serves_it_after_the_grac
     r.center.sweep().await;
     assert_eq!(r.center.pin().as_deref(), Some(new_pin.as_str()));
     assert!(!dir.path().join("tls.next.pem").exists());
-    assert!(
-        handshake(&tls, &[&old_pin], &id, &key, &["rotate"])
-            .await
-            .is_err()
-    );
-    let (mut ws, w) = handshake(&tls, &[&new_pin], &id, &key, &["rotate"])
-        .await
-        .unwrap();
+    assert!(handshake(&tls, &[&old_pin], &id, &key, &[]).await.is_err());
+    let (mut ws, w) = handshake(&tls, &[&new_pin], &id, &key, &[]).await.unwrap();
     assert_eq!(method_of(&w), method::WELCOME);
     // Nodes are still told, with no grace left, so they drop the old pin.
     let n = next(&mut ws, method::CENTER_ROTATE)
@@ -585,9 +578,7 @@ async fn the_owner_ends_the_grace_of_the_center_key_early() {
     let key = NodeKey::generate().unwrap();
     let id = pair_tls(&r, &key, "box-1").await;
     let tls = url(&r, true);
-    let (mut ws, _) = handshake(&tls, &[&old_pin], &id, &key, &["rotate"])
-        .await
-        .unwrap();
+    let (mut ws, _) = handshake(&tls, &[&old_pin], &id, &key, &[]).await.unwrap();
     let new_pin = r.center.rotate_key().await.unwrap()["pin"]
         .as_str()
         .unwrap()
@@ -603,11 +594,7 @@ async fn the_owner_ends_the_grace_of_the_center_key_early() {
     // The link up now goes on, and hears that the grace is over.
     let n = next(&mut ws, method::CENTER_ROTATE).await.unwrap();
     assert_eq!(n["grace_ms"], 0);
-    assert!(
-        handshake(&tls, &[&old_pin], &id, &key, &["rotate"])
-            .await
-            .is_err()
-    );
+    assert!(handshake(&tls, &[&old_pin], &id, &key, &[]).await.is_err());
     r.stop().await;
 }
 
@@ -1244,7 +1231,7 @@ async fn a_restore_does_not_bring_back_a_retired_node_key() {
     );
     let r = center(a.path(), false).await;
     assert!(r.center.read(|s| s.nodes[&id].old_key.is_none()));
-    let (_ws, reply) = handshake(&url(&r, false), &[], &id, &old, &["rotate"])
+    let (_ws, reply) = handshake(&url(&r, false), &[], &id, &old, &[])
         .await
         .unwrap();
     assert_eq!(method_of(&reply), method::BYE);

@@ -13,6 +13,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use nerve_transport::files::Format;
+
 use crate::paths::within;
 
 mod capability;
@@ -25,6 +27,10 @@ pub use capability::{
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeConfig {
+    /// The file's format (`nerve_transport::files::Format`): a file of a
+    /// newer version is refused, one without it is at format 1.
+    #[serde(default)]
+    pub format: Format,
     /// Counts every saved change; `settings.set` and the control socket check
     /// it (`if_version`) so two writers cannot overwrite each other unseen.
     #[serde(default)]
@@ -1160,6 +1166,11 @@ impl NodeConfig {
     pub fn parse(text: &str) -> Result<NodeConfig, String> {
         // Not TOML at all: the typed parse says why.
         if let Ok(doc) = toml::from_str::<toml::Table>(text) {
+            // Before the typed parse: a newer version's file is refused for
+            // its format, not for a key this version does not know.
+            if let Some(n) = doc.get("format").and_then(toml::Value::as_integer) {
+                Format(u64::try_from(n).unwrap_or(0)).check()?;
+            }
             refuse_proxy_secrets(&doc)?;
             capability::refuse_account(&doc)?;
             capability::refuse_units(&doc)?;
@@ -1206,6 +1217,7 @@ impl NodeConfig {
     /// The checks serde cannot do. Folder paths are put in the form the
     /// policy keeps ([`CenterPolicy::validate`]).
     pub fn validate(&mut self) -> Result<(), String> {
+        self.format.check()?;
         if let Some(n) = &self.node.name
             && !nerve_proto::valid_node_name(n)
         {
@@ -1553,6 +1565,33 @@ sudo_allow = ["sudo apt update"]
 
     fn sample() -> String {
         SAMPLE_TEMPLATE.replace("FOLDER", FOLDER)
+    }
+
+    /// `node.toml` is written with `format = 1` above the save counter; a
+    /// file without it is at format 1; one of a newer version is refused
+    /// for its format, also when it has keys this version does not know.
+    #[test]
+    fn node_toml_has_a_format_and_a_newer_one_is_refused() {
+        let mut c = NodeConfig::parse(&sample()).unwrap();
+        assert_eq!(c.format, Format(1));
+        c.version = 7;
+        let text = c.to_toml();
+        assert!(text.starts_with("format = 1\nversion = 7\n"), "{text}");
+        assert_eq!(NodeConfig::parse(&text).unwrap(), c);
+        for newer in ["format = 2\n", "format = 2\nlater = true\n[soon]\nx = 1\n"] {
+            let e = NodeConfig::parse(newer).unwrap_err();
+            assert!(e.contains("format 2") && e.contains("newer version"), "{e}");
+        }
+        assert!(
+            NodeConfig::parse("format = 0\n")
+                .unwrap_err()
+                .contains("format 0")
+        );
+        let mut set = NodeConfig {
+            format: Format(2),
+            ..NodeConfig::default()
+        };
+        assert!(set.validate().unwrap_err().contains("format 2"));
     }
 
     #[test]

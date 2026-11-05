@@ -132,9 +132,6 @@ pub(crate) struct LinkHandle {
     /// once, before it is numbered and kept: the password it may carry is
     /// the one held then, and a frame kept for a resume can outlive it.
     scrub: Scrub,
-    /// Whether the center named the feature `rotate` in its welcome
-    /// (docs/dev/spec/protocol.md §4.10).
-    rotate: std::sync::atomic::AtomicBool,
     /// The answer a key rotation waits for: the method, and where its
     /// params go (crate::rotate).
     waiting: Mutex<Option<(&'static str, Answer)>>,
@@ -200,18 +197,8 @@ impl LinkHandle {
             }),
             subs: Mutex::default(),
             scrub,
-            rotate: Default::default(),
             waiting: Mutex::default(),
         }
-    }
-
-    /// Notes that the center speaks key rotation.
-    pub fn set_rotate(&self, on: bool) {
-        self.rotate.store(on, Ordering::SeqCst);
-    }
-
-    pub fn rotate(&self) -> bool {
-        self.rotate.load(Ordering::SeqCst)
     }
 
     /// Waits for the next notification `method` from the center: its params,
