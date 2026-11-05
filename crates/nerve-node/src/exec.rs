@@ -3265,6 +3265,8 @@ mod tests {
             Path::new("/tmp/tmux-1000/default"),
             Path::new("/dev/shm/p.sock"),
             Path::new("/run/lock/p.sock"),
+            Path::new("/var/lock/p.sock"),
+            Path::new("/var/crash/p.sock"),
             &runtime.join("bus"),
         ] {
             assert!(!reaches(&spec, p), "{p:?}: {spec:?}");
