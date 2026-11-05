@@ -1035,6 +1035,14 @@ pub struct CenterPolicy {
     /// folders' sandbox ([`CenterPolicy::runs_as_owner`]).
     #[serde(default, skip_serializing_if = "is_false")]
     pub as_owner: bool,
+    /// In every mode: its commands get no network (no socket but a unix
+    /// one), held by the node's seccomp filter where they run apart from the
+    /// owner (as `nerve-run`, or in folder mode under the sandbox); where
+    /// they would run as the owner, or the node has no filter, none of them
+    /// runs, and no command of the sudo list runs while it is on. Only the
+    /// owner turns it off again.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub no_network: bool,
     /// `cap` or `cap.action` → setting; `cap.action` wins over `cap`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub caps: BTreeMap<String, CapSetting>,

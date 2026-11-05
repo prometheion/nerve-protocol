@@ -3,16 +3,19 @@
 //! node's config, keys and state; no command runs as it. On Linux a command
 //! of `folder` mode, and of `allowlist` mode unless the pairing says
 //! otherwise, runs as [`RUN_USER`], an account of its own that `install`
-//! makes, with a home of its own and the folders the owner grants it
+//! makes, with a home and a temporary folder of each pairing's own
+//! ([`Own`], crate::own_dirs) and the folders the owner grants it
 //! (crate::acl); a command of `user` mode runs as the owner (the account
 //! that ran `install`, which the service unit names). On Windows every
 //! command runs as the owner, folder mode in an AppContainer. To switch to
 //! the account the service keeps CAP_SETUID and CAP_SETGID, the one
 //! privilege it has, and every command it starts drops both before it runs.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use nerve_policy::CenterEntry;
 use nerve_policy::config::{Access, Folder};
+use nerve_policy::paths::within;
 
 use crate::service::Account;
 
@@ -25,27 +28,194 @@ pub const RUN_USER: &str = "nerve-run";
 /// leaves it.
 pub const RUN_MARK: &str = "Nerve commands";
 
-/// The home of [`RUN_USER`], which `install` makes: its own, writable, where
-/// tool caches and configs go.
+/// The home of [`RUN_USER`], which `install` makes: its own, closed to
+/// others. No command has it as its home: each pairing's commands have a
+/// home and a temporary folder of their own below it ([`Own`]).
 pub const RUN_HOME: &str = "/var/lib/nerve-run";
 
+/// The folders of one pairing's commands of [`RUN_USER`] (#167): a home,
+/// where its programs keep their settings and caches, and a temporary
+/// folder, both below the account's home and both that pairing's alone.
+/// One center's agent then cannot leave a `.gitconfig`, `.bashrc` or
+/// script there that another center's commands would run. Where Landlock
+/// is there a command reaches only its own pairing's two; without it they
+/// are 0700 like the rest of the account's files, which keeps nothing apart
+/// from another pairing's commands of the same account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Own {
+    pub home: PathBuf,
+    pub temp: PathBuf,
+}
+
+impl Own {
+    /// The folders of the pairing `center` (a center name: no `/`, no
+    /// `.`), below `run_home`, the account's home. On Unix at the home's
+    /// real place (passwd may give it through a link, a `/var/lib` moved to
+    /// another disk), as the owner's folders are stored: with the network
+    /// switch on the sandbox writes only at a folder's real place
+    /// (`exec::spelled_apart`), whoever built the folders.
+    pub fn of(run_home: &Path, center: &str) -> Own {
+        #[cfg(unix)]
+        let run_home = &std::fs::canonicalize(run_home).unwrap_or_else(|_| run_home.to_path_buf());
+        let root = run_home.join(center);
+        Own {
+            home: root.join("home"),
+            temp: root.join("tmp"),
+        }
+    }
+}
+
 /// The folders a command of [`RUN_USER`] has besides those of its pairing,
-/// whatever they say: `/tmp`, `/var/tmp` and the account's home, to read,
+/// whatever they say: its pairing's home and temporary folder ([`Own`]),
+/// and `/tmp` and `/var/tmp` for the programs that insist on them, which
+/// every pairing and every account on the machine shares. All to read,
 /// write and run programs in. Under its own uid the owner's sockets and
 /// folders in `/tmp` stay closed to it by their modes.
-pub fn built_in(home: &Path) -> Vec<Folder> {
+pub fn built_in(own: &Own) -> Vec<Folder> {
     let all = Access {
         read: true,
         write: true,
         execute: true,
     };
-    [Path::new("/tmp"), Path::new("/var/tmp"), home]
-        .iter()
-        .map(|p| Folder {
-            path: p.display().to_string(),
-            access: all,
-        })
-        .collect()
+    [
+        Path::new("/tmp"),
+        Path::new("/var/tmp"),
+        own.home.as_path(),
+        own.temp.as_path(),
+    ]
+    .iter()
+    .map(|p| Folder {
+        path: p.display().to_string(),
+        access: all,
+    })
+    .collect()
+}
+
+/// The folders the owner granted, cut around `run_home`, the home of
+/// [`RUN_USER`] that holds every pairing's own folders: a grant at or above
+/// it is replaced by its other entries, level by level down to it, and one
+/// inside it is dropped (`exec::leave_out`, as for the node's own folders).
+/// Every pairing's commands and file calls run as that one account, which
+/// owns all the pairings' folders, so a grant like `/` or `/var` would give
+/// a pairing the others' homes. The pairing's own two folders come after
+/// this ([`built_in`]). `home` is the `~` of the folders.
+pub fn around_pairings(folders: &[Folder], home: &Path, run_home: &Path) -> Vec<Folder> {
+    let run_home = [run_home.to_path_buf()];
+    let mut out = Vec::new();
+    for f in folders {
+        let Some(path) = nerve_policy::protected::expand(home, &f.path) else {
+            out.push(f.clone());
+            continue;
+        };
+        let cut = crate::exec::leave_out(std::slice::from_ref(&path), &run_home);
+        if cut.len() == 1 && cut[0] == path {
+            out.push(f.clone());
+        } else {
+            out.extend(cut.into_iter().map(|p| Folder {
+                path: p.display().to_string(),
+                access: f.access,
+            }));
+        }
+    }
+    out
+}
+
+/// The home of the command account as the paths of a call are compared
+/// (resolved), and the pairing `center`'s own folders in it.
+pub fn pairing_view(run_home: &Path, center: &str) -> (PathBuf, Own) {
+    let home = std::fs::canonicalize(run_home).unwrap_or_else(|_| run_home.to_path_buf());
+    let own = Own::of(&home, center);
+    (home, own)
+}
+
+/// The command account's home and the pairing `center`'s own folders in it
+/// ([`pairing_view`]), to which the gate holds a call that acts as that
+/// account ([`other_pairings`]). `None` for another account: a sudo command
+/// of the pairing runs as root and is looked at as the owner, whose home
+/// holds no pairing's folders, and the sudo allow list names what it does.
+pub fn fence(account: &Account, center: &str) -> Option<(PathBuf, Own)> {
+    (account.name == RUN_USER).then(|| pairing_view(&account.home, center))
+}
+
+/// Why a program may not be handed the folder `handed` with `link` below
+/// it: the link leads into another pairing's folders, or to a folder that
+/// holds them ([`other_pairings`]), and the program follows it. Named by
+/// the link, as the policy's own refusal of a link is
+/// (nerve_policy::LinkCheck), not by where it leads.
+pub fn link_to_other_pairings(
+    link: &nerve_policy::Link,
+    handed: &Path,
+    run_home: &Path,
+    mine: &Own,
+) -> Option<String> {
+    other_pairings(std::slice::from_ref(&link.to), run_home, mine, true).map(|_| {
+        format!(
+            "{} holds a link ({}) that leads into the home or temporary folder of another \
+             pairing; no mode, folder or rule gives a pairing those",
+            nerve_policy::paths::to_wire(handed),
+            nerve_policy::paths::to_wire(&link.at)
+        )
+    })
+}
+
+/// Whether `path` (resolved) lies in `run_home`, the command account's
+/// home, outside the pairing's own two folders `mine`: in another
+/// pairing's home or temporary folder, or in what the account keeps there
+/// besides. With `on_the_way`, the folders above the pairing's own two
+/// (`run_home` itself and the pairing's folder) are not counted: a walk
+/// passes through them and sees only what it may go into.
+pub fn in_other_pairings(path: &Path, run_home: &Path, mine: &Own, on_the_way: bool) -> bool {
+    within(path, run_home)
+        && !within(path, &mine.home)
+        && !within(path, &mine.temp)
+        && !(on_the_way && (within(&mine.home, path) || within(&mine.temp, path)))
+}
+
+/// Why a call of a pairing whose commands run as the command account may
+/// not use `targets`, if it may not: a path in another pairing's folders,
+/// whatever the mode, the folders and the allow rules say (every pairing's
+/// files are that one account's, and the node acts as it). A program is
+/// handed a folder it works below with the owner's rights, so a folder that
+/// holds the account's home is refused too.
+pub fn other_pairings(
+    targets: &[nerve_policy::Target],
+    run_home: &Path,
+    mine: &Own,
+    program: bool,
+) -> Option<String> {
+    targets.iter().find_map(|t| {
+        let shown = nerve_policy::paths::to_wire(&t.path);
+        if in_other_pairings(&t.path, run_home, mine, false) {
+            Some(format!(
+                "{shown} is in the home or temporary folder of another pairing, or in what its \
+                 commands' account keeps besides; no mode, folder or rule gives a pairing those"
+            ))
+        } else if program && t.holds && within(run_home, &t.path) {
+            Some(format!(
+                "{shown} holds the other pairings' home and temporary folders, and a program \
+                 would work below it"
+            ))
+        } else {
+            None
+        }
+    })
+}
+
+/// `entry` as the gate and the sandbox see it when its commands run as
+/// `run` (`nerve-run`): the owner's folders cut around the account's home
+/// ([`around_pairings`]), then the pairing's built-in ones ([`built_in`]).
+/// `home` is the `~` of the folders.
+pub fn with_built_in(mut entry: CenterEntry, home: &Path, run: &Account) -> CenterEntry {
+    let own = Own::of(&run.home, &entry.name);
+    entry.policy.folders = around_pairings(&entry.policy.folders, home, &run.home);
+    entry.policy.folders.extend(built_in(&own));
+    entry
+}
+
+/// Whether `path` (a folder of [`built_in`]) is one every pairing shares:
+/// `/tmp` and `/var/tmp`.
+pub fn shared_folder(path: &str) -> bool {
+    matches!(path, "/tmp" | "/var/tmp")
 }
 
 /// What a command of the installed node gets that would run as the owner
@@ -157,6 +327,42 @@ pub fn landlock_warning(abi: Option<i32>) -> Option<String> {
     })
 }
 
+/// What `status`, a pairing and the apps say where two or more pairings'
+/// commands run as [`RUN_USER`] on a node without Landlock: `separate` (the
+/// installed Linux node, `crate::daemon::Shared::separate`), the kernel's
+/// Landlock ABI `landlock`, and the pairings of `cfg` at `now`. All of them
+/// run as that one account, which owns every pairing's folders, and only
+/// Landlock holds a command to its own pairing's: without it a command of
+/// one pairing reaches what the others keep. A pairing counts if its
+/// commands run as `nerve-run`, or it is offered a capability of the config
+/// (those run as `nerve-run` in every mode, from the pairing's own home). A
+/// revoked pairing runs nothing and is not counted.
+pub fn pairings_warning(
+    separate: bool,
+    landlock: Option<i32>,
+    cfg: &nerve_policy::NodeConfig,
+    now: u64,
+) -> Option<String> {
+    if !separate || landlock.is_some() {
+        return None;
+    }
+    let names: Vec<&str> = cfg
+        .centers
+        .iter()
+        .filter(|c| {
+            !c.revoked
+                && (!c.policy.runs_as_owner(now) || crate::config_cap::runs_as_account(cfg, c))
+        })
+        .map(|c| c.name.as_str())
+        .collect();
+    (names.len() > 1).then(|| {
+        format!(
+            "Without Landlock nothing keeps the pairings apart: the commands of {} all run as {RUN_USER}, so a command of one can read and change what the others keep in their own folders and in the folders you give them, and can reach their running commands, with their network. A kernel with Landlock keeps each pairing to its own.",
+            names.join(", ")
+        )
+    })
+}
+
 /// What closes the reach of [`home_warning`].
 #[cfg(unix)]
 const LANDLOCK_ADVICE: &str =
@@ -170,6 +376,75 @@ const GIVEN_ADVICE: &str = "This warning stays while you give it a folder in you
 #[cfg(all(test, unix))]
 mod home_tests {
     use super::*;
+
+    /// Two or more pairings of nerve-run without Landlock are told, named:
+    /// not with Landlock, not on a node whose commands run as its own user,
+    /// and not where only one runs as nerve-run (the other in user mode, or
+    /// revoked).
+    #[test]
+    fn a_second_pairing_of_nerve_run_without_landlock_is_told() {
+        use nerve_policy::config::Mode;
+        let pairing = |name: &str, mode: Mode| nerve_policy::CenterEntry {
+            name: name.into(),
+            url: "https://c.example".into(),
+            pin: None,
+            center_id: "c".into(),
+            node_id: name.into(),
+            settings: Default::default(),
+            paused: false,
+            revoked: false,
+            unknown: false,
+            public_key: None,
+            key_rotations: 0,
+            pin_rotations: 0,
+            old_pin: None,
+            policy: nerve_policy::config::CenterPolicy {
+                mode,
+                ..Default::default()
+            },
+            capabilities: Vec::new(),
+        };
+        let mut cfg = nerve_policy::NodeConfig {
+            centers: vec![pairing("home", Mode::Folder)],
+            ..Default::default()
+        };
+        assert_eq!(pairings_warning(true, None, &cfg, 0), None);
+        cfg.centers.push(pairing("lab", Mode::Allowlist));
+        let w = pairings_warning(true, None, &cfg, 0).unwrap();
+        assert!(
+            w.contains("nothing keeps the pairings apart")
+                && w.contains("home, lab")
+                && w.contains("reach their running commands"),
+            "{w}"
+        );
+        assert_eq!(pairings_warning(true, Some(6), &cfg, 0), None);
+        assert_eq!(pairings_warning(false, None, &cfg, 0), None);
+        cfg.centers[1].policy.as_owner = true;
+        assert_eq!(pairings_warning(true, None, &cfg, 0), None);
+        cfg.centers[1].policy.as_owner = false;
+        cfg.centers[1].revoked = true;
+        assert_eq!(pairings_warning(true, None, &cfg, 0), None);
+        cfg.centers[1].revoked = false;
+        cfg.centers[1].policy.mode = Mode::User;
+        assert_eq!(pairings_warning(true, None, &cfg, 0), None);
+        // A pairing in user mode counts once a capability of the config is
+        // offered to it: that runs as nerve-run in every mode.
+        cfg.capabilities
+            .push(nerve_policy::config::ConfigCapability {
+                name: "tool.run".into(),
+                summary: String::new(),
+                effect: nerve_proto::descriptor::Effect::Execute,
+                command: vec!["tool".into()],
+                params: serde_json::Value::Null,
+                result: Default::default(),
+                timeout_secs: None,
+                platform: Default::default(),
+            });
+        let w = pairings_warning(true, None, &cfg, 0).unwrap();
+        assert!(w.contains("home, lab"), "{w}");
+        cfg.centers[1].revoked = true;
+        assert_eq!(pairings_warning(true, None, &cfg, 0), None);
+    }
     use std::os::unix::fs::PermissionsExt;
 
     /// A home others may list or enter is open to `nerve-run` too; one
@@ -814,15 +1089,237 @@ mod tests {
         }
     }
 
+    /// A grant that has nothing to do with the account's home stays as the
+    /// owner wrote it (`~` and all); one at or above it is cut around it,
+    /// one inside it goes, whoever's it is.
     #[test]
-    fn the_built_in_folders_are_the_temporary_ones_and_the_home() {
-        let b = built_in(Path::new(RUN_HOME));
+    fn grants_are_cut_around_the_account_home_and_kept_otherwise() {
+        let d = tempfile::tempdir().unwrap();
+        let top = std::fs::canonicalize(d.path()).unwrap();
+        // The cut paths come back as the policy compares them, without the
+        // `\\?\` prefix a resolved Windows path carries.
+        #[cfg(windows)]
+        let top = PathBuf::from(nerve_policy::paths::win::strip_verbatim(
+            &top.to_string_lossy(),
+        ));
+        let run_home = top.join("srv/nerve-run");
+        for dir in ["srv/nerve-run/c/home", "srv/www", "owner/work"] {
+            std::fs::create_dir_all(top.join(dir)).unwrap();
+        }
+        let grant = |p: &str, a: &str| Folder {
+            path: p.into(),
+            access: Access::parse(a).unwrap(),
+        };
+        // Joined part by part: a `/` inside one part stays a `/` on Windows.
+        let under = |p: &str| {
+            p.split('/')
+                .fold(top.clone(), |path, part| path.join(part))
+                .display()
+                .to_string()
+        };
+        let folders = vec![
+            grant("~/work", "rw"),
+            grant(&under("srv"), "r"),
+            grant(&under("srv/nerve-run/c/home"), "rwx"),
+            grant("/srv/proj", "rx"),
+        ];
+        let cut = around_pairings(&folders, &top.join("owner"), &run_home);
+        assert_eq!(
+            cut,
+            vec![
+                grant("~/work", "rw"),
+                grant(&under("srv/www"), "r"),
+                grant("/srv/proj", "rx"),
+            ]
+        );
+    }
+
+    /// Whatever the mode or the rules say, a pairing's paths in another
+    /// pairing's folders, or among what the account keeps in its home, are
+    /// refused; its own two folders, `/tmp` and the rest are not. A program
+    /// is not handed a folder above the account's home either.
+    #[cfg(unix)]
+    #[test]
+    fn a_pairing_gets_no_path_in_another_pairings_folders() {
+        use nerve_policy::{PathAccess, Target};
+        let run_home = Path::new("/srv/nerve-run");
+        let mine = Own::of(run_home, "lab");
+        let target = |p: &str, access: PathAccess, holds: bool| Target {
+            path: PathBuf::from(p),
+            access,
+            holds,
+            arg: None,
+        };
+        let refused = |p: &str, access: PathAccess, holds: bool, program: bool| {
+            other_pairings(&[target(p, access, holds)], run_home, &mine, program)
+        };
+        for p in [
+            "/srv/nerve-run/other/home/.gitconfig",
+            "/srv/nerve-run/other/tmp",
+            "/srv/nerve-run/.ssh/id",
+            "/srv/nerve-run/lab",
+            "/srv/nerve-run",
+        ] {
+            for access in [PathAccess::Read, PathAccess::Write, PathAccess::Run] {
+                let why = refused(p, access, false, false).unwrap_or_default();
+                assert!(why.contains("another pairing"), "{p}: {why}");
+            }
+        }
+        for p in [
+            "/srv/nerve-run/lab/home",
+            "/srv/nerve-run/lab/home/.gitconfig",
+            "/srv/nerve-run/lab/tmp/t",
+            "/srv/nerve-run-other/x",
+            "/srv/www",
+            "/tmp/x",
+        ] {
+            assert_eq!(refused(p, PathAccess::Write, false, false), None, "{p}");
+        }
+        // A folder that holds the account's home: a program works below it.
+        assert_eq!(refused("/srv", PathAccess::Read, true, false), None);
+        assert_eq!(refused("/srv", PathAccess::Read, false, true), None);
+        let why = refused("/srv", PathAccess::Read, true, true).unwrap_or_default();
+        assert!(why.contains("holds"), "{why}");
+        assert_eq!(refused("/srv/www", PathAccess::Read, true, true), None);
+        // A walk passes through the folders above its own two.
+        for (p, passes) in [
+            ("/srv/nerve-run", true),
+            ("/srv/nerve-run/lab", true),
+            ("/srv/nerve-run/lab/home", true),
+            ("/srv/nerve-run/other", false),
+            ("/srv/nerve-run/.ssh", false),
+            ("/srv/www", true),
+        ] {
+            let skipped = in_other_pairings(Path::new(p), run_home, &mine, true);
+            assert_eq!(skipped, !passes, "{p}");
+        }
+    }
+
+    /// The gate holds a pairing to its own folders only where a call acts
+    /// as the command account: a sudo command of the pairing is looked at
+    /// as the owner and may start in the owner's home. A link below a
+    /// handed folder that leads into another pairing's folders, or to one
+    /// that holds them, is refused by its own name; one that stays out of
+    /// them is not.
+    #[cfg(unix)]
+    #[test]
+    fn the_fence_holds_the_command_account_and_the_links_a_program_follows() {
+        use nerve_policy::{Link, PathAccess, Target};
+        let account = |name: &str, home: &str| Account {
+            name: name.into(),
+            uid: 4242,
+            gid: 4242,
+            comment: String::new(),
+            home: PathBuf::from(home),
+            groups: vec![4242],
+        };
+        let target = |p: &str, holds: bool| Target {
+            path: PathBuf::from(p),
+            access: PathAccess::Read,
+            holds,
+            arg: None,
+        };
+        assert!(fence(&account("alice", "/home/alice"), "lab").is_none());
+        let (run_home, mine) = fence(&account(RUN_USER, "/srv/nerve-run"), "lab").unwrap();
+        assert_eq!(mine.home, Path::new("/srv/nerve-run/lab/home"));
+        let refused = |to: &str, holds: bool| {
+            let link = Link {
+                handed: 0,
+                at: PathBuf::from("/srv/www/to"),
+                found_in: PathBuf::from("/srv/www"),
+                to: target(to, holds),
+            };
+            link_to_other_pairings(&link, Path::new("/srv/www"), &run_home, &mine)
+        };
+        for (to, holds) in [
+            ("/srv/nerve-run/other/home", true),
+            ("/srv/nerve-run/other/home/.gitconfig", false),
+            ("/srv/nerve-run/.ssh", true),
+            ("/srv", true),
+        ] {
+            let why = refused(to, holds).unwrap_or_default();
+            assert!(why.contains("/srv/www/to"), "{to}: {why}");
+            assert!(!why.contains("nerve-run"), "{to}: {why}");
+        }
+        for (to, holds) in [
+            ("/srv/nerve-run/lab/home/x", false),
+            ("/srv/www/f", false),
+            ("/srv", false),
+            ("/tmp", true),
+        ] {
+            assert_eq!(refused(to, holds), None, "{to}");
+        }
+    }
+
+    #[test]
+    fn the_built_in_folders_are_the_temporary_ones_and_the_pairings_own() {
+        let b = built_in(&Own::of(Path::new(RUN_HOME), "home-lab"));
         let paths: Vec<&str> = b.iter().map(|f| f.path.as_str()).collect();
-        assert_eq!(paths, ["/tmp", "/var/tmp", RUN_HOME]);
+        // Joined, not spelled out: Windows separates the parts with a backslash.
+        let own = Path::new(RUN_HOME).join("home-lab");
+        let (home, temp) = (own.join("home"), own.join("tmp"));
+        assert_eq!(
+            paths,
+            [
+                "/tmp",
+                "/var/tmp",
+                home.to_str().unwrap(),
+                temp.to_str().unwrap()
+            ]
+        );
+        assert!(
+            paths
+                .iter()
+                .all(|p| !shared_folder(p) || p.ends_with("tmp"))
+        );
+        assert!(shared_folder("/tmp") && !shared_folder(paths[3]));
         assert!(
             b.iter()
                 .all(|f| f.access.read && f.access.write && f.access.execute)
         );
+    }
+
+    /// The pairing's own folders are stored at the account's home as it is,
+    /// not as passwd spells it through a link: with the network off the
+    /// sandbox writes only at a folder's real place, and the pairing must
+    /// stay able to write in its own home.
+    #[cfg(unix)]
+    #[test]
+    fn the_built_in_folders_are_at_the_real_home_of_the_account() {
+        let d = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(d.path()).unwrap();
+        std::fs::create_dir_all(base.join("disk/run")).unwrap();
+        std::os::unix::fs::symlink(base.join("disk"), base.join("lib")).unwrap();
+        let run = Account {
+            name: RUN_USER.into(),
+            uid: 900,
+            gid: 900,
+            comment: String::new(),
+            home: base.join("lib/run"),
+            groups: vec![900],
+        };
+        let entry = nerve_policy::CenterEntry {
+            name: "lab".into(),
+            url: "https://c.example".into(),
+            pin: None,
+            center_id: "c".into(),
+            node_id: "lab".into(),
+            settings: Default::default(),
+            paused: false,
+            revoked: false,
+            unknown: false,
+            public_key: None,
+            key_rotations: 0,
+            pin_rotations: 0,
+            old_pin: None,
+            policy: Default::default(),
+            capabilities: Vec::new(),
+        };
+        let got = with_built_in(entry, &base.join("alice"), &run);
+        let own = Own::of(&base.join("disk/run"), "lab");
+        let paths: Vec<&str> = got.policy.folders.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&own.home.to_str().unwrap()), "{paths:?}");
+        assert!(paths.contains(&own.temp.to_str().unwrap()), "{paths:?}");
     }
 
     #[test]

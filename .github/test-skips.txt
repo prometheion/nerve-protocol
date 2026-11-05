@@ -18,3 +18,8 @@ linux acl::tests::a_revoked_inner_grant_on_another_file_system_stays_stale needs
 linux acl::tests::a_revoked_inner_grant_the_owner_cannot_reach_stays_stale needs a mount namespace; runs as root in the next step
 linux the_backup_file_is_opened_as_the_user_who_asked needs root or a user namespace; runs as root in the next step
 linux root_starts_in_a_folder_only_its_owner_may_enter needs root or a user namespace; runs as root in the next step
+
+# Landlock ABI 9 (Linux 7.1), which keeps unix sockets by path to the
+# pairing's folders while the network switch is off: the runner's kernel has
+# 7.0 (ABI 8). It runs on a kernel with ABI 9.
+linux a_folder_command_without_network_reaches_unix_sockets_in_its_folders_only needs Landlock ABI 9 (Linux 7.1); the runner has ABI 8

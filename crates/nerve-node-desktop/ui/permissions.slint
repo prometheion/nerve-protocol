@@ -114,6 +114,45 @@ component ModeSection inherits Section {
             }
         }
     }
+    // The center's commands may be kept off the network in every mode (the
+    // node's seccomp filter); where it cannot hold them to that, or they run
+    // as the owner in this mode, the node runs none of them.
+    VerticalLayout {
+        padding-left: Space.xl;
+        padding-right: Space.xl;
+        padding-bottom: Space.lg;
+        spacing: Space.sm;
+        HorizontalLayout {
+            alignment: start;
+            Chip {
+                text: "No network for its commands";
+                label: "Keep the commands off the network";
+                on: Perm.no-network;
+                toggled(on) => {
+                    Perm.no-network-set(on);
+                }
+            }
+        }
+        if Perm.no-network && !Perm.network-rules: Banner {
+            tone: Tone.danger;
+            text: "This machine cannot keep commands off the network (the node's seccomp filter cannot be used here), so the node runs none of " + Perm.center + "'s commands while this is on.";
+        }
+        if Perm.no-network && Perm.network-rules && Perm.runs-as-owner: Banner {
+            tone: Tone.danger;
+            text: Perm.separate
+                ? "In this mode " + Perm.center + "'s commands run as " + (Perm.owner-is-root ? "root" : "you") + ", which nothing keeps off the network, so the node runs none of them while this is on. Folder mode, or allowlist mode as nerve-run, runs them."
+                : "This node runs by hand, so " + Perm.center + "'s commands run as " + (Perm.owner-is-root ? "root" : "you") + ", and nothing keeps them off the network here (only folder mode does, as a user that is not root and on Linux 7.1 or later), so the node runs none of them while this is on. The installed node runs folder mode's commands as nerve-run.";
+        }
+        Reveal {
+            shown: Perm.no-network;
+            Text {
+                text: "No command on the sudo list runs while this is on.";
+                color: Theme.text-muted;
+                font-size: Type.small;
+                wrap: word-wrap;
+            }
+        }
+    }
     Reveal {
         shown: Perm.mode-until != "";
         HorizontalLayout {

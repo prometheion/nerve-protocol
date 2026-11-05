@@ -1205,12 +1205,13 @@ async fn a_program_runs_whole_through_the_shim_under_landlock() {
         timeouts: Default::default(),
         sudo: None,
         account: None,
-        separate: false,
+        separate: None,
         pass_env: Vec::new(),
         own: Vec::new(),
         root: None,
         limits: None,
         tap: None,
+        no_network: false,
     };
     let run = |path: &Path| {
         let argv = vec!["cat".into(), "--".into(), path.display().to_string()];

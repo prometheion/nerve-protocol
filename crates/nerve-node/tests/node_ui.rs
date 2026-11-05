@@ -1084,6 +1084,36 @@ async fn the_permissions_audit_and_log_pages_change_the_node() {
     let policy = daemon.config().centers[0].policy.clone();
     assert_eq!(policy.mode, nerve_policy::Mode::Allowlist);
     assert!(policy.as_owner);
+    // The network switch of its folder-mode commands, off and on again.
+    change(
+        addr,
+        &s,
+        "/api/network",
+        json!({"center": "lab", "off": true}),
+    )
+    .await;
+    assert!(daemon.config().centers[0].policy.no_network);
+    // The overview says how that stands for its commands, which run as the
+    // owner on a node by hand in allowlist mode: none runs.
+    let centers = get(addr, "/api/overview", &s).await.json()["centers"].clone();
+    let off = centers[0]["network_off"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        ["as_owner", "not_held"].contains(&off.as_str()),
+        "{centers}"
+    );
+    change(
+        addr,
+        &s,
+        "/api/network",
+        json!({"center": "lab", "off": false}),
+    )
+    .await;
+    assert!(!daemon.config().centers[0].policy.no_network);
+    let centers = get(addr, "/api/overview", &s).await.json()["centers"].clone();
+    assert!(centers[0]["network_off"].is_null(), "{centers}");
     let dir = std::fs::canonicalize(d.path()).unwrap().join("work");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.display().to_string();

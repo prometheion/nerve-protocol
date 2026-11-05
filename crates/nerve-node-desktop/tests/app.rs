@@ -534,6 +534,11 @@ fn the_app_drives_the_cli_end_to_end() {
         f.access.read && f.access.write && !f.access.execute,
         "{f:?}"
     );
+    // The network switch of its folder-mode commands, off and on again.
+    perm.invoke_no_network_set(true);
+    assert!(config(&paths).centers[0].policy.no_network);
+    perm.invoke_no_network_set(false);
+    assert!(!config(&paths).centers[0].policy.no_network);
     // What the installed Linux node's status says of a pairing: who runs
     // its commands, nerve-run's built-in folders, and the failed grants of
     // its own folders only. Also without an owner (`install` as root alone).
@@ -553,6 +558,8 @@ fn the_app_drives_the_cli_end_to_end() {
         st["owner"] = owner.clone();
         st["centers"][0]["account"] = serde_json::json!("nerve-run");
         st["centers"][0]["landlock"] = serde_json::json!(false);
+        st["centers"][0]["no_network"] = serde_json::json!(true);
+        st["network_rules"] = serde_json::json!(false);
         st["home_warning"] = serde_json::json!({"warning": "Without Landlock, nerve-run can read every file in your home /home/alice that other accounts may read (mode 755)"});
         // A folder no center has any more whose access did not come off,
         // and the node's record of them that could not be read: shown on
@@ -566,12 +573,13 @@ fn the_app_drives_the_cli_end_to_end() {
             ],
             "stale": ["/removed/folder", "/var/lib/nerve/state/acl.json"],
         });
-        ctl.show_status(Ok(st));
+        ctl.show_status(Ok(st.clone()));
         if cfg!(target_os = "linux") {
             assert!(perm.get_separate(), "{owner}");
             assert_eq!(perm.get_account(), "nerve-run");
             assert!(
-                perm.get_built_in().contains("/var/lib/nerve-run"),
+                perm.get_built_in()
+                    .contains("/var/lib/nerve-run/home/home and /var/lib/nerve-run/home/tmp"),
                 "{owner}"
             );
             let errors = perm.get_grant_errors();
@@ -583,11 +591,46 @@ fn the_app_drives_the_cli_end_to_end() {
             assert!(stale.contains("acl.json: expected value"), "{stale}");
             assert!(!stale.contains("work/closed"), "{stale}");
             assert!(!perm.get_landlock());
+            // Its network is off, which this machine cannot hold.
+            assert!(perm.get_no_network() && !perm.get_network_rules());
+            // Its commands run as the owner in user mode and in allowlist
+            // mode as the owner, where none of them runs while the network
+            // is off; the node says so in the center's `network_off` and the
+            // page shows what it says, in every mode.
+            for (mode, as_owner, owner_runs) in [
+                ("folder", false, false),
+                ("allowlist", false, false),
+                ("allowlist", true, true),
+                ("user", false, true),
+            ] {
+                let mut st = st.clone();
+                st["centers"][0]["mode"] = serde_json::json!(mode);
+                st["centers"][0]["as_owner"] = serde_json::json!(as_owner);
+                st["centers"][0]["network_off"] =
+                    serde_json::json!(if owner_runs { "as_owner" } else { "held" });
+                ctl.show_status(Ok(st));
+                assert_eq!(perm.get_runs_as_owner(), owner_runs, "{mode} {as_owner}");
+            }
+            ctl.show_status(Ok(st.clone()));
             assert!(perm.get_home_warning().contains("mode 755"));
         } else {
             assert!(!perm.get_separate());
             assert_eq!(perm.get_built_in(), "");
         }
+    }
+    // An installed node that found no owner, whose pairing runs as the
+    // owner: the status says it is installed, and the page words its
+    // network banner for that node, not for one run by hand.
+    if cfg!(target_os = "linux") {
+        let st = serde_json::json!({"daemon": "running", "owner": null, "installed": true,
+            "centers": [{"name": "home", "mode": "user", "account": "alice",
+                "no_network": true, "network_off": "as_owner"}]});
+        ctl.show_status(Ok(st.clone()));
+        assert!(perm.get_separate() && perm.get_runs_as_owner());
+        let mut by_hand = st;
+        by_hand["installed"] = serde_json::json!(false);
+        ctl.show_status(Ok(by_hand));
+        assert!(!perm.get_separate() && perm.get_runs_as_owner());
     }
     // Root as the owner (#151): the page knows, so its texts say root.
     let mut st = serde_json::json!({"daemon": "running", "owner": "root", "owner_is_root": true,

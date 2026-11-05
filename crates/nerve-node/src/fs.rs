@@ -219,6 +219,26 @@ pub fn open_to_all(path: &Path) -> bool {
         }
 }
 
+/// Whether `path`, which a pairing's call reads in none of its folders, is
+/// the command account's own (`nerve-run`): below its home, where every
+/// pairing's own home and temporary folder lies, or a file or folder that
+/// account owns, which another pairing's command made. Their modes tell
+/// nothing: every pairing's commands may change them, as Landlock does not
+/// rule `chmod`. The pairing's own home and temporary folder are among its
+/// folders, so they are never asked here.
+#[cfg(unix)]
+pub fn accounts_own(path: &Path, account: &crate::service::Account) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    path.starts_with(&account.home) || std::fs::metadata(path).is_ok_and(|m| m.uid() == account.uid)
+}
+
+/// No platform but Unix has a command account of its own
+/// (nerve_policy::decide::Reads::Account is Linux only).
+#[cfg(not(unix))]
+pub fn accounts_own(_: &Path, _: &crate::service::Account) -> bool {
+    false
+}
+
 /// No platform but Unix has a command account of its own
 /// (nerve_policy::decide::Reads::Account is Linux only), so nothing counts
 /// as open to it.
@@ -240,17 +260,30 @@ pub fn open_to_all(_: &Path) -> bool {
 /// owner's rights, so a folder handed to it here would let it read below as
 /// the owner whatever is closed to others.
 ///
+/// The command account's own files never go by their modes here
+/// ([`accounts_own`]): every pairing's commands may change those.
+///
 /// The refusals other than the node's own process name no path: `path` is
 /// resolved as the command account, which every pairing's commands share,
 /// and a link of another of its processes (`/proc/<n>/cwd`) leads where
 /// that process works. The center gave the path, and the audit entry names
 /// where it led.
-pub fn may_read_outside(path: &Path, provider: bool) -> Result<(), String> {
+pub fn may_read_outside(
+    path: &Path,
+    provider: bool,
+    account: &crate::service::Account,
+) -> Result<(), String> {
     if own_process(path) {
         Err(format!(
             "{} belongs to the node's own process; no mode reaches it",
             path.display()
         ))
+    } else if accounts_own(path, account) {
+        Err(
+            "a path this call reads is in no folder of this pairing, and belongs to the account \
+             its commands run as: it is another pairing's, whatever its modes say"
+                .into(),
+        )
     } else if !open_to_all(path) {
         Err(
             "a path this call reads is in no folder that allows reading, and not open to every \
@@ -643,7 +676,7 @@ impl FsCall {
     /// through, which they may still do to reach a readable folder inside it.
     pub fn run(self, skip: &dyn Fn(&Path, bool) -> bool) -> Result<Value, RpcError> {
         match self {
-            FsCall::Stat(p) => stat(&p.given),
+            FsCall::Stat(p) => stat(&p.real),
             FsCall::List(p) => list(&p.real, skip),
             FsCall::Read {
                 path,
@@ -666,44 +699,83 @@ impl FsCall {
     }
 }
 
-fn type_of(ft: std::fs::FileType) -> &'static str {
-    if ft.is_symlink() {
-        "link"
-    } else if ft.is_dir() {
-        "dir"
-    } else if ft.is_file() {
-        "file"
-    } else {
-        "other"
+/// What `stat`, `list` and a walk learn of an entry, asked without
+/// following it: a link is a link.
+struct Entry {
+    kind: &'static str,
+    size: u64,
+    mtime_ms: u64,
+}
+
+impl Entry {
+    #[cfg(unix)]
+    fn of(st: &libc::stat) -> Entry {
+        let kind = match st.st_mode & libc::S_IFMT {
+            libc::S_IFLNK => "link",
+            libc::S_IFDIR => "dir",
+            libc::S_IFREG => "file",
+            _ => "other",
+        };
+        let ms = (st.st_mtime as i128) * 1000 + (st.st_mtime_nsec as i128) / 1_000_000;
+        Entry {
+            kind,
+            size: st.st_size as u64,
+            mtime_ms: u64::try_from(ms).unwrap_or(0),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn of(m: &std::fs::Metadata) -> Entry {
+        let ft = m.file_type();
+        let kind = if ft.is_symlink() {
+            "link"
+        } else if ft.is_dir() {
+            "dir"
+        } else if ft.is_file() {
+            "file"
+        } else {
+            "other"
+        };
+        let mtime_ms = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        Entry {
+            kind,
+            size: m.len(),
+            mtime_ms,
+        }
     }
 }
 
-fn mtime_ms(m: &std::fs::Metadata) -> u64 {
-    m.modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
+/// The resolved path the policy judged, asked through its folder's handle
+/// ([`Dir`]): a link swapped in above it since fails the call, and one put
+/// in its stead is shown as the link it is, never followed.
 fn stat(path: &Path) -> Result<Value, RpcError> {
-    let m = std::fs::symlink_metadata(path).map_err(io_error)?;
-    Ok(json!({"type": type_of(m.file_type()), "size": m.len(), "mtime_ms": mtime_ms(&m)}))
+    let e = match split(path) {
+        Ok((dir, name)) => Dir::open(dir).and_then(|d| d.entry(name)),
+        Err(_) => Dir::open(path).and_then(|d| d.entry(".".as_ref())),
+    }
+    .map_err(|e| open_error(path, e))?;
+    Ok(json!({"type": e.kind, "size": e.size, "mtime_ms": e.mtime_ms}))
 }
 
 fn list(path: &Path, skip: &dyn Fn(&Path, bool) -> bool) -> Result<Value, RpcError> {
+    let dir = Dir::listed(path).map_err(|e| open_error(path, e))?;
     let mut entries = Vec::new();
-    for e in std::fs::read_dir(path).map_err(io_error)? {
-        let e = e.map_err(io_error)?;
+    for name in dir.names().map_err(io_error)? {
+        let name = name.map_err(io_error)?;
         // A listed folder shows its name, so it is judged like a read.
-        if skip(&e.path(), false) {
+        if skip(&path.join(&name), false) {
             continue;
         }
-        let m = e.metadata().map_err(io_error)?;
+        let e = dir.entry(&name).map_err(io_error)?;
         entries.push(json!({
-            "name": e.file_name().to_string_lossy(),
-            "type": type_of(m.file_type()),
-            "size": m.len(),
+            "name": name.to_string_lossy(),
+            "type": e.kind,
+            "size": e.size,
         }));
         if entries.len() >= LIST_MAX {
             break;
@@ -783,41 +855,54 @@ fn read(path: &Path, offset: u64, length: Option<u64>) -> Result<Value, RpcError
 }
 
 /// Visits files below `root` (or `root` itself), depth first, sorted, never
-/// following symlinks, leaving out what `skip` names. `each` returns false to
-/// stop. Returns whether the walk was cut short.
+/// following symlinks, leaving out what `skip` names. `each` gets a file's
+/// path, its folder's handle and its name there, to open it by. It returns
+/// false to stop. Returns whether the walk was cut short.
+/// Each folder is opened from `/` a part at a time without following a
+/// link ([`Dir::listed`]), and each entry asked through its folder's handle:
+/// `skip` judges the names the walk builds, so a folder swapped for a link
+/// after it was listed (by a command that may write there) is left out,
+/// not followed to where the names no longer say.
 fn walk(
     root: &Path,
     skip: &dyn Fn(&Path, bool) -> bool,
-    each: &mut dyn FnMut(&Path) -> bool,
+    each: &mut dyn FnMut(&Path, &Dir, &std::ffi::OsStr) -> bool,
 ) -> Result<bool, RpcError> {
-    let m = std::fs::metadata(root).map_err(io_error)?;
-    if m.is_file() {
-        each(root);
-        return Ok(false);
+    if let Ok((up, name)) = split(root) {
+        let up = Dir::open(up).map_err(|e| open_error(root, e))?;
+        if up.entry(name).map_err(|e| open_error(root, e))?.kind == "file" {
+            each(root, &up, name);
+            return Ok(false);
+        }
     }
     let mut stack = vec![root.to_path_buf()];
     let mut visited = 0usize;
-    while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
+    while let Some(path) = stack.pop() {
+        let Ok(dir) = Dir::listed(&path) else {
             continue;
         };
-        let mut names: Vec<_> = rd.filter_map(Result::ok).collect();
-        names.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
+        let Ok(mut names) = dir
+            .names()
+            .and_then(|n| n.collect::<std::io::Result<Vec<_>>>())
+        else {
+            continue;
+        };
+        names.sort_by(|a, b| b.cmp(a));
         let mut files = Vec::new();
-        for e in names {
+        for name in names {
             visited += 1;
             if visited > WALK_LIMIT {
                 return Ok(true);
             }
-            let p = e.path();
-            match e.file_type() {
-                Ok(t) if t.is_dir() && !skip(&p, true) => stack.push(p),
-                Ok(t) if t.is_file() && !skip(&p, false) => files.push(p),
+            let p = path.join(&name);
+            match dir.entry(&name).map(|e| e.kind) {
+                Ok("dir") if !skip(&p, true) => stack.push(p),
+                Ok("file") if !skip(&p, false) => files.push((p, name)),
                 _ => {}
             }
         }
-        for f in files.iter().rev() {
-            if !each(f) {
+        for (p, name) in files.iter().rev() {
+            if !each(p, &dir, name) {
                 return Ok(true);
             }
         }
@@ -839,16 +924,18 @@ fn grep(
 ) -> Result<Value, RpcError> {
     let mut matches = Vec::new();
     let mut truncated = false;
-    let cut = walk(root, skip, &mut |p| {
+    let cut = walk(root, skip, &mut |p, dir, name| {
         if glob.is_some_and(|g| !relative_glob_match(g, root, p)) {
             return true;
         }
-        let small = std::fs::metadata(p).is_ok_and(|m| m.len() <= GREP_FILE_MAX);
-        let Some(text) = small
-            .then(|| std::fs::read(p).ok())
-            .flatten()
-            .and_then(|b| String::from_utf8(b).ok())
-        else {
+        // Opened through its folder's handle, never through a link (one
+        // swapped in since it was listed fails the open).
+        let text = dir.open_file(name).ok().flatten().and_then(|mut f| {
+            let small = f.metadata().is_ok_and(|m| m.len() <= GREP_FILE_MAX);
+            let mut bytes = Vec::new();
+            (small && f.read_to_end(&mut bytes).is_ok()).then_some(bytes)
+        });
+        let Some(text) = text.and_then(|b| String::from_utf8(b).ok()) else {
             // Binary, unreadable or huge files are not searched.
             return true;
         };
@@ -875,7 +962,7 @@ fn find(
 ) -> Result<Value, RpcError> {
     let mut paths = Vec::new();
     let mut truncated = false;
-    let cut = walk(root, skip, &mut |p| {
+    let cut = walk(root, skip, &mut |p, _, _| {
         if relative_glob_match(glob, root, p) {
             if paths.len() >= max {
                 truncated = true;
@@ -941,6 +1028,84 @@ pub fn open_folder(path: &Path) -> std::io::Result<std::os::fd::OwnedFd> {
     Dir::open(path).map(|d| d.fd)
 }
 
+/// The names in the open folder `dir` but `.` and `..`, read through a
+/// copy of its descriptor (no `/proc`, which the node may not read while
+/// it acts as another account).
+#[cfg(unix)]
+pub(crate) fn names(dir: &std::os::fd::OwnedFd) -> std::io::Result<Vec<std::ffi::CString>> {
+    read_names(dir)?.collect()
+}
+
+/// The names of `names`, one `readdir` at a time, so a caller with a cap
+/// stops reading at it (a folder may hold millions).
+#[cfg(unix)]
+pub(crate) struct Names(*mut libc::DIR);
+
+#[cfg(unix)]
+impl Drop for Names {
+    fn drop(&mut self) {
+        // SAFETY: the stream fdopendir made, closed once.
+        unsafe { libc::closedir(self.0) };
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn read_names(dir: &std::os::fd::OwnedFd) -> std::io::Result<Names> {
+    use std::os::fd::AsRawFd;
+    let last = std::io::Error::last_os_error;
+    // SAFETY: a copy of a descriptor we hold, given to fdopendir, which
+    // owns it from then on and closes it with closedir (`Names::drop`).
+    unsafe {
+        let copy = libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0);
+        if copy < 0 {
+            return Err(last());
+        }
+        let d = libc::fdopendir(copy);
+        if d.is_null() {
+            let e = last();
+            libc::close(copy);
+            return Err(e);
+        }
+        libc::rewinddir(d);
+        Ok(Names(d))
+    }
+}
+
+#[cfg(unix)]
+impl Iterator for Names {
+    type Item = std::io::Result<std::ffi::CString>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        #[cfg(target_os = "linux")]
+        use libc::__errno_location as errno;
+        #[cfg(not(target_os = "linux"))]
+        use libc::__error as errno;
+        loop {
+            #[cfg(test)]
+            READDIRS.with(|c| c.set(c.get() + 1));
+            // SAFETY: the stream is open until drop; the entry is read
+            // before the next call.
+            unsafe {
+                *errno() = 0;
+                let e = libc::readdir(self.0);
+                if e.is_null() {
+                    let err = *errno();
+                    return (err != 0).then(|| Err(std::io::Error::from_raw_os_error(err)));
+                }
+                let name = std::ffi::CStr::from_ptr((*e).d_name.as_ptr());
+                if name.to_bytes() != b"." && name.to_bytes() != b".." {
+                    return Some(Ok(name.to_owned()));
+                }
+            }
+        }
+    }
+}
+
+// How many entries `Names` read on this thread (tests tell a capped read
+// from one of the whole folder).
+#[cfg(all(unix, test))]
+thread_local!(static READDIRS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+
 /// The folder a `read` or `write` works in. On Unix it is opened one
 /// component at a time from `/` without following a symlink, and every later
 /// step works relative to that handle, never through a symlink either: the
@@ -1003,6 +1168,57 @@ impl Dir {
             }
         }
         Ok(Dir { fd })
+    }
+
+    /// The resolved folder `path` to list: opened as [`Dir::open`] opens
+    /// one, and its last part for reading. A file there is no folder.
+    fn listed(path: &Path) -> std::io::Result<Dir> {
+        let read = libc::O_DIRECTORY | libc::O_RDONLY;
+        let Some(up) = path.parent() else {
+            return Dir::at(None, "/".as_ref(), read).map(|fd| Dir { fd });
+        };
+        let name = path
+            .file_name()
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOTDIR))?;
+        let up = Dir::open(up)?;
+        match Dir::at(Some(&up.fd), name, read) {
+            // A link there fails as one in the way does (the path changed
+            // since it was judged); a file is no folder to list.
+            Err(e) if e.raw_os_error() == Some(libc::ENOTDIR) => match up.entry(name) {
+                Ok(e) if e.kind == "link" => Err(std::io::Error::from_raw_os_error(libc::ELOOP)),
+                _ => Err(std::io::Error::other("not a folder")),
+            },
+            other => other.map(|fd| Dir { fd }),
+        }
+    }
+
+    /// The names in the folder, but `.` and `..`, read as the caller asks.
+    fn names(&self) -> std::io::Result<impl Iterator<Item = std::io::Result<std::ffi::OsString>>> {
+        use std::os::unix::ffi::OsStringExt;
+        Ok(read_names(&self.fd)?.map(|n| n.map(|n| std::ffi::OsString::from_vec(n.into_bytes()))))
+    }
+
+    /// What `name` in the folder is, without following it.
+    fn entry(&self, name: &std::ffi::OsStr) -> std::io::Result<Entry> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        // SAFETY: fstatat of a valid C string in the folder the handle
+        // holds, into a zeroed struct, no link followed.
+        unsafe {
+            let mut st: libc::stat = std::mem::zeroed();
+            if libc::fstatat(
+                self.fd.as_raw_fd(),
+                name.as_ptr(),
+                &mut st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            ) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(Entry::of(&st))
+        }
     }
 
     /// `name` for reading, if it is a file (`None` if it is something
@@ -1077,6 +1293,18 @@ impl Dir {
         Ok(Dir {
             path: path.to_path_buf(),
         })
+    }
+
+    fn listed(path: &Path) -> std::io::Result<Dir> {
+        Dir::open(path)
+    }
+
+    fn names(&self) -> std::io::Result<impl Iterator<Item = std::io::Result<std::ffi::OsString>>> {
+        Ok(std::fs::read_dir(&self.path)?.map(|e| e.map(|e| e.file_name())))
+    }
+
+    fn entry(&self, name: &std::ffi::OsStr) -> std::io::Result<Entry> {
+        std::fs::symlink_metadata(self.path.join(name)).map(|m| Entry::of(&m))
     }
 
     fn open_file(&self, name: &std::ffi::OsStr) -> std::io::Result<Option<std::fs::File>> {
@@ -1221,7 +1449,7 @@ mod tests {
         std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         let fifo = d.path().join("pipe");
         let writer = a_writer_waits_on(&fifo);
-        let why = may_read_outside(&fifo, false).unwrap_err();
+        let why = may_read_outside(&fifo, false, &other()).unwrap_err();
         assert!(
             why.contains("neither a file nor a folder")
                 && !why.contains(&*d.path().to_string_lossy()),
@@ -1340,6 +1568,66 @@ mod tests {
         mode(&home, 0o755);
     }
 
+    /// A command account that owns none of the test's files, with its home
+    /// elsewhere.
+    #[cfg(unix)]
+    fn other() -> crate::service::Account {
+        crate::service::Account {
+            name: "nerve-run".into(),
+            uid: u32::MAX - 1,
+            gid: u32::MAX - 1,
+            comment: String::new(),
+            home: PathBuf::from("/nonexistent/nerve-run"),
+            groups: Vec::new(),
+        }
+    }
+
+    /// A read in no folder never reaches the command account's own files,
+    /// what lies in its home (the pairings' own homes) or what it made
+    /// elsewhere, however open their modes are; another account's file open
+    /// to all it reaches.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_outside_the_folders_never_reaches_the_command_accounts_own() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap()
+        };
+        let d = tempfile::tempdir().unwrap();
+        mode(d.path(), 0o755);
+        // SAFETY: plain getters.
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        let run = crate::service::Account {
+            uid,
+            gid,
+            home: d.path().join("run"),
+            ..other()
+        };
+        let home = run.home.join("lab/home");
+        std::fs::create_dir_all(&home).unwrap();
+        let secret = home.join(".git-credentials");
+        std::fs::write(&secret, "x").unwrap();
+        for p in [&run.home, &run.home.join("lab"), &home, &secret] {
+            mode(p, 0o755);
+        }
+        let made = d.path().join("made");
+        std::fs::write(&made, "x").unwrap();
+        mode(&made, 0o644);
+        for p in [&secret, &home, &run.home, &made, &run.home.join("missing")] {
+            let why = may_read_outside(p, false, &run).unwrap_err();
+            assert!(why.contains("another pairing's"), "{why}");
+            assert!(accounts_own(p, &run), "{}", p.display());
+        }
+        assert_eq!(may_read_outside(&made, false, &other()), Ok(()));
+        if uid != 0 {
+            assert!(!accounts_own(Path::new("/etc/passwd"), &run));
+            assert_eq!(
+                may_read_outside(Path::new("/etc/passwd"), false, &run),
+                Ok(())
+            );
+        }
+    }
+
     /// A read in no folder, where the node reads as the command account,
     /// goes only where the path is open to every account and that account
     /// may open it, never into the node's own process, and a provider is
@@ -1356,20 +1644,23 @@ mod tests {
         let file = d.path().join("a.txt");
         std::fs::write(&file, "x").unwrap();
         mode(&file, 0o644);
-        assert_eq!(may_read_outside(&file, false), Ok(()));
-        assert_eq!(may_read_outside(&file, true), Ok(()));
-        assert_eq!(may_read_outside(&d.path().join("missing"), true), Ok(()));
-        assert_eq!(may_read_outside(d.path(), false), Ok(()));
+        assert_eq!(may_read_outside(&file, false, &other()), Ok(()));
+        assert_eq!(may_read_outside(&file, true, &other()), Ok(()));
+        assert_eq!(
+            may_read_outside(&d.path().join("missing"), true, &other()),
+            Ok(())
+        );
+        assert_eq!(may_read_outside(d.path(), false, &other()), Ok(()));
         // The refusals name no path: one resolved as the command account
         // may be where another of its processes works.
         let named = |why: &str| why.contains(&*d.path().to_string_lossy());
-        let why = may_read_outside(d.path(), true).unwrap_err();
+        let why = may_read_outside(d.path(), true, &other()).unwrap_err();
         assert!(
             why.contains("a provider would read below it") && !named(&why),
             "{why}"
         );
         mode(&file, 0o600);
-        let why = may_read_outside(&file, false).unwrap_err();
+        let why = may_read_outside(&file, false, &other()).unwrap_err();
         assert!(
             why.contains("not open to every account") && !named(&why),
             "{why}"
@@ -1377,7 +1668,7 @@ mod tests {
         // Others may read it, its owner may not; root opens anything.
         if unsafe { libc::geteuid() } != 0 {
             mode(&file, 0o004);
-            let why = may_read_outside(&file, false).unwrap_err();
+            let why = may_read_outside(&file, false, &other()).unwrap_err();
             assert!(why.contains("may not read") && !named(&why), "{why}");
         }
         mode(&file, 0o644);
@@ -1394,20 +1685,21 @@ mod tests {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 });
                 let tid = rx.recv().unwrap();
-                let r = may_read_outside(&PathBuf::from(format!("/proc/{tid}/stat")), false);
+                let r =
+                    may_read_outside(&PathBuf::from(format!("/proc/{tid}/stat")), false, &other());
                 t.join().unwrap();
                 r
             })
             .join()
             .unwrap();
             for r in [
-                may_read_outside(&own, false),
-                may_read_outside(Path::new("/proc/self/maps"), false),
-                may_read_outside(Path::new("/proc/thread-self/stat"), false),
+                may_read_outside(&own, false, &other()),
+                may_read_outside(Path::new("/proc/self/maps"), false, &other()),
+                may_read_outside(Path::new("/proc/thread-self/stat"), false, &other()),
                 thread,
                 // No process or thread has this id (it lies above every
                 // `pid_max`); the node's next thread could take an unused one.
-                may_read_outside(Path::new("/proc/4294967295/maps"), false),
+                may_read_outside(Path::new("/proc/4294967295/maps"), false, &other()),
             ] {
                 let why = r.unwrap_err();
                 assert!(why.contains("the node's own process"), "{why}");
@@ -1800,6 +2092,21 @@ mod tests {
         assert_eq!(bin["content"], "AP8=");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_list_stops_reading_a_folder_at_its_cap() {
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..LIST_MAX + 300 {
+            std::fs::File::create(d.path().join(format!("f{i}"))).unwrap();
+        }
+        READDIRS.with(|c| c.set(0));
+        let l = list(d.path(), &|_, _| false).unwrap();
+        assert_eq!(l["entries"].as_array().unwrap().len(), LIST_MAX);
+        // `.` and `..` come as entries too; the rest of the folder is not read.
+        let read = READDIRS.with(|c| c.get());
+        assert!(read <= LIST_MAX + 3, "{read} entries read for {LIST_MAX}");
+    }
+
     #[test]
     fn grep_find_list_stat_and_skip() {
         let d = tempfile::tempdir().unwrap();
@@ -1886,6 +2193,80 @@ mod tests {
             std::fs::read_to_string(outside.join("note")).unwrap(),
             "outside secret"
         );
+    }
+
+    /// `list`, `stat`, `grep` and `find` go by handles as `read` does: a
+    /// folder swapped for a link after the policy judged the path, or after
+    /// the walk listed it, and a file swapped for one before `grep` reads
+    /// it, are not followed to where the names no longer say.
+    #[cfg(unix)]
+    #[test]
+    fn a_walk_follows_no_link_swapped_in_after_the_check() {
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let (work, outside) = (root.join("work"), root.join("outside"));
+        let sub = work.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(sub.join("mine"), "needle mine\n").unwrap();
+        std::fs::write(outside.join("mine"), "needle of the other, longer\n").unwrap();
+        std::fs::write(outside.join("theirs"), "needle theirs\n").unwrap();
+        // `at` (`sub` or `sub/mine`) put aside and a link to the same name
+        // in `outside` put in its stead, and back again.
+        let swap = |at: &Path| {
+            std::fs::rename(at, work.join("aside")).unwrap();
+            let to = outside.join(at.strip_prefix(&sub).unwrap_or(Path::new("")));
+            std::os::unix::fs::symlink(to, at).unwrap();
+        };
+        let back = |at: &Path| {
+            std::fs::remove_file(at).unwrap();
+            std::fs::rename(work.join("aside"), at).unwrap();
+        };
+        let reached =
+            |v: &Value| v.to_string().contains("theirs") || v.to_string().contains("other");
+
+        // Swapped after the gate judged the path.
+        let list = FsCall::parse("list", &args(json!({"path": wire(&sub)}))).unwrap();
+        let stat = FsCall::parse("stat", &args(json!({"path": wire(&sub.join("mine"))}))).unwrap();
+        let find = FsCall::parse("find", &args(json!({"path": wire(&sub), "glob": "*"}))).unwrap();
+        swap(&sub);
+        for (what, call) in [("list", list), ("stat", stat), ("find", find)] {
+            match call.run(&|_, _| false) {
+                // `stat` tells sizes, not names: the other `mine` is longer.
+                Ok(v) => assert!(!reached(&v) && v["size"] != 28, "{what}: {v}"),
+                Err(e) => assert!(e.to_string().contains("changed"), "{what}: {e}"),
+            }
+        }
+        back(&sub);
+
+        // Swapped while the walk is under way: as it lists `work`, or as it
+        // lists `sub` for `grep`.
+        for (at, action) in [
+            (sub.clone(), "grep"),
+            (sub.clone(), "find"),
+            (sub.join("mine"), "grep"),
+        ] {
+            let done = std::cell::Cell::new(false);
+            let skip = |p: &Path, _: bool| {
+                if p == at && !done.replace(true) {
+                    swap(&at);
+                }
+                false
+            };
+            let a = json!({"path": wire(&work), "pattern": "needle", "glob": "**"});
+            let a = if action == "find" {
+                json!({"path": wire(&work), "glob": "**"})
+            } else {
+                a
+            };
+            let v = FsCall::parse(action, &args(a)).unwrap().run(&skip).unwrap();
+            assert!(done.get(), "{action} {}", at.display());
+            assert!(!reached(&v), "{action} through {}: {v}", at.display());
+            back(&at);
+        }
+        // And without a swap the walk sees what is there.
+        let g = run("grep", json!({"path": wire(&work), "pattern": "needle"})).unwrap();
+        assert!(g.to_string().contains("needle mine"), "{g}");
     }
 
     #[test]

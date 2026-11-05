@@ -48,6 +48,10 @@ pub struct NodeOptions {
     /// How commands can be confined, instead of asking the kernel. A test
     /// sets it, to stand for a kernel it does not run on.
     pub confinement: Option<Confinement>,
+    /// Whether the node can put its network filter on a command
+    /// (nerve_sandbox::net_filter), instead of asking the kernel. A test
+    /// sets it, to stand for a kernel without seccomp filters.
+    pub net_filter: Option<bool>,
     /// Whether this is the installed service, instead of asking where its
     /// folders are (crate::service::is_service_node). A test sets it, to
     /// stand for the installed node.
@@ -78,6 +82,36 @@ pub struct NodeOptions {
     /// starts again: an owner's restore ([`Daemon::run_until`] sets it).
     /// Without it the node refuses such work.
     pub aside: Option<tokio::sync::mpsc::UnboundedSender<Aside>>,
+    /// Holds a command's call at a point of its set-up, for a test that
+    /// changes the config there (the owner turns the network off while the
+    /// call waits).
+    pub hold: Option<Hold>,
+}
+
+/// Where a call to run a command can be held ([`NodeOptions::hold`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoldAt {
+    /// Just before the call's last look at the owner's network switch.
+    BeforeLastLook,
+    /// Just after it, before the command starts.
+    AfterLastLook,
+}
+
+/// What a test runs at each [`HoldAt`] of a command's call; the call goes on
+/// when it resolves.
+#[derive(Clone)]
+pub struct Hold(Arc<dyn Fn(HoldAt) -> Aside + Send + Sync>);
+
+impl Hold {
+    pub fn new(f: impl Fn(HoldAt) -> Aside + Send + Sync + 'static) -> Hold {
+        Hold(Arc::new(f))
+    }
+}
+
+impl std::fmt::Debug for Hold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Hold")
+    }
 }
 
 /// Work the node runs while it is stopped ([`NodeOptions::aside`]).
@@ -103,12 +137,14 @@ impl NodeOptions {
             log: nerve_transport::log::global(),
             full_rights: None,
             confinement: None,
+            net_filter: None,
             service: None,
             config_caps_by_hand: false,
             cgroups: None,
             resume_grace: resume::GRACE,
             program_wait: crate::link::PROGRAM_WAIT,
             aside: None,
+            hold: None,
         }
     }
 }
@@ -528,6 +564,15 @@ impl CenterState {
 /// Landlock below the floor as none and so refuses folder mode's commands
 /// (nerve_sandbox::LANDLOCK_FLOOR); the installed node keeps it, as its
 /// commands would run as `nerve-run` without it, held by nothing else.
+/// Whether the node can put its network filter on a command here
+/// ([`Shared::net_filter`]).
+fn net_filter_here() -> bool {
+    #[cfg(target_os = "linux")]
+    return nerve_sandbox::net_filter::available();
+    #[cfg(not(target_os = "linux"))]
+    false
+}
+
 pub(crate) fn confinement_for(detected: Confinement, service: bool) -> Confinement {
     if !service {
         return detected.by_hand();
@@ -604,6 +649,16 @@ pub(crate) struct Shared {
     /// Which protected list applies, and where its system folders are.
     pub platform: nerve_policy::protected::Platform,
     pub confinement: Confinement,
+    /// Whether the node can keep a command off the network with its filter
+    /// (nerve_sandbox::net_filter): Linux with seccomp filters, on x86_64 or
+    /// aarch64.
+    pub net_filter: bool,
+    /// Where a test holds a command's call ([`NodeOptions::hold`]).
+    pub hold: Option<Hold>,
+    /// Whether the node runs with full rights (root, an elevated token): its
+    /// commands then have them too, unless the installed node runs them as
+    /// another account.
+    pub full_rights: bool,
     /// The cgroup that holds each command to its limits (crate::cgroup), or
     /// why there is none.
     pub cgroups: crate::cgroup::Found,
@@ -680,6 +735,13 @@ pub(crate) struct Shared {
 impl Shared {
     pub fn config(&self) -> NodeConfig {
         lock(&self.store).config().clone()
+    }
+
+    /// Waits for the test's hold at `at`, if it set one.
+    pub async fn held_at(&self, at: HoldAt) {
+        if let Some(h) = &self.hold {
+            (h.0)(at).await;
+        }
     }
 
     /// The account the commands of a pairing with `policy` run as
@@ -764,9 +826,31 @@ impl Shared {
     }
 
     /// The built-in folders of a pairing whose commands run as `nerve-run`
-    /// ([`crate::account::built_in`]) added to `entry`'s, for the gate and
-    /// the sandbox; the config keeps only those the owner gave.
+    /// ([`crate::account::built_in`]: its own home and temporary folder,
+    /// `/tmp` and `/var/tmp`) added to `entry`'s, for the gate and the
+    /// sandbox; the config keeps only those the owner gave. The owner's
+    /// folders are cut around the account's home first, which holds every
+    /// pairing's own folders ([`crate::account::around_pairings`]).
     pub fn with_built_in(
+        &self,
+        cfg: &NodeConfig,
+        entry: nerve_policy::CenterEntry,
+    ) -> nerve_policy::CenterEntry {
+        if self.separate(&entry.policy)
+            && let Ok(Some(a)) = self.command_account(cfg, &entry.policy)
+        {
+            return crate::account::with_built_in(entry, &self.rules_home(cfg), &a);
+        }
+        entry
+    }
+
+    /// `entry` with the owner's folders cut around the pairings' homes
+    /// ([`crate::account::around_pairings`]) and nothing added, for a
+    /// program's action: it works with the owner's rights, so its paths
+    /// count by the folders the owner granted alone, but not by the
+    /// part of them that holds the other pairings' folders, which the
+    /// pairing's commands and file calls do not get either.
+    pub fn around_pairings(
         &self,
         cfg: &NodeConfig,
         mut entry: nerve_policy::CenterEntry,
@@ -774,12 +858,51 @@ impl Shared {
         if self.separate(&entry.policy)
             && let Ok(Some(a)) = self.command_account(cfg, &entry.policy)
         {
-            entry
-                .policy
-                .folders
-                .extend(crate::account::built_in(&a.home));
+            entry.policy.folders = crate::account::around_pairings(
+                &entry.policy.folders,
+                &self.rules_home(cfg),
+                &a.home,
+            );
         }
         entry
+    }
+
+    /// The home and temporary folder of the pairing `entry` for a command
+    /// that runs as `run` (`nerve-run`), made where they are missing
+    /// (crate::own_dirs::ready): the node makes them as the pairing comes,
+    /// and a command that finds them gone, or comes first, gets them. Only
+    /// the installed Linux node makes them; elsewhere they are named alone.
+    pub fn own_ready(
+        &self,
+        run: &crate::service::Account,
+        entry: &nerve_policy::CenterEntry,
+    ) -> Result<crate::account::Own, String> {
+        #[cfg(target_os = "linux")]
+        if self.service {
+            let file = crate::own_dirs::record_file(&self.paths);
+            return crate::own_dirs::ready(run, &entry.name, &entry.node_id, &file);
+        }
+        Ok(crate::account::Own::of(&run.home, &entry.name))
+    }
+
+    /// Brings the pairings' home and temporary folders in line with the
+    /// config (crate::own_dirs::sync), on the installed Linux node: a new
+    /// pairing's are made, those of a pairing that went are deleted. It
+    /// waits for one already running, and then goes by the config as it is
+    /// then, not by `cfg`, which only names the account. What failed is
+    /// logged; the next change of the config tries again.
+    #[cfg(target_os = "linux")]
+    pub fn sync_own_dirs(&self, cfg: &NodeConfig) {
+        if !self.service {
+            return;
+        }
+        let Ok(Some(run)) = self.run_account(cfg) else {
+            return;
+        };
+        let file = crate::own_dirs::record_file(&self.paths);
+        for e in crate::own_dirs::sync(&run, || self.config(), &file) {
+            tracing::warn!("pairing folders: {e}");
+        }
     }
 
     /// What the center `entry` (the config's, as it is) may do now, for its
@@ -793,18 +916,39 @@ impl Shared {
         entry: &nerve_policy::CenterEntry,
     ) -> crate::descriptor::Reach {
         let now = crate::now_ms();
-        let run_home = self
+        let seen = self
             .separate(&entry.policy)
             .then(|| self.account_seen(cfg, &entry.policy))
-            .flatten()
-            .map(|a| a.home);
+            .flatten();
+        let own = seen
+            .as_ref()
+            .map(|a| crate::account::Own::of(&a.home, &entry.name));
+        // The folders as the gate sees them: not those of the other
+        // pairings' homes ([`crate::account::around_pairings`]).
+        let cut;
+        let entry = match &seen {
+            Some(a) => {
+                let mut c = entry.clone();
+                c.policy.folders = crate::account::around_pairings(
+                    &c.policy.folders,
+                    &self.rules_home(cfg),
+                    &a.home,
+                );
+                cut = c;
+                &cut
+            }
+            None => entry,
+        };
+        // A node that cannot hold the pairing's network switch runs none of
+        // its commands, so folder mode offers none.
         let mut reach = crate::descriptor::Reach::of(
             entry,
             now,
             self.account_name(cfg, &entry.policy),
-            self.confined(cfg),
-            run_home.as_deref(),
+            self.confined(cfg) && self.network_refusal(&entry.policy).is_none(),
+            own.as_ref(),
         );
+        reach.no_network = self.network_off(&entry.policy);
         // Without a sandbox, a folder-mode command that runs at all runs as
         // `nerve-run`, held back by that account alone ([`folder_refusal`]).
         reach.held_by_account = !self.sandboxed();
@@ -816,6 +960,9 @@ impl Shared {
         // tells the list only then. A switch change moves the rev like a
         // grant. No store lock is held here; `sudo_on` takes it.
         reach.sudo = reach.sudo && self.sudo_on();
+        // Nor while the owner keeps the pairing's commands off the network
+        // (crate::link's exec.run refuses it).
+        reach.sudo &= !entry.policy.no_network;
         reach
     }
 
@@ -1185,6 +1332,73 @@ impl Shared {
         self.confinement.available() && self.exe.is_some()
     }
 
+    /// Whether this machine can keep a command off the network: the node's
+    /// filter, which makes every socket but a unix one fail
+    /// (nerve_sandbox::net_filter). Landlock's network rules, where the
+    /// kernel has them, are a second layer under it and not needed: the
+    /// filter refuses more than they do (UDP, raw and every other socket as
+    /// well as TCP), and what it leaves open (a unix socket to a program
+    /// that reaches the network, a socket another process hands over) is
+    /// open with the rules as well.
+    pub fn network_held(&self) -> bool {
+        self.net_filter
+    }
+
+    /// Whether the commands of a pairing with `policy` are kept apart from
+    /// the owner's own now, which the network switch needs to hold them: as
+    /// `nerve-run` (the installed Linux node, folder mode and allowlist mode
+    /// unless the pairing runs as the owner), or in folder mode, under the
+    /// sandbox, on a node run by hand where that can keep a command from the
+    /// owner's own programs ([`by_hand_apart`]). A command that runs as the
+    /// owner with nothing around it reaches the owner's programs, which
+    /// reach the network for it, so the switch does not hold it: user mode,
+    /// and allowlist mode as the owner.
+    fn network_apart(&self, policy: &nerve_policy::config::CenterPolicy) -> bool {
+        self.separate(policy)
+            || !self.service
+                && policy.mode_at(crate::now_ms()) == nerve_policy::Mode::Folder
+                && by_hand_apart(self.full_rights, self.confinement.landlock_abi)
+    }
+
+    /// How the network switch of a pairing with `policy` stands now: `None`
+    /// while it is off; held where its commands are apart from the owner's
+    /// ([`Shared::network_apart`]) and the node has its filter
+    /// ([`Shared::network_held`]); else none of its commands runs, and this
+    /// says why.
+    pub fn network_off(
+        &self,
+        policy: &nerve_policy::config::CenterPolicy,
+    ) -> Option<nerve_proto::descriptor::NetworkOff> {
+        use nerve_proto::descriptor::NetworkOff;
+        if !policy.no_network {
+            return None;
+        }
+        Some(if !self.network_held() {
+            NetworkOff::NotHeld
+        } else if !self.network_apart(policy) {
+            NetworkOff::AsOwner
+        } else {
+            NetworkOff::Held
+        })
+    }
+
+    /// Why the commands of a pairing with `policy` may not run for its
+    /// network switch, in every mode: it is on, and this machine cannot
+    /// hold them to it ([`NETWORK_NOT_HELD`]), or they run as the owner now
+    /// ([`NETWORK_AS_OWNER`]). Fail closed: they do not run then.
+    pub fn network_refusal(
+        &self,
+        policy: &nerve_policy::config::CenterPolicy,
+    ) -> Option<&'static str> {
+        use nerve_proto::descriptor::NetworkOff;
+        match self.network_off(policy)? {
+            NetworkOff::NotHeld => Some(NETWORK_NOT_HELD),
+            NetworkOff::AsOwner if self.service => Some(NETWORK_AS_OWNER),
+            NetworkOff::AsOwner => Some(NETWORK_AS_OWNER_BY_HAND),
+            NetworkOff::Held => None,
+        }
+    }
+
     /// Whether the commands of a pairing with `policy` run under Landlock
     /// now: in folder mode, and as `nerve-run`, where the kernel has it.
     pub fn landlock_for(&self, policy: &nerve_policy::config::CenterPolicy) -> bool {
@@ -1203,6 +1417,18 @@ impl Shared {
             return crate::account::landlock_warning(self.confinement.landlock_abi);
         }
         None
+    }
+
+    /// That the commands of two or more pairings run as `nerve-run` here
+    /// with no Landlock to keep them apart (crate::account::pairings_warning).
+    fn pairings_warning(&self, cfg: &NodeConfig) -> Option<String> {
+        let separate = self.service && cfg!(target_os = "linux");
+        crate::account::pairings_warning(
+            separate,
+            self.confinement.landlock_abi,
+            cfg,
+            crate::now_ms(),
+        )
     }
 
     /// What `nerve-run` may read of the owner's home beyond its folders on
@@ -1468,6 +1694,12 @@ impl Shared {
                     "mode": c.policy.mode_at(now).as_str(),
                     "until": c.policy.until,
                     "as_owner": c.policy.as_owner,
+                    // The owner's network switch for its folder-mode
+                    // commands (`folder network off`).
+                    "no_network": c.policy.no_network,
+                    // How that stands now: held, as_owner or not_held; none
+                    // while it is on.
+                    "network_off": self.network_off(&c.policy),
                     // The account its commands run as now; none on a node
                     // run by hand, which runs them as itself.
                     "account": self.command_account(&cfg, &c.policy).ok().flatten().map(|a| a.name),
@@ -1488,6 +1720,9 @@ impl Shared {
             // root, as whom what runs as the owner then runs.
             "owner": self.owner_name(&cfg),
             "owner_is_root": crate::owner::is_root(self.owner_name(&cfg).as_deref()),
+            // Whether this is the installed node, which an owner may not
+            // have been found for (the web UI words its advice by it).
+            "installed": self.service,
             "confinement": self.confinement.describe(),
             "running": self.running.load(Ordering::Relaxed),
             "sudo": if self.sudo_on() { "on" } else { "off" },
@@ -1498,6 +1733,9 @@ impl Shared {
             // Why folder mode runs no command, which `confinement` alone
             // does not say once the keyring is the reason.
             "folder_commands_off": self.unconfined(&cfg),
+            // Whether this machine can keep folder-mode commands off the
+            // network, which a pairing's switch needs to run any.
+            "network_rules": self.network_held(),
             "command_limits": crate::cgroup::status(&cfg.limits.command, &self.cgroups),
             "providers": self.providers.status(),
             "folder_grants": grants,
@@ -1505,6 +1743,9 @@ impl Shared {
             "home_warning": self.home_warning(&cfg),
             // What this kernel's Landlock does not guard.
             "landlock_warning": self.landlock_warning(),
+            // That nothing keeps two pairings of nerve-run apart without
+            // Landlock.
+            "pairings_warning": self.pairings_warning(&cfg),
             "centers": centers,
             "relay": self.relay.status(&cfg),
             "ui": self.ui_status(&cfg),
@@ -1552,6 +1793,74 @@ pub const KEYRING_NOT_CONFINED: &str = "commands cannot be confined on this mach
 /// nor the session bus exist there.
 #[cfg(windows)]
 pub const KEYRING_NOT_CONFINED: &str = "commands cannot be confined on this machine while the node's keys are in the system keyring: the AppContainer here is not known to keep a command from the Credential Manager the keys are in, so folder mode runs no command; `nerve-node config set machine.secret_storage file` brings them back";
+
+/// Why a pairing's commands may not run where its owner turned their
+/// network off (`folder network off`) and this machine cannot hold them to
+/// that ([`Shared::network_refusal`]).
+#[cfg(not(windows))]
+pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this center's commands, and this machine cannot keep them off it: that needs the kernel's seccomp filters on x86_64 or aarch64, which this node cannot use here, so it runs none of its commands; the owner turns the network back on with `nerve-node folder network on`";
+/// [`NETWORK_NOT_HELD`] on Windows, where nothing holds a command to no
+/// network.
+#[cfg(windows)]
+pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this center's commands, and this machine cannot keep them off it: Windows has no rule here that does, so the node runs none of its commands; the owner turns the network back on with `nerve-node folder network on`";
+
+/// Why a pairing's commands may not run where its owner turned their
+/// network off and they run as the owner in the mode it is in
+/// ([`Shared::network_refusal`]): nothing holds them back from the owner's
+/// programs, which reach the network for them.
+pub const NETWORK_AS_OWNER: &str = "the owner turned the network off for this center's commands, and in this mode they run as the owner, which nothing keeps off the network, so the node runs none of them; the owner turns the network back on with `nerve-node folder network on`, or has them run as nerve-run: `nerve-node mode set folder`, or `nerve-node mode set allowlist` without `--as-owner`";
+
+/// Why a pairing's commands may not run where the owner turned their network
+/// off on a node run by hand, which runs them as its own user
+/// ([`Shared::network_refusal`]).
+pub const NETWORK_AS_OWNER_BY_HAND: &str = "the owner turned the network off for this center's commands, and this node, run by hand, runs them as its own user, which nothing here keeps off the network (only folder mode does, as a user that is not root and on Linux 7.1 or later, whose Landlock tells unix sockets apart), so the node runs none of them; the owner turns the network back on with `nerve-node folder network on`, or installs the node, which runs folder mode's commands as nerve-run";
+
+/// Why a command that was decided while the owner's network switch was off
+/// does not start: the owner turned it on while the call waited for its
+/// folders, and the command would run without the filter.
+pub const NETWORK_SWITCHED_ON: &str = "the owner turned the network off for this center's commands while this one was being set up, so it did not start; send it again";
+
+/// The last look before a command starts, after everything the call waited
+/// for: why it must not start, if it must not. The call decided on the
+/// switch (`decided_off`) when it came in, and the owner may have turned it
+/// on since (`off_now`): the command would run without the filter. And a
+/// command that runs with the switch on has to be apart from the owner's own
+/// programs (`apart`: it runs as `nerve-run`, or under Landlock), whatever
+/// the answers the call went by earlier said: a mode that ends between two
+/// of the call's reads of the clock changes who the command runs as.
+pub fn late_network_refusal(
+    decided_off: bool,
+    off_now: bool,
+    apart: bool,
+    service: bool,
+) -> Option<&'static str> {
+    if off_now && !decided_off {
+        Some(NETWORK_SWITCHED_ON)
+    } else if decided_off && !apart {
+        Some(if service {
+            NETWORK_AS_OWNER
+        } else {
+            NETWORK_AS_OWNER_BY_HAND
+        })
+    } else {
+        None
+    }
+}
+
+/// Whether a node run by hand can keep a folder-mode command apart from its
+/// own user's programs, which the network switch needs: it is not root (a
+/// command of root asks the system's service manager over the bus it keeps
+/// to start a program outside the filter), and Landlock tells unix sockets
+/// by path apart (ABI 9, [`nerve_sandbox::LANDLOCK_RESOLVE_UNIX`]; below it a
+/// command reaches the user's own session bus and service manager).
+pub fn by_hand_apart(full_rights: bool, landlock_abi: Option<i32>) -> bool {
+    !full_rights && landlock_abi.is_some_and(|v| v >= nerve_sandbox::LANDLOCK_RESOLVE_UNIX)
+}
+
+/// Why a command on the sudo list does not run while the owner keeps the
+/// pairing's commands off the network: it runs outside the filter that
+/// holds them, with rights that reach past any.
+pub const NETWORK_SUDO: &str = "the owner turned the network off for this center's commands, and a command on the sudo list runs outside what keeps them off it, with full rights, so none runs while it is off; the owner turns the network back on with `nerve-node folder network on`";
 
 /// Why commands of `folder` mode may not run ([`Shared::unconfined_as`]),
 /// or `None`: `sandbox` says whether the machine confines them, `service`
@@ -1763,6 +2072,9 @@ impl Daemon {
                 opts.confinement.unwrap_or_else(Confinement::detect),
                 service,
             ),
+            net_filter: opts.net_filter.unwrap_or_else(net_filter_here),
+            hold: opts.hold,
+            full_rights,
             cgroups,
             store: Mutex::new(store),
             changed,
@@ -2076,7 +2388,11 @@ async fn supervise(shared: Arc<Shared>) {
             let walk = start_walk(acl_synced);
             acl_synced = Some(cfg.version);
             let (s, c) = (shared.clone(), cfg.clone());
-            tokio::task::spawn_blocking(move || s.sync_acls(&c, walk));
+            tokio::task::spawn_blocking(move || {
+                // A pairing's own folders come and go with it (#167).
+                s.sync_own_dirs(&c);
+                s.sync_acls(&c, walk)
+            });
         }
         // The level follows the config, whoever changed it and however.
         if let Some(log) = &shared.log {
@@ -3660,10 +3976,160 @@ mod tests {
         }
     }
 
+    /// A pairing whose commands the owner took off the network runs them
+    /// only where the node holds them to that: where it has its network
+    /// filter, with or without Landlock's network rules (ABI 4), and where
+    /// they are apart from the owner's own, as `nerve-run` on the installed
+    /// node (folder mode, allowlist mode not as the owner) or under the
+    /// sandbox in folder mode by hand. Elsewhere the node refuses them with
+    /// why, folder mode offers none (no folder marked `x`), and the
+    /// descriptor says which, in every mode; a sudo list is not offered
+    /// meanwhile. With the switch off nothing is refused for it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_pairing_without_network_runs_its_commands_only_where_that_holds() {
+        use nerve_policy::config::{Access, CenterPolicy, Folder, Mode};
+        use nerve_proto::descriptor::NetworkOff::{AsOwner, Held, NotHeld};
+        for (abi, filter) in [
+            (Some(3), true),
+            (Some(3), false),
+            (Some(4), false),
+            (Some(6), false),
+            (Some(6), true),
+            (Some(8), true),
+            (Some(9), true),
+            (Some(9), false),
+        ] {
+            // A node by hand as root keeps no folder-mode command apart.
+            for (service, full) in [(false, false), (false, true), (true, false)] {
+                let log = Log::new(Level::Info);
+                let d = tempfile::tempdir().unwrap();
+                if full {
+                    let paths = NodePaths::new(d.path().join("config"), d.path().join("state"));
+                    for dir in [&paths.state_dir, &paths.config_dir] {
+                        nerve_transport::files::create_private_dir(dir).unwrap();
+                    }
+                    SettingsStore::open(
+                        paths.config_file(),
+                        paths.config_key(),
+                        AuditLog::new(paths.audit_log()),
+                    )
+                    .unwrap()
+                    .update(|c| {
+                        c.machine.allow_root = true;
+                        Ok(())
+                    })
+                    .unwrap();
+                }
+                let mut o = options(&d, &log);
+                o.full_rights = Some(full);
+                o.exe = Some("/bin/true".into());
+                o.confinement = Some(Confinement {
+                    landlock_abi: abi,
+                    appcontainer: false,
+                });
+                o.net_filter = Some(filter);
+                o.service = Some(service);
+                let daemon = Daemon::start(o).await.unwrap();
+                let s = daemon.shared.clone();
+                assert_eq!(s.network_held(), filter);
+                assert_eq!(s.status()["network_rules"], filter);
+                assert_eq!(s.status()["installed"], service);
+                lock(&s.store)
+                    .set_sudo(nerve_policy::Writer::Local, nerve_policy::config::Sudo::On)
+                    .unwrap();
+                *lock(&s.sudo) = Some(crate::sudo::Secret::new("pw".into()));
+                *lock(&s.sudo_for) = s.owner_name(&s.config());
+                let cfg = s.config();
+                // Folder mode, allowlist as nerve-run and as the owner,
+                // user mode; and what the switch is for each where the node
+                // has the filter.
+                for (mode, as_owner, apart) in [
+                    // Folder mode on a node by hand: as a user that is not
+                    // root, with the kernel telling unix sockets apart.
+                    (
+                        Mode::Folder,
+                        false,
+                        service || !full && abi.is_some_and(|v| v >= 9),
+                    ),
+                    (Mode::Allowlist, false, service),
+                    (Mode::Allowlist, true, false),
+                    (Mode::User, false, false),
+                ] {
+                    let what = format!(
+                        "ABI {abi:?}, filter {filter}, service {service}, root {full}, {mode:?}, as owner {as_owner}"
+                    );
+                    let mut policy = CenterPolicy {
+                        mode,
+                        as_owner,
+                        no_network: true,
+                        folders: vec![Folder {
+                            path: "/srv/proj".into(),
+                            access: Access::ALL,
+                        }],
+                        sudo_allow: vec!["sudo true".into()],
+                        ..Default::default()
+                    };
+                    let want = match (filter, apart) {
+                        (false, _) => NotHeld,
+                        (true, false) => AsOwner,
+                        (true, true) => Held,
+                    };
+                    assert_eq!(s.network_off(&policy), Some(want), "{what}");
+                    assert_eq!(
+                        s.network_refusal(&policy),
+                        match want {
+                            NotHeld => Some(NETWORK_NOT_HELD),
+                            AsOwner if service => Some(NETWORK_AS_OWNER),
+                            AsOwner => Some(NETWORK_AS_OWNER_BY_HAND),
+                            Held => None,
+                        },
+                        "{what}"
+                    );
+                    let entry = nerve_policy::CenterEntry {
+                        name: "c".into(),
+                        url: "https://center.example".into(),
+                        pin: None,
+                        center_id: "c".into(),
+                        node_id: "n".into(),
+                        settings: Default::default(),
+                        paused: false,
+                        revoked: false,
+                        unknown: false,
+                        public_key: None,
+                        key_rotations: 0,
+                        pin_rotations: 0,
+                        old_pin: None,
+                        policy: policy.clone(),
+                        capabilities: Vec::new(),
+                    };
+                    let r = s.reach(&cfg, &entry);
+                    assert!(!r.sudo, "{what}");
+                    let a = crate::descriptor::for_center(&cfg, &entry, &r, &[])
+                        .access
+                        .unwrap();
+                    assert_eq!(a.no_network, Some(want), "{what}");
+                    // Only where it holds does folder mode run a command.
+                    if mode == Mode::Folder && !service {
+                        assert_eq!(a.folders[0].access == "rwx", want == Held, "{what}: {a:?}");
+                    }
+                    policy.no_network = false;
+                    assert_eq!(s.network_off(&policy), None, "{what}");
+                    assert_eq!(s.network_refusal(&policy), None, "{what}");
+                    // The sudo list is offered again (and is so only in
+                    // folder mode).
+                    let entry = nerve_policy::CenterEntry { policy, ..entry };
+                    assert!(s.reach(&cfg, &entry).sudo, "{what}");
+                }
+                daemon.stop().await;
+            }
+        }
+    }
+
     /// What each pairing's descriptor tells of the account and the folders,
     /// as the link builds it: on the installed Linux node a folder pairing
-    /// runs as `nerve-run`, whose home, `/tmp` and `/var/tmp` it names as
-    /// that account's own; an allowlist pairing as `nerve-run` names the
+    /// runs as `nerve-run`, and names its own home and temporary folder
+    /// below that account's home (#167), `/tmp` and `/var/tmp`; an allowlist pairing as `nerve-run` names the
     /// account and no folder; a user pairing and an allowlist pairing as
     /// the owner run as the owner, with no built-in folder. A node run by
     /// hand runs everything as its own user, with no built-in folder.
@@ -3736,7 +4202,14 @@ mod tests {
                 let folders: Vec<String> = a
                     .folders
                     .iter()
-                    .map(|f| format!("{} {}{}", f.path, f.access, if f.own { " own" } else { "" }))
+                    .map(|f| {
+                        let own = match (f.own, f.shared) {
+                            (true, true) => " own shared",
+                            (true, false) => " own",
+                            _ => "",
+                        };
+                        format!("{} {}{own}", f.path, f.access)
+                    })
                     .collect();
                 (a.account, folders)
             };
@@ -3750,9 +4223,10 @@ mod tests {
                         Some(crate::account::RUN_USER.to_string()),
                         vec![
                             proj.clone(),
-                            "/tmp rwx own".into(),
-                            "/var/tmp rwx own".into(),
-                            format!("{} rwx own", run_home.display()),
+                            "/tmp rwx own shared".into(),
+                            "/var/tmp rwx own shared".into(),
+                            format!("{} rwx own", run_home.join("c/home").display()),
+                            format!("{} rwx own", run_home.join("c/tmp").display()),
                         ]
                     ),
                     "{what}"
@@ -3779,6 +4253,122 @@ mod tests {
             }
             daemon.stop().await;
         }
+    }
+
+    /// A folder the owner granted that holds the home of `nerve-run` is cut
+    /// around it for the gate, the sandbox and the descriptor, and one inside
+    /// it is dropped: every pairing's folders are that one account's, so a
+    /// grant like `/var` would give this pairing the others' homes. Its own
+    /// two folders come after, whole.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_grant_above_the_accounts_home_is_cut_around_the_pairings_homes() {
+        use nerve_policy::config::{Access, CenterPolicy, Folder, Mode};
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap().join("world");
+        std::fs::create_dir(&root).unwrap();
+        let mut o = options(&d, &log);
+        o.full_rights = Some(false);
+        o.exe = Some("/bin/true".into());
+        o.service = Some(true);
+        o.owner = Some("alice".into());
+        let daemon = Daemon::start(o).await.unwrap();
+        let s = daemon.shared.clone();
+        let run_home = root.join("srv/nerve-run");
+        for (name, uid, home) in [
+            (crate::account::RUN_USER, 4243, run_home.clone()),
+            ("alice", 4242, root.join("alice")),
+        ] {
+            lock(&s.account_cache).insert(
+                name.into(),
+                (
+                    std::time::Instant::now(),
+                    Some(crate::service::Account {
+                        name: name.into(),
+                        uid,
+                        gid: uid,
+                        comment: String::new(),
+                        home,
+                        groups: vec![uid],
+                    }),
+                ),
+            );
+        }
+        for dir in [
+            "srv/nerve-run/c/home",
+            "srv/nerve-run/other/home",
+            "srv/www",
+            "alice",
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let grant = |p: PathBuf| Folder {
+            path: p.display().to_string(),
+            access: Access::parse("rw").unwrap(),
+        };
+        let entry = nerve_policy::CenterEntry {
+            name: "c".into(),
+            url: "https://center.example".into(),
+            pin: None,
+            center_id: "c".into(),
+            node_id: "n".into(),
+            settings: Default::default(),
+            paused: false,
+            revoked: false,
+            unknown: false,
+            public_key: None,
+            key_rotations: 0,
+            pin_rotations: 0,
+            old_pin: None,
+            policy: CenterPolicy {
+                mode: Mode::Folder,
+                folders: vec![
+                    grant(root.clone()),
+                    grant(run_home.join("other/home")),
+                    grant(PathBuf::from("/srv/proj")),
+                ],
+                ..Default::default()
+            },
+            capabilities: Vec::new(),
+        };
+        let cfg = s.config();
+        let wanted: Vec<String> = [
+            root.join("alice"),
+            root.join("srv/www"),
+            PathBuf::from("/srv/proj"),
+            PathBuf::from("/tmp"),
+            PathBuf::from("/var/tmp"),
+            run_home.join("c/home"),
+            run_home.join("c/tmp"),
+        ]
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+        let sorted = |mut v: Vec<String>| {
+            v.sort();
+            v
+        };
+        // What the gate sees, for the account as the database has it (the
+        // test's node cannot switch accounts, so a lookup would refuse).
+        let run = lock(&s.account_cache)
+            .get(crate::account::RUN_USER)
+            .and_then(|(_, a)| a.clone())
+            .unwrap();
+        let gate = crate::account::with_built_in(entry.clone(), &root.join("alice"), &run);
+        let got = sorted(gate.policy.folders.iter().map(|f| f.path.clone()).collect());
+        assert_eq!(got, sorted(wanted.clone()));
+        // The descriptor tells the same, its own folders apart.
+        let told = s.reach(&cfg, &entry);
+        let got = sorted(
+            told.folders
+                .iter()
+                .map(|f| f.path.clone())
+                .chain(told.own.iter().map(|f| f.path.clone()))
+                .collect(),
+        );
+        assert_eq!(got, sorted(wanted));
+        daemon.stop().await;
     }
 
     /// The installed node without Landlock holds folder-mode commands back
@@ -3852,6 +4442,67 @@ mod tests {
                 w.contains(&format!("ABI {abi}, which does not guard device ioctls")),
                 told,
                 "service {service}, ABI {abi}: {st}"
+            );
+            daemon.stop().await;
+        }
+    }
+
+    /// The installed node's status says that nothing keeps its pairings of
+    /// nerve-run apart without Landlock once there are two; with Landlock,
+    /// with one, and on a node run by hand it says nothing of it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_status_says_two_pairings_of_nerve_run_are_not_apart_without_landlock() {
+        for (service, abi, two, told) in [
+            (true, None, true, true),
+            (true, None, false, false),
+            (true, Some(6), true, false),
+            (false, None, true, false),
+        ] {
+            let log = Log::new(Level::Info);
+            let d = tempfile::tempdir().unwrap();
+            let mut o = options(&d, &log);
+            o.full_rights = Some(false);
+            o.exe = Some("/bin/true".into());
+            o.service = Some(service);
+            o.owner = Some("alice".into());
+            o.confinement = Some(Confinement {
+                landlock_abi: abi,
+                appcontainer: false,
+            });
+            let daemon = Daemon::start(o).await.unwrap();
+            let entry = |name: &str| nerve_policy::CenterEntry {
+                name: name.into(),
+                url: "https://center.example".into(),
+                pin: None,
+                center_id: "c".into(),
+                node_id: name.into(),
+                settings: Default::default(),
+                paused: false,
+                revoked: false,
+                unknown: false,
+                public_key: None,
+                key_rotations: 0,
+                pin_rotations: 0,
+                old_pin: None,
+                policy: nerve_policy::config::CenterPolicy {
+                    mode: nerve_policy::Mode::Folder,
+                    ..Default::default()
+                },
+                capabilities: Vec::new(),
+            };
+            daemon.owner_edit(|c| {
+                c.centers.push(entry("home"));
+                if two {
+                    c.centers.push(entry("lab"));
+                }
+            });
+            let st = daemon.status();
+            let w = st["pairings_warning"].as_str().unwrap_or_default();
+            assert_eq!(
+                w.contains("nothing keeps the pairings apart"),
+                told,
+                "service {service}, ABI {abi:?}, two {two}: {st}"
             );
             daemon.stop().await;
         }
@@ -4923,6 +5574,39 @@ mod confinement_tests {
         }
         #[cfg(not(windows))]
         assert!(text.contains("session bus") && text.contains("nerve-run"));
+    }
+
+    /// The last look before a command starts: one decided with the owner's
+    /// switch off does not start once it is on, and one that runs with the
+    /// switch on has to run apart from the owner's programs, whatever mode
+    /// the call went by earlier (a folder mode that ended between two reads
+    /// of the clock leaves a command that runs as the owner).
+    #[test]
+    fn a_command_does_not_start_into_a_switch_it_was_not_decided_by() {
+        // Decided with the switch off, and it stays off.
+        assert_eq!(late_network_refusal(false, false, false, true), None);
+        assert_eq!(late_network_refusal(false, false, true, false), None);
+        // The owner turned it on while the call waited.
+        assert_eq!(
+            late_network_refusal(false, true, true, true),
+            Some(NETWORK_SWITCHED_ON)
+        );
+        assert_eq!(
+            late_network_refusal(false, true, false, false),
+            Some(NETWORK_SWITCHED_ON)
+        );
+        // On when decided: it starts where it is apart from the owner's
+        // programs, and not where it runs as the owner.
+        assert_eq!(late_network_refusal(true, true, true, true), None);
+        assert_eq!(late_network_refusal(true, true, true, false), None);
+        assert_eq!(
+            late_network_refusal(true, true, false, true),
+            Some(NETWORK_AS_OWNER)
+        );
+        assert_eq!(
+            late_network_refusal(true, true, false, false),
+            Some(NETWORK_AS_OWNER_BY_HAND)
+        );
     }
 
     /// Without Landlock, the installed Linux node runs folder mode as

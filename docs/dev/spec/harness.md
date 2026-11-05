@@ -179,14 +179,23 @@ the `result` of the envelope described below.
   `access` block, a line with the mode, its end and the account
   (`Mode: folder until …; commands run as nerve-run.`) and, in folder mode,
   one with the folders and their flags (`Folders (r read, w write, x run
-  commands; own: the command account's own): /home/me/proj (rw, some
-  folders below allow less), /tmp (rwx, own)`; at most 64 folders, the
+  commands; own: the command account's own; shared: every pairing's):
+  /home/me/proj (rw, some folders below allow less),
+  /var/lib/nerve-run/box-1/home (rwx, own), /tmp (rwx, own, shared)`, the
+  legend naming `shared` only where a folder is; at most 64 folders, the
   account's own ones kept first and the rest counted, and the folders the
   node left out for their names counted apart (`N more whose names cannot
   be shown on one line`); with none of either, `Folders: none granted yet`,
   which with `sudo` adds that a command on the sudo list still runs, as
   the node sends `sudo` only while its sudo switch is on and `exec.run` is
-  callable); with `reads_by_account`, before the folders a line `Reads: in
+  callable); with `no_network`, after the folders (in every mode) a line
+  by its value: `held` `Network: none for its commands, the owner turned it
+  off (no socket but unix ones; no command of the sudo list runs
+  meanwhile).`, `as_owner` `Network: the owner turned it off for its
+  commands, and they run as the owner in this mode, where nothing keeps
+  them off it: none of them runs.`, `not_held` `Network: the owner turned it
+  off for its commands, and this machine cannot keep them off it: none of
+  them runs.`; with `reads_by_account`, before the folders a line `Reads: in
   the folders marked r, and outside every folder what is open to every
   account on the machine; writes and commands keep to the folders.`, and with no folder `Folders:
   none granted yet` names writes, not file calls, as refused; a
@@ -205,8 +214,8 @@ the `result` of the envelope described below.
   summary, kind?}], off, more, more_off}` (`kind` `state`, `event` or
   `stream`; none for an action), with the names shown, `summary` only when
   the text has it, and the counts of those not shown; `access` is `{mode,
-  until_ms?, account?, confined, sudo?, reads_by_account?, folders: [{path,
-  access, own?, closed_below?}], more_folders, unnamed?}`.
+  until_ms?, account?, confined, sudo?, reads_by_account?, no_network?, folders: [{path,
+  access, own?, shared?, closed_below?}], more_folders, unnamed?}`.
 - `list(node, capability)`: `capability` is a list of at most 32 names (a
   single name as a string is accepted too, though the schema declares the
   array).
@@ -243,7 +252,13 @@ the `result` of the envelope described below.
   only in one marked `x` (`exec.run`'s advice only); where folders nest the deepest one decides; with
   `confined` the machine's sandbox holds what a command reaches to these
   folders (and the system's files), without it the machine does not and
-  a command reaches what its account may reach; with `sudo`, a command on
+  a command reaches what its account may reach; `exec.run`'s advice says,
+  with `no_network` (in every mode), that its commands have no network, as
+  the owner turned it off, so they can open no network socket, only unix
+  ones, and a command on the owner's sudo list does not run meanwhile
+  (`held`), or that none of them runs, as in this mode they run as the
+  owner (`as_owner`) or the machine cannot keep them off it (`not_held`);
+  with `sudo`, a command on
   the owner's sudo list runs by that list alone, with full rights, in any
   folder and beyond the folders and the sandbox; a folder marked as having
   folders below it that allow less holds folders, not named, that allow
@@ -253,13 +268,21 @@ the `result` of the envelope described below.
   run as an account of their own), that files made in the other folders
   should stay readable for the machine's owner, whose access goes through
   the group bits (0640 or 0660 for files, 0750 or 0770 for folders, not 0600
-  or 0700 unless asked), and that an `own` folder marked `w` is for
-  throwaway files only: every pairing whose commands run as that account
-  shares it (`/tmp` also every account on the machine), with the settings
-  and caches its programs keep there, so what one pairing leaves there can
-  change what another one's commands do; nothing secret stays there, and no
-  program's settings are changed there unless asked. Where the commands run as
-  the owner it says neither. The same advice is under `center` as `{"folders": …}` in
+  or 0700 unless asked); where an `own` folder without `shared` is marked
+  `w`, that those are the pairing's own home and temporary folder, where its
+  programs keep their settings and caches, and (`exec.run`'s advice and
+  the joined one) that the sandbox keeps every other pairing's commands
+  from reading and writing their files (though on an older kernel it cannot
+  stop one from emptying a file), not out of a socket a program listens on
+  there, so no credential cache or key agent runs in them; where a `shared` one is marked `w`, that every pairing of that
+  account and every account on the machine shares it, with the settings and
+  caches programs keep there, so what one leaves there can change what
+  another one's commands do: it is for throwaway files only, nothing secret
+  stays there, and no program's settings are changed there unless asked.
+  Without `confined`, the advice of a command says instead that every
+  pairing whose commands run as that account reaches all the `own` folders,
+  the unshared ones too, so all of them are for throwaway files only. Where
+  the commands run as the owner it says neither. The same advice is under `center` as `{"folders": …}` in
   `structuredContent`. Details are given whole: those that would take the
   answer past 240 KiB (in the text or in `structuredContent`) are named, whole,
   in a line `Not detailed, this answer is full: …` and in `later`, for another

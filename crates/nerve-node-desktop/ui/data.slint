@@ -25,6 +25,9 @@ export struct NodeStatus {
     limits-restart: bool,
     // What the owner should know: why commands do not run.
     warnings: [string],
+    // What the Centers page warns of: that nothing keeps the pairings of
+    // nerve-run apart on a machine without Landlock.
+    pairings-warning: string,
 }
 
 export struct CenterRow {

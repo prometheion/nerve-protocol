@@ -113,11 +113,13 @@ or rule on paths holds it beyond what `nerve-run` itself may reach, and in
 ## The account it runs as
 
 Every capability of `node.toml` runs as the installed node's command account
-`nerve-run`, from its home `/var/lib/nerve-run`, held like that account's
-commands:
+`nerve-run`, from the home of the pairing that calls it
+(`/var/lib/nerve-run/<center>/home`, with that pairing's `TMPDIR`), held like
+that account's commands:
 
 - In a `folder` or `allowlist` pairing whose commands run as `nerve-run`: that
-  pairing's folders and the account's own (its home, `/tmp`, `/var/tmp`),
+  pairing's folders and the account's own (the pairing's home and temporary
+  folder, `/tmp`, `/var/tmp`),
   held there by Landlock where the kernel has it.
 - In a pairing whose commands run as you (`user` mode, `allowlist
   --as-owner`): the account's own folders alone, since your folders are not

@@ -43,6 +43,7 @@ center is paired.
 | `folder add <path> +r +w +x` | Grant a folder | [modes](modes.md#folders) |
 | `folder set <path> -w` | Change a folder's rights | [modes](modes.md#folders) |
 | `folder rm <path>`, `folder ls` | Remove or list folders | [modes](modes.md#folders) |
+| `folder network off\|on` | Keep the center's commands off the network in every mode (no socket but unix ones; no command of its sudo list runs meanwhile), or let them on it again; where they would run as you, or the machine has no seccomp filter for it, none of them runs while it is off | [modes](modes.md#no-network-for-a-centers-commands) |
 | `folder sync` | Give `nerve-run` its entries on everything in the granted folders again, also on what was moved in (the installed Linux node; a pass over every granted folder) | [modes](modes.md#the-account-nerve-run-linux) |
 | `rule add allow\|deny\|sudo '<command>' [--wildcard] [--action A [--pin F=V]]` | Add a command rule, a rule on an action's arguments (`'lamp.set:room=office'`), or with `--action` the rule of an audit entry, `--pin` holding it to one argument | [rules](rules.md), [arguments](rules.md#rules-on-an-actions-arguments) |
 | `rule rm allow\|deny\|sudo '<command>' [--wildcard] [--action A [--pin F=V]]` | Remove a rule | [rules](rules.md#list-change-and-remove-rules) |
@@ -118,7 +119,11 @@ removed only with a change of the format, which the changelog names under
   It names the installed node's `"owner"` and `"owner_is_root"` (root is the
   owner, so `user` mode runs as root), each center's `"account"` (the
   account its commands run as now, `null` on a node run by hand),
-  `"as_owner"` and `"landlock"` (whether Landlock holds its commands now),
+  `"as_owner"`, `"no_network"` (its commands have no network),
+  `"network_off"` (`"held"`, `"as_owner"` or `"not_held"` while it is on:
+  whether the node holds them to it, or runs none, and why) and
+  `"landlock"` (whether Landlock holds its commands now), `"network_rules"`
+  (whether this machine can keep commands off the network),
   the running Linux node's `"folder_grants"` (`"errors"`, `"stale"`,
   `"failed"`, `"skipped"`: what giving `nerve-run` its folders left; a failed
   grant is tried again; while `"stale"` names a folder, no command of
@@ -127,7 +132,11 @@ removed only with a change of the format, which the changelog names under
   owner's home: `"mode"` when the home is open to other accounts, else
   `null`, `"below"` the folders given in it as you named them, the home
   itself where you give it whole; `null` with Landlock or where neither is
-  so).
+  so), and `"pairings_warning"` (on the installed Linux node without
+  Landlock, once two or more pairings' commands run as `nerve-run`, or the
+  config's capabilities, which run as it in every mode, are offered to them:
+  that nothing keeps them apart; `null` otherwise, also for a node that does not
+  run).
   `service status` has `"installed"`, `"state"` (`"running"`, `"stopped"`,
   `"starting"`, `"stopping"` or `"failed"`; `null` when not installed),
   `"enabled"` (it starts with the machine), `"program"` (where the program

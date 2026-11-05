@@ -53,12 +53,13 @@ fn opts(account: &Account, root: AsRoot) -> RunOptions {
         timeouts: Default::default(),
         sudo: None,
         account: Some(account.clone()),
-        separate: false,
+        separate: None,
         pass_env: Vec::new(),
         own: Vec::new(),
         root: Some(root),
         limits: None,
         tap: None,
+        no_network: false,
     }
 }
 

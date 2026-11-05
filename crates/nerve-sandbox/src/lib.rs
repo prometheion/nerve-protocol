@@ -26,6 +26,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub mod inherit;
+#[cfg(target_os = "linux")]
+pub mod net_filter;
 
 /// The argument that selects the shim in the `nerve-node` binary. Hidden from
 /// `--help`.
@@ -42,6 +44,19 @@ pub struct LandlockSpec {
     /// Programs below these may run. The files there can be read by name too
     /// (see `landlock_rules::prepare`), the folders not listed.
     pub exec: Vec<PathBuf>,
+    /// No TCP connection and no listening port ([`LANDLOCK_NETWORK`]), where
+    /// the kernel has the rules for them: a second layer under the node's
+    /// filter ([`net_filter`]), which holds the command off the network by
+    /// itself.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_network: bool,
+    /// With `no_network`, where the kernel can tell them apart
+    /// ([`LANDLOCK_RESOLVE_UNIX`]): the command reaches a unix socket by its
+    /// path only below these, the pairing's own and granted folders and the
+    /// system's sockets ([`kept_sockets`]). A program behind another socket
+    /// could reach the network for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unix: Vec<PathBuf>,
 }
 
 /// What the node sends the shim on its stdin.
@@ -225,6 +240,21 @@ pub fn shim_main() -> i32 {
 /// with no confinement at all.
 pub const LANDLOCK_FLOOR: i32 = 3;
 
+/// The Landlock ABI that rules the network (Linux 6.7): from it a command
+/// can be kept from making TCP connections and from listening on a TCP
+/// port. It rules nothing else of the network: UDP, raw and other sockets
+/// stay open, and so do unix sockets by path; abstract unix sockets close
+/// from [`LANDLOCK_WANTED`] on. The node's filter ([`net_filter`]) is what
+/// holds a command off the network; these rules are a second layer.
+pub const LANDLOCK_NETWORK: i32 = 4;
+
+/// The Landlock ABI that rules unix sockets by path (Linux 7.1): from it a
+/// command whose network is off reaches only the sockets below its rules
+/// ([`LandlockSpec::unix`]). Below it every such socket the command may see
+/// stays open to it, and a program that answers there may reach the network
+/// for it.
+pub const LANDLOCK_RESOLVE_UNIX: i32 = 9;
+
 /// The Landlock ABI the node asks for (Linux 6.12): from it every guard the
 /// node sets is held, and the commands of the installed node's pairings, all
 /// of one account, are kept apart from each other.
@@ -290,9 +320,11 @@ impl Confinement {
     }
 }
 
-/// Directories every confined command may read and run programs from.
+/// Directories every confined command may read and run programs from, each
+/// at its real place (`/bin` is a link to `/usr/bin` on many systems): the
+/// shim opens a rule's path without following a link ([`landlock_rules`]).
 pub fn system_dirs() -> Vec<PathBuf> {
-    [
+    resolved(&[
         "/usr",
         "/bin",
         "/sbin",
@@ -306,11 +338,87 @@ pub fn system_dirs() -> Vec<PathBuf> {
         "/sys",
         "/dev",
         "/run",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .filter(|p| p.exists())
-    .collect()
+    ])
+}
+
+/// The paths of `names` that exist, each at its real place, once.
+fn resolved(names: &[&str]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for p in names.iter().filter_map(|p| std::fs::canonicalize(p).ok()) {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// The system's sockets a command whose network is off still reaches by
+/// path ([`LandlockSpec::unix`]): the system bus, the system log
+/// (`/dev/log`), systemd-resolved's and nscd's. Programs need them to look
+/// up names and accounts, to log and to talk to the system's services. Only
+/// those that are there, each at its real place (`/dev/log` is a link on
+/// systemd systems); the system bus where `DBUS_SYSTEM_BUS_ADDRESS` puts
+/// it, else at its usual place.
+pub fn kept_sockets() -> Vec<PathBuf> {
+    let bus = std::env::var("DBUS_SYSTEM_BUS_ADDRESS").ok();
+    let mut out = bus_sockets(bus.as_deref());
+    out.extend(
+        [
+            "/dev/log",
+            "/run/systemd/resolve/io.systemd.Resolve",
+            "/run/nscd/socket",
+            "/var/run/nscd/socket",
+        ]
+        .iter()
+        .map(PathBuf::from),
+    );
+    let mut kept: Vec<PathBuf> = Vec::new();
+    for p in out.iter().filter_map(|p| std::fs::canonicalize(p).ok()) {
+        if !kept.contains(&p) {
+            kept.push(p);
+        }
+    }
+    kept
+}
+
+/// The sockets of a D-Bus address (`unix:path=...`, several separated by
+/// `;`), the default system bus where there is none. Other transports have
+/// no path to keep.
+fn bus_sockets(address: Option<&str>) -> Vec<PathBuf> {
+    let Some(address) = address.filter(|a| !a.trim().is_empty()) else {
+        return vec![PathBuf::from("/run/dbus/system_bus_socket")];
+    };
+    address
+        .split(';')
+        .filter_map(|a| a.strip_prefix("unix:"))
+        .flat_map(|keys| keys.split(','))
+        .filter_map(|kv| kv.strip_prefix("path="))
+        .map(|v| PathBuf::from(unescape_bus(v)))
+        .collect()
+}
+
+/// A D-Bus address value with its `%XX` escapes undone.
+fn unescape_bus(v: &str) -> String {
+    let b = v.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = b
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (b[i], hex) {
+            (b'%', Some(x)) => {
+                out.push(x);
+                i += 3;
+            }
+            (c, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The terminals of the machine's users under `/dev`: the pseudo-terminals
@@ -365,11 +473,7 @@ fn terminals_in(dev: &Path, tty_class: &Path) -> Vec<PathBuf> {
 /// outside its folders. Not `/dev/tty`: a confined command has no
 /// controlling terminal, and the one it had would be the owner's.
 pub fn system_writable() -> Vec<PathBuf> {
-    ["/dev/null", "/dev/zero", "/dev/full"]
-        .iter()
-        .map(PathBuf::from)
-        .filter(|p| p.exists())
-        .collect()
+    resolved(&["/dev/null", "/dev/zero", "/dev/full"])
 }
 
 #[cfg(target_os = "linux")]
@@ -499,9 +603,95 @@ pub mod landlock_rules {
 
     use super::LandlockSpec;
     use landlock::{
-        ABI, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreated, RulesetCreatedAttr,
-        RulesetStatus, Scope, path_beneath_rules,
+        ABI, Access, AccessFs, AccessNet, BitFlags, PathBeneath, Ruleset, RulesetAttr,
+        RulesetCreated, RulesetCreatedAttr, RulesetError, RulesetStatus, Scope,
     };
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::{Component, Path, PathBuf};
+
+    /// `openat` with `O_PATH`: a handle on the place, no more.
+    fn open_at(dir: i32, name: &CString, flags: i32) -> std::io::Result<OwnedFd> {
+        // SAFETY: a plain openat on a descriptor and a terminated name; the
+        // new descriptor is ours alone.
+        let fd = unsafe {
+            libc::openat(
+                dir,
+                name.as_ptr(),
+                libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW | flags,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is a descriptor just returned by openat.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// The place at `path` (absolute, as the node resolved it), opened part
+    /// by part without following a link: a rule opened by its name would
+    /// follow one that has replaced a part since the node judged the path,
+    /// and grant the folder's flags where the link leads. A part that is a
+    /// link now fails the open (`ELOOP`, `ENOTDIR`).
+    fn open_unlinked(path: &Path) -> std::io::Result<OwnedFd> {
+        let bad = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
+        let mut parts = path.components();
+        if parts.next() != Some(Component::RootDir) {
+            return Err(bad());
+        }
+        let root = CString::new("/").map_err(|_| bad())?;
+        let mut at = open_at(libc::AT_FDCWD, &root, libc::O_DIRECTORY)?;
+        let mut parts = parts.peekable();
+        while let Some(part) = parts.next() {
+            let Component::Normal(name) = part else {
+                return Err(bad());
+            };
+            let name = CString::new(name.as_bytes()).map_err(|_| bad())?;
+            let last = parts.peek().is_none();
+            // O_PATH with O_NOFOLLOW yields the link itself, so a part
+            // before the last must be a folder (O_DIRECTORY) and the last is
+            // looked at.
+            at = open_at(
+                at.as_raw_fd(),
+                &name,
+                if last { 0 } else { libc::O_DIRECTORY },
+            )?;
+            if last {
+                // SAFETY: fstat on our descriptor into a zeroed buffer.
+                let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                if unsafe { libc::fstat(at.as_raw_fd(), &mut st) } != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
+                    return Err(std::io::Error::from_raw_os_error(libc::ELOOP));
+                }
+            }
+        }
+        Ok(at)
+    }
+
+    /// The rules of `paths` with `access`, as `landlock::path_beneath_rules`
+    /// makes them but each path opened by [`open_unlinked`]. A path that is
+    /// not there is left out (a command has no access to what is not there);
+    /// so is one that is a link now, and the command is told.
+    fn rules<'a>(
+        paths: &'a [PathBuf],
+        access: BitFlags<AccessFs>,
+    ) -> impl Iterator<Item = Result<PathBeneath<OwnedFd>, RulesetError>> + 'a {
+        paths.iter().filter_map(move |p| match open_unlinked(p) {
+            Ok(fd) => Some(Ok(PathBeneath::new(fd, access))),
+            Err(e) => {
+                if matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) {
+                    eprintln!(
+                        "nerve-node: {} is, or lies behind, a link now and is left out of the command's sandbox",
+                        p.display()
+                    );
+                }
+                None
+            }
+        })
+    }
 
     /// Best effort up to this ABI: older kernels enforce what they know.
     const ABI_WANTED: ABI = ABI::V6;
@@ -524,16 +714,34 @@ pub mod landlock_rules {
         if !Scope::from_all(ABI_WANTED).is_empty() {
             rs = rs.scope(Scope::from_all(ABI_WANTED)).map_err(e)?;
         }
-        rs.create()
+        // No TCP connection or listening port, with no rule to allow one,
+        // where the kernel has the rules (best effort): the node's filter
+        // (crate::net_filter) holds the command off the network without
+        // them, and these are a second layer under it.
+        // And no unix socket by path but below `unix`, where the kernel
+        // tells them apart (ABI 9, best effort): a program that answers on
+        // another could reach the network for the command. Older kernels
+        // leave them open; the docs say so.
+        if spec.no_network {
+            rs = rs
+                .handle_access(AccessNet::from_all(ABI::V4))
+                .map_err(e)?
+                .handle_access(AccessFs::ResolveUnix)
+                .map_err(e)?;
+        }
+        let rs = rs
+            .create()
             .map_err(e)?
-            .add_rules(path_beneath_rules(&spec.read, read))
+            .add_rules(rules(&spec.read, read))
             .map_err(e)?
-            .add_rules(path_beneath_rules(&spec.write, write))
+            .add_rules(rules(&spec.write, write))
             .map_err(e)?
-            .add_rules(path_beneath_rules(
-                &spec.exec,
-                AccessFs::Execute | AccessFs::ReadFile,
-            ))
+            .add_rules(rules(&spec.exec, AccessFs::Execute | AccessFs::ReadFile))
+            .map_err(e)?;
+        if !spec.no_network {
+            return Ok(rs);
+        }
+        rs.add_rules(rules(&spec.unix, AccessFs::ResolveUnix.into()))
             .map_err(e)
     }
 
@@ -3849,6 +4057,8 @@ mod tests {
             read: [system_dirs(), vec![rw.path().into()]].concat(),
             write: [system_writable(), vec![rw.path().into()]].concat(),
             exec: system_dirs(),
+            no_network: false,
+            unix: Vec::new(),
         };
         let run = |target: &std::path::Path| {
             confined_sh(&spec, &format!("echo x > {}", target.display()))
@@ -3857,6 +4067,58 @@ mod tests {
         assert!(rw.path().join("ok").exists());
         assert!(!run(&other.path().join("no")));
         assert!(!other.path().join("no").exists());
+    }
+
+    /// The system's own paths are given at their real place (`/bin`, `/dev/log`
+    /// are links on many systems), since the shim leaves out a rule whose path
+    /// is a link ([`landlock_rules`]).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_systems_paths_are_not_links() {
+        for p in [system_dirs(), system_writable(), kept_sockets()].concat() {
+            assert_eq!(std::fs::canonicalize(&p).unwrap(), p);
+        }
+        let dirs = system_dirs();
+        assert!(
+            dirs.iter()
+                .all(|p| dirs.iter().filter(|q| *q == p).count() == 1)
+        );
+    }
+
+    /// A rule's path is opened without following a link: a folder the node
+    /// judged as a plain one, and that is a link now, or lies behind one,
+    /// gives its flags nowhere. Skipped where the kernel has no Landlock.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn landlock_rules_do_not_follow_a_link() {
+        if landlock_rules::abi_version().is_none() {
+            eprintln!("no Landlock here; skipped");
+            return;
+        }
+        let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let d = tempfile::tempdir_in(&tmp).unwrap();
+        let base = std::fs::canonicalize(d.path()).unwrap();
+        let (plain, other) = (base.join("plain"), base.join("other"));
+        std::fs::create_dir_all(plain.join("inner")).unwrap();
+        std::fs::create_dir_all(other.join("inner")).unwrap();
+        // The folder itself, and a folder behind another, each a link.
+        std::os::unix::fs::symlink(&other, base.join("is_link")).unwrap();
+        std::os::unix::fs::symlink(&other, base.join("behind")).unwrap();
+        let spec = |w: &Path| LandlockSpec {
+            read: system_dirs(),
+            write: [system_writable(), vec![w.to_path_buf()]].concat(),
+            exec: system_dirs(),
+            no_network: false,
+            unix: Vec::new(),
+        };
+        let put = |w: &Path, target: &Path| {
+            confined_sh(&spec(w), &format!("echo x > {}", target.display()))
+        };
+        // The same rules at a plain place do give the write.
+        assert!(put(&plain.join("inner"), &plain.join("inner/ok")));
+        assert!(!put(&base.join("is_link"), &other.join("no")));
+        assert!(!put(&base.join("behind/inner"), &other.join("inner/no")));
+        assert!(!other.join("no").exists() && !other.join("inner/no").exists());
     }
 
     /// The flags are independent in the kernel too: a folder in `write` alone
@@ -3878,6 +4140,8 @@ mod tests {
             read: system_dirs(),
             write: [system_writable(), vec![wo.path().into()]].concat(),
             exec: [system_dirs(), vec![xo.path().into()]].concat(),
+            no_network: false,
+            unix: Vec::new(),
         };
         let d = |p: &std::path::Path| p.display().to_string();
         assert!(confined_sh(
@@ -3908,5 +4172,281 @@ mod tests {
             ..spec.clone()
         };
         assert!(!confined_sh(&none, &format!("{}/tool", d(xo.path()))));
+    }
+
+    /// The network switch holds in a real child: with it a command cannot
+    /// connect to a TCP port that it reaches without it. Skipped where the
+    /// kernel's Landlock has no network rules, or there is no bash to
+    /// connect with (`/dev/tcp`).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn landlock_keeps_a_command_off_tcp() {
+        if landlock_rules::abi_version().is_none_or(|v| v < LANDLOCK_NETWORK)
+            || !std::path::Path::new("/bin/bash").exists()
+        {
+            eprintln!("no Landlock network rules or no bash here; skipped");
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let open = LandlockSpec {
+            read: system_dirs(),
+            write: system_writable(),
+            exec: system_dirs(),
+            no_network: false,
+            unix: Vec::new(),
+        };
+        let connect = |spec: &LandlockSpec| {
+            confined_sh(
+                spec,
+                &format!("/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}'"),
+            )
+        };
+        assert!(connect(&open));
+        let off = LandlockSpec {
+            no_network: true,
+            ..open.clone()
+        };
+        assert!(!connect(&off));
+        // The files stay as the folders say.
+        assert!(confined_sh(&off, "cat /etc/passwd > /dev/null"));
+    }
+
+    /// The switch's Landlock layer works on the first kernels with
+    /// Landlock's network rules (ABI 4, Linux 6.7 to 6.9), whose file rights
+    /// are fewer than the node asks for, and a kernel without them (ABI 3)
+    /// takes the ruleset all the same: the node's filter ([`net_filter`])
+    /// holds the command off the network there. The kernel here is told to
+    /// say it is of that ABI ([`at_abi`]). Skipped where it has no network
+    /// rules itself, or no bash to connect with.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_network_switch_holds_from_the_first_abi_with_network_rules() {
+        if landlock_rules::abi_version().is_none_or(|v| v < LANDLOCK_NETWORK)
+            || !std::path::Path::new("/bin/bash").exists()
+        {
+            eprintln!("no Landlock network rules or no bash here; skipped");
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let off = LandlockSpec {
+            read: system_dirs(),
+            write: system_writable(),
+            exec: system_dirs(),
+            no_network: true,
+            unix: Vec::new(),
+        };
+        let connect = format!("/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}'");
+        let Some((reached, read)) = at_abi(LANDLOCK_NETWORK, || {
+            (
+                confined_sh(&off, &connect),
+                confined_sh(&off, "cat /etc/passwd > /dev/null"),
+            )
+        }) else {
+            eprintln!("no seccomp listener here; skipped");
+            return;
+        };
+        assert!(!reached);
+        assert!(read);
+        let older = at_abi(LANDLOCK_NETWORK - 1, || {
+            landlock_rules::prepare(&off).map(|_| ())
+        })
+        .unwrap();
+        assert!(older.is_ok(), "{older:?}");
+    }
+
+    /// The system bus is kept where its address puts it, escapes undone,
+    /// and at its usual place without one; a bus on another transport has
+    /// no path to keep.
+    #[test]
+    fn the_system_bus_is_kept_where_its_address_puts_it() {
+        let default = vec![PathBuf::from("/run/dbus/system_bus_socket")];
+        assert_eq!(bus_sockets(None), default);
+        assert_eq!(bus_sockets(Some(" ")), default);
+        assert_eq!(
+            bus_sockets(Some(
+                "unix:guid=1,path=/run/my%20bus;tcp:host=h,port=1;unix:path=/b"
+            )),
+            vec![PathBuf::from("/run/my bus"), PathBuf::from("/b")]
+        );
+        assert!(bus_sockets(Some("unix:abstract=x;tcp:host=h")).is_empty());
+    }
+
+    /// Whether a child under `spec` connects to the unix socket at `path`.
+    /// It connects in the child itself, after the rules hold and before it
+    /// runs `/bin/true`, so no program with sockets of its own is needed.
+    #[cfg(target_os = "linux")]
+    fn confined_connect(spec: &LandlockSpec, path: &std::path::Path) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::process::CommandExt;
+        let mut rs = Some(landlock_rules::prepare(spec).unwrap());
+        // SAFETY: a zeroed sockaddr_un is a valid, empty one.
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let bytes = path.as_os_str().as_bytes();
+        assert!(bytes.len() < addr.sun_path.len());
+        for (d, b) in addr.sun_path.iter_mut().zip(bytes) {
+            *d = *b as libc::c_char;
+        }
+        let mut cmd = std::process::Command::new("/bin/true");
+        // SAFETY: the closure makes the Landlock syscalls on a ruleset built
+        // before the fork, then socket, connect and close on an address
+        // built before it.
+        unsafe {
+            cmd.pre_exec(move || {
+                if let Some(r) = rs.take() {
+                    landlock_rules::enforce(r)?;
+                }
+                let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+                if fd < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let r = libc::connect(
+                    fd,
+                    (&raw const addr).cast(),
+                    std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+                );
+                let e = std::io::Error::last_os_error();
+                libc::close(fd);
+                if r < 0 { Err(e) } else { Ok(()) }
+            });
+        }
+        cmd.status().is_ok_and(|s| s.success())
+    }
+
+    /// With its network off and Landlock from ABI 9, a command reaches a
+    /// unix socket by path only below `unix`, a folder or the socket itself,
+    /// and without the switch every socket it may see. A kernel told it is
+    /// of ABI 8 ([`at_abi`]) takes the ruleset and leaves the sockets open,
+    /// as the docs say. Skipped below ABI 9.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_command_off_the_network_reaches_the_unix_sockets_below_its_rules_only() {
+        if landlock_rules::abi_version().is_none_or(|v| v < LANDLOCK_RESOLVE_UNIX) {
+            eprintln!("no Landlock rules for unix sockets here; skipped");
+            return;
+        }
+        let tmp = std::env::temp_dir();
+        let given = tempfile::tempdir_in(&tmp).unwrap();
+        let other = tempfile::tempdir_in(&tmp).unwrap();
+        let bind = |p: std::path::PathBuf| (std::os::unix::net::UnixListener::bind(&p).unwrap(), p);
+        let (_a, in_given) = bind(given.path().join("s"));
+        let (_b, kept) = bind(other.path().join("kept"));
+        let (_c, elsewhere) = bind(other.path().join("s"));
+        let open = LandlockSpec {
+            read: [system_dirs(), vec![tmp.clone()]].concat(),
+            write: system_writable(),
+            exec: system_dirs(),
+            no_network: false,
+            unix: vec![given.path().into(), kept.clone()],
+        };
+        for p in [&in_given, &kept, &elsewhere] {
+            assert!(confined_connect(&open, p), "{p:?}");
+        }
+        let off = LandlockSpec {
+            no_network: true,
+            ..open.clone()
+        };
+        assert!(confined_connect(&off, &in_given));
+        assert!(confined_connect(&off, &kept));
+        assert!(!confined_connect(&off, &elsewhere));
+        let older = at_abi(LANDLOCK_RESOLVE_UNIX - 1, || {
+            confined_connect(&off, &elsewhere)
+        });
+        assert_ne!(older, Some(false), "{older:?}");
+    }
+
+    /// Runs `f` on a thread of its own where the kernel says its Landlock
+    /// ABI is `abi`: a seccomp filter hands the version query to this
+    /// thread, which answers it. Every other call reaches the kernel as it
+    /// is, so the rules made there are those a kernel of that ABI gets.
+    /// `None` where the kernel has no seccomp listener.
+    #[cfg(target_os = "linux")]
+    fn at_abi<T: Send>(abi: i32, f: impl FnOnce() -> T + Send) -> Option<T> {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        let stmt = |code: u32, k: u32| libc::sock_filter {
+            code: code as u16,
+            jt: 0,
+            jf: 0,
+            k,
+        };
+        let jeq = |k: u32, jf: u8| libc::sock_filter {
+            code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+            jt: 0,
+            jf,
+            k,
+        };
+        let nr = std::mem::offset_of!(libc::seccomp_data, nr) as u32;
+        // The low half of the third argument (the flags) on these
+        // little-endian machines.
+        let flags = (std::mem::offset_of!(libc::seccomp_data, args) + 2 * 8) as u32;
+        let load = libc::BPF_LD | libc::BPF_W | libc::BPF_ABS;
+        let mut filter = [
+            stmt(load, nr),
+            jeq(libc::SYS_landlock_create_ruleset as u32, 3),
+            stmt(load, flags),
+            // LANDLOCK_CREATE_RULESET_VERSION
+            jeq(1, 1),
+            stmt(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_USER_NOTIF),
+            stmt(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_ALLOW),
+        ];
+        let prog = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_mut_ptr(),
+        };
+        let prog = &prog as *const libc::sock_fprog as usize;
+        let (tx, rx) = std::sync::mpsc::channel::<Option<OwnedFd>>();
+        std::thread::scope(|s| {
+            let worker = s.spawn(move || {
+                // SAFETY: the filter outlives the call, and binds this thread
+                // alone (and what it starts), which ends with the test.
+                let fd = unsafe {
+                    libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+                    libc::syscall(
+                        libc::SYS_seccomp,
+                        libc::SECCOMP_SET_MODE_FILTER,
+                        libc::SECCOMP_FILTER_FLAG_NEW_LISTENER,
+                        prog as *const libc::sock_fprog,
+                    )
+                };
+                if fd < 0 {
+                    let _ = tx.send(None);
+                    return None;
+                }
+                // SAFETY: the kernel gave this descriptor to this thread.
+                let _ = tx.send(Some(unsafe { OwnedFd::from_raw_fd(fd as i32) }));
+                Some(f())
+            });
+            let listener = rx.recv().ok().flatten()?;
+            while !worker.is_finished() {
+                let mut p = libc::pollfd {
+                    fd: listener.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: plain calls on our descriptor with structs of ours;
+                // the kernel wants the notification zeroed.
+                unsafe {
+                    if libc::poll(&mut p, 1, 20) <= 0 || p.revents & libc::POLLIN == 0 {
+                        continue;
+                    }
+                    let mut n: libc::seccomp_notif = std::mem::zeroed();
+                    if libc::ioctl(listener.as_raw_fd(), libc::SECCOMP_IOCTL_NOTIF_RECV, &mut n)
+                        != 0
+                    {
+                        continue;
+                    }
+                    let mut r = libc::seccomp_notif_resp {
+                        id: n.id,
+                        val: abi.into(),
+                        error: 0,
+                        flags: 0,
+                    };
+                    libc::ioctl(listener.as_raw_fd(), libc::SECCOMP_IOCTL_NOTIF_SEND, &mut r);
+                }
+            }
+            worker.join().unwrap()
+        })
     }
 }

@@ -9,7 +9,7 @@ use nerve_policy::config::{CapSetting, CenterPolicy, Folder, Mode, SettingsGrant
 use nerve_policy::{CenterEntry, Need, NodeConfig, PathArgs, effect_rule, rules};
 use nerve_proto::descriptor::{
     Access, AccessMode, Action, Capability, Descriptor, Direction, Effect, EventDecl, Exposure,
-    FolderAccess, NodeInfo, Software, StateDecl, StreamDecl, StreamKind,
+    FolderAccess, NetworkOff, NodeInfo, Software, StateDecl, StreamDecl, StreamKind,
 };
 use nerve_proto::schema::PathMark;
 
@@ -643,24 +643,31 @@ pub struct Reach {
     /// goes as far as that account may read ([`nerve_policy::decide::Reads`]).
     /// Set by the daemon.
     pub reads_by_account: bool,
+    /// The owner turned the network off for this center's commands
+    /// ([`CenterPolicy::no_network`]), and how that stands: held, or none
+    /// of them runs (where the machine cannot hold that, `confined` is false
+    /// and folder mode offers no command). Held by default; set by the
+    /// daemon ([`crate::daemon::Shared::network_off`]).
+    pub no_network: Option<NetworkOff>,
     /// The folders the owner granted this center.
     pub folders: Vec<Folder>,
     /// The built-in folders of `nerve-run` where its commands run as that
     /// account ([`crate::account::built_in`]): the gate and the sandbox add
-    /// them to `folders`, and the block marks them as the account's own.
+    /// them to `folders`, and the block marks the pairing's own home and
+    /// temporary folder as `own`, `/tmp` and `/var/tmp` as `shared`.
     pub own: Vec<Folder>,
 }
 
 impl Reach {
-    /// `entry`'s reach at `now_ms`. `run_home` is the home of `nerve-run`
-    /// when this center's commands run as that account now, whose built-in
+    /// `entry`'s reach at `now_ms`. `own` are the pairing's own folders
+    /// when this center's commands run as `nerve-run` now, whose built-in
     /// folders ([`crate::account::built_in`]) the gate adds to the entry's.
     pub fn of(
         entry: &CenterEntry,
         now_ms: u64,
         account: Option<String>,
         confined: bool,
-        run_home: Option<&std::path::Path>,
+        own: Option<&crate::account::Own>,
     ) -> Reach {
         let mode = entry.policy.mode_at(now_ms);
         Reach {
@@ -677,8 +684,9 @@ impl Reach {
                     entry.policy.cap_setting("exec", Some("run")),
                     Some(CapSetting::Hidden | CapSetting::Off)
                 ),
+            no_network: entry.policy.no_network.then_some(NetworkOff::Held),
             folders: entry.policy.folders.clone(),
-            own: run_home.map(crate::account::built_in).unwrap_or_default(),
+            own: own.map(crate::account::built_in).unwrap_or_default(),
         }
     }
 
@@ -798,6 +806,9 @@ impl Reach {
             confined: folder && self.confined && !self.held_by_account,
             sudo: folder && self.sudo,
             reads_by_account: folder && self.reads_by_account,
+            // In every mode: the switch holds the commands in all of them,
+            // or keeps them from running.
+            no_network: self.no_network,
             folders: folders
                 .into_iter()
                 .zip(closed_below)
@@ -806,10 +817,13 @@ impl Reach {
                 // control character or separator, a blank at either end)
                 // would be shown changed, which names another place.
                 .filter(|(_, named)| *named)
-                .map(|(((_, path, a, own), closed_below), _)| FolderAccess {
+                .map(|(((native, path, a, own), closed_below), _)| FolderAccess {
                     path,
                     access: a.to_string(),
                     own,
+                    // Every pairing and account shares these; the pairing's
+                    // own home and temporary folder are its own (#167).
+                    shared: own && crate::account::shared_folder(native),
                     closed_below,
                 })
                 .collect(),
@@ -2052,7 +2066,12 @@ mod tests {
             .map(|f| {
                 (
                     f.path.clone(),
-                    format!("{}{}", f.access, if f.own { " own" } else { "" }),
+                    format!(
+                        "{}{}{}",
+                        f.access,
+                        if f.own { " own" } else { "" },
+                        if f.shared { " shared" } else { "" }
+                    ),
                 )
             })
             .collect()
@@ -2094,8 +2113,8 @@ mod tests {
     }
 
     /// The built-in folders of `nerve-run` are named where the commands run
-    /// as that account, with every flag and marked as its own, together
-    /// with a grant of the same place; folders are named in folder mode
+    /// as that account, with every flag and marked as its own, `/tmp` and
+    /// `/var/tmp` as shared too, together with a grant of the same place; folders are named in folder mode
     /// only, and one with no flag outside every granted one grants nothing.
     #[test]
     fn built_in_folders_only_when_separate() {
@@ -2106,8 +2125,8 @@ mod tests {
             folder("/tmp", "r"),
             folder("/srv/none", ""),
         ];
-        let home = std::path::Path::new("/var/lib/nerve-run");
-        let separate = Reach::of(&e, 0, Some("nerve-run".into()), true, Some(home));
+        let home = crate::account::Own::of(std::path::Path::new("/var/lib/nerve-run"), "lab");
+        let separate = Reach::of(&e, 0, Some("nerve-run".into()), true, Some(&home));
         assert_eq!(
             folders(&super::for_center(
                 &NodeConfig::default(),
@@ -2117,9 +2136,10 @@ mod tests {
             )),
             pairs(&[
                 ("/srv/data", "r"),
-                ("/tmp", "rwx own"),
-                ("/var/tmp", "rwx own"),
-                ("/var/lib/nerve-run", "rwx own"),
+                ("/tmp", "rwx own shared"),
+                ("/var/tmp", "rwx own shared"),
+                ("/var/lib/nerve-run/lab/home", "rwx own"),
+                ("/var/lib/nerve-run/lab/tmp", "rwx own"),
             ])
         );
         let own = Reach::of(&e, 0, Some("me".into()), true, None);
@@ -2128,7 +2148,7 @@ mod tests {
         // Outside folder mode no folder is named, and nothing is confined.
         for mode in [Mode::Allowlist, Mode::User] {
             e.policy.mode = mode;
-            let r = Reach::of(&e, 0, Some("nerve-run".into()), true, Some(home));
+            let r = Reach::of(&e, 0, Some("nerve-run".into()), true, Some(&home));
             let d = super::for_center(&NodeConfig::default(), &e, &r, &[]);
             let a = d.access.unwrap();
             assert!(a.folders.is_empty(), "{mode:?}");

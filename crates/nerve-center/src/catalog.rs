@@ -18,7 +18,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use nerve_proto::descriptor::{
-    Access, AccessMode, Exposure, FolderAccess, bad_member_name, plain_line,
+    Access, AccessMode, Exposure, FolderAccess, NetworkOff, bad_member_name, plain_line,
 };
 use nerve_proto::schema::{self, Role};
 use nerve_proto::{Descriptor, Effect, UnitKind};
@@ -68,6 +68,10 @@ pub struct Reach {
     /// as far as that account may read ([`Access::reads_by_account`]).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub reads_by_account: bool,
+    /// In every mode: the owner turned the network off for this center's
+    /// commands, and how that stands ([`Access::no_network`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_network: Option<NetworkOff>,
     pub folders: Vec<FolderAccess>,
     /// The folders past [`FOLDERS_MAX`], not named.
     pub more_folders: usize,
@@ -95,6 +99,8 @@ impl Reach {
                 path: util::clip(&f.path, PATH_MAX),
                 access: f.access.clone(),
                 own: f.own,
+                // Shared marks one of the account's own folders only.
+                shared: f.own && f.shared,
                 closed_below: f.closed_below,
             })
             .collect();
@@ -126,6 +132,7 @@ impl Reach {
             confined: a.confined,
             sudo: a.sudo,
             reads_by_account: a.reads_by_account,
+            no_network: a.no_network,
             folders,
             more_folders,
             unnamed: a.unnamed,
@@ -133,13 +140,18 @@ impl Reach {
     }
 
     /// The folders as one line: `/home/me/proj (rw, some folders below
-    /// allow less), /tmp (rwx, own)`.
+    /// allow less), /var/lib/nerve-run/box/home (rwx, own), /tmp (rwx, own,
+    /// shared)`.
     pub fn folder_list(&self) -> String {
         let mut parts: Vec<String> = self
             .folders
             .iter()
             .map(|f| {
-                let own = if f.own { ", own" } else { "" };
+                let own = match (f.own, f.shared) {
+                    (true, true) => ", own, shared",
+                    (true, false) => ", own",
+                    _ => "",
+                };
                 let closed = if f.closed_below {
                     ", some folders below allow less"
                 } else {
@@ -195,11 +207,14 @@ impl Reach {
     /// neither. Files made
     /// in the owner's folders should stay readable for the owner, which
     /// matters only where the commands run as an account of their own (the
-    /// node then marks that account's folders `own`). Those folders are
-    /// shared by every pairing whose commands run as that account, and
-    /// `/tmp` by every account on the machine, the settings and caches its
-    /// programs keep there included, so they are for throwaway files only.
-    /// None outside folder mode.
+    /// node then marks that account's folders `own`). Those marked `shared`
+    /// as well (`/tmp`) every pairing of that account and every account on
+    /// the machine shares, the settings and caches programs keep there
+    /// included, so they are for throwaway files only; the others are the
+    /// pairing's own home and temporary folder, which a sandbox keeps
+    /// apart from the other pairings' commands and, without one, nothing
+    /// does. The file calls' advice says nothing of the sandbox. None
+    /// outside folder mode.
     pub fn advice(&self) -> Option<String> {
         self.advice_on(false, true)
     }
@@ -221,8 +236,37 @@ impl Reach {
         self.advice_on(true, true)
     }
 
+    /// What the advice of a command says of the owner's network switch, in
+    /// every mode: that its commands have no network, or why none of them
+    /// runs.
+    fn network_advice(&self) -> Option<&'static str> {
+        Some(match self.no_network? {
+            NetworkOff::Held => {
+                "Its commands have no network: the owner turned it off, so they can open no \
+                 network socket, only unix ones, and a command on the owner's sudo list does not \
+                 run while it is off."
+            }
+            NetworkOff::AsOwner => {
+                "Its commands do not run: the owner turned their network off, and in this mode \
+                 they run as the owner, which nothing keeps off it. They run again once the owner \
+                 turns the network back on, or has them run apart from the owner (the installed node \
+                 does in folder mode, and in allowlist mode not as the owner)."
+            }
+            NetworkOff::NotHeld => {
+                "Its commands do not run: the owner turned their network off, and this machine \
+                 cannot keep them off it. They run again once the owner turns the network back \
+                 on."
+            }
+        })
+    }
+
     fn advice_on(&self, files: bool, commands: bool) -> Option<String> {
-        self.note()?;
+        // Outside folder mode a command's advice is the network switch's
+        // alone, where it is on.
+        let network = self.network_advice().filter(|_| commands);
+        if self.note().is_none() {
+            return network.map(Into::into);
+        }
         // Where the node reads as the command account, the folders hold
         // only what a call writes, where a command starts and what a call
         // that is no read reads; outside them a read reads what every
@@ -331,6 +375,12 @@ impl Reach {
                  runs commands, they reach what the account they run as may reach."
             });
         }
+        // Only a command is held off the network; a sudo command does not
+        // run meanwhile.
+        if let Some(n) = network {
+            out.push(' ');
+            out.push_str(n);
+        }
         if commands && self.sudo {
             out.push_str(
                 " A command on the owner's sudo list for you runs by that list alone, with full \
@@ -354,18 +404,42 @@ impl Reach {
         }
         // The advice stands outside the framing, so it names no path: the
         // paths are the node's words.
-        if self
-            .folders
-            .iter()
-            .any(|f| f.own && f.flags().is_some_and(|(_, w, _)| w))
-        {
+        let writable = |f: &&FolderAccess| f.own && f.flags().is_some_and(|(_, w, _)| w);
+        let private = self.folders.iter().filter(writable).any(|f| !f.shared);
+        let shared = self.folders.iter().filter(writable).any(|f| f.shared);
+        if private && commands && !self.confined {
             out.push_str(
-                " The folders marked own belong to that account, and every pairing whose \
-                 commands run as it shares them (a temporary folder also every account on the \
-                 machine), with the settings and caches its programs keep there: what one \
-                 pairing leaves there can change what another one's commands do. Use one \
-                 marked w for throwaway files only, keep nothing secret there, and change no \
+                " The folders marked own belong to that account. As nothing but that account \
+                 holds the commands, every pairing whose commands run as it reaches all of them, \
+                 also those not marked shared: what one pairing leaves there, the settings and \
+                 caches its programs keep included, can change what another one's commands do. \
+                 Use them for throwaway files only, keep nothing secret there, and change no \
                  program's settings there unless asked.",
+            );
+            return Some(out);
+        }
+        if private {
+            out.push_str(
+                " The folders marked own belong to that account; those not marked shared are \
+                 this pairing's own home and temporary folder, where its programs keep their \
+                 settings and caches.",
+            );
+            if commands {
+                out.push_str(
+                    " The sandbox keeps every other pairing's commands from reading and writing \
+                     their files, though on an older kernel it cannot stop one from emptying a \
+                     file, and not out of a socket a program listens on there: run no credential \
+                     cache or key agent in them.",
+                );
+            }
+        }
+        if shared {
+            out.push_str(
+                " A folder marked shared is one that every pairing of that account and every account on \
+                 the machine shares, with the settings and caches programs keep there: what one \
+                 leaves there can change what another one's commands do. Use it for throwaway \
+                 files only, keep nothing secret there, and change no program's settings there \
+                 unless asked.",
             );
         }
         Some(out)
@@ -1698,13 +1772,13 @@ mod tests {
         let separate = reach(json!([
             {"path": "/home/me/proj", "access": "rw", "closed_below": true},
             {"path": "/home/me/proj/keys", "access": ""},
-            {"path": "/tmp", "access": "rwx", "own": true},
-            {"path": "/var/lib/nerve-run", "access": "rwx", "own": true},
+            {"path": "/tmp", "access": "rwx", "own": true, "shared": true},
+            {"path": "/var/lib/nerve-run/box/home", "access": "rwx", "own": true},
             {"path": "/srv/own-r", "access": "r", "own": true}]));
         assert_eq!(
             separate.note().unwrap(),
-            "/home/me/proj (rw, some folders below allow less), /tmp (rwx, own), \
-             /var/lib/nerve-run (rwx, own), /srv/own-r (r, own)"
+            "/home/me/proj (rw, some folders below allow less), /tmp (rwx, own, shared), \
+             /var/lib/nerve-run/box/home (rwx, own), /srv/own-r (r, own)"
         );
         let advice = separate.advice().unwrap();
         // A folder below that allows less (closed, or left out for its
@@ -1736,21 +1810,57 @@ mod tests {
             ),
             "{advice}"
         );
-        // The own folders are shared, the settings its programs keep there
-        // too, so they are for throwaway files and never called private.
+        // The pairing's own home and temporary folder are its own where the
+        // sandbox holds the commands (#167); a shared one, the settings
+        // programs keep there too, is for throwaway files.
+        let own = "The folders marked own belong to that account; those not marked shared are \
+                   this pairing's own home and temporary folder, where its programs keep their \
+                   settings and caches.";
+        let kept = " The sandbox keeps every other pairing's commands from reading and writing \
+                    their files, though on an older kernel it cannot stop one from emptying a \
+                    file, and not out of a socket a program listens on there: run no credential \
+                    cache or key agent in them.";
+        let shared = " A folder marked shared is one that every pairing of that account and every account on \
+                      the machine shares, with the settings and caches programs keep there: what \
+                      one leaves there can change what another one's commands do. Use it for \
+                      throwaway files only, keep nothing secret there, and change no program's \
+                      settings there unless asked.";
         assert!(
-            advice.ends_with(
-                "The folders marked own belong to that account, and every pairing whose \
-                 commands run as it shares them (a temporary folder also every account on the \
-                 machine), with the settings and caches its programs keep there: what one \
-                 pairing leaves there can change what another one's commands do. Use one \
-                 marked w for throwaway files only, keep nothing secret there, and change no \
-                 program's settings there unless asked."
-            ),
+            advice.ends_with(&format!("{own}{kept}{shared}")),
             "{advice}"
         );
         assert!(!advice.contains("sudo"), "{advice}");
         assert!(!advice.contains("private"), "{advice}");
+        // The file calls' advice says nothing of the sandbox.
+        let files = separate.file_advice().unwrap();
+        assert!(files.ends_with(&format!("{own}{shared}")), "{files}");
+        // Without a sandbox nothing keeps the other pairings out: all the
+        // own folders are for throwaway files.
+        let unheld = Catalog::build(&Descriptor {
+            access: access(json!({"mode": "folder", "confined": false, "folders": [
+                {"path": "/tmp", "access": "rwx", "own": true, "shared": true},
+                {"path": "/var/lib/nerve-run/box/home", "access": "rwx", "own": true}]})),
+            ..desc("box", vec![])
+        })
+        .reach
+        .unwrap()
+        .advice()
+        .unwrap();
+        assert!(
+            unheld.ends_with(
+                "The folders marked own belong to that account. As nothing but that account \
+                 holds the commands, every pairing whose commands run as it reaches all of them, \
+                 also those not marked shared: what one pairing leaves there, the settings and \
+                 caches its programs keep included, can change what another one's commands do. \
+                 Use them for throwaway files only, keep nothing secret there, and change no \
+                 program's settings there unless asked."
+            ),
+            "{unheld}"
+        );
+        // Shared marks only one of the account's own folders.
+        assert!(
+            !reach(json!([{"path": "/srv/x", "access": "rw", "shared": true}])).folders[0].shared
+        );
         // It names no path: the paths are the node's words.
         assert!(!advice.contains('/'), "{advice}");
         // An own folder that may not be written is no place for throwaway files.
@@ -1883,15 +1993,16 @@ mod tests {
         // The account's own folders, which a node lists last, are kept
         // past the limit, and the rest stay in the node's order.
         let mut with_own = folders.clone();
-        with_own.push(json!({"path": "/tmp", "access": "rwx", "own": true}));
-        with_own.push(json!({"path": "/var/tmp", "access": "rwx", "own": true}));
+        with_own.push(json!({"path": "/tmp", "access": "rwx", "own": true, "shared": true}));
+        with_own.push(json!({"path": "/var/tmp", "access": "rwx", "own": true, "shared": true}));
         d.access = access(json!({"mode": "folder", "folders": with_own}));
         let r = Catalog::build(&d).reach.unwrap();
         assert_eq!(r.folders.len(), FOLDERS_MAX);
         assert_eq!(r.more_folders, 6);
         assert!(
-            r.folder_list()
-                .ends_with(", /f60 (r), /tmp (rwx, own), /var/tmp (rwx, own), 6 more"),
+            r.folder_list().ends_with(
+                ", /f60 (r), /tmp (rwx, own, shared), /var/tmp (rwx, own, shared), 6 more"
+            ),
             "{}",
             r.folder_list()
         );

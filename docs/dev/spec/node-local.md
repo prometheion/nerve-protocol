@@ -59,12 +59,27 @@ it; `nerve-run`'s commands are unchanged. No other account with uid 0 is an
 owner. A center cannot turn sudo on while root is the owner (`forbidden`):
 `sudo -v` checks no password of root's. A command gets its account's ids and groups,
 `HOME`, `USER` and `LOGNAME` set to it, and its home as the working
-directory when the call names none; one of `nerve-run` also gets
+directory when the call names none. A command of `nerve-run` has its
+pairing's own home and temporary folder instead (#167, `account::Own`):
+`/var/lib/nerve-run/<center>/home` as `HOME` and working directory, and
+`…/<center>/tmp` as `TMPDIR`; it also gets
 `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME`
-below its home, `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` removed, and
+below that home, `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` removed, and
 git's `safe.directory = *` as command-line configuration (`GIT_CONFIG_COUNT`).
+The node makes `<center>`, `home` and `tmp` (0700) as `nerve-run`
+(`account::FsAs`) at the first config change that has the pairing and
+before each command where they are missing; a link or another account's
+folder in their place refuses the command. A record (`state/own-folders.json`,
+center name to `node_id`) names the pairings it made them for; at each
+config change the folders of a pairing that left the config, or came back
+under its name with another `node_id`, are deleted with what they hold, as
+`nerve-run`, through descriptors and without following a link or leaving
+the file system (folders made closed are opened first, deeper than 64
+levels moved up and walked again). A deletion that fails stays in the
+record and is tried at the next change. Nothing else in `nerve-run`'s home is
+touched, and nothing there is any command's home.
 Of the service's own environment a command of `nerve-run` keeps only `PATH`,
-`LANG`, `TERM` and `TMPDIR` (`exec::KEPT_ENV`) and the names in
+`LANG` and `TERM` (`exec::KEPT_ENV`) and the names in
 `machine.command_env`, with the service's values; the rest (`NERVE_NODE_OWNER`,
 what systemd and the unit's `Environment=` set) is cleared before the
 variables above are set, so naming `HOME` or `XDG_RUNTIME_DIR` there passes
@@ -73,7 +88,8 @@ a person runs, gets the node's environment.
 The `~` of folders, rules and the protected list is the owner's home. A
 command of `nerve-run` is confined by Landlock in `allowlist` mode as well
 (where the kernel has it), to its folders and the built-in `/tmp`,
-`/var/tmp` and its home (§Modes), and gets its pairing's folders as POSIX
+`/var/tmp` and its pairing's own home and temporary folder (§Modes), never
+another pairing's, and gets its pairing's folders as POSIX
 ACLs (§Folder ACLs). An account that is missing, `nerve-run` not made by
 `install` (another comment), root (unless it is the owner) or `nerve` runs no command
 (`unavailable`), after its call was decided and audited; without an owner,
@@ -524,6 +540,7 @@ old_pin = { pin = "<pin>", until_ms = 1790000000000 }  # after the center rotate
 [center.policy]
 mode = "folder"             # allowlist | folder | user (a new pairing: folder; a file without it: allowlist)
 as_owner = false            # allowlist only: its commands run as the owner, not as nerve-run
+no_network = false          # every mode: its commands get no socket but unix ones; only the owner sets it false again
 until = 1790000000000  # optional, folder and user: ms since the epoch; then allowlist
 folders = [{ path = "/home/u/proj", access = "rwx" }]  # folder mode; r w x in any mix, "" for none
 places = ["/home/u/proj"]  # folders `folder add` recorded at their real place; the owner's, a center's write keeps it
@@ -600,7 +617,8 @@ node runs takes the file as it is, since nothing tells what it held before.
 run as `nerve-run` (protocol.md §6).
 
 A call is decided like a provider's (§7, Paths), then runs as `nerve-run`
-from its home. Its paths are judged as `nerve-run`, with the pairing's folders
+from the calling pairing's own home, with its `TMPDIR`, whatever that
+pairing's commands run as. Its paths are judged as `nerve-run`, with the pairing's folders
 and, where the pairing's commands run as `nerve-run`, its built-in ones; a read
 outside them by `nerve-run`'s own access; the link walk as that account. It
 runs under Landlock where present: the pairing's folders and the built-ins
@@ -1129,11 +1147,21 @@ grant or not.
 - **allowlist**: default deny. A call runs only when an `allow` rule lets it
   through. `folders` do not decide; on the installed Linux node, where its
   commands run as `nerve-run` (unless `as_owner`), they and the built-in
-  `/tmp`, `/var/tmp` and the account's home are its Landlock sandbox.
+  `/tmp`, `/var/tmp` and the pairing's own home and temporary folder are its
+  Landlock sandbox. In every mode, a call of a pairing whose commands run
+  as `nerve-run` (`fs`, a program's action, a config capability) is refused
+  a path in `nerve-run`'s home outside the pairing's own two folders, and an
+  `fs` walk leaves them out (`account::other_pairings`), whatever the allow
+  rules say: the node opens the paths as that account, which owns every
+  pairing's folders. A program is not handed a folder that holds that home.
 - **folder** (the mode a new pairing starts in): reading, writing and
   commands inside the `folders` and, on the installed Linux node, the
-  built-in `/tmp`, `/var/tmp` and `nerve-run`'s home (and everything below
-  them), by their flags; where the node reads as `nerve-run` (the installed
+  built-in `/tmp`, `/var/tmp` and the pairing's own home and temporary
+  folder below `nerve-run`'s home (and everything below them), by their
+  flags (the owner's folders are cut around `nerve-run`'s home first,
+  `account::around_pairings`: a folder that holds it is replaced by its other
+  entries, one inside it is dropped, so no grant gives a pairing another
+  pairing's folders, which that one account owns); where the node reads as `nerve-run` (the installed
   Linux node), reading also, outside every folder, what every account may
   read (below).
   `access` is three independent flags, any combination
@@ -1189,6 +1217,70 @@ grant or not.
   sets: a folder that holds one is granted as its other entries, level by
   level down to it, so the command can neither list those levels nor make
   new entries right in them.
+- **`no_network`** (every mode, #167): the pairing's `exec.run` commands
+  and the config capabilities it calls run under the node's seccomp filter
+  (`nerve_sandbox::net_filter`, Linux x86_64 and aarch64, put on last in
+  the child after the account switch and `no_new_privs`): `socket` and
+  `socketpair` of every domain but `AF_UNIX` fail with `EACCES`, the
+  io_uring calls with `ENOSYS`, a call of another architecture ends the
+  process. Landlock's network rules (`BindTcp`, `ConnectTcp`, ABI 4) are a
+  second layer, best effort, and from ABI 9 `ResolveUnix` limits unix
+  sockets by path to the pairing's own and granted folders and
+  `nerve_sandbox::kept_sockets` (the system bus, `/dev/log`,
+  systemd-resolved's and nscd's sockets). Only `w` folders open sockets by
+  path, and the folders every account may write (`exec::SHARED_DIRS`: `/tmp`,
+  `/var/tmp`, `/dev/shm`, `/run/lock`, `/var/lock`, `/var/crash`) and the
+  owner's runtime folder are cut out of the set, a grant above them split
+  around them. The switch holds where the commands are apart
+  from the owner's (`Shared::network_apart`: as `nerve-run`, or on a node
+  run by hand folder mode under the sandbox as a user that is not root and
+  with Landlock ABI 9, `daemon::by_hand_apart`); where they run as the owner
+  (user mode, allowlist mode as the owner, every other case of a node run by
+  hand) a command is refused with `daemon::NETWORK_AS_OWNER` (installed
+  node) or `daemon::NETWORK_AS_OWNER_BY_HAND`, and where the node
+  has no filter (`Shared::network_held`; never on Windows) with
+  `daemon::NETWORK_NOT_HELD`; a sudo command with `daemon::NETWORK_SUDO`.
+  All are audited `forbidden`. A config capability runs as `nerve-run` in
+  every mode, so it is refused only where the filter is missing. The
+  descriptor's access block carries `no_network` (`held`, `as_owner`,
+  `not_held`) in every mode, and no `sudo` while it is on. A program's
+  action is not held by it. The owner sets it (`folder network off|on`, the
+  app, the node web UI); a center's settings may set it, never clear it
+  (`policy.no_network: only the owner can let the commands back on the
+  network`); the mode stays the center's to change. While it is on (in the
+  stored or the new policy), a center's settings change gives it no place to
+  write the old folders did not give (`policy.folders <path>: ... only the
+  owner can give it a place to write`): no new `w` folder, no `w` added to
+  one, no closing entry inside a `w` folder removed, and no `w` folder inside
+  an old one while an old `w` folder above it is narrowed or dropped, since
+  the node follows a link a command put inside a `w` folder once no `w`
+  folder holds it; names are compared as spelled, with their case kept on
+  Unix. Names as spelled cannot see an owner's link above two spellings of
+  one folder, so the node judges that: while the switch is on, a folder with
+  `w` is written in only at its real place (`exec::spelled_apart`): where
+  its path leads elsewhere through a link, whoever added the folder (a
+  center, or the owner by hand or by a `folder add` that could not settle it),
+  it loses the `w` (and so its unix rules) and keeps its other flags, with the
+  reason in the log. `folder add` stores the real place, and the folders
+  every pairing shares (`/tmp`, `/var/tmp`) stay; the pairing's own folders
+  are stored at the account's home as it is.
+  While the switch is on, the node ends the pairing's running commands
+  (`exec.run` and config capabilities) that have the network, audited as
+  `killed` with `code: "no_network"`. It goes by each command (whether the
+  filter is on it), not by the switch going on, at every config change and
+  every 5 s, and also for the commands of a link that dropped and waits for
+  its resume, while the node waits to dial again or for the center's
+  answer. A call that was decided with the switch off and starts after it
+  went on does not start (`daemon::NETWORK_SWITCHED_ON`), and one that
+  started between the two is ended. Whatever else a command left running (a
+  program it detached) is not tracked and keeps what it had. `status` has each
+  center's `no_network` and `network_off` (`held`, `as_owner`, `not_held`;
+  `null` while the switch is on nowhere), `installed` (whether this is the
+  installed node, with or without a recorded owner), the machine's
+  `network_rules` (the filter) and `pairings_warning`: a string on the installed Linux node
+  without Landlock once two or more pairings (not revoked) run as
+  `nerve-run`, or are offered a capability of the config, which does; `null`
+  otherwise. The apps and the CLI show it.
 - **user**: full access as the user, protected paths aside. `allow` rules
   do not count.
 
@@ -1418,6 +1510,13 @@ answer. For each call the node takes the center's policy and, in this order:
    stored by its resolved path and listed in `policy.places`; such a folder
    is also left out when its path resolves to another place now, whatever the
    `w` folders say, and a center's settings document cannot change the list.
+   The node judges a folder's path when it builds the rules, and the shim
+   applies them a moment later: it opens each rule's path part by part
+   without following a link (`landlock_rules`), so a link that replaced a
+   folder in between gives that folder's rights nowhere (the rule is left
+   out, with a line on the command's stderr). The system's own paths in the
+   rules are given at their real place for it (`nerve_sandbox::system_dirs`,
+   `kept_sockets`).
    `folder add` itself does not follow a link that lies inside a `w` folder
    of any center: it refuses, so that a link a command made is not stored,
    and recorded, at its target. It judges and resolves in one pass
@@ -1466,8 +1565,9 @@ The descriptor also tells the center what it may do (protocol.md §6.2,
 `folder` mode its folders with their flags, in the center's path form. The
 link builds it from that center's entry alone, with the built-in folders of
 `nerve-run` added where its commands run as that account, as the gate and
-the sandbox see them, and marked `own`; no other pairing's folders are in
-it. A folder with no flag is never named, as the file calls hide its name
+the sandbox see them, and marked `own` (`/tmp` and `/var/tmp` also
+`shared`); no other pairing's folders, its own home and temporary folder
+included, are in it. A folder with no flag is never named, as the file calls hide its name
 (`fs.list` leaves it out, a refusal under it reads like any other): the
 deepest named folder around it is marked `closed_below` instead. A folder
 whose name would read otherwise on one line (a control character, U+2028 or
@@ -1849,7 +1949,9 @@ and new value), calls allowed or forbidden (a refusal with its reason; a call of
 capability of the config with `command`, its command as it runs, which the
 `audit/decision` event leaves out with the reason, §2), commands killed
 for their memory limit (`decision` `killed`, `code` `memory`, with the
-reason), the relay's tunnels (`"kind": "relay"`, one per tunnel when it ends: `node`,
+reason) and commands ended because the owner's network switch went on
+(`decision` `killed`, `code` `no_network`, `target` `(running commands)` or
+`(a command being started)`), the relay's tunnels (`"kind": "relay"`, one per tunnel when it ends: `node`,
 `center`, `from`, `start`, `end`, `reason`, `up`, `down`; never a token), and what happened to the config
 file itself (`"kind": "config"`, `event` `refused`, `signed`, `accepted`, `restored` or
 `not_recorded`, with the file and the reason), and what the owner did to the node
@@ -2032,8 +2134,9 @@ node like any other, deny rules and `caps` included. Its rule targets are the
 arguments its schema marks with `x-nerve-path` (top-level strings, `read` or
 `write`), each resolved as the command account sees it (`WirePath::parse`
 under `account::FsAs`), as an `fs` call's path is. Only the folders the owner
-granted count for them: the command account's own folders (its home, `/tmp`,
-`/var/tmp`, marked `own` in the access block) are that account's, while the
+granted count for them: the command account's own folders (the pairing's
+home and temporary folder, `/tmp`, `/var/tmp`, marked `own` in the access
+block) are that account's, while the
 program works with the owner's rights, so a path there is in no folder, and
 its read goes only where every account may read (Modes). The folders, the rules,
 the protected paths and the node's own folders judge them, and the audit

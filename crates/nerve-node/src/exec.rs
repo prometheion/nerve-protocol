@@ -430,29 +430,164 @@ pub fn landlock_spec(
     // hand runs as its owner and must not read the owner's terminals by name
     // ([`nerve_sandbox::terminal_devices`]). What it loses: listing `/dev`.
     let no_read = [own, &nerve_sandbox::terminal_devices()].concat();
-    LandlockSpec {
-        read: dev_links_out(leave_out(
-            &[nerve_sandbox::system_dirs(), f.read].concat(),
-            &no_read,
-        )),
+    // The sockets a command reaches by path while its network is off: those
+    // in its `w` folders (connecting to a socket is a write, so a folder it
+    // may only read opens none) and the system's own
+    // (nerve_sandbox::kept_sockets).
+    let unix = [leave_out(&f.write, own), nerve_sandbox::kept_sockets()].concat();
+    let mut spec = LandlockSpec {
+        read: leave_out(&[nerve_sandbox::system_dirs(), f.read].concat(), &no_read),
         write: leave_out(&[nerve_sandbox::system_writable(), f.write].concat(), own),
-        exec: dev_links_out(leave_out(
-            &[nerve_sandbox::system_dirs(), f.exec].concat(),
-            &no_read,
-        )),
-    }
+        exec: leave_out(&[nerve_sandbox::system_dirs(), f.exec].concat(), &no_read),
+        // The caller sets it from the pairing's switch.
+        no_network: false,
+        unix,
+    };
+    without_shared_sockets(&mut spec);
+    without_links(&mut spec);
+    spec
 }
 
-/// `paths` without the links directly in `/dev` (`stdin`, `fd`, `log`,
-/// ...), which [`leave_out`] lists among its other entries. A rule follows
-/// a link and the kernel refuses one on what a link of `/dev` leads to (a
-/// pipe, a socket), and what such a link leads to is under a rule of its
-/// own (`/proc`, the device) or none needs.
-fn dev_links_out(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    paths.retain(|p| {
-        p.parent() != Some(Path::new("/dev")) || !p.symlink_metadata().is_ok_and(|m| m.is_symlink())
-    });
-    paths
+/// [`landlock_spec`] for a command that runs as `nerve-run` for the pairing
+/// whose own folders are `mine`: the sets are cut around that account's home
+/// `run_home` too, which holds every pairing's home and temporary folder,
+/// and the pairing's own two folders stay. The caller acts as the account,
+/// so a folder of the owner that leads there through a link is resolved as
+/// the sandbox sees it here, which the cut of the folders before this
+/// (`account::around_pairings`, made as the node's user) may not manage.
+pub fn pairing_spec(
+    policy: &CenterPolicy,
+    home: &Path,
+    own: &[PathBuf],
+    writable: &[PathBuf],
+    run_home: &Path,
+    mine: &crate::account::Own,
+) -> LandlockSpec {
+    let mut spec = landlock_spec(policy, home, own, writable);
+    let around = [run_home.to_path_buf()];
+    let mine = [real(&mine.home), real(&mine.temp)];
+    for set in [
+        &mut spec.read,
+        &mut spec.write,
+        &mut spec.exec,
+        &mut spec.unix,
+    ] {
+        let (kept, rest): (Vec<PathBuf>, Vec<PathBuf>) = std::mem::take(set)
+            .into_iter()
+            .partition(|p| mine.iter().any(|m| within(&real(p), m)));
+        *set = leave_out(&rest, &around);
+        set.extend(kept);
+    }
+    without_links(&mut spec);
+    spec
+}
+
+/// The folders every account may write to (sticky and world-writable on the
+/// usual Linux): `/tmp` and `/var/tmp`, the shared memory `/dev/shm`, and the
+/// lock and crash folders Debian and Ubuntu open the same way (`/var/lock` is
+/// a link to `/run/lock`).
+const SHARED_DIRS: [&str; 6] = [
+    "/tmp",
+    "/var/tmp",
+    "/dev/shm",
+    "/run/lock",
+    "/var/lock",
+    "/var/crash",
+];
+
+/// `spec` without the places a program of another account, or one that
+/// starts programs for its user, answers on a unix socket by path, among the
+/// ones a command reaches while its network is off: the folders every
+/// account shares ([`SHARED_DIRS`]; `/tmp` holds the owner's tmux server
+/// and X display) and the owner's runtime folder (`$XDG_RUNTIME_DIR`,
+/// `/run/user/<uid>`: its session bus and user service manager). A program
+/// there reaches the network for the command. A folder granted above one of
+/// them is split around it ([`leave_out`]); one granted inside stays. For
+/// every command: those of `nerve-run` are cut at the shared folders, those
+/// of a node run by hand at the owner's own.
+fn without_shared_sockets(spec: &mut LandlockSpec) {
+    let mut shared: Vec<PathBuf> = SHARED_DIRS.iter().map(|d| real(Path::new(d))).collect();
+    shared.extend(runtime_dirs().iter().map(|d| real(d)));
+    let (mut kept, mut above) = (Vec::new(), Vec::new());
+    for p in std::mem::take(&mut spec.unix) {
+        let r = real(&p);
+        if shared.contains(&r) {
+            continue;
+        }
+        if shared.iter().any(|s| within(s, &r)) {
+            above.push(p);
+        } else {
+            kept.push(p);
+        }
+    }
+    kept.extend(leave_out(&above, &shared));
+    spec.unix = kept;
+}
+
+/// The runtime folder of the user this node runs as: where `$XDG_RUNTIME_DIR`
+/// puts it, and the usual `/run/user/<uid>`.
+fn runtime_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    #[cfg(unix)]
+    out.push(PathBuf::from(format!("/run/user/{}", unsafe {
+        libc::geteuid()
+    })));
+    out.extend(
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|d| d.is_absolute()),
+    );
+    out
+}
+
+/// The Landlock rules of a config capability's command, which runs as
+/// `nerve-run` in every mode (`account_home`: that account's home, set where
+/// it runs as the account; `mine`: the pairing's own folders there). Where the
+/// pairing's commands run as `nerve-run` too (`separate`), the rules are the
+/// pairing's ([`pairing_spec`]); where they run as the owner they are the
+/// account's built-in folders ([`crate::config_cap::confined`]), and its
+/// unix sockets by path stay those of its own folders and the system's, not
+/// the shared `/tmp` and `/var/tmp`.
+#[allow(clippy::too_many_arguments)]
+pub fn config_spec(
+    policy: &CenterPolicy,
+    separate: bool,
+    mine: Option<&crate::account::Own>,
+    account_home: Option<&Path>,
+    home: &Path,
+    own: &[PathBuf],
+    writable: &[PathBuf],
+    no_network: bool,
+) -> LandlockSpec {
+    let policy = crate::config_cap::confined(policy, separate, mine);
+    let mut spec = match (mine, account_home) {
+        (Some(mine), Some(run_home)) if separate => {
+            pairing_spec(&policy, home, own, writable, run_home, mine)
+        }
+        _ => landlock_spec(&policy, home, own, writable),
+    };
+    // Landlock's layer of the network switch, as for the pairing's commands.
+    spec.no_network = no_network;
+    spec
+}
+
+/// `spec` without the paths that are links themselves. The folders of a
+/// spec come resolved, so the links among them are the entries [`leave_out`]
+/// and [`leave_protected_out`] list when they split a folder (`/etc/localtime`,
+/// `/bin` on a merged `/usr`, the links directly in `/dev`: `stdin`, `fd`,
+/// `log`, ...). The shim opens a rule's path without following a link
+/// (`nerve_sandbox::landlock_rules`), so such a rule would give nothing, and
+/// it would print a line that is meant for a link which came after the node's
+/// look. What a link leads to is under a rule of its own where it is granted.
+fn without_links(spec: &mut LandlockSpec) {
+    for set in [
+        &mut spec.read,
+        &mut spec.write,
+        &mut spec.exec,
+        &mut spec.unix,
+    ] {
+        set.retain(|p| !p.symlink_metadata().is_ok_and(|m| m.is_symlink()));
+    }
 }
 
 /// A center's folders by what its commands may do there, the system's
@@ -521,8 +656,27 @@ pub fn folder_sets(
                     Some(why) => Err(why),
                     None => Ok(real),
                 });
+            // With the switch on a place to write is used only at its real
+            // place; the folder keeps its other flags there.
+            let access = match &real {
+                Ok(real) => match spelled_apart(policy, x, &path, real) {
+                    Some(why) => {
+                        tracing::warn!(
+                            "folder {} is not written in by the command's sandbox: {why}",
+                            x.path
+                        );
+                        Access {
+                            write: false,
+                            ..x.access
+                        }
+                    }
+                    None => x.access,
+                },
+                Err(_) => x.access,
+            };
             match real {
-                Ok(real) => Some((x.access, real)),
+                Ok(_) if !(access.read || access.write || access.execute) => None,
+                Ok(real) => Some((access, real)),
                 Err(why) => {
                     tracing::warn!("folder {} left out of the command's sandbox: {why}", x.path);
                     None
@@ -558,6 +712,36 @@ fn replaced(policy: &CenterPolicy, path: &str, real: &Path) -> Option<String> {
     (policy.is_placed(path) && !(within(real, at) && within(at, real))).then(|| {
         format!(
             "it was added at its own place and its path leads to {} now, through a link put there since; `folder rm` it and `folder add` the place you mean",
+            real.display()
+        )
+    })
+}
+
+/// Why a folder a command may write is not written in while the owner's
+/// network switch is on, if it is not: the path is not the folder's real
+/// place. The settings rule that keeps a center from giving itself a place
+/// to write then (`nerve_policy::settings`) judges names as spelled, so it
+/// cannot tell a link of the owner above two spellings of one place. The
+/// node can: it takes a place to write only where it is. The folder keeps
+/// its other flags. This holds for every `w` folder spelled through a link,
+/// whoever added it: one a center added, one the owner wrote into
+/// `node.toml` by hand, or stored as given because `folder add` could not
+/// settle it. (`folder add` stores the real place, and [`replaced`] refuses
+/// a recorded one that leads elsewhere; the folders every pairing shares
+/// are root's links, not a command's, and stay.)
+fn spelled_apart(
+    policy: &CenterPolicy,
+    folder: &Folder,
+    path: &Path,
+    real: &Path,
+) -> Option<String> {
+    (policy.no_network
+        && folder.access.write
+        && !crate::account::shared_folder(&folder.path)
+        && !(within(real, path) && within(path, real)))
+    .then(|| {
+        format!(
+            "its path leads to {} through a link, and with the network off a place to write is only used at its real place; the owner `folder add`s the place to give it",
             real.display()
         )
     })
@@ -1116,6 +1300,11 @@ fn split(
     }
 }
 
+/// Why a command the owner's network switch holds does not run where the
+/// node has no filter for it ([`RunOptions::no_network`]).
+pub const NO_FILTER: &str =
+    "the command was not run: this machine has no filter that keeps it off the network";
+
 /// How one command runs.
 #[derive(Debug, Clone)]
 pub struct RunOptions {
@@ -1138,10 +1327,11 @@ pub struct RunOptions {
     /// The account the command runs as (the installed node, every mode,
     /// crate::account); `None` runs it as the node's own user.
     pub account: Option<crate::service::Account>,
-    /// Whether that account is `nerve-run`, whose command gets the
-    /// environment of its own home ([`separate_env`]) and of the node's
-    /// only what [`kept_env`] keeps.
-    pub separate: bool,
+    /// Set where that account is `nerve-run`: the pairing's own home and
+    /// temporary folder (crate::account::Own), whose environment the
+    /// command gets ([`separate_env`]), and of the node's only what
+    /// [`kept_env`] keeps.
+    pub separate: Option<crate::account::Own>,
     /// The names of the node's variables a command of `nerve-run` gets
     /// besides [`KEPT_ENV`] (`machine.command_env`).
     pub pass_env: Vec<String>,
@@ -1159,6 +1349,11 @@ pub struct RunOptions {
     /// Where the output goes as well as into the result, for the call's
     /// `output` stream (crate::tap); `None` keeps it in the result only.
     pub tap: Option<std::sync::Arc<crate::tap::Tap>>,
+    /// The owner's network switch: the command and all it starts make no
+    /// socket but a unix one, held by a seccomp filter put on it before it
+    /// starts (nerve_sandbox::net_filter). Linux only: elsewhere such a
+    /// command does not run.
+    pub no_network: bool,
 }
 
 /// The variables of the node's environment every command of `nerve-run`
@@ -1166,9 +1361,9 @@ pub struct RunOptions {
 /// unit names (the owner, and whatever an operator put there, such as a
 /// proxy URL with its password), and systemd's own. A command of
 /// `nerve-run` gets none of it but these and the names the owner adds
-/// (`machine.command_env`); HOME, USER, LOGNAME and its XDG and git
-/// variables the node sets itself ([`separate_env`]).
-pub const KEPT_ENV: [&str; 4] = ["PATH", "LANG", "TERM", "TMPDIR"];
+/// (`machine.command_env`); HOME, USER, LOGNAME, TMPDIR and its XDG and
+/// git variables the node sets itself ([`separate_env`]).
+pub const KEPT_ENV: [&str; 3] = ["PATH", "LANG", "TERM"];
 
 /// What of `env`, the node's environment, a command of `nerve-run` keeps:
 /// [`KEPT_ENV`] and the names in `more`.
@@ -1184,17 +1379,21 @@ pub fn kept_env(
         .collect()
 }
 
-/// The environment of a command of `nerve-run` besides HOME, USER and
-/// LOGNAME: what it sets, and what it takes away. Its tools keep their
-/// configs and caches in its own `home` (the XDG folders), it has no session
+/// The environment of a command of `nerve-run` besides USER and LOGNAME:
+/// what it sets, and what it takes away. Its home and temporary folder are
+/// its pairing's own (`own`, #167): its tools keep their configs and caches
+/// there (HOME and the XDG folders), and its temporary files in TMPDIR, so
+/// what another pairing's commands leave does not steer it. It has no session
 /// of anyone's to talk to, and git trusts the repositories it reaches: they
 /// belong to the owner, whose folders it was given, and git refuses them as
 /// another account's otherwise ("dubious ownership"). The setting goes in as
 /// git's command-line configuration (`GIT_CONFIG_COUNT`, git 2.31 on), the
 /// one place besides the account's own files it honours `safe.directory`.
-pub fn separate_env(home: &Path) -> (Vec<(String, String)>, Vec<&'static str>) {
-    let under = |p: &str| home.join(p).display().to_string();
+pub fn separate_env(own: &crate::account::Own) -> (Vec<(String, String)>, Vec<&'static str>) {
+    let under = |p: &str| own.home.join(p).display().to_string();
     let set = vec![
+        ("HOME".into(), own.home.display().to_string()),
+        ("TMPDIR".into(), own.temp.display().to_string()),
         ("XDG_CONFIG_HOME".into(), under(".config")),
         ("XDG_CACHE_HOME".into(), under(".cache")),
         ("XDG_DATA_HOME".into(), under(".local/share")),
@@ -1696,6 +1895,12 @@ pub async fn run(
     opts: &RunOptions,
     started: impl FnOnce(&Ender),
 ) -> Result<Value, RpcError> {
+    // Only Linux has the filter that keeps a command off the network; a
+    // command the switch holds runs nowhere else.
+    #[cfg(not(target_os = "linux"))]
+    if opts.no_network {
+        return Err(RpcError::new(ErrorCode::Unavailable, NO_FILTER));
+    }
     // Root's command runs in /bin/sh, whatever shell the others use.
     let shell = opts.shell.as_deref().filter(|_| opts.root.is_none());
     let (program, mut args) = match &call.argv {
@@ -1815,6 +2020,15 @@ pub async fn run(
         // Root as the account (the owner chose it, warned) gets root's
         // rights back at exec, which no_new_privs would keep from it.
         let nnp = opts.sudo.is_none() && opts.account.as_ref().is_none_or(|a| a.uid != 0);
+        // The filter of the owner's network switch, made here: the child
+        // only puts it on, last, once it is the account.
+        let net = match opts.no_network {
+            true => Some(
+                nerve_sandbox::net_filter::Filter::no_network()
+                    .ok_or_else(|| RpcError::new(ErrorCode::Unavailable, NO_FILTER))?,
+            ),
+            false => None,
+        };
         // SAFETY: plain system calls on memory moved into the closure.
         unsafe {
             cmd.pre_exec(move || {
@@ -1831,6 +2045,9 @@ pub async fn run(
                 }
                 if nnp && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                     return Err(std::io::Error::last_os_error());
+                }
+                if let Some(f) = &net {
+                    f.install()?;
                 }
                 Ok(())
             });
@@ -1853,15 +2070,15 @@ pub async fn run(
             // one of nerve-run's only the few variables it keeps.
             if opts.root.is_some() {
                 cmd.env_clear().env("PATH", ROOT_PATH);
-            } else if opts.separate {
+            } else if opts.separate.is_some() {
                 cmd.env_clear()
                     .envs(kept_env(std::env::vars_os(), &opts.pass_env));
             }
             cmd.env("HOME", &a.home)
                 .env("USER", &a.name)
                 .env("LOGNAME", &a.name);
-            if opts.separate {
-                let (set, unset) = separate_env(&a.home);
+            if let Some(own) = &opts.separate {
+                let (set, unset) = separate_env(own);
                 cmd.envs(set);
                 for k in unset {
                     cmd.env_remove(k);
@@ -2254,10 +2471,11 @@ mod tests {
                 .map(|(k, _)| k.to_string_lossy().into_owned())
                 .collect()
         };
-        assert_eq!(kept(&[]), ["PATH", "LANG", "TERM", "TMPDIR"]);
+        // TMPDIR is the pairing's own, never the node's (separate_env).
+        assert_eq!(kept(&[]), ["PATH", "LANG", "TERM"]);
         assert_eq!(
             kept(&["https_proxy".into()]),
-            ["PATH", "LANG", "TERM", "TMPDIR", "https_proxy"]
+            ["PATH", "LANG", "TERM", "https_proxy"]
         );
     }
 
@@ -2271,12 +2489,13 @@ mod tests {
             timeouts: Timeouts::default(),
             sudo: None,
             account: None,
-            separate: false,
+            separate: None,
             pass_env: Vec::new(),
             own: Vec::new(),
             root: None,
             limits: None,
             tap: None,
+            no_network: false,
         }
     }
 
@@ -2487,6 +2706,36 @@ mod tests {
             .unwrap();
         assert_eq!(r["stdout"].as_str().unwrap().len(), 100);
         assert_eq!(r["truncated"], true);
+    }
+
+    /// The owner's network switch holds a command and what it starts: no
+    /// TCP connection and no UDP socket, which it opens without; what needs
+    /// neither runs as it would. Skipped where the kernel takes no seccomp
+    /// filter, or there is no bash to connect with.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_command_off_the_network_opens_no_tcp_or_udp_socket() {
+        if !nerve_sandbox::net_filter::available() || !std::path::Path::new("/bin/bash").exists() {
+            eprintln!("no seccomp filters or no bash here; skipped");
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let udp_port = udp.local_addr().unwrap().port();
+        let script = format!(
+            "/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}' && echo tcp; \
+             /bin/bash -c 'exec 3<>/dev/udp/127.0.0.1/{udp_port}' && echo udp; echo done"
+        );
+        for off in [false, true] {
+            let o = RunOptions {
+                no_network: off,
+                ..opts(4096)
+            };
+            let r = run(&call(&script), &o, |_| {}).await.unwrap();
+            let want = if off { "done\n" } else { "tcp\nudp\ndone\n" };
+            assert_eq!(r["stdout"], want, "network off {off}: {r}");
+        }
     }
 
     /// The output stream carries all a command prints, also past the cap
@@ -2827,6 +3076,366 @@ mod tests {
         for set in [&spec.read, &spec.write, &spec.exec] {
             assert!(set.contains(&w.join("a")), "{set:?}");
             assert!(!set.iter().any(|p| own[0].starts_with(p)), "{set:?}");
+        }
+    }
+
+    /// A folder the node splits around its own gives the entries that are
+    /// links too, and the shim opens a rule's path without following a link
+    /// (it would say so on every command's stderr). No set holds such an
+    /// entry, in any set a split reaches.
+    #[test]
+    fn the_links_among_a_split_folders_entries_get_no_rule() {
+        let d = tempfile::tempdir().unwrap();
+        let w = std::fs::canonicalize(d.path()).unwrap();
+        for dir in ["a", "deep/cfg", "target"] {
+            std::fs::create_dir_all(w.join(dir)).unwrap();
+        }
+        std::fs::write(w.join("file.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(w.join("target"), w.join("to-dir")).unwrap();
+        std::os::unix::fs::symlink(w.join("file.txt"), w.join("to-file")).unwrap();
+        let own = [w.join("deep/cfg")];
+        let policy = CenterPolicy {
+            folders: vec![nerve_policy::config::Folder {
+                path: w.display().to_string(),
+                access: Access::ALL,
+            }],
+            ..Default::default()
+        };
+        let mine = crate::account::Own::of(&w.join("run"), "lab");
+        let specs = [
+            landlock_spec(&policy, &w, &own, std::slice::from_ref(&w)),
+            pairing_spec(
+                &policy,
+                &w,
+                &own,
+                std::slice::from_ref(&w),
+                &w.join("run"),
+                &mine,
+            ),
+        ];
+        for spec in specs {
+            for set in [&spec.read, &spec.write, &spec.exec] {
+                assert!(set.contains(&w.join("a")) && set.contains(&w.join("file.txt")));
+                assert!(
+                    !set.contains(&w.join("to-dir")) && !set.contains(&w.join("to-file")),
+                    "{set:?}"
+                );
+            }
+            for set in [&spec.read, &spec.write, &spec.exec, &spec.unix] {
+                for p in set {
+                    assert!(
+                        !p.symlink_metadata().is_ok_and(|m| m.is_symlink()),
+                        "{p:?}: {spec:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A config capability of a pairing whose commands run as the owner has
+    /// the pairing's own folders at the account's real home too, so the
+    /// network switch, which writes only at a folder's real place, keeps its
+    /// write there where passwd gives the home through a link.
+    #[test]
+    fn a_capability_off_the_network_writes_in_its_own_home_behind_a_link() {
+        let d = tempfile::tempdir().unwrap();
+        let w = std::fs::canonicalize(d.path()).unwrap();
+        std::fs::create_dir_all(w.join("disk/run/lab/home")).unwrap();
+        std::fs::create_dir_all(w.join("disk/run/lab/tmp")).unwrap();
+        std::os::unix::fs::symlink(w.join("disk"), w.join("lib")).unwrap();
+        let run_home = w.join("lib/run");
+        let mine = crate::account::Own::of(&run_home, "lab");
+        // Where the pairing's commands run as the account the folders are
+        // its policy's; where they run as the owner `confined` builds them.
+        let policy = CenterPolicy {
+            mode: nerve_policy::Mode::User,
+            no_network: true,
+            folders: crate::account::built_in(&mine),
+            ..Default::default()
+        };
+        for separate in [false, true] {
+            let spec = config_spec(
+                &policy,
+                separate,
+                Some(&mine),
+                Some(&run_home),
+                &w,
+                &[],
+                &[],
+                true,
+            );
+            for dir in [w.join("disk/run/lab/home"), w.join("disk/run/lab/tmp")] {
+                assert!(spec.write.contains(&dir), "{separate}: {spec:?}");
+            }
+        }
+    }
+
+    /// A folder of the owner that is a link to a place holding the account's
+    /// home gives a command of a pairing the other pairings' folders unless
+    /// the sets are cut where the link is resolved: the sandbox's own
+    /// resolution, not the node user's. The pairing's own folders stay.
+    #[test]
+    fn a_pairings_sets_are_cut_around_the_accounts_home_through_a_link() {
+        let d = tempfile::tempdir().unwrap();
+        let w = std::fs::canonicalize(d.path()).unwrap();
+        let run_home = w.join("srv/run");
+        let mine = crate::account::Own::of(&run_home, "lab");
+        for dir in [&mine.home, &mine.temp, &run_home.join("other/home")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::create_dir_all(w.join("srv/www")).unwrap();
+        std::os::unix::fs::symlink(w.join("srv"), w.join("link")).unwrap();
+        let folder = |p: &Path| nerve_policy::config::Folder {
+            path: p.display().to_string(),
+            access: Access::ALL,
+        };
+        let policy = CenterPolicy {
+            folders: vec![
+                folder(&w.join("link")),
+                folder(&mine.home),
+                folder(&mine.temp),
+            ],
+            ..Default::default()
+        };
+        let reaches = |spec: &LandlockSpec, p: &Path| {
+            [&spec.read, &spec.write, &spec.exec]
+                .iter()
+                .any(|set| set.iter().any(|s| p.starts_with(s)))
+        };
+        // The link leads to a folder that holds the account's home.
+        let plain = landlock_spec(&policy, &w, &[], &[]);
+        assert!(reaches(&plain, &run_home.join("other/home")), "{plain:?}");
+        let spec = pairing_spec(&policy, &w, &[], &[], &run_home, &mine);
+        for set in [&spec.read, &spec.write, &spec.exec] {
+            assert!(set.contains(&w.join("srv/www")), "{set:?}");
+            assert!(
+                set.contains(&mine.home) && set.contains(&mine.temp),
+                "{set:?}"
+            );
+        }
+        assert!(!reaches(&spec, &run_home.join("other/home")), "{spec:?}");
+        assert!(!reaches(&spec, &run_home.join("other")), "{spec:?}");
+        assert!(!reaches(&spec, &run_home), "{spec:?}");
+    }
+
+    /// While its network is off a command reaches unix sockets by path in
+    /// its pairing's own and its `w` folders and the system's kept sockets
+    /// alone: not in the node's own folders, another pairing's, or the
+    /// shared `/tmp` and `/var/tmp`, where a program of another account could
+    /// answer for it.
+    #[test]
+    fn a_command_off_the_network_reaches_the_sockets_of_its_folders_only() {
+        let d = tempfile::tempdir().unwrap();
+        let w = std::fs::canonicalize(d.path()).unwrap();
+        let run_home = w.join("srv/run");
+        let mine = crate::account::Own::of(&run_home, "lab");
+        for dir in [&mine.home, &mine.temp, &run_home.join("other/home")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for dir in ["proj", "state"] {
+            std::fs::create_dir_all(w.join(dir)).unwrap();
+        }
+        let folder = |p: &Path| nerve_policy::config::Folder {
+            path: p.display().to_string(),
+            access: Access::ALL,
+        };
+        let policy = CenterPolicy {
+            folders: [
+                w.join("proj"),
+                mine.home.clone(),
+                mine.temp.clone(),
+                w.clone(),
+            ]
+            .iter()
+            .chain([PathBuf::from("/tmp"), PathBuf::from("/var/tmp")].iter())
+            .map(|p| folder(p))
+            .collect(),
+            ..Default::default()
+        };
+        let own = [w.join("state")];
+        let reaches = |spec: &LandlockSpec, p: &Path| spec.unix.iter().any(|s| p.starts_with(s));
+        let plain = landlock_spec(&policy, &w, &own, &[]);
+        assert!(reaches(&plain, &w.join("proj/s")), "{plain:?}");
+        assert!(!reaches(&plain, &w.join("state/s")), "{plain:?}");
+        let spec = pairing_spec(&policy, &w, &own, &[], &run_home, &mine);
+        for p in [w.join("proj/s"), mine.home.join("s"), mine.temp.join("s")] {
+            assert!(reaches(&spec, &p), "{p:?}: {spec:?}");
+        }
+        for p in [
+            w.join("state/s"),
+            run_home.join("other/home/s"),
+            run_home.join("s"),
+            real(Path::new("/tmp")).join("s"),
+            real(Path::new("/var/tmp")).join("s"),
+        ] {
+            assert!(!reaches(&spec, &p), "{p:?}: {spec:?}");
+        }
+        for kept in nerve_sandbox::kept_sockets() {
+            assert!(spec.unix.contains(&kept), "{kept:?}: {spec:?}");
+        }
+    }
+
+    /// A config capability's command runs as `nerve-run` in every mode: where
+    /// its pairing's commands run as the owner (user mode), its unix sockets
+    /// by path while the network is off are its own folders' and the
+    /// system's, not the shared `/tmp` and `/var/tmp` either.
+    #[test]
+    fn a_capability_off_the_network_reaches_no_socket_in_the_shared_temp_folders() {
+        let d = tempfile::tempdir().unwrap();
+        let w = std::fs::canonicalize(d.path()).unwrap();
+        let run_home = w.join("srv/run");
+        let mine = crate::account::Own::of(&run_home, "lab");
+        for dir in [&mine.home, &mine.temp, &w.join("state")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let own = [w.join("state")];
+        // The pairing's own folders and the shared ones, as the link adds
+        // them ([`crate::account::with_built_in`]) where it runs as the account.
+        let policy = CenterPolicy {
+            mode: nerve_policy::Mode::User,
+            no_network: true,
+            folders: crate::account::built_in(&mine),
+            ..Default::default()
+        };
+        let reaches = |spec: &LandlockSpec, p: &Path| spec.unix.iter().any(|s| p.starts_with(s));
+        for separate in [false, true] {
+            let spec = config_spec(
+                &policy,
+                separate,
+                Some(&mine),
+                Some(&run_home),
+                &w,
+                &own,
+                &[],
+                true,
+            );
+            assert!(spec.no_network);
+            for p in [mine.home.join("s"), mine.temp.join("s")] {
+                assert!(reaches(&spec, &p), "{separate}: {p:?}: {spec:?}");
+            }
+            for p in [
+                real(Path::new("/tmp")).join("s"),
+                real(Path::new("/var/tmp")).join("s"),
+                w.join("state/s"),
+            ] {
+                assert!(!reaches(&spec, &p), "{separate}: {p:?}: {spec:?}");
+            }
+            for kept in nerve_sandbox::kept_sockets() {
+                assert!(spec.unix.contains(&kept), "{kept:?}: {spec:?}");
+            }
+        }
+    }
+
+    /// A node run by hand runs its commands as its owner, so a program of
+    /// the owner answering on a socket by path reaches the network for them:
+    /// the owner's tmux server and display in `/tmp`, the session bus and
+    /// service manager in the runtime folder. Granting such a folder (or one
+    /// above) must not open them while the network is off; a folder the
+    /// command may only read opens no socket at all.
+    #[test]
+    fn a_command_by_hand_off_the_network_reaches_no_session_socket_of_its_owner() {
+        let d = tempfile::tempdir().unwrap();
+        let w = std::fs::canonicalize(d.path()).unwrap();
+        for dir in ["proj", "ro"] {
+            std::fs::create_dir_all(w.join(dir)).unwrap();
+        }
+        // Not below `/tmp` or `/var/tmp`, or their protected entries would
+        // split those granted folders into the places beside them.
+        let home = Path::new("/home/owner");
+        let runtime = PathBuf::from(format!("/run/user/{}", unsafe { libc::geteuid() }));
+        let folder = |p: &Path, access: Access| nerve_policy::config::Folder {
+            path: p.display().to_string(),
+            access,
+        };
+        let read = Access {
+            read: true,
+            ..Access::NONE
+        };
+        let policy = CenterPolicy {
+            folders: vec![
+                folder(&w.join("proj"), Access::ALL),
+                folder(&w.join("ro"), read),
+                folder(Path::new("/tmp"), Access::ALL),
+                folder(Path::new("/var/tmp"), Access::ALL),
+                folder(&runtime, Access::ALL),
+                folder(Path::new("/run"), Access::ALL),
+            ],
+            ..Default::default()
+        };
+        let reaches = |spec: &LandlockSpec, p: &Path| spec.unix.iter().any(|s| p.starts_with(s));
+        let spec = landlock_spec(&policy, home, &[], &[]);
+        for p in [
+            Path::new("/tmp/tmux-1000/default"),
+            Path::new("/tmp/.X11-unix/X0"),
+            Path::new("/var/tmp/s"),
+            &runtime.join("bus"),
+            &runtime.join("systemd/private"),
+            &w.join("ro/s"),
+        ] {
+            assert!(!reaches(&spec, p), "{p:?}: {spec:?}");
+        }
+        // The other folders every account may write are cut as well.
+        for p in [
+            "/dev/shm/p.sock",
+            "/run/lock/p.sock",
+            "/var/lock/p.sock",
+            "/var/crash/p.sock",
+        ] {
+            assert!(!reaches(&spec, Path::new(p)), "{p}: {spec:?}");
+        }
+        // What lies beside them stays: a folder of `/run` that no account
+        // shares.
+        let beside = std::fs::read_dir("/run")
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.is_dir()
+                    && !SHARED_DIRS.iter().any(|s| p.starts_with(s))
+                    && !runtime.starts_with(p)
+            })
+            .expect("a folder in /run");
+        for p in [w.join("proj/s"), beside.join("s")] {
+            assert!(reaches(&spec, &p), "{p:?}: {spec:?}");
+        }
+        // A grant of the whole system is cut around them too.
+        let all = CenterPolicy {
+            folders: vec![folder(Path::new("/"), Access::ALL)],
+            ..Default::default()
+        };
+        let spec = landlock_spec(&all, home, &[], &[]);
+        for p in [
+            Path::new("/tmp/tmux-1000/default"),
+            Path::new("/dev/shm/p.sock"),
+            Path::new("/run/lock/p.sock"),
+            Path::new("/var/lock/p.sock"),
+            Path::new("/var/crash/p.sock"),
+            &runtime.join("bus"),
+        ] {
+            assert!(!reaches(&spec, p), "{p:?}: {spec:?}");
+        }
+        assert!(reaches(&spec, Path::new("/usr/s")), "{spec:?}");
+    }
+
+    /// Each folder every account may write to is dropped from the unix set
+    /// when it is granted itself, whether this machine has it or not (a
+    /// grant of a parent is split around the ones that exist).
+    #[test]
+    fn each_shared_folder_granted_itself_is_dropped_from_the_unix_set() {
+        for dir in [
+            "/tmp",
+            "/var/tmp",
+            "/dev/shm",
+            "/run/lock",
+            "/var/lock",
+            "/var/crash",
+        ] {
+            let mut spec = LandlockSpec {
+                unix: vec![PathBuf::from(dir), PathBuf::from("/srv/own")],
+                ..Default::default()
+            };
+            without_shared_sockets(&mut spec);
+            assert_eq!(spec.unix, [PathBuf::from("/srv/own")], "{dir}");
         }
     }
 
@@ -3181,6 +3790,93 @@ mod tests {
             "{spec:?}"
         );
         assert!(spec.read.contains(&deep), "{spec:?}");
+    }
+
+    /// While the network switch is on, a place to write that the center added
+    /// itself is used only at its real place (the settings rule judges names
+    /// as spelled, so it cannot see the owner's link above two spellings of
+    /// the folder it keeps a center from narrowing). A command with `w` on
+    /// `real/work` put a link at `real/work/sub`; the center narrows `work`
+    /// to `r` and keeps `alias/work/sub` with `w`, `alias` being the owner's
+    /// link to `real`. The folder, its link's target and its unix sockets
+    /// get no rule then; the folder at its real place does, and so does
+    /// the spelled one with the switch off.
+    #[test]
+    fn with_the_network_off_a_place_to_write_is_used_at_its_real_place_only() {
+        let d = tempfile::tempdir().unwrap();
+        let (home, _, docs) = nested_home(&d);
+        let real_work = home.join("real/work");
+        let sub = real_work.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::os::unix::fs::symlink(home.join("real"), home.join("alias")).unwrap();
+        let spelled = home.join("alias/work/sub");
+        let writable = [spelled.clone()];
+        let policy = |folders: Vec<Folder>, off: bool| CenterPolicy {
+            folders,
+            no_network: off,
+            ..Default::default()
+        };
+        let both = |f: &Path| vec![folder(&real_work, "r"), folder(f, "rw")];
+
+        // Where the folder is a plain folder at its real place, it is used.
+        let used = |p: &CenterPolicy| {
+            let spec = landlock_spec(p, &home, &[], &writable);
+            (spec.write.contains(&sub), spec.unix.contains(&sub))
+        };
+        assert_eq!(used(&policy(both(&sub), true)), (true, true));
+        // Spelled through the owner's link it is the same place: used with
+        // the switch off, not used with it on.
+        assert_eq!(used(&policy(both(&spelled), false)), (true, true));
+        assert_eq!(used(&policy(both(&spelled), true)), (false, false));
+        // A read-only folder is no place to write, so it stays. A folder
+        // with more than `w` keeps its other flags at its real place: the
+        // node is told why it is not written in, nothing else changes.
+        let read = policy(vec![folder(&spelled, "r")], true);
+        assert!(landlock_spec(&read, &home, &[], &[]).read.contains(&sub));
+        let all = landlock_spec(
+            &policy(vec![folder(&spelled, "rwx")], true),
+            &home,
+            &[],
+            &[],
+        );
+        assert!(
+            all.read.contains(&sub) && all.exec.contains(&sub),
+            "{all:?}"
+        );
+        assert!(
+            !all.write.contains(&sub) && !all.unix.contains(&sub),
+            "{all:?}"
+        );
+
+        // A command put a link in place of `sub`: with the switch on the
+        // spelled folder gives no rule where it leads.
+        std::fs::remove_dir(&sub).unwrap();
+        std::os::unix::fs::symlink(&docs, &sub).unwrap();
+        let off = landlock_spec(&policy(both(&spelled), false), &home, &[], &writable);
+        assert!(spec_reaches(&off, &docs), "{off:?}");
+        let on = landlock_spec(&policy(both(&spelled), true), &home, &[], &writable);
+        assert!(!on.write.contains(&docs), "{on:?}");
+        assert!(!on.unix.contains(&docs), "{on:?}");
+    }
+
+    /// The folders every pairing shares are root's places, not a command's:
+    /// with the switch on they are written in wherever their path leads, as
+    /// is a folder that is its own real place; any other `w` folder spelled
+    /// through a link is not.
+    #[test]
+    fn the_shared_folders_are_written_in_whatever_their_path_leads_to() {
+        let policy = CenterPolicy {
+            no_network: true,
+            ..Default::default()
+        };
+        let apart = |path: &str, access: &str| {
+            let (p, real) = (Path::new(path), Path::new("/elsewhere/x"));
+            spelled_apart(&policy, &folder(p, access), p, real).is_some()
+        };
+        assert!(!apart("/tmp", "rwx") && !apart("/var/tmp", "rw"));
+        assert!(apart("/srv/tmp", "rw") && !apart("/srv/tmp", "r"));
+        let same = Path::new("/srv/tmp");
+        assert!(spelled_apart(&policy, &folder(same, "rw"), same, same).is_none());
     }
 
     /// A recorded folder that did not exist yet is judged the same: a link
@@ -3731,12 +4427,13 @@ mod windows_tests {
             timeouts: Timeouts::default(),
             sudo: None,
             account: None,
-            separate: false,
+            separate: None,
             pass_env: Vec::new(),
             own: Vec::new(),
             root: None,
             limits: None,
             tap: None,
+            no_network: false,
         }
     }
 

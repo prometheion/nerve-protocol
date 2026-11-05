@@ -514,6 +514,16 @@ pub enum FolderCmd {
     /// center again, also what was moved into them (the installed node on
     /// Linux): a pass over every granted folder.
     Sync,
+    /// Keep a center's commands off the network, or let them on it again:
+    /// `off` lets them open no socket but a unix one, in every mode, and no
+    /// sudo-list command runs; where they run as you (user mode, allowlist
+    /// --as-owner) or the machine cannot hold them, none of them runs.
+    Network {
+        /// `off` or `on`.
+        state: String,
+        #[command(flatten)]
+        center: CenterArg,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2087,6 +2097,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             }
             let e = crate::pair::pair(&paths, &link, name.as_deref()).await?;
             w(out, format!("paired with {} as {}", e.url, e.name));
+            tell_pairings_apart(&paths, out).await;
             Ok(())
         }
         Cmd::Center(CenterCmd::Rm(center)) => {
@@ -2254,6 +2265,9 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             for line in stopped_lines(&cfg, owner.as_deref()) {
                 w(out, line);
             }
+            if let Some(warning) = pairings_warning_here(&paths, &cfg) {
+                w(out, format!("warning: {warning}"));
+            }
             Ok(())
         }
         Cmd::Mode(ModeCmd::Set {
@@ -2305,15 +2319,28 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             Ok(())
         }
         Cmd::Folder(FolderCmd::Sync) => sync_folders(&paths, out).await,
+        Cmd::Folder(FolderCmd::Network { state, center }) => {
+            set_network(&paths, &state, &center, out).await
+        }
         Cmd::Folder(FolderCmd::Ls { center }) => {
             let (cfg, _) = read_config(&paths).await?;
             let name = pick_center(&cfg, &center)?;
-            let folders = &cfg.center(&name).expect("picked").policy.folders;
-            if folders.is_empty() {
+            let policy = &cfg.center(&name).expect("picked").policy;
+            if policy.folders.is_empty() {
                 w(out, format!("{name}: no folders"));
             }
-            for f in folders {
+            for f in &policy.folders {
                 w(out, format!("{}  {}", f.access.to_chmod(), f.path));
+            }
+            if policy.no_network {
+                w(out, format!("{name}: {NO_NETWORK_LINE}"));
+            }
+            if let Some(note) = network_mode_note(
+                policy,
+                crate::service::is_service_node(&paths),
+                apart_by_hand_here(),
+            ) {
+                w(out, note);
             }
             Ok(())
         }
@@ -2901,6 +2928,30 @@ fn settings_grant_warning(name: &str, g: SettingsGrant, root: bool) -> Option<St
     })
 }
 
+/// [`crate::account::pairings_warning`] for the node at `paths` with the
+/// config `cfg`, as this machine stands: whether it is the installed node,
+/// and its kernel's Landlock. For a node that does not run, and right after
+/// a pairing, which the running node may not have read yet.
+pub(crate) fn pairings_warning_here(paths: &NodePaths, cfg: &NodeConfig) -> Option<String> {
+    let separate = cfg!(target_os = "linux") && crate::service::is_service_node(paths);
+    crate::account::pairings_warning(
+        separate,
+        nerve_sandbox::Confinement::detect().landlock_abi,
+        cfg,
+        crate::now_ms(),
+    )
+}
+
+/// Says after a pairing that nothing keeps the pairings of nerve-run apart
+/// here ([`pairings_warning_here`]), once there are two of them.
+async fn tell_pairings_apart(paths: &NodePaths, out: &mut dyn Write) {
+    if let Ok((cfg, _)) = read_config(paths).await
+        && let Some(w) = pairings_warning_here(paths, &cfg)
+    {
+        let _ = writeln!(out, "Warning: {w}");
+    }
+}
+
 /// What `status` says of a node that does not run, with the config `cfg`
 /// and the `owner` the unit names, a line each.
 fn stopped_lines(cfg: &NodeConfig, owner: Option<&str>) -> Vec<String> {
@@ -2939,6 +2990,9 @@ fn status_lines(v: &Value) -> Vec<String> {
     }
     if let Some(l) = v["landlock_warning"].as_str() {
         lines.push(format!("warning: {l}"));
+    }
+    if let Some(p) = v["pairings_warning"].as_str() {
+        lines.push(format!("warning: {p}"));
     }
     lines.extend(
         grant_lines(&v["folder_grants"])
@@ -3221,6 +3275,7 @@ async fn setup_steps(
             let e = crate::pair::pair(paths, &link, None).await?;
             let _ = writeln!(out, "paired with {} as {}", e.url, e.name);
             steps.push(format!("paired with {} as {}", e.url, e.name));
+            tell_pairings_apart(paths, out).await;
             center = Some(e.name);
         } else {
             let _ = writeln!(out, "not paired");
@@ -3373,6 +3428,123 @@ async fn set_mode(
     let whom = if as_owner { ", as you" } else { "" };
     w(out, format!("{name}: mode {}{whom}", m.as_str()));
     Ok(())
+}
+
+/// What `folder network off` and `folder ls` say of a center whose network
+/// is off.
+const NO_NETWORK_LINE: &str =
+    "its commands have no network (no socket but unix ones), and its sudo-list commands do not run";
+
+/// What `folder network off` adds: a command that started with the network
+/// does not keep it, which the running node sees to (`link::Link::
+/// end_commands_without_network`).
+const NO_NETWORK_RUNNING: &str = "a command of it that runs now is ended by the node";
+
+/// `folder network`: the pairing's network switch for its commands
+/// (`policy.no_network`), in every mode. Where this machine cannot hold
+/// them to it, or they run as the owner in the mode the pairing is in, the
+/// node runs none of them, and this says so.
+async fn set_network(
+    paths: &NodePaths,
+    state: &str,
+    center: &CenterArg,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let off = match state {
+        "off" => true,
+        "on" => false,
+        other => return Err(format!("unknown network setting {other} (on or off)")),
+    };
+    let name = edit_center(paths, center, |e| {
+        e.policy.no_network = off;
+        Ok(())
+    })
+    .await?;
+    let _ = writeln!(
+        out,
+        "{name}: {}",
+        if off {
+            NO_NETWORK_LINE
+        } else {
+            "its commands may use the network"
+        }
+    );
+    if off {
+        let _ = writeln!(out, "{NO_NETWORK_RUNNING}");
+    }
+    if off && !network_rules_here() {
+        let _ = writeln!(out, "warning: {}", crate::daemon::NETWORK_NOT_HELD);
+    }
+    let (cfg, _) = read_config(paths).await?;
+    let installed = crate::service::is_service_node(paths);
+    if let Some(note) = cfg
+        .center(&name)
+        .and_then(|c| network_mode_note(&c.policy, installed, apart_by_hand_here()))
+    {
+        let _ = writeln!(out, "{note}");
+    }
+    Ok(())
+}
+
+/// What `folder network off` and `folder ls` add where the center's
+/// commands run as the owner in the mode it is in now: user mode and
+/// allowlist mode as the owner on the installed node; on a node run by hand
+/// every mode, but folder mode where it can keep them apart
+/// ([`crate::daemon::by_hand_apart`], `apart_by_hand`: not root, and Landlock
+/// with unix sockets by path). `installed` says which node it is. The switch
+/// does not hold such a command, so the node runs none of them while it is
+/// on.
+fn network_mode_note(
+    policy: &nerve_policy::config::CenterPolicy,
+    installed: bool,
+    apart_by_hand: bool,
+) -> Option<String> {
+    let mode = policy.mode_at(crate::now_ms());
+    let as_owner = if installed {
+        policy.runs_as_owner(crate::now_ms())
+    } else {
+        mode != Mode::Folder || !apart_by_hand
+    };
+    if !policy.no_network || !as_owner {
+        return None;
+    }
+    if !installed {
+        return Some(
+            "note: this node runs by hand, so its commands run as you, and nothing keeps them off \
+             the network here (only folder mode does, as a user that is not root and on Linux 7.1 \
+             or later), so the node runs none of them while their network is off; the installed \
+             node runs folder mode's commands as nerve-run"
+                .into(),
+        );
+    }
+    let whom = if policy.as_owner && mode == Mode::Allowlist {
+        " as you"
+    } else {
+        ""
+    };
+    Some(format!(
+        "note: it is in {} mode{whom} now, where its commands run as you, so the node runs \
+         none of them while their network is off; folder mode, or allowlist mode without \
+         --as-owner, runs them as nerve-run on the installed node",
+        mode.as_str()
+    ))
+}
+
+/// [`network_mode_note`]'s `apart_by_hand` for this machine and user.
+fn apart_by_hand_here() -> bool {
+    crate::daemon::by_hand_apart(
+        crate::rights::full_rights(),
+        nerve_sandbox::Confinement::detect().landlock_abi,
+    )
+}
+
+/// Whether this machine's kernel can keep a command off the network (the
+/// node's seccomp filter, nerve_sandbox::net_filter); never on Windows.
+fn network_rules_here() -> bool {
+    #[cfg(target_os = "linux")]
+    return nerve_sandbox::net_filter::available();
+    #[cfg(not(target_os = "linux"))]
+    false
 }
 
 /// `folder add`, and the folder step of `setup`.
@@ -5987,6 +6159,59 @@ mod tests {
         assert!(e.contains("unknown setting"), "{e}");
     }
 
+    /// `folder network off` keeps the center's commands off the network,
+    /// `on` lets them on it again, `folder ls` says which, and a machine
+    /// without the node's network filter is warned of; so is a mode in
+    /// which the commands run as the owner, where none of them runs.
+    #[test]
+    fn folder_network_switches_the_folder_commands_network() {
+        let (_d, paths) = setup(&["home"]);
+        let policy = || load(&paths).centers[0].policy.clone();
+        // A node by hand runs allowlist commands as the owner.
+        let by_hand = "note: this node runs by hand, so its commands run as you";
+        let out = run(&paths, &["folder", "network", "off"]).unwrap();
+        assert!(out.contains(by_hand), "{out}");
+        assert!(run(&paths, &["folder", "ls"]).unwrap().contains(by_hand));
+        // The installed node runs them as nerve-run, unless as the owner.
+        let mut p = policy();
+        assert!(network_mode_note(&p, true, false).is_none());
+        p.as_owner = true;
+        assert!(
+            network_mode_note(&p, true, false)
+                .is_some_and(|n| n.contains("allowlist mode as you now")),
+            "{p:?}"
+        );
+        p.mode = Mode::User;
+        assert!(network_mode_note(&p, true, false).is_some_and(|n| n.contains("user mode now")));
+        p.mode = Mode::Folder;
+        assert!(network_mode_note(&p, true, false).is_none());
+        // A node by hand keeps folder mode apart only as a user that is not
+        // root, with Landlock's unix socket rule; else it says so there too.
+        assert!(network_mode_note(&p, false, true).is_none());
+        assert!(network_mode_note(&p, false, false).is_some_and(|n| n.contains(by_hand)));
+        run(&paths, &["mode", "set", "folder"]).unwrap();
+        let out = run(&paths, &["folder", "network", "off"]).unwrap();
+        assert_eq!(out.contains("note:"), !apart_by_hand_here(), "{out}");
+        assert!(
+            out.starts_with(&format!("home: {NO_NETWORK_LINE}\n")),
+            "{out}"
+        );
+        assert!(out.contains(NO_NETWORK_RUNNING), "{out}");
+        assert_eq!(out.contains("warning:"), !network_rules_here(), "{out}");
+        assert!(policy().no_network);
+        let ls = run(&paths, &["folder", "ls"]).unwrap();
+        assert!(ls.contains(&format!("home: {NO_NETWORK_LINE}\n")), "{ls}");
+        let out = run(&paths, &["folder", "network", "on"]).unwrap();
+        assert!(
+            out.starts_with("home: its commands may use the network\n"),
+            "{out}"
+        );
+        assert!(!policy().no_network);
+        assert!(!run(&paths, &["folder", "ls"]).unwrap().contains("network"));
+        let e = run(&paths, &["folder", "network", "maybe"]).unwrap_err();
+        assert!(e.contains("unknown network setting maybe"), "{e}");
+    }
+
     /// Allowlist mode runs as the owner only when asked for, and setting a
     /// mode again without the flag takes it back; the other modes refuse it.
     #[test]
@@ -6879,6 +7104,7 @@ mod tests {
             "owner": "alice",
             "home_warning": {"warning": "Without Landlock, nerve-run can read every file in your home /home/alice"},
             "landlock_warning": "this kernel's Landlock is ABI 4, which does not guard device ioctls",
+            "pairings_warning": "Without Landlock nothing keeps the pairings apart: the commands of a, b all run as nerve-run",
             "folder_grants": {
                 "stale": ["/home/alice/gone", "/var/lib/nerve/state/acl.json"],
                 "errors": [
@@ -6905,6 +7131,12 @@ mod tests {
         );
         assert!(
             has("warning: this kernel's Landlock is ABI 4, which does not guard device ioctls"),
+            "{lines:#?}"
+        );
+        assert!(
+            has(
+                "warning: Without Landlock nothing keeps the pairings apart: the commands of a, b all run as nerve-run"
+            ),
             "{lines:#?}"
         );
         assert!(

@@ -382,9 +382,13 @@ except OSError as e:
         .expect("handshake");
     let mut conn = inc.conn;
 
-    // As nerve-run, with its own home.
+    // As nerve-run, with its pairing's own home (#167).
     let r = run(&mut conn, &proj, "./who.sh").await.unwrap();
-    assert_eq!(out(&r), "nerve-run\n/var/lib/nerve-run\n", "{r}");
+    assert_eq!(
+        out(&r),
+        "nerve-run\n/var/lib/nerve-run/conformance-center/home\n",
+        "{r}"
+    );
     // Of the service's environment only what a command always gets, and
     // what the owner names.
     let env = "./env.sh";
@@ -1317,6 +1321,73 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
         "{audit}"
     );
 
+    // A folder the owner gives that holds nerve-run's home gives the program
+    // no other pairing's folder: not a file in it, not the folder above it
+    // (the program works below what it is handed, with the owner's rights),
+    // and not a link in a folder of the grant that leads there.
+    let other = Path::new("/var/lib/nerve-run/nrv167-other/home");
+    std::fs::create_dir_all(other).unwrap();
+    std::fs::write(other.join("x"), "other\n").unwrap();
+    assert!(
+        sh(Command::new("chown").args([
+            "-R",
+            "nerve-run:nerve-run",
+            "/var/lib/nerve-run/nrv167-other"
+        ]))
+        .0
+    );
+    let linked = Path::new("/var/lib/nrv167-link");
+    std::fs::create_dir_all(linked).unwrap();
+    let _ = std::fs::remove_file(linked.join("to"));
+    std::os::unix::fs::symlink(other, linked.join("to")).unwrap();
+    chmod(linked, "755");
+    let (ok, said) = as_owner(&owner, &["folder", "add", "/var/lib", "+r"]);
+    assert!(ok, "{said}");
+    let e = files_call(&mut conn, "open", &other.join("x"))
+        .await
+        .unwrap_err();
+    assert!(e.contains("another pairing"), "{e}");
+    let e = files_call(&mut conn, "open", Path::new("/var/lib"))
+        .await
+        .unwrap_err();
+    // The node's own folders under it refuse it first on an installed node.
+    assert!(
+        e.contains("holds") || e.contains("belongs to the node itself"),
+        "{e}"
+    );
+    let _ = files_call(&mut conn, "open", linked).await.unwrap_err();
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !calls.contains("/var/lib"),
+        "no call reached the program: {calls}"
+    );
+    let (ok, said) = as_owner(&owner, &["folder", "rm", "/var/lib"]);
+    assert!(ok, "{said}");
+    // In allowlist mode a rule covers places the folders do not give: a
+    // link in the handed folder into another pairing's home refuses the
+    // call all the same (the program would follow it), one that stays in
+    // the folder does not.
+    for args in [
+        &["mode", "set", "allowlist"][..],
+        // The rule an audit entry's button makes for the capability.
+        &["rule", "add", "allow", "", "--action", "files.open"],
+    ] {
+        let (ok, said) = as_owner(&owner, args);
+        assert!(ok, "{said}");
+    }
+    let e = files_call(&mut conn, "open", linked).await.unwrap_err();
+    assert!(
+        e.contains("another pairing") && e.contains("nrv167-link/to"),
+        "{e}"
+    );
+    std::fs::remove_file(linked.join("to")).unwrap();
+    std::fs::write(linked.join("f"), "f\n").unwrap();
+    chmod(&linked.join("f"), "644");
+    std::os::unix::fs::symlink(linked.join("f"), linked.join("to")).unwrap();
+    let r = files_call(&mut conn, "open", linked).await.unwrap();
+    assert_eq!(r["names"], json!(["f", "to"]), "{r}");
+    let _ = std::fs::remove_dir_all(linked);
+
     // A process of a command the node runs (user mode, as the owner) is
     // refused, though it runs the allowed program, and the name is free:
     // the owner lets the attached one go first.
@@ -1348,6 +1419,7 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     assert!(ok, "{said}");
     let _ = std::fs::remove_file(tmp_closed);
     let _ = std::fs::remove_file(open_copy);
+    let _ = std::fs::remove_dir_all("/var/lib/nerve-run/nrv167-other");
     std::fs::remove_dir_all(&base).unwrap();
     std::fs::remove_file(ssh.join("id_b4")).unwrap();
     if made_ssh {
@@ -1582,7 +1654,7 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     let r = config_call(&mut conn, "who.where", json!({}))
         .await
         .unwrap();
-    assert_eq!(r, json!("/var/lib/nerve-run\n"));
+    assert_eq!(r, json!("/var/lib/nerve-run/conformance-center/home\n"));
     // The center is told it is a command of the pairing's command account,
     // which nerve-run is here.
     assert_eq!(as_account(&mut conn, "files.show").await, json!(true));
@@ -2094,4 +2166,426 @@ async fn a_command_is_held_to_its_limits_on_the_installed_node() {
     let (ok, said) = sh(Command::new(BIN).args(["uninstall", "--purge"]));
     assert!(ok, "{said}");
     std::fs::remove_dir_all(&work).unwrap();
+}
+
+/// Two pairings on the installed node each have a home and a temporary
+/// folder of their own below `/var/lib/nerve-run` (#167): their commands'
+/// `HOME` and `TMPDIR`, made 0700 as `nerve-run`, deleted with the pairing.
+/// With Landlock one pairing's command cannot read the other's home;
+/// without it it can, as the docs say, and the second pairing, `status` and
+/// its JSON say that nothing keeps the pairings apart. With a pairing's
+/// network turned off, its commands run under the node's filter, Landlock
+/// or not, and open no TCP or UDP socket, which the other pairing's open;
+/// no command of its sudo list runs meanwhile, while the other's does.
+/// Where the node has no filter its commands do not run, and it says why.
+/// For a test machine only, as root.
+///
+/// `NERVE_NODE_REAL=<the nerve-node to install> NERVE_REAL_OWNER=<an account
+/// with a home, the owner> cargo test -p nerve-node --test real_account --
+/// --ignored --exact each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "installs the node on this machine; NERVE_NODE_REAL and NERVE_REAL_OWNER name it"]
+async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine() {
+    let (Some(exe), Some(owner)) = (
+        std::env::var_os("NERVE_NODE_REAL").map(PathBuf::from),
+        std::env::var("NERVE_REAL_OWNER").ok(),
+    ) else {
+        eprintln!("NERVE_NODE_REAL or NERVE_REAL_OWNER is not set");
+        return;
+    };
+    assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
+    let abi = nerve_sandbox::Confinement::detect().landlock_abi;
+    let landlock = abi.is_some();
+    let filter = nerve_sandbox::net_filter::available();
+    // The owner has a password and sudo, for the sudo list below.
+    let mut pw = Command::new("chpasswd");
+    pw.stdin(std::process::Stdio::piped());
+    let mut child = pw.spawn().unwrap();
+    {
+        use std::io::Write;
+        let line = format!("{owner}:pass-167\n");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(line.as_bytes())
+            .unwrap();
+    }
+    assert!(child.wait().unwrap().success());
+    assert!(sh(Command::new("usermod").args(["-aG", "sudo", &owner])).0);
+    let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
+    assert!(ok, "{said}");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "real-167\n\n\n");
+    assert!(ok, "{said}");
+    let run_home = Path::new("/var/lib/nerve-run");
+    // What an earlier version's command left under a center's name: never
+    // taken for that pairing's home.
+    // First one with no `home` in it (a `mkdir ~/home` of an earlier
+    // version), then one with.
+    let left = run_home.join("home/home");
+    std::fs::create_dir_all(run_home.join("home")).unwrap();
+    std::fs::write(run_home.join("home/notes"), "planted\n").unwrap();
+    let chown_left = || {
+        assert!(
+            sh(Command::new("chown")
+                .args(["-R", "nerve-run:nerve-run"])
+                .arg(run_home.join("home")))
+            .0
+        );
+    };
+    chown_left();
+    // A folder of the owner's for each center, outside the owner's home.
+    let mut links = Vec::new();
+    for name in ["lab", "home"] {
+        let work = PathBuf::from(format!("/srv/nrv167-{name}"));
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).unwrap();
+        assert!(
+            sh(Command::new("chown")
+                .arg(format!("{owner}:{owner}"))
+                .arg(&work))
+            .0
+        );
+        let mut center = FakeCenter::start(false).await.unwrap();
+        let link = center.link().render();
+        let (ok, said) = as_owner(&owner, &["center", "add", &link, "--yes", "--name", name]);
+        assert!(ok, "{said}");
+        // The second pairing of nerve-run (a new one is in folder mode) is
+        // told that nothing keeps it apart from the first without Landlock.
+        assert_eq!(
+            said.contains("Warning: Without Landlock nothing keeps the pairings apart"),
+            name == "home" && !landlock,
+            "{name}: {said}"
+        );
+        for args in [
+            &["mode", "set", "folder", "--center", name][..],
+            &[
+                "folder",
+                "add",
+                work.to_str().unwrap(),
+                "+rwx",
+                "--center",
+                name,
+            ],
+        ] {
+            let (ok, said) = as_owner(&owner, args);
+            assert!(ok, "{args:?}: {said}");
+        }
+        let paired = center.paired().expect("paired");
+        let mut inc = center.next_link(WAIT).await.expect("the node dials");
+        fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
+            .await
+            .expect("handshake");
+        links.push((name, work, inc.conn, center));
+    }
+    // The home pairing's commands do not run until it is gone.
+    {
+        let (_, work, conn, _) = &mut links[1];
+        // A command that names no folder starts in the home that is not
+        // there: it says why, not that a path is no directory.
+        let e = conn
+            .call(
+                "invoke",
+                json!({"cap": "exec", "action": "run", "args": {"command": "pwd"}}),
+                WAIT,
+            )
+            .await
+            .expect("an answer")
+            .unwrap_err()
+            .message;
+        assert!(e.contains("the node did not make it"), "{e}");
+        std::fs::create_dir_all(&left).unwrap();
+        std::fs::write(left.join(".bashrc"), "planted\n").unwrap();
+        chown_left();
+        let e = run(conn, work, "echo ran").await.unwrap_err();
+        assert!(e.contains("the node did not make it"), "{e}");
+        assert!(left.join(".bashrc").exists());
+        // Nor do its file calls read what an earlier pairing under its name
+        // left in what looks like its home.
+        let e = fs_call(
+            conn,
+            "read",
+            json!({"path": left.join(".bashrc").display().to_string()}),
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("the node did not make it"), "{e}");
+    }
+    assert!(sh(Command::new("rm").arg("-rf").arg(run_home.join("home"))).0);
+    // Each command has its pairing's own home and temporary folder, and
+    // leaves a file in each.
+    for (name, work, conn, _) in &mut links {
+        let r = run(
+            conn,
+            work,
+            "id -un; echo \"$HOME|$TMPDIR|$XDG_CONFIG_HOME\"; pwd; \
+             echo mine > \"$HOME/.gitconfig\" && echo t > \"$TMPDIR/t\" && echo made",
+        )
+        .await
+        .unwrap();
+        let at = run_home.join(*name);
+        assert_eq!(
+            out(&r),
+            format!(
+                "nerve-run\n{h}|{t}|{h}/.config\n{w}\nmade\n",
+                h = at.join("home").display(),
+                t = at.join("tmp").display(),
+                w = work.display()
+            ),
+            "{name}: {r}"
+        );
+        for p in [at.clone(), at.join("home"), at.join("tmp")] {
+            let (_, st) = sh(Command::new("stat").args(["-c", "%U %a"]).arg(&p));
+            assert_eq!(st.trim(), "nerve-run 700", "{}", p.display());
+        }
+    }
+    // Folders found gone are made again before the command, which starts
+    // in its home when the call names no folder.
+    assert!(sh(Command::new("rm").arg("-rf").arg(run_home.join("lab"))).0);
+    let (_, _, conn, _) = &mut links[0];
+    let r = conn
+        .call(
+            "invoke",
+            json!({"cap": "exec", "action": "run", "args": {"command": "pwd"}}),
+            WAIT,
+        )
+        .await
+        .expect("an answer")
+        .expect("it runs");
+    assert_eq!(out(&r), "/var/lib/nerve-run/lab/home\n", "{r}");
+    std::fs::write(run_home.join("lab/home/.gitconfig"), "mine\n").unwrap();
+    // The other pairing's home: closed to it under Landlock, open to it
+    // without, as the docs say.
+    let lab_config = run_home.join("lab/home/.gitconfig");
+    let (_, _, conn, _) = &mut links[1];
+    let r = run(
+        conn,
+        &PathBuf::from("/srv/nrv167-home"),
+        &format!("cat {}", lab_config.display()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out(&r) == "mine\n", !landlock, "{r}");
+    // Opened to every account (a command of any pairing may change the
+    // modes), it stays closed to the other pairing's file calls; the lab's
+    // next command closes it again.
+    for p in [run_home, &run_home.join("lab"), &run_home.join("lab/home")] {
+        assert!(sh(Command::new("chmod").arg("755").arg(p)).0);
+    }
+    assert!(sh(Command::new("chmod").arg("644").arg(&lab_config)).0);
+    let e = fs_call(
+        conn,
+        "read",
+        json!({"path": lab_config.display().to_string()}),
+    )
+    .await
+    .unwrap_err();
+    assert!(e.contains("another pairing's"), "{e}");
+    // Nor does a walk from a folder open to all go into it.
+    let r = fs_call(
+        conn,
+        "find",
+        json!({"path": "/var/lib", "glob": "nerve-run/lab/home/.gitconfig"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r["paths"], json!([]), "{r}");
+    // A folder the owner gives that holds the account's home gives no other
+    // pairing's folders: the grant is cut around it.
+    let (ok, said) = as_owner(
+        &owner,
+        &["folder", "add", "/var/lib", "+r", "--center", "home"],
+    );
+    assert!(ok, "{said}");
+    let e = fs_call(
+        conn,
+        "read",
+        json!({"path": lab_config.display().to_string()}),
+    )
+    .await
+    .unwrap_err();
+    assert!(!e.contains("mine"), "{e}");
+    let r = fs_call(
+        conn,
+        "find",
+        json!({"path": "/var/lib", "glob": "nerve-run/lab/home/.gitconfig"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r["paths"], json!([]), "{r}");
+    let (ok, said) = as_owner(&owner, &["folder", "rm", "/var/lib", "--center", "home"]);
+    assert!(ok, "{said}");
+    let (_, work, conn, _) = &mut links[0];
+    run(conn, work, "true").await.unwrap();
+    for p in [run_home, &run_home.join("lab"), &run_home.join("lab/home")] {
+        let (_, st) = sh(Command::new("stat").args(["-c", "%U %a"]).arg(p));
+        assert_eq!(st.trim(), "nerve-run 700", "{}", p.display());
+    }
+    // Allowlist mode judges a file call by the allow rules alone, and a rule
+    // that covers every `fs` call is what an owner writes for a center that
+    // may only read. The node opens the paths as the one account that owns
+    // every pairing's folders, so they stay closed to the call all the same,
+    // whatever the rules say; its own home is open.
+    for args in [
+        &["mode", "set", "allowlist", "--center", "home"][..],
+        &["config", "add", "center.home.policy.allow", "fs"],
+    ] {
+        let (ok, said) = as_owner(&owner, args);
+        assert!(ok, "{args:?}: {said}");
+    }
+    let (_, _, conn, _) = &mut links[1];
+    let own_config = run_home.join("home/home/.gitconfig");
+    let mut seen = Err(String::new());
+    for _ in 0..50 {
+        seen = fs_call(
+            conn,
+            "read",
+            json!({"path": own_config.display().to_string()}),
+        )
+        .await;
+        if seen.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(seen.unwrap()["content"], "mine\n");
+    for (action, args) in [
+        ("read", json!({"path": lab_config.display().to_string()})),
+        (
+            "write",
+            json!({"path": run_home.join("lab/home/planted").display().to_string(), "content": "x"}),
+        ),
+    ] {
+        let e = fs_call(conn, action, args).await.unwrap_err();
+        assert!(e.contains("another pairing"), "{action}: {e}");
+    }
+    assert!(!run_home.join("lab/home/planted").exists());
+    let r = fs_call(
+        conn,
+        "find",
+        json!({"path": "/var/lib", "glob": "nerve-run/lab/home/.gitconfig"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r["paths"], json!([]), "{r}");
+    let r = fs_call(
+        conn,
+        "find",
+        json!({"path": "/var/lib", "glob": "nerve-run/home/home/.gitconfig"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r["paths"].as_array().map(Vec::len), Some(1), "{r}");
+    for args in [
+        &["config", "remove", "center.home.policy.allow", "fs"][..],
+        &["mode", "set", "folder", "--center", "home"],
+    ] {
+        let (ok, said) = as_owner(&owner, args);
+        assert!(ok, "{args:?}: {said}");
+    }
+    // `status` says whether the machine has the filter that holds the
+    // switch, and, without Landlock, that nothing keeps the pairings apart.
+    let (_, st) = as_owner(&owner, &["--json", "status"]);
+    let st: Value = serde_json::from_str(&st).unwrap();
+    assert_eq!(st["network_rules"], filter, "{st}");
+    assert_eq!(
+        st["pairings_warning"]
+            .as_str()
+            .is_some_and(|w| w.contains("nothing keeps the pairings apart") && w.contains("lab")),
+        !landlock,
+        "{st}"
+    );
+    let (_, text) = as_owner(&owner, &["status"]);
+    assert_eq!(
+        text.contains("warning: Without Landlock nothing keeps the pairings apart"),
+        !landlock,
+        "{text}"
+    );
+
+    // The sudo switch on, and `id -un` on both pairings' sudo lists.
+    let (ok, said) = typing(Command::new(BIN).args(["sudo", "on"]), "pass-167\n");
+    assert!(ok, "{said}");
+    for name in ["lab", "home"] {
+        let (ok, said) = as_owner(&owner, &["rule", "add", "sudo", "id -un", "--center", name]);
+        assert!(ok, "{said}");
+    }
+
+    // The lab's network off: held by the node's filter with or without
+    // Landlock, so its commands run but open no TCP or UDP socket, which the
+    // other pairing's still do, and no command of its sudo list runs. Without
+    // the filter none of its commands runs, and the node says why.
+    let (ok, said) = as_owner(&owner, &["folder", "network", "off", "--center", "lab"]);
+    assert!(ok, "{said}");
+    assert_eq!(
+        said.contains("warning: the owner turned the network off"),
+        !filter,
+        "{said}"
+    );
+    let (_, ls) = as_owner(&owner, &["folder", "ls", "--center", "lab"]);
+    assert!(ls.contains("its commands have no network"), "{ls}");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let udp_port = udp.local_addr().unwrap().port();
+    let tcp = format!("/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}' && echo open");
+    let send = format!("/bin/bash -c 'exec 3<>/dev/udp/127.0.0.1/{udp_port}' && echo open");
+    let opened = |r: &Result<Value, String>| {
+        r.as_ref()
+            .is_ok_and(|v| out(v) == "open\n" && v["exit_code"] == 0)
+    };
+    // The node reads the owner's change a moment later.
+    let mut first = Err(String::new());
+    for _ in 0..50 {
+        let (_, work, conn, _) = &mut links[0];
+        first = run(conn, work, &tcp).await;
+        if !opened(&first) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if filter {
+        assert!(first.is_ok() && !opened(&first), "{first:?}");
+        let (_, work, conn, _) = &mut links[0];
+        let r = run(conn, work, &send).await;
+        assert!(r.is_ok() && !opened(&r), "{r:?}");
+        let r = run(conn, work, "echo ran").await.unwrap();
+        assert_eq!(out(&r), "ran\n");
+        let e = run(conn, work, "sudo id -un").await.unwrap_err();
+        assert!(
+            e.contains("a command on the sudo list runs outside what keeps them off it"),
+            "{e}"
+        );
+    } else {
+        let e = first.unwrap_err();
+        assert!(
+            e.contains("cannot keep them off it") && e.contains("seccomp filters"),
+            "{e}"
+        );
+    }
+    let (_, work, conn, _) = &mut links[1];
+    for probe in [&tcp, &send] {
+        let r = run(conn, work, probe).await;
+        assert!(opened(&r), "{probe}: {r:?}");
+    }
+    let r = run(conn, work, "echo ran").await.unwrap();
+    assert_eq!(out(&r), "ran\n");
+    let r = run(conn, work, "sudo id -un").await.unwrap();
+    assert_eq!(out(&r), "root\n", "{r}");
+    drop((listener, udp));
+
+    // The pairing goes, and its folders with what they hold; the other's
+    // stay.
+    let (ok, said) = as_owner(&owner, &["center", "rm", "--center", "home"]);
+    assert!(ok, "{said}");
+    until("the home pairing's folders go", || {
+        !run_home.join("home").exists()
+    });
+    assert!(run_home.join("lab/home/.gitconfig").exists());
+
+    let (ok, said) = sh(Command::new(BIN).args(["uninstall", "--purge"]));
+    assert!(ok, "{said}");
+    assert!(!run_home.exists());
+    for name in ["lab", "home"] {
+        let _ = std::fs::remove_dir_all(format!("/srv/nrv167-{name}"));
+    }
 }

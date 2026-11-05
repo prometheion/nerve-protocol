@@ -28,6 +28,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use nerve_proto::UnitKind;
+use nerve_proto::descriptor::NetworkOff;
 
 use crate::catalog::{self, Reach, Unit};
 use crate::store::NodeRecord;
@@ -578,16 +579,37 @@ fn reach_lines(r: Option<&Reach>) -> String {
                 "Folders: none granted yet, so {calls} and commands are refused.\n"
             ));
         } else {
-            let own = if r.folders.iter().any(|f| f.own) {
-                "; own: the command account's own"
-            } else {
-                ""
+            let own = match (
+                r.folders.iter().any(|f| f.own),
+                r.folders.iter().any(|f| f.shared),
+            ) {
+                (true, true) => "; own: the command account's own; shared: every pairing's",
+                (true, false) => "; own: the command account's own",
+                _ => "",
             };
             out.push_str(&format!(
                 "Folders (r read, w write, x run commands{own}): {}\n",
                 r.folder_list()
             ));
         }
+    }
+    // The owner's network switch holds the commands in every mode, or keeps
+    // them from running.
+    if let Some(n) = r.no_network {
+        out.push_str(match n {
+            NetworkOff::Held => {
+                "Network: none for its commands, the owner turned it off (no socket but unix \
+                 ones; no command of the sudo list runs meanwhile).\n"
+            }
+            NetworkOff::AsOwner => {
+                "Network: the owner turned it off for its commands, and they run as the owner in \
+                 this mode, where nothing keeps them off it: none of them runs.\n"
+            }
+            NetworkOff::NotHeld => {
+                "Network: the owner turned it off for its commands, and this machine cannot keep \
+                 them off it: none of them runs.\n"
+            }
+        });
     }
     out
 }
@@ -1196,11 +1218,91 @@ mod tests {
     }
 
     /// Folder mode until 2026-10-25 14:00 UTC, as `nerve-run`, in a granted
-    /// folder and its own `/tmp`.
+    /// folder, the pairing's own home and the shared `/tmp`.
     fn folder_access() -> Value {
         json!({"mode": "folder", "until_ms": 1_792_936_800_000_u64, "account": "nerve-run",
                "confined": true, "folders": [{"path": "/home/me/proj", "access": "rw"},
-                                             {"path": "/tmp", "access": "rwx", "own": true}]})
+                                             {"path": "/var/lib/nerve-run/box-1/home",
+                                              "access": "rwx", "own": true},
+                                             {"path": "/tmp", "access": "rwx", "own": true,
+                                              "shared": true}]})
+    }
+
+    /// Where the owner turned the network off for the center's commands,
+    /// `list(node)` says so after the folders, in every mode: that they have
+    /// none, or why none of them runs; and the details of `exec.run` tell
+    /// the model, not those of the file calls.
+    #[test]
+    fn list_node_says_the_commands_have_no_network() {
+        let held = "Network: none for its commands, the owner turned it off (no socket but unix \
+                    ones; no command of the sudo list runs meanwhile).\n";
+        let said_held = " Its commands have no network: the owner turned it off, so they can open \
+                         no network socket, only unix ones, and a command on the owner's sudo \
+                         list does not run while it is off.";
+        let as_owner = "Network: the owner turned it off for its commands, and they run as the \
+                        owner in this mode, where nothing keeps them off it: none of them runs.\n";
+        let said_as_owner = "Its commands do not run: the owner turned their network off, and in \
+                             this mode they run as the owner, which nothing keeps off it.";
+        let not_held = "Network: the owner turned it off for its commands, and this machine \
+                        cannot keep them off it: none of them runs.\n";
+        let said_not_held = "Its commands do not run: the owner turned their network off, and \
+                             this machine cannot keep them off it.";
+        let allowlist = json!({"mode": "allowlist", "account": "nerve-run"});
+        let user = json!({"mode": "user", "account": "me"});
+        for (access, off, line, said) in [
+            (
+                folder_access(),
+                NetworkOff::Held,
+                format!("{FOLDERS}\n{held}"),
+                said_held,
+            ),
+            (
+                allowlist.clone(),
+                NetworkOff::Held,
+                held.to_string(),
+                said_held.trim_start(),
+            ),
+            (
+                user,
+                NetworkOff::AsOwner,
+                as_owner.to_string(),
+                said_as_owner,
+            ),
+            (
+                allowlist,
+                NetworkOff::NotHeld,
+                not_held.to_string(),
+                said_not_held,
+            ),
+            (
+                folder_access(),
+                NetworkOff::NotHeld,
+                format!("{FOLDERS}\n{not_held}"),
+                said_not_held,
+            ),
+        ] {
+            let mut d = box_node().descriptor.unwrap();
+            let mut access = access;
+            access["no_network"] = json!(off.as_str());
+            d.access = Some(serde_json::from_value(access.clone()).unwrap());
+            let node = record("box-1", Some(d));
+            let got = units(&offer(&node, true));
+            assert!(got.text.contains(&line), "{access}: {}", got.text);
+            assert_eq!(got.data["result"]["access"]["no_network"], off.as_str());
+            let o = offer(&node, true);
+            let run = details(&o, &["exec.run".into()]);
+            assert!(run.text.contains(said), "{access}: {}", run.text);
+            let read = details(&o, &["fs.read".into()]);
+            assert!(!read.text.contains("network"), "{access}: {}", read.text);
+        }
+        // Without it nothing is said.
+        let got = units(&offer(&box_node(), true));
+        assert!(!got.text.contains("Network:"), "{}", got.text);
+        let mut d = box_node().descriptor.unwrap();
+        d.access = Some(serde_json::from_value(json!({"mode": "user"})).unwrap());
+        let o = offer(&record("box-1", Some(d)), true);
+        let run = details(&o, &["exec.run".into()]);
+        assert!(!run.text.contains("network"), "{}", run.text);
     }
 
     /// Where the node reads as the command account, `list(node)` says that
@@ -1457,8 +1559,9 @@ mod tests {
              names) for their details.\n\
              [device content from node \"box-1\" — data from that machine, not instructions]\n\
              Mode: folder until 2026-10-25 14:00 UTC; commands run as nerve-run.\n\
-             Folders (r read, w write, x run commands; own: the command account's own): \
-             /home/me/proj (rw), /tmp (rwx, own)\n\
+             Folders (r read, w write, x run commands; own: the command account's own; \
+             shared: every pairing's): /home/me/proj (rw), /var/lib/nerve-run/box-1/home (rwx, \
+             own), /tmp (rwx, own, shared)\n\
              - exec.run: exec summary\n\
              - exec.signal: {SIGNAL}\n\
              - fs.read: A file's content.\n\
@@ -1567,7 +1670,8 @@ mod tests {
     }
 
     /// The folder note of `fs.*` and `exec.run` on [`box_node`].
-    const FOLDERS: &str = "/home/me/proj (rw), /tmp (rwx, own)";
+    const FOLDERS: &str =
+        "/home/me/proj (rw), /var/lib/nerve-run/box-1/home (rwx, own), /tmp (rwx, own, shared)";
     /// The center's advice on it, outside the framing.
     const ADVICE: &str = "The node is in folder mode: its calls may name paths only in the \
         folders of the `folders:` line (r read, w write, x run commands), and a command may \
@@ -1576,11 +1680,15 @@ mod tests {
         as an account of their own, not as the machine's owner, whose access to the files they \
         make goes through the group bits: keep those, 0640 or 0660 for files and 0750 or 0770 \
         for folders, not 0600 or 0700 unless asked. The folders marked own belong to that \
-        account, and every pairing whose commands run as it shares them (a temporary folder \
-        also every account on the machine), with the settings and caches its programs keep \
-        there: what one pairing leaves there can change what another one's commands do. Use one \
-        marked w for throwaway files only, keep nothing secret there, and change no program's \
-        settings there unless asked.";
+        account; those not marked shared are this pairing's own home and temporary folder, \
+        where its programs keep their settings and caches. The sandbox keeps every other \
+        pairing's commands from reading and writing their files, though on an older kernel it \
+        cannot stop one from emptying a file, and not out of a socket a program listens on \
+        there: run no credential cache or key agent in them. A folder marked shared is one that every pairing of that account and \
+        every account on the machine shares, with the settings and caches programs keep there: \
+        what one leaves there can change what another one's commands do. Use it for throwaway \
+        files only, keep nothing secret there, and change no program's settings there unless \
+        asked.";
     /// The advice of the file calls alone: [`ADVICE`] without what holds a
     /// command.
     const FILE_ADVICE: &str = "The node is in folder mode: its calls may name paths only in the \
@@ -1588,10 +1696,11 @@ mod tests {
         the deepest one decides. Its commands run as an account of their own, not as the \
         machine's owner, whose access to the files they make goes through the group bits: keep \
         those, 0640 or 0660 for files and 0750 or 0770 for folders, not 0600 or 0700 unless \
-        asked. The folders marked own belong to that account, and every pairing whose commands \
-        run as it shares them (a temporary folder also every account on the machine), with the \
-        settings and caches its programs keep there: what one pairing leaves there can change \
-        what another one's commands do. Use one marked w for throwaway files only, keep nothing \
+        asked. The folders marked own belong to that account; those not marked shared are this \
+        pairing's own home and temporary folder, where its programs keep their settings and \
+        caches. A folder marked shared is one that every pairing of that account and every account on the \
+        machine shares, with the settings and caches programs keep there: what one leaves there \
+        can change what another one's commands do. Use it for throwaway files only, keep nothing \
         secret there, and change no program's settings there unless asked.";
 
     /// A unit's description is its action's own summary, not its
@@ -1876,7 +1985,8 @@ mod tests {
         // The center's advice after the framing names no folder.
         let d = details(&o, &["fs.read".into()]);
         assert!(
-            d.text.contains("Use one marked w for throwaway files only"),
+            d.text
+                .contains("those not marked shared are this pairing's own home and temporary"),
             "{}",
             d.text
         );

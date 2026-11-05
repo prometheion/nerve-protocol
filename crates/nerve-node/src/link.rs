@@ -36,7 +36,7 @@ use nerve_transport::log::{Level, call_line, span};
 use nerve_transport::net::Proxy;
 use nerve_transport::ws::{self, ConnectError, WsMessage};
 
-use crate::daemon::{CenterState, LinkHandle, Shared, lock};
+use crate::daemon::{CenterState, HoldAt, LinkHandle, Shared, lock};
 use crate::descriptor;
 use crate::exec::{self, RunCall, RunOptions, Sig, SignalArgs};
 use crate::fs::{FsCall, WirePath, conflict};
@@ -167,12 +167,33 @@ fn stop_reason(cfg: &NodeConfig, name: &str) -> Option<ByeReason> {
 }
 
 /// Resolves once the config ends center `name`'s link ([`stop_reason`]),
-/// or the daemon is going away.
-async fn halted(shared: &Shared, name: &str, changed: &mut watch::Receiver<u64>) {
-    while stop_reason(&shared.config(), name).is_none() {
+/// or the daemon is going away. Meanwhile it looks after the commands of the
+/// link that dropped (`parked`), which no `serve` looks after: if the owner
+/// turned the network off, those that have it are ended now, not when the
+/// center resumes the link or its grace ends.
+async fn halted(
+    shared: &Shared,
+    name: &str,
+    changed: &mut watch::Receiver<u64>,
+    parked: Option<Arc<Link>>,
+) {
+    loop {
+        if stop_reason(&shared.config(), name).is_some() {
+            return;
+        }
+        if let Some(link) = &parked {
+            link.end_commands_without_network("(running commands)");
+        }
         if changed.changed().await.is_err() {
             return;
         }
+    }
+}
+
+impl Parked {
+    /// The link, for [`halted`], which cannot borrow the slot it waits for.
+    fn link_of(parked: &Option<Parked>) -> Option<Arc<Link>> {
+        parked.as_ref().map(|p| p.link().clone())
     }
 }
 
@@ -219,7 +240,7 @@ pub(crate) async fn run_center(shared: Arc<Shared>, name: String) {
         let read = {
             let (s, n) = (shared.clone(), name.clone());
             let read = tokio::task::spawn_blocking(move || load_keys(&s, &n));
-            let halt = halted(&shared, &name, &mut changed);
+            let halt = halted(&shared, &name, &mut changed, Parked::link_of(&parked));
             dropping_at(read, &mut parked, grace, halt).await
         };
         let (key, next) = match read.unwrap_or_else(|e| Err(format!("the key read stopped: {e}"))) {
@@ -239,7 +260,7 @@ pub(crate) async fn run_center(shared: Arc<Shared>, name: String) {
             }
         };
         let grace = parked.as_ref().map(|p| p.until);
-        let halt = halted(&shared, &name, &mut changed);
+        let halt = halted(&shared, &name, &mut changed, Parked::link_of(&parked));
         let proxy = match dropping_at(
             proxy_for(&shared.paths, &cfg, &url),
             &mut parked,
@@ -271,13 +292,8 @@ pub(crate) async fn run_center(shared: Arc<Shared>, name: String) {
                 limits::MESSAGE_BYTES as usize,
             );
             let grace = parked.as_ref().map(|p| p.until);
-            dropping_at(
-                connect,
-                &mut parked,
-                grace,
-                halted(&shared, &name, &mut changed),
-            )
-            .await
+            let halt = halted(&shared, &name, &mut changed, Parked::link_of(&parked));
+            dropping_at(connect, &mut parked, grace, halt).await
         };
         let outcome = match dialled {
             Err(ConnectError::Unknown) => {
@@ -362,6 +378,11 @@ pub(crate) async fn run_center(shared: Arc<Shared>, name: String) {
                     let cfg = shared.config();
                     if cfg.locked || !cfg.center(&name).is_some_and(CenterEntry::dials) {
                         return;
+                    }
+                    // The commands of the link that dropped have no `serve`
+                    // to end them when the owner turns the network off.
+                    if let Some(link) = Parked::link_of(&parked) {
+                        link.end_commands_without_network("(running commands)");
                     }
                 }
             }
@@ -566,7 +587,7 @@ async fn session(
         // The grace, a lock or a pause may come while the challenge is
         // awaited; the parked link's calls end on time then.
         let grace = parked.as_ref().map(|p| p.until);
-        let halt = halted(shared, &entry.name, &mut *changed);
+        let halt = halted(shared, &entry.name, &mut *changed, Parked::link_of(&parked));
         let step = handshake_step(&mut stream, method::CHALLENGE);
         let ch: Challenge = dropping_at(step, &mut parked, grace, halt).await?;
         // A parked link is offered while its grace lasts and it still keeps
@@ -624,7 +645,7 @@ async fn session(
             .await
             .map_err(|e| (None, format!("send: {e}")))?;
         // An offered link waits for the answer, but not past a lock or pause.
-        let halt = halted(shared, &entry.name, &mut *changed);
+        let halt = halted(shared, &entry.name, &mut *changed, Parked::link_of(&parked));
         let step = handshake_step(&mut stream, method::WELCOME);
         let w: Welcome = dropping_at(step, &mut parked, None, halt).await?;
         if w.version != PROTOCOL_VERSION {
@@ -705,7 +726,7 @@ async fn session(
                 takes: AtomicU64::new(takes),
                 handle,
                 calls: Mutex::default(),
-                commands: Mutex::default(),
+                commands: Commands::default(),
                 taps: Mutex::default(),
                 streams: Mutex::default(),
                 next_sid: AtomicU32::new(1),
@@ -908,8 +929,9 @@ struct Link {
     handle: Arc<LinkHandle>,
     /// Calls in flight; whoever removes an entry sends its reply.
     calls: Mutex<HashMap<Id, InFlight>>,
-    /// Running `exec.run` calls → what ends them.
-    commands: Mutex<HashMap<Id, exec::Ender>>,
+    /// Running `exec.run` calls → what ends them, and whether the owner's
+    /// network switch holds them.
+    commands: Commands<exec::Ender>,
     /// Running `exec.run` calls → their output, for `exec`'s `output`
     /// stream; `None` for a sudo command, whose output is not streamed.
     taps: Mutex<HashMap<Id, Option<Arc<crate::tap::Tap>>>>,
@@ -1079,6 +1101,7 @@ impl Link {
                     self.check_rev(&mut rev);
                     // A mode whose time limit passed takes what it gave.
                     self.recheck_streams().await;
+                    self.end_commands_without_network("(running commands)");
                     self.check_status();
                     crate::rotate::drop_old_pin(&self.shared, &self.name);
                     if self.under_a_pin_that_stopped() {
@@ -1114,6 +1137,7 @@ impl Link {
                     }
                     self.check_rev(&mut rev);
                     self.recheck_streams().await;
+                    self.end_commands_without_network("(running commands)");
                     if cfg.version != version {
                         version = cfg.version;
                         if entry.settings == SettingsGrant::Write {
@@ -1166,6 +1190,56 @@ impl Link {
                     .event("node", "descriptor_changed", json!({"rev": now}));
             }
         }
+    }
+
+    /// Ends this center's running commands that have the network while its
+    /// switch is on: a command that started with the network keeps it (the
+    /// filter goes on at its start), and could pass it to the later commands,
+    /// which the switch holds, through a socket it listens on in the
+    /// pairing's own folders. It goes by each command, not by the switch
+    /// going on: the owner may turn it on, off and on again between two
+    /// looks. Audited as the node's decision, with `target` for where it
+    /// looked. Whoever turned it on: the owner, or the center for itself.
+    fn end_commands_without_network(&self, target: &str) {
+        if !self.network_off_now() {
+            return;
+        }
+        let ended = self.commands.end_unheld();
+        if ended.is_empty() {
+            return;
+        }
+        self.audit_ended_without_network(target);
+        for ender in ended {
+            ender.signal(Sig::Kill);
+        }
+    }
+
+    /// Whether the owner's network switch is on for this center now.
+    fn network_off_now(&self) -> bool {
+        self.entry().is_some_and(|(_, e)| e.policy.no_network)
+    }
+
+    /// Writes the end of a command that has the network after the owner's
+    /// switch went on to the audit log and the node's log.
+    fn audit_ended_without_network(&self, target: &str) {
+        let reason = "the owner turned off the network of this center's commands; a command that started with it does not keep it";
+        tracing::warn!(
+            "center {}: ending its running commands: {reason}",
+            self.name
+        );
+        self.shared.audit(&Entry {
+            ts: crate::now_ms(),
+            center: self.name.clone(),
+            cap: "exec".into(),
+            action: "run".into(),
+            target: target.into(),
+            decision: "killed".into(),
+            code: Some("no_network".into()),
+            session: None,
+            reason: Some(reason.into()),
+            command: None,
+            args: None,
+        });
     }
 
     /// Sends a `node` state change when the status moved (spec §7.1). Other
@@ -2133,7 +2207,8 @@ impl Link {
         // The gate and the sandbox see the built-in folders of `nerve-run`
         // too; the config keeps the owner's. A program (a provider) works
         // with the owner's rights, not that account's: its paths count by
-        // the folders the owner granted alone.
+        // the folders the owner granted alone, cut around the pairings'
+        // homes.
         let granted = entry.clone();
         let entry = self.shared.with_built_in(&cfg, entry);
         let view = descriptor::for_call(
@@ -2202,7 +2277,7 @@ impl Link {
                     format!("the provider {provider} is not attached now"),
                 )
             })?;
-            let entry = granted;
+            let entry = self.shared.around_pairings(&cfg, granted);
             nerve_proto::schema::validate(&action.params, &Value::Object(inv.args.clone()))?;
             let marked = nerve_proto::schema::path_args(&action.params);
             // The arguments its schema marks as paths are the call's rule
@@ -2295,6 +2370,17 @@ impl Link {
                 if self.shared.separate(&entry.policy) {
                     self.acls_ready(&cfg).await?;
                 }
+                // The pairing's own home and temporary folder are the ones the
+                // node made for it: those an earlier pairing under its name
+                // left are deleted first, and while that cannot be done the
+                // call does not run (it would read them).
+                let own_ready = match known
+                    .as_ref()
+                    .filter(|_| self.shared.separate(&entry.policy))
+                {
+                    Some(a) => self.own_ready(a, &entry).await.map(drop),
+                    None => Ok(()),
+                };
                 // A path that does not resolve is in the audit once the
                 // switch is over, as for a provider's.
                 let parsed = {
@@ -2312,7 +2398,9 @@ impl Link {
                 // that account's access holds the reads in no folder
                 // (nerve_policy::decide::Reads), as in the gate.
                 let by_folders = entry.policy.mode_at(crate::now_ms()) == Mode::Folder;
-                let by_account = by_folders && self.reads_by_account(&entry, known.as_ref());
+                let by_account = (by_folders && self.reads_by_account(&entry, known.as_ref()))
+                    .then(|| known.clone())
+                    .flatten();
                 let unconfined = self.shared.unconfined_as(&cfg, || known.clone());
                 // Its refusal names the path as given, as a program's does.
                 let named = match inv.args.get("path") {
@@ -2335,10 +2423,18 @@ impl Link {
                 .await
                 .map_err(|e| as_given(e, &named))?;
                 account.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
+                own_ready.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
                 let protected = self.protected(&entry);
                 let deny = RuleSet::new(&entry.policy.deny, &self.home());
                 let folders = entry.policy.folders.clone();
                 let action = inv.action.clone();
+                // The account's home, where every pairing's own folders lie,
+                // is walked only as far as this pairing's own.
+                let name = entry.name.clone();
+                let run_home = known
+                    .clone()
+                    .filter(|_| self.shared.separate(&entry.policy))
+                    .map(|a| a.home);
                 tokio::task::spawn_blocking(move || {
                     let _as = act_as(known.as_ref())?;
                     // An entry the direct read would refuse stays out of the
@@ -2350,20 +2446,30 @@ impl Link {
                     // open to every account and out of the node's own
                     // process as the gate does; what that account may not
                     // open the walk cannot read anyway.
-                    let open = |p: &std::path::Path| {
-                        if crate::fs::open_to_all(p) && !crate::fs::own_process(p) {
+                    // Nor does it go into what the account owns there: another
+                    // pairing's (crate::fs::accounts_own).
+                    let open = |p: &std::path::Path| match &by_account {
+                        Some(a)
+                            if crate::fs::open_to_all(p)
+                                && !crate::fs::own_process(p)
+                                && !crate::fs::accounts_own(p, a) =>
+                        {
                             Ok(())
-                        } else {
-                            Err(String::new())
                         }
+                        _ => Err(String::new()),
                     };
-                    let reads = if by_account {
+                    let reads = if by_account.is_some() {
                         Reads::Account(&open)
                     } else {
                         Reads::Folders
                     };
+                    let pairings = run_home
+                        .as_ref()
+                        .map(|h| crate::account::pairing_view(h, &name));
                     let skip = |p: &std::path::Path, through: bool| {
-                        protected.check(p, false, &folders).is_some()
+                        pairings.as_ref().is_some_and(|(h, mine)| {
+                            crate::account::in_other_pairings(p, h, mine, true)
+                        }) || protected.check(p, false, &folders).is_some()
                             || deny
                                 .find("fs", &action, &nerve_policy::paths::to_wire(p))
                                 .is_some()
@@ -2612,7 +2718,9 @@ impl Link {
             unconfined: unconfined.map(Into::into),
             sudo: self.shared.sudo_on(),
             shell: self.shell_for(command),
-            by_account: self.reads_by_account(entry, account),
+            by_account: account
+                .filter(|a| self.reads_by_account(entry, Some(a)))
+                .cloned(),
             // The node's own `fs` and the commands of a config capability
             // (as `nerve-run`) read with that account's rights; a program
             // with the owner's.
@@ -2620,9 +2728,24 @@ impl Link {
         };
         // The policy looks at the paths as the account (crate::account::FsAs);
         // the audit entry below is the node's own again.
-        let decision = {
+        let (decision, fence) = {
             let _as = act_as(account)?;
-            judged.with(|env| nerve_policy::decide(&entry.policy, env, &call))
+            let decision = judged.with(|env| nerve_policy::decide(&entry.policy, env, &call));
+            // Whatever the mode and the rules say, a call of a pairing whose
+            // commands run as `nerve-run`, made as that account, gets no
+            // other pairing's folders: the node opens the paths as that
+            // account, which owns them all.
+            let fence = account
+                .filter(|_| self.shared.separate(&entry.policy))
+                .and_then(|run| crate::account::fence(run, &entry.name));
+            let decision = match (decision, &fence) {
+                (Decision::Allow, Some((run_home, mine))) => {
+                    crate::account::other_pairings(targets, run_home, mine, program.is_some())
+                        .map_or(Decision::Allow, Decision::Forbidden)
+                }
+                (decision, _) => decision,
+            };
+            (decision, fence)
         };
         // A program handed a folder follows the links in it: where they
         // lead is judged too, once the call is allowed, so a folder the
@@ -2661,7 +2784,21 @@ impl Link {
                     let _as = act_as(account.as_ref())?;
                     Ok::<_, RpcError>(judged.with(|env| {
                         let check = nerve_policy::LinkCheck::new(&policy, env, &call);
-                        let mut judge = |l: &nerve_policy::Link| check.refuse(l);
+                        // The policy does not know the other pairings'
+                        // folders: in allowlist mode a rule may cover a
+                        // link's place there, so the fence judges it too.
+                        let mut judge = |l: &nerve_policy::Link| {
+                            check.refuse(l).or_else(|| {
+                                fence.as_ref().and_then(|(run_home, mine)| {
+                                    crate::account::link_to_other_pairings(
+                                        l,
+                                        &targets[l.handed].path,
+                                        run_home,
+                                        mine,
+                                    )
+                                })
+                            })
+                        };
                         match crate::fs::links_below(
                             &targets,
                             crate::fs::LINKS_LIMIT,
@@ -3020,9 +3157,9 @@ impl Link {
         let sig = Sig::parse(&s.signal)
             .ok_or_else(|| RpcError::invalid_args("signal must be term, kill or int"))?;
         let id = Id::Num(s.call);
-        let ender = lock(&self.commands)
+        let ender = self
+            .commands
             .get(&id)
-            .cloned()
             .ok_or_else(|| RpcError::invalid_args(format!("no running command {id}")))?;
         ender.signal(sig);
         Ok(json!({}))
@@ -3049,6 +3186,24 @@ impl Link {
             .get("command")
             .and_then(Value::as_str)
             .is_some_and(|c| nerve_policy::sudo_command(c).is_some());
+        // The owner's network switch holds every command of the pairing, in
+        // every mode. Where the node cannot hold one to it (it would run as
+        // the owner, or the machine has no filter), none runs; nor does a
+        // command on the sudo list, which runs outside the filter.
+        let off_net = self.shared.network_refusal(&entry.policy).or_else(|| {
+            (sudo_call && entry.policy.no_network).then_some(crate::daemon::NETWORK_SUDO)
+        });
+        if let Some(why) = off_net {
+            let target = inv.args.get("command").and_then(Value::as_str);
+            self.audit(
+                inv,
+                target.unwrap_or_default(),
+                "forbidden",
+                Some("forbidden"),
+                Some(why),
+            );
+            return Err(RpcError::forbidden(why));
+        }
         let as_root = sudo_call && cfg!(target_os = "linux") && self.shared.separate(&entry.policy);
         let account = if as_root {
             Ok(Some(root_account()))
@@ -3069,15 +3224,52 @@ impl Link {
         } else {
             known.clone()
         };
-        let start_in = looks_as
+        // A command of `nerve-run` starts in its pairing's own home
+        // (crate::account::Own), not the account's. Its folders are made
+        // here where the pairing's sync has not made them yet, so the
+        // folder it starts in is there to be looked at; one that cannot be
+        // made stops the command once it is decided and audited.
+        let ready = match known
             .as_ref()
-            .map_or(&self.shared.home, |a| &a.home)
-            .clone();
+            .filter(|_| self.shared.separate(&entry.policy) && !sudo_call)
+        {
+            Some(a) => self.own_ready(a, entry).await.map(Some),
+            None => Ok(None),
+        };
+        let pairing = match &ready {
+            Ok(own) => own.clone(),
+            Err(_) => known
+                .as_ref()
+                .map(|a| crate::account::Own::of(&a.home, &entry.name)),
+        };
+        let start_in = match &pairing {
+            Some(o) => o.home.clone(),
+            None => looks_as
+                .as_ref()
+                .map_or(&self.shared.home, |a| &a.home)
+                .clone(),
+        };
         // `~` of the folders and rules: the owner's.
         let home = self.shared.rules_home(cfg);
         // `nerve-run` sees the folders once their ACLs are on.
         if self.shared.separate(&entry.policy) && !sudo_call {
             self.acls_ready(cfg).await?;
+        }
+        // Where the pairing's home cannot be had and the call names no other
+        // folder, the command has nowhere to start: it says why, and is in
+        // the audit, rather than the missing folder's path.
+        if let Err(why) = &ready
+            && matches!(inv.args.get("cwd"), None | Some(Value::Null))
+        {
+            let target = inv.args.get("command").and_then(Value::as_str);
+            self.audit(
+                inv,
+                target.unwrap_or_default(),
+                "forbidden",
+                Some("unavailable"),
+                Some(why),
+            );
+            return Err(RpcError::new(ErrorCode::Unavailable, why.clone()));
         }
         // The paths are looked at as the account (crate::account::FsAs).
         let rc = {
@@ -3167,11 +3359,14 @@ impl Link {
         } else {
             None
         };
+        // Its pairing's folders are there before it starts.
+        let pairing = ready.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
+        let separate = pairing.filter(|_| separate);
         let guard = Running::start(self, id.clone(), cfg.limits.max_running as usize)?;
         // A sudo command's output is not streamed (exec::run leaves it out).
         let tap = guard.tap(sudo.is_none() && root.is_none());
         let own = self.shared.own(cfg);
-        let confine = folder || separate && self.shared.exe.is_some();
+        let confine = folder || separate.is_some() && self.shared.exe.is_some();
         let landlock = (confine && self.shared.confinement.landlock_abi.is_some()).then(|| {
             // The folders' entries are listed as the account.
             let _as = act_as(known.as_ref()).ok().flatten();
@@ -3179,14 +3374,44 @@ impl Link {
             // in place of a folder inside one leads nowhere the next
             // command gets rules for.
             let writable = exec::write_folders(cfg, &home);
-            exec::landlock_spec(&entry.policy, &home, &own, &writable)
+            let mut spec = match (separate.as_ref(), known.as_ref()) {
+                // Cut around every pairing's folders as the account sees the
+                // folders, which the gate's cut may not have resolved.
+                (Some(mine), Some(run)) => {
+                    exec::pairing_spec(&entry.policy, &home, &own, &writable, &run.home, mine)
+                }
+                _ => exec::landlock_spec(&entry.policy, &home, &own, &writable),
+            };
+            // The owner's switch, Landlock's layer of it: no TCP, where the
+            // kernel has the rules.
+            spec.no_network = entry.policy.no_network;
+            spec
         });
+        // The owner's switch: the command makes no socket but a unix one,
+        // held by the node's filter, in every mode. It got here only where
+        // the filter holds it (refused above otherwise).
+        let no_network = entry.policy.no_network;
         // Counted while it runs, so the keys do not move into the keyring
         // meanwhile, and not started when they moved after `cfg` was taken.
         let open = crate::daemon::reaches_bus(landlock.as_ref(), || account.clone())
             .then(|| self.shared.open_to_bus())
             .transpose()
             .map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
+        // The last look, after all the call waited for: the owner's switch
+        // may be on since the call was decided, and the mode it went by may
+        // have ended since (the clock was read more than once), so the
+        // command would run without the filter, or as the owner.
+        self.shared.held_at(HoldAt::BeforeLastLook).await;
+        if let Some(why) = crate::daemon::late_network_refusal(
+            no_network,
+            self.network_off_now(),
+            separate.is_some() || landlock.is_some(),
+            self.shared.service,
+        ) {
+            self.audit(inv, &command, "forbidden", Some("forbidden"), Some(why));
+            return Err(RpcError::forbidden(why));
+        }
+        self.shared.held_at(HoldAt::AfterLastLook).await;
         let opts = RunOptions {
             shell: cfg.machine.shell.clone(),
             landlock,
@@ -3207,8 +3432,9 @@ impl Link {
                 .ok()
                 .map(|c| (c.clone(), granted)),
             tap,
+            no_network,
         };
-        let r = exec::run(&rc, &opts, |e| guard.started(e)).await;
+        let r = exec::run(&rc, &opts, |e| guard.started(e, no_network)).await;
         drop(open);
         drop(guard);
         if let Ok(v) = &r {
@@ -3290,6 +3516,14 @@ impl Link {
         // command as it runs, the call's values in it, holds the owner's own
         // words and stays in the node's own log.
         let ran = nerve_policy::config::ConfigCapability::line(&argv);
+        // A capability of the config is a command of `nerve-run` in every
+        // mode: where the owner turned the pairing's network off, it runs
+        // only where the machine can hold it to that, whatever its effect.
+        if entry.policy.no_network && !self.shared.network_held() {
+            let why = crate::daemon::NETWORK_NOT_HELD;
+            self.audit(inv, &target, "forbidden", Some("forbidden"), Some(why));
+            return Err(RpcError::forbidden(why));
+        }
         let unconfined = (effect == Effect::Execute)
             .then(|| self.shared.unconfined_as(cfg, || known.clone()))
             .flatten();
@@ -3324,24 +3558,37 @@ impl Link {
                 ),
             ));
         }
-        // It starts in the account's home (the node's own by hand).
-        let start_in = account
+        // It starts in its pairing's own home (the node's own by hand),
+        // made where it is missing.
+        let pairing = match account.as_ref() {
+            Some(a) => self.own_ready(a, &entry).await.map(Some),
+            None => Ok(None),
+        }
+        .map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
+        let start_in = pairing
             .as_ref()
-            .map_or_else(|| self.shared.home.clone(), |a| a.home.clone());
+            .map_or_else(|| self.shared.home.clone(), |o| o.home.clone());
         let home = self.shared.rules_home(cfg);
         let own = self.shared.own(cfg);
+        // Held off the network like the pairing's commands, by the node's
+        // filter, in every mode (refused above where it has none).
+        let no_network = entry.policy.no_network;
         let landlock = (self.shared.exe.is_some()
             && self.shared.confinement.landlock_abi.is_some())
         .then(|| {
-            let policy = crate::config_cap::confined(
-                &entry.policy,
-                self.shared.separate(&entry.policy),
-                account.as_ref().map(|a| a.home.as_path()),
-            );
             // The folders' entries are listed as the account.
             let _as = act_as(account.as_ref()).ok().flatten();
             let writable = exec::write_folders(cfg, &home);
-            exec::landlock_spec(&policy, &home, &own, &writable)
+            exec::config_spec(
+                &entry.policy,
+                self.shared.separate(&entry.policy),
+                pairing.as_ref(),
+                account.as_ref().map(|run| run.home.as_path()),
+                &home,
+                &own,
+                &writable,
+                no_network,
+            )
         });
         let granted = cfg
             .limits
@@ -3356,6 +3603,16 @@ impl Link {
         );
         let guard = Running::start(self, id.clone(), cfg.limits.max_running as usize)?;
         let timeouts = exec::Timeouts::from_limits(&cfg.limits);
+        // The owner's switch may be on since the call was decided
+        // (`exec_run` has the same look).
+        self.shared.held_at(HoldAt::BeforeLastLook).await;
+        if let Some(why) =
+            crate::daemon::late_network_refusal(no_network, self.network_off_now(), true, true)
+        {
+            self.audit(inv, &target, "forbidden", Some("forbidden"), Some(why));
+            return Err(RpcError::forbidden(why));
+        }
+        self.shared.held_at(HoldAt::AfterLastLook).await;
         let opts = RunOptions {
             shell: None,
             landlock,
@@ -3365,7 +3622,7 @@ impl Link {
             timeouts,
             sudo: None,
             account,
-            separate: true,
+            separate: pairing,
             pass_env: cfg.machine.command_env.clone(),
             own,
             root: None,
@@ -3376,8 +3633,9 @@ impl Link {
                 .ok()
                 .map(|c| (c.clone(), granted)),
             tap: guard.tap(true),
+            no_network,
         };
-        let r = exec::run(&rc, &opts, |e| guard.started(e)).await;
+        let r = exec::run(&rc, &opts, |e| guard.started(e, no_network)).await;
         drop(guard);
         if let Ok(v) = &r {
             self.audit_killed(inv, target, Some(ran), v);
@@ -3408,6 +3666,19 @@ fn root_account() -> crate::service::Account {
 }
 
 impl Link {
+    /// [`Shared::own_ready`] off the runtime: it does file I/O, and waits for
+    /// work on this pairing's folders, a delete of what a big home holds.
+    async fn own_ready(
+        &self,
+        run: &crate::service::Account,
+        entry: &CenterEntry,
+    ) -> Result<crate::account::Own, String> {
+        let (s, run, entry) = (self.shared.clone(), run.clone(), entry.clone());
+        tokio::task::spawn_blocking(move || s.own_ready(&run, &entry))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+
     /// Waits until the folders' ACLs for `nerve-run` follow `cfg`
     /// (crate::acl), or says why its call does not run: an entry that should
     /// have come off is still there. A change that takes long holds the call.
@@ -3581,7 +3852,7 @@ pub(crate) fn may_take(
         unconfined: None,
         sudo: false,
         shell: shell_of(cfg.machine.shell.as_deref(), None),
-        by_account: false,
+        by_account: None,
         provider: true,
     };
     let call = Call {
@@ -3607,8 +3878,9 @@ struct Judged {
     unconfined: Option<String>,
     sudo: bool,
     shell: Shell,
-    /// Whether the node reads as the command account (Link::reads_by_account).
-    by_account: bool,
+    /// The command account, where the node reads as it
+    /// (Link::reads_by_account).
+    by_account: Option<crate::service::Account>,
     /// Whether the call is a program's, not the node's own `fs`.
     provider: bool,
 }
@@ -3619,14 +3891,17 @@ impl Judged {
     /// asked of that account (crate::fs::may_read_outside), so `f` runs
     /// under the switch to it.
     fn with<R>(&self, f: impl FnOnce(&Env) -> R) -> R {
-        let may_read = |p: &std::path::Path| crate::fs::may_read_outside(p, self.provider);
+        let may_read = |p: &std::path::Path| match &self.by_account {
+            Some(a) => crate::fs::may_read_outside(p, self.provider, a),
+            None => Err(String::new()),
+        };
         f(&Env {
             home: &self.home,
             protected: &self.protected,
             unconfined: self.unconfined.as_deref(),
             sudo: self.sudo,
             shell: self.shell,
-            reads: if self.by_account {
+            reads: if self.by_account.is_some() {
                 Reads::Account(&may_read)
             } else {
                 Reads::Folders
@@ -3718,6 +3993,65 @@ fn settings_result(r: Result<u64, SetError>) -> Result<Value, RpcError> {
     }
 }
 
+/// A link's running `exec.run` calls: what ends each (`E`, the command's
+/// [`exec::Ender`]) and whether the owner's network switch holds it. The
+/// switch is checked against this, not against its own changes: whether a
+/// command has the network is a fact about the command.
+struct Commands<E> {
+    by_call: Mutex<HashMap<Id, Command<E>>>,
+}
+
+struct Command<E> {
+    ender: E,
+    /// It started under the switch (the node's filter is on it).
+    held: bool,
+    /// The switch ended it already, so it is not ended and audited again
+    /// while its process goes away.
+    ended: bool,
+}
+
+impl<E> Default for Commands<E> {
+    fn default() -> Commands<E> {
+        Commands {
+            by_call: Mutex::default(),
+        }
+    }
+}
+
+impl<E: Clone> Commands<E> {
+    fn add(&self, id: Id, ender: E, held: bool) {
+        lock(&self.by_call).insert(
+            id,
+            Command {
+                ender,
+                held,
+                ended: false,
+            },
+        );
+    }
+
+    fn get(&self, id: &Id) -> Option<E> {
+        lock(&self.by_call).get(id).map(|c| c.ender.clone())
+    }
+
+    fn remove(&self, id: &Id) {
+        lock(&self.by_call).remove(id);
+    }
+
+    /// What ends the commands that have the network and were not ended for
+    /// it yet, which the caller is to end now (the switch is on).
+    fn end_unheld(&self) -> Vec<E> {
+        lock(&self.by_call)
+            .values_mut()
+            .filter(|c| !c.held && !c.ended)
+            .map(|c| {
+                c.ended = true;
+                c.ender.clone()
+            })
+            .collect()
+    }
+}
+
 /// Counts a running command and remembers its process group, so a control
 /// request from below it is refused and `exec.signal` can find it.
 struct Running<'a> {
@@ -3758,11 +4092,18 @@ impl<'a> Running<'a> {
         tap
     }
 
-    fn started(&self, ender: &exec::Ender) {
+    /// `held` is whether the command runs under the owner's network switch.
+    /// One that does not, and the switch is on by now, is ended: the look at
+    /// the switch ([`Link::end_commands_without_network`]) may have come
+    /// before it was in `commands`. Looking after it is in them leaves no gap
+    /// between the two.
+    fn started(&self, ender: &exec::Ender, held: bool) {
         let pid = ender.pid();
         *lock(&self.pid) = Some(pid);
         lock(&self.link.shared.commands).insert(pid, self.link.name.clone());
-        lock(&self.link.commands).insert(self.id.clone(), ender.clone());
+        self.link.commands.add(self.id.clone(), ender.clone(), held);
+        self.link
+            .end_commands_without_network("(a command being started)");
     }
 }
 
@@ -3771,7 +4112,7 @@ impl Drop for Running<'_> {
         if let Some(pid) = *lock(&self.pid) {
             lock(&self.link.shared.commands).remove(&pid);
         }
-        lock(&self.link.commands).remove(&self.id);
+        self.link.commands.remove(&self.id);
         // Its streams end once they sent what it printed.
         if let Some(Some(tap)) = lock(&self.link.taps).remove(&self.id) {
             tap.end();
@@ -3877,6 +4218,32 @@ mod tests {
         fn drop(&mut self) {
             *self.0.lock().unwrap() = Some(std::time::Instant::now());
         }
+    }
+
+    /// The owner's switch ends the commands that have the network, each
+    /// once, whatever happened to the switch between two looks: one that
+    /// started after it went off and on again is found by its own mark, not
+    /// by a change; one that started under it is never touched.
+    #[test]
+    fn the_switch_ends_the_commands_that_have_the_network_once() {
+        use nerve_proto::Id;
+        let commands = super::Commands::<u32>::default();
+        commands.add(Id::Num(1), 11, false);
+        commands.add(Id::Num(2), 22, true);
+        // Nothing records how often the switch changed: the first look at
+        // it while it is on finds the command without the filter.
+        assert_eq!(commands.end_unheld(), [11]);
+        // Not again while its process goes away.
+        assert!(commands.end_unheld().is_empty());
+        // One that starts later, after the switch went off and on again
+        // unseen, is found the same way; the held one never is.
+        commands.add(Id::Num(3), 33, false);
+        assert_eq!(commands.end_unheld(), [33]);
+        assert_eq!(commands.get(&Id::Num(2)), Some(22));
+        commands.remove(&Id::Num(1));
+        commands.remove(&Id::Num(3));
+        assert!(commands.get(&Id::Num(1)).is_none());
+        assert!(commands.end_unheld().is_empty());
     }
 
     /// A slow step of the dial loop (the keyring, a hanging dial) does not

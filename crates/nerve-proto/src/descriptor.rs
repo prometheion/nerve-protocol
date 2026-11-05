@@ -224,6 +224,33 @@ impl AccessMode {
     }
 }
 
+/// How the owner's network switch for a center's commands stands
+/// ([`Access::no_network`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkOff {
+    /// Its commands run, and open no socket but a unix one; a command on
+    /// the sudo list does not run while it is off.
+    Held,
+    /// Its commands run as the owner in this mode, which nothing keeps off
+    /// the network: the node runs none of them.
+    AsOwner,
+    /// This machine cannot keep a command off the network: the node runs
+    /// none of them (in `folder` mode `confined` is false and no folder is
+    /// marked `x`).
+    NotHeld,
+}
+
+impl NetworkOff {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NetworkOff::Held => "held",
+            NetworkOff::AsOwner => "as_owner",
+            NetworkOff::NotHeld => "not_held",
+        }
+    }
+}
+
 /// What one center may do on the node now, for that center only: its mode,
 /// until when, the account its commands run as, and in `folder` mode the
 /// folders it may use. No other center's grants are in it.
@@ -262,6 +289,11 @@ pub struct Access {
     /// the node's own files stay closed either way.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reads_by_account: bool,
+    /// In every mode: the owner turned the network off for this center's
+    /// commands, and how that stands ([`NetworkOff`]). Absent while the
+    /// network is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_network: Option<NetworkOff>,
     /// In `folder` mode: the folders the center's file calls and commands
     /// may use. Only folder mode names them: in `allowlist` mode as
     /// `nerve-run` they still hold the allowed commands, which this block
@@ -287,14 +319,21 @@ pub struct FolderAccess {
     /// `r` (read), `w` (write) and `x` (run commands), each at most once,
     /// in that order, at least one.
     pub access: String,
-    /// One of the command account's own folders (its home, `/tmp`,
-    /// `/var/tmp`), which the node adds where the commands run as an
-    /// account of their own, not as the owner. Every pairing whose commands
-    /// run as that account shares them, the settings and caches its
-    /// programs keep there included, so they are a place for throwaway
-    /// files only.
+    /// One of the command account's own folders, which the node adds where
+    /// the commands run as an account of their own, not as the owner: the
+    /// pairing's own home and temporary folder, and `/tmp` and `/var/tmp`
+    /// ([`FolderAccess::shared`]). A program's action, which runs with the
+    /// owner's rights, has none of them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub own: bool,
+    /// An `own` folder that every pairing whose commands run as that
+    /// account shares, and every account on the machine (`/tmp`,
+    /// `/var/tmp`): what one leaves there can change what another one's
+    /// programs do, so it is a place for throwaway files only. An `own`
+    /// folder without it is this pairing's alone where a sandbox holds the
+    /// commands ([`Access::confined`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
     /// Some folder below this one, not named, allows the center less than
     /// this one (where folders nest the deepest one decides): one the owner
     /// gave no rights, which the node's file calls hide too, or one left
@@ -638,6 +677,14 @@ mod tests {
             .map(|m| json!(m.as_str()))
             .collect();
         assert_eq!(access["properties"]["mode"]["enum"], json!(modes));
+        let offs: Vec<Value> = [NetworkOff::Held, NetworkOff::AsOwner, NetworkOff::NotHeld]
+            .iter()
+            .map(|n| {
+                assert_eq!(serde_json::to_value(n).unwrap(), json!(n.as_str()));
+                json!(n.as_str())
+            })
+            .collect();
+        assert_eq!(access["properties"]["no_network"]["enum"], json!(offs));
         for m in &modes {
             let read: AccessMode = serde_json::from_value(m.clone()).unwrap();
             assert_eq!(json!(read.as_str()), *m);
@@ -654,10 +701,12 @@ mod tests {
             confined: true,
             sudo: true,
             reads_by_account: true,
+            no_network: Some(NetworkOff::Held),
             folders: vec![FolderAccess {
                 path: "/a".into(),
                 access: "r".into(),
                 own: true,
+                shared: true,
                 closed_below: true,
             }],
             unnamed: 1,
@@ -704,6 +753,7 @@ mod tests {
                 path: "/a".into(),
                 access: a.clone(),
                 own: false,
+                shared: false,
                 closed_below: false,
             };
             assert_eq!(f.flags().is_some(), schema_takes(&a), "{a:?}");
@@ -760,7 +810,7 @@ mod tests {
                              "confined": true, "x-later": 1,
                              "folders": [{"path": "/c/Users/x", "access": "rw"},
                                          {"path": "/tmp", "access": "rwx", "own": true,
-                                          "closed_below": true}]});
+                                          "shared": true, "closed_below": true}]});
         let d: Descriptor = serde_json::from_value(v.clone()).unwrap();
         let a = d.access.clone().unwrap();
         assert_eq!(a.mode, AccessMode::Folder);
@@ -769,12 +819,15 @@ mod tests {
         assert!(a.confined);
         assert_eq!(a.folders[0].flags(), Some((true, true, false)));
         assert!(!a.folders[0].own && a.folders[1].own);
+        assert!(!a.folders[0].shared && a.folders[1].shared);
         assert!(!a.folders[0].closed_below && a.folders[1].closed_below);
         let back = serde_json::to_value(&d).unwrap();
         assert_eq!(back["access"]["folders"][0]["path"], "/c/Users/x");
         // `own` is sent only where it holds.
         assert!(back["access"]["folders"][0].get("own").is_none());
         assert_eq!(back["access"]["folders"][1]["own"], true);
+        assert!(back["access"]["folders"][0].get("shared").is_none());
+        assert_eq!(back["access"]["folders"][1]["shared"], true);
         assert!(back["access"]["folders"][0].get("closed_below").is_none());
         assert_eq!(back["access"]["folders"][1]["closed_below"], true);
         for bad in [
@@ -802,6 +855,7 @@ mod tests {
                 path: "/a".into(),
                 access: a.into(),
                 own: false,
+                shared: false,
                 closed_below: false,
             }
             .flags()

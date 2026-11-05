@@ -85,7 +85,7 @@ center reads, or the node refuses the whole change and names the field.
    `machine.sudo_path`, `machine.secret_storage`, `machine.user` (Windows),
    `machine.command_env` (the installed Linux node: the variables of the
    service's environment a command of `nerve-run` gets besides `PATH`,
-   `LANG`, `TERM` and `TMPDIR`). An owner may set `machine.command_env`
+   `LANG` and `TERM`; its `HOME` and `TMPDIR` are its pairing's own). An owner may set `machine.command_env`
    (it is not in `owner::ROOT_ONLY`): a command as the owner gets the whole
    service environment already, so naming a variable gives `nerve-run`'s
    commands nothing the owner could not read.
@@ -125,6 +125,9 @@ center reads, or the node refuses the whole change and names the field.
     sensing ones keep their `cap` owner-only whatever else offers it
     (nerve-node `config_cap`). The store checks the write
     grant and audits each change as the center's (`Writer::Center`).
+13. The pairing's `policy.no_network` (every mode, #167) once it is on: a
+    center cannot clear it (`settings::client_only`). It may change
+    `policy.mode` and `policy.until` meanwhile, as no mode sheds the switch.
 
 One item is in the document a center reads and is still the owner's: the
 record of the folders' real places, `policy.places`

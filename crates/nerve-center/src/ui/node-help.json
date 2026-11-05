@@ -651,6 +651,18 @@
               "args": [],
               "name": "folder sync",
               "usage": "nerve-node folder sync [OPTIONS]"
+            },
+            {
+              "about": "Keep a center's commands off the network, or let them on it again: `off` lets them open no socket but a unix one, in every mode, and no sudo-list command runs; where they run as you (user mode, allowlist --as-owner) or the machine cannot hold them, none of them runs",
+              "args": [
+                {
+                  "about": "`off` or `on`",
+                  "name": "<STATE>",
+                  "optional": false
+                }
+              ],
+              "name": "folder network",
+              "usage": "nerve-node folder network [OPTIONS] <STATE>"
             }
           ]
         },

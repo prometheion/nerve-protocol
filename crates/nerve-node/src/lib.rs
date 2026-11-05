@@ -32,6 +32,8 @@ pub mod grants;
 mod job;
 pub mod keyring_setup;
 mod link;
+#[cfg(target_os = "linux")]
+pub mod own_dirs;
 pub mod owner;
 pub mod pair;
 pub mod paths;
@@ -72,7 +74,7 @@ mod winsudo;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod winsvc;
 
-pub use daemon::{Daemon, Event, NodeOptions};
+pub use daemon::{Daemon, Event, Hold, HoldAt, NodeOptions};
 pub use paths::NodePaths;
 
 /// Milliseconds since the Unix epoch.

@@ -108,10 +108,8 @@ pub(super) async fn command(
         Cmd::Folder(FolderCmd::Ls { center }) => {
             let (cfg, _) = read_config(paths).await?;
             let name = pick_center(&cfg, &center)?;
-            let folders: Vec<Value> = cfg
-                .center(&name)
-                .expect("picked")
-                .policy
+            let policy = &cfg.center(&name).expect("picked").policy;
+            let folders: Vec<Value> = policy
                 .folders
                 .iter()
                 .map(|f| {
@@ -124,7 +122,7 @@ pub(super) async fn command(
                     })
                 })
                 .collect();
-            json!({ "center": name, "folders": folders })
+            json!({ "center": name, "folders": folders, "no_network": policy.no_network })
         }
         Cmd::Rule(RuleCmd::Ls { list, center }) => {
             let (cfg, _) = read_config(paths).await?;
@@ -272,12 +270,10 @@ async fn status(paths: &NodePaths) -> Result<Value, String> {
         })
         .collect();
     let sudo = sudo_is_on(paths).await?;
-    Ok(stopped(
-        &cfg,
-        crate::service::owner_of(paths),
-        sudo,
-        centers,
-    ))
+    let mut v = stopped(&cfg, crate::service::owner_of(paths), sudo, centers);
+    // Said as the running node says it.
+    v["pairings_warning"] = json!(super::pairings_warning_here(paths, &cfg));
+    Ok(v)
 }
 
 /// The `status` of a node that does not run, with its `owner` as the unit

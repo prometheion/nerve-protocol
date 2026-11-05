@@ -49,6 +49,7 @@ function pageOverview() {
       : btn("Panic", "danger", act(panic), "ban", "panic")),
     o.locked ? banner("warn", "lock", "The node is locked: every link is closed and nothing runs until you unlock it.") : null,
     o.owner_is_root ? banner("warn", "alert", "Root is the owner: commands of user mode, and of allowlist mode as the owner, run as root and can do everything on this machine, Nerve and its keys included.") : null,
+    o.pairings_warning ? banner("warn", "alert", o.pairings_warning) : null,
     section("Centers", "The centers this machine is paired with.", null,
       o.centers.length ? el("div", { class: "stack" }, o.centers.map(centerCard)) : empty("No center is paired yet.", "server")),
     section("Service", "Starting, stopping and restarting the node is done at the CLI.", null,
@@ -90,6 +91,7 @@ function pageCenters() {
   if (!o) return [loading()];
   return [
     head("server", "Centers", "Pair this machine with a center, and decide what each one may change."),
+    o.pairings_warning ? banner("warn", "alert", o.pairings_warning) : null,
     section("Pair a center", "Paste the link the center's web UI shows under Pair a machine. It goes to the node as the command's input, never in a command line.", null,
       pairForm()),
     section("Paired centers", null, null,
@@ -179,6 +181,7 @@ function pagePermissions() {
       state.permCenter = o.centers[i].name; state.perm = null; draw(true); loadPerm().then(() => draw(true)).catch((e) => notify(e.message, "error"));
     }) : null,
     section("Mode", entry.until ? `Until ${when(entry.until)}` : null, null, modeForm(c, entry)),
+    section("Network", "Whether its commands may open network sockets, in every mode.", null, networkForm(c, entry, o)),
     p ? foldersSection(c, p.folders.folders || []) : loading(),
     p ? rulesSection(c, p.rules) : null,
     p ? section("Sudo", "Turning sudo on is done at the CLI: sudo nerve-node sudo on.", null,
@@ -198,6 +201,24 @@ function modeForm(c, entry) {
     el("div", { class: "actions" }, btn("Set the mode", "primary", act(() => api("POST", "/api/mode", {
       center: c, mode: chosen, hours: Number(hours.value) || undefined, as_owner: owner.checked,
     })), "check", `mode:${c}:set`)));
+}
+
+function networkForm(c, entry, o) {
+  const off = el("input", { type: "checkbox", checked: !!entry.no_network });
+  return el("div", { class: "card" },
+    el("label", { class: "check" }, off, el("span", {}, "No network for its commands")),
+    entry.no_network && o.network_rules === false
+      ? el("p", { class: "meta" }, "This machine cannot keep commands off the network (the node's seccomp filter cannot be used here), so the node runs none of this center's commands while this is on.")
+      : null,
+    // The node says the commands run as the owner now (`network_off`),
+    // which nothing keeps off the network.
+    entry.network_off === "as_owner"
+      ? el("p", { class: "meta" }, o.installed
+        ? "In this mode its commands run as you, which nothing keeps off the network, so the node runs none of them while this is on. Folder mode, or allowlist mode as nerve-run, runs them."
+        : "This node runs by hand, so its commands run as you, and nothing keeps them off the network here (only folder mode does, as a user that is not root and on Linux 7.1 or later), so the node runs none of them while this is on. The installed node runs folder mode's commands as nerve-run.")
+      : null,
+    entry.no_network ? el("p", { class: "meta" }, "No command on the sudo list runs while this is on.") : null,
+    el("div", { class: "actions" }, btn("Save", "primary", act(() => api("POST", "/api/network", { center: c, off: off.checked })), "check", `network:${c}:set`)));
 }
 
 function foldersSection(c, folders) {

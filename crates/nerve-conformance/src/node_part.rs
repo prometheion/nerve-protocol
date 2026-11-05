@@ -963,6 +963,30 @@ fn check_access(v: &Value) -> Result<(), String> {
             format!("access unnamed {n} in {mode} mode"),
         )?;
     }
+    // The owner's network switch, in every mode: held where the commands
+    // run apart from the owner (never in user mode), refused as the owner's
+    // (in folder mode only on a node run by hand that cannot keep a command
+    // apart from its user), or not held by the machine (then folder mode
+    // confines nothing). No sudo command runs while it is off.
+    if let Some(n) = a.get("no_network") {
+        let n = n.as_str().unwrap_or_default();
+        ensure(
+            matches!(n, "held" | "as_owner" | "not_held"),
+            format!("access no_network {:?}", a.get("no_network")),
+        )?;
+        ensure(
+            !(n == "held" && mode == "user"),
+            format!("access no_network {n} in {mode} mode"),
+        )?;
+        ensure(
+            a.get("sudo") != Some(&Value::Bool(true)),
+            "access sudo true while the network is off",
+        )?;
+        ensure(
+            n != "not_held" || a.get("confined") != Some(&Value::Bool(true)),
+            "access confined true while the node cannot keep the commands off the network",
+        )?;
+    }
     let folders = match a.get("folders") {
         None => return Ok(()),
         Some(f) => f.as_array().ok_or("access folders is not a list")?,
@@ -982,6 +1006,7 @@ fn check_access(v: &Value) -> Result<(), String> {
             path: path.into(),
             access: f["access"].as_str().unwrap_or("?").into(),
             own: false,
+            shared: false,
             closed_below: false,
         };
         ensure(
@@ -991,6 +1016,16 @@ fn check_access(v: &Value) -> Result<(), String> {
         ensure(
             f.get("own").is_none_or(Value::is_boolean),
             format!("access folder {path}: own {}", f["own"]),
+        )?;
+        // Only one of the command account's own folders is shared by every
+        // pairing of that account.
+        ensure(
+            f.get("shared").is_none_or(Value::is_boolean)
+                && (f["shared"] != true || f["own"] == true),
+            format!(
+                "access folder {path}: shared {} (own {})",
+                f["shared"], f["own"]
+            ),
         )?;
         ensure(
             f.get("closed_below").is_none_or(Value::is_boolean),
@@ -1130,14 +1165,29 @@ mod tests {
                                        "closed_below": true},
                                       {"path": "/c/Users/me", "access": "rwx"},
                                       {"path": "/srv/data\\2026", "access": "r"},
-                                      {"path": "/tmp", "access": "rwx", "own": true}]});
+                                      {"path": "/tmp", "access": "rwx", "own": true,
+                                       "shared": true}]});
         let mut d = echo();
         d["access"] = good.clone();
         check_descriptor(&d, "node-id", 1).unwrap();
         d["access"] = json!({"mode": "user", "account": "me"});
         check_descriptor(&d, "node-id", 1).unwrap();
+        for off in [
+            json!({"mode": "user", "no_network": "as_owner"}),
+            json!({"mode": "allowlist", "account": "nerve-run", "no_network": "held"}),
+            json!({"mode": "allowlist", "no_network": "not_held"}),
+            json!({"mode": "folder", "confined": true, "no_network": "held"}),
+            json!({"mode": "folder", "confined": false, "no_network": "not_held"}),
+            // A node run by hand as root, or below Landlock ABI 9, cannot
+            // keep a folder-mode command apart from its user.
+            json!({"mode": "folder", "confined": false, "no_network": "as_owner"}),
+        ] {
+            d["access"] = off;
+            check_descriptor(&d, "node-id", 1).unwrap();
+        }
+        d["access"] = good.clone();
         type Edit = fn(&mut Value);
-        let cases: [(Edit, &str); 25] = [
+        let cases: [(Edit, &str); 32] = [
             (|a| a["mode"] = json!("later"), "access mode"),
             (|a| a["until_ms"] = json!(-1), "access until_ms"),
             (|a| a["account"] = json!("me\nyou"), "access account"),
@@ -1184,6 +1234,29 @@ mod tests {
                 },
                 "access names folders in user mode",
             ),
+            (
+                |a| a["no_network"] = json!(1),
+                "access no_network Some(Number(1))",
+            ),
+            (
+                |a| a["no_network"] = json!(true),
+                "access no_network Some(Bool(true))",
+            ),
+            (
+                |a| *a = json!({"mode": "user", "no_network": "held"}),
+                "access no_network held in user mode",
+            ),
+            (
+                |a| a["no_network"] = json!("held"),
+                "access sudo true while the network is off",
+            ),
+            (
+                |a| {
+                    a["sudo"] = json!(false);
+                    a["no_network"] = json!("not_held")
+                },
+                "access confined true while the node cannot keep the commands off the network",
+            ),
             (|a| a["sudo"] = json!("yes"), "access sudo"),
             (
                 |a| a["reads_by_account"] = json!("yes"),
@@ -1229,6 +1302,14 @@ mod tests {
             (
                 |a| a["folders"][0]["own"] = json!("yes"),
                 "access folder /home/me/proj: own",
+            ),
+            (
+                |a| a["folders"][3]["shared"] = json!(1),
+                "access folder /tmp: shared 1",
+            ),
+            (
+                |a| a["folders"][0]["shared"] = json!(true),
+                "access folder /home/me/proj: shared true (own null)",
             ),
             (
                 |a| a["folders"][0]["closed_below"] = json!(1),

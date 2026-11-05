@@ -35,7 +35,8 @@ called, `install` puts it in place as `/usr/local/bin/nerve-node`.
 1. Makes the system user `nerve`, with its own group, no login and the home
    `/var/lib/nerve`. The node runs as it.
 2. Makes the system user `nerve-run`, with its own group, no other group, no
-   login and the home `/var/lib/nerve-run` (mode 0700). Commands of
+   login and the home `/var/lib/nerve-run` (mode 0700), which holds a home
+   and a temporary folder for each pairing. Commands of
    `folder` and `allowlist` mode run as it ([modes](modes.md#the-account-nerve-run-linux)).
    A `nerve` or `nerve-run` that `install` did not make is refused.
 3. Makes the folders, private to `nerve` (mode 0700). Folders an earlier
@@ -137,10 +138,11 @@ Running `install` again repairs what is missing and restarts the service.
 | What | Where |
 |---|---|
 | `node.toml`, one key per center | `/etc/nerve` |
-| Audit log, [log](logs.md), control socket and its token, config key, the last version of `node.toml`, the record of the folders' ACLs | `/var/lib/nerve/state` |
+| Audit log, [log](logs.md), control socket and its token, config key, the last version of `node.toml`, the record of the folders' ACLs and of the pairings' own folders | `/var/lib/nerve/state` |
 | The keys, with `machine.secret_storage = "keyring"` | the keyring of `nerve`, `/var/lib/nerve/.local/share/keyrings` |
 | Home of `nerve` | `/var/lib/nerve` |
 | Home of `nerve-run` | `/var/lib/nerve-run` |
+| A pairing's home and temporary folder | `/var/lib/nerve-run/<center>/home`, `/var/lib/nerve-run/<center>/tmp` |
 | The program | `/usr/local/bin/nerve-node` |
 | The unit | `/etc/systemd/system/nerve-node.service` |
 | The owner socket and the provider socket, made at each start, gone at the stop | `/run/nerve-node` |
@@ -199,8 +201,9 @@ A center's commands run as one of two accounts:
 There is no other account to choose. A command gets the account's groups,
 its home as `HOME` and, when the call names no folder, as its working
 folder (a sudo command starts in the owner's home). A command of `nerve-run`
-gets of the service's environment only `PATH`, `LANG`, `TERM`, `TMPDIR` and
-the names you list in `machine.command_env`, nothing the unit sets
+gets of the service's environment only `PATH`, `LANG`, `TERM` and
+the names you list in `machine.command_env` (its `HOME` and `TMPDIR` are its
+pairing's own, below `/var/lib/nerve-run`), nothing the unit sets
 (`NERVE_NODE_OWNER`, an `Environment=` line of yours) and nothing of
 systemd's; a command as the owner gets the service's environment ([the
 environment](modes.md#the-account-nerve-run-linux)). Do not put a secret into

@@ -62,21 +62,30 @@ impl Ctl {
             .cloned()
             .unwrap_or(Value::Null);
         // The installed Linux node runs folder and allowlist mode as
-        // nerve-run (nerve_node::account): it names its owner, and a
-        // pairing's account, also when `install` found no owner.
+        // nerve-run (nerve_node::account): its status says it is installed,
+        // and it names its owner, and a pairing's account, also when
+        // `install` found no owner and every pairing runs as the owner.
         let run = nerve_node::account::RUN_USER;
         let account = c["account"].as_str().unwrap_or_default().to_string();
         let separate = cfg!(target_os = "linux")
-            && (st["owner"].is_string()
+            && (st["installed"] == true
+                || st["owner"].is_string()
                 || st["centers"]
                     .as_array()
                     .into_iter()
                     .flatten()
                     .any(|c| c["account"] == run));
+        // Its own home and temporary folder (#167), and the two every
+        // center shares.
         let built_in = if cfg!(target_os = "linux") && account == run {
+            let own = nerve_node::account::Own::of(
+                std::path::Path::new(nerve_node::account::RUN_HOME),
+                &center,
+            );
             format!(
-                "/tmp, /var/tmp and its home {}",
-                nerve_node::account::RUN_HOME
+                "{} and {}, its own home and temporary folder, and /tmp and /var/tmp, shared with every center and account",
+                own.home.display(),
+                own.temp.display()
             )
         } else {
             String::new()
@@ -113,6 +122,9 @@ impl Ctl {
             p.set_separate(separate);
             p.set_account(account.as_str().into());
             p.set_as_owner(c["as_owner"] == true);
+            p.set_no_network(c["no_network"] == true);
+            p.set_network_rules(st["network_rules"] != false);
+            p.set_runs_as_owner(c["network_off"] == "as_owner");
             p.set_owner_is_root(st["owner_is_root"] == true);
             p.set_built_in(built_in.as_str().into());
             p.set_grant_errors(errors.join("\n").into());
@@ -141,6 +153,23 @@ impl Ctl {
             format!("{center}'s allowed commands run as {whom}.")
         } else {
             format!("{center}'s allowed commands run as nerve-run.")
+        };
+        self.perm_change(args, None, said, |_| {}, |c, e| c.toast(e, Tone::Danger));
+    }
+
+    /// The center's commands off the network (`folder network off`), or on
+    /// it again.
+    fn no_network_set(self: &Rc<Self>, off: bool) {
+        let center = self.perm_center();
+        let args = vec![
+            "folder".into(),
+            "network".into(),
+            if off { "off" } else { "on" }.into(),
+        ];
+        let said = if off {
+            format!("{center}'s commands have no network.")
+        } else {
+            format!("{center}'s commands may use the network.")
         };
         self.perm_change(args, None, said, |_| {}, |c, e| c.toast(e, Tone::Danger));
     }
@@ -644,6 +673,8 @@ pub(super) fn wire(ctl: &Rc<Ctl>, window: &crate::AppWindow) {
     p.on_mode_apply(move || c.mode_apply());
     let c = ctl.clone();
     p.on_as_owner_set(move |on| c.as_owner_set(on));
+    let c = ctl.clone();
+    p.on_no_network_set(move |off| c.no_network_set(off));
     let c = ctl.clone();
     p.on_folder_choose(move || c.folder_choose());
     let c = ctl.clone();

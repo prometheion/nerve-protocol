@@ -118,8 +118,9 @@ own account, not as root; its commands then run without limits, and
 - A `folder` mode command, and every command of `nerve-run`, has no
   controlling terminal; a node you run yourself gives its `allowlist` and
   `user` mode commands the terminal it was started in. Of the installed node's
-  environment a command of `nerve-run` gets only `PATH`, `LANG`, `TERM`,
-  `TMPDIR` and the names in `machine.command_env`. A node you run yourself
+  environment a command of `nerve-run` gets only `PATH`, `LANG`, `TERM`
+  and the names in `machine.command_env`; its `HOME` and `TMPDIR` are its
+  pairing's own. A node you run yourself
   gives its commands your whole environment.
 - Commands run with `no_new_privs`, so setuid programs cannot gain privileges.
   Only a command on the [sudo list](sudo.md) runs without it.
