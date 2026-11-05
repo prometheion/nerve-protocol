@@ -3279,7 +3279,14 @@ mod tests {
     /// grant of a parent is split around the ones that exist).
     #[test]
     fn each_shared_folder_granted_itself_is_dropped_from_the_unix_set() {
-        for dir in SHARED_DIRS {
+        for dir in [
+            "/tmp",
+            "/var/tmp",
+            "/dev/shm",
+            "/run/lock",
+            "/var/lock",
+            "/var/crash",
+        ] {
             let mut spec = LandlockSpec {
                 unix: vec![PathBuf::from(dir), PathBuf::from("/srv/own")],
                 ..Default::default()
