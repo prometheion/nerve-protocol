@@ -1240,9 +1240,8 @@ async fn edit_center(
     let (cfg, _) = read_config(paths).await?;
     let name = pick_center(&cfg, center)?;
     edit(paths, |c| {
-        let e = c
-            .center_mut(&name)
-            .ok_or_else(|| format!("no center named {name}"))?;
+        let missing = no_center_named(c, &name);
+        let e = c.center_mut(&name).ok_or(missing)?;
         f(e)
     })
     .await?;
@@ -1485,6 +1484,17 @@ impl List {
     }
 }
 
+/// What `rule add allow` adds for a center in `mode`: in folder and user
+/// mode the allow rules do not count, and nothing else would say so.
+fn allow_rules_note(name: &str, mode: Mode) -> Option<String> {
+    (mode != Mode::Allowlist).then(|| {
+        format!(
+            "note: {name} is in {} mode, where allow rules do not count; `nerve-node mode allowlist --center {name}` uses them",
+            mode.as_str()
+        )
+    })
+}
+
 /// The words before a command line's trailing ` *`, its wildcard; `None`
 /// for a line without one. A `*` alone names no command.
 fn wildcard_start(line: &str) -> Option<&str> {
@@ -1614,6 +1624,15 @@ async fn rule_cmd(
             {
                 let _ = writeln!(out, "{covers}");
             }
+            // An allow rule that does not count where the center is now is
+            // said, not left to look like it works.
+            if list == List::Allow {
+                let (cfg, _) = read_config(paths).await?;
+                let mode = cfg.center(&name).map(|c| c.policy.mode_at(crate::now_ms()));
+                if let Some(note) = mode.and_then(|m| allow_rules_note(&name, m)) {
+                    let _ = writeln!(out, "{note}");
+                }
+            }
         }
         RuleCmd::Rm { words, center } => {
             // `rule rm [LIST] ENTRY`, and a line of `rule` as it shows all
@@ -1653,7 +1672,11 @@ async fn rule_cmd(
                 let (list, rule) = match found.as_slice() {
                     [] => {
                         return Err(match named {
-                            Some(l) => format!("{text:?} is not on the {}", l.label()),
+                            Some(l) => format!(
+                                "{text:?} is not on the {}; `nerve-node rule {}` shows it",
+                                l.label(),
+                                l.word()
+                            ),
                             None => format!(
                                 "{text:?} is on no list of {name}; `nerve-node rule` shows them"
                             ),
@@ -1695,7 +1718,11 @@ async fn rule_cmd(
                 let rule = list.edited(&new)?;
                 rules::check_not_a_listed_form(&rule, l)?;
                 let Some(at) = l.iter().position(|r| *r == entry) else {
-                    return Err(format!("{entry:?} is not on the {}", list.label()));
+                    return Err(format!(
+                        "{entry:?} is not on the {}; `nerve-node rule {}` shows it",
+                        list.label(),
+                        list.word()
+                    ));
                 };
                 if rule == entry {
                     return Err(format!("{entry:?} is that already"));
@@ -1846,7 +1873,7 @@ pub async fn execute(cli: Cli, out: &mut dyn Write) -> Result<(), String> {
     if service && (cli.config_dir.is_some() || cli.state_dir.is_some()) {
         let l = Layout::system();
         return Err(format!(
-            "install, update and uninstall keep the node's files in {} and {}; --config-dir and --state-dir do not go with them",
+            "install, update, uninstall and service keep the node's files in {} and {}: leave out --config-dir and --state-dir",
             l.paths.config_dir.display(),
             l.paths.state_dir.display()
         ));
@@ -2298,7 +2325,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
         Cmd::Center { cmd: None } => {
             let (cfg, _) = read_config(&paths).await?;
             if cfg.centers.is_empty() {
-                w(out, "no center is paired".into());
+                w(out, NO_CENTER_PAIRED.into());
             }
             let now = crate::now_ms();
             for c in &cfg.centers {
@@ -2491,8 +2518,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
         Cmd::Cap { cmd: None, center } => {
             let (cfg, _) = read_config(&paths).await?;
             if let Some(c) = &center {
-                cfg.center(c)
-                    .ok_or_else(|| format!("no center named {c}"))?;
+                cfg.center(c).ok_or_else(|| no_center_named(&cfg, c))?;
             }
             let v = cap_listing(&paths, &cfg).await?;
             for l in cap_lines(&cfg, &v, center.as_deref()) {
@@ -2578,7 +2604,9 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                     .capabilities
                     .iter_mut()
                     .find(|d| d.name == name)
-                    .ok_or_else(|| format!("no capability {name} is declared"))?;
+                    .ok_or_else(|| {
+                        format!("no capability {name} is declared; `nerve-node cap` lists them")
+                    })?;
                 if let Some(e) = &spec.effect {
                     c.effect = parse_enum(e, "read, write, execute, sense or actuate")?;
                 }
@@ -2595,7 +2623,9 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                 .capabilities
                 .iter()
                 .find(|d| d.name == name)
-                .ok_or_else(|| format!("no capability {name} is declared"))?;
+                .ok_or_else(|| {
+                    format!("no capability {name} is declared; `nerve-node cap` lists them")
+                })?;
             w(out, format!("capability {name} changed: {}", cap_line(c)));
             let notes = CapNotes {
                 installed: crate::service::is_service_node(&paths),
@@ -2617,9 +2647,8 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
         } => {
             edit(&paths, |c| {
                 let owners = c.capabilities.clone();
-                let e = c
-                    .center_mut(&center)
-                    .ok_or_else(|| format!("no center named {center}"))?;
+                let missing = no_center_named(c, &center);
+                let e = c.center_mut(&center).ok_or(missing)?;
                 if !crate::config_cap::remove_added(e, &name, &owners) {
                     return Err(format!("center {center} added no capability {name}"));
                 }
@@ -2650,7 +2679,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                             "no capability {name} is declared in node.toml; center {} added one: cap rm {name} --center {first}",
                             by.join(", center ")
                         ),
-                        None => format!("no capability {name} is declared"),
+                        None => format!("no capability {name} is declared; `nerve-node cap` lists them"),
                     });
                 }
                 // A center's own of that name that senses is offered again,
@@ -2705,7 +2734,9 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                 let before = c.providers.allowed.len();
                 c.providers.allowed.retain(|p| p.name != name);
                 if c.providers.allowed.len() == before {
-                    return Err(format!("no provider {name} is allowed"));
+                    return Err(format!(
+                        "no provider {name} is allowed; `nerve-node provider` lists them"
+                    ));
                 }
                 Ok(())
             })
@@ -3453,7 +3484,7 @@ async fn setup_steps(
     let (cfg, _) = read_config(paths).await?;
     let entry = cfg
         .center(&center)
-        .ok_or_else(|| format!("no center named {center}"))?;
+        .ok_or_else(|| no_center_named(&cfg, &center))?;
     let now = entry.policy.mode_at(crate::now_ms()).as_str().to_string();
     let mode = ask(
         input,
@@ -3525,8 +3556,7 @@ pub(crate) fn ask(
     Ok(line.trim().to_string())
 }
 
-/// What a command that needs a pairing says when there is none.
-pub(crate) const NO_CENTER_PAIRED: &str = "no center is paired";
+pub(crate) use crate::folder_change::{NO_CENTER_PAIRED, no_center_named};
 
 /// A center's mode as `mode` shows it: `folder`, `allowlist, as you`.
 fn mode_line(p: &nerve_policy::config::CenterPolicy, now: u64) -> String {
@@ -5013,9 +5043,7 @@ async fn config_cmd(paths: &NodePaths, c: ConfigCmd, out: &mut dyn Write) -> Res
     }
     if let ConfigCmd::Get { key } = &c {
         let (cfg, _) = read_config(paths).await?;
-        let doc = as_table(&cfg)?;
-        let v = lookup(&toml::Value::Table(doc), &segments(key))
-            .ok_or_else(|| format!("{key} is not set"))?;
+        let v = setting(&cfg, key)?;
         let _ = writeln!(out, "{}", show(&v));
         return Ok(());
     }
@@ -6172,6 +6200,84 @@ fn as_table(cfg: &NodeConfig) -> Result<toml::Table, String> {
     toml::from_str(&cfg.to_toml()).map_err(|e| e.to_string())
 }
 
+/// The keys of node.toml that hold the node's own state, not a setting:
+/// `config get` leaves them out (each center's, and the file's own).
+const STATE_KEYS: &[&str] = &["version", "locked"];
+const CENTER_STATE_KEYS: &[&str] = &[
+    "center_id",
+    "node_id",
+    "pin",
+    "public_key",
+    "key_rotations",
+    "pin_rotations",
+    "old_pin",
+    "revoked",
+    "unknown",
+    "places",
+];
+
+/// The tables of node.toml a setting may be in, by their first word.
+const SETTING_TABLES: &[&str] = &[
+    "node",
+    "machine",
+    "limits",
+    "connection",
+    "relay",
+    "ui",
+    "log",
+    "providers",
+    "capability",
+    "center",
+];
+
+/// node.toml without the node's own state ([`STATE_KEYS`]).
+fn settings_table(cfg: &NodeConfig) -> Result<toml::Value, String> {
+    let mut doc = as_table(cfg)?;
+    for k in STATE_KEYS {
+        doc.remove(*k);
+    }
+    for c in doc
+        .get_mut("center")
+        .and_then(toml::Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(t) = c.as_table_mut() {
+            for k in CENTER_STATE_KEYS {
+                t.remove(*k);
+            }
+        }
+    }
+    Ok(toml::Value::Table(doc))
+}
+
+/// `config get`: one setting, or a table of them, without the node's own
+/// state. A key that is not set says whether its default applies or it is
+/// no setting at all.
+fn setting(cfg: &NodeConfig, key: &str) -> Result<toml::Value, String> {
+    let words = segments(key);
+    if let Some(v) = lookup(&settings_table(cfg)?, &words) {
+        return Ok(v);
+    }
+    if lookup(&toml::Value::Table(as_table(cfg)?), &words).is_some() {
+        return Err(format!(
+            "{key} is the node's own state, not a setting; `nerve-node status` shows the node"
+        ));
+    }
+    match words.as_slice() {
+        [c, name, ..] if c == "center" && cfg.center(name).is_none() => {
+            Err(no_center_named(cfg, name))
+        }
+        [first, ..] if SETTING_TABLES.contains(&first.as_str()) => Err(format!(
+            "{key} is not set, so its default applies (docs/user/config.md lists the defaults)"
+        )),
+        _ => Err(format!(
+            "{key} is no setting of node.toml; its tables are {}",
+            SETTING_TABLES.join(", ")
+        )),
+    }
+}
+
 fn segments(key: &str) -> Vec<String> {
     key.split('.').map(str::to_string).collect()
 }
@@ -6227,11 +6333,16 @@ fn table_at<'a>(
         let list = t
             .get_mut("center")
             .and_then(toml::Value::as_array_mut)
-            .ok_or("no center is paired")?;
+            .ok_or(NO_CENTER_PAIRED)?;
         let entry = list
             .iter_mut()
             .find(|e| e.get("name").and_then(|n| n.as_str()) == Some(rest[0].as_str()))
-            .ok_or_else(|| format!("no center named {}", rest[0]))?;
+            .ok_or_else(|| {
+                format!(
+                    "no center named {}; `nerve-node center` lists them",
+                    rest[0]
+                )
+            })?;
         return table_at(entry, &rest[1..], create);
     }
     if !t.contains_key(first.as_str()) {
@@ -7195,6 +7306,74 @@ mod tests {
         assert_eq!(load(&paths).limits.max_running, 16);
     }
 
+    /// `config get` shows settings, not the node's own state: a center's
+    /// keys and counters are left out of its table, and asked by name they
+    /// are said to be state. A key that is not set says whether its default
+    /// applies or it is no setting at all.
+    #[test]
+    fn config_get_hides_the_nodes_own_state() {
+        let (_d, paths) = setup(&["home"]);
+        let table = run(&paths, &["config", "get", "center.home"]).unwrap();
+        assert!(table.contains("name = \"home\""), "{table}");
+        for state in ["center_id", "node_id", "public_key", "pin ="] {
+            assert!(!table.contains(state), "{state}: {table}");
+        }
+        let whole = run(&paths, &["config", "get", "center"]).unwrap();
+        assert!(!whole.contains("node_id"), "{whole}");
+        let e = run(&paths, &["config", "get", "center.home.node_id"]).unwrap_err();
+        assert!(e.contains("the node's own state, not a setting"), "{e}");
+        let e = run(&paths, &["config", "get", "version"]).unwrap_err();
+        assert!(e.contains("the node's own state"), "{e}");
+        let e = run(&paths, &["config", "get", "center.home.policy.until"]).unwrap_err();
+        assert!(e.contains("not set, so its default applies"), "{e}");
+        let e = run(&paths, &["config", "get", "nonsense"]).unwrap_err();
+        assert!(e.contains("no setting of node.toml"), "{e}");
+        let e = run(&paths, &["config", "get", "center.lab.policy"]).unwrap_err();
+        assert!(e.contains("paired: home"), "{e}");
+        let v = json_of(&paths, &["config", "get", "center.home"]);
+        assert!(v["value"].get("node_id").is_none(), "{v}");
+    }
+
+    /// The errors of a command name what to do next: how to pair, the
+    /// centers that are paired, the command that lists what was meant.
+    #[test]
+    fn the_errors_name_the_fix() {
+        let (_d, none) = setup(&[]);
+        let e = run(&none, &["folder"]).unwrap_err();
+        assert!(
+            e.contains("pair one: `nerve-node center add '<link>'`"),
+            "{e}"
+        );
+        let (_d, paths) = setup(&["home", "work"]);
+        let e = run(&paths, &["folder", "--center", "lab"]).unwrap_err();
+        assert_eq!(e, "no center named lab; paired: home, work");
+        let e = run(&paths, &["rule", "rm", "allow", "ls", "--center", "home"]).unwrap_err();
+        assert!(e.contains("`nerve-node rule allow` shows it"), "{e}");
+        let e = run(&paths, &["cap", "edit", "a.b", "--timeout", "5"]).unwrap_err();
+        assert!(e.contains("`nerve-node cap` lists them"), "{e}");
+        let e = run(&paths, &["provider", "rm", "desk"]).unwrap_err();
+        assert!(e.contains("`nerve-node provider` lists them"), "{e}");
+    }
+
+    /// An allow rule added where the center is not in allowlist mode is
+    /// said not to count, with the command that makes it count.
+    #[test]
+    fn an_allow_rule_outside_allowlist_mode_is_said_not_to_count() {
+        let (_d, paths) = setup(&["home"]);
+        run(&paths, &["mode", "folder"]).unwrap();
+        let out = run(&paths, &["rule", "add", "allow", "git status"]).unwrap();
+        assert!(
+            out.contains("note: home is in folder mode, where allow rules do not count; `nerve-node mode allowlist --center home` uses them"),
+            "{out}"
+        );
+        // Deny rules count in every mode; in allowlist mode allow rules do.
+        let out = run(&paths, &["rule", "add", "deny", "rm -rf /"]).unwrap();
+        assert!(!out.contains("do not count"), "{out}");
+        run(&paths, &["mode", "allowlist"]).unwrap();
+        let out = run(&paths, &["rule", "add", "allow", "git log"]).unwrap();
+        assert!(!out.contains("do not count"), "{out}");
+    }
+
     /// No account for the commands is chosen on Linux: `config` refuses
     /// `machine.user` in every verb, and nothing changes.
     #[cfg(not(windows))]
@@ -7253,7 +7432,7 @@ mod tests {
             &["uninstall", "--purge"],
         ] {
             let e = run(&paths, cmd).unwrap_err();
-            assert!(e.contains("--config-dir and --state-dir do not go"), "{e}");
+            assert!(e.contains("leave out --config-dir and --state-dir"), "{e}");
             assert!(!e.contains("not done"), "{e}");
         }
     }

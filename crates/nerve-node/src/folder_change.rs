@@ -243,16 +243,36 @@ fn same_place(a: &str, b: &str) -> bool {
     within(a, b) && within(b, a)
 }
 
+/// What a command that needs a pairing says when there is none: how to
+/// make one.
+pub const NO_CENTER_PAIRED: &str =
+    "no center is paired; pair one: `nerve-node center add '<link>'`";
+
+/// The error for a center `name` this node has not paired: the names it
+/// has, or how to pair one.
+pub fn no_center_named(cfg: &NodeConfig, name: &str) -> String {
+    match cfg.centers.as_slice() {
+        [] => format!("no center named {name}: {NO_CENTER_PAIRED}"),
+        many => format!(
+            "no center named {name}; paired: {}",
+            many.iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 /// The center a per-center command means: the one named, or the only one.
 pub fn pick_center(cfg: &NodeConfig, given: Option<&str>) -> Result<String, String> {
     if let Some(n) = given {
         return cfg
             .center(n)
             .map(|c| c.name.clone())
-            .ok_or_else(|| format!("no center named {n}"));
+            .ok_or_else(|| no_center_named(cfg, n));
     }
     match cfg.centers.as_slice() {
-        [] => Err("no center is paired".into()),
+        [] => Err(NO_CENTER_PAIRED.into()),
         [one] => Ok(one.name.clone()),
         many => Err(format!(
             "several centers are paired; pick one with --center ({})",
@@ -271,9 +291,8 @@ pub fn apply_to(
     change: &FolderChange,
 ) -> Result<Applied, String> {
     let name = pick_center(cfg, center)?;
-    let e = cfg
-        .center_mut(&name)
-        .ok_or_else(|| format!("no center named {name}"))?;
+    let missing = no_center_named(cfg, &name);
+    let e = cfg.center_mut(&name).ok_or(missing)?;
     let access = change.apply(e)?;
     Ok(Applied {
         mode: e.policy.mode,
@@ -493,11 +512,11 @@ mod tests {
         assert!(e.starts_with("several centers are paired"), "{e}");
         assert_eq!(
             apply_to(&mut two, Some("lab"), &add).unwrap_err(),
-            "no center named lab"
+            "no center named lab; paired: home, work"
         );
         assert_eq!(
             apply_to(&mut config(&[]), None, &add).unwrap_err(),
-            "no center is paired"
+            NO_CENTER_PAIRED
         );
         apply_to(&mut two, Some("work"), &add).unwrap();
         assert!(two.center("home").unwrap().policy.folders.is_empty());

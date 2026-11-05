@@ -185,7 +185,7 @@ pub(super) async fn command(
             let picked = match &center {
                 Some(c) => Some(
                     cfg.center(c)
-                        .ok_or_else(|| format!("no center named {c}"))?
+                        .ok_or_else(|| no_center_named(&cfg, c))?
                         .name
                         .clone(),
                 ),
@@ -219,9 +219,7 @@ pub(super) async fn command(
         }
         Cmd::Config(ConfigCmd::Get { key }) => {
             let (cfg, _) = read_config(paths).await?;
-            let doc = as_table(&cfg)?;
-            let v = lookup(&toml::Value::Table(doc), &segments(&key))
-                .ok_or_else(|| format!("{key} is not set"))?;
+            let v = setting(&cfg, &key)?;
             let value = serde_json::to_value(&v).map_err(|e| e.to_string())?;
             let mut v = json!({ "key": key, "value": value });
             // A program that offers the choice, as setup does, needs to know

@@ -138,7 +138,7 @@ fn entry(shared: &Shared, center: &str) -> Result<(SecretStorage, CenterEntry), 
     let e = cfg
         .center(center)
         .cloned()
-        .ok_or_else(|| format!("no center named {center}"))?;
+        .ok_or_else(|| crate::folder_change::no_center_named(&cfg, center))?;
     Ok((cfg.machine.secret_storage, e))
 }
 

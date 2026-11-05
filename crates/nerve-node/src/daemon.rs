@@ -1195,7 +1195,7 @@ impl Shared {
         use crate::folder_change::{FolderChange, apply_to};
         let cfg = self.config();
         if cfg.center(center).is_none() {
-            return Err(format!("no center named {center}"));
+            return Err(crate::folder_change::no_center_named(&cfg, center));
         }
         let given = nerve_policy::paths::normal_folder(path)?;
         // The folder is the owner's: judged as the owner sees it, before
