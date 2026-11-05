@@ -3274,6 +3274,21 @@ mod tests {
         assert!(reaches(&spec, Path::new("/usr/s")), "{spec:?}");
     }
 
+    /// Each folder every account may write to is dropped from the unix set
+    /// when it is granted itself, whether this machine has it or not (a
+    /// grant of a parent is split around the ones that exist).
+    #[test]
+    fn each_shared_folder_granted_itself_is_dropped_from_the_unix_set() {
+        for dir in SHARED_DIRS {
+            let mut spec = LandlockSpec {
+                unix: vec![PathBuf::from(dir), PathBuf::from("/srv/own")],
+                ..Default::default()
+            };
+            without_shared_sockets(&mut spec);
+            assert_eq!(spec.unix, [PathBuf::from("/srv/own")], "{dir}");
+        }
+    }
+
     /// A folder that is, or since became, a link into a protected entry is
     /// left out of every set, unless the folders release that place with its
     /// flags. The protected entry is the `.ssh` of a home in a temp dir.
