@@ -1,8 +1,11 @@
 //! The files root writes for a service, and the user root's command becomes
 //! on a service's folders.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 
+#[cfg(target_os = "linux")]
 use crate::Account;
 
 /// Writes `data` to `path` through a temporary file beside it and a rename,
