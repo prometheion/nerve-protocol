@@ -376,7 +376,12 @@ and the node web UI's **Permissions** page have it as **No network for its
 commands**. The agent is told, in `list`, that its commands have no network.
 A center that may change its own settings ([settings grant](settings-grant.md))
 can turn its own network off, never on again: only you can. It may change
-its mode while it is off, as no mode escapes the switch.
+its mode while it is off, as no mode escapes the switch, but it can give
+itself no new folder to write while it is off (see below). A command that is
+running when you turn the switch off is ended by the node, and the audit log
+says so (`killed`, `no_network`): it started with the network, and could pass
+it on to the commands that follow through a socket it listens on. Commands
+that start afterwards run under the switch.
 
 What holds it is a seccomp filter of the node's own, on Linux on x86_64 and
 aarch64: a command under it gets "permission denied" for every socket but a
@@ -416,8 +421,10 @@ folder it may only read opens none) and at these places of the system: the syste
 `DBUS_SYSTEM_BUS_ADDRESS` puts it, else `/run/dbus/system_bus_socket`), the
 system log (`/dev/log`), and the sockets of systemd-resolved and nscd,
 which look up names and accounts. Not one in the node's own folders or
-another pairing's, nor one in `/tmp` and `/var/tmp`, which every account
-shares and which hold your tmux server and display, nor one in your runtime
+another pairing's, nor one in the folders every account may write to
+(`/tmp` and `/var/tmp`, which hold your tmux server and display, `/dev/shm`,
+and `/run/lock`, `/var/lock` and `/var/crash` where they are open like
+that), nor one in your runtime
 folder (`$XDG_RUNTIME_DIR`, `/run/user/<uid>`: your session bus and service
 manager), even where you granted that folder. Abstract unix sockets are closed to
 it from ABI 6 (Linux 6.12).
@@ -436,8 +443,12 @@ What it does not cover:
 - A socket in a folder you grant with `w` that is a session's: a program that
   listens there (a terminal multiplexer, a local proxy) can reach the network
   for the command. Keep none in a folder you grant to a center whose network
-  is off. A folder granted above `/tmp` or the runtime folder is cut around
-  them, so a grant of `/` leaves them out too.
+  is off. A folder granted above the shared folders or the runtime folder is
+  cut around them, so a grant of `/` leaves them out too; one granted inside
+  them is not. A folder you grant with `r` or `x` only opens no socket by
+  path (connecting to one is a write), so a read-only grant of `/` does not
+  open the sockets under it. A center with the settings grant cannot give
+  itself a place to write while its network is off.
 - Without Landlock, a command that is running for another pairing of
   `nerve-run`, which has its network: nothing keeps the pairings apart
   there. `status` warns of that when two pairings share the account.

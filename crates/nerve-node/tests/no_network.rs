@@ -392,3 +392,75 @@ async fn commands_that_would_run_as_the_owner_do_not_run_without_network() {
     assert_eq!(r["stdout"], "ran\n", "{r}");
     daemon.stop().await;
 }
+
+/// Sends a command that runs for a minute; returns its call id.
+async fn long(conn: &mut Conn<TcpStream>, cwd: &Path) -> u64 {
+    let args = json!({"command": "sleep 60", "cwd": cwd.display().to_string()});
+    conn.request(
+        "invoke",
+        json!({"cap": "exec", "action": "run", "args": args, "ctx": {}}),
+    )
+    .await
+    .unwrap()
+}
+
+/// A command that started with the network does not keep it when the owner
+/// turns the switch off: the node ends it (and says so in the audit log),
+/// as it could hand its network to the commands that follow through a socket
+/// it listens on. A command that started after the switch is not touched by
+/// it going on again, and one that runs when the owner turns the network
+/// back on goes on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_running_when_the_network_goes_off_is_ended() {
+    if !Path::new("/bin/bash").exists() || !nerve_sandbox::net_filter::available() {
+        eprintln!("skipped: no seccomp filters or no bash here");
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(d.path()).unwrap();
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let daemon = node(&root, &work, &center, false, None, None).await;
+    let mut conn = linked(&mut center).await;
+    let paths = daemon.paths().clone();
+    let set = |off: bool| {
+        let paths = paths.clone();
+        async move {
+            nerve_node::cli::edit(&paths, |c| {
+                c.centers[0].policy.no_network = off;
+                Ok(())
+            })
+            .await
+            .expect("the owner's edit");
+        }
+    };
+    let started = std::time::Instant::now();
+    // Switched off while it runs: ended.
+    let call = long(&mut conn, &work).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    set(true).await;
+    let mut others = Vec::new();
+    let r = conn.answer(call, WAIT, &mut others).await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(30), "{r:?}");
+    let log = std::fs::read_to_string(daemon.paths().audit_log()).unwrap();
+    assert!(
+        log.contains("\"killed\"") && log.contains("no_network"),
+        "{log}"
+    );
+    // Back on: the switch going on is what ends commands, not its state.
+    set(false).await;
+    let call = long(&mut conn, &work).await;
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let mut others = Vec::new();
+    assert!(
+        conn.answer(call, Duration::from_millis(200), &mut others)
+            .await
+            .is_err_and(|e| e.contains("no answer")),
+        "a command with the network was ended"
+    );
+    set(true).await;
+    let r = conn.answer(call, WAIT, &mut others).await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(60), "{r:?}");
+    daemon.stop().await;
+}

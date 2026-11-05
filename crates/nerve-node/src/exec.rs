@@ -486,10 +486,23 @@ pub fn pairing_spec(
     spec
 }
 
+/// The folders every account may write to (sticky and world-writable on the
+/// usual Linux): `/tmp` and `/var/tmp`, the shared memory `/dev/shm`, and the
+/// lock and crash folders Debian and Ubuntu open the same way (`/var/lock` is
+/// a link to `/run/lock`).
+const SHARED_DIRS: [&str; 6] = [
+    "/tmp",
+    "/var/tmp",
+    "/dev/shm",
+    "/run/lock",
+    "/var/lock",
+    "/var/crash",
+];
+
 /// `spec` without the places a program of another account, or one that
 /// starts programs for its user, answers on a unix socket by path, among the
-/// ones a command reaches while its network is off: the shared `/tmp` and
-/// `/var/tmp` (every account shares them; they hold the owner's tmux server
+/// ones a command reaches while its network is off: the folders every
+/// account shares ([`SHARED_DIRS`]; `/tmp` holds the owner's tmux server
 /// and X display) and the owner's runtime folder (`$XDG_RUNTIME_DIR`,
 /// `/run/user/<uid>`: its session bus and user service manager). A program
 /// there reaches the network for the command. A folder granted above one of
@@ -497,7 +510,7 @@ pub fn pairing_spec(
 /// every command: those of `nerve-run` are cut at the shared folders, those
 /// of a node run by hand at the owner's own.
 fn without_shared_sockets(spec: &mut LandlockSpec) {
-    let mut shared = vec![real(Path::new("/tmp")), real(Path::new("/var/tmp"))];
+    let mut shared: Vec<PathBuf> = SHARED_DIRS.iter().map(|d| real(Path::new(d))).collect();
     shared.extend(runtime_dirs().iter().map(|d| real(d)));
     let (mut kept, mut above) = (Vec::new(), Vec::new());
     for p in std::mem::take(&mut spec.unix) {
@@ -3218,8 +3231,28 @@ mod tests {
         ] {
             assert!(!reaches(&spec, p), "{p:?}: {spec:?}");
         }
-        // What lies beside them stays.
-        for p in [w.join("proj/s"), Path::new("/run/lock/s").to_path_buf()] {
+        // The other folders every account may write are cut as well.
+        for p in [
+            "/dev/shm/p.sock",
+            "/run/lock/p.sock",
+            "/var/lock/p.sock",
+            "/var/crash/p.sock",
+        ] {
+            assert!(!reaches(&spec, Path::new(p)), "{p}: {spec:?}");
+        }
+        // What lies beside them stays: a folder of `/run` that no account
+        // shares.
+        let beside = std::fs::read_dir("/run")
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.is_dir()
+                    && !SHARED_DIRS.iter().any(|s| p.starts_with(s))
+                    && !runtime.starts_with(p)
+            })
+            .expect("a folder in /run");
+        for p in [w.join("proj/s"), beside.join("s")] {
             assert!(reaches(&spec, &p), "{p:?}: {spec:?}");
         }
         // A grant of the whole system is cut around them too.
@@ -3228,7 +3261,12 @@ mod tests {
             ..Default::default()
         };
         let spec = landlock_spec(&all, home, &[], &[]);
-        for p in [Path::new("/tmp/tmux-1000/default"), &runtime.join("bus")] {
+        for p in [
+            Path::new("/tmp/tmux-1000/default"),
+            Path::new("/dev/shm/p.sock"),
+            Path::new("/run/lock/p.sock"),
+            &runtime.join("bus"),
+        ] {
             assert!(!reaches(&spec, p), "{p:?}: {spec:?}");
         }
         assert!(reaches(&spec, Path::new("/usr/s")), "{spec:?}");

@@ -3429,6 +3429,11 @@ async fn set_mode(
 const NO_NETWORK_LINE: &str =
     "its commands have no network (no socket but unix ones), and its sudo-list commands do not run";
 
+/// What `folder network off` adds: a command that started with the network
+/// does not keep it, which the running node sees to (`link::Link::
+/// end_commands_without_network`).
+const NO_NETWORK_RUNNING: &str = "a command of it that runs now is ended by the node";
+
 /// `folder network`: the pairing's network switch for its commands
 /// (`policy.no_network`), in every mode. Where this machine cannot hold
 /// them to it, or they run as the owner in the mode the pairing is in, the
@@ -3458,6 +3463,9 @@ async fn set_network(
             "its commands may use the network"
         }
     );
+    if off {
+        let _ = writeln!(out, "{NO_NETWORK_RUNNING}");
+    }
     if off && !network_rules_here() {
         let _ = writeln!(out, "warning: {}", crate::daemon::NETWORK_NOT_HELD);
     }
@@ -6182,6 +6190,7 @@ mod tests {
             out.starts_with(&format!("home: {NO_NETWORK_LINE}\n")),
             "{out}"
         );
+        assert!(out.contains(NO_NETWORK_RUNNING), "{out}");
         assert_eq!(out.contains("warning:"), !network_rules_here(), "{out}");
         assert!(policy().no_network);
         let ls = run(&paths, &["folder", "ls"]).unwrap();

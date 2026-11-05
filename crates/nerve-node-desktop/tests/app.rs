@@ -618,6 +618,20 @@ fn the_app_drives_the_cli_end_to_end() {
             assert_eq!(perm.get_built_in(), "");
         }
     }
+    // An installed node that found no owner, whose pairing runs as the
+    // owner: the status says it is installed, and the page words its
+    // network banner for that node, not for one run by hand.
+    if cfg!(target_os = "linux") {
+        let st = serde_json::json!({"daemon": "running", "owner": null, "installed": true,
+            "centers": [{"name": "home", "mode": "user", "account": "alice",
+                "no_network": true, "network_off": "as_owner"}]});
+        ctl.show_status(Ok(st.clone()));
+        assert!(perm.get_separate() && perm.get_runs_as_owner());
+        let mut by_hand = st;
+        by_hand["installed"] = serde_json::json!(false);
+        ctl.show_status(Ok(by_hand));
+        assert!(!perm.get_separate() && perm.get_runs_as_owner());
+    }
     // Root as the owner (#151): the page knows, so its texts say root.
     let mut st = serde_json::json!({"daemon": "running", "owner": "root", "owner_is_root": true,
         "centers": [{"name": "home", "mode": "user", "account": "root"}]});

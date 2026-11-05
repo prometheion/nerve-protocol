@@ -62,12 +62,14 @@ impl Ctl {
             .cloned()
             .unwrap_or(Value::Null);
         // The installed Linux node runs folder and allowlist mode as
-        // nerve-run (nerve_node::account): it names its owner, and a
-        // pairing's account, also when `install` found no owner.
+        // nerve-run (nerve_node::account): its status says it is installed,
+        // and it names its owner, and a pairing's account, also when
+        // `install` found no owner and every pairing runs as the owner.
         let run = nerve_node::account::RUN_USER;
         let account = c["account"].as_str().unwrap_or_default().to_string();
         let separate = cfg!(target_os = "linux")
-            && (st["owner"].is_string()
+            && (st["installed"] == true
+                || st["owner"].is_string()
                 || st["centers"]
                     .as_array()
                     .into_iter()

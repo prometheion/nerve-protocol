@@ -887,6 +887,29 @@ fn client_only(
             "policy.no_network: only the owner can let the commands back on the network".into(),
         );
     }
+    // A folder a command may write also opens the unix sockets in it while
+    // the network is off (docs/user/modes.md), and a program that answers on
+    // one may reach the network for the command. So while the switch is on,
+    // a center gets no place to write that its old folders did not give
+    // (judged by the deepest folder at each place, as the protected check
+    // below does): no new `w` folder, no `w` added to one, no closing entry
+    // inside a `w` folder removed. It may still take folders away and add
+    // `r` and `x` ones.
+    if o.no_network || n.no_network {
+        let prot = protected(&n.protected);
+        let writes = |folders: &[Folder], path: &Path| {
+            prot.deepest(folders, path).is_some_and(|f| f.access.write)
+        };
+        for place in n.folders.iter().chain(&o.folders) {
+            let path = Path::new(&place.path);
+            if writes(&n.folders, path) && !writes(&o.folders, path) {
+                return Err(format!(
+                    "policy.folders {}: while the owner keeps this center's commands off the network, only the owner can give it a place to write",
+                    place.path
+                ));
+            }
+        }
+    }
     if n.protected.allow != o.protected.allow {
         // Releasing a protected path is the owner's call; adding more is fine.
         return Err("policy.protected.allow: only the owner can release protected paths".into());
@@ -1629,6 +1652,72 @@ mod tests {
             assert!(s.config().center("home").unwrap().policy.no_network);
         }
         assert_eq!(s.config().center("home").unwrap().policy.mode, Mode::User);
+    }
+
+    /// A folder a command may write opens the unix sockets in it while the
+    /// network is off, so a center gets no new place to write then: not a
+    /// folder, not `w` on one it has, not a closing entry inside one taken
+    /// away. It may drop folders and add `r` ones, and does as it likes while
+    /// its network is on.
+    #[test]
+    fn a_center_without_network_gets_no_new_place_to_write() {
+        let d = tempfile::tempdir().unwrap();
+        let (work, read, shut) = (home_str("work"), home_str("read"), home_str("work/shut"));
+        let mut s = owner_folders(d.path(), &[(&work, "rw"), (&read, "r"), (&shut, "")]);
+        let try_folders = |s: &mut SettingsStore, folders: Value| {
+            let v = s.version();
+            s.set_center_document(
+                "home",
+                with_folders(s, folders),
+                v,
+                |_| false,
+                host,
+                &|_, _| None,
+            )
+        };
+        let refused = |e: Result<_, SetError>| matches!(&e, Err(SetError::Forbidden(m)) if m.contains("policy.folders") && m.contains("place to write"));
+        let other = home_str("other");
+        let all = |extra: Value| {
+            let mut v = json!([{"path": work, "access": "rw"}, {"path": read, "access": "r"},
+                {"path": shut, "access": ""}]);
+            v.as_array_mut().unwrap().push(extra);
+            v
+        };
+        // With its network on, a center may.
+        try_folders(&mut s, all(json!({"path": other, "access": "rw"}))).unwrap();
+        try_folders(&mut s, all(json!({"path": other, "access": "r"}))).unwrap();
+        // Turn it off.
+        let v = s.version();
+        let mut new = doc(&s);
+        new["policy"]["no_network"] = json!(true);
+        s.set_center_document("home", new, v, |_| false, host, &|_, _| None)
+            .unwrap();
+        // A new `w` folder, `w` added to one, a closing entry taken away.
+        assert!(refused(try_folders(
+            &mut s,
+            all(json!({"path": home_str("more"), "access": "rw"}))
+        )));
+        let widened = json!([{"path": work, "access": "rw"}, {"path": read, "access": "rw"},
+            {"path": shut, "access": ""}, {"path": other, "access": "r"}]);
+        assert!(refused(try_folders(&mut s, widened)));
+        let opened = json!([{"path": work, "access": "rw"}, {"path": read, "access": "r"},
+            {"path": other, "access": "r"}]);
+        assert!(refused(try_folders(&mut s, opened)));
+        // A folder at a place the `w` folder holds gives nothing new.
+        try_folders(
+            &mut s,
+            json!([{"path": work, "access": "rw"}, {"path": read, "access": "r"},
+                {"path": shut, "access": ""}, {"path": home_str("work/sub"), "access": "rw"},
+                {"path": other, "access": "r"}]),
+        )
+        .unwrap();
+        // A new `r` folder, and folders taken away, go through.
+        try_folders(
+            &mut s,
+            json!([{"path": read, "access": "r"}, {"path": home_str("fresh"), "access": "rx"}]),
+        )
+        .unwrap();
+        assert_eq!(s.config().center("home").unwrap().policy.folders.len(), 2);
     }
 
     /// A folder at or inside a protected entry releases it, so adding one is

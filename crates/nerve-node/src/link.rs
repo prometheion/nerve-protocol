@@ -716,6 +716,7 @@ async fn session(
                 next_sid: AtomicU32::new(1),
                 last_status: Mutex::new("online"),
                 seen_pin: Mutex::new(None),
+                no_network: AtomicBool::new(entry.policy.no_network),
             });
             Ok((link, None))
         }
@@ -916,6 +917,9 @@ struct Link {
     calls: Mutex<HashMap<Id, InFlight>>,
     /// Running `exec.run` calls → what ends them.
     commands: Mutex<HashMap<Id, exec::Ender>>,
+    /// The pairing's network switch as the link last saw it, to end the
+    /// commands that run when it goes on.
+    no_network: AtomicBool,
     /// Running `exec.run` calls → their output, for `exec`'s `output`
     /// stream; `None` for a sudo command, whose output is not streamed.
     taps: Mutex<HashMap<Id, Option<Arc<crate::tap::Tap>>>>,
@@ -1085,6 +1089,7 @@ impl Link {
                     self.check_rev(&mut rev);
                     // A mode whose time limit passed takes what it gave.
                     self.recheck_streams().await;
+                    self.end_commands_without_network();
                     self.check_status();
                     crate::rotate::drop_old_pin(&self.shared, &self.name);
                     if self.under_a_pin_that_stopped() {
@@ -1120,6 +1125,7 @@ impl Link {
                     }
                     self.check_rev(&mut rev);
                     self.recheck_streams().await;
+                    self.end_commands_without_network();
                     if cfg.version != version {
                         version = cfg.version;
                         if entry.settings == SettingsGrant::Write {
@@ -1171,6 +1177,47 @@ impl Link {
                 self.handle
                     .event("node", "descriptor_changed", json!({"rev": now}));
             }
+        }
+    }
+
+    /// Ends this center's running commands when its network switch went on
+    /// since the last look: a command that started with the network keeps it
+    /// (the filter goes on at its start), and could pass it to the later
+    /// commands, which the switch holds, through a socket it listens on in
+    /// the pairing's own folders. Audited as the node's decision. Whoever
+    /// turned it on: the owner, or the center for itself.
+    fn end_commands_without_network(&self) {
+        let Some((_, entry)) = self.entry() else {
+            return;
+        };
+        let now = entry.policy.no_network;
+        if self.no_network.swap(now, Ordering::SeqCst) || !now {
+            return;
+        }
+        let running: Vec<exec::Ender> = lock(&self.commands).values().cloned().collect();
+        if running.is_empty() {
+            return;
+        }
+        let reason = "the owner turned off the network of this center's commands; a command that started with it does not keep it";
+        tracing::warn!(
+            "center {}: ending its running commands: {reason}",
+            self.name
+        );
+        self.shared.audit(&Entry {
+            ts: crate::now_ms(),
+            center: self.name.clone(),
+            cap: "exec".into(),
+            action: "run".into(),
+            target: "(running commands)".into(),
+            decision: "killed".into(),
+            code: Some("no_network".into()),
+            session: None,
+            reason: Some(reason.into()),
+            command: None,
+            args: None,
+        });
+        for ender in running {
+            ender.signal(Sig::Kill);
         }
     }
 
