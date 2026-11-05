@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_tungstenite::WebSocketStream;
 
-use nerve_proto::frame::{Frame, FrameError, Kind};
+use nerve_proto::frame::{Frame, FrameError};
 use nerve_proto::msg::{self, ByeReason, Hello, Limits, Resumed, method};
 use nerve_proto::resume::{self, Replay};
 use nerve_proto::{ErrorCode, Id, Message, PROTOCOL_VERSION, RpcError};
@@ -138,8 +138,6 @@ pub struct Link {
     /// the grace of a rotation (§4.10). A resume sets it to the key of the
     /// hello that resumed it.
     auth_key: Mutex<String>,
-    /// Whether both sides speak key rotation; a resume sets it again.
-    rotate: AtomicBool,
     pub since: Instant,
     pub since_ms: u64,
     pub limits: Limits,
@@ -196,7 +194,6 @@ impl Link {
     fn new(
         node_id: &str,
         auth_key: String,
-        rotate: bool,
         limits: Limits,
         out: mpsc::Sender<Out>,
         resume_id: Option<String>,
@@ -205,7 +202,6 @@ impl Link {
         Link {
             node_id: node_id.to_string(),
             auth_key: Mutex::new(auth_key),
-            rotate: AtomicBool::new(rotate),
             since: Instant::now(),
             since_ms: msg::now_ms(),
             limits,
@@ -238,17 +234,12 @@ impl Link {
     #[cfg(test)]
     pub(crate) fn for_test(node_id: &str) -> Link {
         let (out, _) = mpsc::channel(1);
-        Link::new(node_id, String::new(), false, Limits::default(), out, None)
+        Link::new(node_id, String::new(), Limits::default(), out, None)
     }
 
     /// The node key the hello of the connection now was signed with.
     pub fn auth_key(&self) -> String {
         self.auth_key.lock().unwrap().clone()
-    }
-
-    /// Whether both sides speak key rotation.
-    pub fn rotate(&self) -> bool {
-        self.rotate.load(Ordering::SeqCst)
     }
 
     /// Notes that a frame came.
@@ -386,6 +377,12 @@ impl Link {
                 r.told(got);
             }
         }
+    }
+
+    /// Whether the link's connection dropped and the link waits for its
+    /// resume.
+    pub fn is_parked(&self) -> bool {
+        self.wire.lock().unwrap().parked
     }
 
     /// Parks the link after connection `conn` dropped, if the node can
@@ -1053,13 +1050,15 @@ pub async fn run(
     };
     let hello: Hello = match Message::decode(&hello) {
         Ok(Message::Notification { method: m, params }) if m == method::HELLO => {
-            match nerve_proto::rpc::params(&params) {
+            match nerve_proto::rpc::params::<Hello>(&params) {
                 Ok(h) => h,
-                Err(_) => {
+                // A hello without `features` or `resume` is one of a node
+                // older than this protocol's baseline (§1.1).
+                Err(e) => {
                     center.note(
-                        Level::Debug,
+                        Level::Warn,
                         Some(&node_id),
-                        "the handshake failed: the hello cannot be read",
+                        format!("the handshake failed: the hello cannot be read ({}); the node may be older than this center", e.message),
                     );
                     return refuse(ws, ByeReason::ProtocolError).await;
                 }
@@ -1115,11 +1114,7 @@ pub async fn run(
         return refuse(ws, ByeReason::UnsupportedVersion).await;
     }
 
-    if hello
-        .resume
-        .as_ref()
-        .is_some_and(|r| !resume::valid_link_id(&r.link))
-    {
+    if !resume::valid_link_id(&hello.resume.link) {
         center.note(
             Level::Debug,
             Some(&node_id),
@@ -1151,10 +1146,10 @@ pub async fn run(
     // any other link the node had ends here.
     let (tx, mut rx) = mpsc::channel::<Out>(nerve_proto::limits::SEND_QUEUE);
     let mut carried = None;
-    if let (Some(offer), Some(old)) = (&hello.resume, &before)
-        && old.resume_id.as_deref() == Some(offer.link.as_str())
+    if let Some(old) = &before
+        && old.resume_id.as_deref() == Some(hello.resume.link.as_str())
     {
-        match old.resume(tx.clone(), offer.got) {
+        match old.resume(tx.clone(), hello.resume.got) {
             Ok((conn, again)) => carried = Some((old.clone(), conn, again)),
             Err(e) => center.note(
                 Level::Info,
@@ -1181,37 +1176,28 @@ pub async fn run(
         }
     }
 
-    // Features go only to a node that named its own (§1.1): an older node
-    // refuses a field it does not know in the welcome.
-    let features = (!hello.features.is_empty()).then(|| {
-        nerve_proto::FEATURES
-            .iter()
-            .filter(|f| hello.features.iter().any(|h| h == *f))
-            .map(|f| f.to_string())
-            .collect::<Vec<_>>()
+    // The features of the hello this center speaks too (§1.1).
+    let features: Vec<&str> = nerve_proto::FEATURES
+        .iter()
+        .copied()
+        .filter(|f| hello.features.iter().any(|h| h == f))
+        .collect();
+    let resumed = match &carried {
+        Some((link, _, _)) => Resumed {
+            resumed: true,
+            got: link.got(),
+        },
+        None => Resumed {
+            resumed: false,
+            got: 0,
+        },
+    };
+    let welcome = json!({
+        "version": PROTOCOL_VERSION,
+        "limits": Limits::default(),
+        "features": features,
+        "resume": resumed,
     });
-    let rotate = features
-        .as_ref()
-        .is_some_and(|f| f.iter().any(|f| f == nerve_proto::FEATURE_ROTATE));
-    let mut welcome = json!({"version": PROTOCOL_VERSION, "limits": Limits::default()});
-    if let Some(f) = features {
-        welcome["features"] = json!(f);
-    }
-    // Only a node that offered a resume hears of one: an older node refuses
-    // a welcome with fields it does not know.
-    if hello.resume.is_some() {
-        let r = match &carried {
-            Some((link, _, _)) => Resumed {
-                resumed: true,
-                got: link.got(),
-            },
-            None => Resumed {
-                resumed: false,
-                got: 0,
-            },
-        };
-        welcome["resume"] = serde_json::to_value(r).unwrap_or_default();
-    }
     if send_text(&mut ws, Message::notification(method::WELCOME, welcome))
         .await
         .is_err()
@@ -1237,13 +1223,12 @@ pub async fn run(
         Some(c) => {
             // The link goes on under the key this hello was signed with.
             *c.0.auth_key.lock().unwrap() = auth_key;
-            c.0.rotate.store(rotate, Ordering::SeqCst);
             c
         }
         None => {
-            let id = hello.resume.as_ref().map(|r| r.link.clone());
+            let id = Some(hello.resume.link.clone());
             (
-                Arc::new(Link::new(&node_id, auth_key, rotate, hello.limits, tx, id)),
+                Arc::new(Link::new(&node_id, auth_key, hello.limits, tx, id)),
                 0,
                 Vec::new(),
             )
@@ -1288,7 +1273,7 @@ pub async fn run(
     }
     // A node that links while the center's key rotation is told learns of
     // it now.
-    if rotate && let Some(notice) = center.rotation_notice() {
+    if let Some(notice) = center.rotation_notice() {
         link.notify(method::CENTER_ROTATE, notice).await;
     }
 
@@ -1405,10 +1390,8 @@ pub async fn run(
                 }
             },
             WsMessage::Binary(b) => match Frame::decode(&b) {
-                // A stream's data (crate::streams); nodes send no blobs to
-                // the center.
-                Ok(f) if f.kind == Kind::Stream => link.stream_frame(&f),
-                Ok(_) => {}
+                // A stream's data (crate::streams).
+                Ok(f) => link.stream_frame(&f),
                 // Media frames are refused.
                 Err(FrameError::MediaReserved) => {
                     link.bye(ByeReason::ProtocolError).await;
@@ -1501,7 +1484,7 @@ async fn handle(center: &Center, link: &Arc<Link>, m: Message) -> Option<ByeReas
                     center.changed(crate::center::Change::Nodes);
                 }
             }
-            method::KEY_ROTATE if link.rotate() => {
+            method::KEY_ROTATE => {
                 let (r, dropped) = center.rotate_node_key(link, &params);
                 link.notify(method::KEY_ROTATED, json!(r)).await;
                 // A rotation in the grace of another ends the older key's
@@ -1510,7 +1493,7 @@ async fn handle(center: &Center, link: &Arc<Link>, m: Message) -> Option<ByeReas
                     center.end_link_of_key(&link.node_id, &key);
                 }
             }
-            method::KEY_RETIRE if link.rotate() => {
+            method::KEY_RETIRE => {
                 let (r, opened_with_it) = center.retire_node_key(link, &params);
                 link.notify(method::KEY_RETIRED, json!(r)).await;
                 // The key this link was opened with is refused from now on,
@@ -1525,7 +1508,6 @@ async fn handle(center: &Center, link: &Arc<Link>, m: Message) -> Option<ByeReas
                     .unwrap_or(ByeReason::Shutdown);
                 return Some(reason);
             }
-            // Progress is not passed on to MCP clients.
             _ => {}
         },
     }
@@ -1551,7 +1533,7 @@ mod tests {
     #[tokio::test]
     async fn a_call_dropped_before_its_request_left_keeps_no_place() {
         let (out, mut rx) = mpsc::channel(1);
-        let link = Link::new("n1", String::new(), false, Limits::default(), out, None);
+        let link = Link::new("n1", String::new(), Limits::default(), out, None);
         let (id, _reply) = link.start("invoke", json!({})).await.unwrap();
         assert_eq!((id, link.waiting()), (1, 1));
         // The queue holds that one frame and is full now: the next call
@@ -1573,7 +1555,6 @@ mod tests {
         let link = Arc::new(Link::new(
             "n1",
             String::new(),
-            false,
             Limits::default(),
             out,
             Some("l-1".into()),
@@ -1618,7 +1599,6 @@ mod tests {
         let link = Arc::new(Link::new(
             "n1",
             String::new(),
-            false,
             Limits::default(),
             out,
             Some("l-1".into()),
@@ -1680,14 +1660,7 @@ mod tests {
     #[tokio::test]
     async fn a_stream_open_answered_late_is_closed_on_the_node() {
         let (out, mut rx) = mpsc::channel(8);
-        let link = Arc::new(Link::new(
-            "n1",
-            String::new(),
-            false,
-            Limits::default(),
-            out,
-            None,
-        ));
+        let link = Arc::new(Link::new("n1", String::new(), Limits::default(), out, None));
         let ring = Arc::new(Ring::default());
         let e = link
             .open_stream(json!({}), ring.clone(), Duration::from_millis(50))
@@ -1710,14 +1683,7 @@ mod tests {
     #[tokio::test]
     async fn a_node_that_does_not_answer_gets_few_stream_opens() {
         let (out, mut rx) = mpsc::channel(8);
-        let link = Arc::new(Link::new(
-            "n1",
-            String::new(),
-            false,
-            Limits::default(),
-            out,
-            None,
-        ));
+        let link = Arc::new(Link::new("n1", String::new(), Limits::default(), out, None));
         for _ in 0..UNANSWERED_MAX {
             let ring = Arc::new(Ring::default());
             let e = link
@@ -1746,14 +1712,7 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_stream_open_is_not_left_unanswered_by_the_node() {
         let (out, mut rx) = mpsc::channel(8);
-        let link = Arc::new(Link::new(
-            "n1",
-            String::new(),
-            false,
-            Limits::default(),
-            out,
-            None,
-        ));
+        let link = Arc::new(Link::new("n1", String::new(), Limits::default(), out, None));
         for _ in 0..UNANSWERED_MAX {
             let ring = Arc::new(Ring::default());
             let open = link.open_stream(json!({}), ring, Duration::from_secs(30));
@@ -1790,7 +1749,6 @@ mod tests {
             let link = Arc::new(Link::new(
                 "n1",
                 String::new(),
-                false,
                 Limits::default(),
                 out,
                 Some("l-1".into()),
@@ -1834,14 +1792,7 @@ mod tests {
     #[tokio::test]
     async fn an_unsub_never_follows_a_later_sub_of_its_topic() {
         let (out, mut rx) = mpsc::channel(8);
-        let link = Arc::new(Link::new(
-            "n1",
-            String::new(),
-            false,
-            Limits::default(),
-            out,
-            None,
-        ));
+        let link = Arc::new(Link::new("n1", String::new(), Limits::default(), out, None));
         let ring = |_| Arc::new(Ring::of(crate::streams::Source::Events));
         let (a, b) = (ring(0), ring(1));
         let mut sent = async || {
@@ -1875,7 +1826,6 @@ mod tests {
         let link = Arc::new(Link::new(
             "n1",
             String::new(),
-            false,
             Limits::default(),
             out,
             Some("l-1".into()),

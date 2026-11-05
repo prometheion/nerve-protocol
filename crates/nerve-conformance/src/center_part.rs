@@ -63,6 +63,7 @@ pub async fn run(link: &PairLink) -> Report {
                 "the first frame is a challenge",
                 "a wrong signature closes the link",
                 "a version mismatch closes with unsupported_version",
+                "a hello without features closes with protocol_error",
                 "a good hello gets a welcome for version \"0\"",
                 "the center fetches the descriptor after welcome",
             ] {
@@ -156,6 +157,28 @@ pub async fn run(link: &PairLink) -> Report {
                     reason == "unsupported_version",
                     format!("bye reason {reason:?}"),
                 ),
+                None => Err("the link stayed open".into()),
+            }
+        }
+        .await,
+    );
+
+    // §1.1: `features` is part of the hello's baseline, also when empty.
+    r.check(
+        "1.1",
+        "a hello without features closes with protocol_error",
+        async {
+            let mut c = node.dial(&node.node_id).await.map_err(|e| e.to_string())?;
+            let ch = echo::read_challenge(&mut c).await?;
+            let mut hello = node.hello(&ch, &["0"], false);
+            if let Some(h) = hello.as_object_mut() {
+                h.remove("features");
+            }
+            c.notify(method::HELLO, hello).await?;
+            match c.ends_within(WAIT).await {
+                Some(reason) => {
+                    ensure(reason == "protocol_error", format!("bye reason {reason:?}"))
+                }
                 None => Err("the link stayed open".into()),
             }
         }

@@ -1855,12 +1855,45 @@ async fn resumable_link(
     let hello = fake_center::hello(&mut inc.conn, &center.center_id, &paired)
         .await
         .expect("hello");
-    let offer = hello.resume.expect("the node offers its link for a resume");
+    let offer = hello.resume;
     assert!(nerve_proto::resume::valid_link_id(&offer.link), "{offer:?}");
     fake_center::welcome(&mut inc.conn, Some(answer(&offer)))
         .await
         .expect("welcome");
     (inc.conn, offer)
+}
+
+/// `features` and `resume` are the welcome's baseline (protocol.md §1.1):
+/// a node refuses a welcome without one with `protocol_error`, as a center
+/// older than this protocol's baseline sends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_welcome_without_features_or_resume_is_refused() {
+    let dir = tempdir();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let node = paired_node_with(dir.path(), &center, |_| {}).await;
+    for field in ["features", "resume"] {
+        let paired = center.paired().expect("paired");
+        let mut inc = center.next_link(WAIT).await.expect("the node dials");
+        fake_center::hello(&mut inc.conn, &center.center_id, &paired)
+            .await
+            .expect("hello");
+        let mut w = serde_json::json!({
+            "version": "0",
+            "features": [],
+            "resume": {"resumed": false, "got": 0},
+        });
+        w.as_object_mut().unwrap().remove(field);
+        inc.conn
+            .notify(nerve_proto::msg::method::WELCOME, w)
+            .await
+            .unwrap();
+        assert_eq!(
+            inc.conn.ends_within(WAIT).await.as_deref(),
+            Some("protocol_error"),
+            "{field}"
+        );
+    }
+    node.stop().await;
 }
 
 /// A fresh link, with nothing to carry on.
@@ -2146,7 +2179,7 @@ async fn a_link_not_resumed_within_the_grace_ends_its_calls() {
     let hello = fake_center::hello(&mut inc.conn, &center.center_id, &paired)
         .await
         .expect("hello");
-    let offer = hello.resume.expect("an offer");
+    let offer = hello.resume;
     assert_ne!(offer.link, first.link, "the old link is gone");
     assert_eq!(offer.got, 0, "{offer:?}");
     node.stop().await;
@@ -2193,32 +2226,6 @@ async fn a_link_the_center_does_not_resume_ends_its_calls() {
             .is_err(),
         "the old call was answered: {others:?}"
     );
-    node.stop().await;
-}
-
-/// On a link whose center cannot resume (its welcome says nothing of it),
-/// a drop ends the calls at once, as in 0.0.1.
-#[cfg(target_os = "linux")]
-#[tokio::test(flavor = "multi_thread")]
-async fn without_resume_a_drop_ends_the_calls_at_once() {
-    let dir = tempdir();
-    let mut center = FakeCenter::start(false).await.unwrap();
-    let node = paired_node_with(dir.path(), &center, |p| {
-        p.mode = nerve_policy::Mode::User;
-    })
-    .await;
-    let home = dir.path().join("home");
-    let mut conn = linked(&mut center).await;
-    conn.request(
-        "invoke",
-        json!({"cap": "exec", "action": "run",
-               "args": {"command": "sleep 30 & echo $! > sleep.pid; wait"}}),
-    )
-    .await
-    .unwrap();
-    let pid = pid_in(&home.join("sleep.pid")).await;
-    drop(conn);
-    assert!(ends(pid).await, "the command outlived its link");
     node.stop().await;
 }
 
@@ -2355,7 +2362,7 @@ async fn a_lock_while_the_node_dials_again_ends_the_dropped_link_at_once() {
     let hello = fake_center::hello(&mut inc.conn, &center.center_id, &paired)
         .await
         .expect("hello");
-    let offer = hello.resume.expect("an offer");
+    let offer = hello.resume;
     assert_ne!(offer.link, first.link, "the ended link was offered");
     fake_center::welcome(&mut inc.conn, Some(fresh(&offer)))
         .await
@@ -2377,7 +2384,7 @@ async fn a_lock_while_the_node_waits_for_the_welcome_ends_the_dropped_link_at_on
     let hello = fake_center::hello(&mut inc.conn, &center.center_id, &paired)
         .await
         .expect("hello");
-    let offer = hello.resume.expect("an offer");
+    let offer = hello.resume;
     assert_eq!(offer.link, first.link);
     assert!(running(pid), "the offered link's command runs");
     owner_edit(node.paths(), |c| c.locked = true).await;

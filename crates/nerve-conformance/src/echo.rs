@@ -204,6 +204,8 @@ impl Echo {
             "software": {"name": "nerve-echo", "version": env!("CARGO_PKG_VERSION")},
             "limits": msg::Limits::default(),
             "rev": 1,
+            "features": [],
+            "resume": {"link": msg::hex(&nerve_transport::keys::random_bytes(16)), "got": 0},
         })
     }
 }

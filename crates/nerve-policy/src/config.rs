@@ -1587,8 +1587,10 @@ sudo_allow = ["sudo apt update"]
                 .unwrap_err()
                 .contains("format 0")
         );
-        let mut set = NodeConfig::default();
-        set.format = Format(2);
+        let mut set = NodeConfig {
+            format: Format(2),
+            ..NodeConfig::default()
+        };
         assert!(set.validate().unwrap_err().contains("format 2"));
     }
 

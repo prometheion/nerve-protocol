@@ -500,7 +500,7 @@ async fn a_result_kept_for_a_resume_carries_no_password() {
     let hello = fake_center::hello(&mut inc.conn, &center.center_id, &paired)
         .await
         .expect("hello");
-    let offer = hello.resume.expect("a resume offer");
+    let offer = hello.resume;
     let fresh = nerve_proto::msg::Resumed {
         resumed: false,
         got: 0,
@@ -553,7 +553,7 @@ async fn a_result_kept_for_a_resume_carries_no_password() {
     let hello = fake_center::hello(&mut inc.conn, &center.center_id, &paired)
         .await
         .expect("hello");
-    assert_eq!(hello.resume.as_ref().map(|r| &r.link), Some(&offer.link));
+    assert_eq!(hello.resume.link, offer.link);
     let again = nerve_proto::msg::Resumed {
         resumed: true,
         got: read,

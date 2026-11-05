@@ -17,7 +17,6 @@ pub mod method {
     pub const WELCOME: &str = "welcome";
     pub const DESCRIBE: &str = "describe";
     pub const INVOKE: &str = "invoke";
-    pub const PROGRESS: &str = "progress";
     pub const CANCEL: &str = "cancel";
     pub const GET: &str = "get";
     pub const SUB: &str = "sub";
@@ -28,8 +27,7 @@ pub mod method {
     pub const STREAM_CLOSE: &str = "stream.close";
     pub const SESSION_END: &str = "session.end";
     pub const BYE: &str = "bye";
-    // Key rotation (§4.10), only between sides that both name the feature
-    // `rotate`.
+    // Key rotation (§4.10).
     pub const KEY_ROTATE: &str = "key.rotate";
     pub const KEY_ROTATED: &str = "key.rotated";
     pub const KEY_RETIRE: &str = "key.retire";
@@ -44,8 +42,6 @@ pub mod method {
 pub struct Limits {
     #[serde(default = "d_message")]
     pub message_bytes: u64,
-    #[serde(default = "d_blob")]
-    pub blob_bytes: u64,
     #[serde(default = "d_calls")]
     pub calls: u32,
     #[serde(default = "d_streams")]
@@ -54,9 +50,6 @@ pub struct Limits {
 
 fn d_message() -> u64 {
     crate::limits::MESSAGE_BYTES
-}
-fn d_blob() -> u64 {
-    crate::limits::BLOB_BYTES
 }
 fn d_calls() -> u32 {
     crate::limits::CALLS
@@ -69,7 +62,6 @@ impl Default for Limits {
     fn default() -> Limits {
         Limits {
             message_bytes: d_message(),
-            blob_bytes: d_blob(),
             calls: d_calls(),
             streams: d_streams(),
         }
@@ -109,14 +101,11 @@ pub struct Hello {
     pub limits: Limits,
     /// The descriptor revision the node will describe.
     pub rev: u64,
-    /// Additive features the node speaks (§1.1). Left out by nodes older
-    /// than features.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Additive features the node speaks (§1.1), possibly none. A hello
+    /// without the field is refused.
     pub features: Vec<String>,
-    /// The link this connection carries, for a node that can resume links
-    /// (§4.9).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resume: Option<Resume>,
+    /// The link this connection carries (§4.9).
+    pub resume: Resume,
 }
 
 /// `hello.resume`: the id of the link the node wants to carry on (or a new
@@ -128,8 +117,7 @@ pub struct Resume {
 }
 
 /// `welcome.resume`: whether the center carries on the link the node named,
-/// and how many counted frames of it the center read. Sent only to a node
-/// whose hello had `resume`.
+/// and how many counted frames of it the center read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Resumed {
@@ -150,12 +138,9 @@ pub struct Welcome {
     pub version: String,
     #[serde(default)]
     pub limits: Limits,
-    /// The features of the hello the center speaks too. Sent only to a node
-    /// whose hello named features: an older node refuses the field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub features: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resume: Option<Resumed>,
+    /// The features of the hello the center speaks too, possibly none.
+    pub features: Vec<String>,
+    pub resume: Resumed,
 }
 
 /// `key.rotate` (node → center): the node's new key for this center, signed
@@ -243,9 +228,6 @@ pub struct Invoke {
     pub ctx: Ctx,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_ms: Option<u64>,
-    /// Blob ids this call's arguments reference, sent as binary frames first.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub blobs: Vec<u32>,
 }
 
 impl Invoke {
@@ -264,12 +246,6 @@ fn check_session(ctx: &Ctx) -> Result<(), crate::RpcError> {
         ));
     }
     Ok(())
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Progress {
-    pub id: Value,
-    pub data: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -569,39 +545,57 @@ mod tests {
         assert!(Topics { ctx: long, ..t }.check().is_err());
     }
 
-    #[test]
-    fn hello_is_tolerant() {
-        let h: Hello = serde_json::from_value(json!({
+    /// A hello as every node sends it: features (possibly none) and the
+    /// link it carries.
+    fn hello() -> Value {
+        json!({
             "node_id": "n", "auth": {"sig": "00"}, "versions": ["0"],
-            "software": {"name": "x", "version": "1"}, "rev": 1, "x-extra": true
-        }))
-        .unwrap();
-        assert_eq!(h.limits, Limits::default());
+            "software": {"name": "x", "version": "1"}, "rev": 1,
+            "features": [], "resume": {"link": "00", "got": 0}
+        })
     }
 
     #[test]
-    fn features_are_additive() {
-        // A hello without features (an older node) reads as none.
-        let h: Hello = serde_json::from_value(json!({
-            "node_id": "n", "auth": {"sig": "00"}, "versions": ["0"],
-            "software": {"name": "x", "version": "1"}, "rev": 1
-        }))
-        .unwrap();
+    fn hello_is_tolerant() {
+        let mut v = hello();
+        v["x-extra"] = json!(true);
+        let h: Hello = serde_json::from_value(v).unwrap();
+        assert_eq!(h.limits, Limits::default());
+    }
+
+    /// `features` and `resume` are the baseline of both messages: a hello
+    /// or a welcome without them is refused, saying which is missing; an
+    /// empty list is fine, and a feature name nobody knows is read.
+    #[test]
+    fn features_and_resume_are_required() {
+        let h: Hello = serde_json::from_value(hello()).unwrap();
         assert!(h.features.is_empty());
-        assert!(serde_json::to_value(&h).unwrap().get("features").is_none());
-        // A welcome names them only for a node that asked; the node stays
-        // strict about anything else.
-        let w = Welcome {
-            version: "0".into(),
-            limits: Limits::default(),
-            features: None,
-            resume: None,
-        };
-        assert!(serde_json::to_value(&w).unwrap().get("features").is_none());
-        let w: Welcome =
-            serde_json::from_value(json!({"version": "0", "features": ["rotate"]})).unwrap();
-        assert_eq!(w.features, Some(vec!["rotate".to_string()]));
-        assert!(serde_json::from_value::<Welcome>(json!({"version": "0", "x": 1})).is_err());
+        assert_eq!(serde_json::to_value(&h).unwrap()["features"], json!([]));
+        let mut later = hello();
+        later["features"] = json!(["later"]);
+        let h: Hello = serde_json::from_value(later).unwrap();
+        assert_eq!(h.features, ["later"]);
+        for field in ["features", "resume"] {
+            let mut v = hello();
+            v.as_object_mut().unwrap().remove(field);
+            let e = serde_json::from_value::<Hello>(v).unwrap_err().to_string();
+            assert!(e.contains(&format!("missing field `{field}`")), "{e}");
+        }
+        let welcome =
+            json!({"version": "0", "features": [], "resume": {"resumed": false, "got": 0}});
+        let w: Welcome = serde_json::from_value(welcome.clone()).unwrap();
+        assert!(w.features.is_empty() && !w.resume.resumed);
+        for field in ["features", "resume"] {
+            let mut v = welcome.clone();
+            v.as_object_mut().unwrap().remove(field);
+            let e = serde_json::from_value::<Welcome>(v)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(&format!("missing field `{field}`")), "{e}");
+        }
+        let mut v = welcome;
+        v["x"] = json!(1);
+        assert!(serde_json::from_value::<Welcome>(v).is_err());
         // What a center sends about keys is strict too.
         assert!(
             serde_json::from_value::<CenterRotate>(json!({

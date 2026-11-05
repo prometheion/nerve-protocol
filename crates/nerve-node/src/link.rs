@@ -614,7 +614,7 @@ async fn session(
                 .iter()
                 .map(|f| f.to_string())
                 .collect(),
-            resume: Some(offer.clone()),
+            resume: offer.clone(),
         };
         let m = Message::notification(
             method::HELLO,
@@ -633,15 +633,10 @@ async fn session(
                 format!("the center chose version {:?}", w.version),
             ));
         }
-        // A center older than features names none.
-        let rotate = w
-            .features
-            .as_ref()
-            .is_some_and(|f| f.iter().any(|f| f == nerve_proto::FEATURE_ROTATE));
-        Ok((w.resume, w.limits.message_bytes, rotate))
+        Ok((w.resume, w.limits.message_bytes))
     }
     .await;
-    let (resumed, takes, rotate) = match hello {
+    let (resumed, takes) = match hello {
         Ok(r) => r,
         Err((reason, why)) => {
             tracing::warn!("center {}: the handshake failed: {why}", entry.name);
@@ -676,19 +671,19 @@ async fn session(
     let (tx, mut rx) = mpsc::channel::<WsMessage>(limits::SEND_QUEUE);
     // Stream frames wait in their own queue, sent while `rx` is empty.
     let (ftx, mut frx) = mpsc::channel::<crate::daemon::StreamOut>(STREAM_QUEUE);
-    // The center carries on the parked link, or starts a new one; without
-    // `welcome.resume` it cannot resume links at all (spec §4.9).
+    // The center carries on the parked link, or starts a new one (spec
+    // §4.9).
     let carried = match (resumed, parked) {
-        (Some(Resumed { resumed: true, got }), Some(p)) => {
+        (Resumed { resumed: true, got }, Some(p)) => {
             match p.link().handle.attach(tx.clone(), ftx.clone(), got) {
                 Ok(again) => Ok((p.resume(), Some(again))),
                 Err(e) => Err(format!("the center resumed the link wrongly: {e}")),
             }
         }
-        (Some(Resumed { resumed: true, .. }), None) => {
+        (Resumed { resumed: true, .. }, None) => {
             Err("the center resumed a link the node did not offer".to_string())
         }
-        (r, p) => {
+        (_, p) => {
             if p.is_some() {
                 tracing::info!("center {}: the center did not resume the link", entry.name);
             }
@@ -701,7 +696,7 @@ async fn session(
                 Some(s) => s.scrub(t),
                 None => t,
             });
-            let handle = Arc::new(LinkHandle::new(tx.clone(), ftx.clone(), r.is_some(), scrub));
+            let handle = Arc::new(LinkHandle::new(tx.clone(), ftx.clone(), true, scrub));
             let link = Arc::new(Link {
                 shared: shared.clone(),
                 cs: cs.clone(),
@@ -793,13 +788,12 @@ async fn session(
     });
 
     drop((tx, ftx));
-    link.handle.set_rotate(rotate);
     *lock(&cs.link) = Some(link.handle.clone());
     // A rotation of the node's key that got no answer on an earlier link is
     // sent again on this one, or settled when this hello was signed with the
     // new key and the center took it.
     match pending {
-        Pending::Resend if rotate => {
+        Pending::Resend => {
             tokio::spawn(crate::rotate::resume(shared.clone(), entry.name.clone()));
         }
         Pending::Adopt(public_key) => {
@@ -1045,8 +1039,8 @@ impl Link {
                             self.send(reply).await;
                         }
                         Got::Binary(b) => {
-                            // No blobs or streams flow center → node;
-                            // only reserved media frames break the link.
+                            // No streams flow center → node; only reserved
+                            // media frames break the link.
                             if let Err(FrameError::MediaReserved) = Frame::decode(&b) {
                                 tracing::warn!("center {}: it sent a media frame, which this node does not take", self.name);
                                 return self.end(ByeReason::ProtocolError, Outcome::Retry).await;
@@ -1293,7 +1287,7 @@ impl Link {
                 }
                 // An answer that came after the owner's command gave up
                 // still settles the rotation.
-                if m == method::KEY_ROTATED && self.handle.rotate() {
+                if m == method::KEY_ROTATED {
                     tokio::spawn(crate::rotate::late_answer(
                         self.shared.clone(),
                         self.name.clone(),
@@ -1305,7 +1299,7 @@ impl Link {
                 None
             }
             method::CENTER_ROTATE => {
-                crate::rotate::center_rotated(&self.shared, &self.name, &self.handle, &p);
+                crate::rotate::center_rotated(&self.shared, &self.name, &p);
                 None
             }
             // Unknown notifications are ignored (spec §3).
@@ -3547,7 +3541,6 @@ fn unit_call(cap: &str, name: &str, args: Map<String, Value>, ctx: msg::Ctx) -> 
         args,
         ctx,
         deadline_ms: None,
-        blobs: Vec::new(),
     }
 }
 

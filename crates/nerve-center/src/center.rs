@@ -1415,7 +1415,7 @@ impl Center {
             .lock()
             .unwrap()
             .values()
-            .filter(|l| l.rotate() && !l.is_closed())
+            .filter(|l| !l.is_closed())
             .cloned()
             .collect();
         for l in &links {
@@ -1920,6 +1920,11 @@ impl Center {
                 return;
             }
             links.remove(&old.node_id);
+        }
+        // A link that dropped while the center pinged it was told as a
+        // drop then, and is not a second one.
+        if old.is_parked() {
+            return;
         }
         let silent = old.silent_for();
         let gone = Instant::now()
