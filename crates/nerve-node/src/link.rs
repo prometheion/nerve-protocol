@@ -1185,7 +1185,8 @@ impl Link {
     /// (the filter goes on at its start), and could pass it to the later
     /// commands, which the switch holds, through a socket it listens on in
     /// the pairing's own folders. Audited as the node's decision. Whoever
-    /// turned it on: the owner, or the center for itself.
+    /// turned it on: the owner, or the center for itself. A command still
+    /// being set up is not in `commands` yet: [`Running::started`] ends it.
     fn end_commands_without_network(&self) {
         let Some((_, entry)) = self.entry() else {
             return;
@@ -1198,6 +1199,20 @@ impl Link {
         if running.is_empty() {
             return;
         }
+        self.audit_ended_without_network("(running commands)");
+        for ender in running {
+            ender.signal(Sig::Kill);
+        }
+    }
+
+    /// Whether the owner's network switch is on for this center now.
+    fn network_off_now(&self) -> bool {
+        self.entry().is_some_and(|(_, e)| e.policy.no_network)
+    }
+
+    /// Writes the end of a command that has the network after the owner's
+    /// switch went on to the audit log and the node's log.
+    fn audit_ended_without_network(&self, target: &str) {
         let reason = "the owner turned off the network of this center's commands; a command that started with it does not keep it";
         tracing::warn!(
             "center {}: ending its running commands: {reason}",
@@ -1208,7 +1223,7 @@ impl Link {
             center: self.name.clone(),
             cap: "exec".into(),
             action: "run".into(),
-            target: "(running commands)".into(),
+            target: target.into(),
             decision: "killed".into(),
             code: Some("no_network".into()),
             session: None,
@@ -1216,9 +1231,6 @@ impl Link {
             command: None,
             args: None,
         });
-        for ender in running {
-            ender.signal(Sig::Kill);
-        }
     }
 
     /// Sends a `node` state change when the status moved (spec §7.1). Other
@@ -3376,6 +3388,19 @@ impl Link {
             .then(|| self.shared.open_to_bus())
             .transpose()
             .map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
+        // The last look, after all the call waited for: the owner's switch
+        // may be on since the call was decided, and the mode it went by may
+        // have ended since (the clock was read more than once), so the
+        // command would run without the filter, or as the owner.
+        if let Some(why) = crate::daemon::late_network_refusal(
+            no_network,
+            self.network_off_now(),
+            separate.is_some() || landlock.is_some(),
+            self.shared.service,
+        ) {
+            self.audit(inv, &command, "forbidden", Some("forbidden"), Some(why));
+            return Err(RpcError::forbidden(why));
+        }
         let opts = RunOptions {
             shell: cfg.machine.shell.clone(),
             landlock,
@@ -3398,7 +3423,7 @@ impl Link {
             tap,
             no_network,
         };
-        let r = exec::run(&rc, &opts, |e| guard.started(e)).await;
+        let r = exec::run(&rc, &opts, |e| guard.started(e, no_network)).await;
         drop(open);
         drop(guard);
         if let Ok(v) = &r {
@@ -3567,6 +3592,14 @@ impl Link {
         );
         let guard = Running::start(self, id.clone(), cfg.limits.max_running as usize)?;
         let timeouts = exec::Timeouts::from_limits(&cfg.limits);
+        // The owner's switch may be on since the call was decided
+        // (`exec_run` has the same look).
+        if let Some(why) =
+            crate::daemon::late_network_refusal(no_network, self.network_off_now(), true, true)
+        {
+            self.audit(inv, &target, "forbidden", Some("forbidden"), Some(why));
+            return Err(RpcError::forbidden(why));
+        }
         let opts = RunOptions {
             shell: None,
             landlock,
@@ -3589,7 +3622,7 @@ impl Link {
             tap: guard.tap(true),
             no_network,
         };
-        let r = exec::run(&rc, &opts, |e| guard.started(e)).await;
+        let r = exec::run(&rc, &opts, |e| guard.started(e, no_network)).await;
         drop(guard);
         if let Ok(v) = &r {
             self.audit_killed(inv, target, Some(ran), v);
@@ -3988,11 +4021,21 @@ impl<'a> Running<'a> {
         tap
     }
 
-    fn started(&self, ender: &exec::Ender) {
+    /// `held` is whether the command runs under the owner's network switch.
+    /// One that does not, and the switch is on by now, is ended: the look at
+    /// the switch ([`Link::end_commands_without_network`]) may have come
+    /// before it was in `commands`. Looking after it is in them leaves no gap
+    /// between the two.
+    fn started(&self, ender: &exec::Ender, held: bool) {
         let pid = ender.pid();
         *lock(&self.pid) = Some(pid);
         lock(&self.link.shared.commands).insert(pid, self.link.name.clone());
         lock(&self.link.commands).insert(self.id.clone(), ender.clone());
+        if !held && self.link.network_off_now() {
+            self.link
+                .audit_ended_without_network("(a command being started)");
+            ender.signal(Sig::Kill);
+        }
     }
 }
 

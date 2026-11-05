@@ -381,7 +381,8 @@ itself no new folder to write while it is off (see below). A command that is
 running when you turn the switch off is ended by the node, and the audit log
 says so (`killed`, `no_network`): it started with the network, and could pass
 it on to the commands that follow through a socket it listens on. Commands
-that start afterwards run under the switch.
+that start afterwards run under the switch, and one that was being set up
+when you turned it off does not start without it: it is ended or refused.
 
 What holds it is a seccomp filter of the node's own, on Linux on x86_64 and
 aarch64: a command under it gets "permission denied" for every socket but a
@@ -448,10 +449,21 @@ What it does not cover:
   them is not. A folder you grant with `r` or `x` only opens no socket by
   path (connecting to one is a write), so a read-only grant of `/` does not
   open the sockets under it. A center with the settings grant cannot give
-  itself a place to write while its network is off.
+  itself a place to write while its network is off: no new `w` folder, no
+  `w` added to one, and no `w` folder inside one of yours while the folder
+  above it is narrowed or dropped (a command may have put a link there).
 - Without Landlock, a command that is running for another pairing of
   `nerve-run`, which has its network: nothing keeps the pairings apart
   there. `status` warns of that when two pairings share the account.
+- A program that a command detached before you turned the switch off (a
+  background server it started on its own, outside the command's process
+  group), or that a command left running when it ended: the node ends the
+  commands it tracks, not these, and they keep the network they had. If one
+  listens on a socket in a folder of the pairing, the later commands can
+  reach it. On the installed node, the processes of the account `nerve-run`
+  are the pairings' commands and what they left, so ending them (as root)
+  clears this; on a node you run yourself they are among your own, and you
+  have to find them.
 - A program's action ([providers](providers.md)), which runs as you.
 
 ## The account `nerve-run` (Linux)

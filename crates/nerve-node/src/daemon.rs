@@ -1788,6 +1788,38 @@ pub const NETWORK_AS_OWNER: &str = "the owner turned the network off for this ce
 /// ([`Shared::network_refusal`]).
 pub const NETWORK_AS_OWNER_BY_HAND: &str = "the owner turned the network off for this center's commands, and this node, run by hand, runs them as its own user, which nothing here keeps off the network (only folder mode does, as a user that is not root and on Linux 7.1 or later, whose Landlock tells unix sockets apart), so the node runs none of them; the owner turns the network back on with `nerve-node folder network on`, or installs the node, which runs folder mode's commands as nerve-run";
 
+/// Why a command that was decided while the owner's network switch was off
+/// does not start: the owner turned it on while the call waited for its
+/// folders, and the command would run without the filter.
+pub const NETWORK_SWITCHED_ON: &str = "the owner turned the network off for this center's commands while this one was being set up, so it did not start; send it again";
+
+/// The last look before a command starts, after everything the call waited
+/// for: why it must not start, if it must not. The call decided on the
+/// switch (`decided_off`) when it came in, and the owner may have turned it
+/// on since (`off_now`): the command would run without the filter. And a
+/// command that runs with the switch on has to be apart from the owner's own
+/// programs (`apart`: it runs as `nerve-run`, or under Landlock), whatever
+/// the answers the call went by earlier said: a mode that ends between two
+/// of the call's reads of the clock changes who the command runs as.
+pub fn late_network_refusal(
+    decided_off: bool,
+    off_now: bool,
+    apart: bool,
+    service: bool,
+) -> Option<&'static str> {
+    if off_now && !decided_off {
+        Some(NETWORK_SWITCHED_ON)
+    } else if decided_off && !apart {
+        Some(if service {
+            NETWORK_AS_OWNER
+        } else {
+            NETWORK_AS_OWNER_BY_HAND
+        })
+    } else {
+        None
+    }
+}
+
 /// Whether a node run by hand can keep a folder-mode command apart from its
 /// own user's programs, which the network switch needs: it is not root (a
 /// command of root asks the system's service manager over the bus it keeps
@@ -5514,6 +5546,39 @@ mod confinement_tests {
         }
         #[cfg(not(windows))]
         assert!(text.contains("session bus") && text.contains("nerve-run"));
+    }
+
+    /// The last look before a command starts: one decided with the owner's
+    /// switch off does not start once it is on, and one that runs with the
+    /// switch on has to run apart from the owner's programs, whatever mode
+    /// the call went by earlier (a folder mode that ended between two reads
+    /// of the clock leaves a command that runs as the owner).
+    #[test]
+    fn a_command_does_not_start_into_a_switch_it_was_not_decided_by() {
+        // Decided with the switch off, and it stays off.
+        assert_eq!(late_network_refusal(false, false, false, true), None);
+        assert_eq!(late_network_refusal(false, false, true, false), None);
+        // The owner turned it on while the call waited.
+        assert_eq!(
+            late_network_refusal(false, true, true, true),
+            Some(NETWORK_SWITCHED_ON)
+        );
+        assert_eq!(
+            late_network_refusal(false, true, false, false),
+            Some(NETWORK_SWITCHED_ON)
+        );
+        // On when decided: it starts where it is apart from the owner's
+        // programs, and not where it runs as the owner.
+        assert_eq!(late_network_refusal(true, true, true, true), None);
+        assert_eq!(late_network_refusal(true, true, true, false), None);
+        assert_eq!(
+            late_network_refusal(true, true, false, true),
+            Some(NETWORK_AS_OWNER)
+        );
+        assert_eq!(
+            late_network_refusal(true, true, false, false),
+            Some(NETWORK_AS_OWNER_BY_HAND)
+        );
     }
 
     /// Without Landlock, the installed Linux node runs folder mode as

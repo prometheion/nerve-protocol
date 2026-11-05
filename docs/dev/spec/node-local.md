@@ -1222,8 +1222,11 @@ grant or not.
   second layer, best effort, and from ABI 9 `ResolveUnix` limits unix
   sockets by path to the pairing's own and granted folders and
   `nerve_sandbox::kept_sockets` (the system bus, `/dev/log`,
-  systemd-resolved's and nscd's sockets), never the shared `/tmp` and
-  `/var/tmp` of `nerve-run`. The switch holds where the commands are apart
+  systemd-resolved's and nscd's sockets). Only `w` folders open sockets by
+  path, and the folders every account may write (`exec::SHARED_DIRS`: `/tmp`,
+  `/var/tmp`, `/dev/shm`, `/run/lock`, `/var/lock`, `/var/crash`) and the
+  owner's runtime folder are cut out of the set, a grant above them split
+  around them. The switch holds where the commands are apart
   from the owner's (`Shared::network_apart`: as `nerve-run`, or on a node
   run by hand folder mode under the sandbox as a user that is not root and
   with Landlock ABI 9, `daemon::by_hand_apart`); where they run as the owner
@@ -1239,7 +1242,20 @@ grant or not.
   action is not held by it. The owner sets it (`folder network off|on`, the
   app, the node web UI); a center's settings may set it, never clear it
   (`policy.no_network: only the owner can let the commands back on the
-  network`); the mode stays the center's to change. `status` has each
+  network`); the mode stays the center's to change. While it is on (in the
+  stored or the new policy), a center's settings change gives it no place to
+  write the old folders did not give (`policy.folders <path>: ... only the
+  owner can give it a place to write`): no new `w` folder, no `w` added to
+  one, no closing entry inside a `w` folder removed, and no `w` folder inside
+  an old one while an old `w` folder above it is narrowed or dropped, since
+  the node follows a link a command put inside a `w` folder once no `w`
+  folder holds it; names are compared as spelled, with their case kept on
+  Unix. When the switch goes on, the node ends the pairing's running
+  commands (`exec.run` and config capabilities), audited as `killed` with
+  `code: "no_network"`; a call that was decided with the switch off and
+  starts after it went on does not start (`daemon::NETWORK_SWITCHED_ON`), and
+  one that started between the two is ended. Whatever else a command left
+  running (a program it detached) is not tracked and keeps what it had. `status` has each
   center's `no_network` and `network_off` (`held`, `as_owner`, `not_held`;
   `null` while the switch is on nowhere), `installed` (whether this is the
   installed node, with or without a recorded owner), the machine's
@@ -1908,7 +1924,9 @@ and new value), calls allowed or forbidden (a refusal with its reason; a call of
 capability of the config with `command`, its command as it runs, which the
 `audit/decision` event leaves out with the reason, §2), commands killed
 for their memory limit (`decision` `killed`, `code` `memory`, with the
-reason), the relay's tunnels (`"kind": "relay"`, one per tunnel when it ends: `node`,
+reason) and commands ended because the owner's network switch went on
+(`decision` `killed`, `code` `no_network`, `target` `(running commands)` or
+`(a command being started)`), the relay's tunnels (`"kind": "relay"`, one per tunnel when it ends: `node`,
 `center`, `from`, `start`, `end`, `reason`, `up`, `down`; never a token), and what happened to the config
 file itself (`"kind": "config"`, `event` `refused`, `signed`, `accepted`, `restored` or
 `not_recorded`, with the file and the reason), and what the owner did to the node

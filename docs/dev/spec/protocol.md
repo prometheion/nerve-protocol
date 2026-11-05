@@ -941,7 +941,10 @@ A center with the settings grant `write` may add capabilities of its own
 - event `decision {ts, cap, action, target, decision, code?, session?, args?}`
   (needs `sub`); `decision` is `allowed` or `forbidden`, or `killed` with
   `code: "memory"` for a command the node killed for its memory limit,
-  after that call's `allowed`. `args` holds the call's arguments a rule may
+  after that call's `allowed`, or with `code: "no_network"` for commands the
+  node ended because the owner's network switch went on while they ran
+  (`target` `(running commands)`, or `(a command being started)` for one the
+  switch caught between its decision and its start; node-local.md §2). `args` holds the call's arguments a rule may
   pin (node-local.md §2 Rules): for any action but `exec.run` and the `fs`
   ones, its top-level strings of up to 200 characters, numbers and booleans,
   at most 16. The center keeps no more of it than that.

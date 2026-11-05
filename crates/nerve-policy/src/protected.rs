@@ -1323,6 +1323,36 @@ impl Protected {
             .max_by_key(|f| depth(f))
     }
 
+    /// [`Protected::holds`] with the case of names kept where a file system
+    /// tells names apart by it (every platform but Windows): `/srv/build` is
+    /// no place inside `/srv/Build` there. For a check that old folders held
+    /// a place, folding errs towards holding it, which is the wrong way; a
+    /// file system that folds the case anyway only makes that check refuse
+    /// more.
+    pub fn holds_cased(&self, base: &Path, path: &Path) -> bool {
+        if self.windows {
+            self.holds(base, path)
+        } else {
+            path.starts_with(base)
+        }
+    }
+
+    /// [`Protected::deepest`] by [`Protected::holds_cased`].
+    pub fn deepest_cased<'f>(&self, folders: &'f [Folder], path: &Path) -> Option<&'f Folder> {
+        let depth = |f: &Folder| {
+            let p = Path::new(&f.path);
+            if self.windows {
+                win::depth(&fold(p).to_string_lossy())
+            } else {
+                p.components().count()
+            }
+        };
+        folders
+            .iter()
+            .filter(|f| self.holds_cased(Path::new(&f.path), path))
+            .max_by_key(|f| depth(f))
+    }
+
     /// The tool-config component (`.git`, `.envrc`, ...) a write to `path` touches.
     pub fn tool_config(&self, path: &Path) -> Option<&'static str> {
         let windows = self.windows;

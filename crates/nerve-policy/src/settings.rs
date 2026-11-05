@@ -892,17 +892,35 @@ fn client_only(
     // one may reach the network for the command. So while the switch is on,
     // a center gets no place to write that its old folders did not give
     // (judged by the deepest folder at each place, as the protected check
-    // below does): no new `w` folder, no `w` added to one, no closing entry
-    // inside a `w` folder removed. It may still take folders away and add
-    // `r` and `x` ones.
+    // below does, and with the case of names kept on Unix): no new `w`
+    // folder, no `w` added to one, no closing entry inside a `w` folder
+    // removed. It may still take folders away and add `r` and `x` ones.
+    //
+    // Names are judged as spelled, but the node follows a link a command may
+    // have put inside a `w` folder to where it leads, unless a `w` folder
+    // still holds that link. So a place to write inside an old `w` folder
+    // stays only while every old `w` folder above it is still written: a
+    // center may not narrow `w work` to `r work` and keep or add `w work/sub`,
+    // where `sub` is such a link.
     if o.no_network || n.no_network {
         let prot = protected(&n.protected);
         let writes = |folders: &[Folder], path: &Path| {
-            prot.deepest(folders, path).is_some_and(|f| f.access.write)
+            prot.deepest_cased(folders, path)
+                .is_some_and(|f| f.access.write)
+        };
+        let above = |base: &Path, path: &Path| {
+            prot.holds_cased(base, path) && !prot.holds_cased(path, base)
         };
         for place in n.folders.iter().chain(&o.folders) {
             let path = Path::new(&place.path);
-            if writes(&n.folders, path) && !writes(&o.folders, path) {
+            let refused = writes(&n.folders, path)
+                && (!writes(&o.folders, path)
+                    || o.folders.iter().any(|x| {
+                        x.access.write
+                            && above(Path::new(&x.path), path)
+                            && !writes(&n.folders, Path::new(&x.path))
+                    }));
+            if refused {
                 return Err(format!(
                     "policy.folders {}: while the owner keeps this center's commands off the network, only the owner can give it a place to write",
                     place.path
@@ -1711,6 +1729,30 @@ mod tests {
                 {"path": other, "access": "r"}]),
         )
         .unwrap();
+        // A command may have put a link where a folder inside the `w` one
+        // is spelled, and the node follows it once no `w` folder holds it:
+        // so the outer folder narrowed or dropped, with the inner one kept,
+        // gives a place to write.
+        let sub = home_str("work/sub");
+        let narrowed = json!([{"path": work, "access": "r"}, {"path": read, "access": "r"},
+            {"path": shut, "access": ""}, {"path": sub, "access": "rw"}, {"path": other, "access": "r"}]);
+        assert!(refused(try_folders(&mut s, narrowed)));
+        let dropped = json!([{"path": read, "access": "r"}, {"path": shut, "access": ""},
+            {"path": sub, "access": "rw"}, {"path": other, "access": "r"}]);
+        assert!(refused(try_folders(&mut s, dropped)));
+        let deeper = json!([{"path": work, "access": "r"}, {"path": read, "access": "r"},
+            {"path": shut, "access": ""}, {"path": home_str("work/sub/deep"), "access": "rw"},
+            {"path": other, "access": "r"}]);
+        assert!(refused(try_folders(&mut s, deeper)));
+        // Names that differ in case are different places where the file
+        // system tells them apart.
+        #[cfg(unix)]
+        {
+            let cased = json!([{"path": work, "access": "rw"}, {"path": read, "access": "r"},
+                {"path": shut, "access": ""}, {"path": home_str("Work/other"), "access": "rw"},
+                {"path": other, "access": "r"}]);
+            assert!(refused(try_folders(&mut s, cased)));
+        }
         // A new `r` folder, and folders taken away, go through.
         try_folders(
             &mut s,
