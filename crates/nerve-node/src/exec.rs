@@ -431,10 +431,11 @@ pub fn landlock_spec(
     // ([`nerve_sandbox::terminal_devices`]). What it loses: listing `/dev`.
     let no_read = [own, &nerve_sandbox::terminal_devices()].concat();
     // The sockets a command reaches by path while its network is off: those
-    // in its folders and the system's own (nerve_sandbox::kept_sockets).
-    let granted = [&f.read[..], &f.write, &f.exec].concat();
-    let unix = [leave_out(&granted, own), nerve_sandbox::kept_sockets()].concat();
-    LandlockSpec {
+    // in its `w` folders (connecting to a socket is a write, so a folder it
+    // may only read opens none) and the system's own
+    // (nerve_sandbox::kept_sockets).
+    let unix = [leave_out(&f.write, own), nerve_sandbox::kept_sockets()].concat();
+    let mut spec = LandlockSpec {
         read: dev_links_out(leave_out(
             &[nerve_sandbox::system_dirs(), f.read].concat(),
             &no_read,
@@ -447,7 +448,9 @@ pub fn landlock_spec(
         // The caller sets it from the pairing's switch.
         no_network: false,
         unix,
-    }
+    };
+    without_shared_sockets(&mut spec);
+    spec
 }
 
 /// [`landlock_spec`] for a command that runs as `nerve-run` for the pairing
@@ -457,8 +460,6 @@ pub fn landlock_spec(
 /// so a folder of the owner that leads there through a link is resolved as
 /// the sandbox sees it here, which the cut of the folders before this
 /// (`account::around_pairings`, made as the node's user) may not manage.
-/// While the network is off its unix sockets by path are those of its
-/// folders and the system's, not those in the shared `/tmp` and `/var/tmp`.
 pub fn pairing_spec(
     policy: &CenterPolicy,
     home: &Path,
@@ -470,7 +471,6 @@ pub fn pairing_spec(
     let mut spec = landlock_spec(policy, home, own, writable);
     let around = [run_home.to_path_buf()];
     let mine = [real(&mine.home), real(&mine.temp)];
-    without_shared_sockets(&mut spec);
     for set in [
         &mut spec.read,
         &mut spec.write,
@@ -486,14 +486,49 @@ pub fn pairing_spec(
     spec
 }
 
-/// `spec` without the shared `/tmp` and `/var/tmp` among the places a
-/// command reaches a unix socket by path while its network is off: every
-/// account shares them, so a program of another (or another pairing's
-/// command that has the network) could answer there and reach the network
-/// for it. For every command that runs as `nerve-run`.
+/// `spec` without the places a program of another account, or one that
+/// starts programs for its user, answers on a unix socket by path, among the
+/// ones a command reaches while its network is off: the shared `/tmp` and
+/// `/var/tmp` (every account shares them; they hold the owner's tmux server
+/// and X display) and the owner's runtime folder (`$XDG_RUNTIME_DIR`,
+/// `/run/user/<uid>`: its session bus and user service manager). A program
+/// there reaches the network for the command. A folder granted above one of
+/// them is split around it ([`leave_out`]); one granted inside stays. For
+/// every command: those of `nerve-run` are cut at the shared folders, those
+/// of a node run by hand at the owner's own.
 fn without_shared_sockets(spec: &mut LandlockSpec) {
-    let shared = [real(Path::new("/tmp")), real(Path::new("/var/tmp"))];
-    spec.unix.retain(|p| !shared.contains(&real(p)));
+    let mut shared = vec![real(Path::new("/tmp")), real(Path::new("/var/tmp"))];
+    shared.extend(runtime_dirs().iter().map(|d| real(d)));
+    let (mut kept, mut above) = (Vec::new(), Vec::new());
+    for p in std::mem::take(&mut spec.unix) {
+        let r = real(&p);
+        if shared.contains(&r) {
+            continue;
+        }
+        if shared.iter().any(|s| within(s, &r)) {
+            above.push(p);
+        } else {
+            kept.push(p);
+        }
+    }
+    kept.extend(leave_out(&above, &shared));
+    spec.unix = kept;
+}
+
+/// The runtime folder of the user this node runs as: where `$XDG_RUNTIME_DIR`
+/// puts it, and the usual `/run/user/<uid>`.
+fn runtime_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    #[cfg(unix)]
+    out.push(PathBuf::from(format!("/run/user/{}", unsafe {
+        libc::geteuid()
+    })));
+    out.extend(
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|d| d.is_absolute()),
+    );
+    out
 }
 
 /// The Landlock rules of a config capability's command, which runs as
@@ -520,13 +555,7 @@ pub fn config_spec(
         (Some(mine), Some(run_home)) if separate => {
             pairing_spec(&policy, home, own, writable, run_home, mine)
         }
-        _ => {
-            let mut spec = landlock_spec(&policy, home, own, writable);
-            if account_home.is_some() {
-                without_shared_sockets(&mut spec);
-            }
-            spec
-        }
+        _ => landlock_spec(&policy, home, own, writable),
     };
     // Landlock's layer of the network switch, as for the pairing's commands.
     spec.no_network = no_network;
@@ -3034,7 +3063,7 @@ mod tests {
     }
 
     /// While its network is off a command reaches unix sockets by path in
-    /// its pairing's own and granted folders and the system's kept sockets
+    /// its pairing's own and its `w` folders and the system's kept sockets
     /// alone: not in the node's own folders, another pairing's, or the
     /// shared `/tmp` and `/var/tmp`, where a program of another account could
     /// answer for it.
@@ -3139,6 +3168,70 @@ mod tests {
                 assert!(spec.unix.contains(&kept), "{kept:?}: {spec:?}");
             }
         }
+    }
+
+    /// A node run by hand runs its commands as its owner, so a program of
+    /// the owner answering on a socket by path reaches the network for them:
+    /// the owner's tmux server and display in `/tmp`, the session bus and
+    /// service manager in the runtime folder. Granting such a folder (or one
+    /// above) must not open them while the network is off; a folder the
+    /// command may only read opens no socket at all.
+    #[test]
+    fn a_command_by_hand_off_the_network_reaches_no_session_socket_of_its_owner() {
+        let d = tempfile::tempdir().unwrap();
+        let w = std::fs::canonicalize(d.path()).unwrap();
+        for dir in ["proj", "ro"] {
+            std::fs::create_dir_all(w.join(dir)).unwrap();
+        }
+        // Not below `/tmp` or `/var/tmp`, or their protected entries would
+        // split those granted folders into the places beside them.
+        let home = Path::new("/home/owner");
+        let runtime = PathBuf::from(format!("/run/user/{}", unsafe { libc::geteuid() }));
+        let folder = |p: &Path, access: Access| nerve_policy::config::Folder {
+            path: p.display().to_string(),
+            access,
+        };
+        let read = Access {
+            read: true,
+            ..Access::NONE
+        };
+        let policy = CenterPolicy {
+            folders: vec![
+                folder(&w.join("proj"), Access::ALL),
+                folder(&w.join("ro"), read),
+                folder(Path::new("/tmp"), Access::ALL),
+                folder(Path::new("/var/tmp"), Access::ALL),
+                folder(&runtime, Access::ALL),
+                folder(Path::new("/run"), Access::ALL),
+            ],
+            ..Default::default()
+        };
+        let reaches = |spec: &LandlockSpec, p: &Path| spec.unix.iter().any(|s| p.starts_with(s));
+        let spec = landlock_spec(&policy, home, &[], &[]);
+        for p in [
+            Path::new("/tmp/tmux-1000/default"),
+            Path::new("/tmp/.X11-unix/X0"),
+            Path::new("/var/tmp/s"),
+            &runtime.join("bus"),
+            &runtime.join("systemd/private"),
+            &w.join("ro/s"),
+        ] {
+            assert!(!reaches(&spec, p), "{p:?}: {spec:?}");
+        }
+        // What lies beside them stays.
+        for p in [w.join("proj/s"), Path::new("/run/lock/s").to_path_buf()] {
+            assert!(reaches(&spec, &p), "{p:?}: {spec:?}");
+        }
+        // A grant of the whole system is cut around them too.
+        let all = CenterPolicy {
+            folders: vec![folder(Path::new("/"), Access::ALL)],
+            ..Default::default()
+        };
+        let spec = landlock_spec(&all, home, &[], &[]);
+        for p in [Path::new("/tmp/tmux-1000/default"), &runtime.join("bus")] {
+            assert!(!reaches(&spec, p), "{p:?}: {spec:?}");
+        }
+        assert!(reaches(&spec, Path::new("/usr/s")), "{spec:?}");
     }
 
     /// A folder that is, or since became, a link into a protected entry is

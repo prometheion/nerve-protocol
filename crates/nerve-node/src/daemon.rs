@@ -1693,6 +1693,9 @@ impl Shared {
             // root, as whom what runs as the owner then runs.
             "owner": self.owner_name(&cfg),
             "owner_is_root": crate::owner::is_root(self.owner_name(&cfg).as_deref()),
+            // Whether this is the installed node, which an owner may not
+            // have been found for (the web UI words its advice by it).
+            "installed": self.service,
             "confinement": self.confinement.describe(),
             "running": self.running.load(Ordering::Relaxed),
             "sudo": if self.sudo_on() { "on" } else { "off" },
@@ -3971,6 +3974,7 @@ mod tests {
                 let s = daemon.shared.clone();
                 assert_eq!(s.network_held(), filter);
                 assert_eq!(s.status()["network_rules"], filter);
+                assert_eq!(s.status()["installed"], service);
                 lock(&s.store)
                     .set_sudo(nerve_policy::Writer::Local, nerve_policy::config::Sudo::On)
                     .unwrap();

@@ -1241,8 +1241,9 @@ grant or not.
   (`policy.no_network: only the owner can let the commands back on the
   network`); the mode stays the center's to change. `status` has each
   center's `no_network` and `network_off` (`held`, `as_owner`, `not_held`;
-  `null` while the switch is on nowhere), the machine's `network_rules` (the
-  filter) and `pairings_warning`: a string on the installed Linux node
+  `null` while the switch is on nowhere), `installed` (whether this is the
+  installed node, with or without a recorded owner), the machine's
+  `network_rules` (the filter) and `pairings_warning`: a string on the installed Linux node
   without Landlock once two or more pairings (not revoked) run as
   `nerve-run`, or are offered a capability of the config, which does; `null`
   otherwise. The apps and the CLI show it.

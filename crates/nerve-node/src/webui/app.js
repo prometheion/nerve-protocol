@@ -213,7 +213,7 @@ function networkForm(c, entry, o) {
     // The node says the commands run as the owner now (`network_off`),
     // which nothing keeps off the network.
     entry.network_off === "as_owner"
-      ? el("p", { class: "meta" }, o.owner
+      ? el("p", { class: "meta" }, o.installed
         ? "In this mode its commands run as you, which nothing keeps off the network, so the node runs none of them while this is on. Folder mode, or allowlist mode as nerve-run, runs them."
         : "This node runs by hand, so its commands run as you, and nothing keeps them off the network here (only folder mode does, as a user that is not root and on Linux 7.1 or later), so the node runs none of them while this is on. The installed node runs folder mode's commands as nerve-run.")
       : null,

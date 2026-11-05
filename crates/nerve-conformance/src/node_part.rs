@@ -965,9 +965,9 @@ fn check_access(v: &Value) -> Result<(), String> {
     }
     // The owner's network switch, in every mode: held where the commands
     // run apart from the owner (never in user mode), refused as the owner's
-    // (never in folder mode, which never runs as the owner), or not held by
-    // the machine (then folder mode confines nothing). No sudo command runs
-    // while it is off.
+    // (in folder mode only on a node run by hand that cannot keep a command
+    // apart from its user), or not held by the machine (then folder mode
+    // confines nothing). No sudo command runs while it is off.
     if let Some(n) = a.get("no_network") {
         let n = n.as_str().unwrap_or_default();
         ensure(
@@ -975,7 +975,7 @@ fn check_access(v: &Value) -> Result<(), String> {
             format!("access no_network {:?}", a.get("no_network")),
         )?;
         ensure(
-            !(n == "held" && mode == "user" || n == "as_owner" && mode == "folder"),
+            !(n == "held" && mode == "user"),
             format!("access no_network {n} in {mode} mode"),
         )?;
         ensure(
@@ -1178,13 +1178,16 @@ mod tests {
             json!({"mode": "allowlist", "no_network": "not_held"}),
             json!({"mode": "folder", "confined": true, "no_network": "held"}),
             json!({"mode": "folder", "confined": false, "no_network": "not_held"}),
+            // A node run by hand as root, or below Landlock ABI 9, cannot
+            // keep a folder-mode command apart from its user.
+            json!({"mode": "folder", "confined": false, "no_network": "as_owner"}),
         ] {
             d["access"] = off;
             check_descriptor(&d, "node-id", 1).unwrap();
         }
         d["access"] = good.clone();
         type Edit = fn(&mut Value);
-        let cases: [(Edit, &str); 33] = [
+        let cases: [(Edit, &str); 32] = [
             (|a| a["mode"] = json!("later"), "access mode"),
             (|a| a["until_ms"] = json!(-1), "access until_ms"),
             (|a| a["account"] = json!("me\nyou"), "access account"),
@@ -1242,13 +1245,6 @@ mod tests {
             (
                 |a| *a = json!({"mode": "user", "no_network": "held"}),
                 "access no_network held in user mode",
-            ),
-            (
-                |a| {
-                    a["sudo"] = json!(false);
-                    a["no_network"] = json!("as_owner")
-                },
-                "access no_network as_owner in folder mode",
             ),
             (
                 |a| a["no_network"] = json!("held"),

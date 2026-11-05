@@ -410,13 +410,16 @@ while it is off: it would run outside the filter, with full rights
 `list` tells the agent both.
 
 With Landlock ABI 9 (Linux 7.1) or later, a command whose network is off
-reaches a unix socket by its path only in its pairing's own and granted
-folders and at these places of the system: the system bus (where
+reaches a unix socket by its path only in its pairing's own folders and the
+folders granted to it with `w` (connecting to a socket is a write, so a
+folder it may only read opens none) and at these places of the system: the system bus (where
 `DBUS_SYSTEM_BUS_ADDRESS` puts it, else `/run/dbus/system_bus_socket`), the
 system log (`/dev/log`), and the sockets of systemd-resolved and nscd,
 which look up names and accounts. Not one in the node's own folders or
-another pairing's, nor, on the installed node, one in `/tmp` and
-`/var/tmp`, which every account shares. Abstract unix sockets are closed to
+another pairing's, nor one in `/tmp` and `/var/tmp`, which every account
+shares and which hold your tmux server and display, nor one in your runtime
+folder (`$XDG_RUNTIME_DIR`, `/run/user/<uid>`: your session bus and service
+manager), even where you granted that folder. Abstract unix sockets are closed to
 it from ABI 6 (Linux 6.12).
 
 What it does not cover:
@@ -430,6 +433,11 @@ What it does not cover:
   the system's services, and a name lookup through systemd-resolved or nscd
   still asks the name servers for it.
 - A socket another process hands to the command.
+- A socket in a folder you grant with `w` that is a session's: a program that
+  listens there (a terminal multiplexer, a local proxy) can reach the network
+  for the command. Keep none in a folder you grant to a center whose network
+  is off. A folder granted above `/tmp` or the runtime folder is cut around
+  them, so a grant of `/` leaves them out too.
 - Without Landlock, a command that is running for another pairing of
   `nerve-run`, which has its network: nothing keeps the pairings apart
   there. `status` warns of that when two pairings share the account.
