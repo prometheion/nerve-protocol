@@ -204,8 +204,8 @@ struct Before {
 /// Replaces the program `p` with the new one and restarts its service, with
 /// the service's files as the new program has them (`service-files`, run as
 /// the service's user). `started` waits until the restarted service
-/// answers. `Ok(false)`: the installed program is that one already, and
-/// nothing changed.
+/// answers. `Ok(false)`: the installed program is that one already, its
+/// files are as it has them, and nothing changed.
 pub async fn update(
     p: &Program<'_>,
     sys: &dyn System,
@@ -240,35 +240,44 @@ pub async fn update(
         }
     };
     let old = std::fs::read(p.bin).map_err(|e| format!("{}: {e}", p.bin.display()))?;
-    if new == old {
-        steps.did("the installed program is that one already; nothing to update");
-        return Ok(false);
-    }
+    let same = new == old;
     // Staged beside the program, so the rename that puts it in place does
     // not cross file systems.
     let staged = p.bin.with_file_name(format!(".{name}.new"));
-    write_file(&staged, &new, 0o755)?;
+    if !same {
+        write_file(&staged, &new, 0o755)?;
+    }
+    // Where the program is the installed one already, it still has the
+    // files: an `update` brings those a program left behind, as the update
+    // that installed it did not know them.
+    let from_program = if same { p.bin } else { &staged };
     let checked = (|| {
-        let said = sys.version_of(&staged, &account)?;
-        let new_v = Version::parse_of(name, &said)
-            .ok_or_else(|| format!("the new program is not {name}: it says {said:?}"))?;
         let old_v = sys
             .version_of(p.bin, &account)
             .ok()
             .and_then(|s| Version::parse_of(name, &s));
-        if let Some(o) = old_v
-            && new_v < o
-        {
-            return Err(format!(
-                "the new program is {name} {new_v}, older than the installed {o}; nothing changed"
-            ));
+        let mut new_v = old_v;
+        if !same {
+            let said = sys.version_of(&staged, &account)?;
+            let v = Version::parse_of(name, &said)
+                .ok_or_else(|| format!("the new program is not {name}: it says {said:?}"))?;
+            if let Some(o) = old_v
+                && v < o
+            {
+                return Err(format!(
+                    "the new program is {name} {v}, older than the installed {o}; nothing changed"
+                ));
+            }
+            new_v = Some(v);
         }
         // The new program's own unit and files: it runs under what it
-        // was made for, not under what the installed one wrote.
+        // was made for, not under what the installed one wrote. Root asks
+        // for them, not the service's user: the files root writes must not
+        // come from a process that the service's other processes can reach.
         let mut args = vec![SERVICE_FILES];
         args.extend(p.files_args.iter().map(String::as_str));
         let want = sys
-            .output_of(&staged, &account, &args)
+            .output_of(from_program, None, &args)
             .and_then(|said| files_from(&said, &p.places))
             .map_err(|e| format!("the new program does not say its service's files: {e}"))?;
         Ok((old_v, new_v, want))
@@ -276,34 +285,55 @@ pub async fn update(
     let (old_v, new_v, (want, unknown)) = match checked {
         Ok(v) => v,
         Err(e) => {
-            let _ = std::fs::remove_file(&staged);
+            if !same {
+                let _ = std::fs::remove_file(&staged);
+            }
             return Err(e);
         }
     };
-    std::fs::rename(&staged, p.bin).map_err(|e| format!("{}: {e}", p.bin.display()))?;
-    let old_v = old_v.map_or_else(|| "?".to_string(), |v| v.to_string());
-    steps.did(format!("replaced {name} {old_v} with {new_v}"));
+    let shown = |v: Option<Version>| v.map_or_else(|| "?".to_string(), |v| v.to_string());
+    if !same {
+        std::fs::rename(&staged, p.bin).map_err(|e| format!("{}: {e}", p.bin.display()))?;
+        steps.did(format!(
+            "replaced {name} {} with {}",
+            shown(old_v),
+            shown(new_v)
+        ));
+    }
     let mut before = Vec::new();
-    let start = put_files(&want, &mut before, steps)
+    let put = put_files(&want, &mut before, steps);
+    if put.is_ok() && same && before.is_empty() {
+        steps.did(
+            "the installed program and its service's files are those already; nothing to update",
+        );
+        return Ok(false);
+    }
+    let start = put
         .and_then(|()| reload(sys, &before))
         .and_then(|()| sys.systemctl(&["restart", p.unit]))
         .and_then(|()| started());
     if let Err(e) = start {
-        write_file(p.bin, &old, 0o755)?;
+        if !same {
+            write_file(p.bin, &old, 0o755)?;
+        }
         let files_back = put_back(&before).and_then(|()| reload(sys, &before));
         let back = files_back
             .and_then(|()| sys.systemctl(&["restart", p.unit]))
             .and_then(|()| started());
-        if before.is_empty() {
-            steps.did(format!("put {name} {old_v} back"));
+        let what = match (same, before.is_empty()) {
+            (false, true) => format!("{name} {}", shown(old_v)),
+            (false, false) => format!("{name} {} and its service's files", shown(old_v)),
+            (true, _) => "the service's files".to_string(),
+        };
+        steps.did(format!("put {what} back"));
+        let new = if same {
+            "the service did not start with its new files"
         } else {
-            steps.did(format!("put {name} {old_v} and its service's files back"));
-        }
+            "the new program did not start"
+        };
         return Err(match back {
-            Ok(()) => format!("the new program did not start ({e}); the old one runs again"),
-            Err(e2) => format!(
-                "the new program did not start ({e}), and the old one does not either ({e2})"
-            ),
+            Ok(()) => format!("{new} ({e}); the old one runs again"),
+            Err(e2) => format!("{new} ({e}), and the old one does not either ({e2})"),
         });
     }
     steps.did(format!("restarted the service {}", p.unit));
@@ -628,6 +658,58 @@ mod tests {
         assert_eq!(r, Ok(false));
         assert_eq!(read(&at.unit).as_deref(), Some("old unit"));
         assert_eq!(sys.calls(), ["useradd svc /var/lib/svc"]);
+    }
+
+    /// An installed program whose files were not written by the update that
+    /// put it there (the one before it did not know them): the same program
+    /// again still brings them, and a start that fails puts them back.
+    #[tokio::test]
+    async fn the_same_program_still_brings_the_files_it_has() {
+        for starts in [true, false] {
+            let sys = Fake::new("svc", "Svc", "/var/lib/svc");
+            let at = installed(&sys);
+            let files = files_text(&[("unit", Some("new unit".into())), ("rule", None)]);
+            write_file(&at.bin, format!("svc 1.0.0\n{files}\n").as_bytes(), 0o755).unwrap();
+            let same = at.bin.with_file_name("same");
+            std::fs::copy(&at.bin, &same).unwrap();
+            sys.next_start.set(Some(starts));
+            let mut out = Vec::new();
+            let mut steps = Steps::new(&mut out);
+            let r = update(
+                &program(&at),
+                &sys,
+                Some(&same),
+                &|| sys.started(),
+                &mut steps,
+            )
+            .await;
+            if starts {
+                assert_eq!(r, Ok(true), "{:?}", steps.done);
+                assert_eq!(read(&at.unit).as_deref(), Some("new unit"));
+                assert!(!at.rule.exists());
+                assert_eq!(
+                    sys.calls(),
+                    [
+                        "useradd svc /var/lib/svc",
+                        "systemctl daemon-reload",
+                        "systemctl restart svc.service"
+                    ]
+                );
+            } else {
+                let e = r.unwrap_err();
+                assert!(e.contains("did not start with its new files"), "{e}");
+                assert_eq!(read(&at.unit).as_deref(), Some("old unit"));
+                assert_eq!(read(&at.rule).as_deref(), Some("old rule"));
+                assert!(
+                    steps
+                        .done
+                        .iter()
+                        .any(|s| s == "put the service's files back")
+                );
+            }
+            // The program itself stayed.
+            assert!(read(&at.bin).unwrap().starts_with("svc 1.0.0\n"));
+        }
     }
 
     #[tokio::test]

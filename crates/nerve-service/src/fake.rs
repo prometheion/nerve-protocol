@@ -158,10 +158,20 @@ impl System for Fake {
     fn output_of(
         &self,
         program: &Path,
-        account: &Account,
+        account: Option<&Account>,
         args: &[&str],
     ) -> Result<String, String> {
-        assert_eq!(account.comment, self.mark, "run as the service's user");
+        // The service's files are asked of the program as root: a process
+        // of the service's user could be reached by the others of it.
+        match (args.first().copied(), account) {
+            (Some("--version"), Some(a)) => {
+                assert_eq!(a.comment, self.mark, "run as the service's user")
+            }
+            (Some("service-files"), Some(a)) => {
+                panic!("service-files run as {}, not as root", a.name)
+            }
+            _ => {}
+        }
         self.runs.borrow_mut().push(args.join(" "));
         let text = std::fs::read_to_string(program).map_err(|e| e.to_string())?;
         let (first, rest) = text.split_once('\n').unwrap_or((&text, ""));

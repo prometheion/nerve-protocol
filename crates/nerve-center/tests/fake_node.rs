@@ -3075,10 +3075,33 @@ async fn a_hello_without_features_or_resume_is_refused_and_says_why() {
         };
         assert_eq!(m, method::BYE, "{field}");
         assert_eq!(params["reason"], "protocol_error", "{field}");
-        let said = log_lines(&r.center, &format!("missing field `{field}`"));
+        let said = log_lines(&r.center, &format!("the hello has no `{field}`"));
         assert_eq!(said.len(), 1, "{field}: {said:?}");
         assert!(said[0].contains("older than this center"), "{said:?}");
     }
+    r.stop().await;
+}
+
+/// A hello is read before its signature is checked, so what the center logs
+/// of one it cannot read is a fixed text: a value of the wrong type is
+/// refused, and nothing of what the sender wrote reaches the log.
+#[tokio::test]
+async fn an_unreadable_hello_puts_none_of_its_text_in_the_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = center(dir.path()).await;
+    let key = NodeKey::generate().unwrap();
+    assert_eq!(pair(&r, &key, "box-1").await.0, 200);
+    r.center.log().set_level(nerve_transport::log::Level::Debug);
+    let (_ws, reply) =
+        handshake_with(&r, &key, json!({"features": "a-sentence-the-sender-chose"})).await;
+    let Message::Notification { method: m, params } = reply else {
+        panic!("{reply:?}")
+    };
+    assert_eq!(m, method::BYE);
+    assert_eq!(params["reason"], "protocol_error");
+    assert!(log_lines(&r.center, "a-sentence-the-sender-chose").is_empty());
+    assert!(log_lines(&r.center, "invalid type").is_empty());
+    assert_eq!(log_lines(&r.center, "the hello cannot be read").len(), 1);
     r.stop().await;
 }
 

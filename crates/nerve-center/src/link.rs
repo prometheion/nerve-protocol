@@ -1053,13 +1053,25 @@ pub async fn run(
             match nerve_proto::rpc::params::<Hello>(&params) {
                 Ok(h) => h,
                 // A hello without `features` or `resume` is one of a node
-                // older than this protocol's baseline (§1.1).
-                Err(e) => {
-                    center.note(
-                        Level::Warn,
-                        Some(&node_id),
-                        format!("the handshake failed: the hello cannot be read ({}); the node may be older than this center", e.message),
-                    );
+                // older than this protocol's baseline (§1.1). The hello is
+                // read before its signature is checked, so the log gets a
+                // fixed text, never serde's, which repeats the sender's own.
+                Err(_) => {
+                    let lacks = ["features", "resume"]
+                        .into_iter()
+                        .find(|k| params.get(*k).is_none_or(|v| v.is_null()));
+                    match lacks {
+                        Some(k) => center.note(
+                            Level::Warn,
+                            Some(&node_id),
+                            format!("the handshake failed: the hello has no `{k}`; the node may be older than this center"),
+                        ),
+                        None => center.note(
+                            Level::Debug,
+                            Some(&node_id),
+                            "the handshake failed: the hello cannot be read",
+                        ),
+                    }
                     return refuse(ws, ByeReason::ProtocolError).await;
                 }
             }

@@ -7158,6 +7158,36 @@ mod tests {
         assert!(!BY_HAND.contains("nerve-node "), "{BY_HAND}");
     }
 
+    /// What `update` asks of the new program (`service::files_args`) is what
+    /// `service-files` takes: a flag renamed on one side is refused at the
+    /// next update, so the two are held together here, for every owner and
+    /// every polkit.
+    #[test]
+    fn service_files_takes_what_update_asks() {
+        use crate::service::{Polkit, files_args, service_files_text};
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        for owner in [None, Some("alice"), Some("root")] {
+            for polkit in [Polkit::Rules, Polkit::Old, Polkit::Missing] {
+                let args = files_args(owner.map(String::from), polkit);
+                let mut argv = vec!["nerve-node", "service-files"];
+                argv.extend(args.iter().map(String::as_str));
+                let cli = Cli::try_parse_from(&argv).unwrap();
+                let mut said = Vec::new();
+                rt.block_on(execute(cli, &mut said)).unwrap();
+                let said = String::from_utf8(said).unwrap();
+                let kind = match polkit {
+                    Polkit::Rules => "rules",
+                    Polkit::Old => "pkla",
+                    Polkit::Missing => "none",
+                };
+                let want = service_files_text(&Layout::system(), owner, kind);
+                assert_eq!(said.trim(), want, "{argv:?}");
+            }
+        }
+    }
+
     /// Setup chooses no account: it has no flags, and asks for none.
     #[test]
     fn setup_chooses_no_account() {

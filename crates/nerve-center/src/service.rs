@@ -208,7 +208,7 @@ impl nerve_service::System for Host {
     fn output_of(
         &self,
         program: &Path,
-        account: &Account,
+        account: Option<&Account>,
         args: &[&str],
     ) -> Result<String, String> {
         nerve_service::Host.output_of(program, account, args)
@@ -670,7 +670,7 @@ mod tests {
         fn output_of(
             &self,
             program: &Path,
-            account: &Account,
+            account: Option<&Account>,
             args: &[&str],
         ) -> Result<String, String> {
             self.0.output_of(program, account, args)
@@ -708,7 +708,7 @@ mod tests {
         fn give(&self, _: &Path, _: u32, _: u32) -> Result<(), String> {
             unreachable!()
         }
-        fn output_of(&self, _: &Path, _: &Account, _: &[&str]) -> Result<String, String> {
+        fn output_of(&self, _: &Path, _: Option<&Account>, _: &[&str]) -> Result<String, String> {
             unreachable!()
         }
     }
@@ -928,6 +928,18 @@ mod tests {
                 format!("{what} needs root: run `sudo nerve-center {what}`")
             );
         }
+    }
+
+    /// The socket the center asks whether a node's command runs it is the
+    /// socket the installed node listens on: if the node's state folder or
+    /// socket moved and this did not, the question would go to nobody and
+    /// every command would pass.
+    #[test]
+    fn the_node_s_socket_is_where_the_node_listens() {
+        assert_eq!(
+            PathBuf::from(nerve_service::NODE_CTL_SOCKET),
+            nerve_node::service::Layout::system().paths.ctl_socket()
+        );
     }
 
     /// A caller without root is told so first, also where an installed

@@ -525,7 +525,7 @@ impl nerve_service::System for Host {
     fn output_of(
         &self,
         program: &Path,
-        account: &Account,
+        account: Option<&Account>,
         args: &[&str],
     ) -> Result<String, String> {
         nerve_service::Host.output_of(program, account, args)
@@ -1624,16 +1624,7 @@ async fn update_steps(
     let install = format!("sudo {program} install");
     // The files of the service the new program has, for the owner the unit
     // names now and the polkit of this machine.
-    let mut files_args = Vec::new();
-    if let Some(owner) = unit_owner(layout) {
-        files_args.extend(["--owner".to_string(), owner]);
-    }
-    let polkit = match sys.polkit(&layout.polkit_rule()) {
-        Polkit::Rules => "rules",
-        Polkit::Old => "pkla",
-        Polkit::Missing => "none",
-    };
-    files_args.extend(["--polkit".to_string(), polkit.to_string()]);
+    let files_args = files_args(unit_owner(layout), sys.polkit(&layout.polkit_rule()));
     let p = nerve_service::Program {
         name: program,
         bin: &layout.bin,
@@ -1651,6 +1642,23 @@ async fn update_steps(
         install_parts(layout, steps)?;
     }
     Ok(())
+}
+
+/// What `update` asks the new program besides `service-files`: the owner the
+/// unit names and the polkit of this machine. `nerve-node service-files`
+/// takes them (a test keeps the two in step).
+pub(crate) fn files_args(owner: Option<String>, polkit: Polkit) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(owner) = owner {
+        args.extend(["--owner".to_string(), owner]);
+    }
+    let polkit = match polkit {
+        Polkit::Rules => "rules",
+        Polkit::Old => "pkla",
+        Polkit::Missing => "none",
+    };
+    args.extend(["--polkit".to_string(), polkit.to_string()]);
+    args
 }
 
 /// Where the files `service-files` names go on `layout`.
@@ -2334,7 +2342,7 @@ pub(crate) mod tests {
         fn output_of(
             &self,
             program: &Path,
-            account: &Account,
+            account: Option<&Account>,
             args: &[&str],
         ) -> Result<String, String> {
             self.machine.output_of(program, account, args)
@@ -3521,7 +3529,12 @@ pub(crate) mod tests {
             fn give(&self, _: &Path, _: u32, _: u32) -> Result<(), String> {
                 unreachable!()
             }
-            fn output_of(&self, _: &Path, _: &Account, _: &[&str]) -> Result<String, String> {
+            fn output_of(
+                &self,
+                _: &Path,
+                _: Option<&Account>,
+                _: &[&str],
+            ) -> Result<String, String> {
                 unreachable!()
             }
         }

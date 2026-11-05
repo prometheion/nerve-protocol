@@ -107,6 +107,10 @@ at once.
 
 - A machine that does not link during the 7 days does not learn the new key.
   After the switch it cannot connect and has to be [paired again](pairing.md).
+- A node of 0.0.6 links to this center but does not take the notice (it asks
+  for rotation by a feature that every link has now, and the center no longer
+  names it), and the count of machines told includes it. Update the nodes
+  before you rotate the center's key.
 - New pairing links carry the pin of the key the center serves.
 - The switch also changes the certificate of the web UI and the HTTP MCP
   endpoint when they use TLS. A browser asks to trust it again.
@@ -283,7 +287,15 @@ yourself.
 
 `update` also writes the service unit as the new program has it, so a
 release that changes it needs no `install` again, and its steps go to the
-center's [log](logs.md).
+center's [log](logs.md). It asks the new program for the unit, run as root
+with an empty environment; the same program again still brings the unit it
+has, so a second `update` repairs a unit that is behind. The unit is written
+as a whole, so a line of your own in it is replaced: local changes belong in
+a drop-in, `sudo systemctl edit nerve-center`, which `update` and `install`
+leave alone. This holds for an update done by a release that has it: the
+update that brings such a release is done by the program already installed,
+which replaces only the program, so the first time after it (the notes say
+when) run `sudo nerve-center install` once, or `update` again.
 
 The state folder and the settings are not touched. `update` refuses a file
 that is not `nerve-center` and a program older than the installed one. If the

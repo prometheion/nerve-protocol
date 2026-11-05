@@ -169,9 +169,8 @@ Through a [relay](relay.md), `status` names what the relay answered:
 
 `nerve-node center ls` says ``handshake failed: invalid params: missing field
 `features` `` when the center is older than the node: update the center
-first. The center's log says ``the handshake failed: the hello cannot be read
-(invalid params: missing field `resume` …`` (or `features`) for a node older
-than 0.0.6: update the node.
+first. The center's log says ``the handshake failed: the hello has no `resume` ``
+(or `features`) for a node older than 0.0.6: update the node.
 
 If `status` says `daemon: not running`, start `nerve-node run`. On a node
 [installed as a service](service.md), start the service instead:

@@ -48,13 +48,21 @@ pub trait System {
     fn systemctl(&self, args: &[&str]) -> Result<(), String>;
     /// Gives `path` and everything below it to `uid`:`gid`.
     fn give(&self, path: &Path, uid: u32, gid: u32) -> Result<(), String>;
-    /// What `<program> <args>` prints, run as `account`: a program `update`
-    /// staged, before it takes the installed one's place.
-    fn output_of(&self, program: &Path, account: &Account, args: &[&str])
-    -> Result<String, String>;
+    /// What `<program> <args>` prints, run with an empty environment: a
+    /// program `update` staged, before it takes the installed one's place.
+    /// It runs as `account`, the service's user, or as the caller (root)
+    /// where there is none. Whatever root writes from what it printed must
+    /// not come from a process of the service's user, which every other
+    /// process of that user can reach; so the files are asked of it as root.
+    fn output_of(
+        &self,
+        program: &Path,
+        account: Option<&Account>,
+        args: &[&str],
+    ) -> Result<String, String>;
     /// What `<program> --version` prints, run as `account`.
     fn version_of(&self, program: &Path, account: &Account) -> Result<String, String> {
-        self.output_of(program, account, &["--version"])
+        self.output_of(program, Some(account), &["--version"])
     }
 }
 
@@ -135,14 +143,15 @@ impl System for Host {
     fn output_of(
         &self,
         program: &Path,
-        account: &Account,
+        account: Option<&Account>,
         args: &[&str],
     ) -> Result<String, String> {
         let mut c = std::process::Command::new(program);
-        c.args(args);
-        // A downloaded program runs as the service's user, not as root.
+        c.args(args).env_clear().current_dir("/");
+        // A downloaded program asked for its version runs as the service's
+        // user, not as root.
         #[cfg(unix)]
-        if self.is_root() {
+        if let (true, Some(account)) = (self.is_root(), account) {
             use std::os::unix::process::CommandExt;
             c.uid(account.uid).gid(account.gid);
         }
