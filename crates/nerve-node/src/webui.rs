@@ -42,7 +42,7 @@ use crate::daemon::{Shared, lock};
 use crate::owner::{Endpoint, Owners};
 
 mod pages;
-pub(crate) mod peer;
+pub(crate) use nerve_transport::peer;
 
 const INDEX: &str = include_str!("webui/index.html");
 const APP_JS: &str = include_str!("webui/app.js");

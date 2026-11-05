@@ -12,7 +12,7 @@
 //! A peer is its address, but on loopback every local process has one (or
 //! any of 127.0.0.0/8 it binds): there a peer is the account whose socket it
 //! is, so another account's connections never take the owner's places. On
-//! Linux the kernel names the account ([`nerve_node::local_peer`]); where it
+//! Linux the kernel names the account ([`nerve_transport::peer`]); where it
 //! cannot, all loopback peers are one.
 
 use std::collections::HashMap;
@@ -68,7 +68,7 @@ pub struct Server {
 enum Accounts {
     /// By the account the kernel names.
     #[cfg(target_os = "linux")]
-    Kernel(nerve_node::local_peer::Lookup),
+    Kernel(nerve_transport::peer::Lookup),
     /// Not at all: every loopback peer is one.
     #[cfg_attr(target_os = "linux", allow(dead_code))]
     None,
@@ -99,7 +99,7 @@ impl Peer {
         }
         match accounts {
             #[cfg(target_os = "linux")]
-            Accounts::Kernel(how) => nerve_node::local_peer::account_of(peer, local, how)
+            Accounts::Kernel(how) => nerve_transport::peer::account_of(peer, local, how)
                 .map_or(Peer::Local, Peer::Account),
             #[cfg(test)]
             Accounts::ByAddress => Peer::Addr(ip),
@@ -235,7 +235,7 @@ impl Server {
         }
         let tls = (!plain).then(|| center.clone());
         #[cfg(target_os = "linux")]
-        let accounts = Accounts::Kernel(nerve_node::local_peer::Lookup::for_listener(local));
+        let accounts = Accounts::Kernel(nerve_transport::peer::Lookup::for_listener(local));
         #[cfg(not(target_os = "linux"))]
         let accounts = Accounts::None;
         Ok(Server {

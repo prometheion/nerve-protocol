@@ -32,12 +32,10 @@ pub mod grants;
 mod job;
 pub mod keyring_setup;
 mod link;
-#[cfg(target_os = "linux")]
-mod localnet;
 pub mod owner;
 pub mod pair;
 pub mod paths;
-pub mod prompt;
+pub use nerve_service::prompt;
 // Providers attach over the control socket, which is Unix's; the pipe on
 // Windows takes none yet.
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -75,12 +73,6 @@ mod winsudo;
 mod winsvc;
 
 pub use daemon::{Daemon, Event, NodeOptions};
-/// Who is at the other end of a local TCP connection: the node's web UI
-/// asks it, and the center counts its local peers' connections by it.
-#[cfg(target_os = "linux")]
-pub mod local_peer {
-    pub use crate::webui::peer::{Lookup, account_of};
-}
 pub use paths::NodePaths;
 
 /// Milliseconds since the Unix epoch.

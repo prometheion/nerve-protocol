@@ -677,9 +677,9 @@ rule to the node's `policy.allow` or `policy.deny`, a sudo command's allow to
 `policy.sudo_allow`; `POST /api/audit/rule` takes `node_id`, `list` (`allow`,
 `deny` or `sudo`), the entry's `cap`, `action` and `target`, and `wildcard`),
 help (the node's commands, each with its
-usage and a short explanation; the center reads the list from the node's own
-CLI definition, `GET /api/help`, so it matches `nerve-node --help` of the
-same version), settings (center name, statistics retention, how long a
+usage and a short explanation, `GET /api/help`; the list is the node's
+own CLI definition of the same release, kept as a file in the center's
+source, so it matches `nerve-node --help` of that release), settings (center name, statistics retention, how long a
 pairing code is valid: 1 to 1440 minutes, 10 by default, harness tokens,
 per-node settings and the node's sudo switch), action checker (the
 blocklist, the allow rules, the decision model, taint and the per-node

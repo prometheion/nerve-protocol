@@ -274,8 +274,9 @@ impl Ui {
             ("GET", "/api/stats") => Ok(c.stats_json()),
             ("GET", "/api/audit") => Ok(json!({"decisions": c.audit()})),
             ("GET", "/api/log") => Ok(c.log_json(&log_query(req)?)),
-            // The node's own command list, read from its CLI definition.
-            ("GET", "/api/help") => Ok(json!({"node": nerve_node::cli::help()})),
+            // The node's own command list, as the node of this release has
+            // it ([`NODE_HELP`]).
+            ("GET", "/api/help") => Ok(json!({"node": node_help()})),
             ("POST", "/api/pair") => Ok(c.new_pairing()),
             ("POST", "/api/pair/status") => Ok(c.pairing_status(&s("code"))),
             ("POST", "/api/nodes/rename") => c
@@ -672,6 +673,15 @@ fn refused(e: RpcError) -> (u16, Value) {
     )
 }
 
+/// The node's command list (`nerve_node::cli::help`) of this release, for
+/// the Help page. It is kept as a file, so that the center does not build
+/// on the node; a test checks it against the node's own.
+const NODE_HELP: &str = include_str!("ui/node-help.json");
+
+fn node_help() -> Value {
+    serde_json::from_str(NODE_HELP).unwrap_or(Value::Null)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -730,7 +740,7 @@ mod tests {
     /// `nerve-node`, with its explanation, read straight from clap's tree.
     fn node_commands(cmd: &clap::Command, prefix: &str, out: &mut Vec<(String, String)>) {
         for sub in cmd.get_subcommands() {
-            if sub.get_name() == "help" {
+            if sub.get_name() == "help" || sub.is_hide_set() {
                 continue;
             }
             let name = format!("{prefix}{}", sub.get_name());
@@ -823,6 +833,22 @@ mod tests {
         let ui = Ui::new(&center(d.path()), Some("settings-harness-token"), true);
         let r = ui.request(req("GET", "/api/help", &[h], "")).await;
         assert_eq!(r.status, 401);
+    }
+
+    /// The Help page's command list is the node's own of this release:
+    /// `NERVE_WRITE_NODE_HELP=1 cargo test -p nerve-center --lib node_help`
+    /// writes it again after a change of the node's commands.
+    #[test]
+    fn the_node_help_is_the_node_s_own() {
+        let own = serde_json::to_value(nerve_node::cli::help()).unwrap();
+        if std::env::var_os("NERVE_WRITE_NODE_HELP").is_some() {
+            let file = concat!(env!("CARGO_MANIFEST_DIR"), "/src/ui/node-help.json");
+            std::fs::write(file, format!("{own:#}\n")).unwrap();
+        }
+        assert!(
+            node_help() == own,
+            "src/ui/node-help.json is not the node's help; `NERVE_WRITE_NODE_HELP=1 cargo test -p nerve-center --lib node_help` writes it again"
+        );
     }
 
     async fn pair_status(ui: &Ui, code: &str) -> Value {

@@ -262,9 +262,13 @@ pub async fn hello_with(
         Recv::Msg(Message::Notification {
             method: m,
             params: p,
-        }) if m == method::HELLO => {
-            params::<Hello>(&p).map_err(|e| format!("bad hello: {}", e.message))?
-        }
+        }) if m == method::HELLO => match params::<Hello>(&p) {
+            Ok(h) => h,
+            Err(e) => {
+                conn.bye("protocol_error").await;
+                return Err(format!("bad hello: {}", e.message));
+            }
+        },
         other => {
             conn.bye("protocol_error").await;
             return Err(format!("expected hello, got {other:?}"));

@@ -3156,6 +3156,7 @@ dependencies = [
  "nerve-node",
  "nerve-policy",
  "nerve-proto",
+ "nerve-service",
  "nerve-transport",
  "regex",
  "ring",
@@ -3196,6 +3197,7 @@ dependencies = [
  "nerve-policy",
  "nerve-proto",
  "nerve-sandbox",
+ "nerve-service",
  "nerve-transport",
  "ring",
  "serde",
@@ -3260,6 +3262,20 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "nerve-service"
+version = "0.0.7"
+dependencies = [
+ "libc",
+ "nerve-policy",
+ "nerve-transport",
+ "ring",
+ "serde_json",
+ "tempfile",
+ "tokio",
  "windows-sys 0.61.2",
 ]
 

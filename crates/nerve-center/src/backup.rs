@@ -562,7 +562,7 @@ pub fn run(
             if settle(state)? {
                 as_owner_may_reach(state, file, passphrase_file.as_deref())?;
             }
-            let pass = nerve_node::prompt::passphrase(passphrase_file.as_deref(), out, true)?;
+            let pass = nerve_service::prompt::passphrase(passphrase_file.as_deref(), out, true)?;
             let r = backup(state, file, &pass, *overwrite, backup::ITERATIONS)?;
             print_backup(&r, file, out);
         }
@@ -579,7 +579,7 @@ pub fn run(
                     kind.word()
                 ));
             }
-            let pass = nerve_node::prompt::passphrase(passphrase_file.as_deref(), out, false)?;
+            let pass = nerve_service::prompt::passphrase(passphrase_file.as_deref(), out, false)?;
             let parsed = open(&bytes, &pass)?;
             settle(state)?;
             let r = restore(state, &parsed, *replace)?;
@@ -587,9 +587,14 @@ pub fn run(
         }
         // `main` gives these to the service (crate::service::execute) and
         // to crate::owner.
-        Cmd::Install | Cmd::Update { .. } | Cmd::Uninstall { .. } | Cmd::OwnerToken { .. } => {
+        Cmd::Install
+        | Cmd::Update { .. }
+        | Cmd::Uninstall { .. }
+        | Cmd::OwnerToken { .. }
+        | Cmd::ServiceFiles => {
             return Err(
-                "install, update, uninstall and owner-token are not backup commands".into(),
+                "install, update, uninstall, owner-token and service-files are not backup commands"
+                    .into(),
             );
         }
     }

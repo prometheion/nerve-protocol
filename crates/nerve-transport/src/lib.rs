@@ -12,6 +12,8 @@ pub mod http;
 pub mod keys;
 pub mod log;
 pub mod net;
+#[cfg(target_os = "linux")]
+pub mod peer;
 pub mod sudo;
 pub mod tls;
 pub mod webui;

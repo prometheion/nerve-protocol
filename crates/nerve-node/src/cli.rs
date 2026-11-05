@@ -147,6 +147,16 @@ pub enum Cmd {
     /// Start, stop or restart the installed service, or show its state.
     #[command(subcommand)]
     Service(ServiceCmd),
+    /// Print the files of the service this program installs besides itself, as JSON: `update` of the installed program runs the new one so, to put them in place with it.
+    #[command(hide = true)]
+    ServiceFiles {
+        /// The owner the unit names.
+        #[arg(long, value_name = "ACCOUNT")]
+        owner: Option<String>,
+        /// What polkit takes here: rules, a .pkla file (polkit 0.105), or none.
+        #[arg(long, default_value = "rules", value_parser = ["rules", "pkla", "none"])]
+        polkit: String,
+    },
     /// Stop and remove the service, nerve-run and its entries on your folders, the node's user and the program; the config and state folders stay.
     Uninstall {
         /// Delete the config and state folders too: the keys, the pairings and the audit log.
@@ -1788,7 +1798,11 @@ impl Cmd {
     pub(crate) fn is_service(&self) -> bool {
         matches!(
             self,
-            Cmd::Install { .. } | Cmd::Update { .. } | Cmd::Uninstall { .. } | Cmd::Service(_)
+            Cmd::Install { .. }
+                | Cmd::Update { .. }
+                | Cmd::Uninstall { .. }
+                | Cmd::Service(_)
+                | Cmd::ServiceFiles { .. }
         )
     }
 }
@@ -1943,21 +1957,8 @@ pub(crate) fn service_status(layout: &Layout) -> Result<serde_json::Value, Strin
 /// its commands, so it is asked over its control socket, and refuses a
 /// caller below one of them.
 pub async fn owner_check(paths: &[&NodePaths]) -> Result<(), String> {
-    #[cfg(unix)]
-    for p in paths {
-        match nerve_transport::ctl::call(&p.ctl_socket(), "owner.check", json!({})).await {
-            Ok(_) => {}
-            // No node runs, so no command of one does.
-            Err(e) if e == nerve_transport::ctl::NOT_RUNNING => {}
-            // A node that does not know the method cannot answer it. It is let
-            // through.
-            Err(e) if e.starts_with("unknown method") => {}
-            Err(e) => return Err(e),
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = paths;
-    Ok(())
+    let sockets: Vec<PathBuf> = paths.iter().map(|p| p.ctl_socket()).collect();
+    nerve_service::owner_check(&sockets).await
 }
 
 /// Whether a daemon runs on the control socket; it then took every change
@@ -2750,6 +2751,11 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                 .await;
             #[cfg(not(windows))]
             crate::service::update(&layout, &Host, from.as_deref(), out).await
+        }
+        Cmd::ServiceFiles { owner, polkit } => {
+            let text =
+                crate::service::service_files_text(&Layout::system(), owner.as_deref(), &polkit);
+            writeln!(out, "{text}").map_err(|e| e.to_string())
         }
         Cmd::Service(ServiceCmd::Status) => {
             let v = service_status(&Layout::system())?;
@@ -8976,10 +8982,11 @@ mod tests {
     }
 
     /// Every command and sub-command name of the clap definition, walked
-    /// here on its own so the test does not trust [`help`] to find them.
+    /// here on its own so the test does not trust [`help`] to find them;
+    /// not the hidden ones, which are for programs.
     fn all_names(cmd: &clap::Command, prefix: &str, out: &mut Vec<String>) {
         for sub in cmd.get_subcommands() {
-            if sub.get_name() == "help" {
+            if sub.get_name() == "help" || sub.is_hide_set() {
                 continue;
             }
             let name = format!("{prefix}{}", sub.get_name());

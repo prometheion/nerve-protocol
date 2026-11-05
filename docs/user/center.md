@@ -281,9 +281,14 @@ against the release's `SHA256SUMS`, puts it in place as
 when it is set. `--from <file>` takes a program you downloaded and checked
 yourself.
 
+`update` also writes the service unit as the new program has it, so a
+release that changes it needs no `install` again, and its steps go to the
+center's [log](logs.md).
+
 The state folder and the settings are not touched. `update` refuses a file
 that is not `nerve-center` and a program older than the installed one. If the
-new program does not start, the old one is put back and started again. Its
+new program does not start, the old one is put back with the old unit and
+started again. Its
 last line says where the owner token is: a center installed before there
 was one makes it at this start, and its web UI no longer takes the harness
 token (`sudo cat /var/lib/nerve-center/owner-token`).

@@ -15,6 +15,13 @@ fn main() -> std::process::ExitCode {
         let settle = nerve_center::service::settle_user;
         let mut out = std::io::stdout();
         let done = match cmd {
+            // What `update` of an earlier program asks the new one, which
+            // it runs as the center's user: the files of its service.
+            nerve_center::config::Cmd::ServiceFiles => {
+                let layout = nerve_center::service::Layout::system();
+                println!("{}", nerve_center::service::service_files_text(&layout));
+                Ok(())
+            }
             nerve_center::config::Cmd::OwnerToken { new } => {
                 settle(&state).and_then(|_| nerve_center::owner::run(&state, *new, &mut out))
             }
