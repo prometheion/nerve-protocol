@@ -249,8 +249,8 @@ impl Reach {
             NetworkOff::AsOwner => {
                 "Its commands do not run: the owner turned their network off, and in this mode \
                  they run as the owner, which nothing keeps off it. They run again once the owner \
-                 turns the network back on, or has them run as the node's own account (folder \
-                 mode, or allowlist mode not as the owner)."
+                 turns the network back on, or has them run apart from the owner (the installed node \
+                 does in folder mode, and in allowlist mode not as the owner)."
             }
             NetworkOff::NotHeld => {
                 "Its commands do not run: the owner turned their network off, and this machine \

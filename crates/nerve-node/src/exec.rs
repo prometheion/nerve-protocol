@@ -470,11 +470,7 @@ pub fn pairing_spec(
     let mut spec = landlock_spec(policy, home, own, writable);
     let around = [run_home.to_path_buf()];
     let mine = [real(&mine.home), real(&mine.temp)];
-    // While its network is off it reaches no socket in `/tmp` and
-    // `/var/tmp`, which every account shares: a program of another could
-    // answer there and reach the network for it.
-    let shared = [real(Path::new("/tmp")), real(Path::new("/var/tmp"))];
-    spec.unix.retain(|p| !shared.contains(&real(p)));
+    without_shared_sockets(&mut spec);
     for set in [
         &mut spec.read,
         &mut spec.write,
@@ -487,6 +483,53 @@ pub fn pairing_spec(
         *set = leave_out(&rest, &around);
         set.extend(kept);
     }
+    spec
+}
+
+/// `spec` without the shared `/tmp` and `/var/tmp` among the places a
+/// command reaches a unix socket by path while its network is off: every
+/// account shares them, so a program of another (or another pairing's
+/// command that has the network) could answer there and reach the network
+/// for it. For every command that runs as `nerve-run`.
+fn without_shared_sockets(spec: &mut LandlockSpec) {
+    let shared = [real(Path::new("/tmp")), real(Path::new("/var/tmp"))];
+    spec.unix.retain(|p| !shared.contains(&real(p)));
+}
+
+/// The Landlock rules of a config capability's command, which runs as
+/// `nerve-run` in every mode (`account_home`: that account's home, set where
+/// it runs as the account; `mine`: the pairing's own folders there). Where the
+/// pairing's commands run as `nerve-run` too (`separate`), the rules are the
+/// pairing's ([`pairing_spec`]); where they run as the owner they are the
+/// account's built-in folders ([`crate::config_cap::confined`]), and its
+/// unix sockets by path stay those of its own folders and the system's, not
+/// the shared `/tmp` and `/var/tmp`.
+#[allow(clippy::too_many_arguments)]
+pub fn config_spec(
+    policy: &CenterPolicy,
+    separate: bool,
+    mine: Option<&crate::account::Own>,
+    account_home: Option<&Path>,
+    home: &Path,
+    own: &[PathBuf],
+    writable: &[PathBuf],
+    no_network: bool,
+) -> LandlockSpec {
+    let policy = crate::config_cap::confined(policy, separate, mine);
+    let mut spec = match (mine, account_home) {
+        (Some(mine), Some(run_home)) if separate => {
+            pairing_spec(&policy, home, own, writable, run_home, mine)
+        }
+        _ => {
+            let mut spec = landlock_spec(&policy, home, own, writable);
+            if account_home.is_some() {
+                without_shared_sockets(&mut spec);
+            }
+            spec
+        }
+    };
+    // Landlock's layer of the network switch, as for the pairing's commands.
+    spec.no_network = no_network;
     spec
 }
 
@@ -3044,6 +3087,57 @@ mod tests {
         }
         for kept in nerve_sandbox::kept_sockets() {
             assert!(spec.unix.contains(&kept), "{kept:?}: {spec:?}");
+        }
+    }
+
+    /// A config capability's command runs as `nerve-run` in every mode: where
+    /// its pairing's commands run as the owner (user mode), its unix sockets
+    /// by path while the network is off are its own folders' and the
+    /// system's, not the shared `/tmp` and `/var/tmp` either.
+    #[test]
+    fn a_capability_off_the_network_reaches_no_socket_in_the_shared_temp_folders() {
+        let d = tempfile::tempdir().unwrap();
+        let w = std::fs::canonicalize(d.path()).unwrap();
+        let run_home = w.join("srv/run");
+        let mine = crate::account::Own::of(&run_home, "lab");
+        for dir in [&mine.home, &mine.temp, &w.join("state")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let own = [w.join("state")];
+        // The pairing's own folders and the shared ones, as the link adds
+        // them ([`crate::account::with_built_in`]) where it runs as the account.
+        let policy = CenterPolicy {
+            mode: nerve_policy::Mode::User,
+            no_network: true,
+            folders: crate::account::built_in(&mine),
+            ..Default::default()
+        };
+        let reaches = |spec: &LandlockSpec, p: &Path| spec.unix.iter().any(|s| p.starts_with(s));
+        for separate in [false, true] {
+            let spec = config_spec(
+                &policy,
+                separate,
+                Some(&mine),
+                Some(&run_home),
+                &w,
+                &own,
+                &[],
+                true,
+            );
+            assert!(spec.no_network);
+            for p in [mine.home.join("s"), mine.temp.join("s")] {
+                assert!(reaches(&spec, &p), "{separate}: {p:?}: {spec:?}");
+            }
+            for p in [
+                real(Path::new("/tmp")).join("s"),
+                real(Path::new("/var/tmp")).join("s"),
+                w.join("state/s"),
+            ] {
+                assert!(!reaches(&spec, &p), "{separate}: {p:?}: {spec:?}");
+            }
+            for kept in nerve_sandbox::kept_sockets() {
+                assert!(spec.unix.contains(&kept), "{kept:?}: {spec:?}");
+            }
         }
     }
 

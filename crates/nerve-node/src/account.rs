@@ -327,8 +327,10 @@ pub fn landlock_warning(abi: Option<i32>) -> Option<String> {
 /// Landlock ABI `landlock`, and the pairings of `cfg` at `now`. All of them
 /// run as that one account, which owns every pairing's folders, and only
 /// Landlock holds a command to its own pairing's: without it a command of
-/// one pairing reaches what the others keep. A revoked pairing runs nothing
-/// and is not counted.
+/// one pairing reaches what the others keep. A pairing counts if its
+/// commands run as `nerve-run`, or it is offered a capability of the config
+/// (those run as `nerve-run` in every mode, from the pairing's own home). A
+/// revoked pairing runs nothing and is not counted.
 pub fn pairings_warning(
     separate: bool,
     landlock: Option<i32>,
@@ -341,12 +343,15 @@ pub fn pairings_warning(
     let names: Vec<&str> = cfg
         .centers
         .iter()
-        .filter(|c| !c.revoked && !c.policy.runs_as_owner(now))
+        .filter(|c| {
+            !c.revoked
+                && (!c.policy.runs_as_owner(now) || crate::config_cap::runs_as_account(cfg, c))
+        })
         .map(|c| c.name.as_str())
         .collect();
     (names.len() > 1).then(|| {
         format!(
-            "Without Landlock nothing keeps the pairings apart: the commands of {} all run as {RUN_USER}, so a command of one can read and change what the others keep in their own folders and in the folders you give them. A kernel with Landlock keeps each pairing to its own.",
+            "Without Landlock nothing keeps the pairings apart: the commands of {} all run as {RUN_USER}, so a command of one can read and change what the others keep in their own folders and in the folders you give them, and can reach their running commands, with their network. A kernel with Landlock keeps each pairing to its own.",
             names.join(", ")
         )
     })
@@ -401,7 +406,9 @@ mod home_tests {
         cfg.centers.push(pairing("lab", Mode::Allowlist));
         let w = pairings_warning(true, None, &cfg, 0).unwrap();
         assert!(
-            w.contains("nothing keeps the pairings apart") && w.contains("home, lab"),
+            w.contains("nothing keeps the pairings apart")
+                && w.contains("home, lab")
+                && w.contains("reach their running commands"),
             "{w}"
         );
         assert_eq!(pairings_warning(true, Some(6), &cfg, 0), None);
@@ -413,6 +420,23 @@ mod home_tests {
         assert_eq!(pairings_warning(true, None, &cfg, 0), None);
         cfg.centers[1].revoked = false;
         cfg.centers[1].policy.mode = Mode::User;
+        assert_eq!(pairings_warning(true, None, &cfg, 0), None);
+        // A pairing in user mode counts once a capability of the config is
+        // offered to it: that runs as nerve-run in every mode.
+        cfg.capabilities
+            .push(nerve_policy::config::ConfigCapability {
+                name: "tool.run".into(),
+                summary: String::new(),
+                effect: nerve_proto::descriptor::Effect::Execute,
+                command: vec!["tool".into()],
+                params: serde_json::Value::Null,
+                result: Default::default(),
+                timeout_secs: None,
+                platform: Default::default(),
+            });
+        let w = pairings_warning(true, None, &cfg, 0).unwrap();
+        assert!(w.contains("home, lab"), "{w}");
+        cfg.centers[1].revoked = true;
         assert_eq!(pairings_warning(true, None, &cfg, 0), None);
     }
     use std::os::unix::fs::PermissionsExt;

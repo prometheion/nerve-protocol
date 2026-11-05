@@ -2334,7 +2334,11 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             if policy.no_network {
                 w(out, format!("{name}: {NO_NETWORK_LINE}"));
             }
-            if let Some(note) = network_mode_note(policy, crate::service::is_service_node(&paths)) {
+            if let Some(note) = network_mode_note(
+                policy,
+                crate::service::is_service_node(&paths),
+                apart_by_hand_here(),
+            ) {
                 w(out, note);
             }
             Ok(())
@@ -3461,7 +3465,7 @@ async fn set_network(
     let installed = crate::service::is_service_node(paths);
     if let Some(note) = cfg
         .center(&name)
-        .and_then(|c| network_mode_note(&c.policy, installed))
+        .and_then(|c| network_mode_note(&c.policy, installed, apart_by_hand_here()))
     {
         let _ = writeln!(out, "{note}");
     }
@@ -3469,33 +3473,55 @@ async fn set_network(
 }
 
 /// What `folder network off` and `folder ls` add where the center's
-/// commands run as the owner in the mode it is in now: user mode, allowlist
-/// mode as the owner, and on a node run by hand every mode but folder mode
-/// (`installed` says which). The switch does not hold such a command, so
-/// the node runs none of them while it is on.
+/// commands run as the owner in the mode it is in now: user mode and
+/// allowlist mode as the owner on the installed node; on a node run by hand
+/// every mode, but folder mode where it can keep them apart
+/// ([`crate::daemon::by_hand_apart`], `apart_by_hand`: not root, and Landlock
+/// with unix sockets by path). `installed` says which node it is. The switch
+/// does not hold such a command, so the node runs none of them while it is
+/// on.
 fn network_mode_note(
     policy: &nerve_policy::config::CenterPolicy,
     installed: bool,
+    apart_by_hand: bool,
 ) -> Option<String> {
     let mode = policy.mode_at(crate::now_ms());
     let as_owner = if installed {
         policy.runs_as_owner(crate::now_ms())
     } else {
-        mode != Mode::Folder
+        mode != Mode::Folder || !apart_by_hand
     };
+    if !policy.no_network || !as_owner {
+        return None;
+    }
+    if !installed {
+        return Some(
+            "note: this node runs by hand, so its commands run as you, and nothing keeps them off \
+             the network here (only folder mode does, as a user that is not root and on Linux 7.1 \
+             or later), so the node runs none of them while their network is off; the installed \
+             node runs folder mode's commands as nerve-run"
+                .into(),
+        );
+    }
     let whom = if policy.as_owner && mode == Mode::Allowlist {
         " as you"
     } else {
         ""
     };
-    (policy.no_network && as_owner).then(|| {
-        format!(
-            "note: it is in {} mode{whom} now, where its commands run as you, so the node runs \
-             none of them while their network is off; folder mode, or allowlist mode without \
-             --as-owner, runs them as nerve-run on the installed node",
-            mode.as_str()
-        )
-    })
+    Some(format!(
+        "note: it is in {} mode{whom} now, where its commands run as you, so the node runs \
+         none of them while their network is off; folder mode, or allowlist mode without \
+         --as-owner, runs them as nerve-run on the installed node",
+        mode.as_str()
+    ))
+}
+
+/// [`network_mode_note`]'s `apart_by_hand` for this machine and user.
+fn apart_by_hand_here() -> bool {
+    crate::daemon::by_hand_apart(
+        crate::rights::full_rights(),
+        nerve_sandbox::Confinement::detect().landlock_abi,
+    )
 }
 
 /// Whether this machine's kernel can keep a command off the network (the
@@ -6128,27 +6154,30 @@ mod tests {
         let (_d, paths) = setup(&["home"]);
         let policy = || load(&paths).centers[0].policy.clone();
         // A node by hand runs allowlist commands as the owner.
-        let note = "note: it is in allowlist mode now, where its commands run as you, so the \
-                    node runs none of them while their network is off";
+        let by_hand = "note: this node runs by hand, so its commands run as you";
         let out = run(&paths, &["folder", "network", "off"]).unwrap();
-        assert!(out.contains(note), "{out}");
-        assert!(run(&paths, &["folder", "ls"]).unwrap().contains(note));
+        assert!(out.contains(by_hand), "{out}");
+        assert!(run(&paths, &["folder", "ls"]).unwrap().contains(by_hand));
         // The installed node runs them as nerve-run, unless as the owner.
         let mut p = policy();
-        assert!(network_mode_note(&p, true).is_none());
+        assert!(network_mode_note(&p, true, false).is_none());
         p.as_owner = true;
         assert!(
-            network_mode_note(&p, true).is_some_and(|n| n.contains("allowlist mode as you now")),
+            network_mode_note(&p, true, false)
+                .is_some_and(|n| n.contains("allowlist mode as you now")),
             "{p:?}"
         );
         p.mode = Mode::User;
-        assert!(network_mode_note(&p, true).is_some_and(|n| n.contains("user mode now")));
+        assert!(network_mode_note(&p, true, false).is_some_and(|n| n.contains("user mode now")));
         p.mode = Mode::Folder;
-        assert!(network_mode_note(&p, true).is_none());
-        assert!(network_mode_note(&p, false).is_none());
+        assert!(network_mode_note(&p, true, false).is_none());
+        // A node by hand keeps folder mode apart only as a user that is not
+        // root, with Landlock's unix socket rule; else it says so there too.
+        assert!(network_mode_note(&p, false, true).is_none());
+        assert!(network_mode_note(&p, false, false).is_some_and(|n| n.contains(by_hand)));
         run(&paths, &["mode", "set", "folder"]).unwrap();
         let out = run(&paths, &["folder", "network", "off"]).unwrap();
-        assert!(!out.contains("note:"), "{out}");
+        assert_eq!(out.contains("note:"), !apart_by_hand_here(), "{out}");
         assert!(
             out.starts_with(&format!("home: {NO_NETWORK_LINE}\n")),
             "{out}"
@@ -6156,7 +6185,7 @@ mod tests {
         assert_eq!(out.contains("warning:"), !network_rules_here(), "{out}");
         assert!(policy().no_network);
         let ls = run(&paths, &["folder", "ls"]).unwrap();
-        assert!(ls.ends_with(&format!("home: {NO_NETWORK_LINE}\n")), "{ls}");
+        assert!(ls.contains(&format!("home: {NO_NETWORK_LINE}\n")), "{ls}");
         let out = run(&paths, &["folder", "network", "on"]).unwrap();
         assert!(
             out.starts_with("home: its commands may use the network\n"),

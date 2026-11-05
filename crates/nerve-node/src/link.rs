@@ -3493,24 +3493,19 @@ impl Link {
         let landlock = (self.shared.exe.is_some()
             && self.shared.confinement.landlock_abi.is_some())
         .then(|| {
-            let policy = crate::config_cap::confined(
-                &entry.policy,
-                self.shared.separate(&entry.policy),
-                pairing.as_ref(),
-            );
             // The folders' entries are listed as the account.
             let _as = act_as(account.as_ref()).ok().flatten();
             let writable = exec::write_folders(cfg, &home);
-            let mut spec = match (pairing.as_ref(), account.as_ref()) {
-                (Some(mine), Some(run)) if self.shared.separate(&entry.policy) => {
-                    exec::pairing_spec(&policy, &home, &own, &writable, &run.home, mine)
-                }
-                _ => exec::landlock_spec(&policy, &home, &own, &writable),
-            };
-            // Landlock's layer of the network switch, as for the pairing's
-            // commands.
-            spec.no_network = no_network;
-            spec
+            exec::config_spec(
+                &entry.policy,
+                self.shared.separate(&entry.policy),
+                pairing.as_ref(),
+                account.as_ref().map(|run| run.home.as_path()),
+                &home,
+                &own,
+                &writable,
+                no_network,
+            )
         });
         let granted = cfg
             .limits

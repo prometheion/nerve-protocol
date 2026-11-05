@@ -139,7 +139,9 @@ component ModeSection inherits Section {
         }
         if Perm.no-network && Perm.network-rules && Perm.runs-as-owner: Banner {
             tone: Tone.danger;
-            text: "In this mode " + Perm.center + "'s commands run as " + (Perm.owner-is-root ? "root" : "you") + ", which nothing keeps off the network, so the node runs none of them while this is on. Folder mode, or allowlist mode as nerve-run, runs them.";
+            text: Perm.separate
+                ? "In this mode " + Perm.center + "'s commands run as " + (Perm.owner-is-root ? "root" : "you") + ", which nothing keeps off the network, so the node runs none of them while this is on. Folder mode, or allowlist mode as nerve-run, runs them."
+                : "This node runs by hand, so " + Perm.center + "'s commands run as " + (Perm.owner-is-root ? "root" : "you") + ", and nothing keeps them off the network here (only folder mode does, as a user that is not root and on Linux 7.1 or later), so the node runs none of them while this is on. The installed node runs folder mode's commands as nerve-run.";
         }
         Reveal {
             shown: Perm.no-network;

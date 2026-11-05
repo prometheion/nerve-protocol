@@ -180,7 +180,9 @@ export global Perm {
     // node runs none of them.
     in-out property <bool> no-network;
     in-out property <bool> network-rules: true;
-    out property <bool> runs-as-owner: mode == "user" || (mode == "allowlist" && (as-owner || !separate));
+    // The node's verdict (its `network_off`): the commands run as the owner
+    // now, which nothing keeps off the network.
+    in-out property <bool> runs-as-owner;
     // Root is the owner (#151): what runs as the owner runs as root.
     in-out property <bool> owner-is-root;
     in-out property <string> built-in;

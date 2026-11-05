@@ -117,7 +117,9 @@ one JSON value from stdout:
   It names the installed node's `"owner"` and `"owner_is_root"` (root is the
   owner, so `user` mode runs as root), each center's `"account"` (the
   account its commands run as now, `null` on a node run by hand),
-  `"as_owner"`, `"no_network"` (its commands have no network) and
+  `"as_owner"`, `"no_network"` (its commands have no network),
+  `"network_off"` (`"held"`, `"as_owner"` or `"not_held"` while it is on:
+  whether the node holds them to it, or runs none, and why) and
   `"landlock"` (whether Landlock holds its commands now), `"network_rules"`
   (whether this machine can keep commands off the network),
   the running Linux node's `"folder_grants"` (`"errors"`, `"stale"`,
@@ -129,8 +131,9 @@ one JSON value from stdout:
   `null`, `"below"` the folders given in it as you named them, the home
   itself where you give it whole; `null` with Landlock or where neither is
   so), and `"pairings_warning"` (on the installed Linux node without
-  Landlock, once two or more pairings' commands run as `nerve-run`: that
-  nothing keeps them apart; `null` otherwise, also for a node that does not
+  Landlock, once two or more pairings' commands run as `nerve-run`, or the
+  config's capabilities, which run as it in every mode, are offered to them:
+  that nothing keeps them apart; `null` otherwise, also for a node that does not
   run).
   `service status` has `"installed"`, `"state"` (`"running"`, `"stopped"`,
   `"starting"`, `"stopping"` or `"failed"`; `null` when not installed),

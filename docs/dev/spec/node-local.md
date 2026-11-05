@@ -1224,10 +1224,12 @@ grant or not.
   `nerve_sandbox::kept_sockets` (the system bus, `/dev/log`,
   systemd-resolved's and nscd's sockets), never the shared `/tmp` and
   `/var/tmp` of `nerve-run`. The switch holds where the commands are apart
-  from the owner's (`Shared::network_apart`: as `nerve-run`, or folder mode
-  under the sandbox on a node run by hand); where they run as the owner
-  (user mode, allowlist mode as the owner, allowlist mode run by hand) a
-  command is refused with `daemon::NETWORK_AS_OWNER`, and where the node
+  from the owner's (`Shared::network_apart`: as `nerve-run`, or on a node
+  run by hand folder mode under the sandbox as a user that is not root and
+  with Landlock ABI 9, `daemon::by_hand_apart`); where they run as the owner
+  (user mode, allowlist mode as the owner, every other case of a node run by
+  hand) a command is refused with `daemon::NETWORK_AS_OWNER` (installed
+  node) or `daemon::NETWORK_AS_OWNER_BY_HAND`, and where the node
   has no filter (`Shared::network_held`; never on Windows) with
   `daemon::NETWORK_NOT_HELD`; a sudo command with `daemon::NETWORK_SUDO`.
   All are audited `forbidden`. A config capability runs as `nerve-run` in
@@ -1238,7 +1240,12 @@ grant or not.
   app, the node web UI); a center's settings may set it, never clear it
   (`policy.no_network: only the owner can let the commands back on the
   network`); the mode stays the center's to change. `status` has each
-  center's `no_network` and the machine's `network_rules` (the filter).
+  center's `no_network` and `network_off` (`held`, `as_owner`, `not_held`;
+  `null` while the switch is on nowhere), the machine's `network_rules` (the
+  filter) and `pairings_warning`: a string on the installed Linux node
+  without Landlock once two or more pairings (not revoked) run as
+  `nerve-run`, or are offered a capability of the config, which does; `null`
+  otherwise. The apps and the CLI show it.
 - **user**: full access as the user, protected paths aside. `allow` rules
   do not count.
 

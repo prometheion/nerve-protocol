@@ -204,6 +204,15 @@ pub fn center_offered(
     )
 }
 
+/// Whether the installed Linux node offers `entry`'s center a capability
+/// that runs as `nerve-run`, in whatever mode the pairing is: the config's
+/// or one the center added. Its program then runs as the account the folder
+/// pairings' commands run as, from the pairing's own home.
+pub fn runs_as_account(cfg: &NodeConfig, entry: &CenterEntry) -> bool {
+    !offered_on(cfg, "linux", true).is_empty()
+        || !center_offered(cfg, entry, "linux", true, &[]).is_empty()
+}
+
 /// The attached programs' capabilities (`programs`) `entry`'s center is
 /// offered: none under a capability it added one of its own under. Its own
 /// is left out then ([`center_left_out`]), and its switches and allow rules

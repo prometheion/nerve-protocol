@@ -125,10 +125,13 @@ async fn invoke(
 }
 
 /// With the switch, a folder-mode command cannot connect to a TCP port on
-/// this machine that it reaches without it, nor open a UDP socket, also
-/// where the kernel's Landlock is taken to have no network rules (ABI 3,
-/// a node by hand's floor), and the descriptor tells the center that its
-/// commands have no network.
+/// this machine that it reaches without it, nor open a UDP socket, and the
+/// descriptor tells the center that its commands have no network. A node by
+/// hand holds it only where Landlock tells unix sockets by path apart (ABI
+/// 9, Linux 7.1) and it is not root: below that the commands run as the
+/// owner with the owner's session manager in reach, so it runs none of them
+/// and says why. A capability of the config stands for `nerve-run` here and
+/// runs, held by the filter alone.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_folder_command_without_network_opens_no_tcp_connection() {
     let abi = nerve_sandbox::Confinement::detect().landlock_abi;
@@ -157,6 +160,29 @@ async fn a_folder_command_without_network_opens_no_tcp_connection() {
         let mut center = FakeCenter::start(false).await.unwrap();
         let daemon = node(&root, &work, &center, off, confinement, None).await;
         let mut conn = linked(&mut center).await;
+        let told = confinement.map_or(abi, |c| c.landlock_abi);
+        if off && told.is_none_or(|v| v < nerve_sandbox::LANDLOCK_RESOLVE_UNIX) {
+            // Below ABI 9 a node by hand runs none of them.
+            let e = run(&mut conn, &connect, &work).await.expect_err("refused");
+            assert!(
+                e.message.contains("runs them as its own user"),
+                "{}",
+                e.message
+            );
+            let d = conn
+                .call("describe", json!({"detail": "full"}), WAIT)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(d["access"]["no_network"], "as_owner", "{d}");
+            let r = invoke(&mut conn, "probe.connect", json!({"port": port})).await;
+            assert!(
+                !r.as_ref().is_ok_and(|v| v.as_str() == Some("open\n")),
+                "{r:?}"
+            );
+            daemon.stop().await;
+            continue;
+        }
         for probe in [&connect, &send] {
             let r = run(&mut conn, probe, &work)
                 .await
@@ -305,7 +331,7 @@ async fn commands_that_would_run_as_the_owner_do_not_run_without_network() {
             .await
             .expect_err("refused");
         assert!(
-            e.message.contains("in this mode they run as the owner")
+            e.message.contains("runs them as its own user")
                 && e.message.contains("nerve-node folder network on"),
             "{mode:?}: {}",
             e.message
@@ -341,6 +367,20 @@ async fn commands_that_would_run_as_the_owner_do_not_run_without_network() {
     let e = run(&mut conn, "sudo true", &work)
         .await
         .expect_err("refused");
+    // A node by hand holds folder mode only with Landlock's rule for unix
+    // sockets (ABI 9); below it that refuses every command first.
+    let apart = nerve_sandbox::Confinement::detect()
+        .landlock_abi
+        .is_some_and(|v| v >= nerve_sandbox::LANDLOCK_RESOLVE_UNIX);
+    if !apart {
+        assert!(
+            e.message.contains("runs them as its own user"),
+            "{}",
+            e.message
+        );
+        daemon.stop().await;
+        return;
+    }
     assert!(
         e.message
             .contains("a command on the sudo list runs outside what keeps them off it"),

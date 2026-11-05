@@ -635,6 +635,10 @@ pub(crate) struct Shared {
     /// (nerve_sandbox::net_filter): Linux with seccomp filters, on x86_64 or
     /// aarch64.
     pub net_filter: bool,
+    /// Whether the node runs with full rights (root, an elevated token): its
+    /// commands then have them too, unless the installed node runs them as
+    /// another account.
+    pub full_rights: bool,
     /// The cgroup that holds each command to its limits (crate::cgroup), or
     /// why there is none.
     pub cgroups: crate::cgroup::Found,
@@ -1317,13 +1321,16 @@ impl Shared {
     /// the owner's own now, which the network switch needs to hold them: as
     /// `nerve-run` (the installed Linux node, folder mode and allowlist mode
     /// unless the pairing runs as the owner), or in folder mode, under the
-    /// sandbox (a node run by hand, which runs them as its own user). A
-    /// command that runs as the owner with nothing around it reaches the
-    /// owner's programs, which reach the network for it, so the switch does
-    /// not hold it: user mode, and allowlist mode as the owner.
+    /// sandbox, on a node run by hand where that can keep a command from the
+    /// owner's own programs ([`by_hand_apart`]). A command that runs as the
+    /// owner with nothing around it reaches the owner's programs, which
+    /// reach the network for it, so the switch does not hold it: user mode,
+    /// and allowlist mode as the owner.
     fn network_apart(&self, policy: &nerve_policy::config::CenterPolicy) -> bool {
         self.separate(policy)
-            || !self.service && policy.mode_at(crate::now_ms()) == nerve_policy::Mode::Folder
+            || !self.service
+                && policy.mode_at(crate::now_ms()) == nerve_policy::Mode::Folder
+                && by_hand_apart(self.full_rights, self.confinement.landlock_abi)
     }
 
     /// How the network switch of a pairing with `policy` stands now: `None`
@@ -1359,7 +1366,8 @@ impl Shared {
         use nerve_proto::descriptor::NetworkOff;
         match self.network_off(policy)? {
             NetworkOff::NotHeld => Some(NETWORK_NOT_HELD),
-            NetworkOff::AsOwner => Some(NETWORK_AS_OWNER),
+            NetworkOff::AsOwner if self.service => Some(NETWORK_AS_OWNER),
+            NetworkOff::AsOwner => Some(NETWORK_AS_OWNER_BY_HAND),
             NetworkOff::Held => None,
         }
     }
@@ -1662,6 +1670,9 @@ impl Shared {
                     // The owner's network switch for its folder-mode
                     // commands (`folder network off`).
                     "no_network": c.policy.no_network,
+                    // How that stands now: held, as_owner or not_held; none
+                    // while it is on.
+                    "network_off": self.network_off(&c.policy),
                     // The account its commands run as now; none on a node
                     // run by hand, which runs them as itself.
                     "account": self.command_account(&cfg, &c.policy).ok().flatten().map(|a| a.name),
@@ -1768,6 +1779,21 @@ pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this ce
 /// ([`Shared::network_refusal`]): nothing holds them back from the owner's
 /// programs, which reach the network for them.
 pub const NETWORK_AS_OWNER: &str = "the owner turned the network off for this center's commands, and in this mode they run as the owner, which nothing keeps off the network, so the node runs none of them; the owner turns the network back on with `nerve-node folder network on`, or has them run as nerve-run: `nerve-node mode set folder`, or `nerve-node mode set allowlist` without `--as-owner`";
+
+/// Why a pairing's commands may not run where the owner turned their network
+/// off on a node run by hand, which runs them as its own user
+/// ([`Shared::network_refusal`]).
+pub const NETWORK_AS_OWNER_BY_HAND: &str = "the owner turned the network off for this center's commands, and this node, run by hand, runs them as its own user, which nothing here keeps off the network (only folder mode does, as a user that is not root and on Linux 7.1 or later, whose Landlock tells unix sockets apart), so the node runs none of them; the owner turns the network back on with `nerve-node folder network on`, or installs the node, which runs folder mode's commands as nerve-run";
+
+/// Whether a node run by hand can keep a folder-mode command apart from its
+/// own user's programs, which the network switch needs: it is not root (a
+/// command of root asks the system's service manager over the bus it keeps
+/// to start a program outside the filter), and Landlock tells unix sockets
+/// by path apart (ABI 9, [`nerve_sandbox::LANDLOCK_RESOLVE_UNIX`]; below it a
+/// command reaches the user's own session bus and service manager).
+pub fn by_hand_apart(full_rights: bool, landlock_abi: Option<i32>) -> bool {
+    !full_rights && landlock_abi.is_some_and(|v| v >= nerve_sandbox::LANDLOCK_RESOLVE_UNIX)
+}
 
 /// Why a command on the sudo list does not run while the owner keeps the
 /// pairing's commands off the network: it runs outside the filter that
@@ -1985,6 +2011,7 @@ impl Daemon {
                 service,
             ),
             net_filter: opts.net_filter.unwrap_or_else(net_filter_here),
+            full_rights,
             cgroups,
             store: Mutex::new(store),
             changed,
@@ -3906,12 +3933,33 @@ mod tests {
             (Some(4), false),
             (Some(6), false),
             (Some(6), true),
+            (Some(8), true),
+            (Some(9), true),
+            (Some(9), false),
         ] {
-            for service in [false, true] {
+            // A node by hand as root keeps no folder-mode command apart.
+            for (service, full) in [(false, false), (false, true), (true, false)] {
                 let log = Log::new(Level::Info);
                 let d = tempfile::tempdir().unwrap();
+                if full {
+                    let paths = NodePaths::new(d.path().join("config"), d.path().join("state"));
+                    for dir in [&paths.state_dir, &paths.config_dir] {
+                        nerve_transport::files::create_private_dir(dir).unwrap();
+                    }
+                    SettingsStore::open(
+                        paths.config_file(),
+                        paths.config_key(),
+                        AuditLog::new(paths.audit_log()),
+                    )
+                    .unwrap()
+                    .update(|c| {
+                        c.machine.allow_root = true;
+                        Ok(())
+                    })
+                    .unwrap();
+                }
                 let mut o = options(&d, &log);
-                o.full_rights = Some(false);
+                o.full_rights = Some(full);
                 o.exe = Some("/bin/true".into());
                 o.confinement = Some(Confinement {
                     landlock_abi: abi,
@@ -3933,13 +3981,19 @@ mod tests {
                 // user mode; and what the switch is for each where the node
                 // has the filter.
                 for (mode, as_owner, apart) in [
-                    (Mode::Folder, false, true),
+                    // Folder mode on a node by hand: as a user that is not
+                    // root, with the kernel telling unix sockets apart.
+                    (
+                        Mode::Folder,
+                        false,
+                        service || !full && abi.is_some_and(|v| v >= 9),
+                    ),
                     (Mode::Allowlist, false, service),
                     (Mode::Allowlist, true, false),
                     (Mode::User, false, false),
                 ] {
                     let what = format!(
-                        "ABI {abi:?}, filter {filter}, service {service}, {mode:?}, as owner {as_owner}"
+                        "ABI {abi:?}, filter {filter}, service {service}, root {full}, {mode:?}, as owner {as_owner}"
                     );
                     let mut policy = CenterPolicy {
                         mode,
@@ -3962,7 +4016,8 @@ mod tests {
                         s.network_refusal(&policy),
                         match want {
                             NotHeld => Some(NETWORK_NOT_HELD),
-                            AsOwner => Some(NETWORK_AS_OWNER),
+                            AsOwner if service => Some(NETWORK_AS_OWNER),
+                            AsOwner => Some(NETWORK_AS_OWNER_BY_HAND),
                             Held => None,
                         },
                         "{what}"

@@ -392,15 +392,19 @@ that there, and the agent is offered no command.
 
 The switch holds where the center's commands run as `nerve-run` (on the
 installed Linux node: `folder` mode, and `allowlist` mode without
-`--as-owner`), and in `folder` mode on a node you run yourself, under the
-sandbox. Where they run as you with nothing around them (`user` mode,
-`allowlist` mode with `--as-owner`, and `allowlist` mode on a node you run
-yourself), your own programs would reach the network for them (your
-session's service manager, a key agent), so while the switch is off the
-node runs none of them and says why (`… in this mode they run as the owner,
-which nothing keeps off the network, so the node runs none of them …`).
-`folder network off` and `folder ls` say when the center is in such a mode
-now. Nor does any command on your [sudo list](sudo.md) run for that center
+`--as-owner`). On a node you run yourself it holds in `folder` mode only,
+under the sandbox, as a user that is not root and on Linux 7.1 or later,
+where Landlock tells unix sockets by path apart (below it your session's
+service manager is within reach of the command; as root the system's is).
+Where they run as you with nothing around them (`user` mode, `allowlist`
+mode with `--as-owner`, every other mode of a node you run yourself, and
+`folder` mode there as root or on an older kernel), your own programs would
+reach the network for them (your session's service manager, a key agent),
+so while the switch is off the node runs none of them and says why (`… in
+this mode they run as the owner, which nothing keeps off the network, so the
+node runs none of them …`, or for a node run by hand `… runs them as its own
+user …`). `folder network off`, `folder ls` and the app say when the center
+is in such a mode now. Nor does any command on your [sudo list](sudo.md) run for that center
 while it is off: it would run outside the filter, with full rights
 (`… a command on the sudo list runs outside what keeps them off it …`).
 `list` tells the agent both.
@@ -426,6 +430,9 @@ What it does not cover:
   the system's services, and a name lookup through systemd-resolved or nscd
   still asks the name servers for it.
 - A socket another process hands to the command.
+- Without Landlock, a command that is running for another pairing of
+  `nerve-run`, which has its network: nothing keeps the pairings apart
+  there. `status` warns of that when two pairings share the account.
 - A program's action ([providers](providers.md)), which runs as you.
 
 ## The account `nerve-run` (Linux)

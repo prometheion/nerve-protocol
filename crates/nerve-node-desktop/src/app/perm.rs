@@ -122,6 +122,7 @@ impl Ctl {
             p.set_as_owner(c["as_owner"] == true);
             p.set_no_network(c["no_network"] == true);
             p.set_network_rules(st["network_rules"] != false);
+            p.set_runs_as_owner(c["network_off"] == "as_owner");
             p.set_owner_is_root(st["owner_is_root"] == true);
             p.set_built_in(built_in.as_str().into());
             p.set_grant_errors(errors.join("\n").into());

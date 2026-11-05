@@ -595,7 +595,8 @@ fn the_app_drives_the_cli_end_to_end() {
             assert!(perm.get_no_network() && !perm.get_network_rules());
             // Its commands run as the owner in user mode and in allowlist
             // mode as the owner, where none of them runs while the network
-            // is off; the page says so in every mode.
+            // is off; the node says so in the center's `network_off` and the
+            // page shows what it says, in every mode.
             for (mode, as_owner, owner_runs) in [
                 ("folder", false, false),
                 ("allowlist", false, false),
@@ -605,6 +606,8 @@ fn the_app_drives_the_cli_end_to_end() {
                 let mut st = st.clone();
                 st["centers"][0]["mode"] = serde_json::json!(mode);
                 st["centers"][0]["as_owner"] = serde_json::json!(as_owner);
+                st["centers"][0]["network_off"] =
+                    serde_json::json!(if owner_runs { "as_owner" } else { "held" });
                 ctl.show_status(Ok(st));
                 assert_eq!(perm.get_runs_as_owner(), owner_runs, "{mode} {as_owner}");
             }

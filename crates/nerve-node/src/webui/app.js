@@ -210,10 +210,12 @@ function networkForm(c, entry, o) {
     entry.no_network && o.network_rules === false
       ? el("p", { class: "meta" }, "This machine cannot keep commands off the network (the node's seccomp filter cannot be used here), so the node runs none of this center's commands while this is on.")
       : null,
-    // Its commands run as the owner in user mode and in allowlist mode as
-    // the owner, which nothing keeps off the network.
-    entry.no_network && o.network_rules !== false && (entry.mode === "user" || (entry.mode === "allowlist" && entry.account !== "nerve-run"))
-      ? el("p", { class: "meta" }, "In this mode its commands run as you, which nothing keeps off the network, so the node runs none of them while this is on. Folder mode, or allowlist mode as nerve-run, runs them.")
+    // The node says the commands run as the owner now (`network_off`),
+    // which nothing keeps off the network.
+    entry.network_off === "as_owner"
+      ? el("p", { class: "meta" }, o.owner
+        ? "In this mode its commands run as you, which nothing keeps off the network, so the node runs none of them while this is on. Folder mode, or allowlist mode as nerve-run, runs them."
+        : "This node runs by hand, so its commands run as you, and nothing keeps them off the network here (only folder mode does, as a user that is not root and on Linux 7.1 or later), so the node runs none of them while this is on. The installed node runs folder mode's commands as nerve-run.")
       : null,
     entry.no_network ? el("p", { class: "meta" }, "No command on the sudo list runs while this is on.") : null,
     el("div", { class: "actions" }, btn("Save", "primary", act(() => api("POST", "/api/network", { center: c, off: off.checked })), "check", `network:${c}:set`)));
