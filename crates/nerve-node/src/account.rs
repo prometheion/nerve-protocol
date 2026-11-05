@@ -200,7 +200,15 @@ pub fn other_pairings(
 /// ([`around_pairings`]), then the pairing's built-in ones ([`built_in`]).
 /// `home` is the `~` of the folders.
 pub fn with_built_in(mut entry: CenterEntry, home: &Path, run: &Account) -> CenterEntry {
-    let own = Own::of(&run.home, &entry.name);
+    // The account's home at the place it is (passwd may give it through a
+    // link, a `/var/lib` moved to another disk), as the owner's folders are
+    // stored: with the network switch on the sandbox writes only at a
+    // folder's real place (`exec::spelled_apart`).
+    #[cfg(unix)]
+    let run_home = std::fs::canonicalize(&run.home).unwrap_or_else(|_| run.home.clone());
+    #[cfg(not(unix))]
+    let run_home = run.home.clone();
+    let own = Own::of(&run_home, &entry.name);
     entry.policy.folders = around_pairings(&entry.policy.folders, home, &run.home);
     entry.policy.folders.extend(built_in(&own));
     entry
@@ -1483,6 +1491,49 @@ mod tests {
             b.iter()
                 .all(|f| f.access.read && f.access.write && f.access.execute)
         );
+    }
+
+    /// The pairing's own folders are stored at the account's home as it is,
+    /// not as passwd spells it through a link: with the network off the
+    /// sandbox writes only at a folder's real place, and the pairing must
+    /// stay able to write in its own home.
+    #[cfg(unix)]
+    #[test]
+    fn the_built_in_folders_are_at_the_real_home_of_the_account() {
+        let d = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(d.path()).unwrap();
+        std::fs::create_dir_all(base.join("disk/run")).unwrap();
+        std::os::unix::fs::symlink(base.join("disk"), base.join("lib")).unwrap();
+        let run = Account {
+            name: RUN_USER.into(),
+            uid: 900,
+            gid: 900,
+            comment: String::new(),
+            home: base.join("lib/run"),
+            groups: vec![900],
+        };
+        let entry = nerve_policy::CenterEntry {
+            name: "lab".into(),
+            url: "https://c.example".into(),
+            pin: None,
+            center_id: "c".into(),
+            node_id: "lab".into(),
+            settings: Default::default(),
+            paused: false,
+            revoked: false,
+            unknown: false,
+            public_key: None,
+            key_rotations: 0,
+            pin_rotations: 0,
+            old_pin: None,
+            policy: Default::default(),
+            capabilities: Vec::new(),
+        };
+        let got = with_built_in(entry, &base.join("alice"), &run);
+        let own = Own::of(&base.join("disk/run"), "lab");
+        let paths: Vec<&str> = got.policy.folders.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&own.home.to_str().unwrap()), "{paths:?}");
+        assert!(paths.contains(&own.temp.to_str().unwrap()), "{paths:?}");
     }
 
     #[test]

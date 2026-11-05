@@ -652,13 +652,28 @@ pub fn folder_sets(
                 .and_then(|real| match replaced(policy, &x.path, &real) {
                     Some(why) => Err(why),
                     None => Ok(real),
-                })
-                .and_then(|real| match spelled_apart(policy, x, &path, &real) {
-                    Some(why) => Err(why),
-                    None => Ok(real),
                 });
+            // With the switch on a place to write is used only at its real
+            // place; the folder keeps its other flags there.
+            let access = match &real {
+                Ok(real) => match spelled_apart(policy, x, &path, real) {
+                    Some(why) => {
+                        tracing::warn!(
+                            "folder {} is not written in by the command's sandbox: {why}",
+                            x.path
+                        );
+                        Access {
+                            write: false,
+                            ..x.access
+                        }
+                    }
+                    None => x.access,
+                },
+                Err(_) => x.access,
+            };
             match real {
-                Ok(real) => Some((x.access, real)),
+                Ok(_) if !(access.read || access.write || access.execute) => None,
+                Ok(real) => Some((access, real)),
                 Err(why) => {
                     tracing::warn!("folder {} left out of the command's sandbox: {why}", x.path);
                     None
@@ -699,22 +714,29 @@ fn replaced(policy: &CenterPolicy, path: &str, real: &Path) -> Option<String> {
     })
 }
 
-/// Why a folder a command may write is not used while the owner's network
-/// switch is on, if it is not: the path is not the folder's real place. The
-/// settings rule that keeps a center from giving itself a place to write
-/// then (`nerve_policy::settings`) judges names as spelled, so it cannot
-/// tell a link of the owner above two spellings of one place. The node can:
-/// it takes a place to write only where it is. (`folder add` stores the real
-/// place, and [`replaced`] refuses a recorded one that leads elsewhere, so
-/// this is about the folders a center added.)
+/// Why a folder a command may write is not written in while the owner's
+/// network switch is on, if it is not: the path is not the folder's real
+/// place. The settings rule that keeps a center from giving itself a place
+/// to write then (`nerve_policy::settings`) judges names as spelled, so it
+/// cannot tell a link of the owner above two spellings of one place. The
+/// node can: it takes a place to write only where it is. The folder keeps
+/// its other flags. This holds for every `w` folder spelled through a link,
+/// whoever added it: one a center added, one the owner wrote into
+/// `node.toml` by hand, or stored as given because `folder add` could not
+/// settle it. (`folder add` stores the real place, and [`replaced`] refuses
+/// a recorded one that leads elsewhere; the folders every pairing shares
+/// are root's links, not a command's, and stay.)
 fn spelled_apart(
     policy: &CenterPolicy,
     folder: &Folder,
     path: &Path,
     real: &Path,
 ) -> Option<String> {
-    (policy.no_network && folder.access.write && !(within(real, path) && within(path, real)))
-        .then(|| {
+    (policy.no_network
+        && folder.access.write
+        && !crate::account::shared_folder(&folder.path)
+        && !(within(real, path) && within(path, real)))
+    .then(|| {
         format!(
             "its path leads to {} through a link, and with the network off a place to write is only used at its real place; the owner `folder add`s the place to give it",
             real.display()
@@ -3712,9 +3734,25 @@ mod tests {
         // the switch off, not used with it on.
         assert_eq!(used(&policy(both(&spelled), false)), (true, true));
         assert_eq!(used(&policy(both(&spelled), true)), (false, false));
-        // A read-only folder is no place to write, so it stays.
+        // A read-only folder is no place to write, so it stays. A folder
+        // with more than `w` keeps its other flags at its real place: the
+        // node is told why it is not written in, nothing else changes.
         let read = policy(vec![folder(&spelled, "r")], true);
         assert!(landlock_spec(&read, &home, &[], &[]).read.contains(&sub));
+        let all = landlock_spec(
+            &policy(vec![folder(&spelled, "rwx")], true),
+            &home,
+            &[],
+            &[],
+        );
+        assert!(
+            all.read.contains(&sub) && all.exec.contains(&sub),
+            "{all:?}"
+        );
+        assert!(
+            !all.write.contains(&sub) && !all.unix.contains(&sub),
+            "{all:?}"
+        );
 
         // A command put a link in place of `sub`: with the switch on the
         // spelled folder gives no rule where it leads.
@@ -3723,8 +3761,28 @@ mod tests {
         let off = landlock_spec(&policy(both(&spelled), false), &home, &[], &writable);
         assert!(spec_reaches(&off, &docs), "{off:?}");
         let on = landlock_spec(&policy(both(&spelled), true), &home, &[], &writable);
-        assert!(!spec_reaches(&on, &docs), "{on:?}");
+        assert!(!on.write.contains(&docs), "{on:?}");
         assert!(!on.unix.contains(&docs), "{on:?}");
+    }
+
+    /// The folders every pairing shares are root's places, not a command's:
+    /// with the switch on they are written in wherever their path leads, as
+    /// is a folder that is its own real place; any other `w` folder spelled
+    /// through a link is not.
+    #[test]
+    fn the_shared_folders_are_written_in_whatever_their_path_leads_to() {
+        let policy = CenterPolicy {
+            no_network: true,
+            ..Default::default()
+        };
+        let apart = |path: &str, access: &str| {
+            let (p, real) = (Path::new(path), Path::new("/elsewhere/x"));
+            spelled_apart(&policy, &folder(p, access), p, real).is_some()
+        };
+        assert!(!apart("/tmp", "rwx") && !apart("/var/tmp", "rw"));
+        assert!(apart("/srv/tmp", "rw") && !apart("/srv/tmp", "r"));
+        let same = Path::new("/srv/tmp");
+        assert!(spelled_apart(&policy, &folder(same, "rw"), same, same).is_none());
     }
 
     /// A recorded folder that did not exist yet is judged the same: a link

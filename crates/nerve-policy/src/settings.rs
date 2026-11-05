@@ -903,8 +903,8 @@ fn client_only(
     // center may not narrow `w work` to `r work` and keep or add `w work/sub`,
     // where `sub` is such a link. A link of the owner above two spellings of
     // one folder is beyond names as spelled: the node uses a place to write
-    // that a center added only at its real place while the switch is on
-    // (`exec::spelled_apart` in nerve-node).
+    // that is spelled through a link only without its write while the switch
+    // is on (`exec::spelled_apart` in nerve-node).
     if o.no_network || n.no_network {
         let prot = protected(&n.protected);
         let writes = |folders: &[Folder], path: &Path| {

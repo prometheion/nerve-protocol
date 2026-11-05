@@ -1403,6 +1403,82 @@ async fn folder_mode_gives_no_rule_where_a_command_linked_a_nested_folder() {
     node.stop().await;
 }
 
+/// The node judges a folder rule when it builds the command's rules, and the
+/// shim applies it a moment later. A command of another call that turns a
+/// nested folder into a link in between must not make the rule grant the
+/// folder's rights where the link leads: the shim opens the rule's path
+/// without following a link. The swap is made while the call is held after
+/// its last look (`HoldAt::AfterLastLook`), i.e. after the rules are built.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn folder_mode_gives_no_rule_where_a_link_came_after_the_rules_were_built() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    if !nerve_sandbox::Confinement::detect().by_hand().available() {
+        eprintln!("skipped: Landlock is not available here");
+        return;
+    }
+    let dir = tempdir();
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let home = dir.path().join("home");
+    let (work, docs) = (home.join("work"), home.join("docs"));
+    std::fs::create_dir_all(work.join("bin")).unwrap();
+    std::fs::create_dir_all(&docs).unwrap();
+    let (work, docs) = (
+        std::fs::canonicalize(&work).unwrap(),
+        std::fs::canonicalize(&docs).unwrap(),
+    );
+    let bin = work.join("bin");
+    std::fs::write(bin.join("in-bin.txt"), "bin\n").unwrap();
+    std::fs::write(docs.join("secret.txt"), "secret\n").unwrap();
+    let armed = Arc::new(AtomicBool::new(false));
+    let hold = {
+        let (armed, bin, docs) = (armed.clone(), bin.clone(), docs.clone());
+        nerve_node::Hold::new(move |at| {
+            let (armed, bin, docs) = (armed.clone(), bin.clone(), docs.clone());
+            Box::pin(async move {
+                if at == nerve_node::HoldAt::AfterLastLook && armed.swap(false, Ordering::SeqCst) {
+                    std::fs::remove_dir_all(&bin).unwrap();
+                    std::os::unix::fs::symlink(&docs, &bin).unwrap();
+                }
+            })
+        })
+    };
+    let mut o = options(dir.path());
+    o.hold = Some(hold);
+    pair_in_allowlist(&o.paths, &center).await;
+    owner_edit(&o.paths, |c| {
+        let p = &mut c.centers[0].policy;
+        p.mode = nerve_policy::Mode::Folder;
+        for (path, access) in [(&work, "rwx"), (&bin, "rwx")] {
+            p.folders.push(nerve_policy::config::Folder {
+                path: path.display().to_string(),
+                access: nerve_policy::config::Access::parse(access).unwrap(),
+            });
+        }
+    })
+    .await;
+    let node = Daemon::start(o).await.expect("start");
+    let mut conn = linked(&mut center).await;
+
+    // The folders as they were: `bin` is a folder like the rest.
+    let r = run_in(&mut conn, &work, "cat bin/in-bin.txt").await;
+    assert_eq!(r["stdout"], "bin\n", "{r}");
+
+    // The swap happens after the next call's rules are built, so they are
+    // those of a plain folder `bin`; the shim finds a link at its place.
+    armed.store(true, Ordering::SeqCst);
+    let r = run_in(
+        &mut conn,
+        &work,
+        "cat bin/secret.txt; echo planted > bin/planted.txt",
+    )
+    .await;
+    assert!(std::fs::symlink_metadata(&bin).unwrap().is_symlink());
+    assert!(!r["stdout"].as_str().unwrap().contains("secret"), "{r}");
+    assert!(!docs.join("planted.txt").exists(), "{r}");
+    node.stop().await;
+}
+
 /// A folder mode command gets no controlling terminal. On a node run by hand
 /// in a terminal that is the owner's, which the command must not reach
 /// through `/dev/tty`, nor read the pty by its name under `/dev/pts`

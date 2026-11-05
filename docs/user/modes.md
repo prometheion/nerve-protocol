@@ -310,7 +310,11 @@ The node confines commands with Landlock:
   path passes through a link that lies inside a `w` folder (of any pairing).
   That holds for a link you made yourself too, and a link of yours that
   leads into the `w` folder is followed to its end and judged on the way.
-  The folder is back once its path is a plain folder again. A link of your
+  The folder is back once its path is a plain folder again. The rules are
+  applied to the folder where it is at the moment the command starts: the
+  shim opens each folder without following a link, so a link that replaces a
+  folder between the node's look and the start gives that folder's rights
+  nowhere, and the command is told. A link of your
   own above the `w` folder is followed. A folder you added with `folder add`
   is also left out when a link has replaced it since, and stays out after you
   take `w` off the folder above or remove the pairing that had it
@@ -454,11 +458,12 @@ What it does not cover:
   itself a place to write while its network is off: no new `w` folder, no
   `w` added to one, and no `w` folder inside one of yours while the folder
   above it is narrowed or dropped (a command may have put a link there).
-  The node also uses a place to write that the center added only where it
-  really is: one whose path leads elsewhere through a link of yours (a
-  `/home` that is a link to `/var/home`, say) is left out while the network
-  is off, and the log says so. Add such a place yourself with
-  `nerve-node folder add`, which stores the real place.
+  The node also writes in a folder only where it really is: a folder with
+  `w` whose path leads elsewhere through a link of yours (a `/home` that is
+  a link to `/var/home`, say) gets no write while the network is off, whoever
+  added it (a center, or you by hand in `node.toml`), and the log says so.
+  Its other flags stay. Add such a place with `nerve-node folder add`, which
+  stores the real place.
 - Without Landlock, a command that is running for another pairing of
   `nerve-run`, which has its network: nothing keeps the pairings apart
   there. `status` warns of that when two pairings share the account.

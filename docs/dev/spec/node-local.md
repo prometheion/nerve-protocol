@@ -1252,9 +1252,13 @@ grant or not.
   folder holds it; names are compared as spelled, with their case kept on
   Unix. Names as spelled cannot see an owner's link above two spellings of
   one folder, so the node judges that: while the switch is on, a folder with
-  `w` is used only at its real place (`exec::spelled_apart`; `folder add`
-  stores the real place, so this is about the folders a center added), and
-  is left out, with the reason in the log, where its path leads elsewhere.
+  `w` is written in only at its real place (`exec::spelled_apart`): where
+  its path leads elsewhere through a link, whoever added the folder (a
+  center, or the owner by hand or by a `folder add` that could not settle it),
+  it loses the `w` (and so its unix rules) and keeps its other flags, with the
+  reason in the log. `folder add` stores the real place, and the folders
+  every pairing shares (`/tmp`, `/var/tmp`) stay; the pairing's own folders
+  are stored at the account's home as it is.
   While the switch is on, the node ends the pairing's running commands
   (`exec.run` and config capabilities) that have the network, audited as
   `killed` with `code: "no_network"`. It goes by each command (whether the
@@ -1501,6 +1505,13 @@ answer. For each call the node takes the center's policy and, in this order:
    stored by its resolved path and listed in `policy.places`; such a folder
    is also left out when its path resolves to another place now, whatever the
    `w` folders say, and a center's settings document cannot change the list.
+   The node judges a folder's path when it builds the rules, and the shim
+   applies them a moment later: it opens each rule's path part by part
+   without following a link (`landlock_rules`), so a link that replaced a
+   folder in between gives that folder's rights nowhere (the rule is left
+   out, with a line on the command's stderr). The system's own paths in the
+   rules are given at their real place for it (`nerve_sandbox::system_dirs`,
+   `kept_sockets`).
    `folder add` itself does not follow a link that lies inside a `w` folder
    of any center: it refuses, so that a link a command made is not stored,
    and recorded, at its target. It judges and resolves in one pass

@@ -320,9 +320,11 @@ impl Confinement {
     }
 }
 
-/// Directories every confined command may read and run programs from.
+/// Directories every confined command may read and run programs from, each
+/// at its real place (`/bin` is a link to `/usr/bin` on many systems): the
+/// shim opens a rule's path without following a link ([`landlock_rules`]).
 pub fn system_dirs() -> Vec<PathBuf> {
-    [
+    resolved(&[
         "/usr",
         "/bin",
         "/sbin",
@@ -336,19 +338,27 @@ pub fn system_dirs() -> Vec<PathBuf> {
         "/sys",
         "/dev",
         "/run",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .filter(|p| p.exists())
-    .collect()
+    ])
+}
+
+/// The paths of `names` that exist, each at its real place, once.
+fn resolved(names: &[&str]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for p in names.iter().filter_map(|p| std::fs::canonicalize(p).ok()) {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
 }
 
 /// The system's sockets a command whose network is off still reaches by
 /// path ([`LandlockSpec::unix`]): the system bus, the system log
 /// (`/dev/log`), systemd-resolved's and nscd's. Programs need them to look
 /// up names and accounts, to log and to talk to the system's services. Only
-/// those that are there; the system bus where `DBUS_SYSTEM_BUS_ADDRESS`
-/// puts it, else at its usual place.
+/// those that are there, each at its real place (`/dev/log` is a link on
+/// systemd systems); the system bus where `DBUS_SYSTEM_BUS_ADDRESS` puts
+/// it, else at its usual place.
 pub fn kept_sockets() -> Vec<PathBuf> {
     let bus = std::env::var("DBUS_SYSTEM_BUS_ADDRESS").ok();
     let mut out = bus_sockets(bus.as_deref());
@@ -362,8 +372,13 @@ pub fn kept_sockets() -> Vec<PathBuf> {
         .iter()
         .map(PathBuf::from),
     );
-    out.retain(|p| p.exists());
-    out
+    let mut kept: Vec<PathBuf> = Vec::new();
+    for p in out.iter().filter_map(|p| std::fs::canonicalize(p).ok()) {
+        if !kept.contains(&p) {
+            kept.push(p);
+        }
+    }
+    kept
 }
 
 /// The sockets of a D-Bus address (`unix:path=...`, several separated by
@@ -458,11 +473,7 @@ fn terminals_in(dev: &Path, tty_class: &Path) -> Vec<PathBuf> {
 /// outside its folders. Not `/dev/tty`: a confined command has no
 /// controlling terminal, and the one it had would be the owner's.
 pub fn system_writable() -> Vec<PathBuf> {
-    ["/dev/null", "/dev/zero", "/dev/full"]
-        .iter()
-        .map(PathBuf::from)
-        .filter(|p| p.exists())
-        .collect()
+    resolved(&["/dev/null", "/dev/zero", "/dev/full"])
 }
 
 #[cfg(target_os = "linux")]
@@ -592,9 +603,95 @@ pub mod landlock_rules {
 
     use super::LandlockSpec;
     use landlock::{
-        ABI, Access, AccessFs, AccessNet, Ruleset, RulesetAttr, RulesetCreated, RulesetCreatedAttr,
-        RulesetStatus, Scope, path_beneath_rules,
+        ABI, Access, AccessFs, AccessNet, BitFlags, PathBeneath, Ruleset, RulesetAttr,
+        RulesetCreated, RulesetCreatedAttr, RulesetError, RulesetStatus, Scope,
     };
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::{Component, Path, PathBuf};
+
+    /// `openat` with `O_PATH`: a handle on the place, no more.
+    fn open_at(dir: i32, name: &CString, flags: i32) -> std::io::Result<OwnedFd> {
+        // SAFETY: a plain openat on a descriptor and a terminated name; the
+        // new descriptor is ours alone.
+        let fd = unsafe {
+            libc::openat(
+                dir,
+                name.as_ptr(),
+                libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW | flags,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is a descriptor just returned by openat.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// The place at `path` (absolute, as the node resolved it), opened part
+    /// by part without following a link: a rule opened by its name would
+    /// follow one that has replaced a part since the node judged the path,
+    /// and grant the folder's flags where the link leads. A part that is a
+    /// link now fails the open (`ELOOP`, `ENOTDIR`).
+    fn open_unlinked(path: &Path) -> std::io::Result<OwnedFd> {
+        let bad = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
+        let mut parts = path.components();
+        if parts.next() != Some(Component::RootDir) {
+            return Err(bad());
+        }
+        let root = CString::new("/").map_err(|_| bad())?;
+        let mut at = open_at(libc::AT_FDCWD, &root, libc::O_DIRECTORY)?;
+        let mut parts = parts.peekable();
+        while let Some(part) = parts.next() {
+            let Component::Normal(name) = part else {
+                return Err(bad());
+            };
+            let name = CString::new(name.as_bytes()).map_err(|_| bad())?;
+            let last = parts.peek().is_none();
+            // O_PATH with O_NOFOLLOW yields the link itself, so a part
+            // before the last must be a folder (O_DIRECTORY) and the last is
+            // looked at.
+            at = open_at(
+                at.as_raw_fd(),
+                &name,
+                if last { 0 } else { libc::O_DIRECTORY },
+            )?;
+            if last {
+                // SAFETY: fstat on our descriptor into a zeroed buffer.
+                let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                if unsafe { libc::fstat(at.as_raw_fd(), &mut st) } != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
+                    return Err(std::io::Error::from_raw_os_error(libc::ELOOP));
+                }
+            }
+        }
+        Ok(at)
+    }
+
+    /// The rules of `paths` with `access`, as `landlock::path_beneath_rules`
+    /// makes them but each path opened by [`open_unlinked`]. A path that is
+    /// not there is left out (a command has no access to what is not there);
+    /// so is one that is a link now, and the command is told.
+    fn rules<'a>(
+        paths: &'a [PathBuf],
+        access: BitFlags<AccessFs>,
+    ) -> impl Iterator<Item = Result<PathBeneath<OwnedFd>, RulesetError>> + 'a {
+        paths.iter().filter_map(move |p| match open_unlinked(p) {
+            Ok(fd) => Some(Ok(PathBeneath::new(fd, access))),
+            Err(e) => {
+                if matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) {
+                    eprintln!(
+                        "nerve-node: {} is, or lies behind, a link now and is left out of the command's sandbox",
+                        p.display()
+                    );
+                }
+                None
+            }
+        })
+    }
 
     /// Best effort up to this ABI: older kernels enforce what they know.
     const ABI_WANTED: ABI = ABI::V6;
@@ -635,19 +732,16 @@ pub mod landlock_rules {
         let rs = rs
             .create()
             .map_err(e)?
-            .add_rules(path_beneath_rules(&spec.read, read))
+            .add_rules(rules(&spec.read, read))
             .map_err(e)?
-            .add_rules(path_beneath_rules(&spec.write, write))
+            .add_rules(rules(&spec.write, write))
             .map_err(e)?
-            .add_rules(path_beneath_rules(
-                &spec.exec,
-                AccessFs::Execute | AccessFs::ReadFile,
-            ))
+            .add_rules(rules(&spec.exec, AccessFs::Execute | AccessFs::ReadFile))
             .map_err(e)?;
         if !spec.no_network {
             return Ok(rs);
         }
-        rs.add_rules(path_beneath_rules(&spec.unix, AccessFs::ResolveUnix))
+        rs.add_rules(rules(&spec.unix, AccessFs::ResolveUnix.into()))
             .map_err(e)
     }
 
@@ -3973,6 +4067,58 @@ mod tests {
         assert!(rw.path().join("ok").exists());
         assert!(!run(&other.path().join("no")));
         assert!(!other.path().join("no").exists());
+    }
+
+    /// The system's own paths are given at their real place (`/bin`, `/dev/log`
+    /// are links on many systems), since the shim leaves out a rule whose path
+    /// is a link ([`landlock_rules`]).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_systems_paths_are_not_links() {
+        for p in [system_dirs(), system_writable(), kept_sockets()].concat() {
+            assert_eq!(std::fs::canonicalize(&p).unwrap(), p);
+        }
+        let dirs = system_dirs();
+        assert!(
+            dirs.iter()
+                .all(|p| dirs.iter().filter(|q| *q == p).count() == 1)
+        );
+    }
+
+    /// A rule's path is opened without following a link: a folder the node
+    /// judged as a plain one, and that is a link now, or lies behind one,
+    /// gives its flags nowhere. Skipped where the kernel has no Landlock.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn landlock_rules_do_not_follow_a_link() {
+        if landlock_rules::abi_version().is_none() {
+            eprintln!("no Landlock here; skipped");
+            return;
+        }
+        let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let d = tempfile::tempdir_in(&tmp).unwrap();
+        let base = std::fs::canonicalize(d.path()).unwrap();
+        let (plain, other) = (base.join("plain"), base.join("other"));
+        std::fs::create_dir_all(plain.join("inner")).unwrap();
+        std::fs::create_dir_all(other.join("inner")).unwrap();
+        // The folder itself, and a folder behind another, each a link.
+        std::os::unix::fs::symlink(&other, base.join("is_link")).unwrap();
+        std::os::unix::fs::symlink(&other, base.join("behind")).unwrap();
+        let spec = |w: &Path| LandlockSpec {
+            read: system_dirs(),
+            write: [system_writable(), vec![w.to_path_buf()]].concat(),
+            exec: system_dirs(),
+            no_network: false,
+            unix: Vec::new(),
+        };
+        let put = |w: &Path, target: &Path| {
+            confined_sh(&spec(w), &format!("echo x > {}", target.display()))
+        };
+        // The same rules at a plain place do give the write.
+        assert!(put(&plain.join("inner"), &plain.join("inner/ok")));
+        assert!(!put(&base.join("is_link"), &other.join("no")));
+        assert!(!put(&base.join("behind/inner"), &other.join("inner/no")));
+        assert!(!other.join("no").exists() && !other.join("inner/no").exists());
     }
 
     /// The flags are independent in the kernel too: a folder in `write` alone
