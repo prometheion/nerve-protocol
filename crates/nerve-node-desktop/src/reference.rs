@@ -81,32 +81,32 @@ const COMMANDS: &[(&str, &str, Place)] = &[
     ),
     (
         "center rm",
-        "nerve-node center rm --center lab",
+        "nerve-node center rm lab",
         (Some(Page::Centers), -1, "Centers › Unpair"),
     ),
     (
-        "center ls",
-        "nerve-node center ls",
+        "center",
+        "nerve-node center",
         (Some(Page::Centers), -1, "Centers"),
     ),
     (
         "center pause",
-        "nerve-node center pause --center lab",
+        "nerve-node center pause lab",
         (Some(Page::Centers), -1, "Centers › Pause"),
     ),
     (
         "center resume",
-        "nerve-node center resume --center lab",
+        "nerve-node center resume lab",
         (Some(Page::Centers), -1, "Centers › Resume"),
     ),
     (
         "center rotate-key",
-        "nerve-node center rotate-key --center lab",
+        "nerve-node center rotate-key lab",
         (Some(Page::Centers), -1, "Centers › New key"),
     ),
     (
-        "center grant",
-        "nerve-node center grant settings write --center lab",
+        "center settings",
+        "nerve-node center settings on lab",
         (Some(Page::Centers), -1, "Centers › Settings grant"),
     ),
     (
@@ -115,18 +115,18 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         (Some(Page::Settings), 2, "Settings › Network"),
     ),
     (
-        "proxy rm",
-        "nerve-node proxy rm",
+        "proxy off",
+        "nerve-node proxy off",
         (Some(Page::Settings), 2, "Settings › Network"),
     ),
     (
-        "proxy ls",
-        "nerve-node proxy ls",
+        "proxy",
+        "nerve-node proxy",
         (Some(Page::Settings), 2, "Settings › Network"),
     ),
     (
-        "relay set",
-        "nerve-node relay set 0.0.0.0:7490",
+        "relay on",
+        "nerve-node relay on 0.0.0.0:7490",
         (Some(Page::Relay), -1, "Relay › Turn on"),
     ),
     (
@@ -140,13 +140,8 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         (Some(Page::Relay), -1, "Relay › Add a node"),
     ),
     (
-        "relay set-centers",
-        "nerve-node relay set-centers lab-pc --center home",
-        (Some(Page::Relay), -1, "Relay › Centers and limits"),
-    ),
-    (
-        "relay set-limits",
-        "nerve-node relay set-limits lab-pc --max-links 12",
+        "relay set",
+        "nerve-node relay set lab-pc --to home --max-links 12",
         (Some(Page::Relay), -1, "Relay › Centers and limits"),
     ),
     (
@@ -160,27 +155,26 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         (Some(Page::Relay), -1, "Relay › Remove"),
     ),
     (
-        "relay ls",
-        "nerve-node relay ls",
+        "relay",
+        "nerve-node relay",
         (Some(Page::Relay), -1, "Relay"),
     ),
     // The web UI is the node's other way in from a browser; the app does
     // not switch it.
     ("ui", "nerve-node ui", NOT_HERE),
-    ("ui status", "nerve-node ui status", NOT_HERE),
     ("ui on", "nerve-node ui on", NOT_HERE),
     ("ui off", "nerve-node ui off", NOT_HERE),
     ("ui token add", "nerve-node ui token add laptop", NOT_HERE),
-    ("ui token ls", "nerve-node ui token ls", NOT_HERE),
+    ("ui token", "nerve-node ui token", NOT_HERE),
     ("ui token rm", "nerve-node ui token rm laptop", NOT_HERE),
     (
-        "mode set",
-        "nerve-node mode set folder --center lab",
+        "mode",
+        "nerve-node mode folder --center lab",
         (Some(Page::Policy), -1, "Permissions › Mode"),
     ),
     (
         "folder add",
-        "nerve-node folder add ~/projects +r +w --center lab",
+        "nerve-node folder add ~/projects rw --center lab",
         (
             Some(Page::Policy),
             -1,
@@ -188,26 +182,21 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         ),
     ),
     (
-        "folder set",
-        "nerve-node folder set ~/projects -w --center lab",
-        (Some(Page::Policy), -1, "Permissions › Folders"),
-    ),
-    (
         "folder rm",
         "nerve-node folder rm ~/projects --center lab",
         (Some(Page::Policy), -1, "Permissions › Folders"),
     ),
     (
-        "folder ls",
-        "nerve-node folder ls --center lab",
+        "folder",
+        "nerve-node folder --center lab",
         (Some(Page::Policy), -1, "Permissions › Folders"),
     ),
     // The pass over every grant is for the installed Linux node's accounts;
     // the app has no such account.
     ("folder sync", "nerve-node folder sync", NOT_HERE),
     (
-        "folder network",
-        "nerve-node folder network off --center lab",
+        "network",
+        "nerve-node network off --center lab",
         (
             Some(Page::Policy),
             -1,
@@ -225,7 +214,7 @@ const COMMANDS: &[(&str, &str, Place)] = &[
     ),
     (
         "rule rm",
-        "nerve-node rule rm allow 'git status' --center lab",
+        "nerve-node rule rm 'git status' --center lab",
         (
             Some(Page::Policy),
             -1,
@@ -242,8 +231,8 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         ),
     ),
     (
-        "rule ls",
-        "nerve-node rule ls --center lab",
+        "rule",
+        "nerve-node rule --center lab",
         (
             Some(Page::Policy),
             -1,
@@ -269,8 +258,8 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         ),
     ),
     (
-        "cap ls",
-        "nerve-node cap ls --center lab",
+        "cap",
+        "nerve-node cap --center lab",
         (Some(Page::Capabilities), -1, "Capabilities"),
     ),
     (
@@ -301,8 +290,8 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         ),
     ),
     (
-        "cap provider allow",
-        "nerve-node cap provider allow desk /usr/lib/nerve-desktop/nerve-desktop",
+        "provider add",
+        "nerve-node provider add desk /usr/lib/nerve-desktop/nerve-desktop",
         (
             Some(Page::Capabilities),
             -1,
@@ -310,8 +299,8 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         ),
     ),
     (
-        "cap provider rm",
-        "nerve-node cap provider rm desk",
+        "provider rm",
+        "nerve-node provider rm desk",
         (
             Some(Page::Capabilities),
             -1,
@@ -319,8 +308,8 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         ),
     ),
     (
-        "cap provider ls",
-        "nerve-node cap provider ls",
+        "provider",
+        "nerve-node provider",
         (Some(Page::Capabilities), -1, "Capabilities › Programs"),
     ),
     (
@@ -334,8 +323,8 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         (Some(Page::Policy), -1, "Permissions › Sudo › Turn off"),
     ),
     (
-        "sudo status",
-        "nerve-node sudo status",
+        "sudo",
+        "nerve-node sudo",
         (Some(Page::Policy), -1, "Permissions › Sudo"),
     ),
     (
@@ -359,8 +348,8 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         (Some(Page::Settings), 6, "Settings › Advanced › Add"),
     ),
     (
-        "config remove",
-        "nerve-node config remove center.lab.policy.allow 'fs.read:~/notes/*'",
+        "config rm",
+        "nerve-node config rm center.lab.policy.allow 'fs.read:~/notes/*'",
         (Some(Page::Settings), 6, "Settings › Advanced › Remove"),
     ),
     (
@@ -380,7 +369,7 @@ const COMMANDS: &[(&str, &str, Place)] = &[
     ),
     (
         "audit",
-        "nerve-node audit --denied --last 20",
+        "nerve-node audit --refused --last 20",
         (Some(Page::Audit), -1, "Audit"),
     ),
     (
@@ -424,7 +413,7 @@ pub fn command_of(words: &str) -> Option<(&'static str, Place)> {
 /// names where they have one.
 fn topic(section: &str) -> String {
     match section {
-        "Install and set up" => "Install".into(),
+        "Set up" => "Install".into(),
         "What a center may do" => "Permissions".into(),
         other => other.into(),
     }
@@ -663,19 +652,19 @@ mod tests {
                 }
             }
         }
-        assert!(!args("relay ls").contains(&"<NAME>".to_string()));
-        assert!(!args("folder ls").contains(&"<PATH>".to_string()));
-        assert_eq!(args("rule ls").iter().filter(|a| *a == "<LIST>").count(), 1);
+        assert!(!args("relay").contains(&"<NAME>".to_string()));
+        assert!(!args("folder").contains(&"<PATH>".to_string()));
+        assert_eq!(args("rule").iter().filter(|a| *a == "<LIST>").count(), 1);
         assert!(args("folder add").contains(&"<PATH>".to_string()));
         // What many commands take is said on the row of each, too.
-        assert!(args("mode set").contains(&"--center <CENTER>".to_string()));
+        assert!(args("mode").contains(&"--center <CENTER>".to_string()));
         // The search finds what a command takes, and only that.
         let found = groups(&all, "the folder.", false, &Opened::default());
         assert!(
             found
                 .iter()
                 .flat_map(|g| g.rows.iter().collect::<Vec<_>>())
-                .all(|r| r.name != "folder ls")
+                .all(|r| r.name != "folder")
         );
     }
 
@@ -763,7 +752,7 @@ mod tests {
     fn the_capability_commands_are_on_their_page() {
         let caps: Vec<_> = COMMANDS
             .iter()
-            .filter(|(c, _, _)| c.starts_with("cap "))
+            .filter(|(c, _, _)| *c == "cap" || c.starts_with("cap ") || c.starts_with("provider"))
             .collect();
         assert_eq!(caps.len(), 8);
         for (name, _, (page, tab, place)) in caps {
@@ -798,9 +787,10 @@ mod tests {
             names,
             [
                 "Install",
-                "Pair and connect",
+                "Centers",
                 "Permissions",
-                "Run and watch"
+                "Watch and stop",
+                "More"
             ]
         );
         let pair = &topics[1];

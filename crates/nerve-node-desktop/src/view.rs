@@ -32,7 +32,7 @@ pub const ROOT_OWNER: &str = "Root is the owner of this node: commands of user m
 /// What the app says once the settings grant of the center `name` is given
 /// (`on`) or taken. Where root is the node's owner (`root`), the center may
 /// set its own mode to user, whose commands run as root, and the app says
-/// so, as `center grant settings write` does.
+/// so, as `center settings on` does.
 pub fn settings_grant_said(name: &str, on: bool, root: bool) -> String {
     match (on, root) {
         (true, true) => format!(
@@ -161,10 +161,10 @@ fn limits_line(why: &str) -> (String, bool) {
 }
 
 /// The command of a pairing, and what goes on its input: the link holds the
-/// pairing code, so it is read from the input (`--link-stdin`) and is not in
+/// pairing code, so it is read from the input (`-`) and is not in
 /// the list of processes. Without `yes` the command only previews.
 pub fn pair_command(link: &str, name: &str, yes: bool) -> (Vec<String>, String) {
-    let mut args = vec!["center".to_string(), "add".into(), "--link-stdin".into()];
+    let mut args = vec!["center".to_string(), "add".into(), "-".into()];
     if !name.trim().is_empty() {
         args.push(format!("--name={}", name.trim()));
     }
@@ -322,7 +322,7 @@ pub fn mode_until(c: &Value, now_ms: u64) -> String {
     }
 }
 
-/// The folders of `folder ls --json`.
+/// The folders of `folder --json`.
 pub fn folders(v: &Value) -> Vec<FolderRow> {
     v["folders"]
         .as_array()
@@ -338,7 +338,7 @@ pub fn folders(v: &Value) -> Vec<FolderRow> {
 }
 
 /// The errors of the node's folder grants (`status`'s
-/// `folder_grants.errors`, each about the path it begins with) that concern
+/// `folder_access.errors`, each about the path it begins with) that concern
 /// `folders`, a center's (`~` the owner's `home`): a path inside one of
 /// them, or above it on the way. One that names no path is the node's and
 /// concerns every center.
@@ -365,7 +365,7 @@ pub fn grant_errors_for(errors: &[String], folders: &[String], home: &Path) -> V
         .collect()
 }
 
-/// The node's folder-grant errors (`status`'s `folder_grants`) split by
+/// The node's folder-grant errors (`status`'s `folder_access`) split by
 /// whether they are about access `nerve-run` keeps although it should have
 /// lost it (`stale`: folders whose entries could not be taken off, or the
 /// node's record of them). Those, with the path itself where no error names
@@ -397,19 +397,22 @@ pub fn stale_grants(stale: &[String], errors: &[String]) -> (Vec<String>, Vec<St
     (kept, rest)
 }
 
-/// The rights `folder set` takes for a folder: `=rwx`, the letters that
-/// are on.
+/// The rights `folder add` takes for a folder: the letters that are on,
+/// `none` for no letter.
 pub fn rights(read: bool, write: bool, execute: bool) -> String {
-    let mut r = String::from("=");
+    let mut r = String::new();
     for (on, c) in [(read, 'r'), (write, 'w'), (execute, 'x')] {
         if on {
             r.push(c);
         }
     }
+    if r.is_empty() {
+        r.push_str("none");
+    }
     r
 }
 
-/// One list of `rule ls --json`, each rule as `rule ls` prints it: a tab or
+/// One list of `rule --json`, each rule as `rule` prints it: a tab or
 /// line break of a rule written `\t`, `\n`, so a row stays one line.
 pub fn rule_list_of(v: &Value, list: &str) -> Vec<SharedString> {
     v[list]
@@ -421,7 +424,7 @@ pub fn rule_list_of(v: &Value, list: &str) -> Vec<SharedString> {
         .collect()
 }
 
-/// For each rule of `list` in `rule ls --json`, in [`rule_list_of`]'s
+/// For each rule of `list` in `rule --json`, in [`rule_list_of`]'s
 /// order, why its conditions no longer fit the arguments its action takes
 /// now (`stale`), or "" where they fit.
 pub fn rule_unfit_of(v: &Value, list: &str) -> Vec<SharedString> {
@@ -435,7 +438,7 @@ pub fn rule_unfit_of(v: &Value, list: &str) -> Vec<SharedString> {
 }
 
 /// What a rule field says under it while the owner types (#152, C1): for
-/// a rule `cap.action:…` of an action the node offers (`listing`, `cap ls
+/// a rule `cap.action:…` of an action the node offers (`listing`, `cap
 /// --json`, as `center` sees it), the arguments it takes, or what is wrong
 /// with the conditions typed so far, and whether that is an error. Nothing
 /// for any other text: a command, a path rule, a rule without conditions.
@@ -495,7 +498,7 @@ pub fn rule_hint(text: &str, listing: &Value, center: &str) -> (String, bool) {
     }
 }
 
-/// Whether the deny list of `rule ls --json` lacks a rule of the guard a
+/// Whether the deny list of `rule --json` lacks a rule of the guard a
 /// new pairing gets (`nerve-node rule guard`).
 pub fn guard_missing(v: &Value) -> bool {
     let deny: Vec<String> = v["deny"]
@@ -508,7 +511,7 @@ pub fn guard_missing(v: &Value) -> bool {
     !nerve_policy::rules::guard_missing(&deny).is_empty()
 }
 
-/// Whether the deny list of `rule ls --json` still holds a text of the
+/// Whether the deny list of `rule --json` still holds a text of the
 /// guard from before it read commands (`nerve-node rule guard` replaces it).
 pub fn guard_older(v: &Value) -> bool {
     let deny: Vec<String> = v["deny"]
@@ -729,14 +732,14 @@ pub fn pattern_rule(text: &str) -> bool {
     })
 }
 
-/// The rows of the Capabilities page, from `cap ls --json`: each
+/// The rows of the Capabilities page, from `cap --json`: each
 /// capability once, where its first unit comes, and its units under it, in
 /// the node's order. `center` is the one whose switches show ("" for none):
 /// each switch as `caps` holds it (-1 where none is set and the mode
 /// decides), and whether the running node lets that center use the unit
 /// now. A unit the node leaves out says why, and has no switch; neither has
 /// `settings`, which the center's settings grant governs. A unit a center
-/// added shows its command (from `added`), as `cap ls` does: its summary is
+/// added shows its command (from `added`), as `cap` does: its summary is
 /// the center's own words.
 pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
     let word = |w: &Value| match w.as_str() {
@@ -819,7 +822,7 @@ pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
                 ""
             };
             // A unit with no switch of its own takes its capability's, as
-            // the node does; `cap ls` says it in the unit's `centers`.
+            // the node does; `cap` says it in the unit's `centers`.
             let own = setting(name);
             let shown = if own < 0 && !center.is_empty() {
                 word(&r["centers"][center])
@@ -845,7 +848,7 @@ pub fn cap_rows(v: &Value, center: &str) -> Vec<CapRow> {
     rows
 }
 
-/// The programs allowed as providers, from `cap ls --json`: whether each is
+/// The programs allowed as providers, from `cap --json`: whether each is
 /// attached, as the running node said ("" while it does not run).
 pub fn programs(v: &Value) -> Vec<ProgramRow> {
     v["programs"]
@@ -924,7 +927,7 @@ pub fn cap_form_args(form: &CapForm, adding: bool) -> (Vec<String>, Option<Strin
     nerve_policy::config::form::cli_args(form, adding)
 }
 
-/// The capabilities of node.toml the owner declared, from `cap ls
+/// The capabilities of node.toml the owner declared, from `cap
 /// --json`'s `config`.
 pub fn declared(v: &Value) -> Vec<DeclaredRow> {
     v["config"]
@@ -994,7 +997,7 @@ pub fn log_rows(newest: &[Value], problems_only: bool, now_ms: u64) -> Vec<LogRo
         .collect()
 }
 
-/// Whether the proxy of `proxy ls --json` is a relay: https, with a pin
+/// Whether the proxy of `proxy --json` is a relay: https, with a pin
 /// and a login (its node's name); its address and that name.
 pub fn relay_of(proxy: &Value) -> (bool, String, String) {
     let url = s(&proxy["proxy"]);
@@ -1018,7 +1021,7 @@ pub fn sentence_of(e: &str) -> String {
     t
 }
 
-/// The tunnels of `relay ls --json` the relay carries now, each since when.
+/// The tunnels of `relay --json` the relay carries now, each since when.
 pub fn tunnels(v: &Value, now_ms: u64) -> Vec<TunnelRow> {
     v["tunnels"]
         .as_array()
@@ -1042,7 +1045,7 @@ pub fn tunnels(v: &Value, now_ms: u64) -> Vec<TunnelRow> {
         .collect()
 }
 
-/// The nodes of `relay ls --json` that may use the relay.
+/// The nodes of `relay --json` that may use the relay.
 pub fn relay_nodes(v: &Value) -> Vec<RelayNodeRow> {
     v["nodes"]
         .as_array()
@@ -1108,7 +1111,8 @@ pub fn setting(v: &Value) -> String {
 }
 
 /// A proxy URL and the password the owner typed, as `proxy set` takes them
-/// with `--password-stdin`: a password in the URL (`user:password@`) moves
+/// (the password on stdin for a URL with a user name and no password): a
+/// password in the URL (`user:password@`) moves
 /// out of it, unless one was typed. `None`: no password.
 pub fn proxy_login(url: &str, typed: &str) -> (String, Option<String>) {
     let mut url = url.to_string();
@@ -1615,7 +1619,7 @@ pub fn rule_list(e: &Value, list: &str) -> &'static str {
 
 /// The arguments of an audit entry's call a rule may pin (its `args`, kept
 /// by the node): each as the rule writes it (`room=office`) and as `rule
-/// add --pin` takes it (the value as it is).
+/// add --arg` takes it (the value as it is).
 pub fn audit_pins(e: &Value) -> Vec<(String, String)> {
     e["args"]
         .as_object()
@@ -1640,26 +1644,29 @@ pub fn pin_args(e: &Value, list: &str, pin: usize) -> Option<Vec<String>> {
         if list == "deny" { "deny" } else { "allow" }.into(),
         s(&e["target"]).into(),
         format!("--action={}.{}", s(&e["cap"]), s(&e["action"])),
-        format!("--pin={given}"),
+        format!("--arg={given}"),
         format!("--center={}", s(&e["center"])),
     ])
 }
 
 /// The command a button runs: `rule add` with the entry's action, target
-/// and center ([`rule_list`] picks the list).
+/// and center, on the allow or deny list (a sudo command goes on the sudo
+/// list by itself, [`rule_list`]); the wildcard widens the target as
+/// `rule add` reads a trailing `*`.
 pub fn rule_args(e: &Value, list: &str, wildcard: bool) -> Vec<String> {
-    let mut args = vec![
+    let (cap, action, target) = (s(&e["cap"]), s(&e["action"]), s(&e["target"]));
+    let target = match wildcard {
+        true => nerve_node::cli::wildcard_target(cap, action, target),
+        false => target.to_string(),
+    };
+    vec![
         "rule".to_string(),
         "add".into(),
-        rule_list(e, list).into(),
-        s(&e["target"]).into(),
-        format!("--action={}.{}", s(&e["cap"]), s(&e["action"])),
+        if list == "deny" { "deny" } else { "allow" }.into(),
+        target,
+        format!("--action={cap}.{action}"),
         format!("--center={}", s(&e["center"])),
-    ];
-    if wildcard {
-        args.push("--wildcard".into());
-    }
-    args
+    ]
 }
 
 #[cfg(test)]
@@ -1668,14 +1675,11 @@ mod tests {
     fn a_pairing_link_goes_on_the_input_and_not_in_the_arguments() {
         let link = "nerve://pair?center=https%3A%2F%2Fc.example&code=SECRETCODE&pin=x";
         let (args, input) = super::pair_command(&format!("  {link}\n"), " lab ", true);
-        assert_eq!(
-            args,
-            ["center", "add", "--link-stdin", "--name=lab", "--yes"]
-        );
+        assert_eq!(args, ["center", "add", "-", "--name=lab", "--yes"]);
         assert_eq!(input, link);
         assert!(!args.iter().any(|a| a.contains("SECRETCODE")), "{args:?}");
         let (args, _) = super::pair_command(link, "", false);
-        assert_eq!(args, ["center", "add", "--link-stdin"]);
+        assert_eq!(args, ["center", "add", "-"]);
     }
 
     /// A pairing from before the guard read commands is told its guard is of
@@ -1694,7 +1698,7 @@ mod tests {
         assert!(!guard_older(&v));
     }
 
-    /// A rule with a line break is one row, written as `rule ls` prints it.
+    /// A rule with a line break is one row, written as `rule` prints it.
     #[test]
     fn a_rule_with_a_line_break_is_one_row() {
         let v = json!({"deny": ["exec.run:a\n*", "exec.run:b\tc\r\n", "exec.run:C:\\new"]});
@@ -2210,15 +2214,17 @@ mod tests {
                 "rule",
                 "add",
                 "allow",
-                "git status",
+                "git *",
                 "--action=exec.run",
                 "--center=home",
-                "--wildcard"
             ]
         );
-        // A sudo command goes on the sudo list; a deny on the deny list.
+        // A sudo command goes on the sudo list by itself; a deny on the
+        // deny list.
         let e = call("sudo apt update", "forbidden", "home");
-        assert_eq!(rule_args(&e, "allow", false)[2], "sudo");
+        assert_eq!(rule_list(&e, "allow"), "sudo");
+        assert_eq!(rule_args(&e, "allow", false)[2], "allow");
+        assert_eq!(rule_args(&e, "allow", true)[3], "sudo apt *");
         assert_eq!(rule_args(&e, "deny", false)[2], "deny");
         let e = json!({"center": "home", "cap": "fs", "action": "write", "target": "/srv/a"});
         assert_eq!(
@@ -2228,9 +2234,9 @@ mod tests {
     }
 
     /// An audit entry's arguments a rule may pin, as the pin buttons name
-    /// them and as `rule add --pin` takes them; a rule field's hint from
-    /// `cap ls` (a center's own action only for that center); and the rules
-    /// `rule ls` says no longer fit, row by row (#152, C1).
+    /// them and as `rule add --arg` takes them; a rule field's hint from
+    /// `cap` (a center's own action only for that center); and the rules
+    /// `rule` says no longer fit, row by row (#152, C1).
     #[test]
     fn pins_hints_and_rules_that_no_longer_fit() {
         let e = json!({"center": "home", "cap": "lamp", "action": "set", "target": "lamp.set",
@@ -2251,7 +2257,7 @@ mod tests {
                 "deny",
                 "lamp.set",
                 "--action=lamp.set",
-                "--pin=room=a,b",
+                "--arg=room=a,b",
                 "--center=home"
             ]
         );
@@ -2318,7 +2324,7 @@ mod tests {
         assert!(rule_unfit_of(&ls, "deny").is_empty());
     }
 
-    /// A capability a center added (`cap ls` source `center <name>`) is
+    /// A capability a center added (`cap` source `center <name>`) is
     /// listed for that center, with its switch, and for no other one.
     #[test]
     fn what_a_center_added_is_listed_for_that_center_alone() {
@@ -2467,7 +2473,7 @@ mod tests {
         assert_eq!(caps_notes(false, true), (String::new(), String::new()));
     }
 
-    /// The dialog's command line splits as `cap ls` writes one, so an edit
+    /// The dialog's command line splits as `cap` writes one, so an edit
     /// gives back the command it showed.
     #[test]
     fn a_command_line_splits_into_its_words() {
@@ -2619,7 +2625,7 @@ mod tests {
                 "sensors.read",
                 "--effect=sense",
                 "--summary=",
-                "--params-stdin",
+                "--params=-",
                 "--result=text",
                 "--timeout=default",
                 "--platform=any",
@@ -2661,8 +2667,8 @@ mod tests {
             (f[0].path.as_str(), f[0].read, f[0].write, f[0].execute),
             ("/srv/a", true, false, true)
         );
-        assert_eq!(rights(true, false, true), "=rx");
-        assert_eq!(rights(false, false, false), "=");
+        assert_eq!(rights(true, false, true), "rx");
+        assert_eq!(rights(false, false, false), "none");
         let c = json!({"mode": "user", "until": NOW + 90 * 60_000});
         assert_eq!(mode_until(&c, NOW), "Back to allowlist mode in 1 h.");
         assert_eq!(mode_until(&json!({"mode": "user"}), NOW), "");

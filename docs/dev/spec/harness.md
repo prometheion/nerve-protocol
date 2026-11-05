@@ -681,7 +681,7 @@ naming what refused it; such a call never reaches the node. The checker can
 only refuse, and a call it lets through goes to its node, whose policy
 decides: what no mode and no rule allows is refused at once with
 `error forbidden: <reasons>`, and nothing is run. The owner allows more on the
-node (`nerve-node rule add allow`, `mode set`, `folder add`) or, with the
+node (`nerve-node rule add allow`, `mode `, `folder add`) or, with the
 settings grant, from the audit tab; a checker refusal is changed on the
 center's action checker tab.
 

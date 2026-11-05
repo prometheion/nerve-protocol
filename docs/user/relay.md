@@ -30,11 +30,11 @@ no call runs on the relay for a node it carries.
 Turn the relay on and give the other node a link:
 
 ```sh
-nerve-node relay set 0.0.0.0:7490
+nerve-node relay on 0.0.0.0:7490
 nerve-node relay add lab-pc --address relay.example
 ```
 
-`relay set` makes the relay's certificate the first time and shows its pin.
+`relay on` makes the relay's certificate the first time and shows its pin.
 The relay's port, 7490, is not the [web UI](node-web-ui.md)'s, 7470, and the
 two have certificates of their own.
 `relay add` makes the node's token and shows it once, in a link that holds
@@ -67,8 +67,8 @@ token goes on working ([On Windows](#on-windows)).
 
 The certificate's key is kept with the node's own keys, where
 `machine.secret_storage` says: a file in the config folder by default, or
-the system keyring ([config](config.md)). `relay set` keeps the same
-certificate when you change the address. If its key is lost, `relay set`
+the system keyring ([config](config.md)). `relay on` keeps the same
+certificate when you change the address. If its key is lost, `relay on`
 makes a new one and says so; the relayed nodes then need the new pin.
 
 The relay is off until you turn it on. A center cannot turn it on, change
@@ -76,18 +76,18 @@ it or see it, settings grant or not.
 
 ## Limit a node to some centers
 
-Without `--center`, a relayed node may reach every https center of the relay
+Without `--to`, a relayed node may reach every https center of the relay
 (see [below](#where-a-tunnel-may-go)). To let it reach only some:
 
 ```sh
-nerve-node relay add lab-pc --center home
-nerve-node relay set-centers lab-pc --center home --center work
-nerve-node relay set-centers lab-pc              # every center again
+nerve-node relay add lab-pc --to home
+nerve-node relay set lab-pc --to home --to work
+nerve-node relay set lab-pc --to '*'     # every center again
 ```
 
 A tunnel to a center off the list is refused with the same answer as one to
 a center the relay does not have, so the node learns nothing of the others.
-`set-centers` ends the node's tunnels to a center it takes away. `relay ls`
+`relay set --to` ends the node's tunnels to a center it takes away. `relay`
 shows each node's list.
 
 ## On the relayed node
@@ -138,7 +138,7 @@ dials through that one too. Each relay in such a chain follows the same
 rules. To the outer relay, the inner one is a single relay node: its own
 links and every tunnel of the nodes behind it count against that one node's
 limits there. Give the inner relay limits of its own on the outer relay
-with `relay set-limits`, or its fifth link at once is refused
+with `relay set`, or its fifth link at once is refused
 ([limits](#limits)). All of the inner relay's connections come from one
 address, so at most 4 of them can wait for the outer relay's answer at
 once: when many of its nodes redial at the same moment (after a center
@@ -149,7 +149,7 @@ back-off.
 ## Limits
 
 ```sh
-nerve-node relay set 0.0.0.0:7490 --max-links 16 --max-links-per-node 4
+nerve-node relay on 0.0.0.0:7490 --max-links 16 --max-links-per-node 4
 ```
 
 `--max-links` is the number of tunnels at once over all relayed nodes, 16
@@ -169,14 +169,14 @@ links and whose nodes' tunnels all count as its own. Give that one node
 limits of its own:
 
 ```sh
-nerve-node relay set-limits inner-relay --max-links 12 --max-opens-per-minute 300
-nerve-node relay set-limits inner-relay --max-links 20   # the opens stay at 300
-nerve-node relay set-limits inner-relay                  # the relay's limits again
+nerve-node relay set inner-relay --max-links 12 --max-opens-per-minute 300
+nerve-node relay set inner-relay --max-links 20   # the opens stay at 300
+nerve-node relay set inner-relay --max-links default --max-opens-per-minute default   # the relay's again
 ```
 
 `--max-links` there counts its own links to its centers plus one per center
 for each node behind it; raise the relay's `--max-links` too if the total
-needs it (`set-limits` says when the relay's total is lower). `relay ls`
+needs it (`relay set` says when the relay's total is lower). `relay`
 shows a node's own limits. A relayed node that hits the
 outer relay's limits sees `502` from its own relay.
 
@@ -193,7 +193,7 @@ reach the relay over IPv4 or from elsewhere.
 ## Who is connected
 
 ```sh
-nerve-node relay ls
+nerve-node relay
 ```
 
 ```
@@ -204,7 +204,7 @@ node lab-pc: the centers home
 tunnel lab-pc from 10.0.0.7:51544 to center home for 2 h 5 min
 ```
 
-`nerve-node status` shows the relay in one line and `relay ls` names the
+`nerve-node status` shows the relay in one line and `relay` names the
 tunnels; on Windows both ask the node over its
 [control pipe](platforms.md#the-control-pipe). Every tunnel is one entry
 in the [audit log](audit.md) when it ends: the node, its address, the
@@ -225,8 +225,8 @@ Each of these ends the tunnels it concerns at once:
 | Command | Ends |
 |---|---|
 | `nerve-node relay rm lab-pc` | The tunnels of `lab-pc`; its token no longer works |
-| `nerve-node relay set-centers lab-pc --center work` | The tunnels of `lab-pc` to its other centers |
-| `nerve-node center rm --center home` | The tunnels to `home` |
+| `nerve-node relay set lab-pc --to work` | The tunnels of `lab-pc` to its other centers |
+| `nerve-node center rm home` | The tunnels to `home` |
 | `nerve-node relay off` | Every tunnel; the relay stops listening and keeps its nodes |
 | `nerve-node panic` | Every tunnel, and the relay does not listen until `unlock` |
 
@@ -256,7 +256,7 @@ reach the relay's port.
   tunnel. Give a token only where that is acceptable, and take it away with
   `relay rm` if you think it leaked.
 - Centers behind one address (`https://h.example/a`, `https://h.example/b`)
-  are reached together: `relay add --center a` is refused there unless you
+  are reached together: `relay add --to a` is refused there unless you
   name `b` too. The relay tells an address in any spelling apart from
   others, but not a name from the address it resolves to: pair the relay's
   centers at one name or address each.

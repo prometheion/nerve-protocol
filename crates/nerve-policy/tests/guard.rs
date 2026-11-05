@@ -59,7 +59,7 @@ const NODE_ITSELF: &[Case] = &[
     ("nerve-node config set machine.user root", SH, PROGRAMS),
     ("nerve-node", SH, PROGRAMS),
     (
-        "sudo /usr/local/bin/nerve-node-desktop mode set user",
+        "sudo /usr/local/bin/nerve-node-desktop mode user",
         SH,
         PROGRAMS,
     ),
@@ -69,7 +69,7 @@ const NODE_ITSELF: &[Case] = &[
     ("true | nerve-node audit", SH, PROGRAMS),
     ("(nerve-node.exe panic)", SH, PROGRAMS),
     (
-        "./target/release/nerve-node-desktop mode set user",
+        "./target/release/nerve-node-desktop mode user",
         SH,
         PROGRAMS,
     ),
@@ -230,7 +230,7 @@ const NODE_ITSELF: &[Case] = &[
         PROGRAMS,
     ),
     (
-        "cmd.exe /c \"C:\\Program Files\\Nerve\\nerve-node.exe\" mode set user",
+        "cmd.exe /c \"C:\\Program Files\\Nerve\\nerve-node.exe\" mode user",
         WIN,
         PROGRAMS,
     ),

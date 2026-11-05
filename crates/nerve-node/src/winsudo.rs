@@ -235,7 +235,7 @@ pub async fn off(
     Ok(())
 }
 
-/// `nerve-node sudo status`: on when the signed config says so and the
+/// `nerve-node sudo`: on when the signed config says so and the
 /// password is kept.
 pub fn status(paths: &NodePaths) -> Result<bool, String> {
     let cfg = read(paths)?;
@@ -389,7 +389,7 @@ mod tests {
     }
 
     /// A node whose config key is in the system keyring (no `config.key`)
-    /// reads its config there for `sudo status`.
+    /// reads its config there for `sudo`.
     #[test]
     fn status_reads_a_config_whose_key_is_in_the_keyring() {
         let d = tempfile::tempdir().unwrap();

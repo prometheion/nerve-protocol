@@ -70,7 +70,7 @@ impl CapFormErrors {
 
 /// The words of a command as a form takes it on one line: words apart
 /// by blanks; a word with blanks, quotes or a line break in double quotes,
-/// with the escapes of JSON (as `cap ls` writes it, so an edit gives back
+/// with the escapes of JSON (as `cap` writes it, so an edit gives back
 /// what it showed), or in single quotes as it is.
 pub fn command_words(line: &str) -> Result<Vec<String>, String> {
     let mut words = Vec::new();
@@ -245,7 +245,7 @@ pub fn cli_args(form: &CapForm, adding: bool) -> (Vec<String>, Option<String>) {
     }
     let mut input = None;
     if !form.params.trim().is_empty() {
-        args.push("--params-stdin".into());
+        args.push("--params=-".into());
         input = Some(form.params.trim().to_string());
     } else if !adding {
         args.push("--params=none".into());
@@ -268,9 +268,9 @@ pub fn cli_args(form: &CapForm, adding: bool) -> (Vec<String>, Option<String>) {
     (args, input)
 }
 
-/// A form's fields for a capability as `cap ls --json` (its `config`) and
+/// A form's fields for a capability as `cap --json` (its `config`) and
 /// `settings.get` give it ([`ConfigCapability::entry`]): what was declared,
-/// the command as `cap ls` writes it.
+/// the command as `cap` writes it.
 pub fn of_entry(entry: &Value) -> CapForm {
     let words: Vec<String> = entry["command"]
         .as_array()

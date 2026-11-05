@@ -892,8 +892,8 @@ pub fn arg_schemas(caps: Vec<Capability>) -> impl Fn(&str, &str) -> Option<Value
 }
 
 /// The node's own capabilities that have actions, every action in: what
-/// `cap ls` lists as built in (crate::provider::listing). `settings` among
-/// them, which no switch but `center grant settings` governs.
+/// `cap` lists as built in (crate::provider::listing). `settings` among
+/// them, which no switch but `center settings` governs.
 pub fn built_in(cfg: &NodeConfig) -> Vec<Capability> {
     vec![
         fs_cap(Exposure::On),

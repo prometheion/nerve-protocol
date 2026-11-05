@@ -95,9 +95,9 @@ A node you run yourself, and Windows, read with your own rights, so there
 ## Set the mode
 
 ```sh
-nerve-node mode set allowlist
-nerve-node mode set folder
-nerve-node mode set user
+nerve-node mode allowlist
+nerve-node mode folder
+nerve-node mode user
 ```
 
 `folder` and `user` stay until you change them. To set a time limit, add
@@ -105,7 +105,7 @@ nerve-node mode set user
 `folder`.
 
 ```sh
-nerve-node mode set user --for 2
+nerve-node mode user --for 2
 ```
 
 `--for` needs at least 1 and does not go with `allowlist`. Setting a mode
@@ -115,7 +115,7 @@ again without `--for` removes an earlier limit.
 you instead, outside the folders' sandbox:
 
 ```sh
-nerve-node mode set allowlist --as-owner
+nerve-node mode allowlist --as-owner
 ```
 
 Setting the mode again without `--as-owner` goes back to `nerve-run`.
@@ -194,14 +194,14 @@ folders and credentials.
 
 | Command | Does |
 |---|---|
-| `nerve-node folder add ~/proj +r +w +x` | Add a folder. Name at least one right |
-| `nerve-node folder set ~/proj -w` | Change rights, like `chmod`: `+x` adds, `-w` removes, `'=rx'` sets exactly. Applied left to right |
+| `nerve-node folder add ~/proj rwx` | Add a folder, with its rights as one word (`r`, `rw`, `rx`, `rwx`) |
+| `nerve-node folder add ~/proj rx` | Change the rights of a folder it has |
+| `nerve-node folder add ~/proj/secret none` | Close a folder inside one it has |
 | `nerve-node folder rm ~/proj` | Remove the folder |
-| `nerve-node folder ls` | List folders and rights |
+| `nerve-node folder` | List folders and rights |
 
-Quote `'=rx'` so zsh leaves it alone. `folder add` on a path that is listed
-already replaces its rights. `folder set` leaves a folder with no rights in
-the list. `folder rm` removes it. Inside a granted folder, a folder with no
+`folder add` on a path that is listed already replaces its rights. `none`
+leaves a folder with no rights in the list. `folder rm` removes it. Inside a granted folder, a folder with no
 rights closes what lies below it to file calls and to commands that start
 there, but a command started in the folder around it still reaches it: the
 sandbox is built from the folders that grant something.
@@ -240,9 +240,9 @@ whoever made the link, also after you took `w` off the folder above or removed
 the pairing that had it. The folder is back once its path leads to the place
 you added again. To take the place the path leads to now, `folder rm` the
 folder and `folder add` it again. Name it with the path you gave to
-`folder add`, or the one `folder ls` shows (a trailing slash does not matter;
-on the installed node only the one `folder ls` shows works for a path that
-went through a link, see below). `folder rm` and `folder set` find the entry
+`folder add`, or the one `folder` shows (a trailing slash does not matter;
+on the installed node only the one `folder` shows works for a path that
+went through a link, see below). `folder rm` finds the entry
 also through links of your own, and where the link that replaced it cannot be
 resolved (it dangles or loops), and act on that entry, not on the folder the
 link leads to now.
@@ -267,7 +267,7 @@ so it cannot judge the links on a path there. With the node running,
 it follows the path, refuses a link inside a `w` folder as
 above, and stores and records the real place (the command says so when that
 is not the path you gave). A folder it stored at the place a link leads to is
-listed there: give `folder rm` and `folder set` the path `folder ls` shows,
+listed there: give `folder rm` the path `folder` shows,
 since the CLI cannot see the link. Given the link, they say `is not a
 folder of this center` and add that the account cannot look into the path and
 which path to use, naming the folders of the center that could be it. With no
@@ -371,14 +371,14 @@ hold the network or what a command reaches through it:
 
 ### No network for a center's commands
 
-`nerve-node folder network off --center lab` keeps that center's commands
+`nerve-node network off --center lab` keeps that center's commands
 off the network, in every mode: they can open no network socket, TCP, UDP,
 raw or of any other kind, to this machine or any other, only unix ones. It
 holds for `exec.run` and for the [capabilities of your
 `node.toml`](config-capabilities.md) that center calls, as both are
 commands of its pairing, and is stored as `no_network = true` in the
-center's policy in `node.toml`. `nerve-node folder network on` lets them on
-the network again; `folder ls` and `status` say when it is off. The app's
+center's policy in `node.toml`. `nerve-node network on` lets them on
+the network again; `folder` and `status` say when it is off. The app's
 and the node web UI's **Permissions** page have it as **No network for its
 commands**. The agent is told, in `list`, that its commands have no network.
 A center that may change its own settings ([settings grant](settings-grant.md))
@@ -402,7 +402,7 @@ under it. Where the node cannot set the filter (another architecture, a
 kernel without seccomp filters), or on Windows, it cannot hold a command to
 it, so while the switch is off it runs none of that center's commands and
 says why (`the owner turned the network off for this center's commands, and
-this machine cannot keep them off it: …`); `folder network off` warns of
+this machine cannot keep them off it: …`); `network off` warns of
 that there, and the agent is offered no command.
 
 The switch holds where the center's commands run as `nerve-run` (on the
@@ -418,7 +418,7 @@ reach the network for them (your session's service manager, a key agent),
 so while the switch is off the node runs none of them and says why (`… in
 this mode they run as the owner, which nothing keeps off the network, so the
 node runs none of them …`, or for a node run by hand `… runs them as its own
-user …`). `folder network off`, `folder ls` and the app say when the center
+user …`). `network off`, `folder` and the app say when the center
 is in such a mode now. Nor does any command on your [sudo list](sudo.md) run for that center
 while it is off: it would run outside the filter, with full rights
 (`… a command on the sudo list runs outside what keeps them off it …`).
@@ -512,7 +512,7 @@ Keep nothing there that the machine's other accounts must not read.
   a folder later gets the entry by the default; what you move into it (`mv`
   of a download or a clone) keeps the ACL it had, so `nerve-run` reaches it
   only as any other account would. The node gives it the folder's entries
-  when it walks every grant again: when it starts, on `folder set`, and on
+  when it walks every grant again: when it starts, on `folder add` of a folder it has, and on
   `nerve-node folder sync`. Each walk is a pass over everything in every
   granted folder, which takes a while for large trees. `status` and the
   commands of `nerve-run` do not wait for it while the folders' entries are
@@ -546,7 +546,7 @@ Keep nothing there that the machine's other accounts must not read.
   as it is, since another name may lie outside your folders: `uninstall`
   says how many, and they keep its old uid.
 - A grant that fails (a folder below it closed to you, a file system without
-  ACLs) is named by `folder add` and `folder set` and in `nerve-node status`,
+  ACLs) is named by `folder add` and in `nerve-node status`,
   also after a restart, and is tried again: at the node's start, with the
   next change of the folders, and at most once a minute before a command.
 - Of the service's environment its commands get only `PATH`, `LANG` and
@@ -573,7 +573,7 @@ Keep nothing there that the machine's other accounts must not read.
   home (the shared `.cache`, `.config`, `.gitconfig`, `.ssh` and the like of
   an earlier version) is no command's any more. The node leaves it; delete
   it, such as `sudo rm -rf /var/lib/nerve-run/.cache`. An entry there named
-  after one of your centers (`nerve-node center ls`) must go as well, or that
+  after one of your centers (`nerve-node center`) must go as well, or that
   pairing's commands do not run: the node made none of them.
 - git trusts the repositories it reaches (`safe.directory`), so it works in
   your repositories although they are not its own.
@@ -735,7 +735,7 @@ folders.
   refused, the pairing's commands do not run. A change that takes more than a few seconds says
   how far it is: the CLI prints it, a running node writes it to its log,
   and a command waits for it.
-- `folder rm` and `folder set` change the entry, and removing the pairing
+- `folder rm` and `folder add` change the entry, and removing the pairing
   takes it off. That is the node's entry on the folder: permissions a
   command gave what it made there stay (see "What the AppContainer does not
   stop" below). A running node takes these changes from the CLI at once,
@@ -750,14 +750,14 @@ folders.
   the entries is in its state folder.
 - Each pairing's container has a profile in the account that ran the node:
   a folder `%LOCALAPPDATA%\Packages\nerve.…` and a registry key.
-  `center ls` names each pairing's container (`AppContainer nerve.…`). The
+  `center` names each pairing's container (`AppContainer nerve.…`). The
   profile goes with the container's last folder entry, with `center rm`,
   and at `uninstall`, which say which profiles they removed. While the node
   runs they keep its profiles and say so, as it still serves the pairing
   until it starts again, and the other changes the CLI writes to the file
   itself keep them too; stop the node first. The running node itself removes
   a profile when the pairing's last granted folder is deleted or moved away.
-  So does a `folder rm` or `folder set` that leaves a pairing with no
+  So does a `folder rm` or `folder add ... none` that leaves a pairing with no
   granted folder: the CLI hands it to the node over the
   [control pipe](platforms.md#the-control-pipe), and the node syncs the
   grants and removes the profile, without the CLI saying so. The name comes from the
@@ -772,14 +772,14 @@ folders.
   `\` at the end, and absolute or relative as it was given (only `\` and
   `/` may differ). Each `center rm` says
   `removed the AppContainer profile nerve.…`, also when the grants of the
-  other pairings do not follow. To check first, run `center ls` with the
+  other pairings do not follow. To check first, run `center` with the
   same folders: when the `AppContainer nerve.…` name it shows for a
   pairing is not in the `Get-ChildItem` list below, that pairing never ran
   a command in its container, or the state folder is spelled otherwise
   than the node had it.
 - If the config folder is gone too, the node cannot tell which profiles
   were its own. `Get-ChildItem $env:LOCALAPPDATA\Packages -Filter nerve.*`
-  lists the profiles of all nodes this account ran; those that `center ls`
+  lists the profiles of all nodes this account ran; those that `center`
   of the nodes you still run (with their folders) does not name are left
   over. Remove each, as that account, with
   `[Nerve.Profile]::DeleteAppContainerProfile('nerve.…')` after
@@ -976,7 +976,7 @@ planned.
   pairing, and Windows deletes it with the container's profile. The node
   removes that profile with the container's last grant, a running node
   too when the pairing's folders are gone at its sync, also after a
-  `folder rm` or `folder set` of the last one; `center rm`, `uninstall` and
+  `folder rm` or `folder add ... none` of the last one; `center rm`, `uninstall` and
   the other changes the CLI writes to the file itself remove it only while
   the node does not run (see above) (checked, code).
 - **The registry.** Checked: a command reads the machine part (`HKLM`, for
@@ -1130,5 +1130,5 @@ No rule closes these limits.
 | You want | Use |
 |---|---|
 | The agent may run a few known commands | `allowlist` with [rules](rules.md) |
-| The agent works freely in a project folder | `folder` (the default) with one folder `+r +w +x` |
+| The agent works freely in a project folder | `folder` (the default) with one folder `rwx` |
 | The agent acts as you | `user`, maybe with `--for` |

@@ -1766,10 +1766,10 @@ async fn a_full_owner_socket_does_not_block_the_provider_socket_and_the_reverse(
     daemon.stop().await;
 }
 
-/// `cap ls` on a running node lists the capabilities of the attached
+/// `cap` on a running node lists the capabilities of the attached
 /// programs too, with their effects and where they come from, an action the
 /// node left out with its reason, and which allowed program is attached;
-/// `cap provider ls` says the same of the programs.
+/// `provider` says the same of the programs.
 #[tokio::test(flavor = "multi_thread")]
 async fn cap_ls_lists_what_the_attached_programs_offer() {
     let dir = tempfile::tempdir().unwrap();
@@ -1798,7 +1798,7 @@ async fn cap_ls_lists_what_the_attached_programs_offer() {
     let (_p, first) = hello_with(&paths.ctl_socket(), caps).await;
     assert_eq!(first["ok"]["capabilities"], json!(["lamp"]), "{first}");
 
-    let ls = cli(&paths, &["cap", "ls"]).await;
+    let ls = cli(&paths, &["cap"]).await;
     let words = |name: &str| {
         ls.lines()
             .find(|l| l.split_whitespace().next() == Some(name))
@@ -1830,7 +1830,7 @@ async fn cap_ls_lists_what_the_attached_programs_offer() {
         "{ls}"
     );
 
-    let v: Value = serde_json::from_str(&cli(&paths, &["--json", "cap", "ls"]).await).unwrap();
+    let v: Value = serde_json::from_str(&cli(&paths, &["--json", "cap"]).await).unwrap();
     let on = v["capabilities"]
         .as_array()
         .unwrap()
@@ -1853,8 +1853,7 @@ async fn cap_ls_lists_what_the_attached_programs_offer() {
     assert_eq!(read["centers"], json!({"lab": "default"}), "{v}");
     assert_eq!(read["now"], json!({"lab": "on"}), "{v}");
     assert_eq!(v["running"], true, "{v}");
-    let v: Value =
-        serde_json::from_str(&cli(&paths, &["--json", "cap", "provider", "ls"]).await).unwrap();
+    let v: Value = serde_json::from_str(&cli(&paths, &["--json", "provider"]).await).unwrap();
     assert_eq!(
         v,
         json!({"running": true, "programs": [
@@ -2860,7 +2859,7 @@ async fn a_program_that_does_not_answer_times_out() {
     daemon.stop().await;
 }
 
-/// `cap ls` names each of a program's state keys, events and streams with
+/// `cap` names each of a program's state keys, events and streams with
 /// its kind after its effect, as `--json` rows do with `kind`; an action
 /// has none. Each center's column says whether it may have the unit now.
 #[tokio::test(flavor = "multi_thread")]
@@ -2879,7 +2878,7 @@ async fn cap_ls_names_the_kind_of_a_programs_units() {
     let (_p, first) = hello_with(&paths.ctl_socket(), caps).await;
     assert_eq!(first["ok"]["capabilities"], json!(["sensors"]), "{first}");
 
-    let ls = cli(&paths, &["cap", "ls"]).await;
+    let ls = cli(&paths, &["cap"]).await;
     let words = |name: &str| {
         ls.lines()
             .find(|l| l.split_whitespace().next() == Some(name))
@@ -2903,7 +2902,7 @@ async fn cap_ls_names_the_kind_of_a_programs_units() {
         );
     }
 
-    let v: Value = serde_json::from_str(&cli(&paths, &["--json", "cap", "ls"]).await).unwrap();
+    let v: Value = serde_json::from_str(&cli(&paths, &["--json", "cap"]).await).unwrap();
     let row = |name: &str| {
         v["capabilities"]
             .as_array()

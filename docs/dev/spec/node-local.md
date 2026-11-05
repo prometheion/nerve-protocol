@@ -628,7 +628,7 @@ comes from a program the owner allows (§7).
 
 A call's audit target is its paths, else `cap.action`,
 as for a program; the entry adds `command`, the command as it runs (or would
-have run), the call's values filled in (one line, as `cap ls` quotes it),
+have run), the call's values filled in (one line, as `cap` quotes it),
 which stays in the node's log: the `audit/decision` event leaves it out (as
 it leaves out the reason), since the descriptor gives a center no word of
 the command. While it runs, its argv is open to every account in `/proc`,
@@ -878,8 +878,8 @@ header values are secrets: the node keeps them in the system keyring
 (`http://user:password@host:port`) become a `Proxy-Authorization: Basic`
 header in the same entry. `node.toml` keeps only the URL without them and the
 header names. No value is written to a file, the audit log, a log line, an
-error text or the output of a command; `proxy set` and `proxy ls` print the
-header names only, and `proxy rm` deletes the entry with the config entries.
+error text or the output of a command; `proxy set` and `proxy` print the
+header names only, and `proxy off` deletes the entry with the config entries.
 
 There is no fallback to a file. Where the keyring cannot be reached (a Linux
 without a desktop session has no Secret Service), `proxy set` with a header or
@@ -902,9 +902,9 @@ does anywhere. Reading is as consistent: with headers named in `node.toml`
 (set before the install) the link stops with `bad proxy:` and the same reason
 (in the center's status and in the log; on Windows `status` asks the node over
 its pipe, as on Linux), and
-`proxy ls` shows it, both without asking the keyring: an entry may be in the
+`proxy` shows it, both without asking the keyring: an entry may be in the
 administrator's Credential Manager, but the service does not find it, so
-`proxy ls` must not call the values good.
+`proxy` must not call the values good.
 
 A `node.toml` that holds header values (`headers = { Name = "value" }`) or a
 user name and password in `connection.proxy` is refused on load, without the values in the message: take them out of the
@@ -930,8 +930,8 @@ and so does a Linux node without a keyring whose keys are in files; with
 `keyring` and no keyring that answers, `proxy set` refuses with the
 keyring's error and changes nothing, and a node whose keys are there does
 not start, as for any key of the node. `--header` values of an `https://`
-proxy stay in the keyring as above. `proxy rm` deletes the password with the
-config entries; `proxy ls` shows the pin and the user name, never the
+proxy stay in the keyring as above. `proxy off` deletes the password with the
+config entries; `proxy` shows the pin and the user name, never the
 password.
 
 ### Relay
@@ -939,7 +939,7 @@ password.
 The node can be the relay of other nodes (protocol §4.8). Only the owner
 turns it on, and a center reads and changes nothing of it, grant or not.
 
-- `nerve-node relay set <ip:port> [--max-links N] [--max-links-per-node N]
+- `nerve-node relay on <ip:port> [--max-links N] [--max-links-per-node N]
   [--max-opens-per-minute N]`
   turns it on; `relay off` stops listening and ends every tunnel, and keeps
   the nodes.
@@ -966,18 +966,18 @@ turns it on, and a center reads and changes nothing of it, grant or not.
   away and ends that node's tunnels; its centers and limits go with it.
 - With `--center` (given more than once for more) the node's tunnels go
   only to the named centers of this node; without it, to every center a
-  tunnel may go to (below). `relay set-centers <name> [--center
+  tunnel may go to (below). `relay on <name> [--center
   <center>]...` changes the list later (without `--center`: every center
   again) and ends the node's tunnels to a center it took away. Only paired
   centers can be named; a center unpaired later stays on the list and is
   reached no more. A tunnel to a center off the list is refused with the
   same `403` as one to a center this node does not have.
-- `nerve-node relay ls` shows the relay, its pin, its nodes with their
+- `nerve-node relay` shows the relay, its pin, its nodes with their
   centers and, from the running node, its tunnels: the node, its address,
   the center and since when.
-  `status` carries the same under `relay` (§5); on Windows `relay ls` asks
+  `status` carries the same under `relay` (§5); on Windows `relay` asks
   the control pipe's `status` for them. `relay rm`, `relay off` and `relay
-  set-centers` say whether their cut is in force: "now" when a running node
+  set --to` say whether their cut is in force: "now" when a running node
   took the change; on Windows, where the CLI writes the file for the next
   start, that a running node keeps its tunnels until then and must be
   restarted to cut them now.
@@ -988,7 +988,7 @@ turns it on, and a center reads and changes nothing of it, grant or not.
   address. Centers that share a host and port (one reverse proxy, a path
   each) are all reached by a tunnel there: the relay grants it only when the
   node may reach every one of them, a list that splits them is refused by
-  `relay add` and `set-centers`, and the log and the audit name them all
+  `relay add` and `relay set`, and the log and the audit name them all
   (`a, b`). A tunnel reaches whatever is served at that host and port, seen
   from this machine's address (other names of the proxy too), since the
   relay does not read what goes inside it. A paused center is still a target: pausing stops this node's
@@ -1029,15 +1029,15 @@ turns it on, and a center reads and changes nothing of it, grant or not.
   can rotate the log, and a line names the node whose refusals it counts.
 - A node opens at most `relay.max_opens_per_minute` tunnels a minute (30
   unless set: a node needs one per center and redials after a second at the
-  soonest; `relay set`, `relay ls` and `status` show it; a relay behind
+  soonest; `relay set`, `relay` and `status` show it; a relay behind
   this one, which carries many nodes, gets more as a limit of its own,
   below); past that it gets `503`.
   `relay.max_links_per_node` and `relay.max_opens_per_minute` hold for
   every relay node; raising them raises them for every token. A node can
   have limits of its own instead (`[[relay.node]]` `max_links` and
-  `max_opens_per_minute`, set with `relay set-limits <name> [--max-links N]
+  `max_opens_per_minute`, set with `relay on <name> [--max-links N]
   [--max-opens-per-minute N]`: a limit not given stays, as with `relay
-  set`, and no flag at all clears both; shown by `relay ls`). That is for a relay behind this one: in a chain the inner
+  set`, and no flag at all clears both; shown by `relay`). That is for a relay behind this one: in a chain the inner
   relay is one relay node of the outer one, and its own links and every
   tunnel of the nodes behind it count against that node's limits (and the
   relay's `max_links`). A refusal at the outer relay reaches the relayed
@@ -1083,18 +1083,18 @@ grant or not.
 - `nerve-node ui on [--listen <ip:port>] [--name <host>]... [--new-cert]` sets
   `ui.listen` (`127.0.0.1:7470` unless given) and, with no token yet, makes
   one labelled `first` and shows it once; `ui off` clears `ui.listen` and
-  keeps the tokens and the key; `ui status` shows the address, the node's
+  keeps the tokens and the key; `ui` shows the address, the node's
   state of it (`listening` or why not) and the labels. The running node takes
   each at once, so `ui on` waits for it for a few seconds.
 - `nerve-node ui token add <label>` makes a token (43 characters of `a-z0-9`),
   shown once; `node.toml` keeps its SHA-256 only. `ui token rm <label>` takes
-  it away and ends the sessions it opened. `ui token ls` shows labels and
+  it away and ends the sessions it opened. `ui token` shows labels and
   times. Tokens are made at the CLI only.
 - Beyond loopback the UI speaks TLS only, with a certificate of its own made
   by the first `ui on` there (self-signed; it names the address, this
   machine's name, `localhost` and each `--name`): the key is a node key
   (`keys/ui-tls.pem` or the keyring entry `ui-tls:<config folder>`, §1) and
-  `ui.pin` keeps its pin. `ui on` and `ui status` print its SHA-256
+  `ui.pin` keeps its pin. `ui on` and `ui` print its SHA-256
   fingerprint. `--new-cert` makes a new one and ends every session. Without
   its key the UI does not listen beyond loopback (`status` says why). On
   loopback it is plain HTTP and takes no certificate flags.
@@ -1136,7 +1136,7 @@ grant or not.
   outlives it. The pages offer what the desktop app's offer; the commands
   that need root (`install`, `update`, `uninstall`, `service`, `sudo on`),
   `backup`, `restore` and `setup` stay at the CLI.
-- `center add --link-stdin` reads the pairing link from the first line of its
+- `center add -` reads the pairing link from the first line of its
   input, so it is not in the process list; the web UI pairs that way.
 - A `restore` of a config that turns the UI on says so, and at which address;
   when the address is beyond loopback and neither the backup nor this node
@@ -1244,7 +1244,7 @@ grant or not.
   every mode, so it is refused only where the filter is missing. The
   descriptor's access block carries `no_network` (`held`, `as_owner`,
   `not_held`) in every mode, and no `sudo` while it is on. A program's
-  action is not held by it. The owner sets it (`folder network off|on`, the
+  action is not held by it. The owner sets it (`network off|on`, the
   app, the node web UI); a center's settings may set it, never clear it
   (`policy.no_network: only the owner can let the commands back on the
   network`); the mode stays the center's to change. While it is on (in the
@@ -1285,7 +1285,7 @@ grant or not.
   do not count.
 
 Folder and user have no time limit by default: once set, they stay until the
-owner changes them. A limit is opt-in (`until`, or `nerve-node mode set user
+owner changes them. A limit is opt-in (`until`, or `nerve-node mode user
 --for HOURS`). When it runs out, the center is back in `allowlist`, the default
 deny mode, not in `folder`.
 
@@ -1374,7 +1374,7 @@ the argument out, gives `null`, or a value of another type cannot be told; an
 allow rule covers a call only where every condition holds, a deny rule wherever
 none is known not to hold. A rule whose argument went from the schema thus
 refuses every call of its action (deny) or covers none (allow), and one whose
-`=` value left an `enum` holds for no call; `rule ls` names every rule that no
+`=` value left an `enum` holds for no call; `rule` names every rule that no
 longer fits (`stale` in its JSON). The audit entry's `args` hold a marked path
 as resolved. The center's action checker reads the
 same syntax with the same code (`nerve_policy::conditions`), with `~` as any
@@ -1397,8 +1397,8 @@ documentation of rules for what each refuses.
 | `notes.open:path~~/private/*` | `notes.open` with its path argument there |
 | `lamp.set:room=office,brightness<=50` | `lamp.set` with those values |
 
-The four buttons of the center's audit view and `nerve-node rule add allow|deny|sudo
-<command> [--wildcard]` write exactly these forms: exact (`exec.run:git status`) or
+The four buttons of the center's audit view and `nerve-node rule add allow|deny
+<command>` (a trailing ` *` is the wildcard) write exactly these forms: exact (`exec.run:git status`) or
 wildcard (`exec.run:git *`, `fs.read:/home/u/notes/*` for the folder of the
 path, the capability for another action). For an action that takes
 conditions, an audit entry keeps the call's top-level strings (up to 200
@@ -1608,7 +1608,7 @@ The normal `allow` list does not count for them.
   be one simple command: one with `; & | $ \` ( ) < >` or a line break is
   refused. A `sudo_allow` glob covers only the plain lines a wildcard allow
   rule covers (§2, Rules); any other line runs only when an entry is that
-  whole line, escaped as `rule add sudo` writes it. The node runs it as `sudo -S -k -p <prompt> …` without Landlock
+  whole line, escaped as `rule add allow 'sudo …'` writes it. The node runs it as `sudo -S -k -p <prompt> …` without Landlock
   (which would stop sudo from gaining privileges), with a random prompt per
   command, started as the account the commands run as (§1), so sudo raises
   it from that account. It writes the password to stdin only after sudo
@@ -1745,14 +1745,14 @@ Methods:
 | `config.accept` | | takes `node.toml` as it is after it was refused, and signs it (§1); an action that came to sense or actuate in it is switched off, in the same write, for each center whose earlier switch or allow rule covered it: `{version, held: [[center, action]]}` |
 | `folder.add` | `center`, `path`, `access` | `folder add`, done by the node so that it is judged as the owner (`exec::settle`): the path is followed a link at a time and must resolve to itself, the folder is stored at that place with `access` (replacing the entry there) and recorded in `policy.places`; `{stored, recorded, mode, counts}` (`counts`: whether the
 center's folders hold its commands, in folder mode or as `nerve-run`). An error, with nothing changed, when the path crosses a link inside a `w` folder of any center, leads nowhere, or changed while it was looked at. Where the node cannot tell either (a folder it may not look into, or a `w` folder it cannot resolve) the folder is stored as given, `recorded` is false, and a record it had stays. The CLI uses it whenever a node runs |
-| `folder.grants` | `every` (bool) | the installed Linux node brings the folder ACLs in line at once (§Folder ACLs), with `every` walking every grant, and answers what that left, and whether this is the installed node: `{errors, stale, failed, skipped, service}`; `null` on Windows. `folder add` and `rm` ask it, `folder set` and `folder sync` with `every` |
+| `folder.grants` | `every` (bool) | the installed Linux node brings the folder ACLs in line at once (§Folder ACLs), with `every` walking every grant, and answers what that left, and whether this is the installed node: `{errors, stale, failed, skipped, service}`; `null` on Windows. `folder add` and `rm` ask it, `folder add` of a folder the center has and `folder sync` with `every` |
 | `reload` | | rereads `node.toml`; only a file the node signed is applied (§1) |
 | `sudo.status` | | `{sudo: "on"|"off"}` |
 | `sudo.on` | `password` | checks it with `sudo -v` and turns the switch on (§4) |
 | `sudo.off` | | turns the switch off and drops the password |
 | `center.rotate-key` | `center`, `end_grace` | rotates the node's key for `center` over the live link, or with `end_grace` ends the grace of the old one (protocol §4.10); `{center, public_key}`, the new key once. Waits for the center's answer, at most 15 s; an error when the node has no link to it or the center does not speak `rotate`. Also served on the control pipe (Windows) |
 | `owner.check` | | changes nothing; the CLI asks it before `install`, `setup`, `update`, `uninstall`, `backup` and `restore` |
-| `caps.list` | | what `cap ls` shows: `{capabilities, programs, config, added, running}`; each capability row `{name: "cap.action", effect, source: "built-in" \| "config" \| "program <name>", summary, centers: {<center>: "on"\|"off"\|"hidden"\|"default"}, now: {<center>: "on"\|"off"}, params?}`, `params` an action's arguments schema (also on a left-out config or center row; what a rule's conditions are checked against, §2 Rules), `centers` the switch (`cap set`; `default` where none is set; for `settings`, which has none, `"granted"`\|`"not granted"` by the center's `settings` grant) and `now` whether the center's descriptor offers the action now and it is not off (§3: mode, rules, switches, the machine); an action a program offered that the node left out with `broken` (its reason), no effect and no `now`; a config capability's row that this node does not offer (§2; a node run by hand offers none) has `left_out` (why) and no `now`; `config` each `[[capability]]` as declared, `{name, summary, effect, command, params, result, timeout_secs, platform}`, the schemas as JSON (`result` `"text"` or a schema); a capability a center added (§2) has the source `center <name>`, its counted effect, and `centers` and `now` for that center alone, and `added` lists each one as `config` does, with its `center`; `programs` the entries of `providers.allowed`, each `{name, exe, attached}`. A stopped node's CLI makes the same from `node.toml`, with the node's own capabilities and the config's (no program's), no `now` and `attached` null. Also served on the control pipe (Windows), where no program attaches |
+| `caps.list` | | what `cap` shows: `{capabilities, programs, config, added, running}`; each capability row `{name: "cap.action", effect, source: "built-in" \| "config" \| "program <name>", summary, centers: {<center>: "on"\|"off"\|"hidden"\|"default"}, now: {<center>: "on"\|"off"}, params?}`, `params` an action's arguments schema (also on a left-out config or center row; what a rule's conditions are checked against, §2 Rules), `centers` the switch (`cap set`; `default` where none is set; for `settings`, which has none, `"granted"`\|`"not granted"` by the center's `settings` grant) and `now` whether the center's descriptor offers the action now and it is not off (§3: mode, rules, switches, the machine); an action a program offered that the node left out with `broken` (its reason), no effect and no `now`; a config capability's row that this node does not offer (§2; a node run by hand offers none) has `left_out` (why) and no `now`; `config` each `[[capability]]` as declared, `{name, summary, effect, command, params, result, timeout_secs, platform}`, the schemas as JSON (`result` `"text"` or a schema); a capability a center added (§2) has the source `center <name>`, its counted effect, and `centers` and `now` for that center alone, and `added` lists each one as `config` does, with its `center`; `programs` the entries of `providers.allowed`, each `{name, exe, attached}`. A stopped node's CLI makes the same from `node.toml`, with the node's own capabilities and the config's (no program's), no `now` and `attached` null. Also served on the control pipe (Windows), where no program attaches |
 | `hello` | `role` (`provider`), `name`, `capabilities` | a capability provider attaches; the connection stays (§7); on a node run by hand only, the installed node takes it on its provider socket |
 
 Every method is refused from a process that runs below a command the node
@@ -1931,8 +1931,8 @@ A walk holds the walk lock (`Shared::acl_walk`) only: the last report
 sync that finds the record not behind returns before it waits for a walk.
 A sync runs at the start (there it walks every grant, also an unchanged one,
 so what was moved into a granted folder gets its entries), on each config
-version, on `folder.grants` (with `{"every": true}`, from `folder set` and
-`folder sync`, every grant too), and before a call of `nerve-run` (`exec.run`, `fs`),
+version, on `folder.grants` (with `{"every": true}`, from `folder add` of a folder the
+center has and `folder sync`, every grant too), and before a call of `nerve-run` (`exec.run`, `fs`),
 where a failed grant is tried again at most once a minute (`ACL_RETRY`).
 The call is refused while an entry that should have come off is left
 (`stale`), for every pairing of `nerve-run`. `uninstall` takes every
@@ -1972,7 +1972,7 @@ move fails the entry is still written, past that bound, and the node logs the
 failure once. Refused calls get at most half of a full file: past that the
 oldest refusals are dropped instead of the file being moved, so a center
 that makes refused calls cannot push out what the node allowed or changed.
-`nerve-node audit [--denied] [--follow]` shows both files, `audit.jsonl.1`
+`nerve-node audit [--refused] [--follow]` shows both files, `audit.jsonl.1`
 first, and `--follow` finishes the old file after a move before it reads the
 new one.
 
@@ -1987,8 +1987,8 @@ asks from `/proc/<pid>/exe`, and Windows' pipes take no provider.
 ### Who may attach
 
 Only a program the owner names in `providers.allowed` (§2), by a name and the
-absolute path of its executable (`nerve-node cap provider allow desk
-/usr/lib/nerve-desktop/nerve-desktop`; `cap provider rm desk` takes it off).
+absolute path of its executable (`nerve-node provider add desk
+/usr/lib/nerve-desktop/nerve-desktop`; `provider rm desk` takes it off).
 None is allowed by default; only the owner changes the list, as no center document
 holds it. A name is 1 to 32 of `a-z`, `0-9` and `-`, starting and ending with a letter
 or digit, and not `node` or `config` (the providers of the node's own capabilities

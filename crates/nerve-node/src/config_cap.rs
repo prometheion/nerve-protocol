@@ -27,7 +27,7 @@ use nerve_policy::{NodeConfig, SetError};
 use nerve_proto::descriptor::{Action, Capability, Effect, Exposure};
 use nerve_proto::{ErrorCode, RpcError};
 
-/// The `provider` of a config capability in the descriptor and `cap ls`.
+/// The `provider` of a config capability in the descriptor and `cap`.
 pub const PROVIDER: &str = "config";
 
 /// The most of a failed command's stderr its error repeats.
@@ -556,7 +556,7 @@ pub fn as_account_for(caps: &mut [Capability], separate: bool) {
     }
 }
 
-/// `c` as `cap ls --json` gives it: as the owner declared it, the schemas
+/// `c` as `cap --json` gives it: as the owner declared it, the schemas
 /// as JSON (ConfigCapability::entry).
 pub fn entry(c: &ConfigCapability) -> Value {
     c.entry()

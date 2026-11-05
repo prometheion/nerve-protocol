@@ -4,9 +4,9 @@ A center cannot change anything on a machine at first (`settings off`). The
 settings grant lets it. Only you can give it, on the machine.
 
 ```sh
-nerve-node center grant settings write
-nerve-node center grant settings off      # take it back
-nerve-node center ls                      # shows "settings write" or "settings off"
+nerve-node center settings on
+nerve-node center settings off      # take it back
+nerve-node center                      # shows "settings write" or "settings off"
 ```
 
 With several centers, add `--center <name>`.
@@ -42,7 +42,7 @@ grant only to a center you would also give a shell.
 Where root is the node's owner ([service](service.md#root-as-the-owner)),
 `user` mode runs commands as root. A center with the grant can switch itself
 to it, and so run commands as root, with no password asked. On such a node
-the grant gives the center root: `center grant settings write` warns of it,
+the grant gives the center root: `center settings on` warns of it,
 and so does the desktop app when you give the grant.
 
 ## What stays with you

@@ -15,14 +15,18 @@ pub(super) fn own_form(cmd: &Cmd) -> bool {
         Cmd::Status
             | Cmd::Audit { clear: None, .. }
             | Cmd::Log { clear: None, .. }
-            | Cmd::Center(CenterCmd::Ls | CenterCmd::Add { .. })
-            | Cmd::Folder(FolderCmd::Ls { .. })
-            | Cmd::Rule(RuleCmd::Ls { .. })
-            | Cmd::Cap(CapCmd::Ls { .. } | CapCmd::Provider(ProviderCmd::Ls))
+            | Cmd::Center {
+                cmd: None | Some(CenterCmd::Add { .. })
+            }
+            | Cmd::Mode { mode: None, .. }
+            | Cmd::Folder { cmd: None, .. }
+            | Cmd::Rule { cmd: None, .. }
+            | Cmd::Cap { cmd: None, .. }
+            | Cmd::Provider { cmd: None }
             | Cmd::Config(ConfigCmd::Get { .. })
-            | Cmd::Proxy(ProxyCmd::Ls)
-            | Cmd::Relay(RelayCmd::Ls)
-            | Cmd::Sudo(SudoCmd::Status)
+            | Cmd::Proxy { cmd: None }
+            | Cmd::Relay { cmd: None }
+            | Cmd::Sudo { cmd: None }
             | Cmd::Service(ServiceCmd::Status)
     )
 }
@@ -86,26 +90,44 @@ pub(super) async fn command(
         Cmd::Audit {
             clear: None,
             follow,
-            denied,
+            refused,
             last,
-        } => return audit(paths, follow, denied, last, true, out).await,
+        } => return audit(paths, follow, refused, last, true, out).await,
         Cmd::Log {
             clear: None,
             follow,
             last,
             problems,
         } => return log_cmd(paths, follow, last, problems, true, out).await,
-        Cmd::Center(CenterCmd::Ls) => centers(paths).await?,
-        Cmd::Center(CenterCmd::Add {
-            link,
-            link_stdin,
-            name,
-            yes,
-        }) => {
-            let link = given_link(link, link_stdin)?;
+        Cmd::Center { cmd: None } => centers(paths).await?,
+        Cmd::Center {
+            cmd: Some(CenterCmd::Add { link, name, yes }),
+        } => {
+            let link = given_link(&link)?;
             pair(paths, &link, name.as_deref(), yes).await?
         }
-        Cmd::Folder(FolderCmd::Ls { center }) => {
+        Cmd::Mode {
+            mode: None,
+            for_hours,
+            as_owner,
+            center,
+        } => {
+            if for_hours.is_some() || as_owner {
+                return Err("name the mode: `nerve-node mode allowlist|folder|user`".into());
+            }
+            let (cfg, _) = read_config(paths).await?;
+            let names = match &center.center {
+                Some(_) => vec![pick_center(&cfg, &center)?],
+                None => cfg.centers.iter().map(|c| c.name.clone()).collect(),
+            };
+            let now = crate::now_ms();
+            let modes: Vec<Value> = names
+                .iter()
+                .map(|n| mode_data(n, &cfg.center(n).expect("listed").policy, now))
+                .collect();
+            json!({ "modes": modes })
+        }
+        Cmd::Folder { cmd: None, center } => {
             let (cfg, _) = read_config(paths).await?;
             let name = pick_center(&cfg, &center)?;
             let policy = &cfg.center(&name).expect("picked").policy;
@@ -124,7 +146,11 @@ pub(super) async fn command(
                 .collect();
             json!({ "center": name, "folders": folders, "no_network": policy.no_network })
         }
-        Cmd::Rule(RuleCmd::Ls { list, center }) => {
+        Cmd::Rule {
+            cmd: None,
+            list,
+            center,
+        } => {
             let (cfg, _) = read_config(paths).await?;
             let name = pick_center(&cfg, &center)?;
             let mut policy = cfg.center(&name).expect("picked").policy.clone();
@@ -141,7 +167,7 @@ pub(super) async fn command(
                 }
             }
             // The rules whose conditions no longer fit the action's
-            // arguments, each with why (`rule ls` says it after the rules).
+            // arguments, each with why (`rule` says it after the rules).
             let stale = stale_rules(paths, &cfg, &name, shown.iter()).await?;
             v["stale"] = Value::Object(
                 stale
@@ -151,7 +177,7 @@ pub(super) async fn command(
             );
             v
         }
-        Cmd::Cap(CapCmd::Ls { center }) => {
+        Cmd::Cap { cmd: None, center } => {
             let (cfg, _) = read_config(paths).await?;
             let mut v = cap_listing(paths, &cfg).await?;
             // One center's switches as the app reads them, besides: with
@@ -186,7 +212,7 @@ pub(super) async fn command(
             }
             v
         }
-        Cmd::Cap(CapCmd::Provider(ProviderCmd::Ls)) => {
+        Cmd::Provider { cmd: None } => {
             let (cfg, _) = read_config(paths).await?;
             let v = cap_listing(paths, &cfg).await?;
             json!({"programs": v["programs"], "running": v["running"]})
@@ -205,9 +231,9 @@ pub(super) async fn command(
             }
             v
         }
-        Cmd::Proxy(ProxyCmd::Ls) => proxy(paths).await?,
-        Cmd::Relay(RelayCmd::Ls) => relay(paths).await?,
-        Cmd::Sudo(SudoCmd::Status) => {
+        Cmd::Proxy { cmd: None } => proxy(paths).await?,
+        Cmd::Relay { cmd: None } => relay(paths).await?,
+        Cmd::Sudo { cmd: None } => {
             json!({ "sudo": if sudo_is_on(paths).await? { "on" } else { "off" } })
         }
         _ => return Err("this command has no JSON form of its own".into()),
@@ -294,7 +320,7 @@ fn stopped(cfg: &NodeConfig, owner: Option<String>, sudo: bool, centers: Vec<Val
     })
 }
 
-/// One center as `center ls` and a stopped node's `status` show it.
+/// One center as `center` and a stopped node's `status` show it.
 fn center(paths: &NodePaths, c: &nerve_policy::CenterEntry, now: u64) -> Value {
     let mut v = json!({
         "name": c.name,
@@ -314,7 +340,7 @@ fn center(paths: &NodePaths, c: &nerve_policy::CenterEntry, now: u64) -> Value {
     v
 }
 
-/// `center ls`.
+/// `center`.
 async fn centers(paths: &NodePaths) -> Result<Value, String> {
     let (cfg, _) = read_config(paths).await?;
     let now = crate::now_ms();
@@ -355,7 +381,7 @@ async fn pair(
     Ok(v)
 }
 
-/// `proxy ls`: the proxy, its pin and login, the names of its headers, and
+/// `proxy`: the proxy, its pin and login, the names of its headers, and
 /// why the link cannot use it, when it cannot. Never a secret.
 async fn proxy(paths: &NodePaths) -> Result<Value, String> {
     let (cfg, _) = read_config(paths).await?;
@@ -383,7 +409,7 @@ async fn proxy(paths: &NodePaths) -> Result<Value, String> {
     }))
 }
 
-/// `relay ls`: the relay's settings, the nodes that may use it, and on a
+/// `relay`: the relay's settings, the nodes that may use it, and on a
 /// running node its state and open tunnels (`null` when none runs).
 async fn relay(paths: &NodePaths) -> Result<Value, String> {
     let (cfg, _) = read_config(paths).await?;

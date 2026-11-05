@@ -279,18 +279,18 @@ fn every_page_light_and_dark() {
         OFFICE,
         "--yes",
     ]);
-    run(&["center", "grant", "settings", "write", "--center", "home"]);
-    run(&["mode", "set", "user", "--for", "8", "--center", "lab"]);
-    run(&["center", "pause", "--center", OFFICE]);
+    run(&["center", "settings", "on", "--center", "home"]);
+    run(&["mode", "user", "--for", "8", "--center", "lab"]);
+    run(&["center", "pause", OFFICE]);
     // lab's center is far away, and cannot be reached.
     run(&["config", "set", "center.lab.url", LAB_URL]);
     drop(lab);
     // home's folders and rules.
     for (folder, rights) in [
-        ("alex/projects/site", vec!["+r", "+w", "+x"]),
-        ("alex/Documents", vec!["+r"]),
-        ("alex/scratch", vec!["+r", "+w"]),
-        (DEEP, vec!["+r", "+x"]),
+        ("alex/projects/site", vec!["rwx"]),
+        ("alex/Documents", vec!["r"]),
+        ("alex/scratch", vec!["rw"]),
+        (DEEP, vec!["rx"]),
     ] {
         let p = root.join(folder);
         std::fs::create_dir_all(&p).unwrap();
@@ -366,13 +366,7 @@ fn every_page_light_and_dark() {
         run(&args);
     }
     run(&["cap", "set", "sensors.read", "on", "--center", "home"]);
-    run(&[
-        "cap",
-        "provider",
-        "allow",
-        "desk",
-        "/usr/lib/nerve-desk/nerve-desk",
-    ]);
+    run(&["provider", "add", "desk", "/usr/lib/nerve-desk/nerve-desk"]);
     run(&["relay", "add", "laptop-2"]);
 
     // Calls the centers made, as the node records them.
@@ -665,7 +659,7 @@ fn every_page_light_and_dark() {
         let p = root.join(format!("alex/clients/client-{i:02}/repository"));
         std::fs::create_dir_all(&p).unwrap();
         let p = p.display().to_string();
-        run(&["folder", "add", &p, "+r", "+w", "--center", OFFICE]);
+        run(&["folder", "add", &p, "rw", "--center", OFFICE]);
     }
     perm.invoke_pick(office as i32);
     shots.take("permissions-long");
@@ -829,7 +823,7 @@ fn every_page_light_and_dark() {
     prefs.set_relay_edit_own(true);
     shots.take("relay-node");
     prefs.set_relay_edit_open(false);
-    // On, carrying tunnels now (as `relay ls` of a running relay says).
+    // On, carrying tunnels now (as `relay` of a running relay says).
     prefs.set_relay_listen("0.0.0.0:7490".into());
     prefs.set_relay_status("listening on 0.0.0.0:7490".into());
     let relay = serde_json::json!({

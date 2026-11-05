@@ -891,7 +891,7 @@ pub fn install_asking(
 }
 
 /// What `install` says to do next: the headless way to a working pairing.
-const NEXT: &str = "Next: `nerve-node center add '<link>'` pairs the node with a center, and `nerve-node folder add <folder> +rwx` gives it a folder to read, write and run commands in.";
+const NEXT: &str = "Next: `nerve-node center add '<link>'` pairs the node with a center, and `nerve-node folder add <folder> rwx` gives it a folder to read, write and run commands in.";
 
 #[allow(clippy::too_many_arguments)]
 fn install_steps(
@@ -4657,17 +4657,14 @@ pub(crate) mod tests {
     /// run in: folder mode needs `x` on a command's working folder.
     #[test]
     fn the_folder_install_suggests_lets_commands_run() {
-        let rights: Vec<String> = NEXT
+        let rights = NEXT
             .split("folder add <folder> ")
             .nth(1)
             .unwrap()
             .split('`')
             .next()
-            .unwrap()
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
-        let a = crate::folder_change::FolderChange::new_rights(&rights).unwrap();
+            .unwrap();
+        let a = crate::folder_change::FolderChange::new_rights(rights).unwrap();
         assert!(a.read && a.write && a.execute, "{a:?}");
     }
 }

@@ -134,7 +134,7 @@ function centerManageCard(c) {
           const yes = await modal({ title: `Let ${c.name} change its rights?`, message: "It may then set everything this machine lets it do, up to user mode and sudo.", confirm: "Grant", danger: true });
           if (!yes) return;
         }
-        await api("POST", "/api/centers/grant", { center: c.name, what: "settings", value: grant ? "off" : "write" });
+        await api("POST", "/api/centers/settings", { center: c.name, state: grant ? "off" : "on" });
       }), "key", `center:${c.name}:grant`),
       btn("New key", "ghost", act(async () => {
         await api("POST", "/api/centers/rotate", { center: c.name });
@@ -237,7 +237,7 @@ function rulesSection(c, rules) {
   const lists = [["allow", "Allowed"], ["deny", "Forbidden"], ["sudo", "Run with sudo"]];
   return section("Rules", "Commands and patterns a center may run, may not, or runs with sudo.", btn("Add the guard", "ghost", act(() => api("POST", "/api/rules/guard", { center: c }).then(loadPerm)), "shield", "rules:guard"),
     lists.map(([list, title]) => {
-      const field = el("input", { class: "input", type: "text", placeholder: list === "sudo" ? "apt update" : "git status, or fs.read:~/notes/*", autocomplete: "off", spellcheck: "false", "aria-label": `${title}: a new rule` });
+      const field = el("input", { class: "input", type: "text", placeholder: list === "sudo" ? "apt update" : "git status, git *, or fs.read:~/notes/*", autocomplete: "off", spellcheck: "false", "aria-label": `${title}: a new rule` });
       const wild = el("input", { type: "checkbox" });
       return el("div", { class: "card" },
         el("h4", {}, title),

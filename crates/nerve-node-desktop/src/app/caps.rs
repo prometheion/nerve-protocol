@@ -1,8 +1,8 @@
-//! The Capabilities page: what the node offers, read with `cap ls`, each
+//! The Capabilities page: what the node offers, read with `cap`, each
 //! unit's switch for one center (`cap set`), the capabilities of node.toml
 //! (`cap add`, `cap edit` and `cap rm`, through a dialog that checks them as
-//! the owner types), and the programs allowed as providers (`cap provider
-//! allow` and `rm`).
+//! the owner types), and the programs allowed as providers (`provider add`
+//! and `rm`).
 
 use std::rc::Rc;
 
@@ -63,7 +63,7 @@ impl Ctl {
         let default_max = nerve_policy::config::Limits::default().max_timeout_secs;
         self.job(
             move |r| {
-                let mut args = vec!["cap".to_string(), "ls".into()];
+                let mut args = vec!["cap".to_string()];
                 if !center.is_empty() {
                     args.push(format!("--center={center}"));
                 }
@@ -347,9 +347,8 @@ impl Ctl {
             c.set_program_error(SharedString::new());
         });
         let args = vec![
-            "cap".into(),
             "provider".into(),
-            "allow".into(),
+            "add".into(),
             "--".into(),
             name.clone(),
             exe,
@@ -373,13 +372,7 @@ impl Ctl {
     }
 
     fn program_remove(self: &Rc<Self>, name: &str) {
-        let args = vec![
-            "cap".into(),
-            "provider".into(),
-            "rm".into(),
-            "--".into(),
-            name.into(),
-        ];
+        let args = vec!["provider".into(), "rm".into(), "--".into(), name.into()];
         self.caps_change(
             args,
             None,

@@ -564,7 +564,7 @@ fn the_app_drives_the_cli_end_to_end() {
         // A folder no center has any more whose access did not come off,
         // and the node's record of them that could not be read: shown on
         // this center although neither is one of its folders.
-        st["folder_grants"] = serde_json::json!({
+        st["folder_access"] = serde_json::json!({
             "errors": [
                 format!("{}: Permission denied (os error 13)", root.join("work/closed").display()),
                 "/elsewhere/proj: Permission denied (os error 13)",
@@ -710,14 +710,14 @@ fn the_app_drives_the_cli_end_to_end() {
     perm.invoke_rule_remove(0, "exec.run:cargo build --release".into());
     assert!(!allowed("exec.run:cargo build --release"));
     // A pattern for files goes in as it is, as `config add` adds it, and
-    // comes out as `rule ls` shows it.
+    // comes out as `rule` shows it.
     perm.set_allow_text("fs.read:~/notes/*".into());
     perm.invoke_rule_add(0);
     assert!(allowed("fs.read:~/notes/*"), "{}", store.get_toast());
     assert!(perm.get_allow().iter().any(|r| r == "fs.read:~/notes/*"));
     perm.invoke_rule_remove(0, "fs.read:~/notes/*".into());
     assert!(!allowed("fs.read:~/notes/*"));
-    // The text `rule ls` writes for a line break is not one: refused, with
+    // The text `rule` writes for a line break is not one: refused, with
     // the field kept. A Windows path with `\\t` or `\\n` in it is a rule.
     let listed = nerve_policy::rules::escape_controls(nerve_policy::rules::GUARD_OLD[12]);
     let before = config(&paths).centers[0].policy.deny.clone();
@@ -968,7 +968,7 @@ fn the_app_drives_the_cli_end_to_end() {
     assert_eq!(prefs.get_raw_error(), "");
     assert_eq!(prefs.get_raw_shown(), "debug");
     // A list grows and shrinks by one entry, as `config add` and `config
-    // remove` change it.
+    // rm` change it.
     prefs.set_raw_key("center.home.policy.deny".into());
     prefs.set_raw_value("fs:~/private/*".into());
     prefs.invoke_raw_add();

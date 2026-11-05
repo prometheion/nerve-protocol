@@ -2,8 +2,8 @@
 //! `restore` of both programs.
 //!
 //! The passphrase comes from a terminal without echo, from the first line of
-//! a file (`--passphrase-file`), or, when stdin is not a terminal, from one
-//! line of stdin. It is never a command-line argument or an environment
+//! a file (`--passphrase-file`; `-` is stdin), or, when stdin is not a
+//! terminal, from one line of stdin. It is never a command-line argument or an environment
 //! variable: both are visible to every process of the user.
 
 use std::io::{BufRead, Write};
@@ -14,14 +14,17 @@ use nerve_transport::backup::Passphrase;
 /// The longest passphrase file read.
 const MAX_FILE: u64 = 4096;
 
-/// The passphrase from `file` when one is named, else from the owner. With
-/// `confirm`, a terminal asks twice (a new backup: a typo there would make
-/// the file unreadable).
+/// The passphrase from `file` when one is named (`-`: the first line of
+/// stdin), else from the owner. With `confirm`, a terminal asks twice (a new
+/// backup: a typo there would make the file unreadable).
 pub fn passphrase(
     file: Option<&Path>,
     out: &mut dyn Write,
     confirm: bool,
 ) -> Result<Passphrase, String> {
+    if file == Some(Path::new("-")) {
+        return from_reader(&mut std::io::stdin().lock());
+    }
     if let Some(f) = file {
         return from_file(f);
     }

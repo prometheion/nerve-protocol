@@ -42,7 +42,7 @@ nothing of yours until you give it a folder. There its file calls may still
 read what every account on the machine may read
 ([reading in folder mode](modes.md#reading-in-folder-mode)); writes and
 commands wait for a folder:
-`nerve-node folder add ~/project +r +w +x` ([modes](modes.md),
+`nerve-node folder add ~/project rwx` ([modes](modes.md),
 [rules](rules.md)). Its deny list holds the
 guard, which keeps commands off this node itself
 ([rules](rules.md#the-guard-against-changing-the-node)).
@@ -86,15 +86,15 @@ Every command that works on one center takes `--center <name>`. With more than
 one center the command refuses to guess:
 
 ```sh
-nerve-node mode set folder --center lab
-nerve-node center ls
+nerve-node mode folder --center lab
+nerve-node center
 ```
 
 ## Unpair
 
 | From | How | Effect |
 |---|---|---|
-| The machine | `nerve-node center rm --center lab` | Tells the center if the link is up, forgets the center and deletes its key |
+| The machine | `nerve-node center rm lab` | Tells the center if the link is up, forgets the center and deletes its key |
 | The center | Overview, **Remove** on the machine | Ends the link. The node stops dialling that center and shows it as `revoked` until you run `center rm` |
 
 To pair again, remove the old pairing on both sides, then make a new link.
@@ -105,7 +105,7 @@ Each pairing has its own key. To replace the key for a center without pairing
 again, run on the machine, while the node runs and is linked to that center:
 
 ```sh
-nerve-node center rotate-key --center lab
+nerve-node center rotate-key lab
 ```
 
 The node makes a new key and sends it to the center over the link, signed with

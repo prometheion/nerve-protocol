@@ -28,15 +28,13 @@ fn only_installed() -> String {
 
 #[derive(Debug, Subcommand)]
 pub enum UiCmd {
-    /// Show whether the web UI is on, where it listens, and the labels of its tokens.
-    Status,
     /// Turn the web UI on. With no token yet, makes one named `first` and shows it once. Beyond loopback it is served over TLS with a certificate of its own, made the first time; compare its fingerprint with the one the browser shows.
     On {
         /// The address and port to listen on (127.0.0.1:7470 unless set). Any address but loopback, like 0.0.0.0:7470, makes the UI reachable from the network.
         #[arg(long, value_name = "ADDRESS")]
         listen: Option<String>,
         /// A host name the certificate names besides this machine's own and the address; can be given more than once.
-        #[arg(long = "name", value_name = "HOST")]
+        #[arg(long = "host", value_name = "HOST")]
         names: Vec<String>,
         /// Make a new certificate: every session ends, and the browser asks about it again.
         #[arg(long)]
@@ -44,9 +42,12 @@ pub enum UiCmd {
     },
     /// Turn the web UI off: it stops listening and every session ends. Its tokens stay.
     Off,
-    /// Make, list and revoke the tokens that log in to the web UI.
-    #[command(subcommand)]
-    Token(UiTokenCmd),
+    /// List the tokens that log in to the web UI by label, make one, or revoke one.
+    #[command(args_conflicts_with_subcommands = true)]
+    Token {
+        #[command(subcommand)]
+        cmd: Option<UiTokenCmd>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -56,8 +57,6 @@ pub enum UiTokenCmd {
         /// Its label, 1 to 32 of a-z, 0-9 and -.
         label: String,
     },
-    /// List the tokens by label, never the tokens.
-    Ls,
     /// Revoke a token; the sessions it opened end at once.
     Rm {
         /// The token's label.
@@ -67,16 +66,19 @@ pub enum UiTokenCmd {
 
 /// Whether `c` only reads.
 pub fn only_reads(c: &Option<UiCmd>) -> bool {
-    matches!(
-        c,
-        None | Some(UiCmd::Status) | Some(UiCmd::Token(UiTokenCmd::Ls))
-    )
+    matches!(c, None | Some(UiCmd::Token { cmd: None }))
 }
 
 /// Whether the web UI may run `c` itself (crate::owner::VIA_ENV): what reads,
 /// and revoking a token, which only narrows who gets in.
 pub fn allowed_from_the_web(c: &Option<UiCmd>) -> bool {
-    only_reads(c) || matches!(c, Some(UiCmd::Token(UiTokenCmd::Rm { .. })))
+    only_reads(c)
+        || matches!(
+            c,
+            Some(UiCmd::Token {
+                cmd: Some(UiTokenCmd::Rm { .. })
+            })
+        )
 }
 
 pub(super) async fn ui_cmd(
@@ -93,19 +95,19 @@ pub(super) async fn ui_cmd(
     let w = |out: &mut dyn Write, s: String| {
         let _ = writeln!(out, "{s}");
     };
-    match c.unwrap_or(UiCmd::Status) {
-        UiCmd::Status => {
-            let (cfg, _) = read_config(paths).await?;
-            let live = live_ui(paths).await?;
-            let print = current_fingerprint(paths, &cfg);
-            for line in status_lines(&cfg, live.as_ref(), print.as_deref()) {
-                w(out, line);
-            }
-            let mut data = status_data(&cfg, live.as_ref());
-            data["fingerprint"] = json!(print);
-            json::also("ui", data);
-            Ok(())
+    let Some(c) = c else {
+        let (cfg, _) = read_config(paths).await?;
+        let live = live_ui(paths).await?;
+        let print = current_fingerprint(paths, &cfg);
+        for line in status_lines(&cfg, live.as_ref(), print.as_deref()) {
+            w(out, line);
         }
+        let mut data = status_data(&cfg, live.as_ref());
+        data["fingerprint"] = json!(print);
+        json::also("ui", data);
+        return Ok(());
+    };
+    match c {
         UiCmd::On {
             listen,
             names,
@@ -118,7 +120,7 @@ pub(super) async fn ui_cmd(
             let tls = !addr.ip().is_loopback();
             if !tls && (new_cert || !names.is_empty()) {
                 return Err(format!(
-                    "{at} is loopback, which the web UI serves without TLS: --name and --new-cert are for an address beyond it"
+                    "{at} is loopback, which the web UI serves without TLS: --host and --new-cert are for an address beyond it"
                 ));
             }
             let live = live_ui(paths).await?;
@@ -200,7 +202,9 @@ pub(super) async fn ui_cmd(
             }
             Ok(())
         }
-        UiCmd::Token(UiTokenCmd::Add { label }) => {
+        UiCmd::Token {
+            cmd: Some(UiTokenCmd::Add { label }),
+        } => {
             if !nerve_policy::config::valid_ui_label(&label) {
                 return Err(format!(
                     "{label:?} is not a token label: 1 to 32 characters of a-z, 0-9 and -, not starting with -"
@@ -225,7 +229,7 @@ pub(super) async fn ui_cmd(
             json::also("token", json!({"label": label, "token": token}));
             Ok(())
         }
-        UiCmd::Token(UiTokenCmd::Ls) => {
+        UiCmd::Token { cmd: None } => {
             let (cfg, _) = read_config(paths).await?;
             if cfg.ui.tokens.is_empty() {
                 w(
@@ -239,7 +243,9 @@ pub(super) async fn ui_cmd(
             json::also("tokens", tokens_data(&cfg));
             Ok(())
         }
-        UiCmd::Token(UiTokenCmd::Rm { label }) => {
+        UiCmd::Token {
+            cmd: Some(UiTokenCmd::Rm { label }),
+        } => {
             edit(paths, |c| {
                 if c.ui.token(&label).is_none() {
                     return Err(format!("no web UI token is labelled {label}"));
@@ -298,7 +304,7 @@ fn ui_cert(
     all.push(crate::descriptor::host_name());
     for n in names {
         if n.is_empty() || n.contains(|c: char| c.is_whitespace() || c == '/') {
-            return Err(format!("--name {n:?} is not a host name"));
+            return Err(format!("--host {n:?} is not a host name"));
         }
         all.push(n.clone());
     }
@@ -345,7 +351,7 @@ fn new_token() -> (String, nerve_policy::config::UiToken) {
     (token, t)
 }
 
-/// When a token was made, as `ui token ls` says it.
+/// When a token was made, as `ui token` says it.
 fn made_text(made: &str) -> &str {
     if made.is_empty() {
         "at a time not kept"
@@ -515,8 +521,8 @@ mod tests {
         };
         for ok in [
             &["ui"][..],
-            &["ui", "status"],
-            &["ui", "token", "ls"],
+            &["ui"],
+            &["ui", "token"],
             &["ui", "token", "rm", "laptop"],
         ] {
             assert!(allowed_from_the_web(&parse(ok)), "{ok:?}");

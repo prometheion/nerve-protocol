@@ -183,7 +183,7 @@ pub fn has_conditions(rule: &str) -> bool {
 
 /// Why `rule` no longer fits the schema its action publishes now (an
 /// argument it names is gone or has another type, or the action is not
-/// offered), or `None`: what `rule ls` and the app flag. Such a rule no
+/// offered), or `None`: what `rule` and the app flag. Such a rule no
 /// longer decides as was meant ([`crate::conditions::stale`]).
 pub fn stale(
     rule: &str,
@@ -905,7 +905,7 @@ pub const GUARD_OLD: &[&str] = &[
 ];
 
 /// `rule` with its tab, carriage return and line feed written `\t`, `\r` and
-/// `\n`, as `rule ls` and the app show it: an older text of the guard holds
+/// `\n`, as `rule` and the app show it: an older text of the guard holds
 /// them (they end a command in a script), and a listing keeps one line a rule.
 pub fn escape_controls(rule: &str) -> String {
     let mut out = String::with_capacity(rule.len());
@@ -922,7 +922,7 @@ pub fn escape_controls(rule: &str) -> String {
 
 /// Refuses `rule` if it is the listed form ([`escape_controls`]) of a rule
 /// with a tab or line break: of one of the guard's (also an older text) or of
-/// an entry of `listed`, the list it goes on. A rule pasted from `rule ls` so
+/// an entry of `listed`, the list it goes on. A rule pasted from `rule` so
 /// would look like that rule and be another: there `\n` is the letter `n`
 /// (and on Windows `\` a separator). Any other text is taken as it is, so a
 /// path like `C:\tools\x.exe` is a rule on every OS.
@@ -936,7 +936,7 @@ pub fn check_not_a_listed_form(rule: &str, listed: &[String]) -> Result<(), Stri
         return Ok(());
     }
     Err(format!(
-        "rule {rule:?} is how `rule ls` writes a rule with a tab or line break, not the rule: pasted so, a `\\n` is the letter n. Add the rule itself (`nerve-node rule guard` puts the guard's rules on), or give `rule rm` and `rule edit` the listed text"
+        "rule {rule:?} is how `rule` writes a rule with a tab or line break, not the rule: pasted so, a `\\n` is the letter n. Add the rule itself (`nerve-node rule guard` puts the guard's rules on), or give `rule rm` and `rule edit` the listed text"
     ))
 }
 

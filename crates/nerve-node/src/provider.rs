@@ -1237,12 +1237,12 @@ async fn check(
     })
 }
 
-/// What `cap ls` shows (docs/user/commands.md): every action of the node's
+/// What `cap` shows (docs/user/commands.md): every action of the node's
 /// own capabilities and of the attached programs', each with its effect,
 /// where it comes from and how each center has it set (`cap set`: `on`,
 /// `off`, `hidden`, or `default` where the mode alone decides; for
 /// `settings`, which no switch governs, `granted` or `not granted` by
-/// `center grant settings`); an action a
+/// `center settings`); an action a
 /// program offered that the node left out, with the reason; and the
 /// programs the owner allowed, attached or not. `live` is the running node:
 /// without it no program's capabilities are known, and no row says whether

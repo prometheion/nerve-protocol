@@ -1656,7 +1656,7 @@ impl Shared {
     }
 
     /// What the last sync of the folders' ACLs left, on the installed Linux
-    /// node (crate::acl): `status`'s `folder_grants`.
+    /// node (crate::acl): `status`'s `folder_access`.
     pub fn folder_grants(&self) -> Value {
         #[cfg(target_os = "linux")]
         {
@@ -1695,7 +1695,7 @@ impl Shared {
                     "until": c.policy.until,
                     "as_owner": c.policy.as_owner,
                     // The owner's network switch for its folder-mode
-                    // commands (`folder network off`).
+                    // commands (`network off`).
                     "no_network": c.policy.no_network,
                     // How that stands now: held, as_owner or not_held; none
                     // while it is on.
@@ -1738,7 +1738,7 @@ impl Shared {
             "network_rules": self.network_held(),
             "command_limits": crate::cgroup::status(&cfg.limits.command, &self.cgroups),
             "providers": self.providers.status(),
-            "folder_grants": grants,
+            "folder_access": grants,
             // What nerve-run may read of the owner's home without Landlock.
             "home_warning": self.home_warning(&cfg),
             // What this kernel's Landlock does not guard.
@@ -1795,25 +1795,25 @@ pub const KEYRING_NOT_CONFINED: &str = "commands cannot be confined on this mach
 pub const KEYRING_NOT_CONFINED: &str = "commands cannot be confined on this machine while the node's keys are in the system keyring: the AppContainer here is not known to keep a command from the Credential Manager the keys are in, so folder mode runs no command; `nerve-node config set machine.secret_storage file` brings them back";
 
 /// Why a pairing's commands may not run where its owner turned their
-/// network off (`folder network off`) and this machine cannot hold them to
+/// network off (`network off`) and this machine cannot hold them to
 /// that ([`Shared::network_refusal`]).
 #[cfg(not(windows))]
-pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this center's commands, and this machine cannot keep them off it: that needs the kernel's seccomp filters on x86_64 or aarch64, which this node cannot use here, so it runs none of its commands; the owner turns the network back on with `nerve-node folder network on`";
+pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this center's commands, and this machine cannot keep them off it: that needs the kernel's seccomp filters on x86_64 or aarch64, which this node cannot use here, so it runs none of its commands; the owner turns the network back on with `nerve-node network on`";
 /// [`NETWORK_NOT_HELD`] on Windows, where nothing holds a command to no
 /// network.
 #[cfg(windows)]
-pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this center's commands, and this machine cannot keep them off it: Windows has no rule here that does, so the node runs none of its commands; the owner turns the network back on with `nerve-node folder network on`";
+pub const NETWORK_NOT_HELD: &str = "the owner turned the network off for this center's commands, and this machine cannot keep them off it: Windows has no rule here that does, so the node runs none of its commands; the owner turns the network back on with `nerve-node network on`";
 
 /// Why a pairing's commands may not run where its owner turned their
 /// network off and they run as the owner in the mode it is in
 /// ([`Shared::network_refusal`]): nothing holds them back from the owner's
 /// programs, which reach the network for them.
-pub const NETWORK_AS_OWNER: &str = "the owner turned the network off for this center's commands, and in this mode they run as the owner, which nothing keeps off the network, so the node runs none of them; the owner turns the network back on with `nerve-node folder network on`, or has them run as nerve-run: `nerve-node mode set folder`, or `nerve-node mode set allowlist` without `--as-owner`";
+pub const NETWORK_AS_OWNER: &str = "the owner turned the network off for this center's commands, and in this mode they run as the owner, which nothing keeps off the network, so the node runs none of them; the owner turns the network back on with `nerve-node network on`, or has them run as nerve-run: `nerve-node mode folder`, or `nerve-node mode allowlist` without `--as-owner`";
 
 /// Why a pairing's commands may not run where the owner turned their network
 /// off on a node run by hand, which runs them as its own user
 /// ([`Shared::network_refusal`]).
-pub const NETWORK_AS_OWNER_BY_HAND: &str = "the owner turned the network off for this center's commands, and this node, run by hand, runs them as its own user, which nothing here keeps off the network (only folder mode does, as a user that is not root and on Linux 7.1 or later, whose Landlock tells unix sockets apart), so the node runs none of them; the owner turns the network back on with `nerve-node folder network on`, or installs the node, which runs folder mode's commands as nerve-run";
+pub const NETWORK_AS_OWNER_BY_HAND: &str = "the owner turned the network off for this center's commands, and this node, run by hand, runs them as its own user, which nothing here keeps off the network (only folder mode does, as a user that is not root and on Linux 7.1 or later, whose Landlock tells unix sockets apart), so the node runs none of them; the owner turns the network back on with `nerve-node network on`, or installs the node, which runs folder mode's commands as nerve-run";
 
 /// Why a command that was decided while the owner's network switch was off
 /// does not start: the owner turned it on while the call waited for its
@@ -1860,7 +1860,7 @@ pub fn by_hand_apart(full_rights: bool, landlock_abi: Option<i32>) -> bool {
 /// Why a command on the sudo list does not run while the owner keeps the
 /// pairing's commands off the network: it runs outside the filter that
 /// holds them, with rights that reach past any.
-pub const NETWORK_SUDO: &str = "the owner turned the network off for this center's commands, and a command on the sudo list runs outside what keeps them off it, with full rights, so none runs while it is off; the owner turns the network back on with `nerve-node folder network on`";
+pub const NETWORK_SUDO: &str = "the owner turned the network off for this center's commands, and a command on the sudo list runs outside what keeps them off it, with full rights, so none runs while it is off; the owner turns the network back on with `nerve-node network on`";
 
 /// Why commands of `folder` mode may not run ([`Shared::unconfined_as`]),
 /// or `None`: `sandbox` says whether the machine confines them, `service`
@@ -2531,7 +2531,7 @@ const FROM_A_COMMAND: &str =
     "refused: this request comes from a command the node runs for a center";
 
 /// One request on Windows' control pipe (crate::pipe): the status, the
-/// capabilities for `cap ls` (crate::provider::listing), and the changes to
+/// capabilities for `cap` (crate::provider::listing), and the changes to
 /// a center's folders, checked and made as the CLI makes them on
 /// the file (crate::folder_change). The node then brings the folder grants
 /// in line before it answers, as the CLI does after it wrote the file.
@@ -2765,7 +2765,7 @@ pub(crate) fn control(
     match method {
         "status" => Reply::Ok(shared.status()),
         // Every capability with its effect and settings, the programs'
-        // too (crate::provider::listing), for `cap ls`.
+        // too (crate::provider::listing), for `cap`.
         "caps.list" => Reply::Ok(crate::provider::listing(
             &shared.config(),
             Some(shared),
@@ -2835,7 +2835,7 @@ pub(crate) fn control(
             {
                 let cap = name.split_once('.').map_or(&name[..], |(c, _)| c);
                 return Reply::Err(format!(
-                    "center {center} keeps a capability of its own under {cap}, so it is offered neither that one nor a program's {cap}: an on or allow rule for {name} now would go with the center's own when it is removed; remove the center's first (cap ls --center {center} lists them, cap rm NAME --center {center} removes one), then turn on the program's"
+                    "center {center} keeps a capability of its own under {cap}, so it is offered neither that one nor a program's {cap}: an on or allow rule for {name} now would go with the center's own when it is removed; remove the center's first (cap --center {center} lists them, cap rm NAME --center {center} removes one), then turn on the program's"
                 ));
             }
             // Who made it, as the CLI names its user (crate::cli::invoker):
@@ -4861,17 +4861,17 @@ mod tests {
         let paths = daemon.paths();
         let saved = SettingsStore::peek(&paths.config_file(), &paths.config_key()).unwrap();
         assert_eq!(saved.center("home").unwrap().policy.folders, folders());
-        let set = FolderChange::Set {
+        let set = FolderChange::Add {
             path: folder.clone(),
-            given: folder.clone(),
-            changes: vec!["-x".into(), "+w".into()],
+            access: nerve_policy::config::Access::parse("rw").unwrap(),
+            recorded: true,
         };
         let v = call(1000, set.method(), set.params(None)).await.unwrap();
         assert_eq!(v["access"], "rw");
         assert_eq!(folders()[0].access.to_chmod(), "rw-");
         assert_eq!(places(), std::slice::from_ref(&folder));
         // The same checks as the CLI's: a folder the center does not have,
-        // a right that is none, a path that is not absolute, and no other
+        // a right that is not one, a path that is not absolute, and no other
         // change than a folder's.
         let rm_other = FolderChange::Rm {
             path: "/elsewhere".into(),
@@ -4881,10 +4881,10 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e, "/elsewhere is not a folder of this center");
-        let e = call(1000, "folder.add", json!({"path": folder, "access": ""}))
+        let e = call(1000, "folder.add", json!({"path": folder, "access": "rq"}))
             .await
             .unwrap_err();
-        assert!(e.contains("grants some right"), "{e}");
+        assert!(e.contains("not a folder flag"), "{e}");
         let e = call(1000, "folder.add", json!({"path": "work", "access": "r"}))
             .await
             .unwrap_err();
@@ -5031,7 +5031,7 @@ mod tests {
         daemon.stop().await;
     }
 
-    /// Windows' pipe answers `cap ls` as the socket does: the running node's
+    /// Windows' pipe answers `cap` as the socket does: the running node's
     /// listing.
     #[tokio::test]
     async fn the_pipe_lists_the_capabilities_of_the_running_node() {

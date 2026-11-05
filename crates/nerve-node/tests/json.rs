@@ -27,7 +27,7 @@ fn every_answer_is_json_on_stdout() {
     let (ok, v) = node(d.path(), &["status"]);
     assert!(ok, "{v}");
     assert_eq!(v["daemon"], "not running", "{v}");
-    let (ok, v) = node(d.path(), &["mode", "set", "user"]);
+    let (ok, v) = node(d.path(), &["mode", "user"]);
     assert!(!ok, "{v}");
     let e = v["error"].as_str().unwrap();
     assert!(e.contains("center"), "{e}");
@@ -97,45 +97,21 @@ fn with_stdin(dir: &std::path::Path, args: &[&str], input: &str) -> (bool, serde
 #[test]
 fn a_proxy_password_comes_on_stdin() {
     let d = tempfile::tempdir().unwrap();
+    // A user name without a password reads it; an empty one is refused.
     let (ok, v) = with_stdin(
         d.path(),
-        &[
-            "proxy",
-            "set",
-            "https://relay.example:7490",
-            "--password-stdin",
-        ],
-        "s3cret\n",
+        &["proxy", "set", "https://laptop@relay.example:7490"],
+        "\n",
     );
     assert!(!ok);
-    assert!(v["error"].as_str().unwrap().contains("user name"), "{v}");
+    assert!(v["error"].as_str().unwrap().contains("no password"), "{v}");
     let (ok, v) = with_stdin(
         d.path(),
-        &[
-            "proxy",
-            "set",
-            "https://laptop:x@relay.example:7490",
-            "--password-stdin",
-        ],
-        "s3cret\n",
-    );
-    assert!(!ok);
-    assert!(
-        v["error"].as_str().unwrap().contains("password already"),
-        "{v}"
-    );
-    let (ok, v) = with_stdin(
-        d.path(),
-        &[
-            "proxy",
-            "set",
-            "https://laptop@relay.example:7490",
-            "--password-stdin",
-        ],
+        &["proxy", "set", "https://laptop@relay.example:7490"],
         "s3cret\n",
     );
     assert!(ok, "{v}");
-    let (_, ls) = node(d.path(), &["proxy", "ls"]);
+    let (_, ls) = node(d.path(), &["proxy"]);
     assert!(ls.to_string().contains("laptop"), "{ls}");
     assert!(!ls.to_string().contains("s3cret"), "{ls}");
     let config = std::fs::read_to_string(d.path().join("config/node.toml")).unwrap();
@@ -174,12 +150,7 @@ fn a_restore_says_what_it_did_as_data() {
     let d = tempfile::tempdir().unwrap();
     let (ok, v) = with_stdin(
         d.path(),
-        &[
-            "proxy",
-            "set",
-            "https://laptop@relay.example:7490",
-            "--password-stdin",
-        ],
+        &["proxy", "set", "https://laptop@relay.example:7490"],
         "s3cret\n",
     );
     assert!(ok, "{v}");

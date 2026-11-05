@@ -260,7 +260,9 @@ pub fn refused(cmd: &Cmd) -> Option<String> {
             "setup",
             "it can install a system keyring and restart the service",
         ),
-        Cmd::Sudo(SudoCmd::On) => (
+        Cmd::Sudo {
+            cmd: Some(SudoCmd::On),
+        } => (
             "sudo on",
             if cfg!(windows) {
                 "it lets commands run with an administrator's rights"
@@ -289,7 +291,7 @@ pub fn needs_admin(cmd: &Cmd) -> bool {
             ConfigCmd::Set { key, .. }
             | ConfigCmd::Unset { key }
             | ConfigCmd::Add { key, .. }
-            | ConfigCmd::Remove { key, .. },
+            | ConfigCmd::Rm { key, .. },
         ) => ROOT_ONLY.contains(&key.as_str()),
         c => refused(c).is_some(),
     }
@@ -442,7 +444,8 @@ impl FileJob {
             _ => return None,
         };
         let whole = |p: &Path| match &cwd {
-            Some(c) if p.is_relative() => c.join(p),
+            // `-` is stdin, no file.
+            Some(c) if p.is_relative() && p != Path::new("-") => c.join(p),
             _ => p.to_path_buf(),
         };
         Some(FileJob {
@@ -462,17 +465,18 @@ pub fn reads_input(cmd: &Cmd) -> bool {
     use crate::cli::{CapCmd, CenterCmd, ProxyCmd};
     match cmd {
         Cmd::Setup => true,
-        Cmd::Cap(CapCmd::Add { spec, .. } | CapCmd::Edit { spec, .. }) => {
-            spec.params_stdin || spec.result_stdin
-        }
-        Cmd::Center(CenterCmd::Add {
-            yes, link_stdin, ..
-        }) => !yes || *link_stdin,
-        Cmd::Proxy(ProxyCmd::Set {
-            password_stdin,
-            headers_stdin,
+        Cmd::Cap {
+            cmd: Some(CapCmd::Add { spec, .. } | CapCmd::Edit { spec, .. }),
             ..
-        }) => *password_stdin || *headers_stdin,
+        } => spec.params_stdin() || spec.result_stdin(),
+        Cmd::Center {
+            cmd: Some(CenterCmd::Add { yes, link, .. }),
+        } => !yes || link == "-",
+        // A URL with a user name and no password reads the password, and
+        // `--header -` the headers.
+        Cmd::Proxy {
+            cmd: Some(ProxyCmd::Set { url, headers, .. }),
+        } => headers.iter().any(|h| h == "-") || crate::cli::proxy_wants_password(url),
         _ => false,
     }
 }
@@ -555,9 +559,10 @@ pub fn forwarded_args(
 /// The folder or file `cmd` names, which the node gets as a whole path.
 fn named_path(cmd: &Cmd) -> Option<&PathBuf> {
     match cmd {
-        Cmd::Folder(
-            FolderCmd::Add { path, .. } | FolderCmd::Set { path, .. } | FolderCmd::Rm { path, .. },
-        ) => Some(path),
+        Cmd::Folder {
+            cmd: Some(FolderCmd::Add { path, .. } | FolderCmd::Rm { path, .. }),
+            ..
+        } => Some(path),
         Cmd::Backup { file, .. } | Cmd::Restore { file, .. } => Some(file),
         _ => None,
     }
@@ -565,7 +570,7 @@ fn named_path(cmd: &Cmd) -> Option<&PathBuf> {
 
 /// Which word of `given` is the path `path` the command was parsed with:
 /// the one that, put in place by another, changes that path. A command word
-/// or another argument may be spelt like it (`folder add folder +rwx`).
+/// or another argument may be spelt like it (`folder add folder rwx`).
 fn path_word(given: &[std::ffi::OsString], path: &Path) -> Option<usize> {
     const OTHER: &str = "nerve-forwarded-path";
     (0..given.len())
@@ -1435,22 +1440,22 @@ async fn locked_meanwhile(locked: &mut Option<tokio::sync::watch::Receiver<u64>>
 
 /// Whether `cmd` only reads: it changes nothing of the node.
 fn only_reads(cmd: &Cmd) -> bool {
-    use crate::cli::{
-        CapCmd, CenterCmd, ConfigCmd, ProviderCmd, ProxyCmd, RelayCmd, RuleCmd, ServiceCmd,
-    };
+    use crate::cli::{ConfigCmd, ServiceCmd};
     matches!(
         cmd,
         Cmd::Status
             | Cmd::Audit { clear: None, .. }
             | Cmd::Log { clear: None, .. }
-            | Cmd::Center(CenterCmd::Ls)
-            | Cmd::Folder(FolderCmd::Ls { .. })
-            | Cmd::Rule(RuleCmd::Ls { .. })
-            | Cmd::Cap(CapCmd::Ls { .. } | CapCmd::Provider(ProviderCmd::Ls))
+            | Cmd::Center { cmd: None }
+            | Cmd::Mode { mode: None, .. }
+            | Cmd::Folder { cmd: None, .. }
+            | Cmd::Rule { cmd: None, .. }
+            | Cmd::Cap { cmd: None, .. }
+            | Cmd::Provider { cmd: None }
             | Cmd::Config(ConfigCmd::Get { .. })
-            | Cmd::Proxy(ProxyCmd::Ls)
-            | Cmd::Relay(RelayCmd::Ls)
-            | Cmd::Sudo(SudoCmd::Status)
+            | Cmd::Proxy { cmd: None }
+            | Cmd::Relay { cmd: None }
+            | Cmd::Sudo { cmd: None }
             | Cmd::Service(ServiceCmd::Status)
     ) || matches!(cmd, Cmd::Ui { cmd } if crate::cli::ui::only_reads(cmd))
 }
@@ -2275,24 +2280,24 @@ mod tests {
             &["status"][..],
             &["audit", "--last", "200"],
             &["log", "--problems"],
-            &["center", "ls"],
-            &["rule", "ls", "--center", "home"],
+            &["center"],
+            &["rule", "--center", "home"],
             &["config", "get", "log.level"],
-            &["relay", "ls"],
+            &["relay"],
             &["service", "status"],
-            &["cap", "ls"],
-            &["cap", "provider", "ls"],
+            &["cap"],
+            &["provider"],
         ] {
             assert!(only_reads(&cli(args).cmd), "{args:?}");
         }
         for args in [
             &["config", "set", "log.level", "debug"][..],
             &["rule", "add", "allow", "git status"],
-            &["center", "pause", "--center", "home"],
+            &["center", "pause", "home"],
             &["panic"],
             &["log", "clear"],
             &["audit", "clear"],
-            &["cap", "provider", "rm", "desk"],
+            &["provider", "rm", "desk"],
         ] {
             assert!(!only_reads(&cli(args).cmd), "{args:?}");
         }
@@ -2327,18 +2332,18 @@ mod tests {
         assert_eq!(refused(&cli(&["setup"]).cmd).is_some(), cfg!(windows));
         for args in [
             &["status"][..],
-            &["center", "ls"],
+            &["center"],
             &["center", "add", "nerve://pair?x", "--yes"],
             &["rule", "add", "allow", "ls"],
-            &["mode", "set", "folder"],
+            &["mode", "folder"],
             &["config", "set", "log.level", "debug"],
             &["sudo", "off"],
-            &["sudo", "status"],
+            &["sudo"],
             &["audit", "--last", "5"],
             &["log", "--follow"],
             &["panic"],
             &["unlock"],
-            &["proxy", "rm"],
+            &["proxy", "off"],
             // With the file the owner's program hands over (item 14).
             &["backup", "/tmp/b"],
             &["restore", "/tmp/b"],
@@ -2427,13 +2432,13 @@ mod tests {
             "folder",
             "add",
             "src",
-            "+r",
+            "r",
         ];
         let c = cli(&given);
         let whole = home.join("src");
         assert_eq!(
             forwarded_args(&c, os(&given), Some(home.clone())).unwrap(),
-            ["folder", "add", &*whole.to_string_lossy(), "+r"]
+            ["folder", "add", &*whole.to_string_lossy(), "r"]
         );
         // Without a folder to make it whole, it is refused.
         assert!(forwarded_args(&c, os(&given), None).is_err());
@@ -2476,17 +2481,15 @@ mod tests {
         // A command word spelt like the path stays a word: the path is
         // the argument the command was parsed with.
         for (given, at) in [
-            (vec!["folder", "add", "folder", "+rwx"], 2),
-            (vec!["folder", "add", "add", "+r"], 2),
-            (vec!["folder", "set", "set", "-w"], 2),
+            (vec!["folder", "add", "folder", "rwx"], 2),
+            (vec!["folder", "add", "add", "r"], 2),
             (vec!["folder", "rm", "rm"], 2),
             (vec!["backup", "backup", "--overwrite"], 1),
             (vec!["restore", "restore"], 1),
             // After `--` too: the words there go as they are, the path
             // among them not.
-            (vec!["folder", "add", "--", "srv", "+rw"], 3),
+            (vec!["folder", "add", "--", "srv", "rw"], 3),
             (vec!["folder", "rm", "--", "srv"], 3),
-            (vec!["folder", "set", "--", "srv", "-w"], 3),
         ] {
             let mut want: Vec<String> = given.iter().map(|w| w.to_string()).collect();
             want[at] = home.join(given[at]).display().to_string();
@@ -2526,9 +2529,13 @@ mod tests {
         assert!(!reads_input(
             &cli(&["center", "add", "nerve://pair?x", "--yes"]).cmd
         ));
+        assert!(reads_input(&cli(&["center", "add", "-", "--yes"]).cmd));
+        // A user name without a password, or `--header -`, reads them.
+        assert!(reads_input(&cli(&["proxy", "set", "http://u@h:1"]).cmd));
         assert!(reads_input(
-            &cli(&["proxy", "set", "http://u@h:1", "--password-stdin"]).cmd
+            &cli(&["proxy", "set", "http://h:1", "--header", "-"]).cmd
         ));
+        assert!(!reads_input(&cli(&["proxy", "set", "http://u:p@h:1"]).cmd));
         assert!(!reads_input(&cli(&["proxy", "set", "http://h:1"]).cmd));
         // A capability's schema comes on stdin when the owner says so.
         for (args, reads) in [
@@ -2539,13 +2546,13 @@ mod tests {
                     "a.b",
                     "--effect",
                     "read",
-                    "--params-stdin",
+                    "--params=-",
                     "--",
                     "x",
                 ][..],
                 true,
             ),
-            (&["cap", "edit", "a.b", "--result-stdin"], true),
+            (&["cap", "edit", "a.b", "--result=-"], true),
             (
                 &[
                     "cap", "add", "a.b", "--effect", "read", "--params", "none", "--", "x",

@@ -566,14 +566,14 @@ fn decide_with(policy: &CenterPolicy, env: &Env, call: &Call, rules: &Rules) -> 
         // value of another type, or leaves out, counts (fails closed).
         if let Some(rule) = deny.find_args(call.cap, call.action, &arg, true) {
             // A pinned string may hold a line break; the reason stays one
-            // line, the rule as `rule ls` shows it.
+            // line, the rule as `rule` shows it.
             let rule = crate::rules::escape_controls(rule);
             return Decision::Forbidden(format!("{}.{} is denied ({rule})", call.cap, call.action));
         }
     } else {
         for t in &targets {
             if let Some(rule) = find_rule(deny, call, t) {
-                // The rule as `rule ls` shows it: the guard's hold tabs and
+                // The rule as `rule` shows it: the guard's hold tabs and
                 // line breaks, and a reason is one line in the audit and
                 // the log.
                 let rule = crate::rules::escape_controls(rule);
@@ -808,7 +808,7 @@ fn by_sudo_list(policy: &CenterPolicy, call: &Call, reasons: &mut Vec<String>) -
             // PowerShell's `start` is Start-Process), so a wildcard cannot
             // say what they are handed.
             Some(what) => format!(
-                "a wildcard sudo entry does not cover a line with {what}: it covers no expression character, invisible character or word that starts another command; add an entry for the whole line with `nerve-node rule add sudo`, without --wildcard"
+                "a wildcard sudo entry does not cover a line with {what}: it covers no expression character, invisible character or word that starts another command; add an entry for the whole line with `nerve-node rule add allow`, without a trailing *"
             ),
             None => "a sudo command runs only when the sudo allow list names it".into(),
         });
@@ -3137,7 +3137,7 @@ mod tests {
                 assert!(
                     matches!(&d, Decision::Forbidden(m)
                         if m.contains(&format!("does not cover a line with {what}:"))
-                            && m.contains("with `nerve-node rule add sudo`, without --wildcard")
+                            && m.contains("with `nerve-node rule add allow`, without a trailing *")
                             && !m.contains("'<")),
                     "{mode:?} {line}: {d:?}"
                 );

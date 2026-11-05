@@ -1206,7 +1206,7 @@ pub fn containers(paths: &NodePaths, node_id: &str) -> Vec<String> {
 /// The name of the container of the pairing `node_id` whose profile this
 /// account has, of [`containers`]; [`container`] when it has none. So the
 /// owner tells the profiles of the nodes they keep from leftovers
-/// (`center ls`).
+/// (`center`).
 pub fn profile_name(paths: &NodePaths, node_id: &str) -> String {
     #[cfg(windows)]
     {
@@ -2848,7 +2848,7 @@ mod tests {
         assert_ne!(container_at(typed, "n"), container_at(default, "n"));
         let paths = NodePaths::new("/c", "/s/state");
         assert_eq!(containers(&paths, "n")[0], container(&paths, "n"));
-        // `center ls` names the one with a profile, else the node's own.
+        // `center` names the one with a profile, else the node's own.
         let mut store = FakeProfiles::default();
         assert_eq!(profile_in(&paths, "n", &mut store), container(&paths, "n"));
         let last = containers(&paths, "n").pop().unwrap();

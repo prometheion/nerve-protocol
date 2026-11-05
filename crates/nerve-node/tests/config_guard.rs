@@ -258,7 +258,7 @@ async fn a_file_with_a_wrong_mac_is_refused_at_start_up() {
     let refused = config_events(&o, "refused");
     assert_eq!(refused.len(), 1, "{refused:?}");
     // The CLI refuses to work on it as well ...
-    assert!(cli(&o.paths, &["center", "ls"]).await.is_err());
+    assert!(cli(&o.paths, &["center"]).await.is_err());
     // ... until the owner looks at it and takes it.
     cli(&o.paths, &["config", "accept"]).await.unwrap();
     assert_eq!(config_events(&o, "accepted").len(), 1);
@@ -320,7 +320,7 @@ async fn an_earlier_signed_file_put_back_is_refused_at_start_up() {
         "{refused:?}"
     );
     // The CLI refuses to work on it as well, and the file is as it was put.
-    assert!(cli(&o.paths, &["center", "ls"]).await.is_err());
+    assert!(cli(&o.paths, &["center"]).await.is_err());
     assert_eq!(std::fs::read(&file).unwrap(), earlier);
 
     // A running node does not take it back either, also when a restart
@@ -351,7 +351,7 @@ async fn an_owner_change_through_the_local_interface_is_applied_and_signed() {
         .await
         .unwrap();
     // From allowlist, as the change below is to folder mode.
-    cli(&o.paths, &["mode", "set", "allowlist"]).await.unwrap();
+    cli(&o.paths, &["mode", "allowlist"]).await.unwrap();
     let node = Daemon::start(o.clone()).await.unwrap();
     let file = o.paths.config_file();
     let work = o.home.join("work");
@@ -359,10 +359,10 @@ async fn an_owner_change_through_the_local_interface_is_applied_and_signed() {
 
     // The CLI reaches the running node over its control socket; the change
     // is in force at once, with no file watch and no tick.
-    cli(&o.paths, &["folder", "add", work.to_str().unwrap(), "+rw"])
+    cli(&o.paths, &["folder", "add", work.to_str().unwrap(), "rw"])
         .await
         .unwrap();
-    cli(&o.paths, &["mode", "set", "folder"]).await.unwrap();
+    cli(&o.paths, &["mode", "folder"]).await.unwrap();
     let cfg = node.config();
     assert_eq!(cfg.centers[0].policy.mode, nerve_policy::Mode::Folder);
     assert_eq!(cfg.centers[0].policy.folders.len(), 1);
@@ -476,7 +476,7 @@ async fn a_command_cannot_read_the_config_over_the_control_socket() {
     let mut conn = linked(&mut center).await;
 
     // The owner reads it through the same CLI.
-    let owner = cli(&paths, &["center", "ls"]).await.unwrap();
+    let owner = cli(&paths, &["center"]).await.unwrap();
     assert!(owner.contains(CENTER_SHOWN), "{owner}");
     assert!(
         cli(&paths, &["status"])
@@ -489,7 +489,7 @@ async fn a_command_cannot_read_the_config_over_the_control_socket() {
     // not stop a connection to the socket (with the keys in files they leave
     // connecting alone), and the command runs as the node's own user. It
     // must get nothing from it.
-    let r = run_command(&mut conn, &work, &nerve(&o, "center ls")).await;
+    let r = run_command(&mut conn, &work, &nerve(&o, "center")).await;
     let shown = format!("{}{}", r["stdout"], r["stderr"]);
     assert!(!shown.contains(CENTER_SHOWN), "{r}");
     assert!(shown.contains("refused"), "{r}");
@@ -530,7 +530,7 @@ async fn a_command_without_a_sandbox_is_refused_while_it_runs() {
         &o.home,
         &format!(
             "(cd .local/state && cat nerve/run/ctl.token) > /dev/null && {}",
-            nerve(&o, "center ls")
+            nerve(&o, "center")
         ),
     )
     .await;
@@ -541,14 +541,14 @@ async fn a_command_without_a_sandbox_is_refused_while_it_runs() {
     let r = run_command(
         &mut conn,
         &work,
-        &nerve(&o, &format!("folder add {} +rw", extra.display())),
+        &nerve(&o, &format!("folder add {} rw", extra.display())),
     )
     .await;
     assert!(format!("{r}").contains("comes from a command"), "{r}");
     assert_eq!(node.config(), before);
     // The owner's, from outside any command, is answered.
     assert!(
-        cli(&paths, &["center", "ls"])
+        cli(&paths, &["center"])
             .await
             .unwrap()
             .contains(CENTER_SHOWN)
@@ -576,7 +576,7 @@ async fn a_process_that_outlives_its_command_cannot_change_the_config() {
     // file `go`, which comes once the call has returned, and then asks the
     // node to add a folder to the center's policy. It lets go of the output
     // the call waits for.
-    let change = nerve(&o, &format!("folder add {} +rw", extra.display()));
+    let change = nerve(&o, &format!("folder add {} rw", extra.display()));
     let r = run_command(
         &mut conn,
         &work,
@@ -611,7 +611,7 @@ async fn a_process_that_outlives_its_command_cannot_change_the_config() {
     assert_eq!(NodeConfig::load(&o.paths.config_file()).unwrap(), before);
 
     // The owner's CLI still changes it.
-    cli(&paths, &["folder", "add", extra.to_str().unwrap(), "+rw"])
+    cli(&paths, &["folder", "add", extra.to_str().unwrap(), "rw"])
         .await
         .unwrap();
     assert_ne!(node.config(), before);

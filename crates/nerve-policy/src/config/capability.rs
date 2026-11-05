@@ -452,7 +452,7 @@ impl ConfigCapability {
     }
 
     /// The capability as JSON, as the owner declared it, the schemas as
-    /// JSON: what `cap ls --json` gives, and the form a center sends and is
+    /// JSON: what `cap --json` gives, and the form a center sends and is
     /// given its own in (`settings.cap-add`, `settings.get`).
     pub fn entry(&self) -> Value {
         json!({
@@ -471,7 +471,7 @@ impl ConfigCapability {
     }
 
     /// The command as declared, as one line ([`ConfigCapability::line`]),
-    /// for `cap ls`.
+    /// for `cap`.
     pub fn command_line(&self) -> String {
         Self::line(&self.command)
     }

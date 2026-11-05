@@ -213,7 +213,7 @@ async fn a_backup_of_another_node_is_refused_without_replace() {
     .await
     .unwrap();
     assert!(b.key_file("one").exists() && !b.key_file("two").exists());
-    let list = cli(&b, &["center", "ls"]).await.unwrap();
+    let list = cli(&b, &["center"]).await.unwrap();
     assert!(list.contains("one") && !list.contains("two"), "{list}");
 }
 
@@ -299,5 +299,5 @@ async fn a_restore_can_leave_the_proxy_out() {
         .unwrap_err();
     assert!(err.contains("not set"), "{err}");
     // The pairing is there all the same.
-    assert!(cli(&bare, &["center", "ls"]).await.unwrap().contains("lab"));
+    assert!(cli(&bare, &["center"]).await.unwrap().contains("lab"));
 }

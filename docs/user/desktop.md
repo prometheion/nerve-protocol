@@ -255,9 +255,9 @@ switches are on [Capabilities](#capabilities).
 
 On **Permissions**, the **Mode** names who runs the commands: in folder
 mode `nerve-run`, in user mode you; in allowlist mode **Run them as you**
-switches between `nerve-run` and you (`mode set allowlist --as-owner`). In
+switches between `nerve-run` and you (`mode allowlist --as-owner`). In
 every mode **No network for its commands** keeps them off the network
-(`folder network off`); in a mode where they run as you, or on a machine
+(`network off`); in a mode where they run as you, or on a machine
 where the node cannot keep them off it, the page then says that none of
 that center's commands runs, and it says that no command of its sudo list
 runs meanwhile. On **Centers**, a banner says when nothing keeps the
@@ -298,7 +298,7 @@ installed node keeps its keys in files ([Windows](service.md#windows)).
 
 ## Capabilities
 
-**Capabilities** (Ctrl+9) shows what the node offers, as `nerve-node cap ls`
+**Capabilities** (Ctrl+9) shows what the node offers, as `nerve-node cap`
 does: its own capabilities, the [capabilities of your
 `node.toml`](config-capabilities.md) and those of the programs you allow
 ([providers](providers.md)). Each action, and each state key, event or
@@ -315,7 +315,7 @@ center [added itself](config-capabilities.md#capabilities-a-center-adds)
 shows with the source `center <name>`, its switches and the whole command
 it runs, over as many lines as it takes, and only while that center is
 chosen: its line for the agent is the center's own words, so read the
-command before you turn on one that senses or acts (`nerve-node cap ls
+command before you turn on one that senses or acts (`nerve-node cap
 --center <name>` prints it too). Remove it with `nerve-node cap rm NAME --center <name>`.
 A stopped node shows its own capabilities and those of `node.toml`; the
 programs' show while it runs.
@@ -335,7 +335,7 @@ read it, stays in the form with its reason. Removing one
 (`cap rm`) asks first.
 
 **Programs** lists the programs allowed as providers, whether each is
-attached, and a row to allow one by its name and its file (`cap provider
+attached, and a row to allow one by its name and its file (`provider
 allow`), which **Choose…** picks.
 
 A node run by hand offers no capabilities of `node.toml` (they run as

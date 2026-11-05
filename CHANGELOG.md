@@ -164,6 +164,22 @@
 - What breaks: `/var/lib/nerve-run` is no command's home any more and the node does not move what it held: what the programs of `nerve-run` kept there (`.cache`, `.config`, `.gitconfig`, `.local`, `.ssh` and the like) is lost to them, ssh keys included (ssh looks for them there, not in `HOME`; `docs/user/modes.md` says how to give a pairing one); delete all of it (`sudo rm -rf /var/lib/nerve-run/.cache` and so on), also an entry named after one of your centers, whose commands do not run until it is gone. A command of `nerve-run` no longer gets the service's `TMPDIR`.
 - A command's Landlock rules open each folder without following a link, so a folder that a command replaced by a link after the node judged it gives its rights nowhere (the rule is left out and the command's stderr says so; a link that was there when the node looked gets no rule and no message); the system's own paths in the rules are given at their real place.
 
+### Simple commands, configuration and help
+
+- `nerve-node` has one rule for every noun: the noun alone shows (`center`, `mode`, `folder`, `rule`, `sudo`, `cap`, `provider`, `proxy`, `relay`, `ui`, `ui token`), `add`/`rm` change a list, `set` a value, `on`/`off` a switch. `mode` alone shows each center's mode.
+- Folder rights are one word: `folder add ~/proj rw` adds a folder or changes the rights of one the center has, and `none` closes a folder inside another. A change of a folder's rights walks every grant, as `folder sync` does.
+- A trailing ` *` is the wildcard of a rule: `rule add allow 'git status *'`, and with `--action fs.read` a folder and all below it as `/srv/data/*`. `rule add` says what such a rule covers ("it allows every `rm` command"). A sudo command goes on the sudo list by itself: `rule add allow 'sudo apt update'`. `rule rm` takes the entry as `rule` shows it, or the command line that made it, and needs the list only when the entry is on two.
+- Breaks (no aliases; change your scripts):
+  - `mode set <mode>` → `mode <mode>`; `folder network on|off` → `network on|off`; `folder ls`, `center ls`, `rule ls`, `cap ls`, `proxy ls`, `relay ls`, `sudo status`, `ui status`, `ui token ls` → the noun alone (`folder`, `center`, …, `ui token`).
+  - `folder add <p> +r +w +x` → `folder add <p> rwx`; `folder set <p> <changes>` is gone: `folder add <p> <rights>` sets the rights, `none` closes a folder.
+  - `rule add sudo '<cmd>'` → `rule add allow 'sudo <cmd>'`; `--wildcard` → a trailing ` *` (`'git *'`, `--action fs.read '/srv/data/*'`, `--action lamp.set '*'`); `rule add --pin F=V` → `--arg F=V`; `rule rm` takes no `--wildcard`, `--action` or `--pin`: give it the entry as `rule` shows it.
+  - `center rm|pause|resume|rotate-key --center <name>` → `center rm|pause|resume|rotate-key <name>`; `center grant settings write|off --center <name>` → `center settings on|off <name>`.
+  - `cap provider allow|rm|ls` → `provider add|rm`, `provider`.
+  - `relay set <address>` → `relay on <address>` (`relay set 0.0.0.0:7490` says so); `relay set-centers <n> --center C` and `relay set-limits <n>` → `relay set <n> [--to C]… [--max-links N] [--max-opens-per-minute N]` (`--to '*'` for every center, `default` for the relay's limit); `relay add --center C` → `relay add --to C`.
+  - `proxy rm` → `proxy off`; `config remove` → `config rm`; `ui on --name` → `ui on --host`; `audit --denied` → `audit --refused`.
+  - The `--…-stdin` flags go: `center add --link-stdin` → `center add -`; `cap add|edit --params-stdin`/`--result-stdin` → `--params -`/`--result -`; `proxy set --password-stdin` → a URL with a user name and no password (`http://user@host:port`) reads the password from stdin, or asks for it at a terminal; `--headers-stdin` → `--header -`. `--passphrase-file -` reads the passphrase from stdin. An empty password is refused.
+  - `--json`: `status`'s `folder_grants` → `folder_access`; `mode --json` is new (`{"modes": [...]}`).
+
 ## 0.0.6
 
 ### The desktop app

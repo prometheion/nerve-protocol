@@ -58,7 +58,7 @@ Grant a folder at or inside the protected path. The folder releases it for the
 rights it has, and no more: `r` for reads, `w` for writes, `x` for commands.
 
 ```sh
-nerve-node folder add ~/.ssh +r        # reads of ~/.ssh may now pass
+nerve-node folder add ~/.ssh r       # reads of ~/.ssh may now pass
 ```
 
 Or release a path by name:

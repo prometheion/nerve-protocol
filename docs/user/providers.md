@@ -25,7 +25,7 @@ No program may attach until you name it, with a name of your choice (not
 [`node.toml`](config-capabilities.md)) and the full path of its executable:
 
 ```sh
-nerve-node cap provider allow desk /usr/lib/nerve-desktop/nerve-desktop
+nerve-node provider add desk /usr/lib/nerve-desktop/nerve-desktop
 ```
 
 The node checks that the program that attaches under that name runs that very
@@ -33,11 +33,11 @@ file. Allowing a name again replaces its program. A center cannot change the
 list. To let a program go:
 
 ```sh
-nerve-node cap provider rm desk
+nerve-node provider rm desk
 ```
 
 Its capabilities leave at once. In the [desktop app](desktop.md#capabilities)
-the list is on **Capabilities** › **Programs**. `nerve-node cap provider ls` lists the
+the list is on **Capabilities** › **Programs**. `nerve-node provider` lists the
 programs you allow and whether each is attached; `nerve-node status` lists the
 providers that are attached:
 
@@ -65,7 +65,7 @@ still make the allowed one attach for it. Allow only programs you trust.
 
 ## See what is there
 
-`nerve-node cap ls` lists every capability, one action a line (and a
+`nerve-node cap` lists every capability, one action a line (and a
 program's state keys, events and streams, each with its kind after the
 effect): what it does (its effect), where it comes from (`built-in`, `config` for
 [your own](config-capabilities.md), or `program desk`), and for
@@ -73,7 +73,7 @@ each center whether it may use it now (`on` or `off`, as its mode, rules and
 switches decide), with the switch in brackets where you set one with `cap
 set` (`hidden` ones say just that), for one center with `--center`. The
 `settings` actions, with which a center changes its own entry, have no switch:
-they say `granted` or `not granted`, as `center grant settings` set it. An
+they say `granted` or `not granted`, as `center settings` set it. An
 action the node left out says why. A switch for something no program offers now is
 listed too, as it counts once one does. On a stopped node it lists the node's
 own capabilities and the programs you allow, and for each center only the
@@ -112,7 +112,7 @@ one off. While no provider offers a capability or one of its actions, only
 you can allow it or turn it on, as the node cannot tell yet what it does. An
 entry a center wrote while the capability did neither stays when a new
 version of the program makes it sense or act: after such an update, check
-`nerve-node rule ls allow` and `nerve-node cap ls`. A capability a center
+`nerve-node rule allow` and `nerve-node cap`. A capability a center
 [added itself](config-capabilities.md#capabilities-a-center-adds) does not
 count as offered for this: that center switches only its own actions, each
 by its name, and while it keeps one under the name a program offers, it is
@@ -262,7 +262,7 @@ log](audit.md). An event goes only to a center that may have it when it
 happens, so a center you take `on` from gets no more of it, even while it is
 still subscribed. An open stream is asked about again when you change the
 config and when a mode's time limit passes: one the center may no longer
-have ends, and the program is told. `nerve-node cap ls` lists them with
+have ends, and the program is told. `nerve-node cap` lists them with
 their kind after the effect (`sense state`, `read event`).
 
 A capability of [`node.toml`](config-capabilities.md) has actions only: a

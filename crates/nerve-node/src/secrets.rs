@@ -153,7 +153,7 @@ pub fn store_proxy_headers(paths: &NodePaths, headers: &[(String, String)]) -> R
 /// or one without a value for a name, is an error that names the entry. On
 /// the installed node on Windows named headers are an error without a keyring
 /// call: whatever an administrator's keyring holds, the service does not find
-/// it, and the same answer must come from the service and from `proxy ls`.
+/// it, and the same answer must come from the service and from `proxy`.
 pub fn proxy_headers(paths: &NodePaths, names: &[String]) -> Result<Vec<(String, String)>, String> {
     if names.is_empty() {
         return Ok(Vec::new());
