@@ -593,21 +593,44 @@ async fn a_command_that_starts_into_the_switch_is_ended_as_it_starts() {
     daemon.stop().await;
 }
 
-/// Waits up to 5 s for process `pid` to end.
-async fn ends(pid: u32) -> bool {
-    let running = |pid: u32| {
-        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
-            s.rsplit_once(')')
-                .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
-        })
-    };
-    for _ in 0..100 {
-        if !running(pid) {
+/// Whether process `pid` runs (a zombie does not).
+fn alive(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+        s.rsplit_once(')')
+            .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
+    })
+}
+
+/// Waits up to `within` for process `pid` to end.
+async fn ends(pid: u32, within: Duration) -> bool {
+    let until = std::time::Instant::now() + within;
+    while std::time::Instant::now() < until {
+        if !alive(pid) {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    false
+    !alive(pid)
+}
+
+/// Accepts the node's link with the handshake of a center that can resume
+/// links, and offers no resume of an earlier one.
+async fn resumable(center: &mut FakeCenter) -> Conn<TcpStream> {
+    let paired = center.paired().expect("paired");
+    let mut inc = center.next_link(WAIT).await.expect("the node dials");
+    fake_center::hello(&mut inc.conn, &center.center_id, &paired)
+        .await
+        .expect("hello");
+    fake_center::welcome(
+        &mut inc.conn,
+        Some(nerve_proto::msg::Resumed {
+            resumed: false,
+            got: 0,
+        }),
+    )
+    .await
+    .expect("welcome");
+    inc.conn
 }
 
 /// A command of a link that dropped, which the center may still resume, is
@@ -620,11 +643,21 @@ async fn a_command_of_a_dropped_link_is_ended_when_the_network_goes_off() {
         eprintln!("skipped: no seccomp filters or no bash here");
         return;
     }
-    // The node waits about a second before it dials again; after that it
-    // waits for the center, which this test never answers.
-    for (what, after) in [
-        ("waiting to dial", Duration::from_millis(100)),
-        ("waiting for the center", Duration::from_millis(2500)),
+    // The node waits 0.9 to 1 s before it dials again, and after that it
+    // waits for the center, which this test never answers. The command must
+    // end at once, before the node's next step would look after it: the
+    // time from the drop it has is what tells the two places apart.
+    for (what, after, by) in [
+        (
+            "waiting to dial",
+            Duration::from_millis(50),
+            Duration::from_millis(800),
+        ),
+        (
+            "waiting for the center",
+            Duration::from_millis(2500),
+            Duration::from_millis(5500),
+        ),
     ] {
         let d = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(d.path()).unwrap();
@@ -632,7 +665,7 @@ async fn a_command_of_a_dropped_link_is_ended_when_the_network_goes_off() {
         std::fs::create_dir_all(&work).unwrap();
         let mut center = FakeCenter::start(false).await.unwrap();
         let daemon = node(&root, &work, &center, false, None, None).await;
-        let mut conn = linked(&mut center).await;
+        let mut conn = resumable(&mut center).await;
         let args = json!({"command": "sleep 60 & echo $! > sleep.pid; wait",
                           "cwd": work.display().to_string()});
         conn.request(
@@ -653,14 +686,20 @@ async fn a_command_of_a_dropped_link_is_ended_when_the_network_goes_off() {
         }
         let pid = pid.expect("the command started");
         drop(conn);
+        let dropped = std::time::Instant::now();
         tokio::time::sleep(after).await;
+        assert!(alive(pid), "the command went with the link, {what}");
         nerve_node::cli::edit(daemon.paths(), |c| {
             c.centers[0].policy.no_network = true;
             Ok(())
         })
         .await
         .expect("the owner's edit");
-        assert!(ends(pid).await, "the command of a dropped link, {what}");
+        let within = by.saturating_sub(dropped.elapsed());
+        assert!(
+            ends(pid, within).await,
+            "the command of a dropped link, {what}"
+        );
         daemon.stop().await;
     }
 }
