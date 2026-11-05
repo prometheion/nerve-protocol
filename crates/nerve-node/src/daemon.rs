@@ -1693,6 +1693,9 @@ impl Shared {
                     "status": status,
                     "mode": c.policy.mode_at(now).as_str(),
                     "until": c.policy.until,
+                    // Where a timer ends (`mode user --for N`).
+                    "then": c.policy.ends(now).map(|(_, m)| m.as_str()),
+                    "allow_rules": c.policy.allow.len(),
                     "as_owner": c.policy.as_owner,
                     // The owner's network switch for its folder-mode
                     // commands (`network off`).

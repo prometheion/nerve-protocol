@@ -154,8 +154,9 @@ pub enum Cmd {
         /// protected files aside). Without it, each center's mode is shown.
         #[arg(value_name = "MODE")]
         mode: Option<String>,
-        /// Go back to allowlist after this many hours (folder and user mode
-        /// otherwise stay until you change them).
+        /// End the mode after this many hours: user goes back to the mode
+        /// before it, folder to allowlist (without it they stay until you
+        /// change them).
         #[arg(long = "for", value_name = "HOURS")]
         for_hours: Option<u64>,
         /// With allowlist: run the allowed commands as you instead of as
@@ -3143,8 +3144,14 @@ fn stopped_lines(cfg: &NodeConfig, owner: Option<&str>) -> Vec<String> {
     if cfg.locked {
         lines.push("LOCKED (panic): nothing runs until `nerve-node unlock`".into());
     }
+    let now = crate::now_ms();
     for c in &cfg.centers {
-        lines.push(format!("{}  {}", c.name, c.url));
+        lines.push(format!(
+            "{}  {}  mode {}",
+            c.name,
+            c.url,
+            mode_line(&c.policy, now)
+        ));
     }
     lines
 }
@@ -3188,8 +3195,22 @@ fn status_lines(v: &Value) -> Vec<String> {
             Some(a) => format!(", as {a}"),
             None => String::new(),
         };
+        // A timed mode says how long it has and where it ends.
+        let timer = match (c["until"].as_u64(), c["then"].as_str()) {
+            (Some(until), Some(then)) => {
+                let left = until.saturating_sub(crate::now_ms());
+                let then = Mode::parse(then).unwrap_or(Mode::Allowlist);
+                let rules = c["allow_rules"].as_u64().unwrap_or(0) as usize;
+                format!(
+                    " for {} more, then {}",
+                    nerve_transport::log::span(Duration::from_millis(left)),
+                    then_text(then, rules)
+                )
+            }
+            _ => String::new(),
+        };
         lines.push(format!(
-            "{}  {}  mode {}{whom}",
+            "{}  {}  mode {}{timer}{whom}",
             c["name"].as_str().unwrap_or_default(),
             c["status"].as_str().unwrap_or_default(),
             c["mode"].as_str().unwrap_or_default(),
@@ -3558,7 +3579,8 @@ pub(crate) fn ask(
 
 pub(crate) use crate::folder_change::{NO_CENTER_PAIRED, no_center_named};
 
-/// A center's mode as `mode` shows it: `folder`, `allowlist, as you`.
+/// A center's mode as `mode` shows it: `folder`, `allowlist, as you`,
+/// `user for 1h 59m more, then folder`.
 fn mode_line(p: &nerve_policy::config::CenterPolicy, now: u64) -> String {
     let mode = p.mode_at(now);
     let whom = if p.runs_as_owner(now) && mode == Mode::Allowlist {
@@ -3566,16 +3588,36 @@ fn mode_line(p: &nerve_policy::config::CenterPolicy, now: u64) -> String {
     } else {
         ""
     };
-    format!("{}{whom}", mode.as_str())
+    let timer = match p.ends(now) {
+        Some((until, then)) => format!(
+            " for {} more, then {}",
+            nerve_transport::log::span(Duration::from_millis(until - now)),
+            then_text(then, p.allow.len())
+        ),
+        None => String::new(),
+    };
+    format!("{}{whom}{timer}", mode.as_str())
+}
+
+/// The mode a timer ends in, in words: allowlist says what it then runs.
+fn then_text(then: Mode, allow_rules: usize) -> String {
+    match (then, allow_rules) {
+        (Mode::Allowlist, 0) => "allowlist (no allow rule: nothing runs)".into(),
+        (Mode::Allowlist, 1) => "allowlist (1 allow rule)".into(),
+        (Mode::Allowlist, n) => format!("allowlist ({n} allow rules)"),
+        (m, _) => m.as_str().into(),
+    }
 }
 
 /// A center's mode for `mode --json`.
 pub(crate) fn mode_data(name: &str, p: &nerve_policy::config::CenterPolicy, now: u64) -> Value {
+    let ends = p.ends(now);
     json!({
         "center": name,
         "mode": p.mode_at(now).as_str(),
         "as_owner": p.as_owner && p.mode_at(now) == Mode::Allowlist,
-        "until_ms": p.until,
+        "until_ms": ends.map(|(u, _)| u),
+        "then": ends.map(|(_, m)| m.as_str()),
     })
 }
 
@@ -3620,15 +3662,30 @@ async fn set_mode(
                 .ok_or_else(|| "--for is too large".to_string())
         })
         .transpose()?;
+    let ends = std::cell::Cell::new(None);
     let name = edit_center(paths, center, |e| {
+        // A timed user mode goes back to the mode before it, never to
+        // user; a timed folder mode to allowlist (CenterPolicy::after).
+        let before = e.policy.mode_at(crate::now_ms());
+        e.policy.then =
+            (m == Mode::User && until.is_some() && before == Mode::Folder).then_some(Mode::Folder);
         e.policy.mode = m;
         e.policy.until = until;
         e.policy.as_owner = as_owner;
+        ends.set(
+            e.policy
+                .ends(crate::now_ms())
+                .map(|(_, then)| (then, e.policy.allow.len())),
+        );
         Ok(())
     })
     .await?;
     let whom = if as_owner { ", as you" } else { "" };
-    w(out, format!("{name}: mode {}{whom}", m.as_str()));
+    let timer = match (for_hours, ends.get()) {
+        (Some(h), Some((then, rules))) => format!(" for {h} h, then {}", then_text(then, rules)),
+        _ => String::new(),
+    };
+    w(out, format!("{name}: mode {}{whom}{timer}", m.as_str()));
     Ok(())
 }
 
@@ -6641,6 +6698,54 @@ mod tests {
         assert_eq!(policy().mode, Mode::Folder);
         run(&paths, &["mode", "allowlist"]).unwrap();
         assert_eq!(policy().until, None);
+    }
+
+    /// A timed user mode goes back to the mode before it, never to user; a
+    /// timed folder mode ends in allowlist. `mode` and `status` say where a
+    /// timer ends, and what allowlist mode then runs.
+    #[test]
+    fn a_timer_ends_in_the_mode_before_and_says_where() {
+        let (_d, paths) = setup(&["home"]);
+        let policy = || load(&paths).centers[0].policy.clone();
+        run(&paths, &["mode", "folder"]).unwrap();
+        let out = run(&paths, &["mode", "user", "--for", "2"]).unwrap();
+        assert!(
+            out.starts_with("home: mode user for 2 h, then folder\n"),
+            "{out}"
+        );
+        let until = policy().until.unwrap();
+        assert_eq!(policy().mode_at(until - 1), Mode::User);
+        assert_eq!(policy().mode_at(until), Mode::Folder);
+        let shown = run(&paths, &["mode"]).unwrap();
+        assert!(
+            shown.starts_with("home: user for 1 h 59 min more, then folder\n"),
+            "{shown}"
+        );
+        let status = run(&paths, &["status"]).unwrap();
+        assert!(
+            status.contains("mode user for 1 h 59 min more, then folder"),
+            "{status}"
+        );
+        let v = json_of(&paths, &["mode"]);
+        assert_eq!(v["modes"][0]["then"], "folder", "{v}");
+        // Timed again from that timed user mode: it ends where that one did
+        // not, in allowlist, which says it runs nothing without a rule.
+        let out = run(&paths, &["mode", "user", "--for", "1"]).unwrap();
+        assert!(
+            out.contains("then allowlist (no allow rule: nothing runs)"),
+            "{out}"
+        );
+        assert_eq!(policy().mode_at(policy().until.unwrap()), Mode::Allowlist);
+        // A timed folder mode ends in allowlist.
+        run(&paths, &["mode", "folder"]).unwrap();
+        run(&paths, &["rule", "add", "allow", "git status"]).unwrap();
+        let out = run(&paths, &["mode", "folder", "--for", "1"]).unwrap();
+        assert!(out.contains("then allowlist (1 allow rule)"), "{out}");
+        assert_eq!(policy().then, None);
+        assert_eq!(policy().mode_at(policy().until.unwrap()), Mode::Allowlist);
+        // Without a timer nothing is said of one.
+        run(&paths, &["mode", "user"]).unwrap();
+        assert_eq!(run(&paths, &["mode"]).unwrap(), "home: user\n");
     }
 
     /// Without a control socket to tell (no daemon, or Windows, which has

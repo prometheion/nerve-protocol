@@ -1286,8 +1286,9 @@ grant or not.
 
 Folder and user have no time limit by default: once set, they stay until the
 owner changes them. A limit is opt-in (`until`, or `nerve-node mode user
---for HOURS`). When it runs out, the center is back in `allowlist`, the default
-deny mode, not in `folder`.
+--for HOURS`). When it runs out, a timed `user` is back in the mode before it,
+`policy.then` (`folder`, or `allowlist` when unset; never `user`), and a timed
+`folder` in `allowlist`, the default deny mode.
 
 Reading in folder mode where the node reads as the command account: the
 installed Linux node does a center's file calls as `nerve-run`

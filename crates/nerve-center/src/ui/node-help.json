@@ -307,7 +307,7 @@
                   "optional": true
                 },
                 {
-                  "about": "Go back to allowlist after this many hours (folder and user mode otherwise stay until you change them)",
+                  "about": "End the mode after this many hours: user goes back to the mode before it, folder to allowlist (without it they stay until you change them)",
                   "name": "--for <HOURS>",
                   "optional": true
                 },

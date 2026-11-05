@@ -820,7 +820,8 @@ impl CenterEntry {
 pub enum Mode {
     /// Default deny: a call runs only when an allow rule lets it through.
     /// What a pairing whose file names no mode is in, and where `folder` and
-    /// `user` fall back to when their time runs out.
+    /// `user` fall back to when their time runs out (a timed `user` that
+    /// came from `folder` goes back to `folder`).
     #[default]
     Allowlist,
     /// Full access inside the folders, by their flags: reading where `r` is
@@ -839,6 +840,13 @@ impl Mode {
             Mode::Folder => "folder",
             Mode::User => "user",
         }
+    }
+
+    /// The mode of its word, [`Mode::as_str`]'s.
+    pub fn parse(s: &str) -> Option<Mode> {
+        [Mode::Allowlist, Mode::Folder, Mode::User]
+            .into_iter()
+            .find(|m| m.as_str() == s)
     }
 }
 
@@ -1013,10 +1021,15 @@ pub struct CenterPolicy {
     pub mode: Mode,
     /// An opt-in time limit for `folder` and `user`: milliseconds since the
     /// Unix epoch at which the mode runs out and the center falls back to
-    /// `allowlist`. None means no limit: the mode stays until the owner
-    /// changes it.
+    /// [`CenterPolicy::then`]. None means no limit: the mode stays until the
+    /// owner changes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<u64>,
+    /// The mode a timed `user` mode falls back to, the one before it:
+    /// `folder` or `allowlist` (None), never `user`. A timed `folder` mode
+    /// always falls back to `allowlist`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub then: Option<Mode>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<Folder>,
     /// The folders (by path) the node recorded at their real place when the
@@ -1118,9 +1131,25 @@ impl CenterPolicy {
     /// passed is `allowlist`.
     pub fn mode_at(&self, now_ms: u64) -> Mode {
         match self.mode {
-            Mode::Folder | Mode::User if self.until.is_some_and(|u| u <= now_ms) => Mode::Allowlist,
+            Mode::Folder | Mode::User if self.until.is_some_and(|u| u <= now_ms) => self.after(),
             m => m,
         }
+    }
+
+    /// The mode a timed mode falls back to when it runs out: `folder` after
+    /// a timed `user` that came from it, else `allowlist`; never `user`.
+    pub fn after(&self) -> Mode {
+        match (self.mode, self.then) {
+            (Mode::User, Some(Mode::Folder)) => Mode::Folder,
+            _ => Mode::Allowlist,
+        }
+    }
+
+    /// When the mode in force at `now_ms` runs out, and the mode after it;
+    /// `None` for a mode without a limit.
+    pub fn ends(&self, now_ms: u64) -> Option<(u64, Mode)> {
+        let until = self.until.filter(|u| *u > now_ms)?;
+        matches!(self.mode, Mode::Folder | Mode::User).then(|| (until, self.after()))
     }
 
     /// Whether the commands of this pairing run as the owner's account at
@@ -1438,6 +1467,13 @@ impl CenterPolicy {
     /// twice is then one folder, or refused when the two give it different
     /// access, so no spelling decides which folder holds a path.
     pub fn validate(&mut self) -> Result<(), String> {
+        // `then` goes with a timed user mode alone: a change of the mode
+        // or its timer (a center's own, with the settings grant) drops it.
+        match self.then {
+            Some(Mode::User) => return Err("policy.then: a timed mode never ends in user".into()),
+            Some(_) if self.mode != Mode::User || self.until.is_none() => self.then = None,
+            _ => {}
+        }
         let mut folders: Vec<Folder> = Vec::with_capacity(self.folders.len());
         for f in &self.folders {
             folder_spelling(&f.path, cfg!(windows))?;
@@ -2231,6 +2267,22 @@ sudo_allow = ["sudo apt update"]
         p.as_owner = false;
         p.until = Some(5);
         assert!(p.runs_as_owner(4) && !p.runs_as_owner(5));
+        assert_eq!(p.ends(4), Some((5, Mode::Allowlist)));
+        assert_eq!(p.ends(5), None);
+        // One that came from folder mode is folder mode again, never user.
+        p.then = Some(Mode::Folder);
+        assert_eq!(p.mode_at(5), Mode::Folder);
+        assert_eq!(p.ends(4), Some((5, Mode::Folder)));
+        p.validate().unwrap();
+        p.then = Some(Mode::User);
+        assert!(p.validate().unwrap_err().contains("never ends in user"));
+        assert_eq!(p.mode_at(5), Mode::Allowlist);
+        // A timed folder mode ends in allowlist, whatever `then` says.
+        p.mode = Mode::Folder;
+        p.then = Some(Mode::Folder);
+        assert_eq!(p.mode_at(5), Mode::Allowlist);
+        p.validate().unwrap();
+        assert_eq!(p.then, None, "dropped with the timed user mode");
     }
 
     #[test]

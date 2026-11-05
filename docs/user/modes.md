@@ -101,8 +101,9 @@ nerve-node mode user
 ```
 
 `folder` and `user` stay until you change them. To set a time limit, add
-`--for` with hours. When it ends, the pairing goes back to `allowlist`, not to
-`folder`.
+`--for` with hours. When it ends, a timed `user` goes back to the mode before
+it (`folder` or `allowlist`, never `user`), a timed `folder` to `allowlist`.
+`nerve-node mode` and `status` say where it ends.
 
 ```sh
 nerve-node mode user --for 2
