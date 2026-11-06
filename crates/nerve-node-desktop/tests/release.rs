@@ -165,6 +165,37 @@ fn the_user_guide_and_the_notes_are_linux_only() {
     );
 }
 
+/// The Breaks of 0.0.7 tell a user what to change in a script or a state
+/// folder from 0.0.6: the renames of the commands and options, and the
+/// steps of the one change that stops a center (the local model d1-3B).
+/// Each line here was missing from the notes once.
+#[test]
+fn the_breaks_of_the_notes_give_the_action_of_each() {
+    let changelog = include_str!("../../../CHANGELOG.md");
+    let breaks = changelog
+        .split("\n## 0.0.7\n")
+        .nth(1)
+        .unwrap()
+        .split("\n### Breaks\n")
+        .nth(1)
+        .expect("a section ### Breaks")
+        .split("\n### ")
+        .next()
+        .unwrap();
+    let flat = breaks.split_whitespace().collect::<Vec<_>>().join(" ");
+    for needed in [
+        "`relay add <n> --center C` → `--to C`",
+        "`--mcp none` → `--mcp off`",
+        "with no `--wildcard`",
+        "`daemon:`",
+        "set `threshold` to 0.75",
+        "`timeout_ms` to 12000",
+        "install the model again on the Action checker page",
+    ] {
+        assert!(flat.contains(needed), "the Breaks lack {needed}:\n{breaks}");
+    }
+}
+
 /// The released app keeps what Slint's Royalty-free license 2.0, under which
 /// it uses Slint, asks of it (LICENSE.md): the AboutSlint widget in the About
 /// dialog, which an item of the main window's sidebar opens. The crate's
@@ -252,8 +283,9 @@ fn the_release_installs_its_linux_programs_where_the_docs_say_they_are_tested() 
     }
 }
 
-/// The app's links to the user guide open the docs of the release the app
-/// is, at its tag, not `main`, which may have moved on.
+/// The app's links to the user guide open the docs at the ref the build
+/// names (`Store.guide-ref`: the release's tag, or `main` in a build that is
+/// no release, whose tag would not exist), and a release run names its tag.
 #[test]
 fn the_app_opens_the_guide_of_its_release() {
     for (name, ui) in [
@@ -267,11 +299,19 @@ fn the_app_opens_the_guide_of_its_release() {
         assert!(!links.is_empty(), "{name}");
         for l in links {
             assert!(
-                l.contains("/v\" + Store.version + \"/docs/user"),
+                l.contains("/\" + Store.guide-ref + \"/docs/user"),
                 "{name}: {l}"
             );
         }
     }
+    let env = RELEASE
+        .lines()
+        .find(|l| l.starts_with("  NERVE_GUIDE_REF: "))
+        .expect("the run names the guide's ref");
+    assert!(
+        env.contains("inputs.kind == 'release' && format('v{0}', inputs.version) || 'main'"),
+        "{env}"
+    );
 }
 
 /// GitHub's private vulnerability reporting is a setting of the repository,

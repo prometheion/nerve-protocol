@@ -9,6 +9,9 @@ leads to the detail.
 - `user` mode, and `allowlist` mode with `--as-owner`, run commands as you,
   outside the sandbox. Where root is the owner, they run as root
   ([accounts](../dev/sandbox-linux.md#the-accounts-commands-run-as)).
+- A command that runs as you can change the node's settings as you can:
+  the node refuses only the simple ways, as a guard against mistakes
+  ([user mode](../dev/policy-engine.md#user-mode)).
 - With root as the owner, a center with the settings grant can switch
   itself to `user` mode and so run commands as root
   ([root as the owner](../dev/service.md#root-as-the-owner)).
@@ -36,8 +39,9 @@ leads to the detail.
 - All pairings share `/tmp` and `/var/tmp`. Keep no secret there, and run no
   key agent or credential cache in a pairing's home
   ([the account](../dev/sandbox-linux.md#the-account-nerve-run)).
-- Without Landlock, each pairing's commands reach the folders of the others,
-  as all run as `nerve-run`. `status` warns; give a center you trust less a
+- Without Landlock, each pairing's commands reach the folders and the
+  running commands of the others, with their network, as all run as
+  `nerve-run`. `status` warns; give a center you trust less a
   machine of its own ([the account](../dev/sandbox-linux.md#the-account-nerve-run)).
 - Below Linux 6.12 (stock Ubuntu 22.04, 24.04 and Debian 12), one center's
   commands can signal another's and reach its abstract sockets. `status`

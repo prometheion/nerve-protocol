@@ -152,8 +152,10 @@ The file was moved there (`mv`) and kept its own access list. Run
 
 A command that changes the node goes through the running node. Without one,
 it says `the change is in node.toml; it takes effect at the next start of
-the node`: `nerve-node service start`. A command a center runs cannot
-change the node: `refused: this request comes from a command the node runs
-for a center`.
+the node`: `nerve-node service start`. A command a center runs as
+`nerve-run` cannot change the node: `refused: this request comes from a
+command the node runs for a center`. One that runs as you (`user` mode,
+`--as-owner`) is refused only when it runs `nerve-node` itself, and can go
+another way ([user mode](../dev/policy-engine.md#user-mode)).
 
 </details>

@@ -40,6 +40,9 @@ the network off.
 - A name lookup through the system's resolver still asks the name servers.
 - A program a command left running before you turned it off keeps its
   network.
+- Without Landlock, a command of another pairing that has the network: the
+  pairings are not kept apart there, and `status` warns
+  ([pairings](../dev/sandbox-linux.md#what-it-does-not-stop-linux)).
 - A program's action ([capabilities](capabilities.md)) runs as you, outside
   the switch.
 

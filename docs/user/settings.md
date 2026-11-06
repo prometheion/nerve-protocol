@@ -35,7 +35,7 @@ node takes a change at once.
 | `limits.max_running` | 16 | Commands at once, over all centers |
 | `limits.default_timeout_secs` | 600 | How long a command runs when its call names no time |
 | `limits.max_timeout_secs` | 3600 | The longest any command runs |
-| `limits.output_cap_bytes` | 16 MiB | Output kept of stdout and of stderr each |
+| `limits.output_cap_bytes` | 16 MiB | Output of stdout and of stderr each; a result carries 1 MiB at most |
 | `limits.command.memory_mb` | 4096 | Memory of one command, in MiB |
 
 The full list is in [settings and config](../dev/settings-and-config.md#the-settings).

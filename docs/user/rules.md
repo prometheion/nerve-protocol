@@ -142,8 +142,9 @@ nerve-node center                      # shows the grant
 
 With the grant a center may change its own pairing's mode (up to `user`),
 folders, rules and capability switches, and turn sudo on and off. It may add
-rules with the audit page's buttons, and capabilities of its own that wait
-for your `on`.
+rules with the audit page's buttons, and capabilities of its own: fixed
+commands that run as `nerve-run`. It turns those on itself; one that senses
+or acts waits for your `on`. To stop it adding commands, take the grant back.
 
 No grant lets it pair or unpair, touch the keys, the grant itself, `panic`
 or another center's pairing, or change the proxy or a machine setting (the

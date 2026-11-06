@@ -440,8 +440,8 @@ const HELP_KEYS = [
   ["Enter", "Pick the marked entry of a list"],
   ["← →", "Choose in a row of choices"],
 ];
-// The user guide of this release (NERVE_VERSION comes before this file).
-const GUIDE = `https://github.com/prometheion/nerve-protocol/tree/v${NERVE_VERSION}/docs/user`;
+// The user guide of this release (NERVE_GUIDE_REF comes before this file).
+const GUIDE = `https://github.com/prometheion/nerve-protocol/tree/${NERVE_GUIDE_REF}/docs/user`;
 
 // The folds that are open, by key, so a redraw of the page keeps them so.
 const openFolds = new Set();

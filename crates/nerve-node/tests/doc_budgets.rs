@@ -131,8 +131,70 @@ fn the_budget_and_the_cell_limit_are_held() {
     assert!(faults("p", &fenced, 1000).is_empty());
 }
 
-/// Every page of the docs that the code names (a comment, a message, a help
-/// link) is there: a page that moves takes its names in the code along.
+/// What a user needs to know about a limit stays on its page, shortened:
+/// each line is a page and a text it keeps (the review rounds found these
+/// cut). Plan: a limit is shortened, never cut.
+#[test]
+fn the_user_pages_keep_the_limits_a_user_needs() {
+    const KEPT: &[(&str, &str)] = &[
+        // A result carries 1 MiB at most, whatever the cap says.
+        ("docs/user/settings.md", "a result carries 1 MiB at most"),
+        // A command as you can change the node's settings.
+        (
+            "docs/user/safety.md",
+            "A command that runs as you can change the node's settings",
+        ),
+        (
+            "docs/user/folders-and-modes.md",
+            "change the node's settings as you can",
+        ),
+        ("docs/user/troubleshooting.md", "One that runs as you"),
+        // What a stop leaves running.
+        ("docs/user/watch-and-stop.md", "keeps running"),
+        // A center's own capabilities: only those that sense or act wait.
+        (
+            "docs/user/rules.md",
+            "one that senses\nor acts waits for your `on`",
+        ),
+        // Without Landlock the pairings reach each other's commands.
+        (
+            "docs/user/network.md",
+            "a command of another pairing that has the network",
+        ),
+        (
+            "docs/user/safety.md",
+            "the running commands of the others, with their network",
+        ),
+        // The relay link holds a secret.
+        ("docs/user/pair.md", "The link holds the relay token"),
+    ];
+    let mut missing = Vec::new();
+    for (name, text) in KEPT {
+        let page = std::fs::read_to_string(root().join(name)).unwrap();
+        // Lines wrap anywhere: compare the words.
+        let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !flat(&page).contains(&flat(text)) {
+            missing.push(format!("{name}: {text}"));
+        }
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+    // One thing a page must not say: that a center's command cannot change
+    // the node, as `user` mode commands can.
+    let trouble = std::fs::read_to_string(root().join("docs/user/troubleshooting.md")).unwrap();
+    assert!(
+        !trouble.contains("A command a center runs cannot"),
+        "troubleshooting.md says a center's command cannot change the node"
+    );
+    let stop = std::fs::read_to_string(root().join("docs/user/watch-and-stop.md")).unwrap();
+    assert!(
+        !stop.contains("kills it with everything it"),
+        "watch-and-stop.md says a stop kills everything the command started"
+    );
+}
+
+/// Every page of the docs that the code and the dev docs name (a comment, a
+/// message, a help link, a spec's reference) is there: a page that moves
+/// takes its names along.
 #[test]
 fn every_doc_page_the_code_names_exists() {
     fn walk(dir: &Path, found: &mut Vec<String>) {
@@ -145,7 +207,7 @@ fn every_doc_page_the_code_names_exists() {
             let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
                 continue;
             };
-            if !["rs", "slint", "js", "json", "html"].contains(&ext) {
+            if !["rs", "slint", "js", "json", "html", "md"].contains(&ext) {
                 continue;
             }
             let text = std::fs::read_to_string(&path).unwrap();
@@ -170,6 +232,7 @@ fn every_doc_page_the_code_names_exists() {
     }
     let mut found = Vec::new();
     walk(&root().join("crates"), &mut found);
+    walk(&root().join("docs/dev"), &mut found);
     // A test that feeds a made-up command its own path of the docs.
     found.retain(|f| !f.contains("nerve-policy/tests/guard.rs"));
     assert!(found.is_empty(), "{}", found.join("\n"));

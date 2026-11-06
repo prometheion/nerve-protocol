@@ -71,6 +71,10 @@ env:
   KIND: ${{ inputs.kind }}
   VERSION: ${{ inputs.version }}
   WINDOWS: ${{ inputs.windows }}
+  # The git ref the programs' help links to for the user guide: a release
+  # links its own tag (made after the run, before anyone has the programs), a
+  # pre-release links main, since its tag exists only after the run.
+  NERVE_GUIDE_REF: ${{ inputs.kind == 'release' && format('v{0}', inputs.version) || 'main' }}
 
 jobs:
   check:

@@ -72,6 +72,12 @@ only, and the `windows` input stays off. 0.1.0 turns it on.
    own file from there, as `nerve-node update` takes `nerve-node-*`. A release
    is marked latest. A pre-release is marked as a pre-release.
 
+The programs' help links to the user guide (`--help`, both web UIs, the
+desktop app) name the git ref in `NERVE_GUIDE_REF`: the run sets it to
+`v<version>` for a release, whose tag exists once the run is over, and to
+`main` for a pre-release. A build without it, such as `cargo build`, links
+`main`, so no link leads to a tag that does not exist (`crates/nerve-transport/build.rs`).
+
 The binaries are not signed. The workflow uses no secrets. Only its last job
 may write to the repository.
 

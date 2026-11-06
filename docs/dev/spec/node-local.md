@@ -1444,7 +1444,7 @@ answer. For each call the node takes the center's policy and, in this order:
    user, unconfined, so does a program an `allowlist` rule lets run, and a
    sudo command (§4) runs as root without the sandbox in every mode; a
    `folder` mode command can also ask a service of the user's session to run
-   a program outside it (`docs/user/modes.md`).
+   a program outside it (`docs/dev/sandbox-linux.md`).
 1. A `locked` node (after `panic`) keeps no links and runs nothing; a paused,
    revoked or unknown center is not dialled.
 2. The capability setting: `off` refuses (`disabled`, written to the audit

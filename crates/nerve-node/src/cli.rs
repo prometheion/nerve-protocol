@@ -1099,12 +1099,12 @@ pub fn doc_of(command: &str) -> &'static str {
     }
 }
 
-/// The user guide's page `doc` as this release has it: the docs at the
-/// release's tag, not at `main`, which may have moved on.
+/// The user guide's page `doc` as this build has it: the docs at the
+/// release's tag in a release build, at `main` in any other.
 pub fn guide_url(doc: &str) -> String {
     format!(
-        "https://github.com/prometheion/nerve-protocol/blob/v{}/docs/user/{doc}",
-        env!("CARGO_PKG_VERSION")
+        "https://github.com/prometheion/nerve-protocol/blob/{}/docs/user/{doc}",
+        nerve_transport::webui::GUIDE_REF
     )
 }
 
@@ -10784,8 +10784,8 @@ mod tests {
         let long = folder.render_long_help().to_string();
         assert!(
             long.ends_with(&format!(
-                "More in the user guide: https://github.com/prometheion/nerve-protocol/blob/v{}/docs/user/folders-and-modes.md\n",
-                env!("CARGO_PKG_VERSION")
+                "More in the user guide: https://github.com/prometheion/nerve-protocol/blob/{}/docs/user/folders-and-modes.md\n",
+                nerve_transport::webui::GUIDE_REF
             )),
             "{long}"
         );

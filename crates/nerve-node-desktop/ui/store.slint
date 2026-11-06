@@ -11,6 +11,9 @@ import {
 export global Store {
     in-out property <Page> page: Page.overview;
     in-out property <string> version;
+    // The git ref of the user guide the Help links open: the release's tag
+    // in a release build, `main` in any other.
+    in-out property <string> guide-ref;
 
     // The node's status and its centers, both from `nerve-node status`.
     in-out property <Load> status-load: Load.loading;

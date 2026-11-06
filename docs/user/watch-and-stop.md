@@ -87,5 +87,8 @@ until you `unlock`. A center can never unlock it. A center with the
 settings grant can pause its own link; only you resume it.
 
 A command stops when its call ends: on its timeout, when it is cancelled,
-or when its session or link ends. The node kills it with everything it
-started ([what ends a command](../dev/sandbox-linux.md#what-ends-a-command)).
+or when its session or link ends. The node kills its process group, and
+where it has a cgroup (`status` says so) all it started. A program handed to
+a service manager, or detached on a node without a cgroup, keeps running: end
+`nerve-run`'s leftover processes yourself
+([what ends a command](../dev/sandbox-linux.md#what-ends-a-command)).

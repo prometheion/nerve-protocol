@@ -22,7 +22,8 @@ the guard and [protected paths](rules.md#protected-paths) hold in every mode.
 A call that nothing allows is refused at once; nothing waits for an answer.
 
 - `user` mode, and `allowlist` with `--as-owner`, run commands as you,
-  outside the sandbox. Where root is the owner, as root
+  outside the sandbox. Where root is the owner, as root. Such a command can
+  change the node's settings as you can
   ([user mode](../dev/policy-engine.md#user-mode)).
 - `folder` mode leaves the network open: `nerve-node network off`
   ([network](network.md)).

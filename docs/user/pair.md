@@ -113,8 +113,9 @@ nerve-node relay on 0.0.0.0:7490
 nerve-node relay add lab-pc --address relay.example
 ```
 
-`relay add` shows a link once. On the relayed node, paste it as its proxy,
-then pair as usual:
+`relay add` shows a link once. The link holds the relay token: delete the
+`proxy set` line from your shell's history, and `relay rm` the node if it
+leaked. On the relayed node, paste it as its proxy, then pair as usual:
 
 ```sh
 nerve-node proxy set 'nerve://relay?address=...&node=lab-pc&token=...&pin=...'

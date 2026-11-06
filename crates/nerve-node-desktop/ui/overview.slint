@@ -247,7 +247,7 @@ export component OverviewPage inherits PageFrame {
                 if (Store.status.limits-restart && Store.service-state == "running") {
                     Store.service("restart");
                 } else {
-                    Platform.open-url("https://github.com/prometheion/nerve-protocol/blob/v" + Store.version + "/docs/user/settings.md#limits-per-command");
+                    Platform.open-url("https://github.com/prometheion/nerve-protocol/blob/" + Store.guide-ref + "/docs/user/settings.md#limits-per-command");
                 }
             }
         }

@@ -362,6 +362,7 @@ impl Ctl {
         });
         let store = window.global::<Store>();
         store.set_version(env!("CARGO_PKG_VERSION").into());
+        store.set_guide_ref(nerve_transport::webui::GUIDE_REF.into());
         let install = window.global::<Install>();
         install.set_version(env!("CARGO_PKG_VERSION").into());
         install.set_windows(cfg!(windows));

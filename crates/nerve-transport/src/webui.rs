@@ -24,11 +24,14 @@ use crate::http::{Request, Response};
 pub const APP_CSS: &str = include_str!("webui/app.css");
 pub const THEME_JS: &str = include_str!("webui/theme-init.js");
 pub const ICON: &str = include_str!("webui/icon.svg");
-/// The kit, after the version of this release: its help links to the user
-/// guide at the release's tag (`GUIDE` in kit.js), which matches the program.
+/// The git ref of the user guide the program's help links to: the release's
+/// tag in a release build, `main` in any other (build.rs).
+pub const GUIDE_REF: &str = env!("NERVE_GUIDE_REF");
+/// The kit, after the guide's ref: its help links to the user guide there
+/// (`GUIDE` in kit.js), which matches the program.
 pub const KIT_JS: &str = concat!(
-    "const NERVE_VERSION = \"",
-    env!("CARGO_PKG_VERSION"),
+    "const NERVE_GUIDE_REF = \"",
+    env!("NERVE_GUIDE_REF"),
     "\";\n",
     include_str!("webui/kit.js")
 );
@@ -540,14 +543,16 @@ mod tests {
     }
 
     /// The help's guide links name the docs of this release, at its tag,
-    /// not `main`, which may have moved on.
+    /// when it is a release build, and `main` in any other build: a tag
+    /// that does not exist yet would be a dead link.
     #[test]
     fn the_guide_is_the_one_of_this_release() {
         assert!(
-            KIT_JS.starts_with(&format!(
-                "const NERVE_VERSION = \"{}\";\n",
-                env!("CARGO_PKG_VERSION")
-            )),
+            GUIDE_REF == "main" || GUIDE_REF == concat!("v", env!("CARGO_PKG_VERSION")),
+            "{GUIDE_REF}"
+        );
+        assert!(
+            KIT_JS.starts_with(&format!("const NERVE_GUIDE_REF = \"{GUIDE_REF}\";\n")),
             "{}",
             &KIT_JS[..80]
         );
@@ -556,10 +561,9 @@ mod tests {
             .find(|l| l.starts_with("const GUIDE = "))
             .unwrap();
         assert!(
-            guide.contains("/tree/v${NERVE_VERSION}/docs/user`"),
+            guide.contains("/tree/${NERVE_GUIDE_REF}/docs/user`"),
             "{guide}"
         );
-        assert!(!KIT_JS.contains("/main/docs"));
     }
 
     /// The scanner of short texts finds a long subtitle, a long banner and a

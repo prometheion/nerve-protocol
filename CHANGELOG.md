@@ -68,8 +68,10 @@ There are no aliases: change your scripts.
   in it matches: check your rules.
 - The action checker refuses a pattern on a scope other than `exec.run` and
   `fs`: name the capability whole.
-- A 0.0.6 center with the local model d1-3B does not start: set `d1-2b` in
-  its `state.json`.
+- A 0.0.6 center with the local model d1-3B does not start: in its
+  `state.json` change `d1-3b` to `d1-2b`, set `threshold` to 0.75 and
+  `timeout_ms` to 12000, start the center, and install the model again on the
+  Action checker page. Until then every call the model would judge is refused.
 - A 0.0.7 node does not link to an older center: update the center first.
   Update the nodes before you rotate the center's key.
 - A `state.json` or `node.toml` with an unknown field or a newer `format` is
@@ -100,9 +102,13 @@ There are no aliases: change your scripts.
   `center rm lab`; `center grant settings` → `center settings on|off`;
   `cap provider` → `provider`.
 - And: `relay set <address>` → `relay on`; `relay set-centers` and
-  `set-limits` → `relay set`; `proxy rm` → `proxy off`; `config remove` →
-  `config rm`; `audit --denied` → `audit --refused`; `service status` →
-  `status`; the `--…-stdin` flags → `-`.
+  `set-limits` → `relay set`; `relay add <n> --center C` → `--to C`;
+  `proxy rm` → `proxy off`; `config remove` → `config rm`;
+  `audit --denied` → `audit --refused`; `service status` → `status`; the
+  `--…-stdin` flags → `-`; the center's `--mcp none` → `--mcp off`.
+- `rule rm` takes the entry as `rule add` shows it, with no `--wildcard`,
+  `--action` or `--pin`. `status` starts its first line with `node:` where it
+  started with `daemon:`: change a script that reads it.
 - `rule guard` is gone, and a guard rule cannot be removed.
 - `--json`: `status`'s `folder_grants` is `folder_access`, and
   `service status`'s data is `status`'s `service`.
