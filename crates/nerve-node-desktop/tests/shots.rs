@@ -279,7 +279,7 @@ fn every_page_light_and_dark() {
         OFFICE,
         "--yes",
     ]);
-    run(&["center", "settings", "on", "--center", "home"]);
+    run(&["center", "settings", "on", "home"]);
     run(&["mode", "user", "--for", "8", "--center", "lab"]);
     run(&["center", "pause", OFFICE]);
     // lab's center is far away, and cannot be reached.
@@ -306,7 +306,7 @@ fn every_page_light_and_dark() {
         ("allow", LONG_RULE),
         ("deny", "git push --force origin main"),
         ("deny", "rm -rf /"),
-        ("sudo", "sudo systemctl restart nginx"),
+        ("allow", "sudo systemctl restart nginx"),
     ] {
         run(&["rule", "add", list, rule, "--center", "home"]);
     }
@@ -1031,13 +1031,14 @@ fn every_page_light_and_dark() {
     let manual = window.global::<nerve_node_desktop::Manual>();
     manual.set_keys_open(true);
     shots.take_full("help-keys", 1000);
-    // The command reference beside the keys: by topic, two commands open,
-    // a topic closed, filtered, A to Z.
+    // The command reference beside the keys: by topic, two cards open, one
+    // command's options shown, a topic closed, filtered, A to Z.
     manual.set_commands_open(true);
     shots.take("help-both");
     shots.take_full("help-commands", 3600);
-    manual.invoke_ref_toggle("center add".into());
-    manual.invoke_ref_toggle("relay add".into());
+    manual.invoke_ref_toggle("center".into());
+    manual.invoke_ref_toggle("relay".into());
+    manual.invoke_ref_toggle("options:center add".into());
     manual.invoke_ref_group_toggle("Install".into());
     shots.take_full("help-commands-open", 4400);
     manual.set_ref_filter("relay".into());
@@ -1048,8 +1049,9 @@ fn every_page_light_and_dark() {
     manual.invoke_ref_update();
     shots.take_full("help-commands-az", 4200);
     manual.set_ref_by_name(false);
-    manual.invoke_ref_toggle("center add".into());
-    manual.invoke_ref_toggle("relay add".into());
+    manual.invoke_ref_toggle("center".into());
+    manual.invoke_ref_toggle("relay".into());
+    manual.invoke_ref_toggle("options:center add".into());
     manual.invoke_ref_group_toggle("Install".into());
     manual.invoke_ref_update();
     manual.set_keys_open(false);

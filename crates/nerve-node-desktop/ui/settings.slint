@@ -6,7 +6,7 @@ import { Load, RelayNodeRow, Limit } from "data.slint";
 import { Store, Prefs, Install, Perm } from "store.slint";
 import {
     Button, ButtonKind, Card, Pill, Banner, PageHeader, PageFrame, Segmented, Divider,
-    TextField, Field, InfoRow, ListRow, Icon, IconTile, Reveal, TabBar,
+    TextField, Field, InfoRow, ListRow, Icon, IconTile, Reveal, TabBar, Fold,
 } from "widgets.slint";
 
 // A setting card: its icon, title and sentence on top, its controls below.
@@ -15,6 +15,8 @@ export component Group inherits Card {
     in property <Tone> tone: Tone.accent;
     in property <string> title;
     in property <string> text;
+    // The rest of the line on it, folded under it.
+    in property <string> more;
     pad: Space.xl;
     gap: Space.lg;
     HorizontalLayout {
@@ -44,6 +46,9 @@ export component Group inherits Card {
                     font-size: Type.small;
                     wrap: word-wrap;
                 }
+            }
+            if root.more != "": Fold {
+                more: root.more;
             }
         }
     }
@@ -169,8 +174,9 @@ export component SettingsPage inherits PageFrame {
                 title: "Account for commands";
                 text: Install.windows
                     ? "Commands from centers run as this account."
-                    : Perm.owner-is-root ? "Folder and allowlist mode run commands as nerve-run, an account of their own that reaches only the folders you give it. User mode runs them as root, the owner of this node, with every right on this machine."
-                    : "Folder and allowlist mode run commands as nerve-run, an account of their own that reaches only the folders you give it. User mode runs them as you.";
+                    : Perm.owner-is-root ? "Commands run as nerve-run, which reaches only your folders (user mode: as root)."
+                    : "Commands run as nerve-run, which reaches only your folders (user mode: as you).";
+                more: Install.windows ? "" : "Folder and allowlist mode run commands as nerve-run, an account of their own. User mode runs them as " + (Perm.owner-is-root ? "root, the owner of this node, with every right on this machine." : "you.");
                 // One block: a hidden part takes no room, nor the space around it.
                 VerticalLayout {
                     Reveal {

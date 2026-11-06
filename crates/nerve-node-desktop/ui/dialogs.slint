@@ -317,8 +317,8 @@ export component AboutDialog inherits Dialog {
 export component ModeDialog inherits Dialog {
     title: Perm.mode-choice == "folder" ? "Folder mode for " + Perm.center : "User mode for " + Perm.center;
     subtitle: Perm.mode-choice == "folder"
-        ? (Perm.separate ? "It writes and runs commands as nerve-run, an account of its own, only in the folders you give it, /tmp and its home; it may read those and what every account on this machine may read." : "It may do what each of its folders allows.")
-        : Perm.owner-is-root ? "Its commands run as root, the owner of this node: anything on this machine, Nerve and its keys included. Best for a while, not for good."
+        ? (Perm.separate ? "Runs as nerve-run, only in your folders, /tmp and its home. It can also read what every account may read." : "It may do what each of its folders allows.")
+        : Perm.owner-is-root ? "Its commands run as root, with every right here, Nerve and its keys included. Best for a while."
         : "Its commands run as you: anything you may do, protected files aside. Best for a while, not for good.";
     card-width: 480px;
     close => {
@@ -437,7 +437,8 @@ export component FolderDialog inherits Dialog {
 // center do while the owner types; the node checks again on save.
 export component CapDialog inherits Dialog {
     title: Caps.edit-new ? "Add a capability" : "Change " + Caps.edit-name;
-    subtitle: "A command the node runs as nerve-run, held to the center's folders. A word written {name} is the call's argument name, as one whole word; no shell reads it.";
+    subtitle: "A command the node runs as nerve-run, held to the center's folders.";
+    subtitle-more: "A word written {name} is the call's argument name, as one whole word; no shell reads it.";
     card-width: 640px;
     close => {
         Caps.edit-open = false;
@@ -553,7 +554,8 @@ export component CapDialog inherits Dialog {
     }
     Field {
         label: "Arguments";
-        hint: "A JSON Schema of an object; empty for none. A property with \"x-nerve-path\": \"read\" or \"write\" is a path the node holds to the folders.";
+        hint: "A JSON Schema of an object; empty for none.";
+        more: "A property with \"x-nerve-path\": \"read\" or \"write\" is a path the node holds to the folders.";
         error: Caps.params-error;
         TextArea {
             text <=> Caps.edit-params;
@@ -943,7 +945,8 @@ export component RestoreDialog inherits Dialog {
 // Why the app asks for administrator rights, before the system asks.
 export component ElevateDialog inherits Dialog {
     title: "Administrator rights";
-    subtitle: "You are not the owner of this node, the account that installed it, so reading and changing it needs administrator rights.";
+    subtitle: "You are not the owner of this node, so reading and changing it needs administrator rights.";
+    subtitle-more: "The owner is the account that installed it.";
     card-width: 520px;
     close => {
         Store.elevate-open = false;

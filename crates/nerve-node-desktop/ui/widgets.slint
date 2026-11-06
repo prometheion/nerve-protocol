@@ -259,6 +259,48 @@ export component Button {
     }
 }
 
+// The rest of a short text: "More" opens it under the line, "Less" closes
+// it again. The line before it says what counts, a limit included; this
+// holds the why and the detail. It keeps its own state, unless the page
+// keeps it (`kept`, as the reference does across a new filter): then `open`
+// says, and a click only calls `toggled`.
+export component Fold inherits VerticalLayout {
+    in property <string> more;
+    in property <string> summary: "More";
+    in property <bool> kept;
+    in property <bool> open;
+    in property <length> font-size: Type.small;
+    callback toggled();
+    property <bool> own;
+    property <bool> shown: root.kept ? root.open : root.own;
+    spacing: 4px;
+    HorizontalLayout {
+        alignment: start;
+        Button {
+            text: root.shown ? "Less" : root.summary;
+            kind: ButtonKind.ghost;
+            small: true;
+            clicked => {
+                root.own = !root.own;
+                root.toggled();
+            }
+        }
+    }
+    Reveal {
+        shown: root.shown;
+        VerticalLayout {
+            spacing: 6px;
+            if root.more != "": Text {
+                text: root.more;
+                color: Theme.text-muted;
+                font-size: root.font-size;
+                wrap: word-wrap;
+            }
+            @children
+        }
+    }
+}
+
 export component Card inherits Rectangle {
     in property <length> pad: Space.xl;
     in property <length> gap: Space.md;
@@ -347,6 +389,8 @@ export component Banner inherits Rectangle {
     in property <Tone> tone: Tone.danger;
     in property <string> title;
     in property <string> text;
+    // The reason of a short text, folded under it.
+    in property <string> more;
     in property <string> action;
     callback acted();
     background: Theme.tone-soft(root.tone);
@@ -393,6 +437,9 @@ export component Banner inherits Rectangle {
                     font-size: Type.small;
                     wrap: word-wrap;
                 }
+            }
+            if root.more != "": Fold {
+                more: root.more;
             }
         }
         if root.action != "": VerticalLayout {
@@ -1312,6 +1359,8 @@ export component TextField {
 export component Field {
     in property <string> label;
     in property <string> hint;
+    // The rest of the hint, folded under it.
+    in property <string> more;
     in property <string> error;
     VerticalLayout {
         VerticalLayout {
@@ -1333,6 +1382,10 @@ export component Field {
                 font-size: Type.caption;
                 wrap: word-wrap;
             }
+        }
+        if root.more != "" && root.error == "": Fold {
+            more: root.more;
+            font-size: Type.caption;
         }
     }
 }
@@ -1447,6 +1500,8 @@ export component PathText {
 export component Dialog inherits Rectangle {
     in property <string> title;
     in property <string> subtitle;
+    // The rest of the subtitle, folded under it.
+    in property <string> subtitle-more;
     in property <length> card-width: Size.dialog;
     callback close();
     callback enter();
@@ -1518,6 +1573,10 @@ export component Dialog inherits Rectangle {
                                     font-size: Type.body;
                                     wrap: word-wrap;
                                 }
+                            }
+                            if root.subtitle-more != "": Fold {
+                                more: root.subtitle-more;
+                                font-size: Type.body;
                             }
                         }
                         VerticalLayout {

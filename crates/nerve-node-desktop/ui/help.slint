@@ -1,22 +1,104 @@
-// Help: the app's keys and the command reference: every nerve-node command
-// by topic or from A to Z, to filter, each one opening on its arguments, an
-// example and the place in the app that does the same (src/reference.rs).
+// Help: the app's keys and the command reference: every nerve-node card
+// by topic or from A to Z, to filter, each one opening on its commands, with
+// an example, the place in the app and their arguments folded (src/reference.rs).
 // Each action in the app runs one of these commands. Every part opens and
 // closes on its own: opening one leaves the others as they are. Windows
 // has no reference: there the app is the only way to the node, and a list
 // of commands to type would send the owner to a terminal that is not there.
 
 import { Theme, Type, Space, Radius, Tone } from "theme.slint";
-import { Page, RefRow } from "data.slint";
+import { Page, RefRow, RefVerb } from "data.slint";
 import { Manual, Store, Prefs, Install } from "store.slint";
 import {
     Button, ButtonKind, Card, PageHeader, PageFrame, Divider, Code, Fit, Reveal, Expander,
-    TextField, Segmented, Icon, Pill, FocusRing,
+    TextField, Segmented, Icon, Pill, FocusRing, Fold,
 } from "widgets.slint";
 
-// One command of the reference: its name and first sentence on a line;
-// open, the rest of what it does, how it is written, its arguments, an
-// example, and the button to the place in the app that does the same.
+// One command inside a card: its words and line, an example, the place in
+// the app that does the same, and a fold with the rest, how it is written
+// and its arguments.
+component VerbBlock inherits VerticalLayout {
+    in property <RefVerb> verb;
+    spacing: 6px;
+    HorizontalLayout {
+        spacing: Space.md;
+        Text {
+            text: root.verb.name;
+            color: Theme.text;
+            font-size: Type.small;
+            font-weight: Type.semibold;
+            font-family: Type.mono;
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.verb.line;
+            color: Theme.text;
+            font-size: Type.small;
+            wrap: word-wrap;
+        }
+    }
+    Code {
+        text: root.verb.example;
+    }
+    HorizontalLayout {
+        spacing: Space.sm;
+        Text {
+            text: root.verb.in-app ? "In the app:"
+                : root.verb.place != "" ? root.verb.place
+                : "Not in the app: the service runs the node.";
+            color: Theme.text-muted;
+            font-size: Type.small;
+            vertical-alignment: center;
+        }
+        if root.verb.in-app: Button {
+            text: root.verb.place;
+            icon: @image-url("icons/arrow-right.svg");
+            kind: ButtonKind.secondary;
+            small: true;
+            clicked => {
+                Manual.ref-go(root.verb.page, root.verb.tab);
+            }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+    }
+    Fold {
+        summary: root.verb.args.length > 0 ? "Options (" + root.verb.args.length + ")" : "More";
+        more: root.verb.more;
+        kept: true;
+        open: root.verb.open;
+        toggled => {
+            Manual.ref-toggle("options:" + root.verb.name);
+        }
+        Code {
+            text: root.verb.usage;
+        }
+        for a in root.verb.args: Fit {
+            HorizontalLayout {
+                spacing: Space.md;
+                Text {
+                    width: 200px;
+                    text: a.name;
+                    color: Theme.text;
+                    font-size: Type.caption;
+                    font-family: Type.mono;
+                    wrap: char-wrap;
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: a.about;
+                    color: Theme.text-muted;
+                    font-size: Type.caption;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}
+
+// One card of the reference: its name and line on a line; open, the rest
+// of what it is for, its commands, and its page of the user guide.
 component CommandRow inherits Rectangle {
     in property <RefRow> item;
     in property <bool> topic;
@@ -107,72 +189,34 @@ component CommandRow inherits Rectangle {
                 spacing: Space.md;
                 Divider { }
                 Reveal {
-                    shown: root.item.about != "";
+                    shown: root.item.more != "";
                     Text {
-                        text: root.item.about;
+                        text: root.item.more;
                         color: Theme.text;
                         font-size: Type.small;
                         wrap: word-wrap;
                     }
                 }
-                Code {
-                    text: root.item.usage;
-                }
-                Reveal {
-                    shown: root.item.args.length > 0;
-                    VerticalLayout {
-                        spacing: 6px;
-                        for a in root.item.args: Fit {
-                            HorizontalLayout {
-                                spacing: Space.md;
-                                Text {
-                                    width: 200px;
-                                    text: a.name;
-                                    color: Theme.text;
-                                    font-size: Type.caption;
-                                    font-family: Type.mono;
-                                    wrap: char-wrap;
-                                }
-                                Text {
-                                    horizontal-stretch: 1;
-                                    text: a.about;
-                                    color: Theme.text-muted;
-                                    font-size: Type.caption;
-                                    wrap: word-wrap;
-                                }
-                            }
-                        }
-                    }
-                }
-                VerticalLayout {
-                    spacing: 4px;
-                    Text {
-                        text: "Example";
-                        color: Theme.text-muted;
-                        font-size: Type.caption;
-                        font-weight: Type.semibold;
-                    }
-                    Code {
-                        text: root.item.example;
+                for v in root.item.verbs: Fit {
+                    VerbBlock {
+                        verb: v;
                     }
                 }
                 HorizontalLayout {
                     spacing: Space.sm;
                     Text {
-                        text: root.item.in-app ? "In the app:"
-                            : root.item.place != "" ? root.item.place
-                            : "Not in the app: the service runs the node.";
+                        text: "More in the user guide:";
                         color: Theme.text-muted;
                         font-size: Type.small;
                         vertical-alignment: center;
                     }
-                    if root.item.in-app: Button {
-                        text: root.item.place;
-                        icon: @image-url("icons/arrow-right.svg");
-                        kind: ButtonKind.secondary;
+                    Button {
+                        text: root.item.doc;
+                        icon: @image-url("icons/external.svg");
+                        kind: ButtonKind.ghost;
                         small: true;
                         clicked => {
-                            Manual.ref-go(root.item.page, root.item.tab);
+                            Platform.open-url("https://github.com/prometheion/nerve-protocol/blob/main/docs/user/" + root.item.doc);
                         }
                     }
                     Rectangle {

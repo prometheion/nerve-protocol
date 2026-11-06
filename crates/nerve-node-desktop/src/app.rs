@@ -183,7 +183,7 @@ pub struct Ctl {
     /// and screenshots, which draw without motion.
     motion_source: Cell<Option<MotionSource>>,
     /// Every command of the CLI, for the Help page's reference.
-    reference: Vec<crate::reference::Command>,
+    reference: Vec<crate::reference::Card>,
     /// The commands and topics of the reference the owner opened or closed.
     ref_opened: RefCell<crate::reference::Opened>,
     /// Where a new relay link says this machine is, as `relay` guessed.

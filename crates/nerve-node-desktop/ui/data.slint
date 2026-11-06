@@ -150,14 +150,13 @@ export struct HelpArg {
     about: string,
 }
 
-// A command of the reference (src/reference.rs): its words, its first
-// sentence and the rest, how it is written, its arguments, an example, and
-// where the app does the same.
-export struct RefRow {
-    topic: string,
+// A command of the reference (src/reference.rs), inside its card: its
+// words, its line and the rest, how it is written, its arguments, an
+// example, and where the app does the same.
+export struct RefVerb {
     name: string,
     line: string,
-    about: string,
+    more: string,
     usage: string,
     args: [HelpArg],
     example: string,
@@ -166,7 +165,20 @@ export struct RefRow {
     // The tab of Settings, -1 for none.
     tab: int,
     place: string,
-    // It shows its arguments and example.
+    // Its fold (the rest, how it is written, its arguments) is open.
+    open: bool,
+}
+
+// A row of the reference: a noun with its commands, or a command that
+// stands alone; its line, the rest, and its page of the user guide.
+export struct RefRow {
+    topic: string,
+    name: string,
+    line: string,
+    more: string,
+    doc: string,
+    verbs: [RefVerb],
+    // It shows its commands.
     open: bool,
 }
 

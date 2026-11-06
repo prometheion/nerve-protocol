@@ -475,9 +475,11 @@ A click on the page that is open reads nothing again; **Refresh** does.
 ## Help
 
 **Help** lists these keys and, on Linux, has the command reference: every
-`nerve-node` command by topic or from A to Z, with a filter. A command opens
-on its arguments, an example, and a button to the place in the app that does
-the same. The keys, the reference, each topic and each command open and close
+`nerve-node` command by topic or from A to Z, with a filter, one row per
+command card as on the web UI. A row opens on its commands, each with its
+line, an example and a button to the place in the app that does the same; its
+options fold under **Options**, and the row ends on its page of this guide.
+The keys, the reference, each topic, each row and each fold open and close
 on their own. On Windows Help has the keys and no command reference: there
 the app is the only way to the node, and every page it would point to is in
 the sidebar.

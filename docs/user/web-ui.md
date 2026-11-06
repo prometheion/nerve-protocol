@@ -265,15 +265,18 @@ the marked entry and **Escape** closes it.
 
 ### Help
 
-Built like the desktop app's Help: two parts that open and close on their own.
+Parts that open and close on their own:
 
-- **Keyboard shortcuts.** The keys of the web UI.
-- **Command reference.** The commands of `nerve-node`, the program on each
+- **Connect a harness.** How an AI app reaches this center, as on the Overview.
+- **nerve-center commands.** The center's own commands, one line each; its
+  options and the advanced ones fold.
+- **nerve-node commands.** The commands of `nerve-node`, the program on each
   machine. The center reads them from the node's own command definition, so
   they match `nerve-node --help` of the same build. Type in the filter to keep
   the commands whose name, explanation or arguments contain it, and list them
-  **By topic** or **A to Z**. A topic opens and closes its commands; a command
-  opens on what it does, how it is written and its arguments.
+  **By topic** or **A to Z**. A row opens on its commands, one line each, with
+  their options folded, and a link to its page of this guide.
+- **Keyboard shortcuts.** The keys of the web UI.
 
 **User guide** at the top opens these pages on GitHub.
 
