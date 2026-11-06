@@ -810,7 +810,7 @@ mod tests {
         assert!((20..=40).contains(&rows), "{rows} rows");
         let pair = &topics[1];
         let center = pair.rows.iter().find(|r| r.name == "center").unwrap();
-        assert_eq!(center.doc, "pairing.md");
+        assert_eq!(center.doc, "pair.md");
         let add = center
             .verbs
             .iter()
