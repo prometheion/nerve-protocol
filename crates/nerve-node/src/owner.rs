@@ -2632,8 +2632,21 @@ mod tests {
             input_for(&cli(args).cmd, terminal, || Ok("pw".into())).unwrap()
         };
         let set = ["proxy", "set", "http://u@h:1"];
-        assert!(matches!(input(&set, true), Input::Text(t) if t == "pw\n"));
-        assert!(!terminal_of(&input(&set, true), true));
+        // The installed node on Windows takes no proxy password, so a
+        // terminal is not asked for one there.
+        #[cfg(windows)]
+        {
+            let e = input_for(&cli(&set).cmd, true, || Ok("pw".into()));
+            assert!(matches!(e, Err(e) if e == crate::secrets::proxy_windows_refusal()));
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(matches!(input(&set, true), Input::Text(t) if t == "pw\n"));
+            assert!(!terminal_of(&input(&set, true), true));
+            // A password not given ends it here.
+            let e = input_for(&cli(&set).cmd, true, || Err("no password given".into()));
+            assert!(matches!(e, Err(e) if e == "no password given"));
+        }
         assert!(matches!(input(&set, false), Input::Stdin));
         let headers = ["proxy", "set", "http://u@h:1", "--header", "-"];
         assert!(matches!(input(&headers, true), Input::Stdin));
@@ -2641,9 +2654,6 @@ mod tests {
             input(&["proxy", "set", "http://u:p@h:1"], true),
             Input::None
         ));
-        // A password not given ends it here.
-        let e = input_for(&cli(&set).cmd, true, || Err("no password given".into()));
-        assert!(matches!(e, Err(e) if e == "no password given"));
     }
 
     /// The owner pipe lets in SYSTEM, the administrators, the node's account,
