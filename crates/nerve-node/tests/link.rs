@@ -2007,6 +2007,15 @@ async fn a_welcome_without_features_or_resume_is_refused() {
             Some("protocol_error"),
             "{field}"
         );
+        // `status` says what to do: update the center first.
+        let said = node.status()["centers"][0]["status"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            said.starts_with("the center is older than this node: update it first"),
+            "{field}: {said}"
+        );
     }
     node.stop().await;
 }

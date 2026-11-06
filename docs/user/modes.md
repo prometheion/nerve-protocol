@@ -627,7 +627,7 @@ Check that your kernel supports it, with the node running:
 nerve-node status
 ```
 
-The first line reads `daemon: running (confinement landlock v…)`. With
+The first line reads `node: running (confinement landlock v…)`. With
 `confinement none` the kernel has no Landlock. The installed node then runs
 `folder` mode and `allowlist` mode commands as `nerve-run` without it: its
 account alone holds it back, so it reaches the folders you give it and
@@ -915,7 +915,7 @@ folders.
   --no-hardlinks`. Or remove them (delete `node_modules` or `.venv`) before
   you add, change or remove the folder.
 
-`nerve-node status` shows a running node's confinement (`daemon: running
+`nerve-node status` shows a running node's confinement (`node: running
 (confinement appcontainer)`): on Windows it asks the node over its
 [control pipe](platforms.md#the-control-pipe). The node also names it when it
 starts, in its output and its [log](logs.md):

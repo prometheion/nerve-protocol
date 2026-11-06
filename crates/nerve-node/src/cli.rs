@@ -126,7 +126,7 @@ pub enum Cmd {
         #[arg(long, value_name = "FILE")]
         passphrase_file: Option<PathBuf>,
     },
-    /// Start, stop or restart the installed service, or show its state.
+    /// Start, stop or restart the installed service; `status` shows its state.
     #[command(subcommand)]
     Service(ServiceCmd),
     /// Print the files of the service this program installs besides itself, as JSON: `update` of the installed program runs the new one so, to put them in place with it.
@@ -473,8 +473,6 @@ pub enum ServiceCmd {
     Stop,
     /// Stop it and start it again, so the node takes every change in node.toml.
     Restart,
-    /// Show whether the node is installed as a service, whether it runs, and the program it runs with its version.
-    Status,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2085,7 +2083,7 @@ pub fn service_log(cli: &Cli) -> Option<Result<PathBuf, String>> {
 /// the service the app installs and starts.
 pub const BY_HAND: &str = "on Windows the node runs only as its service: the desktop app's installer installs it, and Start on the app's Overview starts it";
 
-/// `service status` as JSON (crate::service::service_status): the
+/// The installed service's state as JSON (crate::service::service_status): the
 /// installed service's state as this machine's service manager says it.
 pub(crate) fn service_status(layout: &Layout) -> Result<serde_json::Value, String> {
     #[cfg(windows)]
@@ -2385,23 +2383,10 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
             Ok(())
         }
         Cmd::Status => {
-            // On Windows the node answers over its control pipe.
-            if let Some(v) = live_status(&paths).await? {
-                for line in status_lines(&v) {
-                    w(out, line);
-                }
-                return Ok(());
-            }
-            let cfg = SettingsStore::peek_with(
-                &paths.config_file(),
-                &crate::secrets::NodeSecrets::for_cli(&paths),
-            )?;
-            let owner = crate::service::owner_of(&paths);
-            for line in stopped_lines(&cfg, owner.as_deref()) {
+            // The same data as `status --json`, for people.
+            let v = json::status(&paths).await?;
+            for line in status_lines(&v) {
                 w(out, line);
-            }
-            if let Some(warning) = pairings_warning_here(&paths, &cfg) {
-                w(out, format!("warning: {warning}"));
             }
             Ok(())
         }
@@ -2951,34 +2936,11 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                 crate::service::service_files_text(&Layout::system(), owner.as_deref(), &polkit);
             writeln!(out, "{text}").map_err(|e| e.to_string())
         }
-        Cmd::Service(ServiceCmd::Status) => {
-            let v = service_status(&Layout::system())?;
-            let state = match v["state"].as_str() {
-                None => "not installed as a service".to_string(),
-                Some(state) => {
-                    let boot = match v["enabled"].as_bool() {
-                        Some(true) => ", starts with the machine",
-                        Some(false) => ", does not start with the machine",
-                        None => "",
-                    };
-                    format!("{state}{boot}")
-                }
-            };
-            let version = v["version"]
-                .as_str()
-                .map_or_else(String::new, |v| format!(" (version {v})"));
-            let program = if v["present"] == true {
-                format!("{}{version}", v["program"].as_str().unwrap_or_default())
-            } else {
-                format!("none at {}", v["program"].as_str().unwrap_or_default())
-            };
-            writeln!(out, "service: {state}\nprogram: {program}").map_err(|e| e.to_string())
-        }
         Cmd::Service(c) => {
             let action = match c {
                 ServiceCmd::Start => crate::service::ServiceAction::Start,
                 ServiceCmd::Stop => crate::service::ServiceAction::Stop,
-                _ => crate::service::ServiceAction::Restart,
+                ServiceCmd::Restart => crate::service::ServiceAction::Restart,
             };
             let layout = Layout::system();
             // An owner without root does not reach the control socket; the
@@ -3119,43 +3081,36 @@ async fn tell_pairings_apart(paths: &NodePaths, out: &mut dyn Write) {
     }
 }
 
-/// What `status` says of a node that does not run, with the config `cfg`
-/// and the `owner` the unit names, a line each.
-fn stopped_lines(cfg: &NodeConfig, owner: Option<&str>) -> Vec<String> {
-    let mut lines = vec!["daemon: not running".to_string()];
-    lines.extend(owner_line(owner, crate::owner::is_root(owner)));
-    let limits = crate::cgroup::status(&cfg.limits.command, &Err("the node does not run".into()));
-    if let Some(line) = limits_lines(&limits).first() {
-        lines.push(line.clone());
-    }
-    if cfg.locked {
-        lines.push("LOCKED (panic): nothing runs until `nerve-node unlock`".into());
-    }
-    let now = crate::now_ms();
-    for c in &cfg.centers {
-        lines.push(format!(
-            "{}  {}  mode {}",
-            c.name,
-            c.url,
-            mode_line(&c.policy, now)
-        ));
-    }
-    lines
-}
-
-/// What `status` says of a running node, from its `status` answer `v`, a
-/// line each.
+/// What `status` says of the node, from `status --json`'s `v` (a running
+/// node's answer, or what the config says of a stopped one), a line each:
+/// the node and its service, the warnings, each center, and the next step.
 fn status_lines(v: &Value) -> Vec<String> {
-    let mut lines = vec![format!(
-        "daemon: running (confinement {})",
-        v["confinement"].as_str().unwrap_or("?")
-    )];
+    let running = v["daemon"] != "not running";
+    let mut lines = vec![match running {
+        true => format!(
+            "node: running (confinement {})",
+            v["confinement"].as_str().unwrap_or("?")
+        ),
+        false => "node: not running".to_string(),
+    }];
+    lines.extend(service_line(&v["service"]));
     if let Some(why) = v["folder_commands_off"].as_str() {
         lines.push(format!("folder mode runs no command: {why}"));
     }
-    lines.extend(limits_lines(&v["command_limits"]));
+    // A stopped node knows only the limits it would set.
+    let limits = match v["command_limits"].is_null() {
+        true => Vec::new(),
+        false => limits_lines(&v["command_limits"]),
+    };
+    match running {
+        true => lines.extend(limits),
+        false => lines.extend(limits.into_iter().take(1)),
+    }
     if v["locked"] == true {
         lines.push("LOCKED (panic): nothing runs until `nerve-node unlock`".into());
+    }
+    if let Some(s) = v["sudo"].as_str() {
+        lines.push(format!("sudo: {s}"));
     }
     lines.extend(owner_line(v["owner"].as_str(), v["owner_is_root"] == true));
     if let Some(h) = v["home_warning"]["warning"].as_str() {
@@ -3183,7 +3138,10 @@ fn status_lines(v: &Value) -> Vec<String> {
             None => String::new(),
         };
         // A timed mode says how long it has and where it ends.
-        let timer = match (c["until"].as_u64(), c["then"].as_str()) {
+        let timer = match (
+            c["until"].as_u64().filter(|u| *u > crate::now_ms()),
+            c["then"].as_str(),
+        ) {
             (Some(until), Some(then)) => {
                 let left = until.saturating_sub(crate::now_ms());
                 let then = Mode::parse(then).unwrap_or(Mode::Allowlist);
@@ -3196,12 +3154,17 @@ fn status_lines(v: &Value) -> Vec<String> {
             }
             _ => String::new(),
         };
+        // A stopped node has no link to tell: the center's address then.
+        let link = c["status"]
+            .as_str()
+            .or_else(|| c["url"].as_str())
+            .unwrap_or_default();
         lines.push(format!(
-            "{}  {}  mode {}{timer}{whom}",
+            "{}  {link}  mode {}{timer}{whom}",
             c["name"].as_str().unwrap_or_default(),
-            c["status"].as_str().unwrap_or_default(),
             c["mode"].as_str().unwrap_or_default(),
         ));
+        lines.extend(center_summary(c));
     }
     for p in v["providers"].as_array().into_iter().flatten() {
         let caps: Vec<&str> = p["capabilities"]
@@ -3229,7 +3192,76 @@ fn status_lines(v: &Value) -> Vec<String> {
             relay["status"].as_str().unwrap_or_default()
         ));
     }
+    lines.extend(next_steps(v).into_iter().map(|s| format!("next: {s}")));
     lines
+}
+
+/// What `status` says of the installed service, from `status --json`'s
+/// `service` (`None` where there is none to tell).
+fn service_line(s: &Value) -> Option<String> {
+    if s.is_null() {
+        return None;
+    }
+    let Some(state) = s["state"].as_str() else {
+        return Some("service: not installed (this node runs by hand)".into());
+    };
+    let boot = match s["enabled"].as_bool() {
+        Some(true) => ", starts with the machine",
+        Some(false) => ", does not start with the machine",
+        None => "",
+    };
+    let version = s["version"]
+        .as_str()
+        .map_or_else(String::new, |v| format!(", version {v}"));
+    Some(format!("service: {state}{boot}{version}"))
+}
+
+/// One center's rights in a line, for `status`: its folders, its network,
+/// and how many rules each list has.
+fn center_summary(c: &Value) -> Option<String> {
+    let n = |k: &str| c[k].as_u64();
+    let (folders, allow, deny, sudo) = (
+        n("folders")?,
+        n("allow_rules")?,
+        n("deny_rules")?,
+        n("sudo_rules")?,
+    );
+    let network = if c["no_network"] == true { "off" } else { "on" };
+    Some(format!(
+        "  folders: {folders}; network: {network}; rules: {allow} allow, {deny} deny and the guard, {sudo} sudo"
+    ))
+}
+
+/// What to do next, from `status --json`'s `v`: start a node that does
+/// not run, pair a first center, give a folder-mode center a folder.
+fn next_steps(v: &Value) -> Vec<String> {
+    let mut steps = Vec::new();
+    if v["daemon"] == "not running" {
+        steps.push(match v["service"]["state"].as_str() {
+            Some(_) => "start it: `nerve-node service start`".to_string(),
+            None => "start it: `sudo nerve-node install` installs it as a service (or `nerve-node run` in the foreground)".to_string(),
+        });
+    }
+    if v["locked"] == true {
+        steps.push("let it work again: `nerve-node unlock`".into());
+    }
+    let centers = v["centers"].as_array().cloned().unwrap_or_default();
+    if centers.is_empty() {
+        steps.push("pair a center: `nerve-node center add '<link>'`".into());
+    }
+    for c in &centers {
+        if c["mode"] == "folder" && c["folders"].as_u64() == Some(0) {
+            let name = c["name"].as_str().unwrap_or_default();
+            let which = match centers.len() {
+                1 => String::new(),
+                _ => format!(" --center {name}"),
+            };
+            steps.push(format!(
+                "give {name} a folder: `nerve-node folder add ~/project rw{which}`"
+            ));
+        }
+    }
+    steps
 }
 
 /// The texts of `v`, a list of strings.
@@ -7649,18 +7681,26 @@ mod tests {
         assert!(crate::owner::ROOT_OWNER_NOTE.contains("run as root"));
         assert_eq!(owner_line(None, false), None);
         // So does a stopped node's.
-        let cfg = NodeConfig::default();
         let root_line = format!("owner: {}", crate::owner::ROOT_OWNER_NOTE);
-        let stopped = stopped_lines(&cfg, Some("root"));
-        assert_eq!(stopped[0], "daemon: not running");
-        assert_eq!(stopped.contains(&root_line), !cfg!(windows), "{stopped:#?}");
-        let alice = stopped_lines(&cfg, Some("alice"));
+        let stopped = |owner: Option<&str>| {
+            status_lines(&json!({
+                "daemon": "not running",
+                "owner": owner,
+                "owner_is_root": crate::owner::is_root(owner),
+            }))
+        };
+        assert_eq!(stopped(Some("root"))[0], "node: not running");
+        assert_eq!(
+            stopped(Some("root")).contains(&root_line),
+            !cfg!(windows),
+            "{:#?}",
+            stopped(Some("root"))
+        );
+        let alice = stopped(Some("alice"));
         assert!(alice.contains(&"owner: alice".to_string()), "{alice:#?}");
         assert!(!alice.contains(&root_line), "{alice:#?}");
         assert!(
-            !stopped_lines(&cfg, None)
-                .iter()
-                .any(|l| l.starts_with("owner:")),
+            !stopped(None).iter().any(|l| l.starts_with("owner:")),
             "no owner, no line"
         );
         // Nothing of the kind on a node that has none of it.
@@ -7669,6 +7709,88 @@ mod tests {
             !plain.contains("warning") && !plain.contains("Landlock,"),
             "{plain}"
         );
+    }
+
+    /// `status` is one place to look: the node and its service, each
+    /// center's mode and what it may do, and the next step to take.
+    #[test]
+    fn the_status_says_the_service_each_center_and_the_next_step() {
+        let lines = status_lines(&json!({
+            "daemon": "not running",
+            "sudo": "off",
+            "service": {"installed": true, "state": "stopped", "enabled": true, "version": "0.0.7"},
+            "centers": [],
+        }));
+        assert_eq!(
+            lines,
+            [
+                "node: not running",
+                "service: stopped, starts with the machine, version 0.0.7",
+                "sudo: off",
+                "next: start it: `nerve-node service start`",
+                "next: pair a center: `nerve-node center add '<link>'`",
+            ]
+        );
+        let by_hand = status_lines(&json!({
+            "daemon": "not running",
+            "service": {"installed": false, "state": null},
+            "centers": [{"name": "lab", "url": "https://c.example", "mode": "allowlist",
+                         "folders": 0, "allow_rules": 1, "deny_rules": 2, "sudo_rules": 0}],
+        }));
+        assert!(
+            by_hand.contains(&"service: not installed (this node runs by hand)".to_string()),
+            "{by_hand:#?}"
+        );
+        assert!(
+            by_hand
+                .iter()
+                .any(|l| l.contains("`sudo nerve-node install`")),
+            "{by_hand:#?}"
+        );
+        assert!(
+            by_hand.contains(&"lab  https://c.example  mode allowlist".to_string()),
+            "{by_hand:#?}"
+        );
+        assert!(
+            by_hand.contains(
+                &"  folders: 0; network: on; rules: 1 allow, 2 deny and the guard, 0 sudo"
+                    .to_string()
+            ),
+            "{by_hand:#?}"
+        );
+        // A running node with a folder-mode center and no folder: give it one.
+        let lines = status_lines(&json!({
+            "confinement": "landlock abi 6",
+            "centers": [
+                {"name": "lab", "status": "connected", "mode": "folder", "no_network": true,
+                 "folders": 0, "allow_rules": 0, "deny_rules": 0, "sudo_rules": 0},
+                {"name": "home", "status": "the center is older than this node: update it first", "mode": "folder",
+                 "folders": 1, "allow_rules": 0, "deny_rules": 0, "sudo_rules": 0},
+            ],
+        }));
+        assert!(
+            lines.contains(
+                &"  folders: 0; network: off; rules: 0 allow, 0 deny and the guard, 0 sudo"
+                    .to_string()
+            ),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.contains(
+                &"next: give lab a folder: `nerve-node folder add ~/project rw --center lab`"
+                    .to_string()
+            ),
+            "{lines:#?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("give home")), "{lines:#?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("home  the center is older than this node")),
+            "{lines:#?}"
+        );
+        // `service status` is gone: `status` says it.
+        assert!(Cli::try_parse_from(["nerve-node", "service", "status"]).is_err());
     }
 
     /// After a change of the folders the CLI says what the node's sync

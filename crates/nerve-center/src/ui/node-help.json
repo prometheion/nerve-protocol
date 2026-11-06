@@ -163,7 +163,7 @@
           ]
         },
         {
-          "about": "Start, stop or restart the installed service, or show its state",
+          "about": "Start, stop or restart the installed service; `status` shows its state",
           "holds": [
             "service"
           ],
@@ -187,12 +187,6 @@
               "args": [],
               "name": "service restart",
               "usage": "nerve-node service restart [OPTIONS]"
-            },
-            {
-              "about": "Show whether the node is installed as a service, whether it runs, and the program it runs with its version",
-              "args": [],
-              "name": "service status",
-              "usage": "nerve-node service status [OPTIONS]"
             }
           ]
         }

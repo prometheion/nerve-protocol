@@ -510,6 +510,15 @@ fn bye(reason: ByeReason) -> WsMessage {
     ))
 }
 
+/// What a center's status says when its welcome lacks what this node's
+/// protocol takes for granted (`features`, `resume`): a center of an earlier
+/// release, which the owner updates first.
+fn older_center(why: &str) -> Option<&'static str> {
+    (why.contains("missing field `features`") || why.contains("missing field `resume`")).then_some(
+        "the center is older than this node: update it first (`sudo nerve-center update` on its machine)",
+    )
+}
+
 /// Reads the next handshake notification named `want`.
 async fn handshake_step<S, T>(stream: &mut S, want: &str) -> Result<T, (Option<ByeReason>, String)>
 where
@@ -661,7 +670,10 @@ async fn session(
         Ok(r) => r,
         Err((reason, why)) => {
             tracing::warn!("center {}: the handshake failed: {why}", entry.name);
-            cs.set_status(format!("handshake failed: {why}"));
+            cs.set_status(match older_center(&why) {
+                Some(older) => older.to_string(),
+                None => format!("handshake failed: {why}"),
+            });
             if let Some(r) = reason {
                 let _ = sink.send(bye(r)).await;
             }

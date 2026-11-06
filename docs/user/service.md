@@ -268,7 +268,7 @@ a node that is not installed as well.
 nerve-node service stop      # the node ends its links; nothing runs
 nerve-node service start
 nerve-node service restart   # takes every change in node.toml
-nerve-node service status    # anyone may ask
+nerve-node status            # the service too; anyone may ask
 ```
 
 `service` does what `systemctl stop|start|restart nerve-node` does, and
@@ -284,9 +284,9 @@ a password from their own local session: by the rule
 no rules, by `/etc/polkit-1/localauthority/50-local.d/50-nerve-node.pkla`.
 No file lets the owner manage other units. Over SSH it needs `sudo`. Root
 as the owner needs none of these files, and `install` writes none for it. A
-stopped service starts again with the machine. `service status` says whether
+stopped service starts again with the machine. `status` says whether
 the node is installed as a service, whether it runs, whether it starts with
-the machine, and the installed program with its version.
+the machine, and the installed program's version.
 
 ## Update
 

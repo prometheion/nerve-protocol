@@ -1440,7 +1440,7 @@ async fn locked_meanwhile(locked: &mut Option<tokio::sync::watch::Receiver<u64>>
 
 /// Whether `cmd` only reads: it changes nothing of the node.
 fn only_reads(cmd: &Cmd) -> bool {
-    use crate::cli::{ConfigCmd, ServiceCmd};
+    use crate::cli::ConfigCmd;
     matches!(
         cmd,
         Cmd::Status
@@ -1456,7 +1456,6 @@ fn only_reads(cmd: &Cmd) -> bool {
             | Cmd::Proxy { cmd: None }
             | Cmd::Relay { cmd: None }
             | Cmd::Sudo { cmd: None }
-            | Cmd::Service(ServiceCmd::Status)
     ) || matches!(cmd, Cmd::Ui { cmd } if crate::cli::ui::only_reads(cmd))
 }
 
@@ -2284,7 +2283,6 @@ mod tests {
             &["rule", "--center", "home"],
             &["config", "get", "log.level"],
             &["relay"],
-            &["service", "status"],
             &["cap"],
             &["provider"],
         ] {
@@ -2367,7 +2365,6 @@ mod tests {
         }
         for args in [
             &["service", "restart"][..],
-            &["service", "status"],
             &["config", "set", "log.level", "debug"],
             &["rule", "add", "deny", "rm"],
             &["sudo", "off"],

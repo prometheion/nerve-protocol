@@ -46,11 +46,6 @@ const COMMANDS: &[(&str, &str, Place)] = &[
         (Some(Page::Overview), -1, "Overview › Restart"),
     ),
     (
-        "service status",
-        "nerve-node service status",
-        (Some(Page::Overview), -1, "Overview"),
-    ),
-    (
         "setup",
         "nerve-node setup",
         (

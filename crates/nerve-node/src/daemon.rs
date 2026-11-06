@@ -1695,7 +1695,11 @@ impl Shared {
                     "until": c.policy.until,
                     // Where a timer ends (`mode user --for N`).
                     "then": c.policy.ends(now).map(|(_, m)| m.as_str()),
+                    // What it may do, counted, for `status`.
+                    "folders": c.policy.folders.len(),
                     "allow_rules": c.policy.allow.len(),
+                    "deny_rules": c.policy.deny.iter().filter(|r| !nerve_policy::rules::is_guard(r)).count(),
+                    "sudo_rules": c.policy.sudo_allow.len(),
                     "as_owner": c.policy.as_owner,
                     // The owner's network switch for its folder-mode
                     // commands (`network off`).

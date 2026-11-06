@@ -62,7 +62,7 @@ center is paired.
 | Command | Does | Page |
 |---|---|---|
 | `run` | Run the node in the foreground (Linux; on Windows the node runs only as the installed service, and `run` is refused) | [pairing](pairing.md) |
-| `status` | Show whether it runs, the links, the confinement and the [limits per command](limits.md) | [troubleshooting](troubleshooting.md) |
+| `status` | Show whether it runs, its service, the links, what each center may do, the confinement, the [limits per command](limits.md) and the next step | [troubleshooting](troubleshooting.md) |
 | `audit [--refused] [--last N] [--follow]` | Show what was allowed and refused | [audit](audit.md) |
 | `audit clear` | Start the audit log afresh; the entries so far stay in its older file | [audit](audit.md#clear-it) |
 | `log [--problems] [--last N] [--follow]` | Show the node's log | [logs](logs.md) |
@@ -79,7 +79,6 @@ center is paired.
 | `setup` | Name the node, choose where the keys are, pair the first center, choose its mode and a folder | [service](service.md#setup) |
 | `update [--from FILE]` | Put the latest release in place and restart the service | [service](service.md#update) |
 | `service start\|stop\|restart` | Start, stop or restart the installed service | [service](service.md#start-and-stop) |
-| `service status` | Show whether the node is installed as a service, whether it runs, and its program and version | [service](service.md#start-and-stop) |
 | `uninstall [--purge]` | Remove the service, `nerve-run` and its ACL entries, the node's user and the program | [service](service.md#uninstall) |
 | `backup <file> [--include-keyring] [--overwrite] [--passphrase-file F\|-]` | Write the config and keys to a file that a passphrase protects | [backup](backup.md) |
 | `restore <file> [--replace] [--secret-storage file\|keyring] [--without-proxy] [--passphrase-file F\|-]` | Put a backup in place of this node's, or on another machine | [backup](backup.md#restore) |
@@ -109,7 +108,7 @@ removed only with a change of the format, which the changelog names under
   of `node.toml` as declared, its schemas as JSON, `running`, and for one
   center, with `--center` or where only one is paired, `center`, `caps` and
   `known`, what `cap set` switches), `provider`, `config get`,
-  `proxy`, `relay`, `sudo`, `service status`, and `audit` and `log`
+  `proxy`, `relay`, `sudo`, and `audit` and `log`
   (`{"entries": [...]}`, the lines as the file holds them; with `--follow`
   one a line). `status` has `"daemon"`:
   `"running"`, with what the running node says, or `"not running"`.
@@ -134,7 +133,7 @@ removed only with a change of the format, which the changelog names under
   config's capabilities, which run as it in every mode, are offered to them:
   that nothing keeps them apart; `null` otherwise, also for a node that does not
   run).
-  `service status` has `"installed"`, `"state"` (`"running"`, `"stopped"`,
+  `status`'s `"service"` has `"installed"`, `"state"` (`"running"`, `"stopped"`,
   `"starting"`, `"stopping"` or `"failed"`; `null` when not installed),
   `"enabled"` (it starts with the machine), `"program"` (where the program
   is installed), `"present"` (whether it is there) and `"version"`. It needs

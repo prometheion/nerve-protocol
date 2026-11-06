@@ -38,8 +38,7 @@ fn the_node_called_by_another_name_is_the_node() {
         format!("nerve-node {}", env!("CARGO_PKG_VERSION"))
     );
     // Its installed place is the node's, so install and update take it.
-    let v: serde_json::Value =
-        serde_json::from_str(&said(&node, &["--json", "service", "status"])).unwrap();
-    let program = PathBuf::from(v["program"].as_str().unwrap());
+    let v: serde_json::Value = serde_json::from_str(&said(&node, &["--json", "status"])).unwrap();
+    let program = PathBuf::from(v["service"]["program"].as_str().unwrap());
     assert_eq!(program.file_stem().unwrap(), "nerve-node", "{v}");
 }

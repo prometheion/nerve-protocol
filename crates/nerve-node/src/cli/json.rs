@@ -27,7 +27,6 @@ pub(super) fn own_form(cmd: &Cmd) -> bool {
             | Cmd::Proxy { cmd: None }
             | Cmd::Relay { cmd: None }
             | Cmd::Sudo { cmd: None }
-            | Cmd::Service(ServiceCmd::Status)
     )
 }
 
@@ -86,7 +85,6 @@ pub(super) async fn command(
 ) -> Result<(), String> {
     let v = match cmd {
         Cmd::Status => status(paths).await?,
-        Cmd::Service(ServiceCmd::Status) => service_status(&Layout::system())?,
         Cmd::Audit {
             clear: None,
             follow,
@@ -277,7 +275,15 @@ fn keyring_here(paths: &NodePaths) -> Value {
 /// `status`: what the running node says of itself, with `"daemon":
 /// "running"`; else what the config says, with `"daemon": "not running"`
 /// and no link status for the centers.
-async fn status(paths: &NodePaths) -> Result<Value, String> {
+pub(super) async fn status(paths: &NodePaths) -> Result<Value, String> {
+    let mut v = node_status(paths).await?;
+    // The installed service: whether it is there, runs, starts with the
+    // machine, and its program's version (`service status` before).
+    v["service"] = service_status(&Layout::system()).unwrap_or(Value::Null);
+    Ok(v)
+}
+
+async fn node_status(paths: &NodePaths) -> Result<Value, String> {
     if let Some(mut v) = live_status(paths).await? {
         v["daemon"] = json!("running");
         return Ok(v);
@@ -328,7 +334,13 @@ fn center(paths: &NodePaths, c: &nerve_policy::CenterEntry, now: u64) -> Value {
         "url": c.url,
         "mode": c.policy.mode_at(now).as_str(),
         "until": c.policy.until,
+        "then": c.policy.ends(now).map(|(_, m)| m.as_str()),
         "as_owner": c.policy.as_owner,
+        "no_network": c.policy.no_network,
+        "folders": c.policy.folders.len(),
+        "allow_rules": c.policy.allow.len(),
+        "deny_rules": c.policy.deny.iter().filter(|r| !rules::is_guard(r)).count(),
+        "sudo_rules": c.policy.sudo_allow.len(),
         "settings": c.settings,
         "paused": c.paused,
         "revoked": c.revoked,

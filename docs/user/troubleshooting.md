@@ -181,7 +181,7 @@ Through a [relay](relay.md), `status` names what the relay answered:
 first. The center's log says ``the handshake failed: the hello has no `resume` ``
 (or `features`) for a node older than 0.0.6: update the node.
 
-If `status` says `daemon: not running`, start `nerve-node run`. On a node
+If `status` says `node: not running`, start `nerve-node run`. On a node
 [installed as a service](service.md), start the service instead:
 `sudo systemctl start nerve-node`. A node started there by hand lacks the
 privileges the service has, so it cannot switch to the account commands run

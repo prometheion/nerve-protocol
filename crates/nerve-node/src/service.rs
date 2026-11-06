@@ -1917,7 +1917,7 @@ impl ServiceAction {
     }
 }
 
-/// The installed service, as `service status` says it.
+/// The installed service, as `status` says it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceState {
     /// running, stopped, starting, stopping or failed.
@@ -1953,7 +1953,7 @@ fn unit_state_of(shown: &str) -> ServiceState {
     }
 }
 
-/// `service status`: whether the node is installed as a service here, its
+/// `status`'s `service`: whether the node is installed as a service here, its
 /// state (`None`: not installed), and the program it runs with its version.
 /// Anyone may ask; the program says its version as the one who asks.
 pub fn service_status(layout: &Layout, state: Option<&ServiceState>) -> serde_json::Value {
