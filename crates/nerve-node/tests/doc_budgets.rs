@@ -230,7 +230,7 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
         ("docs/user/safety.md", "does not stop a running command"),
         (
             "docs/user/safety.md",
-            "is readable by every account, the other centers' commands too",
+            "is readable by every account; by other pairings' commands only where `status` warns",
         ),
         ("docs/user/safety.md", "tells programs apart, not users"),
         ("docs/user/safety.md", "the keyring is yours"),

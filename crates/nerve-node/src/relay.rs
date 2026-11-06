@@ -1870,6 +1870,9 @@ mod tests {
             crate::pair::pair(&o.paths, &link, Some("home")).await?;
             crate::cli::edit(&o.paths, |c| {
                 c.centers[0].settings = nerve_policy::config::SettingsGrant::Write;
+                // A center may not put it on the sudo list; the owner does.
+                c.centers[0].policy.sudo_allow =
+                    vec![nerve_conformance::node_part::SUDO_ALLOWED.into()];
                 Ok(())
             })
             .await?;

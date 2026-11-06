@@ -1354,6 +1354,10 @@ pub struct RunOptions {
     /// starts (nerve_sandbox::net_filter). Linux only: elsewhere such a
     /// command does not run.
     pub no_network: bool,
+    /// Linux: the command runs through the shim in a PID namespace with a
+    /// `/proc` of its own, and sees only its own processes
+    /// (nerve_sandbox::own_proc, #199).
+    pub own_proc: bool,
 }
 
 /// The variables of the node's environment every command of `nerve-run`
@@ -1916,13 +1920,18 @@ pub async fn run(
     {
         line.insert_str(0, nerve_sandbox::POWERSHELL_START);
     }
-    let shim = (opts.landlock.is_some() || opts.container.is_some()).then(|| ShimSpec {
-        program: program.clone().into(),
-        args: args.clone(),
-        parent: std::process::id(),
-        landlock: opts.landlock.clone(),
-        container: opts.container.clone(),
-    });
+    // A sudo command and root's never: sudo would not rise in the user
+    // namespace the shim makes for it.
+    let own_proc = opts.own_proc && opts.sudo.is_none() && opts.root.is_none();
+    let shim =
+        (opts.landlock.is_some() || opts.container.is_some() || own_proc).then(|| ShimSpec {
+            program: program.clone().into(),
+            args: args.clone(),
+            parent: std::process::id(),
+            landlock: opts.landlock.clone(),
+            container: opts.container.clone(),
+            own_proc,
+        });
     // The shim makes the container's profile and window station for the
     // user it runs as, which is not wired for another account yet; such a
     // command would run without its container (crate::daemon, which gives
@@ -2484,6 +2493,7 @@ mod tests {
             limits: None,
             tap: None,
             no_network: false,
+            own_proc: false,
         }
     }
 
@@ -4422,6 +4432,7 @@ mod windows_tests {
             limits: None,
             tap: None,
             no_network: false,
+            own_proc: false,
         }
     }
 

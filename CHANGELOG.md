@@ -23,6 +23,7 @@ Built and tested, not released: 0.0.7 publishes the Linux programs only.
 - `proxy set -` reads the proxy URL or relay link from the first line of stdin, as `center add -` does, and `relay add` shows that form: the relay token is no longer in the process list or the shell's history ([#198](https://github.com/prometheion/nerve-protocol/issues/198)).
 - The center's **Pair a machine** card shows `nerve-node center add -` with the link to paste under it, each with Copy, and says to open the link on a Windows machine ([#198](https://github.com/prometheion/nerve-protocol/issues/198)).
 - The desktop app no longer keeps a `nerve://` link on its own command line while its window is open: the start the link opens hands it to a new start on stdin and ends ([#198](https://github.com/prometheion/nerve-protocol/issues/198)).
+- On Linux each folder-mode command, and each command of `nerve-run`, runs in a PID namespace with a `/proc` of its own: `ps` there shows its own processes, never another pairing's running commands. `install` on Ubuntu 24.04 adds an AppArmor profile that allows it, and `status` warns where the kernel cannot ([#199](https://github.com/prometheion/nerve-protocol/issues/199)).
 
 ## 0.0.7
 

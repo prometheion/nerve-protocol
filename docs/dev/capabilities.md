@@ -671,10 +671,11 @@ session for the action checker).
 #### Keep secrets out of the command
 
 While a command runs, its line, with the call's values in it, is there for
-every account on the machine to read, as every program's is (`ps`, `/proc`):
-for the centers' commands and file reads too. So a token or a password in
-the command is a token any center may read while it runs, and a value one
-center gives a call another may read the same way. Put a secret in a file
+every account on the machine to read, as every program's is (`ps`, `/proc`).
+Another pairing's command does not see it where the node gives each command
+a [`/proc` of its own](sandbox-linux.md#a-proc-of-its-own), but every other
+account, and that command on a kernel where `status` warns, does. So a
+token or a password in the command is one others may read while it runs. Put a secret in a file
 the program reads (`curl -H @file`, a `--config` file). Even then a
 capability cannot keep a secret from the centers whose commands run as
 `nerve-run`, since they read what it reads: a secret that must stay yours

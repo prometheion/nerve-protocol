@@ -2589,3 +2589,99 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
         let _ = std::fs::remove_dir_all(format!("/srv/nrv167-{name}"));
     }
 }
+
+/// Whether a process of this machine has `text` in its command line.
+fn running_with(text: &str) -> bool {
+    std::fs::read_dir("/proc").unwrap().flatten().any(|e| {
+        std::fs::read(e.path().join("cmdline"))
+            .is_ok_and(|c| String::from_utf8_lossy(&c).contains(text))
+    })
+}
+
+/// The installed node gives each folder-mode command of `nerve-run` a
+/// `/proc` of its own (#199): `ps -eo args` in one pairing's command does
+/// not show the running command of another, which `nerve-run` runs too;
+/// `ps`, `top` and `make` work there; `status` warns of nothing. The run
+/// and its numbers are in the PR's handover.
+///
+/// `NERVE_NODE_REAL=<the nerve-node to install> NERVE_REAL_OWNER=<an
+/// account with a home> cargo test -p nerve-node --test real_account --
+/// --ignored --exact the_installed_nodes_pairings_see_only_their_own_processes`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "installs the node on this machine; NERVE_NODE_REAL and NERVE_REAL_OWNER name it"]
+async fn the_installed_nodes_pairings_see_only_their_own_processes() {
+    let (Some(exe), Some(owner)) = (
+        std::env::var_os("NERVE_NODE_REAL").map(PathBuf::from),
+        std::env::var("NERVE_REAL_OWNER").ok(),
+    ) else {
+        eprintln!("skipped: NERVE_NODE_REAL or NERVE_REAL_OWNER is not set");
+        return;
+    };
+    assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
+    let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
+    assert!(ok, "{said}");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "\n");
+    assert!(ok, "{said}");
+    let mut links = Vec::new();
+    for name in ["lab", "home"] {
+        let work = PathBuf::from(format!("/srv/nrv199-{name}"));
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).unwrap();
+        assert!(
+            sh(Command::new("chown")
+                .arg(format!("{owner}:{owner}"))
+                .arg(&work))
+            .0
+        );
+        let mut center = FakeCenter::start(false).await.unwrap();
+        let link = center.link().render();
+        let (ok, said) = as_owner(&owner, &["center", "add", &link, "--yes", "--name", name]);
+        assert!(ok, "{said}");
+        let p = work.to_str().unwrap();
+        let (ok, said) = as_owner(&owner, &["folder", "add", p, "rwx", "--center", name]);
+        assert!(ok, "{said}");
+        let paired = center.paired().expect("paired");
+        let mut inc = center.next_link(WAIT).await.expect("the node dials");
+        fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
+            .await
+            .expect("handshake");
+        links.push((work, inc.conn, center));
+    }
+    let (_, st) = as_owner(&owner, &["status"]);
+    assert!(!st.contains("no /proc of its own"), "{st}");
+    let (home, mut home_conn, _home_center) = links.pop().unwrap();
+    let (lab, lab_conn, _lab_center) = links.pop().unwrap();
+    // The lab pairing's command runs while the home pairing's looks.
+    let marker = format!("nrv199-marker-{}", std::process::id());
+    let line = format!("sleep 4; : {marker}");
+    let first = {
+        let (lab, mut conn) = (lab.clone(), lab_conn);
+        tokio::spawn(async move { (run(&mut conn, &lab, &line).await, conn) })
+    };
+    until("the lab command runs", || running_with(&marker));
+    let r = run(&mut home_conn, &home, "ps -eo user,pid,args")
+        .await
+        .unwrap();
+    assert!(!out(&r).contains(&marker), "{r}");
+    assert!(out(&r).contains("nerve-run"), "{r}");
+    let (r, mut lab_conn) = first.await.unwrap();
+    assert_eq!(r.unwrap()["exit_code"], 0);
+    // Its own processes it sees, and the tools that read /proc work.
+    let r = run(&mut lab_conn, &lab, &format!("ps -eo args; : {marker}"))
+        .await
+        .unwrap();
+    assert!(out(&r).contains(&marker), "{r}");
+    let r = run(&mut lab_conn, &lab, "top -bn1 | head -12")
+        .await
+        .unwrap();
+    assert_eq!(r["exit_code"], 0, "{r}");
+    std::fs::write(lab.join("Makefile"), "all:\n\t@echo built\n").unwrap();
+    let r = run(&mut lab_conn, &lab, "make -j2").await.unwrap();
+    assert_eq!(out(&r), "built\n", "{r}");
+
+    let (ok, said) = sh(Command::new(BIN).args(["uninstall", "--purge"]));
+    assert!(ok, "{said}");
+    for work in [&lab, &home] {
+        let _ = std::fs::remove_dir_all(work);
+    }
+}

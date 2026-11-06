@@ -87,8 +87,8 @@ leads to the detail.
   node without a cgroup, outlives a stop
   ([what ends a command](../dev/sandbox-linux.md#what-ends-a-command)).
 - While a command runs, its line, with the call's values, is readable by
-  every account, the other centers' commands too. Put no secret in a command
-  or a capability's line
+  every account; by other pairings' commands only where `status` warns. Put
+  no secret in a command or a capability's line
   ([secrets](../dev/capabilities.md#keep-secrets-out-of-the-command)).
 - The check of a program's provider tells programs apart, not users: allow
   only programs you trust

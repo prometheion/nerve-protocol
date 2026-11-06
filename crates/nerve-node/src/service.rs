@@ -161,6 +161,13 @@ impl Layout {
             .join(POLKIT_PKLA)
     }
 
+    /// The AppArmor profile that lets the node's commands have a `/proc` of
+    /// their own where AppArmor holds user namespaces back
+    /// ([`apparmor_profile_text`]).
+    pub fn apparmor_profile(&self) -> PathBuf {
+        self.etc().join("apparmor.d").join(APPARMOR_PROFILE)
+    }
+
     pub fn installed(&self) -> bool {
         #[cfg(windows)]
         {
@@ -252,6 +259,32 @@ pub fn owner_in_unit(text: &str) -> Option<String> {
 
 /// The file name of the polkit rule ([`Layout::polkit_rule`]).
 pub const POLKIT_RULE: &str = "50-nerve-node.rules";
+
+/// The name of the node's AppArmor profile and its file
+/// ([`Layout::apparmor_profile`]).
+pub const APPARMOR_PROFILE: &str = "nerve-node";
+
+/// The node's AppArmor profile, for the program at `bin`: it confines
+/// nothing (`unconfined`) and lets the program make a user namespace,
+/// which Ubuntu 24.04 holds back from an account by default
+/// (`kernel.apparmor_restrict_unprivileged_userns`). The exec shim, the
+/// same program, makes one for each command held apart from the owner, to
+/// give it a `/proc` of its own (nerve_sandbox::own_proc, #199).
+pub fn apparmor_profile_text(bin: &Path) -> String {
+    format!(
+        "# Written by `nerve-node install`; `nerve-node uninstall` removes it.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile {APPARMOR_PROFILE} {} flags=(unconfined) {{
+  userns,
+
+  include if exists <local/{APPARMOR_PROFILE}>
+}}
+",
+        bin.display()
+    )
+}
 
 /// The file name of the `.pkla` file ([`Layout::polkit_pkla`]).
 pub const POLKIT_PKLA: &str = "50-nerve-node.pkla";
@@ -438,6 +471,16 @@ pub trait System: nerve_service::System {
     fn polkit(&self, _rule: &Path) -> Polkit {
         Polkit::Missing
     }
+    /// Whether AppArmor holds user namespaces back from an account here
+    /// (`kernel.apparmor_restrict_unprivileged_userns`, Ubuntu 24.04).
+    fn restricts_userns(&self) -> bool {
+        false
+    }
+    /// Loads the AppArmor profile at `profile` into the kernel, or with
+    /// `remove` takes it out.
+    fn apparmor(&self, profile: &Path, _remove: bool) -> Result<(), String> {
+        Err(format!("cannot load {} here", profile.display()))
+    }
     /// Whether `pkexec` is there.
     fn has_pkexec(&self) -> bool {
         false
@@ -621,6 +664,24 @@ impl System for Host {
                 args.join(" "),
                 failure(&o)
             )),
+        }
+    }
+
+    fn restricts_userns(&self) -> bool {
+        std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+            .is_ok_and(|v| v.trim() == "1")
+    }
+
+    fn apparmor(&self, profile: &Path, remove: bool) -> Result<(), String> {
+        let o = std::process::Command::new("apparmor_parser")
+            .arg(if remove { "-R" } else { "-r" })
+            .arg(profile)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("apparmor_parser: {e}"))?;
+        match o.status.success() {
+            true => Ok(()),
+            false => Err(format!("apparmor_parser: {}", failure(&o))),
         }
     }
 
@@ -1039,6 +1100,7 @@ fn start_installed(
     steps: &mut Steps,
 ) -> Result<(), String> {
     put_polkit(layout, sys, owner, steps)?;
+    put_apparmor(layout, sys, steps)?;
     nerve_service::start_unit(
         sys,
         &layout.unit,
@@ -1361,6 +1423,45 @@ fn remove_if_there(path: &Path) -> Result<bool, String> {
 }
 
 /// Removes the polkit files and the service helper again.
+/// Where AppArmor holds user namespaces back, puts the node's profile
+/// ([`apparmor_profile_text`]) and loads it, so the node's commands get a
+/// `/proc` of their own; where it does not, a profile an earlier install
+/// put goes. Not loaded, the node runs on and `status` says what that
+/// leaves.
+fn put_apparmor(layout: &Layout, sys: &dyn System, steps: &mut Steps) -> Result<(), String> {
+    let path = layout.apparmor_profile();
+    if !sys.restricts_userns() {
+        return remove_apparmor(layout, sys, steps);
+    }
+    let text = apparmor_profile_text(&layout.bin);
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+        write_file(&path, text.as_bytes(), 0o644)?;
+    }
+    match sys.apparmor(&path, false) {
+        Ok(()) => steps.did(format!(
+            "put the AppArmor profile {}, which lets the node give each command a /proc of its own",
+            path.display()
+        )),
+        Err(e) => steps.did(format!(
+            "Warning: the AppArmor profile {} did not load ({e}): each pairing's commands see the running commands of the others",
+            path.display()
+        )),
+    }
+    Ok(())
+}
+
+/// Takes the node's AppArmor profile out of the kernel and deletes it.
+fn remove_apparmor(layout: &Layout, sys: &dyn System, steps: &mut Steps) -> Result<(), String> {
+    let path = layout.apparmor_profile();
+    if path.exists() {
+        let _ = sys.apparmor(&path, true);
+    }
+    if remove_if_there(&path)? {
+        steps.did(format!("removed {}", path.display()));
+    }
+    Ok(())
+}
+
 fn remove_polkit(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
     let helper = layout.service_helper();
     for path in [
@@ -1491,6 +1592,7 @@ fn uninstall_steps(
         ));
     }
     remove_polkit(layout, steps)?;
+    remove_apparmor(layout, sys, steps)?;
     // The commands' account and its home go: a uid nobody has must not own
     // files, since the next account to get it would. Its processes ended
     // with the service.
@@ -2280,6 +2382,10 @@ pub(crate) mod tests {
         pub(crate) landlock: std::cell::Cell<bool>,
         /// The kernel's Landlock ABI, for what `install` says of it.
         pub(crate) landlock_abi: std::cell::Cell<Option<i32>>,
+        /// Whether AppArmor holds user namespaces back.
+        pub(crate) restricts_userns: std::cell::Cell<bool>,
+        /// The AppArmor profiles loaded (true) and taken out (false).
+        pub(crate) apparmor: std::cell::RefCell<Vec<(PathBuf, bool)>>,
     }
 
     impl std::ops::Deref for Fake {
@@ -2302,6 +2408,8 @@ pub(crate) mod tests {
                 pkexec_here: std::cell::Cell::new(true),
                 landlock: std::cell::Cell::new(true),
                 landlock_abi: std::cell::Cell::new(None),
+                restricts_userns: std::cell::Cell::new(false),
+                apparmor: std::cell::RefCell::default(),
             }
         }
     }
@@ -2399,6 +2507,15 @@ pub(crate) mod tests {
 
         fn polkit(&self, _rule: &Path) -> Polkit {
             self.polkit.get()
+        }
+        fn restricts_userns(&self) -> bool {
+            self.restricts_userns.get()
+        }
+        fn apparmor(&self, profile: &Path, remove: bool) -> Result<(), String> {
+            self.apparmor
+                .borrow_mut()
+                .push((profile.to_path_buf(), !remove));
+            Ok(())
         }
     }
 
@@ -3985,6 +4102,54 @@ pub(crate) mod tests {
             assert!(!f.exists(), "{}", f.display());
         }
         assert!(!helper.parent().unwrap().exists());
+    }
+
+    /// Where AppArmor holds user namespaces back (Ubuntu 24.04), install
+    /// puts and loads the node's profile, so its commands get a /proc of
+    /// their own (#199); elsewhere it puts none and takes an old one away,
+    /// and uninstall takes it out of the kernel and deletes it.
+    #[cfg(unix)]
+    #[test]
+    fn install_loads_an_apparmor_profile_where_user_namespaces_are_held_back() {
+        let d = tempfile::tempdir().unwrap();
+        let l = layout(d.path());
+        let sys = Fake::new();
+        let bin = d.path().join("new");
+        std::fs::write(&bin, "nerve-node 1.0.0\n").unwrap();
+        let profile = l.apparmor_profile();
+        install(&l, &sys, &bin, "alice", &mut Vec::new()).unwrap();
+        assert!(!profile.exists());
+        assert!(sys.apparmor.borrow().is_empty());
+        sys.restricts_userns.set(true);
+        let mut out = Vec::new();
+        install(&l, &sys, &bin, "alice", &mut out).unwrap();
+        let text = std::fs::read_to_string(&profile).unwrap();
+        assert_eq!(text, apparmor_profile_text(&l.bin));
+        for line in [
+            format!(
+                "profile nerve-node {} flags=(unconfined) {{",
+                l.bin.display()
+            ),
+            "  userns,".into(),
+        ] {
+            assert!(text.lines().any(|t| t == line), "{line}: {text}");
+        }
+        assert_eq!(*sys.apparmor.borrow(), [(profile.clone(), true)]);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("put the AppArmor profile"), "{out}");
+        // Without the restriction an old profile goes.
+        sys.restricts_userns.set(false);
+        install(&l, &sys, &bin, "alice", &mut Vec::new()).unwrap();
+        assert!(!profile.exists());
+        assert_eq!(
+            sys.apparmor.borrow().last(),
+            Some(&(profile.clone(), false))
+        );
+        sys.restricts_userns.set(true);
+        install(&l, &sys, &bin, "alice", &mut Vec::new()).unwrap();
+        uninstall(&l, &sys, false, &mut Vec::new()).unwrap();
+        assert!(!profile.exists());
+        assert_eq!(sys.apparmor.borrow().last(), Some(&(profile, false)));
     }
 
     /// The helper does what it says and nothing else: one of the three

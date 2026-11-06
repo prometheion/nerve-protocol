@@ -68,6 +68,7 @@ fn opts() -> RunOptions {
         limits: None,
         tap: None,
         no_network: false,
+        own_proc: false,
     }
 }
 

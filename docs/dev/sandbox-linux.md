@@ -208,6 +208,50 @@ hold the network or what a command reaches through it:
 - Below Landlock ABI 6, abstract unix sockets and signals to the other
   processes of its account ([versions](#landlock-versions)).
 
+### A `/proc` of its own
+
+Every pairing's commands run as one account, `nerve-run`, and
+`/proc/<pid>/cmdline` is open to every account: one pairing's command would
+read another's running command lines with `ps -eo args`, call values and
+all, Landlock or not. So each command held apart from you, a `folder` mode
+command and one of `nerve-run` (allowlist mode, a capability of
+`node.toml`), runs in a PID namespace of its own with its own `/proc`
+mounted (#199, `nerve_sandbox::own_proc`). `ps`, `top` and `/proc` show its
+own processes only; a process of another pairing is not there to name.
+
+The node has no `CAP_SYS_ADMIN`, so the shim makes an unprivileged user
+namespace first and the PID and mount namespaces in it. The user namespace
+maps the command's own user and group to themselves and nothing else: no
+one is root inside, and the kernel checks every access as the real
+account. Three processes stand for a command: the shim, which the node
+waits for and which ends as the command ended (by the same signal too);
+the namespace's init, which mounts `/proc` before Landlock (which forbids a
+mount) and reaps what is left to it; and the command. A signal to the
+command's process group reaches the command as before; the shim and the init
+let it pass. When the command ends, the init ends and the kernel kills what
+is left in the namespace, as the node kills what is left in its cgroup.
+A sudo command and root's run without it: sudo would not rise there.
+
+What it costs, measured on Linux 7.2 (median of 30 starts): about 0.7 ms more
+per command (3.2 ms instead of 2.5 ms for `true` through the shim).
+`ps`, `top`, `pgrep`, `make -j`, `git` and `cargo build` work as before. A
+file of another account (yours, root's) shows its owner and group as
+`nobody` (`ls -l`), since only `nerve-run` is mapped; access is not changed
+by it. `ps` shows the shim as PID 1 (`nerve-node __exec-shim`), the command
+as its child. A program left running in the background ends with the
+command, as the cgroup ends it on a node that has one.
+
+The node tries it once at start. Where the kernel does not let `nerve-run`
+make a user namespace, or mount `/proc` in one (some containers), the
+commands run as before, and `status` says that each pairing's commands see
+the running commands of the others (`processes_warning`). Ubuntu 24.04
+holds user namespaces back with AppArmor
+(`kernel.apparmor_restrict_unprivileged_userns`): there `install` puts the
+profile `/etc/apparmor.d/nerve-node`, which confines nothing and allows the
+program a user namespace, and loads it; `uninstall` removes it. The
+commands then may make user namespaces too, as on any other distribution.
+Windows: W2 adds the test of a pairing's processes (#149).
+
 ### No network for a center's commands
 
 `nerve-node network off --center lab` keeps that center's commands

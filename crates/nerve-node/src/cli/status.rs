@@ -140,6 +140,9 @@ fn status_lines(v: &Value) -> Vec<String> {
     if let Some(p) = v["pairings_warning"].as_str() {
         lines.push(format!("warning: {p}"));
     }
+    if let Some(p) = v["processes_warning"].as_str() {
+        lines.push(format!("warning: {p}"));
+    }
     lines.extend(
         grant_lines(&v["folder_access"])
             .into_iter()
@@ -377,6 +380,12 @@ mod tests {
         );
         assert!(crate::owner::ROOT_OWNER_NOTE.contains("run as root"));
         assert_eq!(owner_line(None, false, false), None);
+        // So is a kernel that gives no command a /proc of its own (#199).
+        let shared = status_lines(&json!({"processes_warning": "they see each other"}));
+        assert!(
+            shared.contains(&"warning: they see each other".to_string()),
+            "{shared:#?}"
+        );
         // An administrator as the owner on Windows is its twin (#197).
         let admin = status_lines(&json!({"owner": "alice", "owner_is_admin": true}));
         assert!(

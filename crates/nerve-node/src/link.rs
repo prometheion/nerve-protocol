@@ -3464,6 +3464,7 @@ impl Link {
             return Err(RpcError::forbidden(why));
         }
         self.shared.held_at(HoldAt::AfterLastLook).await;
+        let (landlock_held, separate_held) = (landlock.is_some(), separate.is_some());
         let opts = RunOptions {
             shell: cfg.machine.shell.clone(),
             landlock,
@@ -3485,6 +3486,8 @@ impl Link {
                 .map(|c| (c.clone(), granted)),
             tap,
             no_network,
+            // Held apart from the owner, it sees only its own processes.
+            own_proc: self.shared.own_proc && (landlock_held || separate_held),
         };
         let r = exec::run(&rc, &opts, |e| guard.started(e, no_network)).await;
         drop(open);
@@ -3686,6 +3689,9 @@ impl Link {
                 .map(|c| (c.clone(), granted)),
             tap: guard.tap(true),
             no_network,
+            // It runs as nerve-run, apart from the owner (by hand: as a
+            // test's stand-in for it).
+            own_proc: self.shared.own_proc,
         };
         let r = exec::run(&rc, &opts, |e| guard.started(e, no_network)).await;
         drop(guard);

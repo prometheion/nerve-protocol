@@ -53,6 +53,10 @@ pub struct NodeOptions {
     /// (nerve_sandbox::net_filter), instead of asking the kernel. A test
     /// sets it, to stand for a kernel without seccomp filters.
     pub net_filter: Option<bool>,
+    /// Whether the shim can give a command a `/proc` of its own
+    /// (nerve_sandbox::own_proc), instead of trying it once at start. A test
+    /// sets it, to stand for a kernel that cannot.
+    pub own_proc: Option<bool>,
     /// Whether this is the installed service, instead of asking where its
     /// folders are (crate::service::is_service_node). A test sets it, to
     /// stand for the installed node.
@@ -139,6 +143,7 @@ impl NodeOptions {
             full_rights: None,
             confinement: None,
             net_filter: None,
+            own_proc: None,
             service: None,
             config_caps_by_hand: false,
             cgroups: None,
@@ -565,6 +570,22 @@ impl CenterState {
 /// Landlock below the floor as none and so refuses folder mode's commands
 /// (nerve_sandbox::LANDLOCK_FLOOR); the installed node keeps it, as its
 /// commands would run as `nerve-run` without it, held by nothing else.
+/// What `status` says where the pairings' commands see each other's
+/// processes ([`Shared::processes_warning`]).
+pub const PROCESSES_SHARED: &str = "this kernel gives no command a /proc of its own (no user namespaces for nerve-run): each pairing's commands see the running commands of the others, with their command lines";
+
+/// Whether the shim at `exe` can give a command a PID namespace with a
+/// `/proc` of its own here ([`Shared::own_proc`]): tried once.
+fn own_proc_here(exe: Option<&std::path::Path>) -> bool {
+    #[cfg(target_os = "linux")]
+    return exe.is_some_and(nerve_sandbox::own_proc::works);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = exe;
+        false
+    }
+}
+
 /// Whether the node can put its network filter on a command here
 /// ([`Shared::net_filter`]).
 fn net_filter_here() -> bool {
@@ -654,6 +675,11 @@ pub(crate) struct Shared {
     /// (nerve_sandbox::net_filter): Linux with seccomp filters, on x86_64 or
     /// aarch64.
     pub net_filter: bool,
+    /// Whether a command held apart from the owner (folder mode, or as
+    /// `nerve-run`) gets a PID namespace with a `/proc` of its own, where it
+    /// sees only its own processes (nerve_sandbox::own_proc, #199): Linux,
+    /// where the kernel lets the shim make one.
+    pub own_proc: bool,
     /// Where a test holds a command's call ([`NodeOptions::hold`]).
     pub hold: Option<Hold>,
     /// Whether the node runs with full rights (root, an elevated token): its
@@ -1428,6 +1454,19 @@ impl Shared {
         None
     }
 
+    /// That the commands of the installed Linux node's pairings, all of
+    /// `nerve-run`, see each other's running commands here, with their
+    /// command lines: the kernel gives the shim no PID namespace with a
+    /// `/proc` of its own (nerve_sandbox::own_proc). Without Landlock
+    /// [`Shared::pairings_warning`] says more.
+    fn processes_warning(&self) -> Option<&'static str> {
+        (self.service
+            && cfg!(target_os = "linux")
+            && self.confinement.landlock_abi.is_some()
+            && !self.own_proc)
+            .then_some(PROCESSES_SHARED)
+    }
+
     /// That the commands of two or more pairings run as `nerve-run` here
     /// with no Landlock to keep them apart (crate::account::pairings_warning).
     fn pairings_warning(&self, cfg: &NodeConfig) -> Option<String> {
@@ -1764,6 +1803,8 @@ impl Shared {
             // That nothing keeps two pairings of nerve-run apart without
             // Landlock.
             "pairings_warning": self.pairings_warning(&cfg),
+            // That the pairings' commands see each other's processes.
+            "processes_warning": self.processes_warning(),
             "centers": centers,
             "relay": self.relay.status(&cfg),
             "ui": self.ui_status(&cfg),
@@ -2079,6 +2120,9 @@ impl Daemon {
             .cgroups
             .unwrap_or_else(|| crate::cgroup::Cgroups::find().map(Arc::new));
         let endpoint = opts.owners.filter(|_| opts.ctl);
+        let own_proc = opts
+            .own_proc
+            .unwrap_or_else(|| own_proc_here(opts.exe.as_deref()));
         let shared = Arc::new(Shared {
             paths: paths.clone(),
             service,
@@ -2091,6 +2135,7 @@ impl Daemon {
                 service,
             ),
             net_filter: opts.net_filter.unwrap_or_else(net_filter_here),
+            own_proc,
             hold: opts.hold,
             full_rights,
             cgroups,
@@ -4486,6 +4531,40 @@ mod tests {
                 w.contains(&format!("ABI {abi}, which does not guard device ioctls")),
                 told,
                 "service {service}, ABI {abi}: {st}"
+            );
+            daemon.stop().await;
+        }
+    }
+
+    /// The installed node's status says where its pairings' commands see
+    /// each other's processes: no /proc of their own here (#199). A node
+    /// run by hand, and one where the shim makes one, say nothing of it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_status_says_where_the_pairings_see_each_others_processes() {
+        for (service, own_proc, told) in [
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
+        ] {
+            let log = Log::new(Level::Info);
+            let d = tempfile::tempdir().unwrap();
+            let mut o = options(&d, &log);
+            o.full_rights = Some(false);
+            o.exe = Some("/bin/true".into());
+            o.service = Some(service);
+            o.owner = Some("alice".into());
+            o.own_proc = Some(own_proc);
+            o.confinement = Some(Confinement {
+                landlock_abi: Some(6),
+                appcontainer: false,
+            });
+            let daemon = Daemon::start(o).await.unwrap();
+            let st = daemon.status();
+            assert_eq!(
+                st["processes_warning"].as_str() == Some(PROCESSES_SHARED),
+                told,
+                "service {service}, own /proc {own_proc}: {st}"
             );
             daemon.stop().await;
         }
