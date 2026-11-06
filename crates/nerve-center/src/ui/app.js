@@ -66,7 +66,7 @@ function getStarted(o) {
     itile(done ? "ok" : "info", done ? "ok" : "neutral"), el("span", { class: done ? "meta" : "name" }, text), done ? null : action);
   return section("Get started", "Three steps; this goes once they are done.", null, el("div", { class: "card stack" },
     step(paired, "1. Pair a machine", btn("Pair a machine", "primary push", act(async () => { state.pairing = await api("POST", "/api/pair"); }), "plus", "start:pair")),
-    step(folder, "2. Give it a folder: nerve-node folder add ~/project rw", btn("Copy", "ghost push", () => copy(FOLDER_STEP), "copy", "start:folder")),
+    step(folder, "2. Give it a folder: nerve-node folder add ~/project rwx", btn("Copy", "ghost push", () => copy(FOLDER_STEP), "copy", "start:folder")),
     step(harness, "3. Connect a harness", el("a", { class: "btn ghost push", href: "#help" }, "How"))));
 }
 
@@ -165,7 +165,7 @@ function pairingCard(p) {
 
 // What a new pairing needs next: in folder mode its commands run only in a
 // folder it was given.
-const FOLDER_STEP = "nerve-node folder add ~/project rw";
+const FOLDER_STEP = "nerve-node folder add ~/project rwx";
 
 // The card that follows a pairing: the machine is paired, and its next step.
 function pairedCard(node) {

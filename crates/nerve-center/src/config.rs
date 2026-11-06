@@ -105,7 +105,8 @@ pub fn refuse_old_names(
 )]
 pub struct Args {
     /// Print help (`nerve-center help <command>` for one command's whole text)
-    #[arg(short = 'h', long = "help", action = clap::ArgAction::HelpShort)]
+    // Global, so that every command has its own `--help` too.
+    #[arg(short = 'h', long = "help", global = true, action = clap::ArgAction::HelpShort)]
     help: Option<bool>,
     /// The state folder (identity, paired machines, statistics)
     ///
@@ -413,6 +414,26 @@ mod tests {
         assert_eq!(address_url("[::]:7481"), format!("https://{host}:7481"));
         assert_eq!(address_url("127.0.0.1:7481"), "http://127.0.0.1:7481");
         assert_eq!(address_url("10.0.0.5:7481"), "https://10.0.0.5:7481");
+    }
+
+    /// Every command answers `--help` and `-h`, not only the top level
+    /// (round 4, correctness 1): turning clap's own flag off had taken it
+    /// from the subcommands too.
+    #[test]
+    fn every_command_has_its_own_help_flag() {
+        use clap::CommandFactory;
+        for c in Args::command().get_subcommands() {
+            for flag in ["--help", "-h"] {
+                let e = Args::try_parse_from(["nerve-center", c.get_name(), flag])
+                    .expect_err("help is no run");
+                assert_eq!(
+                    e.kind(),
+                    clap::error::ErrorKind::DisplayHelp,
+                    "{} {flag}",
+                    c.get_name()
+                );
+            }
+        }
     }
 
     /// One line first (plan 4.1): every command's `about` and every flag's

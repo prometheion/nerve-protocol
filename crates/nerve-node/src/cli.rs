@@ -900,7 +900,7 @@ pub fn everyday(program: &str) -> String {
   sudo {program} install                 install it as a service, then pair a center
   {program} status                       how it is, and what to do next
   {program} center add '<link>'          pair with a center
-  {program} folder add ~/project rw      let the center use a folder
+  {program} folder add ~/project rwx     let the center use a folder
   {program} rule add allow '<command>'   allow a command (allowlist mode)
   {program} audit                        what was allowed and refused
 
@@ -3600,7 +3600,7 @@ fn next_steps(v: &Value) -> Vec<String> {
                 _ => format!(" --center {name}"),
             };
             steps.push(format!(
-                "give {name} a folder: `nerve-node folder add ~/project rw{which}`"
+                "give {name} a folder: `nerve-node folder add ~/project rwx{which}`"
             ));
         }
     }
@@ -6064,11 +6064,18 @@ async fn show_proxy(paths: &NodePaths, out: &mut dyn Write) -> Result<(), String
 }
 
 /// The password of a proxy URL with a user name and no password: asked
-/// without echo at a terminal, else the first line of stdin.
+/// without echo at a terminal (a console on Windows, as `sudo on` asks), else
+/// the first line of stdin.
 pub fn proxy_password(out: &mut dyn Write) -> Result<String, String> {
     #[cfg(unix)]
     return read_password(out, "proxy password: ");
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    return crate::winsvc::WinSystem::read_password(
+        &crate::win_host::WinHost,
+        "proxy password: ",
+        out,
+    );
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = out;
         let mut line = String::new();
@@ -8392,7 +8399,7 @@ mod tests {
         );
         assert!(
             lines.contains(
-                &"next: give lab a folder: `nerve-node folder add ~/project rw --center lab`"
+                &"next: give lab a folder: `nerve-node folder add ~/project rwx --center lab`"
                     .to_string()
             ),
             "{lines:#?}"
@@ -11076,6 +11083,23 @@ mod tests {
         let out = run(paths, &a).unwrap();
         assert_eq!(out.lines().count(), 1, "one JSON line: {out}");
         serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"))
+    }
+
+    /// Bare `network` is a read like bare `mode`: `--json` gives each
+    /// center's switch as data, not the words of a change (round 4,
+    /// correctness 4).
+    #[test]
+    fn bare_network_prints_its_data_as_json() {
+        let (_d, paths) = setup(&["home", "work"]);
+        let v = json_of(&paths, &["network"]);
+        assert_eq!(v["networks"].as_array().unwrap().len(), 2, "{v}");
+        assert_eq!(v["networks"][0]["no_network"], false, "{v}");
+        run(&paths, &["network", "off", "--center", "work"]).unwrap();
+        let v = json_of(&paths, &["network", "--center", "work"]);
+        assert_eq!(v["networks"].as_array().unwrap().len(), 1, "{v}");
+        assert_eq!(v["networks"][0]["center"], "work", "{v}");
+        assert_eq!(v["networks"][0]["no_network"], true, "{v}");
+        assert!(v.get("messages").is_none(), "{v}");
     }
 
     /// The read commands print their data as JSON for the desktop app,

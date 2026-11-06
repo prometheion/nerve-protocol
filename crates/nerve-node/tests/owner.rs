@@ -107,7 +107,10 @@ async fn as_the_cli(
     )
     .unwrap();
     let asked = || Ok(typed.trim_end_matches('\n').to_string());
-    let input = match nerve_node::owner::input_for(&cli.cmd, terminal, asked)? {
+    let input = nerve_node::owner::input_for(&cli.cmd, terminal, asked)?;
+    // The node is told as forwarding tells it, from the input passed.
+    let terminal = nerve_node::owner::terminal_of(&input, terminal);
+    let input = match input {
         Input::Stdin => Input::Text(typed.into()),
         other => other,
     };
@@ -241,6 +244,31 @@ async fn the_command_is_told_whether_the_owner_is_at_a_terminal() {
         let (out, code) = as_the_cli(&at, &["setup"], terminal, "").await.unwrap();
         assert_eq!((out.as_str(), code), (want, 0), "{terminal}");
     }
+    daemon.stop().await;
+}
+
+/// A proxy password asked at the owner's terminal reaches the node's command
+/// as its first input line, ended by a newline, and the command is told it
+/// has no terminal, so it neither prompts nor reads the screen (round 4,
+/// spec 2). From a pipe the typed text goes on as it is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_proxy_password_asked_at_the_terminal_reaches_the_command_as_a_line() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut o, at) = options(d.path(), vec![uid()]);
+    // A program in the node's place that says what it got and was told.
+    let said = o.home.join("said");
+    nerve_transport::files::write_program(
+        &said,
+        "#!/bin/sh\ncat\nprintf 'terminal=%s\\n' \"$NERVE_OWNER_TERMINAL\"\n",
+    )
+    .unwrap();
+    o.owners.as_mut().unwrap().program = said;
+    let daemon = Daemon::start(o).await.unwrap();
+    let set = ["proxy", "set", "http://alice@relay.example:3128"];
+    let (out, code) = as_the_cli(&at, &set, true, "hunter2\n").await.unwrap();
+    assert_eq!((out.as_str(), code), ("hunter2\nterminal=\n", 0));
+    let (out, code) = as_the_cli(&at, &set, false, "hunter2\n").await.unwrap();
+    assert_eq!((out.as_str(), code), ("hunter2\nterminal=\n", 0));
     daemon.stop().await;
 }
 

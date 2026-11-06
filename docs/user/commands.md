@@ -100,7 +100,8 @@ one JSON value from stdout. Fields are only ever added: one is renamed or
 removed only with a change of the format, which the changelog names under
 "Breaks". A script ignores the fields it does not know.
 
-- The read commands print their data: `status`, `center`, `folder`,
+- The read commands print their data: `status`, `center`, `mode`, `network`
+  (`{"networks": [{"center", "no_network"}]}`), `folder`,
   `rule` (the lists, and `stale`: each rule whose arguments the action no
   longer takes, with why), `cap` (`capabilities`, one row per action, state key,
   event or stream with `"kind"` on all but actions, an action's arguments

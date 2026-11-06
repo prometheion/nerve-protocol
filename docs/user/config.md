@@ -300,13 +300,15 @@ machine.secret_storage is "keyring", but the system keyring cannot be reached (e
 ```
 
 The node never falls back to the files. Start the keyring, or on a Linux
-without a desktop, let `setup` install one.
+without a desktop, `nerve-node config set machine.secret_storage keyring`
+offers to install one.
 
 ### A keyring on a Linux without a desktop
 
-A server without a desktop usually has no keyring. When you choose `keyring`
-in `nerve-node setup` (on the installed node too, without `sudo`), or
-the settings say `keyring` and no keyring answers, setup asks:
+A server without a desktop usually has no keyring. When you set
+`nerve-node config set machine.secret_storage keyring` (on the installed node
+too, without `sudo`), or the settings already say `keyring` and `nerve-node
+setup` finds no keyring answering, it asks:
 
 ```
 No system keyring answers for nerve: ….

@@ -377,13 +377,14 @@ installed node it does not arise.
 #### A keyring on a Linux without a desktop
 
 A Linux without a desktop usually has no Secret Service. When the keys are to
-be in the keyring (the config says so, or the owner chooses it in `setup`)
-and none answers for the node's user, `setup` asks whether to install one.
+be in the keyring (the owner sets `machine.secret_storage keyring` with
+`config set`, or the config says so and `setup` runs) and none answers for
+the node's user, they ask whether to install one.
 `install` asks the same when it runs in a terminal and the config of an
 earlier install says `keyring`; without a terminal it refuses before it
-starts the service. The question is asked only at a terminal: `setup` run
-by the owner without sudo goes through the owner socket, whose client tells
-the node whether its input is a terminal's (`terminal` in the request,
+starts the service. The question is asked only at a terminal: `setup` and
+`config set machine.secret_storage keyring`, run by the owner without sudo,
+go through the owner socket, whose client tells the node whether its input is a terminal's (`terminal` in the request,
 `NERVE_OWNER_TERMINAL=1` for the command), and piped answers get the
 refusal. No is the default, and so is the end of the input; both keep the
 refusal. Yes runs, as root, each program by the absolute path found in

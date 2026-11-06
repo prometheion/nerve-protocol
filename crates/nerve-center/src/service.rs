@@ -347,13 +347,23 @@ fn stopped_for(
 /// service, where its web UI and harnesses reach it, where its owner token
 /// is, its machines, and where its log is. Of the installed center where it
 /// is installed (crate::config::Args::owner_state_dir).
-pub fn status(layout: &Layout, state: &Path, out: &mut dyn Write) -> Result<(), String> {
+///
+/// `ui` and `mcp` are what this command was given (`--ui`, `--mcp`, their
+/// variables): the installed center's come from its settings file, a
+/// center a harness starts has no file, so these are all that is known of it.
+pub fn status(
+    layout: &Layout,
+    state: &Path,
+    ui: &str,
+    mcp: &crate::config::McpMode,
+    out: &mut dyn Write,
+) -> Result<(), String> {
     let installed = layout.installed() && state == layout.state;
     // Root's file: read as root, before anything else.
     let file = installed
         .then(|| std::fs::read_to_string(layout.settings()).ok())
         .flatten();
-    for line in status_lines(layout, state, installed, file.as_deref()) {
+    for line in status_lines(layout, state, installed, file.as_deref(), ui, mcp) {
         let _ = writeln!(out, "{line}");
     }
     Ok(())
@@ -361,7 +371,15 @@ pub fn status(layout: &Layout, state: &Path, out: &mut dyn Write) -> Result<(), 
 
 /// The lines of [`status`], with `file` the installed center's settings
 /// where they could be read.
-fn status_lines(layout: &Layout, state: &Path, installed: bool, file: Option<&str>) -> Vec<String> {
+fn status_lines(
+    layout: &Layout,
+    state: &Path,
+    installed: bool,
+    file: Option<&str>,
+    given_ui: &str,
+    given_mcp: &crate::config::McpMode,
+) -> Vec<String> {
+    use crate::config::McpMode;
     let mut lines = vec![run_line(state, crate::attach::runs(state), cfg!(unix))];
     if installed {
         let ask = |verb: &str| {
@@ -383,30 +401,54 @@ fn status_lines(layout: &Layout, state: &Path, installed: bool, file: Option<&st
     } else {
         lines.push("service: not installed (a harness starts this center)".into());
     }
-    // Where it is reached: what the settings file sets, else the defaults.
+    // Where it is reached: what the settings file sets, else the defaults;
+    // for a center a harness starts (no file) what this command is given.
     let at = |var: &str| file.and_then(|f| setting_in(f, var));
     let web = crate::config::address_url;
-    let ui = at("NERVE_CENTER_UI").unwrap_or_else(|| "127.0.0.1:7480".into());
+    let ui = match installed {
+        true => at("NERVE_CENTER_UI").unwrap_or_else(|| "127.0.0.1:7480".into()),
+        false => given_ui.to_string(),
+    };
     lines.push(match ui.as_str() {
-        "off" => "web UI: off".into(),
+        a if a.eq_ignore_ascii_case("off") => "web UI: off".into(),
         a => format!("web UI: {}", web(a)),
     });
     lines.push(match (installed, at("NERVE_CENTER_MCP").as_deref()) {
         (true, None | Some("http")) => format!("harnesses: {}/mcp", web(crate::config::MCP_HTTP)),
         (true, Some("off")) => "harnesses: none (MCP is off)".into(),
         (true, Some(a)) => format!("harnesses: {}/mcp", web(a)),
-        (false, _) => "harnesses: the one that starts it, over stdio".into(),
+        (false, _) => match given_mcp {
+            McpMode::Stdio => "harnesses: the one that starts it, over stdio".into(),
+            McpMode::Off => "harnesses: none (MCP is off)".into(),
+            McpMode::Http(a) => format!("harnesses: {}/mcp", web(a)),
+        },
     });
+    if !installed {
+        lines.push(
+            "(the web UI and harnesses are as `--ui` and `--mcp` give them to this command; a running center may have been started with others)"
+                .into(),
+        );
+    }
     if installed && file.is_none() {
         lines.push(format!(
             "(these are the defaults: {} says more to root, `sudo nerve-center status`)",
             layout.settings().display()
         ));
     }
-    let sudo = if installed { "sudo " } else { "" };
+    // The command that finds this center's token from where it is run.
+    let installed_dir = match installed {
+        true => Some(state),
+        false => layout.installed().then_some(layout.state.as_path()),
+    };
     lines.push(format!(
-        "owner token: in {}; `{sudo}nerve-center owner-token` shows it",
-        crate::owner::path(state).display()
+        "owner token: in {}; `{}` shows it",
+        crate::owner::path(state).display(),
+        crate::ui::token_command_of(
+            state,
+            installed_dir,
+            &crate::config::default_state_dir(),
+            true
+        )
     ));
     lines.push(match read_store(state) {
         Ok(Some(s)) if s.nodes.is_empty() => {
@@ -987,6 +1029,7 @@ fn asset_name() -> Result<String, String> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use crate::config::McpMode;
 
     /// The machine of the node's service tests too
     /// ([`nerve_service::fake::Fake`]), with the center's user.
@@ -1513,7 +1556,7 @@ mod tests {
             .save(&state)
             .unwrap();
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let lines = status_lines(&l, &state, true, None);
+        let lines = status_lines(&l, &state, true, None, "127.0.0.1:7480", &McpMode::Stdio);
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(
             lines[0].contains("only root and its user may read"),
@@ -1578,7 +1621,17 @@ mod tests {
         // SAFETY: a plain call with a valid path.
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || tx.send(status_lines(&l, &state, false, None)).unwrap());
+        std::thread::spawn(move || {
+            tx.send(status_lines(
+                &l,
+                &state,
+                false,
+                None,
+                "127.0.0.1:7480",
+                &McpMode::Stdio,
+            ))
+            .unwrap()
+        });
         let lines = rx
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("status waited on a FIFO");
@@ -1595,7 +1648,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let l = layout(d.path());
         let state = d.path().join("own");
-        let lines = status_lines(&l, &state, false, None);
+        let lines = status_lines(&l, &state, false, None, "127.0.0.1:7480", &McpMode::Stdio);
         assert_eq!(
             lines[0],
             format!("center: none has run in {} yet", state.display())
@@ -1614,20 +1667,55 @@ mod tests {
             .unwrap(),
         );
         store.save(&state).unwrap();
-        let lines = status_lines(&l, &state, false, None).join("\n");
+        let lines =
+            status_lines(&l, &state, false, None, "127.0.0.1:7480", &McpMode::Stdio).join("\n");
         for want in [
             "service: not installed (a harness starts this center)",
             "web UI: http://127.0.0.1:7480",
             "harnesses: the one that starts it, over stdio",
-            "`nerve-center owner-token` shows it",
+            "owner-token --state-dir ",
             "machines: 1 paired: web-1",
             "log: ",
         ] {
             assert!(lines.contains(want), "{want}: {lines}");
         }
+        // What this command is given is all that is known of a center a
+        // harness starts, and its token is found with its folder (round 4,
+        // correctness 2).
+        let lines = status_lines(
+            &l,
+            &state,
+            false,
+            None,
+            "127.0.0.1:7490",
+            &McpMode::Http("127.0.0.1:7491".into()),
+        )
+        .join("\n");
+        for want in [
+            "web UI: http://127.0.0.1:7490",
+            "harnesses: http://127.0.0.1:7491/mcp",
+            &format!(
+                "`nerve-center owner-token --state-dir {}` shows it",
+                state.display()
+            ),
+        ] {
+            assert!(lines.contains(want), "{want}: {lines}");
+        }
+        assert!(!lines.contains("7480"), "{lines}");
+        let lines = status_lines(&l, &state, false, None, "off", &McpMode::Off).join("\n");
+        assert!(lines.contains("web UI: off"), "{lines}");
+        assert!(lines.contains("harnesses: none (MCP is off)"), "{lines}");
         // The installed center: its service, its HTTP MCP and journalctl.
         let file = "NERVE_CENTER_UI=0.0.0.0:7480\nNERVE_CENTER_MCP=0.0.0.0:7481\n";
-        let lines = status_lines(&l, &state, true, Some(file)).join("\n");
+        let lines = status_lines(
+            &l,
+            &state,
+            true,
+            Some(file),
+            "127.0.0.1:7480",
+            &McpMode::Stdio,
+        )
+        .join("\n");
         // An address on all of them is reached by the machine's name.
         let host = crate::center::host_name();
         assert!(

@@ -126,14 +126,20 @@ fn absolute(p: &Path) -> std::path::PathBuf {
 /// `proxy set`. The node keeps them nowhere else.
 pub const PROXY_WINDOWS_SERVICE: &str = "the installed node on Windows is the service nerve-node, which runs as the account nerve, and the Credential Manager is one per account: a proxy's header values and password in the system keyring go to the Credential Manager of the account that put them there, not to that of nerve, and the service does not find them. The node keeps them nowhere else";
 
+/// What the installed node on Windows says to a proxy that needs a header
+/// value or a password ([`PROXY_WINDOWS_SERVICE`]).
+pub fn proxy_windows_refusal() -> String {
+    format!(
+        "this proxy needs a header value or a password, but {PROXY_WINDOWS_SERVICE}. So nothing was changed: the installed node on Windows can use only a proxy that needs neither: set one under Settings › Network › Proxy in the app, without headers and without a user name and password in the URL"
+    )
+}
+
 /// Puts the proxy's header values into the node's keyring entry, replacing
 /// what it held. The installed node on Windows refuses, before it asks the
 /// keyring ([`PROXY_WINDOWS_SERVICE`]).
 pub fn store_proxy_headers(paths: &NodePaths, headers: &[(String, String)]) -> Result<(), String> {
     if windows_service(paths) {
-        return Err(format!(
-            "this proxy needs a header value or a password, but {PROXY_WINDOWS_SERVICE}. So nothing was changed: the installed node on Windows can use only a proxy that needs neither: set one under Settings › Network › Proxy in the app, without headers and without a user name and password in the URL"
-        ));
+        return Err(proxy_windows_refusal());
     }
     let entry = Entry::proxy(paths);
     let map: BTreeMap<&str, &str> = headers

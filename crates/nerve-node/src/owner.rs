@@ -439,6 +439,12 @@ pub fn input_for(
         && crate::cli::proxy_wants_password(url)
         && !headers.iter().any(|h| h == "-")
     {
+        // The installed node on Windows takes no proxy password, so it is
+        // not asked for one first (round 4, security 1).
+        #[cfg(windows)]
+        if crate::secrets::windows_service(&crate::service::Layout::system().paths) {
+            return Err(crate::secrets::proxy_windows_refusal());
+        }
         return Ok(Input::Text(format!("{}\n", ask()?)));
     }
     Ok(if reads_input(cmd) {
@@ -1484,6 +1490,7 @@ fn only_reads(cmd: &Cmd) -> bool {
             | Cmd::Log { clear: None, .. }
             | Cmd::Center { cmd: None }
             | Cmd::Mode { mode: None, .. }
+            | Cmd::Network { state: None, .. }
             | Cmd::Folder { cmd: None, .. }
             | Cmd::Rule { cmd: None, .. }
             | Cmd::Cap { cmd: None, .. }
@@ -2316,6 +2323,8 @@ mod tests {
             &["audit", "--last", "200"],
             &["log", "--problems"],
             &["center"],
+            &["mode"],
+            &["network"],
             &["rule", "--center", "home"],
             &["config", "get", "log.level"],
             &["relay"],
@@ -2332,6 +2341,7 @@ mod tests {
             &["log", "clear"],
             &["audit", "clear"],
             &["provider", "rm", "desk"],
+            &["network", "off"],
         ] {
             assert!(!only_reads(&cli(args).cmd), "{args:?}");
         }

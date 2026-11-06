@@ -19,6 +19,7 @@ pub(super) fn own_form(cmd: &Cmd) -> bool {
                 cmd: None | Some(CenterCmd::Add { .. })
             }
             | Cmd::Mode { mode: None, .. }
+            | Cmd::Network { state: None, .. }
             | Cmd::Folder { cmd: None, .. }
             | Cmd::Rule { cmd: None, .. }
             | Cmd::Cap { cmd: None, .. }
@@ -124,6 +125,23 @@ pub(super) async fn command(
                 .map(|n| mode_data(n, &cfg.center(n).expect("listed").policy, now))
                 .collect();
             json!({ "modes": modes })
+        }
+        Cmd::Network {
+            state: None,
+            center,
+        } => {
+            let (cfg, _) = read_config(paths).await?;
+            let names = match &center.center {
+                Some(_) => vec![pick_center(&cfg, &center)?],
+                None => cfg.centers.iter().map(|c| c.name.clone()).collect(),
+            };
+            let networks: Vec<Value> = names
+                .iter()
+                .map(|n| {
+                    json!({ "center": n, "no_network": cfg.center(n).expect("listed").policy.no_network })
+                })
+                .collect();
+            json!({ "networks": networks })
         }
         Cmd::Folder { cmd: None, center } => {
             let (cfg, _) = read_config(paths).await?;

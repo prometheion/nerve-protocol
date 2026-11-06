@@ -36,7 +36,9 @@ fn main() -> std::process::ExitCode {
             nerve_center::config::Cmd::OwnerToken { new } => {
                 settle(&state).and_then(|_| nerve_center::owner::run(&state, *new, &mut out))
             }
-            Cmd::Status => nerve_center::service::status(&layout, &state, &mut out),
+            Cmd::Status => {
+                nerve_center::service::status(&layout, &state, &args.ui, &args.mcp, &mut out)
+            }
             // A restore into the running service stops it first and starts
             // it again after (as root, before this one becomes the
             // folder's owner).

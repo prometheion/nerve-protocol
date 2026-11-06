@@ -95,7 +95,7 @@ fn token_command(state: &std::path::Path, local: bool) -> String {
 /// `owner-token` alone goes to the installed center's folder, else to
 /// `default` (crate::config::Args::owner_state_dir): any other folder is
 /// named with `--state-dir`, which `local` shows (else a placeholder).
-fn token_command_of(
+pub(crate) fn token_command_of(
     state: &std::path::Path,
     installed: Option<&std::path::Path>,
     default: &std::path::Path,
@@ -3201,7 +3201,10 @@ mod tests {
             r#"el("span", { class: "name" }, "Connect a harness")"#,
             "Make a token",
             "claude mcp add --transport http nerve",
-            "nerve-node folder add ~/project rw",
+            // `rwx`: in folder mode a command runs only where the folder has
+            // `x`, so `rw` would hand over a folder that refuses `git status`
+            // (round 4, correctness 3). The whole word, quote and all.
+            "folder add ~/project rwx\"",
             "is paired",
             "Skip the model",
             "Trust this",
@@ -3231,6 +3234,7 @@ mod tests {
             "\"Delete\"",
             "\"Allow rules\"",
             "Added a checker allow rule",
+            "~/project rw\"",
         ] {
             assert!(!APP_JS.contains(gone), "{gone}");
         }
