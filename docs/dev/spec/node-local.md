@@ -1399,12 +1399,13 @@ documentation of rules for what each refuses.
 | `lamp.set:room=office,brightness<=50` | `lamp.set` with those values |
 
 The four buttons of the center's audit view and `nerve-node rule add allow|deny
-<command>` (a trailing ` *` is the wildcard) write exactly these forms: exact (`exec.run:git status`) or
+<command>` (a trailing ` *` is the wildcard; the exact buttons pass `--exact`,
+which keeps a `*` at the end of the entry's command as it is) write exactly these forms: exact (`exec.run:git status`) or
 wildcard (`exec.run:git *`, `fs.read:/home/u/notes/*` for the folder of the
 path, the capability for another action). For an action that takes
 conditions, an audit entry keeps the call's top-level strings (up to 200
 characters), numbers and booleans, at most 16, as `args` (§6); a pin button
-and `rule add --action <cap.action> --pin <field>=<value>` write
+and `rule add --action <cap.action> --arg <field>=<value>` write
 `<cap.action>:<field>=<value>` from one of them. They only add a rule to a list;
 rules can be written by hand as well (`nerve-node config add
 center.<name>.policy.allow '<rule>'`).

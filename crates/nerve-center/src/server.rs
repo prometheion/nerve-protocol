@@ -115,7 +115,7 @@ pub async fn start(args: &Args, lock: Lock) -> Result<Running, String> {
         // The URL a harness on this machine uses, or the address it was
         // given beyond it, with the certificate's pin to trust.
         let url = match tls {
-            true => format!("https://{at}/mcp"),
+            true => format!("{}/mcp", crate::config::address_url(at)),
             false => format!("http://{}/mcp", server.local_addr()),
         };
         told("http", Some(url), tls.then(|| center.pin()).flatten());

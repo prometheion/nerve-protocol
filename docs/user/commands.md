@@ -39,7 +39,7 @@ center is paired.
 | Command | Does | Page |
 |---|---|---|
 | `mode`, `mode allowlist\|folder\|user [--for HOURS] [--as-owner]` | Show each center's mode, or choose it; with allowlist, `--as-owner` runs the allowed commands as you instead of `nerve-run` | [modes](modes.md) |
-| `folder add <path> r\|rw\|rwx…\|none` | Grant a folder, change its rights, or close one inside another (`none`) | [modes](modes.md#folders) |
+| `folder add <path> r\|rw\|rwx…\|none` | Grant a folder, change its rights, or close one inside another to file calls (`none`; a command run in the folder around it still reaches it) | [modes](modes.md#folders) |
 | `folder rm <path>`, `folder` | Remove or list folders | [modes](modes.md#folders) |
 | `network off\|on` | Keep the center's commands off the network in every mode (no socket but unix ones; no command of its sudo list runs meanwhile), or let them on it again; where they would run as you, or the machine has no seccomp filter for it, none of them runs while it is off | [modes](modes.md#no-network-for-a-centers-commands) |
 | `folder sync` | Give `nerve-run` its entries on everything in the granted folders again, also on what was moved in (the installed Linux node; a pass over every granted folder) | [modes](modes.md#the-account-nerve-run-linux) |

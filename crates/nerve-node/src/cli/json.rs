@@ -276,10 +276,25 @@ fn keyring_here(paths: &NodePaths) -> Value {
 /// "running"`; else what the config says, with `"daemon": "not running"`
 /// and no link status for the centers.
 pub(super) async fn status(paths: &NodePaths) -> Result<Value, String> {
-    let mut v = node_status(paths).await?;
     // The installed service: whether it is there, runs, starts with the
-    // machine, and its program's version (`service status` before).
-    v["service"] = service_status(&Layout::system()).unwrap_or(Value::Null);
+    // machine, and its program's version.
+    let service = service_status(&Layout::system()).unwrap_or(Value::Null);
+    with_service(node_status(paths).await, service)
+}
+
+/// The node's status with the installed `service` in it. A stopped
+/// installed node whose folders this account may not open still says its
+/// service, which needs no rights on them (the app shows Stopped and its
+/// Start button from it), and why the rest is not shown (`unread`).
+pub(crate) fn with_service(node: Result<Value, String>, service: Value) -> Result<Value, String> {
+    let mut v = match node {
+        Ok(v) => v,
+        Err(why) if service["installed"] == true && service["state"] != "running" => {
+            json!({ "daemon": "not running", "unread": why })
+        }
+        Err(e) => return Err(e),
+    };
+    v["service"] = service;
     Ok(v)
 }
 

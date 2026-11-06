@@ -119,6 +119,7 @@ impl Ctl {
         self.with_perm(|p| {
             p.set_mode(c["mode"].as_str().unwrap_or_default().into());
             p.set_mode_until(view::mode_until(&c, now_ms()).into());
+            p.set_user_then(view::timed_user_then(&c, now_ms()).into());
             p.set_separate(separate);
             p.set_account(account.as_str().into());
             p.set_as_owner(c["as_owner"] == true);

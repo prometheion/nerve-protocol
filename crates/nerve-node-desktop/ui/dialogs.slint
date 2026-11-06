@@ -340,7 +340,7 @@ export component ModeDialog inherits Dialog {
             gap: Space.md;
             Field {
                 label: "Hours";
-                hint: "Then it goes back to allowlist mode.";
+                hint: "Then it goes back to " + (Perm.mode-choice == "user" ? Perm.user-then : "allowlist") + " mode.";
                 TextField {
                     text <=> Perm.mode-hours;
                     label: "Hours";

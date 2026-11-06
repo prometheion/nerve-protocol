@@ -672,7 +672,9 @@ impl Reach {
         let mode = entry.policy.mode_at(now_ms);
         Reach {
             mode,
-            until_ms: entry.policy.until.filter(|_| mode != Mode::Allowlist),
+            // The end of the mode in force: a timed user mode that went
+            // back to folder mode has none any more.
+            until_ms: entry.policy.ends(now_ms).map(|(until, _)| until),
             account,
             confined,
             held_by_account: false,
@@ -2164,6 +2166,15 @@ mod tests {
             .unwrap();
         assert_eq!((a.mode, a.until_ms), (AccessMode::Allowlist, None));
         assert!(a.folders.is_empty());
+        // A timed user mode that went back to folder mode tells no end that
+        // has passed (round 1, correctness 1).
+        e.policy.mode = Mode::User;
+        e.policy.then = Some(Mode::Folder);
+        let r = Reach::of(&e, 5, None, true, None);
+        let a = super::for_center(&NodeConfig::default(), &e, &r, &[])
+            .access
+            .unwrap();
+        assert_eq!((a.mode, a.until_ms), (AccessMode::Folder, None));
     }
 
     /// A folder with no rights is never named, as the node's file calls

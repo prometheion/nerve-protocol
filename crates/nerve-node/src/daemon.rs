@@ -1198,20 +1198,28 @@ impl Shared {
             return Err(crate::folder_change::no_center_named(&cfg, center));
         }
         let given = nerve_policy::paths::normal_folder(path)?;
-        // The folder is the owner's: judged as the owner sees it, before
-        // any grant lets `nerve-run` see it at all.
-        let account = self.owner_account(&cfg).unwrap_or(None);
-        let home = account
-            .as_ref()
-            .map_or_else(|| self.home.clone(), |a| a.home.clone());
-        let settled = {
-            let _as = crate::link::act_as(account.as_ref()).map_err(|e| e.message)?;
-            crate::exec::settle(&cfg, &home, std::path::Path::new(&given))
-        };
-        let (stored, recorded) = match settled {
-            Settled::Refused(why) => return Err(refusal(path, &why)),
-            Settled::At(place) => (place.display().to_string(), true),
-            Settled::Unknown => (given, false),
+        let listed = cfg
+            .center(center)
+            .and_then(|e| crate::folder_change::narrowed(e, &given, access));
+        let (stored, recorded) = match listed {
+            Some(entry) => entry,
+            None => {
+                // The folder is the owner's: judged as the owner sees it,
+                // before any grant lets `nerve-run` see it at all.
+                let account = self.owner_account(&cfg).unwrap_or(None);
+                let home = account
+                    .as_ref()
+                    .map_or_else(|| self.home.clone(), |a| a.home.clone());
+                let settled = {
+                    let _as = crate::link::act_as(account.as_ref()).map_err(|e| e.message)?;
+                    crate::exec::settle(&cfg, &home, std::path::Path::new(&given))
+                };
+                match settled {
+                    Settled::Refused(why) => return Err(refusal(path, &why)),
+                    Settled::At(place) => (place.display().to_string(), true),
+                    Settled::Unknown => (given, false),
+                }
+            }
         };
         let change = FolderChange::Add {
             path: stored.clone(),
@@ -2674,7 +2682,7 @@ async fn answer(
         // The folders' ACLs brought in line with the config now, also a
         // grant that failed before, and what that left: the CLI tells the
         // owner after a change of the folders (crate::acl). With `every`
-        // (`folder set`, `folder sync`) every grant is walked, also what was
+        // (`folder add` of a listed folder, `folder sync`) every grant is walked, also what was
         // moved into a granted folder.
         "folder.grants" => {
             if shared.below_command(peer.pid) {

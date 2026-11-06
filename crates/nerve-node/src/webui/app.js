@@ -240,8 +240,8 @@ function foldersSection(c, folders) {
 
 function rulesSection(c, rules) {
   const lists = [["allow", "Allowed"], ["deny", "Forbidden"], ["sudo", "Run with sudo"]];
-  return section("Rules", "Commands a center may run, may not, or runs with sudo; the guard is built in.", null,
-    more("rules:guard", "More", el("p", { class: "meta" }, "The guard's rules keep a center's commands off Nerve itself. They catch mistakes, not someone who hides the name: the account the commands run as is the real protection.")),
+  return section("Rules", "Commands allowed, forbidden or run with sudo; a built-in guard catches mistakes, not someone who hides the name.", null,
+    more("rules:guard", "More", el("p", { class: "meta" }, "The guard's rules keep a center's commands off Nerve itself. They match by name only: the account the commands run as is the real protection.")),
     lists.map(([list, title]) => {
       const field = el("input", { class: "input", type: "text", placeholder: list === "sudo" ? "apt update" : "git status, git *, or fs.read:~/notes/*", autocomplete: "off", spellcheck: "false", "aria-label": `${title}: a new rule` });
       const wild = el("input", { type: "checkbox" });

@@ -69,11 +69,21 @@ pub fn try_lock(state: &Path) -> Result<Option<Lock>, String> {
 /// Whether a center runs in `state`: it holds the lock there. `None` where
 /// that cannot be told (no lock file yet: no center ran; or another
 /// platform). Opens the file only, so it never makes one in another's
-/// folder.
+/// folder, and as `try_lock` not through a link; nor does it wait on what
+/// is not a plain file (a FIFO the folder's user put there for root's
+/// `status` or restore).
 #[cfg(unix)]
 pub fn runs(state: &Path) -> Option<bool> {
     use std::os::fd::AsRawFd;
-    let file = std::fs::File::open(state.join(LOCK_FILE)).ok()?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(state.join(LOCK_FILE))
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
     // SAFETY: flock on a file descriptor this function owns.
     let r = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
     Some(r != 0)
@@ -228,5 +238,32 @@ mod tests {
         // A plain lock file is taken as before.
         std::fs::remove_file(state.join(LOCK_FILE)).unwrap();
         assert!(claim(&state).unwrap().is_some());
+    }
+
+    /// Whether a center runs is not told through a link, nor by waiting on
+    /// a FIFO in place of the lock (round 1, correctness 6): root's
+    /// `status` and restore ask it in the center's user's folder.
+    #[test]
+    fn whether_a_center_runs_is_not_read_through_a_link_or_a_fifo() {
+        let d = tempfile::tempdir().unwrap();
+        let state = d.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let held = d.path().join("held");
+        std::fs::create_dir_all(&held).unwrap();
+        let _lock = try_lock(&held).unwrap().unwrap();
+        std::os::unix::fs::symlink(held.join(LOCK_FILE), state.join(LOCK_FILE)).unwrap();
+        assert_eq!(runs(&state), None, "through a link");
+        std::fs::remove_file(state.join(LOCK_FILE)).unwrap();
+        let fifo = std::ffi::CString::new(state.join(LOCK_FILE).to_str().unwrap()).unwrap();
+        // SAFETY: a plain call with a valid path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let s = state.clone();
+        std::thread::spawn(move || tx.send(runs(&s)).unwrap());
+        let answer = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("runs() waited on a FIFO");
+        assert_eq!(answer, None);
+        assert_eq!(runs(&held), Some(true));
     }
 }

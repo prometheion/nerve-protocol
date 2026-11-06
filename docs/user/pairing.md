@@ -114,7 +114,7 @@ for 7 more days, so nothing breaks while the switch is under way. To end that
 now:
 
 ```sh
-nerve-node center rotate-key --end-grace --center lab
+nerve-node center rotate-key --end-grace lab
 ```
 
 - The machine keeps its id at the center; what it offers and its statistics stay.

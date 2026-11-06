@@ -194,6 +194,22 @@ impl FolderChange {
     }
 }
 
+/// The listed folder `folder add` changes in place: the one of center `e`
+/// written as `given`, when `access` takes rights from it and gives none.
+/// Narrowing needs no look at where the path leads now: the entry stays the
+/// one it was, with less, also where its path became a link that a fresh
+/// look would follow elsewhere or refuse. Its place stays recorded as it
+/// was. The same rights again are looked at, which records a folder that
+/// was not.
+pub fn narrowed(e: &CenterEntry, given: &str, access: Access) -> Option<(String, bool)> {
+    let f = e.policy.folders.iter().find(|f| f.path == given)?;
+    let had = f.access;
+    let within = (!access.read || had.read)
+        && (!access.write || had.write)
+        && (!access.execute || had.execute);
+    (within && access != had).then(|| (f.path.clone(), e.policy.is_placed(&f.path)))
+}
+
 /// The most folders named in the hint when none of them lies beside the path.
 const HINT_MAX: usize = 3;
 
@@ -391,8 +407,8 @@ mod tests {
         let refused = |method: &str, params: Value| {
             FolderChange::from_request(method, params).expect_err("taken")
         };
-        // An unknown right, or one given twice; the method `folder set`
-        // had is gone.
+        // An unknown right, or one given twice; there is no other method
+        // than `folder.add` and `folder.rm`.
         let e = refused("folder.add", json!({"path": "/srv/a", "access": "rq"}));
         assert!(e.contains("not a folder flag"), "{e}");
         refused("folder.add", json!({"path": "/srv/a", "access": "rr"}));

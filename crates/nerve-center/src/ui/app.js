@@ -22,12 +22,19 @@ let settingsRun = 0;
 const state = { paired: null, harnessToken: null, overview: null, stats: null, statsNode: null, audit: null, log: null, help: null, pairing: null, settings: null, newToken: null, newPin: null, checker: null, caps: null, capsNode: null };
 
 let helpParts = null;
+let helpKey = null;
 
 function pageHelp() {
   const h = state.help && state.help.node;
   if (!h) return [loading()];
+  // The parts are kept so a redraw does not close what is open, but the
+  // Connect a harness card follows its token and the center's MCP: a
+  // token made or hidden here shows at once.
+  const mcp = state.overview && state.overview.mcp;
+  const key = JSON.stringify([state.harnessToken, mcp || null]);
+  if (key !== helpKey) { helpParts = null; helpKey = key; }
   if (!helpParts) helpParts = buildHelp(h, [
-    expander("Connect a harness", "plug", true, harnessCard(state.overview && state.overview.mcp)),
+    expander("Connect a harness", "plug", true, harnessCard(mcp)),
     expander("nerve-center commands", "terminal", true, centerCommands(state.help.center)),
     el("p", { class: "meta" }, "New here? ", el("a", { href: "#overview" }, "Get started"), " on the Overview."),
   ]);
@@ -120,7 +127,7 @@ function harnessCard(mcp) {
     const header = `Authorization: Bearer ${token}`;
     const json = JSON.stringify({ mcpServers: { nerve: { type: "http", url: m.url, headers: { Authorization: `Bearer ${token}` } } } });
     parts.push(
-      el("p", { class: "meta" }, "Shown only now. Paste the JSON into the harness's MCP settings, or run the line for Claude Code."),
+      el("p", { class: "meta" }, "Shown only now. Paste the JSON into the harness's settings; the Claude Code line puts the token in your shell's history."),
       el("div", { class: "pair-rows" },
         row("JSON", json),
         row("URL", m.url),
@@ -632,9 +639,12 @@ function pageChecker() {
       checkerToggle("blocklist_on", "Blocklist (deterministic, on by default)", cfg.blocklist_on, (v) => { cfg.blocklist_on = v; }),
       checkerToggle("model_on", "Decision model (off by default)", cfg.model_on, (v) => { cfg.model_on = v; }, modelOnAsks),
       checkerToggle("taint_on", "Taint marking (a session is tainted after a call returns content)", cfg.taint_on, (v) => { cfg.taint_on = v; }))),
-    // On but not running: every checked call is refused (fail closed).
+    // On but not running: every checked call is refused (fail closed), or
+    // with fail closed off goes to the machine unjudged.
     c.meta.model_wanted && !(c.meta.local && c.meta.local.phase === "ready") && cfg.model.source === "local"
-      ? banner("down", "alert", "The decision model is on but does not run: every call it checks is refused. The Log page says why.") : null,
+      ? (cfg.model.fail_closed
+        ? banner("down", "alert", "The decision model is on but does not run: every call it checks is refused. The Log page says why.")
+        : banner("down", "alert", "The decision model is on but does not run, and fail closed is off: its calls pass unjudged.")) : null,
     c.meta.rejected && c.meta.rejected.length ? banner("warn", "alert", `Some rules do not parse and were left out: ${c.meta.rejected.join("; ")}`) : null,
     c.meta.unpublished && c.meta.unpublished.length ? banner("warn", "alert", `Some rules name a capability no machine offers, so they match no call now (a typo, or a capability that is gone): ${c.meta.unpublished.join("; ")}`) : null,
     staleBanner(c.meta.stale),
@@ -680,7 +690,8 @@ async function modelOnAsks() {
   const meta = state.checker.meta;
   if (state.checker.cfg.model.source !== "local" || meta.installed || !meta.platform_supported) return true;
   const pin = meta.models[0];
-  const yes = await modal({ title: "No model is installed", message: `With the model on and none installed, every checked call is refused. Install ${pin.name} (${gb(pin.bytes)}) on the CPU now?`, confirm: "Install and turn on" });
+  const what = state.checker.cfg.model.fail_closed ? "every checked call is refused" : "every checked call passes unjudged (fail closed is off)";
+  const yes = await modal({ title: "No model is installed", message: `With the model on and none installed, ${what}. Install ${pin.name} (${gb(pin.bytes)}) on the CPU now?`, confirm: "Install and turn on" });
   if (!yes) return false;
   await api("POST", "/api/checker/install", { gpu: false, model: pin.id });
   return true;
@@ -972,16 +983,20 @@ function modelCard(cfg, meta) {
   const localDiv = el("div", {}, ...localInstall(meta));
   const showSource = () => { epDiv.hidden = source !== "endpoint"; localDiv.hidden = source !== "local"; };
   showSource();
-  return section("Decision model", "An optional model that refuses dangerous calls; it fails closed.", null,
+  return section("Decision model", m.fail_closed ? "An optional model that refuses dangerous calls; it fails closed."
+    : "An optional model that refuses dangerous calls; fail closed is off, so a call it cannot judge runs.", null,
     el("div", { class: "card" },
       el("div", { class: "form-row" }, srcPicker.root),
+      // Off is the one setting that lets calls through unjudged, so it is
+      // not folded away while it is off.
+      m.fail_closed ? null : el("label", { class: "switch" }, failClosed, el("span", {}, "Fail closed is off: a call the model cannot judge is allowed and logged. On refuses it (recommended).")),
       epDiv,
       localDiv,
       more("checker:advanced", "Advanced",
         el("p", { class: "meta" }, "A System One model answers, in one pass, whether a call is dangerous; at or above the threshold the call is refused. An unreachable model refuses the call unless you switch fail closed off."),
         el("div", { class: "form-row" }, field("Threshold (0 to 1)", threshold), field("Timeout (ms)", timeout)),
         el("div", { class: "form-row" }, scopePicker.root),
-        el("label", { class: "switch" }, failClosed, el("span", {}, "Fail closed: refuse a call when the model is unreachable (recommended). Off: allow and log it.")),
+        m.fail_closed ? el("label", { class: "switch" }, failClosed, el("span", {}, "Fail closed: refuse a call when the model is unreachable (recommended). Off: allow and log it.")) : null,
         el("div", { class: "form-row" }, field("Question (the command text is never put here; it goes only in the state sent to the model)", instr)),
         el("div", { class: "form-row" }, field("When true (dangerous)", critTrue), field("When false (safe)", critFalse))),
       el("div", { class: "actions" },

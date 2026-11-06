@@ -400,8 +400,8 @@
                   "optional": false
                 }
               ],
-              "line": "Let a center use a folder: r reads, w writes, x runs commands; none closes it",
-              "more": "Let a center use a folder, or change what it may do in one it has: `r` reads, `w` writes, `x` runs commands (`rw`, `rx`); `none` closes a folder inside one it may use.",
+              "line": "Let a center use a folder (r, w, x); none closes one to file calls only",
+              "more": "Let a center use a folder, or change what it may do in one it has: `r` reads, `w` writes, `x` runs commands (`rw`, `rx`). `none` closes a folder inside one it may use to file calls; a command run in the folder around it still reaches it.",
               "name": "folder add",
               "usage": "nerve-node folder add [OPTIONS] <PATH> <RIGHTS>"
             },
@@ -491,6 +491,12 @@
                   "line": "With --action: hold the rule to one argument, like room=office",
                   "more": "With --action: hold the rule to one argument of the call, as the audit buttons do: `--arg room=office` makes `lamp.set:room=office`.",
                   "name": "--arg <FIELD=VALUE>",
+                  "optional": true
+                },
+                {
+                  "line": "With --action: take the target as it is, a `*` in it too (the exact buttons)",
+                  "more": "With --action: take the target as the audit entry has it, a `*` at its end too, so that `rm -rf *` stays that one command. The audit's Allow and Deny buttons make their rule so; without it a trailing `*` is the wildcard.",
+                  "name": "--exact",
                   "optional": true
                 }
               ],

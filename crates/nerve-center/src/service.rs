@@ -301,25 +301,38 @@ pub fn with_service_stopped(
     if !ours {
         return f(out);
     }
-    nerve_service::System::systemctl(&Host, &["stop", UNIT_NAME])?;
-    did(out, format!("stopped {UNIT_NAME} for the restore"));
-    let _ = out.flush();
     // The restore becomes the folder's owner for its work, for good: it
     // runs in a child, so that this process, root still, starts the service
     // again. The child finds no center running and restores.
-    let r = std::env::current_exe()
-        .and_then(|exe| {
-            std::process::Command::new(exe)
-                .args(std::env::args_os().skip(1))
-                .status()
-        })
-        .map_err(|e| format!("the restore did not start: {e}"))
-        .and_then(|s| {
-            s.success()
-                .then_some(())
-                .ok_or_else(|| "the restore failed".to_string())
-        });
-    let started = nerve_service::System::systemctl(&Host, &["start", UNIT_NAME]);
+    stopped_for(&Host, out, &|| {
+        std::env::current_exe()
+            .and_then(|exe| {
+                std::process::Command::new(exe)
+                    .args(std::env::args_os().skip(1))
+                    .status()
+            })
+            .map_err(|e| format!("the restore did not start: {e}"))
+            .and_then(|s| {
+                s.success()
+                    .then_some(())
+                    .ok_or_else(|| "the restore failed".to_string())
+            })
+    })
+}
+
+/// Stops the service, runs `restore`, and starts the service again whether
+/// the restore did its work or not; the restore's answer. A service that
+/// does not stop runs no restore.
+fn stopped_for(
+    sys: &dyn nerve_service::System,
+    out: &mut dyn Write,
+    restore: &dyn Fn() -> Result<(), String>,
+) -> Result<(), String> {
+    sys.systemctl(&["stop", UNIT_NAME])?;
+    did(out, format!("stopped {UNIT_NAME} for the restore"));
+    let _ = out.flush();
+    let r = restore();
+    let started = sys.systemctl(&["start", UNIT_NAME]);
     match started {
         Ok(()) => did(out, format!("started {UNIT_NAME} again")),
         Err(e) => did(
@@ -349,20 +362,7 @@ pub fn status(layout: &Layout, state: &Path, out: &mut dyn Write) -> Result<(), 
 /// The lines of [`status`], with `file` the installed center's settings
 /// where they could be read.
 fn status_lines(layout: &Layout, state: &Path, installed: bool, file: Option<&str>) -> Vec<String> {
-    let mut lines = Vec::new();
-    let runs = crate::attach::runs(state);
-    lines.push(match runs {
-        Some(true) => format!("center: running, in {}", state.display()),
-        Some(false) => format!("center: not running, in {}", state.display()),
-        // Root and the center's user may look into its folder, not others:
-        // the service line says whether it runs.
-        None if crate::owner::not_yours(state) => format!(
-            "center: in {}, which only root and its user may read (`sudo nerve-center status` says more)",
-            state.display()
-        ),
-        None if !state.exists() => format!("center: none has run in {} yet", state.display()),
-        None => format!("center: not running, in {}", state.display()),
-    });
+    let mut lines = vec![run_line(state, crate::attach::runs(state), cfg!(unix))];
     if installed {
         let ask = |verb: &str| {
             std::process::Command::new("systemctl")
@@ -385,10 +385,7 @@ fn status_lines(layout: &Layout, state: &Path, installed: bool, file: Option<&st
     }
     // Where it is reached: what the settings file sets, else the defaults.
     let at = |var: &str| file.and_then(|f| setting_in(f, var));
-    let web = |a: &str| match crate::config::is_loopback(a) {
-        true => format!("http://{a}"),
-        false => format!("https://{a}"),
-    };
+    let web = crate::config::address_url;
     let ui = at("NERVE_CENTER_UI").unwrap_or_else(|| "127.0.0.1:7480".into());
     lines.push(match ui.as_str() {
         "off" => "web UI: off".into(),
@@ -411,7 +408,7 @@ fn status_lines(layout: &Layout, state: &Path, installed: bool, file: Option<&st
         "owner token: in {}; `{sudo}nerve-center owner-token` shows it",
         crate::owner::path(state).display()
     ));
-    lines.push(match crate::store::Store::load(state) {
+    lines.push(match read_store(state) {
         Ok(Some(s)) if s.nodes.is_empty() => {
             "machines: none paired yet; the web UI's Overview pairs one".into()
         }
@@ -430,6 +427,55 @@ fn status_lines(layout: &Layout, state: &Path, installed: bool, file: Option<&st
         false => format!("log: {}", state.join("log.jsonl").display()),
     });
     lines
+}
+
+/// The first line of `status`: whether a center runs in `state`, as
+/// `runs` ([`crate::attach::runs`]) says. Only `unix` has the lock that
+/// tells it; elsewhere a folder that exists says it cannot be told.
+fn run_line(state: &Path, runs: Option<bool>, unix: bool) -> String {
+    match runs {
+        Some(true) => format!("center: running, in {}", state.display()),
+        Some(false) => format!("center: not running, in {}", state.display()),
+        // Root and the center's user may look into its folder, not others:
+        // the service line says whether it runs.
+        None if crate::owner::not_yours(state) => format!(
+            "center: in {}, which only root and its user may read (`sudo nerve-center status` says more)",
+            state.display()
+        ),
+        None if !state.exists() => format!("center: none has run in {} yet", state.display()),
+        None if !unix => format!(
+            "center: in {}; whether one runs there cannot be told on this system",
+            state.display()
+        ),
+        None => format!("center: not running, in {}", state.display()),
+    }
+}
+
+/// The center's store for `status`: read as the folder's owner
+/// ([`as_owner_of`]), so root parses nothing the center's user could not
+/// read, not through a link, and only a plain file, so it never waits on
+/// one. `Ok(None)` when no center saved one.
+fn read_store(state: &Path) -> Result<Option<crate::store::Store>, String> {
+    let _owner = as_owner_of(state)?;
+    let path = state.join(crate::store::FILE);
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = match open.open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+        return Err(format!("{} is not a file", path.display()));
+    }
+    let mut text = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut text).map_err(|e| e.to_string())?;
+    crate::store::Store::parse(&text).map(Some)
 }
 
 /// Says a step as it is done.
@@ -561,6 +607,12 @@ pub fn install_with(
     for (var, value) in set {
         check_setting(var, value)?;
     }
+    // A settings file an earlier install kept may name an old variable,
+    // which the new program refuses to start with: said before anything
+    // changes, as `update` does, not after the service fails to answer.
+    let kept = std::fs::read_to_string(layout.settings()).unwrap_or_default();
+    crate::config::refuse_old_names(|k| setting_in(&kept, k), &layout.settings())
+        .map_err(|e| format!("{e}; install changed nothing"))?;
     let mut steps = Steps::new(out);
     let account = nerve_service::system_account(
         sys,
@@ -624,10 +676,7 @@ fn done_lines(file: &str, owner_token: &str, kept: &Path) -> [String; 3] {
         None | Some("http") => crate::config::MCP_HTTP.to_string(),
         Some(a) => a.to_string(),
     };
-    let web = |a: &str| match crate::config::is_loopback(a) {
-        true => format!("http://{a}"),
-        false => format!("https://{a}"),
-    };
+    let web = crate::config::address_url;
     [
         format!("Web UI:      {}", web(&ui)),
         format!(
@@ -654,10 +703,17 @@ fn setting_in(file: &str, var: &str) -> Option<String> {
 }
 
 /// Refuses a setting `install` would write into the file that is not one:
-/// a line break would put another variable there.
+/// a line break would put another variable there, and systemd reads a
+/// backslash (a trailing one joins the next line), quotes and `$` in an
+/// `EnvironmentFile=` as more than the characters they are.
 fn check_setting(var: &str, value: &str) -> Result<(), String> {
     if value.is_empty() || value.contains(['\n', '\r', '\0']) {
         return Err(format!("{var}: one line, not empty"));
+    }
+    if value.contains(['\\', '"', '\'', '$']) {
+        return Err(format!(
+            "{var} {value:?}: no backslash, quote or $, which systemd reads in its settings file"
+        ));
     }
     match var {
         "NERVE_CENTER_LISTEN" if value.parse::<std::net::SocketAddr>().is_err() => Err(format!(
@@ -1386,16 +1442,33 @@ mod tests {
             ("NERVE_CENTER_NAME", "a\nNERVE_CENTER_UI=0.0.0.0:80"),
             ("NERVE_CENTER_LISTEN", "nowhere"),
             ("NERVE_CENTER_PUBLIC_URL", "lab.example"),
+            // systemd joins a line that ends in a backslash with the next,
+            // and reads quotes (round 1, correctness 8).
+            ("NERVE_CENTER_NAME", "lab\\"),
+            ("NERVE_CENTER_NAME", "\"lab\""),
+            ("NERVE_CENTER_PUBLIC_URL", "https://lab.example/$x"),
         ] {
             let e = install_with(&l, &sys, &exe, &[(var, bad.to_string())], &mut Vec::new())
                 .unwrap_err();
             assert!(!e.is_empty(), "{var}");
         }
-        assert!(
-            !std::fs::read_to_string(l.settings())
-                .unwrap()
-                .contains("0.0.0.0:80")
+        let file = std::fs::read_to_string(l.settings()).unwrap();
+        assert!(!file.contains("0.0.0.0:80"));
+        assert_eq!(
+            setting_in(&file, "NERVE_CENTER_NAME").as_deref(),
+            Some("lab-2")
         );
+        // A kept settings file with an old name is refused before anything
+        // changes, as `update` refuses it (round 1, correctness 9).
+        std::fs::write(l.settings(), format!("{file}NERVE_HARNESS_TOKEN=nrv_x\n")).unwrap();
+        let mut out = Vec::new();
+        let e = install_with(&l, &sys, &exe, &[], &mut out).unwrap_err();
+        assert!(
+            e.starts_with("rename NERVE_HARNESS_TOKEN to NERVE_CENTER_HARNESS_TOKEN in"),
+            "{e}"
+        );
+        assert!(e.ends_with("; install changed nothing"), "{e}");
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
     }
 
     /// `update` changes nothing while the settings file names an old
@@ -1441,6 +1514,72 @@ mod tests {
         assert!(lines[0].contains("`sudo nerve-center status`"), "{lines:?}");
     }
 
+    /// A restore into the running service stops it, restores once and
+    /// starts it again, also when the restore fails (a wrong passphrase),
+    /// and gives the restore's answer (round 1, spec 3).
+    #[test]
+    fn a_restore_into_the_service_starts_it_again_whatever_happens() {
+        for answer in [Ok(()), Err("the restore failed".to_string())] {
+            let sys = Fake::new();
+            let runs = std::cell::Cell::new(0);
+            let mut out = Vec::new();
+            let r = stopped_for(&sys, &mut out, &|| {
+                runs.set(runs.get() + 1);
+                answer.clone()
+            });
+            assert_eq!(r, answer);
+            assert_eq!(runs.get(), 1);
+            assert_eq!(
+                sys.calls(),
+                [
+                    format!("systemctl stop {UNIT_NAME}"),
+                    format!("systemctl start {UNIT_NAME}")
+                ]
+            );
+            let out = String::from_utf8(out).unwrap();
+            assert!(
+                out.ends_with(&format!("started {UNIT_NAME} again\n")),
+                "{out}"
+            );
+        }
+    }
+
+    /// Where no lock tells whether a center runs (Windows), `status` does
+    /// not say a running one does not run (round 1, correctness 7).
+    #[test]
+    fn the_status_says_when_it_cannot_tell_whether_a_center_runs() {
+        let d = tempfile::tempdir().unwrap();
+        let line = run_line(d.path(), None, false);
+        assert!(line.contains("cannot be told"), "{line}");
+        assert!(!line.contains("not running"), "{line}");
+        let gone = d.path().join("none");
+        assert!(run_line(&gone, None, false).contains("none has run"));
+    }
+
+    /// Root's `status` does not wait on a FIFO the center's user put in
+    /// place of its store (round 1, correctness 6).
+    #[cfg(unix)]
+    #[test]
+    fn the_status_does_not_wait_on_a_fifo_store() {
+        let d = tempfile::tempdir().unwrap();
+        let l = layout(d.path());
+        let state = d.path().join("own");
+        std::fs::create_dir_all(&state).unwrap();
+        let fifo =
+            std::ffi::CString::new(state.join(crate::store::FILE).to_str().unwrap()).unwrap();
+        // SAFETY: a plain call with a valid path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(status_lines(&l, &state, false, None)).unwrap());
+        let lines = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("status waited on a FIFO");
+        assert!(
+            lines.iter().any(|l| l.starts_with("machines: ")),
+            "{lines:?}"
+        );
+    }
+
     /// `status` of a center that is not installed: where it runs, how
     /// harnesses reach it, the owner token, the machines and the log.
     #[test]
@@ -1478,9 +1617,14 @@ mod tests {
         // The installed center: its service, its HTTP MCP and journalctl.
         let file = "NERVE_CENTER_UI=0.0.0.0:7480\nNERVE_CENTER_MCP=0.0.0.0:7481\n";
         let lines = status_lines(&l, &state, true, Some(file)).join("\n");
-        assert!(lines.contains("web UI: https://0.0.0.0:7480"), "{lines}");
+        // An address on all of them is reached by the machine's name.
+        let host = crate::center::host_name();
         assert!(
-            lines.contains("harnesses: https://0.0.0.0:7481/mcp"),
+            lines.contains(&format!("web UI: https://{host}:7480")),
+            "{lines}"
+        );
+        assert!(
+            lines.contains(&format!("harnesses: https://{host}:7481/mcp")),
             "{lines}"
         );
         assert!(

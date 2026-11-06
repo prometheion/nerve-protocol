@@ -483,6 +483,9 @@ fn the_app_drives_the_cli_end_to_end() {
     assert_eq!(perm.get_load(), Load::Ready, "{}", perm.get_error());
     // A new pairing starts in folder mode.
     assert_eq!(perm.get_mode(), "folder");
+    // From folder mode a timed user mode goes back to folder mode, and the
+    // dialog and the page say so (round 1, correctness 2).
+    assert_eq!(perm.get_user_then(), "folder");
     perm.invoke_mode_pick("user".into());
     assert!(perm.get_mode_open());
     perm.set_mode_timed(true);
@@ -494,7 +497,7 @@ fn the_app_drives_the_cli_end_to_end() {
     assert!(p.until.is_some());
     assert_eq!(perm.get_mode(), "user");
     assert!(
-        perm.get_mode_until().contains("Back to allowlist"),
+        perm.get_mode_until().contains("Back to folder mode"),
         "{}",
         perm.get_mode_until()
     );

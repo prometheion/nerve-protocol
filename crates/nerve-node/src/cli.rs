@@ -408,6 +408,11 @@ pub enum RuleCmd {
         /// With --action: hold the rule to one argument of the call, as the audit buttons do: `--arg room=office` makes `lamp.set:room=office`.
         #[arg(long, value_name = "FIELD=VALUE", requires = "action")]
         arg: Option<String>,
+        /// With --action: take the target as it is, a `*` in it too (the exact buttons)
+        ///
+        /// With --action: take the target as the audit entry has it, a `*` at its end too, so that `rm -rf *` stays that one command. The audit's Allow and Deny buttons make their rule so; without it a trailing `*` is the wildcard.
+        #[arg(long, requires = "action")]
+        exact: bool,
         #[command(flatten)]
         center: CenterArg,
     },
@@ -593,9 +598,9 @@ pub enum SudoCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum FolderCmd {
-    /// Let a center use a folder: r reads, w writes, x runs commands; none closes it
+    /// Let a center use a folder (r, w, x); none closes one to file calls only
     ///
-    /// Let a center use a folder, or change what it may do in one it has: `r` reads, `w` writes, `x` runs commands (`rw`, `rx`); `none` closes a folder inside one it may use.
+    /// Let a center use a folder, or change what it may do in one it has: `r` reads, `w` writes, `x` runs commands (`rw`, `rx`). `none` closes a folder inside one it may use to file calls; a command run in the folder around it still reaches it.
     Add {
         /// The folder.
         path: PathBuf,
@@ -1497,13 +1502,18 @@ async fn rotate_key(
         );
         return Ok(());
     }
-    let days = nerve_proto::ROTATE_GRACE_MS / 86_400_000;
     json::also("public_key", json!(key));
-    let _ = writeln!(
-        out,
-        "center {name} took this machine's new key:\n  {key}\nThe old key is deleted here. The center takes it for {days} more days, unless you end that now with `nerve-node center rotate-key --end-grace --center {name}`."
-    );
+    let _ = writeln!(out, "{}", rotated_text(&name, key));
     Ok(())
+}
+
+/// What `center rotate-key` says once the center took the new key, with
+/// the command that ends the old key's grace.
+fn rotated_text(name: &str, key: &str) -> String {
+    let days = nerve_proto::ROTATE_GRACE_MS / 86_400_000;
+    format!(
+        "center {name} took this machine's new key:\n  {key}\nThe old key is deleted here. The center takes it for {days} more days, unless you end that now with `nerve-node center rotate-key --end-grace {name}`."
+    )
 }
 
 /// Changes one center's entry.
@@ -1588,9 +1598,10 @@ impl List {
         command: &str,
         action: Option<&str>,
         arg: Option<&str>,
+        exact: bool,
     ) -> Result<String, String> {
         if let Some(action) = action {
-            return self.action_rule(action, command, arg);
+            return self.action_rule(action, command, arg, exact);
         }
         if arg.is_some() {
             return Err("--arg names an argument of the action --action names".into());
@@ -1658,12 +1669,16 @@ impl List {
     /// the audit buttons of the desktop app and of the center make it
     /// ([`rules::rule_for`]). A target that ends in `*` is the wildcard: a
     /// command's ` *`, a folder's `/*`, or `*` alone for the capability of
-    /// an action without a target. The sudo list takes sudo commands only.
+    /// an action without a target. With `exact` the target is taken as it
+    /// is, a `*` in it too: the audit's Allow and Deny buttons hand over the
+    /// command an agent sent, and its `rm -rf *` must not become every
+    /// `rm -rf`. The sudo list takes sudo commands only.
     pub(crate) fn action_rule(
         self,
         action: &str,
         target: &str,
         arg: Option<&str>,
+        exact: bool,
     ) -> Result<String, String> {
         // A cut target is no longer the call's, so no rule can name it.
         if nerve_policy::audit::is_cut_target(target) {
@@ -1679,6 +1694,7 @@ impl List {
             List::Sudo if arg.is_some() => {
                 Err("the sudo list holds commands; --arg is for the allow and deny lists".into())
             }
+            List::Sudo if exact => rules::sudo_rule_for(target, false),
             List::Sudo => self.command_rule(target),
             // `--arg FIELD=VALUE`: the value as the audit entry shows it,
             // which the rule then holds to; the node reads it as the
@@ -1688,6 +1704,13 @@ impl List {
                     .and_then(|p| p.split_once('='))
                     .ok_or("--arg takes FIELD=VALUE, like room=office")?;
                 rules::rule_for(cap, act, target, false, Some((field, &json!(value))))
+            }
+            _ if exact => {
+                if (cap, act) == ("exec", "run") && sudo_command(target.trim()).is_some() {
+                    // The same refusal as the command line without --exact.
+                    self.command_rule(target)?;
+                }
+                rules::rule_for(cap, act, target, false, None)
             }
             _ if (cap, act) == ("exec", "run") => self.command_rule(target),
             List::Allow | List::Deny if cap == "fs" => match target.trim().strip_suffix("/*") {
@@ -1870,6 +1893,7 @@ async fn rule_cmd(
             command,
             action,
             arg,
+            exact,
             center,
         } => {
             // A sudo command goes on the sudo list: the command says where.
@@ -1882,7 +1906,7 @@ async fn rule_cmd(
             };
             let rule = match (list, &action) {
                 (List::Sudo, None) => list.command_rule(&command)?,
-                _ => list.entry(&command, action.as_deref(), arg.as_deref())?,
+                _ => list.entry(&command, action.as_deref(), arg.as_deref(), exact)?,
             };
             let name = edit_center(paths, &center, |e| {
                 push_unique(list.of(&mut e.policy), &rule);
@@ -1894,7 +1918,11 @@ async fn rule_cmd(
                 _ => "",
             };
             let _ = writeln!(out, "{name}: {} {rule:?}{note}", list.label());
-            if action.is_none()
+            // A wildcard is said with --action too: an audit entry's target
+            // copied by hand may end in ` *` without meaning every command.
+            if !exact
+                && arg.is_none()
+                && action.as_deref().is_none_or(|a| a == "exec.run")
                 && let Some(covers) = wildcard_note(list, &command)
             {
                 let _ = writeln!(out, "{covers}");
@@ -3400,6 +3428,11 @@ fn status_lines(v: &Value) -> Vec<String> {
         false => "node: not running".to_string(),
     }];
     lines.extend(service_line(&v["service"]));
+    if let Some(why) = v["unread"].as_str() {
+        lines.push(format!(
+            "centers: not shown while the node is stopped, its folders are not yours to read ({why})"
+        ));
+    }
     if let Some(why) = v["folder_commands_off"].as_str() {
         lines.push(format!("folder mode runs no command: {why}"));
     }
@@ -3550,6 +3583,10 @@ fn next_steps(v: &Value) -> Vec<String> {
     }
     if v["locked"] == true {
         steps.push("let it work again: `nerve-node unlock`".into());
+    }
+    // Its centers were not read: none to pair or to give a folder.
+    if v["unread"].is_string() {
+        return steps;
     }
     let centers = v["centers"].as_array().cloned().unwrap_or_default();
     if centers.is_empty() {
@@ -4142,9 +4179,17 @@ async fn set_mode(
     let name = edit_center(paths, center, |e| {
         // A timed user mode goes back to the mode before it, never to
         // user; a timed folder mode to allowlist (CenterPolicy::after).
-        let before = e.policy.mode_at(crate::now_ms());
-        e.policy.then =
-            (m == Mode::User && until.is_some() && before == Mode::Folder).then_some(Mode::Folder);
+        // The mode before is a folder mode without a timer, or the one a
+        // timed user mode in force came from, so a timer set again ends
+        // where it did. A timed folder mode would lose its own end there,
+        // so a user mode from it ends in allowlist.
+        let now = crate::now_ms();
+        let from = match e.policy.mode_at(now) {
+            Mode::Folder if e.policy.ends(now).is_none() => Some(Mode::Folder),
+            Mode::User if e.policy.ends(now).is_some() => e.policy.then,
+            _ => None,
+        };
+        e.policy.then = from.filter(|_| m == Mode::User && until.is_some());
         e.policy.mode = m;
         e.policy.until = until;
         e.policy.as_owner = as_owner;
@@ -4356,14 +4401,22 @@ async fn add_folder(
         Some(a) => a,
         None => {
             // No node to ask (on Windows the node's pipe takes the change but
-            // not the judging): judge the path here, as this process sees it.
-            let settled = crate::exec::settle(&cfg, &crate::paths::home_dir(), Path::new(&given));
-            let (stored, recorded) = match settled {
-                crate::exec::Settled::Refused(why) => {
-                    return Err(crate::daemon::refusal(&given, &why));
+            // not the judging): judge the path here, as this process sees it,
+            // unless it narrows a listed folder, which stays that entry.
+            let listed = cfg
+                .center(&name)
+                .and_then(|e| crate::folder_change::narrowed(e, &given, access));
+            let (stored, recorded) = match listed {
+                Some(entry) => entry,
+                None => {
+                    match crate::exec::settle(&cfg, &crate::paths::home_dir(), Path::new(&given)) {
+                        crate::exec::Settled::Refused(why) => {
+                            return Err(crate::daemon::refusal(&given, &why));
+                        }
+                        crate::exec::Settled::At(place) => (place.display().to_string(), true),
+                        crate::exec::Settled::Unknown => (given.clone(), false),
+                    }
                 }
-                crate::exec::Settled::At(place) => (place.display().to_string(), true),
-                crate::exec::Settled::Unknown => (given.clone(), false),
             };
             let change = FolderChange::Add {
                 path: stored.clone(),
@@ -4381,7 +4434,7 @@ async fn add_folder(
     if access.is_none() {
         w(
             out,
-            "note: the folder grants nothing: it closes it inside a folder the center may use (`nerve-node folder rm` removes it)"
+            "note: the folder grants nothing: it closes it to file calls; a command run in the folder around it still reaches it (`nerve-node folder rm` removes it)"
                 .into(),
         );
     }
@@ -7240,13 +7293,21 @@ mod tests {
         );
         let v = json_of(&paths, &["mode"]);
         assert_eq!(v["modes"][0]["then"], "folder", "{v}");
-        // Timed again from that timed user mode: it ends where that one did
-        // not, in allowlist, which says it runs nothing without a rule.
+        // Timed again from that timed user mode: it ends where that one
+        // did, in folder mode (round 1, correctness 1).
+        let out = run(&paths, &["mode", "user", "--for", "1"]).unwrap();
+        assert!(out.contains("for 1 h, then folder"), "{out}");
+        assert_eq!(policy().mode_at(policy().until.unwrap()), Mode::Folder);
+        // From a timed folder mode a timed user mode ends in allowlist, not
+        // in a folder mode that would have lost its own end; allowlist
+        // says it runs nothing without a rule.
+        run(&paths, &["mode", "folder", "--for", "3"]).unwrap();
         let out = run(&paths, &["mode", "user", "--for", "1"]).unwrap();
         assert!(
             out.contains("then allowlist (no allow rule: nothing runs)"),
             "{out}"
         );
+        assert_eq!(policy().then, None);
         assert_eq!(policy().mode_at(policy().until.unwrap()), Mode::Allowlist);
         // A timed folder mode ends in allowlist.
         run(&paths, &["mode", "folder"]).unwrap();
@@ -7322,6 +7383,34 @@ mod tests {
         assert!(!load(&paths).locked);
     }
 
+    /// Narrowing a listed folder changes that entry, also where its path
+    /// has become a link to elsewhere since: the wider entry does not stay
+    /// beside a narrow one at the link's end (round 1, correctness 10).
+    #[cfg(unix)]
+    #[test]
+    fn narrowing_a_listed_folder_changes_that_entry() {
+        let (d, paths) = setup(&["home"]);
+        let proj = d.path().join("proj");
+        std::fs::create_dir(&proj).unwrap();
+        let listed = proj.to_str().unwrap().to_string();
+        run(&paths, &["folder", "add", &listed, "rwx"]).unwrap();
+        let folders = || load(&paths).centers[0].policy.folders.clone();
+        assert_eq!(folders()[0].path, listed);
+        let moved = d.path().join("srv-proj");
+        std::fs::rename(&proj, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &proj).unwrap();
+        run(&paths, &["folder", "add", &listed, "r"]).unwrap();
+        let f = folders();
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(
+            (f[0].path.as_str(), f[0].access.to_string().as_str()),
+            (listed.as_str(), "r")
+        );
+        // Wider is looked at again: the link's end is the folder then.
+        run(&paths, &["folder", "add", &listed, "rw"]).unwrap();
+        assert!(folders().iter().any(|f| f.path == moved.to_str().unwrap()));
+    }
+
     /// `folder add` takes its rights as one word, and changes the rights of
     /// a folder it has; `none` closes one inside another.
     #[test]
@@ -7361,6 +7450,25 @@ mod tests {
         std::fs::create_dir(&inner).unwrap();
         let out = run(&paths, &["folder", "add", inner.to_str().unwrap(), "none"]).unwrap();
         assert!(out.contains("the folder grants nothing"), "{out}");
+        // Its limit is said where it is made, and in the first line of its
+        // help (round 1, security 3).
+        assert!(
+            out.contains("a command run in the folder around it still reaches it"),
+            "{out}"
+        );
+        let add = Cli::command();
+        let add = add
+            .find_subcommand("folder")
+            .and_then(|f| f.find_subcommand("add"))
+            .unwrap();
+        assert!(
+            add.get_about()
+                .unwrap()
+                .to_string()
+                .contains("file calls only"),
+            "{:?}",
+            add.get_about()
+        );
         assert_eq!(folders()[1].access, Access::NONE);
     }
 
@@ -7428,16 +7536,26 @@ mod tests {
         let out = run(&paths, &["folder", "add", proj.to_str().unwrap(), "rw"]).unwrap();
         assert!(!out.contains("not recorded"), "{out}");
         assert_eq!(load(&paths).centers[0].policy.places.len(), 1);
-        // Added again where it cannot look, the rights change and the record
-        // it has stays: a record only narrows, and the node checks it as the
-        // account before each command.
+        // Narrowed where it cannot look, the listed entry changes in place
+        // with its record: nothing needs a look.
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o000)).unwrap();
         let out = run(&paths, &["folder", "add", proj.to_str().unwrap(), "r"]);
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!out.unwrap().contains("not recorded"));
+        let policy = load(&paths).centers[0].policy.clone();
+        assert_eq!(policy.folders.len(), 1);
+        assert_eq!(policy.folders[0].access.to_string(), "r");
+        assert_eq!(policy.places, [proj.display().to_string()]);
+        // Widened where it cannot look, the rights change and the record it
+        // has stays: a record only narrows, and the node checks it as the
+        // account before each command.
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let out = run(&paths, &["folder", "add", proj.to_str().unwrap(), "rwx"]);
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(out.unwrap().contains("not recorded at its real place"));
         let policy = load(&paths).centers[0].policy.clone();
         assert_eq!(policy.folders.len(), 1);
-        assert_eq!(policy.folders[0].access.to_string(), "r");
+        assert_eq!(policy.folders[0].access.to_string(), "rwx");
         assert_eq!(policy.places, [proj.display().to_string()]);
     }
 
@@ -9212,8 +9330,8 @@ mod tests {
 
     /// `folder sync` asks the node to walk every grant, and tells the owner
     /// what that left, or that there is nothing to sync where no ACL gives the
-    /// folders. `folder set` asks the same; `folder rm` only for the changed
-    /// grants.
+    /// folders. `folder add` of a listed folder asks the same; `folder rm`
+    /// only for the changed grants.
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread")]
     async fn folder_sync_walks_every_grant_and_tells_what_it_left() {
@@ -10603,6 +10721,62 @@ mod tests {
         assert!(long.is_empty(), "{long:#?}");
     }
 
+    /// The command `center rotate-key` names to end the grace is one the
+    /// CLI takes (round 1, correctness 4).
+    #[test]
+    fn the_rotate_key_hint_is_a_command_that_parses() {
+        let text = rotated_text("lab", "k");
+        let command = text.split('`').nth(1).unwrap();
+        let words: Vec<&str> = command.split_whitespace().collect();
+        let cli = Cli::try_parse_from(&words).unwrap_or_else(|e| panic!("{command}: {e}"));
+        assert!(
+            matches!(
+                cli.cmd,
+                Cmd::Center {
+                    cmd: Some(CenterCmd::RotateKey {
+                        end_grace: true,
+                        ..
+                    }),
+                    ..
+                }
+            ),
+            "{command}"
+        );
+    }
+
+    /// A stopped installed node whose folders the owner may not open still
+    /// says its service, so the app shows Stopped and its Start button, and
+    /// `status` names the next step, not pairing (round 1, correctness 3).
+    #[test]
+    fn a_stopped_node_says_its_service_without_its_folders() {
+        let service =
+            json!({"installed": true, "state": "stopped", "enabled": true, "version": "0.0.7"});
+        let unread = Err("cannot read /etc/nerve/node.toml: permission denied".to_string());
+        let v = json::with_service(unread, service.clone()).unwrap();
+        assert_eq!(v["service"], service);
+        let lines = status_lines(&v);
+        assert!(
+            lines.contains(&"service: stopped, starts with the machine, version 0.0.7".to_string()),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("centers: not shown")),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.contains(&"next: start it: `nerve-node service start`".to_string()),
+            "{lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("pair a center")),
+            "{lines:#?}"
+        );
+        // A running service, or none: the error is the answer.
+        let running = json!({"installed": true, "state": "running"});
+        assert!(json::with_service(Err("x".into()), running).is_err());
+        assert!(json::with_service(Err("x".into()), Value::Null).is_err());
+    }
+
     /// `--help` lists the commands in the four groups and More, one line
     /// each, and names the options every command takes there only; a
     /// command's long page ends on its guide page.
@@ -11603,7 +11777,7 @@ mod tests {
             if wildcard {
                 let wide = wildcard_target(cap, action, target);
                 let made = List::Allow
-                    .action_rule(&format!("{cap}.{action}"), &wide, None)
+                    .action_rule(&format!("{cap}.{action}"), &wide, None, false)
                     .unwrap();
                 assert_eq!(made, rule, "{wide}");
             }
@@ -11614,7 +11788,7 @@ mod tests {
         );
         assert_eq!(
             List::Sudo
-                .action_rule("exec.run", "sudo -n apt *", None)
+                .action_rule("exec.run", "sudo -n apt *", None, false)
                 .unwrap(),
             rules::sudo_rule_for("sudo -n apt install x", true).unwrap()
         );
@@ -11640,6 +11814,44 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("cut"), "{e}");
+    }
+
+    /// The audit's exact buttons (`--exact`) keep a `*` at the end of the
+    /// command an agent sent: Allow on `rm -rf *` is that one command, not
+    /// every `rm -rf`, and the same on the sudo list and for a path. Without
+    /// `--exact` the trailing `*` is the wildcard, and `rule add` says so.
+    #[test]
+    fn the_exact_buttons_keep_a_trailing_star_as_it_is() {
+        let (_d, paths) = setup(&["home"]);
+        let policy = || load(&paths).centers[0].policy.clone();
+        for (list, target, action) in [
+            ("allow", "rm -rf *", "exec.run"),
+            ("allow", "sudo chown -R me *", "exec.run"),
+            ("deny", "/srv/data/*", "fs.read"),
+        ] {
+            let out = run(
+                &paths,
+                &["rule", "add", list, target, "--action", action, "--exact"],
+            )
+            .unwrap();
+            assert!(!out.contains("every"), "{out}");
+        }
+        assert_eq!(policy().allow, ["exec.run:rm -rf [*]"]);
+        assert_eq!(policy().sudo_allow, ["sudo chown -R me [*]"]);
+        assert_eq!(policy().deny, ["fs.read:/srv/data/[*]"]);
+        // `--exact` keeps the refusal of a sudo command on the allow list's
+        // own form and needs --action.
+        assert!(run(&paths, &["rule", "add", "allow", "rm *", "--exact"]).is_err());
+        let out = run(
+            &paths,
+            &["rule", "add", "allow", "git add *", "--action", "exec.run"],
+        )
+        .unwrap();
+        assert!(
+            out.contains("it allows every command that starts with `git add`"),
+            "{out}"
+        );
+        assert!(policy().allow.contains(&"exec.run:git add *".to_string()));
     }
 
     fn logged(ts: u64, level: &str, msg: &str) -> String {

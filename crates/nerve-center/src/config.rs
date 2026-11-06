@@ -366,9 +366,35 @@ pub fn is_loopback(addr: &str) -> bool {
     }
 }
 
+/// The URL a person or a harness reaches the address `a` at: http on
+/// loopback, https beyond it, and this machine's name for an address that
+/// listens on all of them (`0.0.0.0`, `[::]`), which no client connects to.
+pub fn address_url(a: &str) -> String {
+    if is_loopback(a) {
+        return format!("http://{a}");
+    }
+    match a.parse::<std::net::SocketAddr>() {
+        Ok(s) if s.ip().is_unspecified() => {
+            format!("https://{}:{}", crate::center::host_name(), s.port())
+        }
+        _ => format!("https://{a}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An address that listens on all of them is named by the machine's
+    /// name, as a harness connects to it (round 1, correctness 12).
+    #[test]
+    fn a_wildcard_address_is_reached_by_the_machines_name() {
+        let host = crate::center::host_name();
+        assert_eq!(address_url("0.0.0.0:7481"), format!("https://{host}:7481"));
+        assert_eq!(address_url("[::]:7481"), format!("https://{host}:7481"));
+        assert_eq!(address_url("127.0.0.1:7481"), "http://127.0.0.1:7481");
+        assert_eq!(address_url("10.0.0.5:7481"), "https://10.0.0.5:7481");
+    }
 
     /// One line first (plan 4.1): every command's `about` and every flag's
     /// `help` is at most 80 characters; the rest is the long help.

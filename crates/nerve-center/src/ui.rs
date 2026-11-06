@@ -78,12 +78,50 @@ fn center_help() -> Value {
 /// The command that shows the owner token of the center in `state`: with
 /// `sudo` for the installed center, whose folder is its own user's, without
 /// it for a center you started, whose folder is yours.
-fn token_command(state: &std::path::Path) -> &'static str {
+fn token_command(state: &std::path::Path) -> String {
     let installed = crate::service::Layout::system();
-    match installed.installed() && state == installed.state {
-        true => "sudo nerve-center owner-token",
-        false => "nerve-center owner-token",
+    token_command_of(
+        state,
+        installed.installed().then_some(installed.state.as_path()),
+        &crate::config::default_state_dir(),
+    )
+}
+
+/// [`token_command`] where `installed` is the installed center's folder, if
+/// one is installed, and `default` the folder of a harness-started center.
+/// `owner-token` alone goes to the installed center's folder, else to
+/// `default` (crate::config::Args::owner_state_dir): any other folder is
+/// named with `--state-dir`.
+fn token_command_of(
+    state: &std::path::Path,
+    installed: Option<&std::path::Path>,
+    default: &std::path::Path,
+) -> String {
+    if installed == Some(state) {
+        return "sudo nerve-center owner-token".into();
     }
+    if installed.is_none() && state == default {
+        return "nerve-center owner-token".into();
+    }
+    let dir = state.display().to_string();
+    let plain = dir
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-~:\\".contains(c));
+    match plain {
+        true => format!("nerve-center owner-token --state-dir {dir}"),
+        false => format!(
+            "nerve-center owner-token --state-dir '{}'",
+            dir.replace('\'', "'\\''")
+        ),
+    }
+}
+
+/// `text` for HTML: the login's tagline names a folder.
+fn html_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 const SHARED_TOKEN: &str = "This owner token is also a harness token, so it is refused. Make a new one with `nerve-center owner-token --new`.";
 
@@ -258,7 +296,7 @@ impl Ui {
     fn login_page(&self) -> Response {
         let tagline = format!(
             "One center for all your machines. <code>{}</code> shows its owner token.",
-            token_command(self.center.dir())
+            html_text(&token_command(self.center.dir()))
         );
         webui::login_page("Owner token", &tagline)
     }
@@ -2148,24 +2186,47 @@ mod tests {
         let r = sign_in(&ui, "not-the-secret").await;
         assert_eq!(r.status, 401);
         assert!(json(&r).get("session").is_none());
+        // The command names this center's own folder, which `owner-token`
+        // alone would not reach (round 1, correctness 11).
+        let command = format!(
+            "nerve-center owner-token --state-dir {}",
+            d.path().display()
+        );
         assert_eq!(
             json(&r)["error"],
-            format!("{WRONG_TOKEN} `nerve-center owner-token` shows it.")
+            format!("{WRONG_TOKEN} `{command}` shows it.")
         );
         // The login page names the command for this center, which runs from
         // a folder of its own here: no sudo.
         let page = body(&ui.request(req("GET", "/login", &[HOST], "")).await);
         assert!(
-            page.contains("<code>nerve-center owner-token</code> shows its owner token"),
+            page.contains(&format!("<code>{command}</code> shows its owner token")),
             "{page}"
         );
+        use std::path::Path;
+        let (installed, default) = (
+            Path::new("/var/lib/nerve-center"),
+            Path::new("/home/o/.local/state/nerve-center"),
+        );
+        let of = |state: &str, installed: Option<&Path>| {
+            token_command_of(Path::new(state), installed, default)
+        };
         assert_eq!(
-            token_command(&crate::service::Layout::system().state),
-            if crate::service::Layout::system().installed() {
-                "sudo nerve-center owner-token"
-            } else {
-                "nerve-center owner-token"
-            }
+            of("/var/lib/nerve-center", Some(installed)),
+            "sudo nerve-center owner-token"
+        );
+        assert_eq!(
+            of("/home/o/.local/state/nerve-center", None),
+            "nerve-center owner-token"
+        );
+        // With a center installed, `owner-token` alone goes to its folder.
+        assert_eq!(
+            of("/home/o/.local/state/nerve-center", Some(installed)),
+            "nerve-center owner-token --state-dir /home/o/.local/state/nerve-center"
+        );
+        assert_eq!(
+            of("/home/o/my centers/a", None),
+            "nerve-center owner-token --state-dir '/home/o/my centers/a'"
         );
         assert!(!body(&r).contains("not-the-secret"));
         // An empty post is no better.
@@ -3123,6 +3184,16 @@ mod tests {
             "Switch this entry off for this machine",
             "The decision model is on but does not run",
             "With the model on and none installed",
+            // With fail closed off the page says the calls pass unjudged,
+            // and does not fold that switch away (round 1, security 2).
+            "and fail closed is off: its calls pass unjudged",
+            "every checked call passes unjudged (fail closed is off)",
+            "fail closed is off, so a call it cannot judge runs",
+            // The Help page's harness card follows its token, and says what
+            // the Claude Code line costs (round 1, security 5 and 6).
+            "if (key !== helpKey) { helpParts = null; helpKey = key; }",
+            "the Claude Code line puts the token in your shell's history",
+            "m.fail_closed ? null : el(\"label\", { class: \"switch\" }, failClosed",
             "more(\"settings:center\"",
             "more(\"settings:machines\", \"Advanced",
             "more(\"checker:advanced\", \"Advanced\"",

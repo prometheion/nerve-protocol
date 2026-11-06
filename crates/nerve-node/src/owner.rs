@@ -357,7 +357,16 @@ fn wanted(cli: &Cli) -> bool {
     }
     let paths = NodePaths::from_args(cli.config_dir.clone(), cli.state_dir.clone());
     let layout = crate::service::Layout::system();
-    paths == layout.paths && crate::service::check_access(&paths).is_err()
+    paths == layout.paths
+        && crate::service::check_access(&paths).is_err()
+        && !(matches!(cli.cmd, Cmd::Status) && !service_runs(&layout))
+}
+
+/// Whether the installed service runs. A stopped one has no owner endpoint
+/// to answer `status`, which then says the service's state here: that
+/// needs no rights on the node's folders.
+fn service_runs(layout: &crate::service::Layout) -> bool {
+    crate::cli::service_status(layout).is_ok_and(|s| s["state"] == "running")
 }
 
 /// Runs `cli`'s command through the owner endpoint when this process may not

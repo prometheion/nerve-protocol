@@ -196,6 +196,20 @@ fn every_subtitle_is_short() {
     assert_eq!(webui::long_subtitles(APP_JS, 120), Vec::<String>::new());
 }
 
+/// A limit stays in the first line (plan 4.1): the Rules section says what
+/// the guard does not do outside its fold.
+#[test]
+fn the_rules_say_the_guards_limit_unfolded() {
+    let line = APP_JS
+        .lines()
+        .find(|l| l.contains("section(\"Rules\""))
+        .unwrap();
+    assert!(
+        line.contains("guard catches mistakes, not someone who hides the name"),
+        "{line}"
+    );
+}
+
 /// No script of the page builds HTML from text: what a center or the node
 /// wrote goes into text nodes only. The page has no inline script.
 #[test]

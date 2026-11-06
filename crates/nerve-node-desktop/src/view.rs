@@ -295,7 +295,11 @@ fn center(c: &Value, running: bool, now_ms: u64) -> CenterRow {
         && let Some(until) = c["until"].as_u64()
         && until > now_ms
     {
-        detail.push_str(&format!(" Back to allowlist {}.", ahead(until - now_ms)));
+        detail.push_str(&format!(
+            " Back to {} {}.",
+            back_to(c),
+            ahead(until - now_ms)
+        ));
     }
     CenterRow {
         name: s(&c["name"]).into(),
@@ -316,9 +320,30 @@ fn center(c: &Value, running: bool, now_ms: u64) -> CenterRow {
 pub fn mode_until(c: &Value, now_ms: u64) -> String {
     match c["until"].as_u64() {
         Some(until) if until > now_ms && c["mode"] != "allowlist" => {
-            format!("Back to allowlist mode {}.", ahead(until - now_ms))
+            format!("Back to {} mode {}.", back_to(c), ahead(until - now_ms))
         }
         _ => String::new(),
+    }
+}
+
+/// The mode a center's timer ends in, as `status --json` says (`then`):
+/// folder mode after a timed user mode that came from it, else allowlist.
+fn back_to(c: &Value) -> &'static str {
+    match c["then"].as_str() {
+        Some("folder") => "folder",
+        _ => "allowlist",
+    }
+}
+
+/// The mode a timed user mode set now would end in, as `mode user --for`
+/// makes it: a folder mode without a timer, or the end of the timed user
+/// mode in force; else allowlist.
+pub fn timed_user_then(c: &Value, now_ms: u64) -> &'static str {
+    let timed = c["until"].as_u64().is_some_and(|u| u > now_ms);
+    match c["mode"].as_str() {
+        Some("folder") if !timed => "folder",
+        Some("user") if timed => back_to(c),
+        _ => "allowlist",
     }
 }
 
@@ -1626,21 +1651,26 @@ pub fn pin_args(e: &Value, list: &str, pin: usize) -> Option<Vec<String>> {
 /// The command a button runs: `rule add` with the entry's action, target
 /// and center, on the allow or deny list (a sudo command goes on the sudo
 /// list by itself, [`rule_list`]); the wildcard widens the target as
-/// `rule add` reads a trailing `*`.
+/// `rule add` reads a trailing `*`, and the exact buttons take it as it is
+/// (`--exact`), so an agent's `rm -rf *` stays that one command.
 pub fn rule_args(e: &Value, list: &str, wildcard: bool) -> Vec<String> {
     let (cap, action, target) = (s(&e["cap"]), s(&e["action"]), s(&e["target"]));
     let target = match wildcard {
         true => nerve_node::cli::wildcard_target(cap, action, target),
         false => target.to_string(),
     };
-    vec![
+    let mut a = vec![
         "rule".to_string(),
         "add".into(),
         if list == "deny" { "deny" } else { "allow" }.into(),
         target,
         format!("--action={cap}.{action}"),
         format!("--center={}", s(&e["center"])),
-    ]
+    ];
+    if !wildcard {
+        a.push("--exact".into());
+    }
+    a
 }
 
 #[cfg(test)]
@@ -1787,7 +1817,7 @@ mod tests {
         let said = json!({"messages": [
             "center lab took this machine's new key:",
             "  ed25519:AAAA",
-            "The old key is deleted here. The center takes it for 7 more days, unless you end that now with `nerve-node center rotate-key --end-grace --center lab`.",
+            "The old key is deleted here. The center takes it for 7 more days, unless you end that now with `nerve-node center rotate-key --end-grace lab`.",
         ], "public_key": "ed25519:AAAA"});
         let (text, copy) = new_key("lab", &said, None);
         // The key apart, and no prose in it; nothing to copy to another node.
@@ -2189,6 +2219,11 @@ mod tests {
             rule_args(&e, "deny", false)[3..5],
             ["/srv/a", "--action=fs.write"]
         );
+        // The exact buttons take the agent's command as it is, a `*` at its
+        // end too; the wildcard button does not.
+        let e = call("rm -rf *", "forbidden", "home");
+        assert_eq!(rule_args(&e, "allow", false).last().unwrap(), "--exact");
+        assert!(!rule_args(&e, "allow", true).contains(&"--exact".to_string()));
     }
 
     /// An audit entry's arguments a rule may pin, as the pin buttons name
@@ -2630,6 +2665,19 @@ mod tests {
         let c = json!({"mode": "user", "until": NOW + 90 * 60_000});
         assert_eq!(mode_until(&c, NOW), "Back to allowlist mode in 1 h.");
         assert_eq!(mode_until(&json!({"mode": "user"}), NOW), "");
+        // A timed user mode that came from folder mode goes back there, as
+        // the node says (`then`), and a new one set from it would too
+        // (round 1, correctness 2).
+        let c = json!({"mode": "user", "until": NOW + 90 * 60_000, "then": "folder"});
+        assert_eq!(mode_until(&c, NOW), "Back to folder mode in 1 h.");
+        assert_eq!(timed_user_then(&c, NOW), "folder");
+        assert_eq!(timed_user_then(&json!({"mode": "folder"}), NOW), "folder");
+        let timed_folder = json!({"mode": "folder", "until": NOW + 1});
+        assert_eq!(timed_user_then(&timed_folder, NOW), "allowlist");
+        assert_eq!(
+            timed_user_then(&json!({"mode": "allowlist"}), NOW),
+            "allowlist"
+        );
         let login = |u: &str, t: &str| proxy_login(u, t);
         assert_eq!(
             login("http://p.example:3128", ""),

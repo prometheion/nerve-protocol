@@ -436,7 +436,8 @@ fn link(b: &Value) -> Result<String, (u16, String)> {
     Ok(format!("{l}\n"))
 }
 
-/// The rights `folder set` takes: `=rwx`, the letters that are on.
+/// The rights `folder add` takes: one word of the letters that are on
+/// (`rwx`); empty for none, which the page does not add.
 fn rights(read: bool, write: bool, execute: bool) -> String {
     let mut r = String::new();
     for (on, c) in [(read, 'r'), (write, 'w'), (execute, 'x')] {
@@ -645,7 +646,7 @@ fn rules_of(e: &Value) -> Value {
             true => crate::cli::wildcard_target(cap, action, target),
             false => target.to_string(),
         };
-        match list.action_rule(&format!("{cap}.{action}"), &target, None) {
+        match list.action_rule(&format!("{cap}.{action}"), &target, None, !wildcard) {
             Ok(rule) => json!({ "list": list_word(list), "rule": visible(&rule) }),
             Err(why) => json!({ "error": why }),
         }
@@ -725,11 +726,17 @@ fn audit_rule(b: &Value) -> Result<Vec<String>, (u16, String)> {
         }
         opts.push(("arg", p));
     }
-    let target = match b["wildcard"] == true {
+    // The exact buttons take the agent's command as it is: its `rm -rf *`
+    // is not the wildcard the owner types.
+    let wildcard = b["wildcard"] == true;
+    let target = match wildcard {
         true => crate::cli::wildcard_target(cap, action, target),
         false => target.to_string(),
     };
     let mut a = args(&["rule", "add"], &opts, &[]);
+    if !wildcard {
+        a.push("--exact".into());
+    }
     a.extend(["--".to_string(), list.to_string(), target]);
     Ok(a)
 }
@@ -819,6 +826,7 @@ mod tests {
                 "add",
                 "--action=exec.run",
                 "--center=home",
+                "--exact",
                 "--",
                 "allow",
                 "git\tlog"
@@ -870,6 +878,13 @@ mod tests {
         assert_eq!(r["wildcard"]["list"], "sudo");
         assert_eq!(r["wildcard"]["rule"], "sudo -n apt *");
         assert_eq!(r["deny"]["list"], "deny");
+        // The exact buttons keep a `*` the agent's command ends in.
+        let r = entry("exec", "run", "rm -rf *");
+        assert_eq!(r["allow"]["rule"], "exec.run:rm -rf [*]");
+        assert_eq!(r["deny"]["rule"], "exec.run:rm -rf [*]");
+        assert_eq!(r["wildcard"]["rule"], "exec.run:rm *");
+        let r = entry("exec", "run", "sudo chown -R me *");
+        assert_eq!(r["allow"]["rule"], "sudo chown -R me [*]");
         // A rule that cannot be made says why, and has no rule to show.
         let r = entry("fs", "read", "relative/path");
         assert!(r["allow"]["error"].is_string(), "{r}");

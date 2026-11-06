@@ -105,6 +105,27 @@ fn a_proxy_password_comes_on_stdin() {
     );
     assert!(!ok);
     assert!(v["error"].as_str().unwrap().contains("no password"), "{v}");
+    // With `--header -` the password is the first line, the headers after
+    // it: an empty first line is no password either (round 1, spec 4).
+    let (ok, v) = with_stdin(
+        d.path(),
+        &[
+            "proxy",
+            "set",
+            "https://laptop@relay.example:7490",
+            "--header",
+            "-",
+        ],
+        "\nX-Team: lab\n",
+    );
+    assert!(!ok, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("no password given: the first line of stdin is empty"),
+        "{v}"
+    );
     let (ok, v) = with_stdin(
         d.path(),
         &["proxy", "set", "https://laptop@relay.example:7490"],

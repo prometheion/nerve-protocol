@@ -206,7 +206,9 @@ buttons. That needs the [settings grant](settings-grant.md).
 action: the entry's path, or a folder and all below it as `/srv/data/*`. An
 action without a path takes `''`, and covers its capability as `'*'`.
 `--arg FIELD=VALUE` holds such a rule to one argument of the call, as the
-audit buttons that pin one do (see below).
+audit buttons that pin one do (see below). `--exact` takes the entry's text as
+it is, a `*` at its end too, as the **Allow** and **Deny** buttons do: an
+agent's `rm -rf *` stays that one command.
 
 ```sh
 nerve-node rule add allow /srv/data/report.txt --action fs.read
