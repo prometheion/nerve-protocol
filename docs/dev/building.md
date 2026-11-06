@@ -10,6 +10,10 @@ cargo build --release
 # target/release/nerve-center and target/release/nerve-node
 ```
 
+A debug build keeps line tables only (`[profile.dev]` in `Cargo.toml`), as
+CI builds: enough for a backtrace, and a far smaller `target/`. For a
+debugger, build with `CARGO_PROFILE_DEV_DEBUG=true`.
+
 `target/release/nerve-node-desktop` is the node with its desktop app
 (`crates/nerve-node-desktop`). On Linux it needs the fontconfig headers to build
 (`libfontconfig1-dev` on Debian and Ubuntu), and glibc: it is no static musl

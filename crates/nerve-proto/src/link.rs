@@ -426,6 +426,69 @@ pub struct PairResponse {
 mod tests {
     use super::*;
 
+    /// schemas/pair-request.schema.json says what the code takes: the fields
+    /// of [`PairRequest`], all of them required and no other
+    /// (`deny_unknown_fields`), a code as [`valid_code`] takes it and a name
+    /// as [`crate::valid_node_name`] does.
+    #[test]
+    fn the_published_pair_request_schema_is_the_code_s() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/pair-request.schema.json"
+        );
+        let s: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let req = PairRequest {
+            code: "a".into(),
+            name: "n".into(),
+            platform: "linux".into(),
+            arch: "x86_64".into(),
+            public_key: "0".repeat(64),
+        };
+        let mut fields: Vec<String> = serde_json::to_value(&req)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        fields.sort();
+        let mut properties: Vec<String> = s["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        properties.sort();
+        let mut required: Vec<String> = s["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        required.sort();
+        assert_eq!(properties, fields);
+        assert_eq!(required, fields);
+        assert_eq!(s["additionalProperties"], false);
+        let p = &s["properties"];
+        assert_eq!(p["code"]["pattern"], "^[A-Za-z0-9]{1,64}$");
+        assert!(valid_code(&"a".repeat(64)) && !valid_code(&"a".repeat(65)) && !valid_code("a-b"));
+        assert_eq!(p["name"]["pattern"], "^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$");
+        for (name, ok) in [
+            ("a", true),
+            ("a-b", true),
+            ("-a", false),
+            ("a-", false),
+            ("A", false),
+        ] {
+            assert_eq!(crate::valid_node_name(name), ok, "{name}");
+        }
+        assert!(
+            crate::valid_node_name(&"a".repeat(32)) && !crate::valid_node_name(&"a".repeat(33))
+        );
+        assert_eq!(p["public_key"]["pattern"], "^[0-9a-f]{64}$");
+    }
+
     #[test]
     fn center_urls() {
         let u = CenterUrl::parse("HTTPS://Center.example:8443/nerve/").unwrap();

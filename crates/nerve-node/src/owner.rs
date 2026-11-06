@@ -1073,16 +1073,11 @@ pub fn take_text(pending: &mut Vec<u8>) -> String {
     text
 }
 
-/// The owner socket this process talks to: the installed node's, or the one
-/// `NERVE_OWNER_SOCKET` names.
-#[cfg(unix)]
-pub fn socket_here() -> PathBuf {
-    std::env::var_os("NERVE_OWNER_SOCKET").map_or_else(socket, PathBuf::from)
-}
-
+/// The installed node's owner socket, connected. No variable moves it: the
+/// CLI talks to the one place the service listens on.
 #[cfg(unix)]
 async fn connect(_paths: &NodePaths) -> Result<tokio::net::UnixStream, String> {
-    connect_at(&socket_here()).await
+    connect_at(&socket()).await
 }
 
 /// The owner socket at `at`, connected.

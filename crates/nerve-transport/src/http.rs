@@ -275,8 +275,19 @@ impl Response {
         for (k, v) in &self.headers {
             head.push_str(&format!("{k}: {v}\r\n"));
         }
+        // No answer is kept by a cache; one that says so itself (the web UIs'
+        // API, crate::webui::with_security_headers) says it once.
+        let cache = if self
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("cache-control"))
+        {
+            ""
+        } else {
+            "Cache-Control: no-store\r\n"
+        };
         head.push_str(&format!(
-            "Content-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+            "Content-Length: {}\r\nConnection: close\r\n{cache}\r\n",
             self.body.len()
         ));
         let timed_out = || {
@@ -531,6 +542,26 @@ mod tests {
         a.write_all(b"GET / HTTP/1.1\r\n").await.unwrap();
         drop(a);
         assert!(read_request_head(&mut b).await.is_err());
+    }
+
+    /// Every answer says `Cache-Control: no-store` once: also one that set
+    /// the header itself, as the web UIs' API does.
+    #[tokio::test]
+    async fn an_answer_says_no_store_once() {
+        for resp in [
+            Response::text(200, "x"),
+            Response::text(200, "x").with_header("Cache-Control", "no-store"),
+        ] {
+            let mut out = Vec::new();
+            resp.write(&mut out).await.unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert_eq!(
+                text.to_ascii_lowercase().matches("cache-control:").count(),
+                1,
+                "{text}"
+            );
+            assert!(text.contains("Cache-Control: no-store\r\n"), "{text}");
+        }
     }
 
     /// A peer that reads nothing of its answer is dropped once a part of it

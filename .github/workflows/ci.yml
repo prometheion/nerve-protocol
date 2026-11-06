@@ -57,9 +57,6 @@ env:
   CARGO_TERM_COLOR: never
   # A CI run never builds twice, so incremental compilation only fills the cache.
   CARGO_INCREMENTAL: "0"
-  # Line tables are enough for a backtrace, and the cache and the link step stay
-  # small (the Windows PDBs most of all).
-  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   # A test that fails on a machine nobody can reach says where.
   RUST_BACKTRACE: "1"
 
