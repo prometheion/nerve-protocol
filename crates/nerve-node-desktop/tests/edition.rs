@@ -32,8 +32,7 @@ fn the_app_called_nerve_node_is_the_app() {
         said(&app, &["--version"]).trim(),
         format!("nerve-node-desktop {}", env!("CARGO_PKG_VERSION"))
     );
-    let v: serde_json::Value =
-        serde_json::from_str(&said(&app, &["--json", "status"])).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&said(&app, &["--json", "status"])).unwrap();
     let program = PathBuf::from(v["service"]["program"].as_str().unwrap());
     assert_eq!(program.file_stem().unwrap(), "nerve-node-desktop", "{v}");
 }
