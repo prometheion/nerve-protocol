@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+use nerve_transport::sync::lock;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, oneshot};
@@ -37,7 +38,6 @@ use nerve_proto::schema::{self, Role};
 use nerve_proto::{ErrorCode, RpcError};
 
 use crate::daemon::Shared;
-use crate::daemon::lock;
 use crate::tap::Tap;
 
 /// The capabilities and profiles that are the node's own, and the ones the

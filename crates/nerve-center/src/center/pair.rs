@@ -1,6 +1,8 @@
 //! Pairing a node by a code (docs/dev/spec/protocol.md §3), and the log
 //! of the codes that ran out.
 
+use nerve_transport::sync::lock;
+
 use super::*;
 
 impl Center {
@@ -9,7 +11,7 @@ impl Center {
     /// A new pairing code and the link that carries it.
     pub fn new_pairing(&self) -> Value {
         let ttl = Duration::from_secs(u64::from(self.read(|st| st.pair_code_minutes)) * 60);
-        let code = self.codes.lock().unwrap().create(Instant::now(), ttl);
+        let code = lock(&self.codes).create(Instant::now(), ttl);
         // The code is a secret until it is used, so it is not logged.
         self.log.record(
             Level::Info,
@@ -38,7 +40,7 @@ impl Center {
     /// `open` while it can still pair a machine (a pairing in progress counts,
     /// it may fail), and once a machine used it, that machine as `node`.
     pub fn pairing_status(&self, code: &str) -> Value {
-        let outcome = self.codes.lock().unwrap().outcome(code, Instant::now());
+        let outcome = lock(&self.codes).outcome(code, Instant::now());
         match outcome {
             Outcome::Open => json!({"open": true, "node": null}),
             Outcome::Gone => json!({"open": false, "node": null}),
@@ -63,7 +65,7 @@ impl Center {
                 json!({ "error": "the body is {\"code\": \"<pairing code>\"}" }),
             );
         };
-        let probe = self.codes.lock().unwrap().probe(&code, Instant::now());
+        let probe = lock(&self.codes).probe(&code, Instant::now());
         self.log.record(
             Level::Debug,
             None,
@@ -113,10 +115,10 @@ impl Center {
         let now = Instant::now();
         // Taken out in the same step as the check: the code is used up from
         // here on, and given back only if this pairing fails.
-        let Ok(taken) = self.codes.lock().unwrap().take(&req.code, now) else {
+        let Ok(taken) = lock(&self.codes).take(&req.code, now) else {
             // Anyone who reaches the port can send these; one line now and
             // then says it happens.
-            let quiet = self.pair_log.lock().unwrap().take(now);
+            let quiet = lock(&self.pair_log).take(now);
             if let Some(more) = quiet {
                 let also = if more > 0 {
                     format!(" ({more} more since the last line)")
@@ -181,10 +183,7 @@ impl Center {
         });
         match out {
             Ok(resp) => {
-                self.codes
-                    .lock()
-                    .unwrap()
-                    .done(taken, &node_id, Instant::now());
+                lock(&self.codes).done(taken, &node_id, Instant::now());
                 self.log.record(
                     Level::Info,
                     Some((&req.name, &node_id)),
@@ -197,7 +196,7 @@ impl Center {
                 (200, serde_json::to_value(resp).unwrap_or_default())
             }
             Err(why) => {
-                self.codes.lock().unwrap().fail(taken);
+                lock(&self.codes).fail(taken);
                 let unwritable = why.starts_with(UNWRITABLE);
                 self.log.record(
                     if unwritable {
@@ -217,7 +216,7 @@ impl Center {
     /// and then, so a log line is at most a few seconds behind the expiry.
     pub fn sweep_codes(&self) {
         // The wrong codes left out of a burst are counted when it is over.
-        let left_out = self.pair_log.lock().unwrap().flush(Instant::now());
+        let left_out = lock(&self.pair_log).flush(Instant::now());
         if left_out > 0 {
             self.log.record(
                 Level::Warn,
@@ -228,7 +227,7 @@ impl Center {
                 ),
             );
         }
-        let lost = self.codes.lock().unwrap().sweep(Instant::now());
+        let lost = lock(&self.codes).sweep(Instant::now());
         if lost.expired > 0 {
             self.log.record(
                 Level::Info,

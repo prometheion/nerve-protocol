@@ -2595,6 +2595,13 @@ pub(crate) mod tests {
         // The cgroup of the service is the node's, for one per command.
         assert!(unit.contains("\nDelegate=cpu memory pids\n"), "{unit}");
         assert!(unit.contains("\nOOMPolicy=continue\n"), "{unit}");
+        // A node that ends with an error or a signal is started again: one
+        // that found a lock poisoned ends so (nerve_transport::sync).
+        assert!(unit.contains("\nRestart=on-failure\n"), "{unit}");
+        assert!(
+            !unit.contains("SuccessExitStatus") && !unit.contains("RestartPrevent"),
+            "{unit}"
+        );
         // The owner socket's folder, which every account may enter.
         assert!(
             unit.contains("\nRuntimeDirectory=nerve-node\nRuntimeDirectoryMode=0755\n"),

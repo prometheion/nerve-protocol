@@ -734,7 +734,7 @@ pub fn init(config_dir: &Path) {
 /// A logon of `account`, with the password `install` stored; one is kept
 /// for [`FRESH`].
 pub fn token_for(account: &Account) -> Result<Arc<Token>, String> {
-    let mut cached = crate::daemon::lock(&LOGON);
+    let mut cached = nerve_transport::sync::lock(&LOGON);
     if let Some((n, at, t)) = cached.as_ref()
         && *n == account.name
         && at.elapsed() < FRESH

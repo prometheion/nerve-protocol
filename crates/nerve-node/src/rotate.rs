@@ -513,7 +513,8 @@ pub(crate) fn drop_old_pin(shared: &Shared, center: &str) -> bool {
         return false;
     }
     let cs = shared.center(center);
-    if crate::daemon::lock(&cs.old_pin_failed).is_some_and(|t| t.elapsed() < OLD_PIN_RETRY) {
+    if nerve_transport::sync::lock(&cs.old_pin_failed).is_some_and(|t| t.elapsed() < OLD_PIN_RETRY)
+    {
         return false;
     }
     let saved = shared.mark_center(center, |e| {
@@ -522,14 +523,14 @@ pub(crate) fn drop_old_pin(shared: &Shared, center: &str) -> bool {
         }
     });
     if !saved {
-        *crate::daemon::lock(&cs.old_pin_failed) = Some(std::time::Instant::now());
+        *nerve_transport::sync::lock(&cs.old_pin_failed) = Some(std::time::Instant::now());
         tracing::warn!(
             "center {center}: the grace of its old key has ended, but its old pin could not be dropped from node.toml; trying again in {}",
             span(OLD_PIN_RETRY)
         );
         return false;
     }
-    *crate::daemon::lock(&cs.old_pin_failed) = None;
+    *nerve_transport::sync::lock(&cs.old_pin_failed) = None;
     tracing::info!("center {center}: the grace of its old key has ended; its old pin is dropped");
     true
 }

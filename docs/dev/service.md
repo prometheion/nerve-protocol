@@ -386,7 +386,11 @@ a password from their own local session: by the rule
 no rules, by `/etc/polkit-1/localauthority/50-local.d/50-nerve-node.pkla`.
 No file lets the owner manage other units. Over SSH it needs `sudo`. Root
 as the owner needs none of these files, and `install` writes none for it. A
-stopped service starts again with the machine. `status` says whether
+stopped service starts again with the machine. A node that ends with an error
+or a signal starts again after 5 seconds (`Restart=on-failure`; on Windows
+the service's failure actions, three times a day at most). The node and the
+center end so on purpose when a lock is poisoned
+([logging](logging.md#a-poisoned-lock)). `status` says whether
 the node is installed as a service, whether it runs, whether it starts with
 the machine, and the installed program's version.
 

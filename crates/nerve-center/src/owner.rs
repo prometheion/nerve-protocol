@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
+use nerve_transport::sync::lock;
+
 use crate::util;
 
 /// The file in the state folder.
@@ -177,7 +179,7 @@ impl OwnerToken {
     /// or holds no token, and then nobody logs in.
     pub fn hash(&self) -> Option<String> {
         let stamp = Stamp::of(&self.path);
-        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        let mut seen = lock(&self.seen);
         // Without an inode (Windows) a token written within one tick of the
         // clock has the old one's length and time, so the file is read each
         // time there.

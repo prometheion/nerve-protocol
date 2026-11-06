@@ -16,7 +16,7 @@ use std::ffi::{CStr, CString};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use nerve_policy::NodeConfig;
 
@@ -61,13 +61,13 @@ static RECORD: Mutex<()> = Mutex::new(());
 static NAMES: Mutex<BTreeMap<String, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
 
 fn name_lock(name: &str) -> Arc<Mutex<()>> {
-    let mut names = NAMES.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut names = nerve_transport::sync::lock(&NAMES);
     names.entry(name.to_string()).or_default().clone()
 }
 
 /// The node's id at the center `name` that the record has folders for.
 fn recorded(file: &Path, name: &str) -> Option<String> {
-    let _one = RECORD.lock().unwrap_or_else(PoisonError::into_inner);
+    let _one = nerve_transport::sync::turn(&RECORD);
     read_record(file).remove(name)
 }
 
@@ -75,7 +75,7 @@ fn change_record(
     file: &Path,
     change: impl FnOnce(&mut BTreeMap<String, String>),
 ) -> Result<(), String> {
-    let _one = RECORD.lock().unwrap_or_else(PoisonError::into_inner);
+    let _one = nerve_transport::sync::turn(&RECORD);
     let mut record = read_record(file);
     change(&mut record);
     write_record(file, &record)
@@ -89,7 +89,7 @@ fn change_record(
 /// next sync tries again. A pairing's folders are handled under its own
 /// lock, so the commands of the others do not wait for a long delete.
 pub fn sync(run: &Account, cfg: impl FnOnce() -> NodeConfig, file: &Path) -> Vec<String> {
-    let _one = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
+    let _one = nerve_transport::sync::turn(&SYNCING);
     // The config as it is once this sync's turn has come: one started for
     // an older version would delete the folders of a pairing a newer one
     // made.
@@ -101,7 +101,7 @@ pub fn sync(run: &Account, cfg: impl FnOnce() -> NodeConfig, file: &Path) -> Vec
         .map(|c| (c.name.as_str(), c.node_id.as_str()))
         .collect();
     let gone: Vec<(String, String)> = {
-        let _one = RECORD.lock().unwrap_or_else(PoisonError::into_inner);
+        let _one = nerve_transport::sync::turn(&RECORD);
         read_record(file)
             .into_iter()
             .filter(|(name, id)| now.get(name.as_str()) != Some(&id.as_str()))
@@ -109,7 +109,7 @@ pub fn sync(run: &Account, cfg: impl FnOnce() -> NodeConfig, file: &Path) -> Vec
     };
     for (name, old) in gone {
         let lock = name_lock(&name);
-        let _name = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _name = nerve_transport::sync::turn(&lock);
         // A command may have made the pairing's folders again while this
         // waited for its lock, also for a pairing made after this sync read
         // its config: only the folders of the id it saw are its to delete.
@@ -131,7 +131,7 @@ pub fn sync(run: &Account, cfg: impl FnOnce() -> NodeConfig, file: &Path) -> Vec
     }
     for (name, id) in now {
         let lock = name_lock(name);
-        let _name = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _name = nerve_transport::sync::turn(&lock);
         if recorded(file, name).is_some() {
             // Made again only where a command found them gone.
             continue;
@@ -158,7 +158,7 @@ pub fn sync(run: &Account, cfg: impl FnOnce() -> NodeConfig, file: &Path) -> Vec
 /// on this pairing's own folders.
 pub fn ready(run: &Account, center: &str, node_id: &str, file: &Path) -> Result<Own, String> {
     let lock = name_lock(center);
-    let _name = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    let _name = nerve_transport::sync::turn(&lock);
     match recorded(file, center) {
         Some(id) if id == node_id => return make(run, center),
         Some(_) => {

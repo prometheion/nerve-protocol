@@ -257,7 +257,7 @@ thread_local! {
 fn own_addresses() -> Vec<IpAddr> {
     static READ: std::sync::Mutex<Option<(std::time::Instant, Vec<IpAddr>)>> =
         std::sync::Mutex::new(None);
-    let mut read = READ.lock().unwrap_or_else(|e| e.into_inner());
+    let mut read = crate::sync::lock(&READ);
     match &*read {
         Some((at, own)) if at.elapsed() < std::time::Duration::from_secs(1) => own.clone(),
         _ => {

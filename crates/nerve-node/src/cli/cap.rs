@@ -84,14 +84,14 @@ pub(super) async fn add_cap(
         }
         let before = cfg.clone();
         cfg.capabilities.push(c.clone());
-        *held.lock().unwrap() = crate::config_cap::hold_new(&before, cfg);
+        *nerve_transport::sync::lock(&held) = crate::config_cap::hold_new(&before, cfg);
         Ok(())
     })
     .await?;
     w(out, format!("capability {name} added: {}", cap_line(&c)));
     let notes = CapNotes {
         installed: crate::service::is_service_node(&paths),
-        held: held.into_inner().unwrap(),
+        held: nerve_transport::sync::into_inner(held),
         programs,
     };
     for note in notes.of(&c) {
@@ -126,7 +126,7 @@ pub(super) async fn edit_cap(
             c.command = command.clone();
         }
         cap_spec(&spec, input.as_deref(), c)?;
-        *held.lock().unwrap() = crate::config_cap::hold_new(&before, cfg);
+        *nerve_transport::sync::lock(&held) = crate::config_cap::hold_new(&before, cfg);
         Ok(())
     })
     .await?;
@@ -139,7 +139,7 @@ pub(super) async fn edit_cap(
     w(out, format!("capability {name} changed: {}", cap_line(c)));
     let notes = CapNotes {
         installed: crate::service::is_service_node(&paths),
-        held: held.into_inner().unwrap(),
+        held: nerve_transport::sync::into_inner(held),
         programs: Vec::new(),
     };
     for note in notes.of(c) {
@@ -197,12 +197,12 @@ pub(super) async fn rm_cap(
         }
         // A center's own of that name that senses is offered again,
         // and waits for an `on` given for its command.
-        *held.lock().unwrap() = crate::config_cap::hold_new(&was, c);
+        *nerve_transport::sync::lock(&held) = crate::config_cap::hold_new(&was, c);
         Ok(())
     })
     .await?;
     w(out, format!("capability {name} removed"));
-    for (center, name) in held.into_inner().unwrap() {
+    for (center, name) in nerve_transport::sync::into_inner(held) {
         w(out, held_note(&center, &name));
     }
     Ok(())

@@ -4,7 +4,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
@@ -21,6 +21,7 @@ use nerve_proto::resume::{self, Replay};
 use nerve_proto::{Effect, Message};
 use nerve_sandbox::Confinement;
 use nerve_transport::log::{Level, Log};
+use nerve_transport::sync::lock;
 use nerve_transport::ws::WsMessage;
 
 use crate::descriptor::IMPLICIT;
@@ -148,12 +149,6 @@ impl NodeOptions {
             hold: None,
         }
     }
-}
-
-/// Locks a std mutex, shrugging off poisoning: every holder keeps its state
-/// consistent before anything can panic.
-pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Where the params of an awaited notification go.
@@ -1090,14 +1085,13 @@ impl Shared {
         if walk == AclWalk::IfBehind && !behind(want, true) {
             return;
         }
-        let _walking = match self.acl_walk.try_lock() {
-            Ok(g) => g,
-            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => {
+        let _walking = match nerve_transport::sync::try_turn(&self.acl_walk) {
+            Some(g) => g,
+            None => {
                 if walk == AclWalk::IfBehind && !behind(want, false) {
                     return;
                 }
-                lock(&self.acl_walk)
+                nerve_transport::sync::turn(&self.acl_walk)
             }
         };
         let Some(want) = fresh() else {

@@ -1,6 +1,8 @@
 //! The rotation of the center's TLS key and of the nodes' keys
 //! (docs/dev/spec/protocol.md §4.10).
 
+use nerve_transport::sync::lock;
+
 use super::*;
 
 impl Center {
@@ -22,7 +24,7 @@ impl Center {
     }
 
     fn start_rotation(&self) -> Result<Value, String> {
-        let _one = self.rotating.lock().unwrap();
+        let _one = nerve_transport::sync::turn(&self.rotating);
         if self.read(|s| {
             s.key_rotation
                 .as_ref()
@@ -60,7 +62,7 @@ impl Center {
         // Saved before anything is told: a rotation the state file does not
         // hold is dropped at the next start, with its key.
         let saved = {
-            let mut st = self.store.lock().unwrap();
+            let mut st = lock(&self.store);
             let before = st.key_rotation.replace(record);
             st.key_rotations += 1;
             let r = self.write_snapshot(self.snapshot(&st));
@@ -100,7 +102,7 @@ impl Center {
     }
 
     fn end_rotation(&self, why: &str) -> Result<Value, String> {
-        let _one = self.rotating.lock().unwrap();
+        let _one = nerve_transport::sync::turn(&self.rotating);
         let Some(r) = self
             .read(|s| s.key_rotation.clone())
             .filter(|r| r.finished_ms.is_none())
@@ -129,11 +131,11 @@ impl Center {
         std::fs::rename(&next_path, self.dir.join(IDENTITY_FILE))
             .map_err(|e| format!("cannot put the new key in place: {e}; the old key stays"))?;
         let pin = next.pin();
-        *self.server_config.lock().unwrap() = config;
+        *lock(&self.server_config) = config;
         if self.public_url.tls {
-            *self.pin.lock().unwrap() = Some(pin.clone());
+            *lock(&self.pin) = Some(pin.clone());
         }
-        *self.identity.lock().unwrap() = Arc::new(next);
+        *lock(&self.identity) = Arc::new(next);
         let now = now_ms();
         self.update(|s| {
             if let Some(r) = s.key_rotation.as_mut() {
@@ -178,10 +180,7 @@ impl Center {
         let Some(notice) = self.rotation_notice() else {
             return 0;
         };
-        let links: Vec<Arc<Link>> = self
-            .links
-            .lock()
-            .unwrap()
+        let links: Vec<Arc<Link>> = lock(&self.links)
             .values()
             .filter(|l| !l.is_closed())
             .cloned()
@@ -461,10 +460,7 @@ impl Center {
         // And whatever way a key stopped counting (the grace ended, the node
         // ended it, a newer rotation dropped it, or a link came up just
         // after), a link opened with it ends at the next sweep.
-        let links: Vec<Arc<Link>> = self
-            .links
-            .lock()
-            .unwrap()
+        let links: Vec<Arc<Link>> = lock(&self.links)
             .values()
             .filter(|l| !l.is_closed())
             .cloned()

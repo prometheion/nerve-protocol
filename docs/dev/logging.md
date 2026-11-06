@@ -71,6 +71,22 @@ not the daemon writes no log file.
   from the config it holds on every pass, so any writer (the CLI, a reload)
   is followed within a second.
 
+## A poisoned lock
+
+A thread that panics while it holds a std lock leaves the lock poisoned, and
+what it guards may be half changed. The center and the node take every lock
+through `nerve_transport::sync` (`lock`, `try_lock`, `read`, `write`,
+`into_inner`): on a poisoned one it writes one error line that names the lock
+(the type it holds and where it was taken), then ends the process with exit
+code 70. The service starts it again with clean state: systemd's
+`Restart=on-failure` on Linux, the service's failure actions on Windows
+([service](service.md#start-and-stop)). It ends with an exit code, not an
+abort, so no core dump holds the keys and passwords the program has in
+memory. When the log's own lock is the poisoned one, the line goes to stderr
+only. A lock that guards no data and only takes turns (`sync::turn`, such as
+the grant walk's) holds nothing a panic could leave half changed, so its
+poisoning is cleared and the program goes on.
+
 ## The Windows Event Log
 
 The installed node on Windows also writes its start, its stop, a start that
@@ -86,7 +102,9 @@ the body's thread (`run_body`) is caught there and ends the program with
 at most, as `install` sets them; the entry says so) and the frame of
 `service_main`, which cannot unwind, adds no second panic. A panic on another
 thread, such as a task tokio catches, is written as a part of the node that
-panicked; the node runs on. The text goes through `log::scrub`, as a line of
+panicked; the node runs on, unless the panic left a lock poisoned: the next
+take of that lock ends the program ([above](#a-poisoned-lock)), and the
+failure actions start it again. The text goes through `log::scrub`, as a line of
 the log does: one line, redacted, cut. Every user may read the Application
 log.
 

@@ -20,9 +20,9 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, Weak};
 
+use nerve_transport::sync::lock;
 use tokio::sync::Notify;
 
-use crate::daemon::lock;
 use crate::sudo::{REDACTED, Secret};
 
 /// What a stream opened on a running command gets first: the end of what

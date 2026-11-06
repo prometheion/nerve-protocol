@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
+use nerve_transport::sync::lock;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -36,7 +37,7 @@ use nerve_transport::log::{Level, call_line, span};
 use nerve_transport::net::Proxy;
 use nerve_transport::ws::{self, ConnectError, WsMessage};
 
-use crate::daemon::{CenterState, HoldAt, LinkHandle, Shared, lock};
+use crate::daemon::{CenterState, HoldAt, LinkHandle, Shared};
 use crate::descriptor;
 use crate::exec::{self, RunCall, RunOptions, Sig, SignalArgs};
 use crate::fs::{FsCall, WirePath, conflict};

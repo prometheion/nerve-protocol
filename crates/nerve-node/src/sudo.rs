@@ -12,8 +12,9 @@
 
 use nerve_policy::config::Sudo;
 use nerve_policy::{SetError, Writer};
+use nerve_transport::sync::lock;
 
-use crate::daemon::{Shared, lock};
+use crate::daemon::Shared;
 
 /// A password that is overwritten when it is dropped.
 pub(crate) struct Secret(String);
