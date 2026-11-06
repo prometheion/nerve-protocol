@@ -4,6 +4,12 @@
 # `gh workflow run repeat.yml --ref <branch> -f os=windows-2025
 # -f package=nerve-node -f count=50 -f filter=ctrl_c`).
 #
+# GitHub starts a workflow by hand only once the file is on the default
+# branch. Before that, and for a branch whose changes are not on main yet,
+# a push to a branch `repeat/<anything>` runs it too, with what the file
+# `.github/repeat.env` on that branch says, one `key=value` a line: `os`,
+# `package`, `filter`, `count`, as the inputs below.
+#
 # It builds the package's test programs once, as the CI job of that system
 # does, then runs them `count` times with `filter`, the arguments libtest
 # takes after `--` (test names or parts of them, `--exact`,
@@ -14,6 +20,9 @@
 name: Repeat tests
 
 on:
+  push:
+    branches:
+      - "repeat/**"
   workflow_dispatch:
     inputs:
       os:
@@ -51,9 +60,58 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  # The inputs, or on a push what .github/repeat.env says; checked here, so
+  # a runner or count that is not one is refused before anything builds.
+  what:
+    name: What to repeat
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      os: ${{ steps.what.outputs.os }}
+      package: ${{ steps.what.outputs.package }}
+      filter: ${{ steps.what.outputs.filter }}
+      count: ${{ steps.what.outputs.count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'push'
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/repeat.env
+          sparse-checkout-cone-mode: false
+      - id: what
+        env:
+          OS: ${{ inputs.os }}
+          PACKAGE: ${{ inputs.package }}
+          FILTER: ${{ inputs.filter }}
+          COUNT: ${{ inputs.count }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            [ -f .github/repeat.env ] || { echo "::error::a repeat/ branch needs .github/repeat.env"; exit 1; }
+            # Read as data, never run.
+            while IFS='=' read -r key value; do
+              case $key in
+                os) OS=$value ;;
+                package) PACKAGE=$value ;;
+                filter) FILTER=$value ;;
+                count) COUNT=$value ;;
+              esac
+            done < .github/repeat.env
+          fi
+          case $OS in ubuntu-24.04 | windows-2025) ;; *) echo "::error::no runner $OS"; exit 1 ;; esac
+          case $COUNT in '' | *[!0-9]* | 0) echo "::error::no count $COUNT"; exit 1 ;; esac
+          [[ $PACKAGE =~ ^[a-z0-9_-]+$ ]] || { echo "::error::no package $PACKAGE"; exit 1; }
+          [ -n "$FILTER" ] || { echo "::error::no filter"; exit 1; }
+          {
+            echo "os=$OS"
+            echo "package=$PACKAGE"
+            echo "filter=$FILTER"
+            echo "count=$COUNT"
+          } >> "$GITHUB_OUTPUT"
+
   repeat:
-    name: ${{ inputs.package }} ${{ inputs.filter }} ×${{ inputs.count }} on ${{ inputs.os }}
-    runs-on: ${{ inputs.os }}
+    name: ${{ needs.what.outputs.package }} ${{ needs.what.outputs.filter }} ×${{ needs.what.outputs.count }} on ${{ needs.what.outputs.os }}
+    needs: what
+    runs-on: ${{ needs.what.outputs.os }}
     timeout-minutes: 180
     steps:
       # As ci.yml's Windows job: the repository is LF everywhere.
@@ -98,15 +156,15 @@ jobs:
       # Doctests are left out: they are no test programs to run again.
       - name: Build the test programs once
         env:
-          PACKAGE: ${{ inputs.package }}
+          PACKAGE: ${{ needs.what.outputs.package }}
         run: cargo test --locked -p "$PACKAGE" --tests --no-run
       # cargo runs them as they are built, each from its package's folder
       # with the variables cargo gives a test, as the CI jobs do.
       - name: Run them again and again
         env:
-          PACKAGE: ${{ inputs.package }}
-          FILTER: ${{ inputs.filter }}
-          COUNT: ${{ inputs.count }}
+          PACKAGE: ${{ needs.what.outputs.package }}
+          FILTER: ${{ needs.what.outputs.filter }}
+          COUNT: ${{ needs.what.outputs.count }}
         run: |
           # The filter is words for libtest, split as a shell splits them.
           read -r -a args <<< "$FILTER"
