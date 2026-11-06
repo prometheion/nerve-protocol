@@ -3408,7 +3408,13 @@ mod tests {
             }],
             ..Default::default()
         };
-        let spec = crate::exec::landlock_spec(&policy, &home, &own, &[]);
+        let p = nerve_policy::protected::Protected::new(
+            &nerve_policy::protected::Platform::Unix,
+            &home,
+            &own,
+            &policy.protected,
+        );
+        let spec = crate::exec::landlock_spec(&policy, &home, &own, &[], &p);
         let keyrings = std::fs::canonicalize(&keyrings).unwrap();
         for set in [&spec.read, &spec.write, &spec.exec] {
             assert!(!set.iter().any(|r| keyrings.starts_with(r)), "{set:?}");

@@ -1807,8 +1807,10 @@ impl Link {
             self.audit(inv, &target, "forbidden", Some("disabled"), Some(&why));
             return Err(RpcError::new(ErrorCode::Disabled, why));
         }
+        let protected = self.protected(entry);
         self.gate(
             entry,
+            &protected,
             inv,
             effect,
             &[],
@@ -2337,8 +2339,10 @@ impl Link {
             let unconfined = (effect == Effect::Execute)
                 .then(|| self.shared.unconfined_as(&cfg, || known.clone()))
                 .flatten();
+            let protected = self.protected(&entry);
             self.gate(
                 &entry,
+                &protected,
                 &inv,
                 effect,
                 &targets,
@@ -2391,8 +2395,10 @@ impl Link {
         // is the action itself.
         let target = format!("{}.{}", inv.cap, inv.action);
         let unconfined = self.shared.unconfined(&cfg);
+        let protected = self.protected(&entry);
         self.gate(
             &entry,
+            &protected,
             &inv,
             effect,
             &[],
@@ -2465,8 +2471,10 @@ impl Link {
             Some(Value::String(given)) => vec![(call.target_text(), given.clone())],
             _ => Vec::new(),
         };
+        let protected = self.protected(&entry);
         self.gate(
             &entry,
+            &protected,
             inv,
             effect,
             &call.targets(),
@@ -2482,7 +2490,6 @@ impl Link {
         .map_err(|e| as_given(e, &named))?;
         account.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
         own_ready.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
-        let protected = self.protected(&entry);
         let deny = RuleSet::new(&entry.policy.deny, &self.home());
         let folders = entry.policy.folders.clone();
         let action = inv.action.clone();
@@ -2724,6 +2731,7 @@ impl Link {
     async fn gate(
         &self,
         entry: &CenterEntry,
+        protected: &Protected,
         inv: &Invoke,
         effect: Effect,
         targets: &[Target],
@@ -2766,7 +2774,7 @@ impl Link {
         let audited: &Map<String, Value> = &audited;
         let judged = Judged {
             home: self.home(),
-            protected: self.protected(entry),
+            protected: protected.clone(),
             unconfined: unconfined.map(Into::into),
             sudo: self.shared.sudo_on(),
             shell: self.shell_for(command),
@@ -3358,8 +3366,10 @@ impl Link {
             .map(|given| (nerve_policy::paths::to_wire(&rc.cwd), given.to_string()))
             .into_iter()
             .collect();
+        let protected = self.protected(entry);
         self.gate(
             entry,
+            &protected,
             inv,
             effect,
             &rc.targets(),
@@ -3429,10 +3439,16 @@ impl Link {
             let mut spec = match (separate.as_ref(), known.as_ref()) {
                 // Cut around every pairing's folders as the account sees the
                 // folders, which the gate's cut may not have resolved.
-                (Some(mine), Some(run)) => {
-                    exec::pairing_spec(&entry.policy, &home, &own, &writable, &run.home, mine)
-                }
-                _ => exec::landlock_spec(&entry.policy, &home, &own, &writable),
+                (Some(mine), Some(run)) => exec::pairing_spec(
+                    &entry.policy,
+                    &home,
+                    &own,
+                    &writable,
+                    &run.home,
+                    mine,
+                    &protected,
+                ),
+                _ => exec::landlock_spec(&entry.policy, &home, &own, &writable, &protected),
             };
             // The owner's switch, Landlock's layer of it: no TCP, where the
             // kernel has the rules.
@@ -3579,8 +3595,10 @@ impl Link {
         let unconfined = (effect == Effect::Execute)
             .then(|| self.shared.unconfined_as(cfg, || known.clone()))
             .flatten();
+        let protected = self.protected(&entry);
         self.gate(
             &entry,
+            &protected,
             inv,
             effect,
             &targets,
@@ -3640,6 +3658,7 @@ impl Link {
                 &own,
                 &writable,
                 no_network,
+                &protected,
             )
         });
         let granted = cfg

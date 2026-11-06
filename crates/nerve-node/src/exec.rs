@@ -418,14 +418,18 @@ pub fn other_text() -> Option<crate::tap::Decode> {
 /// command may be the one that wrote. A folder whose resolution crosses a
 /// link inside one is left out ([`led_away`]): a command may have put that
 /// link, and the rule would grant the folder's flags wherever it leads.
+///
+/// `protected` is the protected list the gate judged the call by, built
+/// once for the call (the Unix one: Landlock is Linux's), so the sandbox
+/// goes by the list the decision did.
 pub fn landlock_spec(
     policy: &CenterPolicy,
     home: &Path,
     own: &[PathBuf],
     writable: &[PathBuf],
+    protected: &Protected,
 ) -> LandlockSpec {
-    // Landlock is Linux's, so the list is the Unix one.
-    let f = folder_sets(policy, home, own, &Platform::Unix, writable);
+    let f = folder_sets(policy, home, protected, writable);
     // `/dev` is read whole except the terminals: a command of a node run by
     // hand runs as its owner and must not read the owner's terminals by name
     // ([`nerve_sandbox::terminal_devices`]). What it loses: listing `/dev`.
@@ -462,8 +466,9 @@ pub fn pairing_spec(
     writable: &[PathBuf],
     run_home: &Path,
     mine: &crate::account::Own,
+    protected: &Protected,
 ) -> LandlockSpec {
-    let mut spec = landlock_spec(policy, home, own, writable);
+    let mut spec = landlock_spec(policy, home, own, writable, protected);
     let around = [run_home.to_path_buf()];
     let mine = [real(&mine.home), real(&mine.temp)];
     for set in [
@@ -558,13 +563,14 @@ pub fn config_spec(
     own: &[PathBuf],
     writable: &[PathBuf],
     no_network: bool,
+    protected: &Protected,
 ) -> LandlockSpec {
     let policy = crate::config_cap::confined(policy, separate, mine);
     let mut spec = match (mine, account_home) {
         (Some(mine), Some(run_home)) if separate => {
-            pairing_spec(&policy, home, own, writable, run_home, mine)
+            pairing_spec(&policy, home, own, writable, run_home, mine, protected)
         }
-        _ => landlock_spec(&policy, home, own, writable),
+        _ => landlock_spec(&policy, home, own, writable, protected),
     };
     // Landlock's layer of the network switch, as for the pairing's commands.
     spec.no_network = no_network;
@@ -629,11 +635,9 @@ pub struct FolderSets {
 pub fn folder_sets(
     policy: &CenterPolicy,
     home: &Path,
-    own: &[PathBuf],
-    platform: &Platform,
+    protected: &Protected,
     writable: &[PathBuf],
 ) -> FolderSets {
-    let protected = Protected::new(platform, home, own, &policy.protected);
     // The boundary is judged by resolved places, so a writable folder
     // reached by one spelling catches a folder configured by another.
     let bounds: Vec<PathBuf> = writable.iter().map(|w| real(w)).collect();
@@ -690,7 +694,7 @@ pub fn folder_sets(
             .filter(|(a, _)| f(*a))
             .map(|(_, p)| p.clone())
             .collect();
-        leave_protected_out(&granted, &protected, write)
+        leave_protected_out(&granted, protected, write)
     };
     FolderSets {
         read: folders(&|a| a.read, false),
@@ -765,7 +769,8 @@ pub fn container_grants(
     platform: &Platform,
     writable: &[PathBuf],
 ) -> Vec<(PathBuf, Access)> {
-    let f = folder_sets(policy, home, own, platform, writable);
+    let protected = Protected::new(platform, home, own, &policy.protected);
+    let f = folder_sets(policy, home, &protected, writable);
     let mut out: Vec<(PathBuf, Access)> = Vec::new();
     for (set, flag) in [(f.read, 'r'), (f.write, 'w'), (f.exec, 'x')] {
         for p in leave_out(&set, own) {
@@ -2435,6 +2440,55 @@ mod command_line_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// The specs with the protected list built for them, as a call builds
+    /// it once for its gate and its sandbox.
+    fn landlock_spec(
+        policy: &CenterPolicy,
+        home: &Path,
+        own: &[PathBuf],
+        writable: &[PathBuf],
+    ) -> LandlockSpec {
+        let p = Protected::new(&Platform::Unix, home, own, &policy.protected);
+        super::landlock_spec(policy, home, own, writable, &p)
+    }
+
+    fn pairing_spec(
+        policy: &CenterPolicy,
+        home: &Path,
+        own: &[PathBuf],
+        writable: &[PathBuf],
+        run_home: &Path,
+        mine: &crate::account::Own,
+    ) -> LandlockSpec {
+        let p = Protected::new(&Platform::Unix, home, own, &policy.protected);
+        super::pairing_spec(policy, home, own, writable, run_home, mine, &p)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn config_spec(
+        policy: &CenterPolicy,
+        separate: bool,
+        mine: Option<&crate::account::Own>,
+        account_home: Option<&Path>,
+        home: &Path,
+        own: &[PathBuf],
+        writable: &[PathBuf],
+        no_network: bool,
+    ) -> LandlockSpec {
+        let p = Protected::new(&Platform::Unix, home, own, &policy.protected);
+        super::config_spec(
+            policy,
+            separate,
+            mine,
+            account_home,
+            home,
+            own,
+            writable,
+            no_network,
+            &p,
+        )
+    }
     use nerve_policy::config::Access;
 
     /// A command of nerve-run keeps of the node's environment only the few
