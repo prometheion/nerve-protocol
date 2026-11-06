@@ -890,18 +890,31 @@ fn client_only(
         ));
     }
     // A deny rule of exec narrows a sudo entry (`sudo apt *` with a deny rule
-    // for `sudo apt remove*`), so taking one off while the list holds an
-    // entry widens what runs as root: that stays the owner's too. It is
-    // judged by the rule's scope, since a pattern cannot tell which entries
-    // it narrows.
-    if !o.sudo_allow.is_empty()
-        && let Some(rule) = o.deny.iter().find(|r| {
-            let scope = crate::rules::scope_of(r);
-            !n.deny.contains(r) && (scope == "exec" || scope.starts_with("exec."))
-        })
-    {
+    // for `sudo apt remove*`), so taking one off widens what runs as root once
+    // the owner has such an entry. A center could empty the list first and
+    // take the rule off in a second request, so this holds whatever the list
+    // holds now, for every rule that can match a sudo command: one with no
+    // pattern, a first word of `sudo` or a path to it, or a wildcard in it.
+    // (The owner's `off` of exec is not held: a center cannot tell it from
+    // its own, docs/dev/settings-and-config.md.)
+    if let Some(rule) = o.deny.iter().find(|r| {
+        let scope = crate::rules::scope_of(r);
+        !n.deny.contains(r)
+            && (scope == "exec" || scope.starts_with("exec."))
+            && crate::guard::Guard::of_rule(r).is_none()
+            && match r.split_once(':') {
+                None => true,
+                Some((_, pattern)) => {
+                    let first = pattern.split_whitespace().next().unwrap_or("");
+                    first.is_empty()
+                        || first == "sudo"
+                        || first.ends_with("/sudo")
+                        || first.contains(['*', '?', '['])
+                }
+            }
+    }) {
         return Err(format!(
-            "policy.deny {rule}: while the sudo list has an entry, only the owner takes off a deny rule of exec, which narrows the entry"
+            "policy.deny {rule}: only the owner takes off a deny rule of exec that can match a sudo command, since it narrows an entry of the sudo list"
         ));
     }
     // The network switch holds the commands back; taking it away lets them
@@ -1634,13 +1647,30 @@ mod tests {
         .unwrap();
         let e = set(&mut s, json!(["exec.run:sudo apt remove*"])).unwrap_err();
         assert!(matches!(e, SetError::Forbidden(_)), "{e:?}");
-        // With no entry left there is nothing to narrow.
-        s.update(|c| {
-            c.center_mut("home").unwrap().policy.sudo_allow.clear();
-            Ok(())
-        })
+        // Emptying the list first does not free the rule: the owner may put
+        // the entry back later.
+        let mut emptied = doc(&s);
+        emptied["policy"]["sudo_allow"] = json!([]);
+        let v = s.version();
+        s.set_center_document("home", emptied, v, |_| false, unix, &|_, _| None)
+            .unwrap();
+        let e = set(&mut s, json!([])).unwrap_err();
+        assert!(matches!(e, SetError::Forbidden(_)), "{e:?}");
+        // A rule that cannot match a sudo command narrows no entry.
+        set(
+            &mut s,
+            json!([
+                "exec.run:sudo apt remove*",
+                "exec.run:sudo rm*",
+                "exec.run:rm *"
+            ]),
+        )
         .unwrap();
-        set(&mut s, json!([])).unwrap();
+        set(
+            &mut s,
+            json!(["exec.run:sudo apt remove*", "exec.run:sudo rm*"]),
+        )
+        .unwrap();
     }
 
     #[test]

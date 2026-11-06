@@ -155,8 +155,7 @@ and the command that shows it
 No grant lets it pair or unpair, touch the keys, the grant itself, `panic`
 or another center's pairing, or change the proxy or a machine setting (the
 shell, `allow_root`, the sudo path, where the keys are, the log level). Nor
-may it put a command on the sudo list (or, with an entry there, take off an
-`exec` deny rule), turn its network on or release a protected path ([the grant](../dev/settings-and-config.md#the-settings-grant)).
+may it put a command on the sudo list (or take off an `exec` deny rule that can match one), turn its network on or release a protected path ([the grant](../dev/settings-and-config.md#the-settings-grant)).
 
 - A center with the grant can widen its rights up to `user` mode. Give it
   only to a center you would also give a shell.

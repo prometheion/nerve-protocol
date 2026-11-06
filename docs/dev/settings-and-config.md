@@ -152,8 +152,13 @@ entry and changes none, and an entry goes only with its folder.
 Because the grant lets a center widen its rules up to `user` mode, a center
 with the grant is as strong as `user` mode on that machine, never more: the
 sudo list is the owner's (item 15): `client_only` refuses an entry a center adds,
-and, while the list has an entry, a deny rule of scope `exec` or `exec.*` it
-takes off, since that rule narrows a wildcard entry. Entries of a 0.0.7
+and, whatever the list holds now, a deny rule of scope `exec` or `exec.*` it
+takes off that can match a sudo command (no pattern, `sudo` or a wildcard as
+the first word), since that rule narrows a wildcard entry (the center could
+empty the list and the owner put the entry back). The owner's `cap set exec
+off` is not held: a center cannot be told from its own, so a center with the
+grant can turn `exec` back on, and `cap ... off` does not hold sudo entries
+back from it. Entries of a 0.0.7
 center stay (no migrations): `rule --center <name>` lists them. `as_owner` goes with `allowlist` mode
 alone: `CenterPolicy::validate` drops it under any other mode, so a timed
 mode a center saves never ends in `allowlist` as the owner.

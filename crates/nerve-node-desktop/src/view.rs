@@ -113,6 +113,9 @@ pub fn status(v: &Value, now_ms: u64) -> (NodeStatus, Vec<CenterRow>) {
             held = false;
             (limits_off, limits_restart) = limits_line(why);
         }
+        if let Some(why) = v["processes_warning"].as_str() {
+            warnings.push(why.into());
+        }
         if v["keyring_failed"] == true {
             warnings.push(
                 "The node found no keyring at its start. Restart it once the keyring runs.".into(),
@@ -2010,6 +2013,11 @@ mod tests {
             "folder_commands_off": "commands cannot be confined on this machine"});
         let (st, _) = status(&v, NOW);
         assert_eq!(st.state, "locked");
+        assert_eq!(st.warnings.row_count(), 1);
+        // The Linux node's note that pairings see each other's commands.
+        let v = json!({"daemon": "running", "locked": false, "centers": [],
+            "processes_warning": "commands of different pairings can read each other"});
+        let (st, _) = status(&v, NOW);
         assert_eq!(st.warnings.row_count(), 1);
     }
 
