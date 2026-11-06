@@ -2601,8 +2601,10 @@ fn running_with(text: &str) -> bool {
 /// The installed node gives each folder-mode command of `nerve-run` a
 /// `/proc` of its own (#199): `ps -eo args` in one pairing's command does
 /// not show the running command of another, which `nerve-run` runs too;
-/// `ps`, `top` and `make` work there; `status` warns of nothing. The run
-/// and its numbers are in the PR's handover.
+/// `ps`, `top` and `make` work there; `status` warns of nothing. With the
+/// settings grant a center may not put a command on the sudo list, and
+/// `center settings off` says what stays (#197); `proxy set -` takes the
+/// proxy from a pipe (#198).
 ///
 /// `NERVE_NODE_REAL=<the nerve-node to install> NERVE_REAL_OWNER=<an
 /// account with a home> cargo test -p nerve-node --test real_account --
@@ -2663,7 +2665,7 @@ async fn the_installed_nodes_pairings_see_only_their_own_processes() {
         .await
         .unwrap();
     assert!(!out(&r).contains(&marker), "{r}");
-    assert!(out(&r).contains("nerve-run"), "{r}");
+    assert!(out(&r).contains("ps -eo user,pid,args"), "{r}");
     let (r, mut lab_conn) = first.await.unwrap();
     assert_eq!(r.unwrap()["exit_code"], 0);
     // Its own processes it sees, and the tools that read /proc work.
@@ -2678,6 +2680,73 @@ async fn the_installed_nodes_pairings_see_only_their_own_processes() {
     std::fs::write(lab.join("Makefile"), "all:\n\t@echo built\n").unwrap();
     let r = run(&mut lab_conn, &lab, "make -j2").await.unwrap();
     assert_eq!(out(&r), "built\n", "{r}");
+    eprintln!(
+        "lab's ps -eo args, while it runs itself:\n{}",
+        out(&run(&mut lab_conn, &lab, "ps -eo user,pid,args")
+            .await
+            .unwrap())
+    );
+
+    // #197: with the grant the center may not put a command on the sudo
+    // list; taking the grant back says what stays.
+    let (ok, said) = as_owner(&owner, &["center", "settings", "on", "lab"]);
+    assert!(ok, "{said}");
+    eprintln!("$ nerve-node center settings on lab\n{said}");
+    let mut got = None;
+    for _ in 0..100 {
+        let r = lab_conn
+            .call(
+                "get",
+                json!({"cap": "settings", "keys": ["document", "version"]}),
+                WAIT,
+            )
+            .await
+            .expect("an answer");
+        if let Ok(v) = r {
+            got = Some(v);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let got = got.expect("the grant reaches the center");
+    let mut doc = got["document"].clone();
+    doc["policy"]["sudo_allow"] = json!(["sudo id"]);
+    let e = lab_conn
+        .call(
+            "invoke",
+            json!({"cap": "settings", "action": "set", "ctx": {},
+                   "args": {"document": doc, "if_version": got["version"]}}),
+            WAIT,
+        )
+        .await
+        .expect("an answer")
+        .expect_err("only the owner");
+    assert!(
+        e.message
+            .contains("only the owner puts a command on the sudo list"),
+        "{}",
+        e.message
+    );
+    eprintln!(
+        "lab's settings.set with sudo_allow [\"sudo id\"]: {}",
+        e.message
+    );
+    let (_, rules) = as_owner(&owner, &["rule", "sudo", "--center", "lab"]);
+    assert!(!rules.contains("sudo id"), "{rules}");
+    let (ok, said) = as_owner(&owner, &["center", "settings", "off", "lab"]);
+    assert!(
+        ok && said.contains("What lab changed stays as it is"),
+        "{said}"
+    );
+    eprintln!("$ nerve-node center settings off lab\n{said}");
+
+    // #198: the proxy from a pipe, never in the process list.
+    let (ok, said) = as_owner_typing(&owner, &["proxy", "set", "-"], "http://127.0.0.1:3128\n");
+    assert!(ok && said.contains("proxy http://127.0.0.1:3128"), "{said}");
+    eprintln!("$ echo http://127.0.0.1:3128 | nerve-node proxy set -\n{said}");
+    let (_, shown) = as_owner(&owner, &["proxy"]);
+    assert!(shown.contains("http://127.0.0.1:3128"), "{shown}");
+    assert!(as_owner(&owner, &["proxy", "off"]).0);
 
     let (ok, said) = sh(Command::new(BIN).args(["uninstall", "--purge"]));
     assert!(ok, "{said}");

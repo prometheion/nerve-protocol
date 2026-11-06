@@ -540,11 +540,13 @@ pub fn reads_input(cmd: &Cmd) -> bool {
         Cmd::Center {
             cmd: Some(CenterCmd::Add { yes, link, .. }),
         } => !yes || link == "-",
-        // A URL with a user name and no password reads the password, and
-        // `--header -` the headers.
+        // `-` reads the URL or relay link, a URL with a user name and no
+        // password the password, and `--header -` the headers.
         Cmd::Proxy {
             cmd: Some(ProxyCmd::Set { url, headers, .. }),
-        } => headers.iter().any(|h| h == "-") || crate::cli::proxy_wants_password(url),
+        } => {
+            url == "-" || headers.iter().any(|h| h == "-") || crate::cli::proxy_wants_password(url)
+        }
         _ => false,
     }
 }
@@ -2596,6 +2598,8 @@ mod tests {
         ));
         assert!(!reads_input(&cli(&["proxy", "set", "http://u:p@h:1"]).cmd));
         assert!(!reads_input(&cli(&["proxy", "set", "http://h:1"]).cmd));
+        // The URL or relay link from stdin (#198).
+        assert!(reads_input(&cli(&["proxy", "set", "-"]).cmd));
         // A capability's schema comes on stdin when the owner says so.
         for (args, reads) in [
             (
