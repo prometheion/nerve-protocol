@@ -2063,7 +2063,7 @@ impl Link {
         })?;
         let (program, serial) = self.program(&cap.provider)?;
         let args = o.params;
-        nerve_proto::schema::validate(&decl.params, &Value::Object(args.clone()))?;
+        nerve_proto::schema::validate_map(&decl.params, &args)?;
         let inv = unit_call(&o.cap, &o.stream, args.clone(), o.ctx.clone());
         let off = cap.exposure == Exposure::Off;
         self.decide_unit(&entry, &inv, decl.effect, off, program)
@@ -2310,7 +2310,7 @@ impl Link {
                 )
             })?;
             let entry = self.shared.around_pairings(&cfg, granted);
-            nerve_proto::schema::validate(&action.params, &Value::Object(inv.args.clone()))?;
+            nerve_proto::schema::validate_map(&action.params, &inv.args)?;
             let marked = nerve_proto::schema::path_args(&action.params);
             // The arguments its schema marks as paths are the call's rule
             // targets, resolved as the command account would see them, as an
@@ -2618,20 +2618,18 @@ impl Link {
                 args.insert(field.clone(), Value::String(real.clone()));
                 // Its schema holds the path as it is handed, too. Only the
                 // audit names where it leads ([`as_given`]).
-                nerve_proto::schema::validate(params, &Value::Object(args.clone())).map_err(
-                    |_| {
-                        let (cap, act) = (&inv.cap, &inv.action);
-                        (
-                            given,
-                            crate::fs::bad_path(format!(
-                                "{given} leads to a path {cap}.{act} does not take"
-                            )),
-                            Some(format!(
-                                "{given} leads to {real}, which {cap}.{act} does not take"
-                            )),
-                        )
-                    },
-                )?;
+                nerve_proto::schema::validate_map(params, &args).map_err(|_| {
+                    let (cap, act) = (&inv.cap, &inv.action);
+                    (
+                        given,
+                        crate::fs::bad_path(format!(
+                            "{given} leads to a path {cap}.{act} does not take"
+                        )),
+                        Some(format!(
+                            "{given} leads to {real}, which {cap}.{act} does not take"
+                        )),
+                    )
+                })?;
                 named.push((real, given.clone()));
                 targets.push(Target {
                     holds: crate::fs::holds(&path.real, write),
@@ -2753,18 +2751,19 @@ impl Link {
         // The audit's arguments hold each marked path as resolved, as the
         // rules match it: a pin made from the entry names the place the
         // call reached, not the spelling it was given in (a link, a `..`).
-        let mut audited = inv.args.clone();
+        // Copied only when a path is replaced: the arguments may be large.
+        let mut audited = std::borrow::Cow::Borrowed(&inv.args);
         for t in targets {
             if let Some(field) = &t.arg
                 && audited.contains_key(field)
             {
-                audited.insert(
+                audited.to_mut().insert(
                     field.clone(),
                     Value::String(nerve_policy::paths::to_wire(&t.path)),
                 );
             }
         }
-        let audited = &audited;
+        let audited: &Map<String, Value> = &audited;
         let judged = Judged {
             home: self.home(),
             protected: self.protected(entry),
@@ -3553,7 +3552,7 @@ impl Link {
         decl: nerve_policy::config::ConfigCapability,
     ) -> Result<Value, RpcError> {
         let params = decl.params_schema();
-        nerve_proto::schema::validate(&params, &Value::Object(inv.args.clone()))?;
+        nerve_proto::schema::validate_map(&params, &inv.args)?;
         let marked = nerve_proto::schema::path_args(&params);
         let runs_as = self.shared.run_account(cfg);
         let entry = self.shared.with_built_in(cfg, granted);
