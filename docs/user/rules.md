@@ -131,7 +131,8 @@ memory only, so a restart turns sudo off.
 - With the network off, no sudo-list command runs ([network](network.md)).
 - Turning sudo on in the center's web UI puts your password into a page the
   center serves. If you do not trust the center, run `sudo nerve-node sudo on`
-  on the machine
+  on the machine; while sudo is on, a center with the grant can still list
+  commands for root (see [the settings grant](#the-settings-grant))
   ([from the web UI](../dev/policy-engine.md#from-the-web-ui)).
 
 ## The settings grant
@@ -158,8 +159,10 @@ shell, `allow_root`, the sudo path, where the keys are, the log level). Nor
 may it turn its network on or release a protected path
 ([the grant](../dev/settings-and-config.md#the-settings-grant)).
 
-- A center with the grant can widen its rights up to `user` mode. Give it
-  only to a center you would also give a shell.
+- A center with the grant can widen its rights up to `user` mode, and while
+  sudo is on, put commands on its own sudo list, which run as root. Give it
+  only to a center you would also give a shell, and keep sudo off while a
+  center you would not give root has the grant.
 - With root as the owner, a center with the settings grant can switch
   itself to `user` mode and so run commands as root
   ([root as the owner](../dev/service.md#root-as-the-owner)).

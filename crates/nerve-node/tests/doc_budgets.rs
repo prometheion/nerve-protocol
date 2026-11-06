@@ -23,7 +23,7 @@ const BUDGETS: &[(&str, usize)] = &[
     ("docs/user/watch-and-stop.md", 900),
     ("docs/user/troubleshooting.md", 1500),
     ("docs/user/commands.md", 600),
-    ("docs/user/safety.md", 700),
+    ("docs/user/safety.md", 850),
 ];
 
 /// The most words a table cell may have.
@@ -203,6 +203,50 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
         ),
         ("docs/user/settings.md", "hands a center the node's keys"),
         ("docs/user/backup.md", "one that has its token keeps it"),
+        // The round 4 limits: the sudo grant, safety.md holding every limit
+        // of the task pages, and the link in the process list.
+        (
+            "docs/user/rules.md",
+            "put commands on its own sudo list, which run as root",
+        ),
+        (
+            "docs/user/rules.md",
+            "a center with the grant can still list commands for root",
+        ),
+        (
+            "docs/user/safety.md",
+            "a center with the settings grant can list commands for root itself",
+        ),
+        (
+            "docs/user/safety.md",
+            "Taking the grant back leaves what the center added",
+        ),
+        (
+            "docs/user/safety.md",
+            "puts your password into a page the center serves",
+        ),
+        (
+            "docs/user/safety.md",
+            "can also read its files by name, not list them",
+        ),
+        ("docs/user/safety.md", "a program a command left running"),
+        ("docs/user/safety.md", "does not stop a running command"),
+        (
+            "docs/user/safety.md",
+            "readable by every account while it runs",
+        ),
+        ("docs/user/safety.md", "tells programs apart, not users"),
+        ("docs/user/safety.md", "the keyring is yours"),
+        ("docs/user/safety.md", "restore only one you made yourself"),
+        ("docs/user/safety.md", "A relay token reaches"),
+        (
+            "docs/user/safety.md",
+            "A panic ends web UI sessions, not tokens",
+        ),
+        (
+            "docs/user/pair.md",
+            "the link is in the process list, which any account can read",
+        ),
         // The relay link holds a secret.
         ("docs/user/pair.md", "The link holds the relay token"),
     ];

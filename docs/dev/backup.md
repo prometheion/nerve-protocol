@@ -390,8 +390,8 @@ hashes of the harness tokens, the statistics, the settings of the
 [key rotation](identity-and-pairing.md#rotate-the-centers-key) it also holds the new key,
 `tls.next.pem`, which the machines already trust. Not the [log](logging.md#the-log-as-the-owner-reads-it).
 
-Not the [owner token](web-uis.md#log-in) (`owner-token`) is made only where none exists: a center restored into a state folder with
-no token makes one at its next start, and one that has its token keeps it.
+Not the [owner token](web-uis.md#log-in) (`owner-token`). The center makes one only where none exists: a center restored into a
+state folder with no token makes one at its next start, and one that has its token keeps it.
 `nerve-center owner-token` says it, and `--new` replaces it.
 
 Not the action checker's endpoint token (`checker-model.token`), which is a

@@ -10,6 +10,11 @@ Pairing links a machine to a center. Do it once per machine and center.
    nerve-node center add 'nerve://pair?center=...&code=...&pin=...'
    ```
 
+   While `center add` asks, the link is in the process list, which any
+   account can read. On a machine where that matters, run
+   `nerve-node center add -` and paste the link on the next line: `-` reads
+   it from stdin instead.
+
 3. The node shows the center's address and what it may do at first, and asks
    before it stores anything. Then check the link:
 

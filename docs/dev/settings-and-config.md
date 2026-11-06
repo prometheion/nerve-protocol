@@ -140,7 +140,10 @@ a write that differs there; it keeps the record as it was. The center adds no
 entry and changes none, and an entry goes only with its folder.
 
 Because the grant lets a center widen its rules up to `user` mode, a center
-with the grant is as strong as `user` mode on that machine.
+with the grant is as strong as `user` mode on that machine. It also writes its
+own `policy.sudo_allow` (its Audit page does, `client_only` has no check on
+it), and the sudo switch is one for the machine: while it is on, those commands
+run as root in every mode. With the grant and sudo on, a center reaches root.
 
 ## The node's own folders
 
@@ -680,8 +683,10 @@ Each change is checked, then saved. A change is audited on the machine with the
 old and the new value and the name of the center.
 
 A center with the grant can widen its own rights up to `user` mode. A center
-that is taken over is then as strong as `user` mode on that machine. Give the
-grant only to a center you would also give a shell.
+that is taken over is then as strong as `user` mode on that machine, and while
+sudo is on it can list commands for root in its own `policy.sudo_allow`. Give
+the grant only to a center you would also give a shell, and keep sudo off while
+a center you would not give root has it.
 
 Where root is the node's owner ([service](service.md#root-as-the-owner)),
 `user` mode runs commands as root. A center with the grant can switch itself

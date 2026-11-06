@@ -18,12 +18,22 @@ leads to the detail.
 - Commands on the sudo list run as root, outside the folders. With the
   network off they do not run
   ([sudo](../dev/policy-engine.md#sudo-as-the-owner-uses-it)).
+- While sudo is on, a center with the settings grant can list commands for
+  root itself. Keep sudo off while a center you would not give root has the
+  grant ([the grant](../dev/settings-and-config.md#the-settings-grant)).
+- Taking the grant back leaves what the center added, still on
+  ([the grant](../dev/settings-and-config.md#without-the-grant)).
+- Turning sudo on in the center's web UI puts your password into a page the
+  center serves. If you do not trust it, run `sudo nerve-node sudo on` on the
+  machine ([from the web UI](../dev/policy-engine.md#from-the-web-ui)).
 
 ## Folders
 
 - On the installed node, a file call in `folder` mode may also read what
   every account may read, such as `/etc` and most of `/usr`
   ([reading](../dev/sandbox-linux.md#reading-in-folder-mode)).
+- A command in an `x` folder can also read its files by name, not list them
+  ([reading](../dev/sandbox-linux.md#what-a-command-can-reach-in-folder-mode)).
 - A folder with `none` is closed to file calls. A command started in the
   folder around it still reaches it
   ([folders](../dev/policy-engine.md#folders-and-rights)).
@@ -62,6 +72,9 @@ leads to the detail.
 - A command reaches every unix socket its account may write to. On a node
   run by hand, that includes your session's (tmux, X)
   ([what it does not stop](../dev/sandbox-linux.md#what-it-does-not-stop-linux)).
+- The network switch does not stop a name lookup through the system's
+  resolver, a program a command left running, or a program's action
+  ([network](network.md)).
 
 ## Commands
 
@@ -71,6 +84,19 @@ leads to the detail.
 - The action checker's blocklist and the node's guard catch mistakes by
   name, not someone who hides the name. The mode, the rules and the account
   are the protection ([guard](../dev/policy-engine.md#the-guard)).
+- A mode change, `cap set ... off` or the end of a `--for` does not stop a
+  running command. A program handed to a service manager, or detached on a
+  node without a cgroup, outlives a stop
+  ([what ends a command](../dev/sandbox-linux.md#what-ends-a-command)).
+- A capability's command line, with the call's values, is readable by every
+  account while it runs. Put no secret in it
+  ([secrets](../dev/capabilities.md#keep-secrets-out-of-the-command)).
+- The check of a program's provider tells programs apart, not users: allow
+  only programs you trust
+  ([capabilities](capabilities.md)).
+- On a node run by hand the keyring is yours: an allow rule for `secret-tool`
+  hands a center the node's keys
+  ([keys](../dev/settings-and-config.md#where-the-node-keeps-its-keys)).
 - A command that asks another program for something, such as the keyring
   over D-Bus, names no protected path
   ([protection](../dev/policy-engine.md#what-protection-covers)).
@@ -91,12 +117,19 @@ leads to the detail.
   be paired again ([rotation](../dev/identity-and-pairing.md#rotate-the-centers-key)).
 - A backup holds neither the owner token nor the checker's endpoint token
   ([backup](../dev/backup.md#what-is-not-in-a-backup)).
+- A restored backup brings its own pairings, modes and rules: restore only
+  one you made yourself ([restore](../dev/backup.md#restore)).
+- A relay token reaches the relay's centers' host and port, and the other
+  sites a reverse proxy serves there
+  ([relay](../dev/node-link.md#a-relay-as-the-owner-sets-it-up)).
 
 ## Web UIs, updates and logs
 
 - Beyond loopback, both web UIs need TLS on a self-signed certificate.
   Compare its fingerprint before you log in, or keep them on loopback
   behind an SSH tunnel ([beyond loopback](../dev/web-uis.md#beyond-loopback)).
+- A panic ends web UI sessions, not tokens: `ui token rm` a leaked one first
+  ([panic](../dev/web-uis.md#panic)).
 - Releases are not signed yet. `update` trusts the `SHA256SUMS` of the same
   release ([update](../dev/service.md#update-the-node)).
 - The audit log (about 20 MiB) and the log (about 10 MiB) drop their oldest

@@ -38,7 +38,8 @@ sudo ./nerve-node-x86_64-linux install
 `install` puts the program at `/usr/local/bin/nerve-node` and starts the
 service, which starts with the machine. You become its owner: you run its
 commands without `sudo`. At a terminal it then asks [setup](#setup)'s
-questions. Without one it says what to run:
+questions. Without one it says what to run (the link shows in the process list while
+`center add` asks: [pair](pair.md) has the `-` form):
 
 ```sh
 nerve-node center add '<pairing link>'

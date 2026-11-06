@@ -47,7 +47,9 @@ On ARM, take the `aarch64` files.
 
    At a terminal it asks for the pairing link (**Pair a machine** in the web
    UI shows one), the mode, a folder with its rights, and the network.
-   Without a terminal, pair and give a folder yourself:
+   Without a terminal, pair and give a folder yourself (the link shows in
+   the process list while `center add` asks: [pair](docs/user/pair.md) has
+   the `-` form):
 
    ```sh
    nerve-node center add '<pairing link>'
