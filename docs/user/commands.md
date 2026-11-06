@@ -11,7 +11,7 @@ commands.
 | Group | Commands |
 |---|---|
 | Set up | `install`, `setup`, `update`, `uninstall [--purge]`, `backup <file>`, `restore <file>`, `service start\|stop\|restart` |
-| Centers | `center`, `center add <link>`, `center rm\|pause\|resume\|rotate-key [<name>]`, `center settings on\|off` |
+| Centers | `center`, `center add -`, `center rm\|pause\|resume\|rotate-key [<name>]`, `center settings on\|off` |
 | What a center may do | `mode [<mode>] [--for H]`, `folder`, `folder add <path> <rights>\|none`, `folder rm`, `folder sync`, `network [on\|off]` |
 | | `rule`, `rule add allow\|deny '<command>'`, `rule rm '<entry>'`, `rule edit`, `sudo [on\|off]` |
 | Watch and stop | `status`, `audit [--refused]`, `audit clear`, `log [--problems]`, `log clear`, `panic`, `unlock` |

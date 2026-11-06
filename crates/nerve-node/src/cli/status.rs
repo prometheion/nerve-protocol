@@ -272,7 +272,7 @@ fn next_steps(v: &Value) -> Vec<String> {
     }
     let centers = v["centers"].as_array().cloned().unwrap_or_default();
     if centers.is_empty() {
-        steps.push("pair a center: `nerve-node center add '<link>'`".into());
+        steps.push("pair a center: `nerve-node center add -`, then paste the link".into());
     }
     for c in &centers {
         if c["mode"] == "folder" && c["folders"].as_u64() == Some(0) {
@@ -466,7 +466,7 @@ mod tests {
                 "service: stopped, starts with the machine, version 0.0.7",
                 "sudo: off",
                 "next: start it: `nerve-node service start`",
-                "next: pair a center: `nerve-node center add '<link>'`",
+                "next: pair a center: `nerve-node center add -`, then paste the link",
             ]
         );
         let by_hand = status_lines(&json!({

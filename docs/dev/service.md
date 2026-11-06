@@ -175,7 +175,7 @@ folder and its rights, and the network. Without a terminal it says what to
 run instead:
 
 ```sh
-nerve-node center add '<pairing link>'
+nerve-node center add -     # then paste the pairing link
 nerve-node folder add ~/project rwx
 ```
 

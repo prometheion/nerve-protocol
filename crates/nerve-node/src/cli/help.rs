@@ -133,7 +133,7 @@ pub fn everyday(program: &str) -> String {
 
   sudo {program} install                 install it as a service, then pair a center
   {program} status                       how it is, and what to do next
-  {program} center add '<link>'          pair with a center
+  {program} center add -                 pair with a center: paste the link
   {program} folder add ~/project rwx     let the center use a folder
   {program} rule add allow '<command>'   allow a command (allowlist mode)
   {program} audit                        what was allowed and refused

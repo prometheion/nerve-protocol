@@ -1750,7 +1750,7 @@ mod tests {
         let (_d, none) = setup(&[]);
         let e = run(&none, &["folder"]).unwrap_err();
         assert!(
-            e.contains("pair one: `nerve-node center add '<link>'`"),
+            e.contains("pair one: `nerve-node center add -`, then paste the link"),
             "{e}"
         );
         let (_d, paths) = setup(&["home", "work"]);

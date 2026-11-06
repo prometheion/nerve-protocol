@@ -562,17 +562,18 @@ impl CenterState {
     }
 }
 
-/// How this node confines the commands of folder mode. The installed
-/// Windows service runs every command as another account (crate::win_user),
-/// and the AppContainer is not wired for that account yet (its profile and
-/// window station are made for the user the shim runs as), so there folder
-/// mode has no confinement and runs no command. A node run by hand takes a
-/// Landlock below the floor as none and so refuses folder mode's commands
-/// (nerve_sandbox::LANDLOCK_FLOOR); the installed node keeps it, as its
-/// commands would run as `nerve-run` without it, held by nothing else.
 /// What `status` says where the pairings' commands see each other's
 /// processes ([`Shared::processes_warning`]).
-pub const PROCESSES_SHARED: &str = "this kernel gives no command a /proc of its own (no user namespaces for nerve-run): each pairing's commands see the running commands of the others, with their command lines";
+pub const PROCESSES_SHARED: &str = "this kernel gives no command a /proc of its own (the node may not make user namespaces here): each pairing's commands see the running commands of the others, with their command lines";
+
+/// Whether an `exec.run` command gets a `/proc` of its own: on a node where
+/// the shim can make one (`available`, [`Shared::own_proc`]), the commands
+/// held apart from the owner, by Landlock (folder mode) or as `nerve-run`
+/// (also where Landlock is missing). A command of the owner's own rights
+/// sees the owner's processes anyway.
+pub(crate) fn exec_has_own_proc(available: bool, landlock_held: bool, separate_held: bool) -> bool {
+    available && (landlock_held || separate_held)
+}
 
 /// Whether the shim at `exe` can give a command a PID namespace with a
 /// `/proc` of its own here ([`Shared::own_proc`]): tried once.
@@ -595,6 +596,14 @@ fn net_filter_here() -> bool {
     false
 }
 
+/// How this node confines the commands of folder mode. The installed
+/// Windows service runs every command as another account (crate::win_user),
+/// and the AppContainer is not wired for that account yet (its profile and
+/// window station are made for the user the shim runs as), so there folder
+/// mode has no confinement and runs no command. A node run by hand takes a
+/// Landlock below the floor as none and so refuses folder mode's commands
+/// (nerve_sandbox::LANDLOCK_FLOOR); the installed node keeps it, as its
+/// commands would run as `nerve-run` without it, held by nothing else.
 pub(crate) fn confinement_for(detected: Confinement, service: bool) -> Confinement {
     if !service {
         return detected.by_hand();
@@ -1454,16 +1463,14 @@ impl Shared {
         None
     }
 
-    /// That the commands of the installed Linux node's pairings, all of
-    /// `nerve-run`, see each other's running commands here, with their
-    /// command lines: the kernel gives the shim no PID namespace with a
-    /// `/proc` of its own (nerve_sandbox::own_proc). Without Landlock
+    /// That the commands of a Linux node's pairings, all of one account
+    /// (`nerve-run` on the installed node, the owner by hand), see each
+    /// other's running commands here, with their command lines: the kernel
+    /// gives the shim no PID namespace with a `/proc` of its own
+    /// (nerve_sandbox::own_proc). Without Landlock
     /// [`Shared::pairings_warning`] says more.
     fn processes_warning(&self) -> Option<&'static str> {
-        (self.service
-            && cfg!(target_os = "linux")
-            && self.confinement.landlock_abi.is_some()
-            && !self.own_proc)
+        (cfg!(target_os = "linux") && self.confinement.landlock_abi.is_some() && !self.own_proc)
             .then_some(PROCESSES_SHARED)
     }
 
@@ -4536,16 +4543,32 @@ mod tests {
         }
     }
 
-    /// The installed node's status says where its pairings' commands see
-    /// each other's processes: no /proc of their own here (#199). A node
-    /// run by hand, and one where the shim makes one, say nothing of it.
+    /// Which commands get a /proc of their own: the ones held apart from
+    /// the owner, by Landlock or as nerve-run (also without Landlock, the
+    /// half the tests of a node by hand cannot start), and only where the
+    /// shim can make one (round 1, spec/security 4).
+    #[test]
+    fn a_command_held_apart_gets_a_proc_of_its_own() {
+        use super::exec_has_own_proc as has;
+        assert!(has(true, true, false), "folder mode, Landlock");
+        assert!(has(true, false, true), "nerve-run without Landlock");
+        assert!(has(true, true, true));
+        assert!(!has(true, false, false), "the owner's own rights");
+        assert!(!has(false, true, true), "no namespace here");
+    }
+
+    /// The status says where the pairings' commands see each other's
+    /// processes, on the installed node and on one run by hand: no /proc of
+    /// their own here (#199). A node where the shim makes one says nothing
+    /// of it.
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread")]
     async fn the_status_says_where_the_pairings_see_each_others_processes() {
         for (service, own_proc, told) in [
             (true, false, true),
             (true, true, false),
-            (false, false, false),
+            (false, false, true),
+            (false, true, false),
         ] {
             let log = Log::new(Level::Info);
             let d = tempfile::tempdir().unwrap();

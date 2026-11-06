@@ -2754,3 +2754,100 @@ async fn the_installed_nodes_pairings_see_only_their_own_processes() {
         let _ = std::fs::remove_dir_all(work);
     }
 }
+
+/// With the node's AppArmor profile loaded and the service running in it
+/// (what `install` does on Ubuntu 24.04), a command leaves the profile at
+/// its start: in folder mode through the shim, in `user` mode without it
+/// (round 1, security 1). Without that the label of the command stays
+/// `nerve-node (unconfined)`, and its user namespaces keep all their
+/// capabilities. This machine need not hold user namespaces back: the label
+/// is what is read.
+///
+/// `NERVE_NODE_REAL=<the nerve-node to install> NERVE_REAL_OWNER=<an
+/// account with a home> cargo test -p nerve-node --test real_account --
+/// --ignored --exact the_nodes_commands_leave_its_apparmor_profile`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "installs the node on this machine and loads an AppArmor profile; NERVE_NODE_REAL and NERVE_REAL_OWNER name it"]
+async fn the_nodes_commands_leave_its_apparmor_profile() {
+    let (Some(exe), Some(owner)) = (
+        std::env::var_os("NERVE_NODE_REAL").map(PathBuf::from),
+        std::env::var("NERVE_REAL_OWNER").ok(),
+    ) else {
+        eprintln!("skipped: NERVE_NODE_REAL or NERVE_REAL_OWNER is not set");
+        return;
+    };
+    assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
+    let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
+    assert!(ok, "{said}");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "\n");
+    assert!(ok, "{said}");
+    let work = PathBuf::from("/srv/nrv-aa-work");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    assert!(
+        sh(Command::new("chown")
+            .arg(format!("{owner}:{owner}"))
+            .arg(&work))
+        .0
+    );
+    let mut center = FakeCenter::start(false).await.unwrap();
+    let link = center.link().render();
+    let (ok, said) = as_owner(&owner, &["center", "add", &link, "--yes", "--name", "lab"]);
+    assert!(ok, "{said}");
+    let (ok, said) = as_owner(
+        &owner,
+        &[
+            "folder",
+            "add",
+            work.to_str().unwrap(),
+            "rwx",
+            "--center",
+            "lab",
+        ],
+    );
+    assert!(ok, "{said}");
+    // The profile `install` writes where AppArmor holds user namespaces
+    // back, loaded by hand here, and the service started again in it.
+    let profile = Path::new("/etc/apparmor.d/nerve-node");
+    std::fs::write(
+        profile,
+        nerve_node::service::apparmor_profile_text(Path::new(BIN)),
+    )
+    .unwrap();
+    let (ok, said) = sh(Command::new("apparmor_parser").arg("-r").arg(profile));
+    assert!(ok, "{said}");
+    let (ok, said) = sh(Command::new("systemctl").args(["restart", "nerve-node"]));
+    assert!(ok, "{said}");
+    let (_, pid) =
+        sh(Command::new("systemctl").args(["show", "-p", "MainPID", "--value", "nerve-node"]));
+    let label = std::fs::read_to_string(format!("/proc/{}/attr/current", pid.trim())).unwrap();
+    eprintln!("the node's label: {}", label.trim());
+    assert!(
+        label.starts_with("nerve-node"),
+        "the node is in its profile: {label}"
+    );
+    let paired = center.paired().expect("paired");
+    let mut inc = center.next_link(WAIT).await.expect("the node dials");
+    fake_center::handshake(&mut inc.conn, &center.center_id, &paired)
+        .await
+        .expect("handshake");
+    let mut conn = inc.conn;
+    let r = run(&mut conn, &work, "cat /proc/self/attr/current")
+        .await
+        .unwrap();
+    eprintln!("folder mode, through the shim: {}", out(&r).trim());
+    assert_eq!(out(&r), "unconfined\n", "{r}");
+    // `user` mode: no shim, the owner's own account.
+    assert!(as_owner(&owner, &["mode", "user", "--center", "lab"]).0);
+    let r = run(&mut conn, &work, "cat /proc/self/attr/current")
+        .await
+        .unwrap();
+    eprintln!("user mode, without the shim: {}", out(&r).trim());
+    assert_eq!(out(&r), "unconfined\n", "{r}");
+
+    let _ = sh(Command::new("apparmor_parser").arg("-R").arg(profile));
+    let _ = std::fs::remove_file(profile);
+    let (ok, said) = sh(Command::new(BIN).args(["uninstall", "--purge"]));
+    assert!(ok, "{said}");
+    let _ = std::fs::remove_dir_all(&work);
+}

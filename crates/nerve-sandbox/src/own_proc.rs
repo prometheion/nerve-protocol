@@ -9,7 +9,11 @@
 //! first, unprivileged, in which it may make the other two. The namespace
 //! maps the command's own user and group to themselves and nothing else:
 //! there is no root inside, a file of another account shows as `nobody`,
-//! and the kernel still checks every access as the real account. Three
+//! and the kernel still checks every access as the real account. A node
+//! that runs as root maps every id it sees instead ([`id_map`]): in a
+//! namespace the kernel lets root override file permissions only over ids
+//! the namespace maps, and root's command would lose its rights over the
+//! files of everyone else. Three
 //! processes then stand for the command:
 //!
 //! - the shim, in the node's namespace, which the node waits for: it waits
@@ -46,14 +50,20 @@ fn last() -> io::Error {
 pub fn enter() -> io::Result<Entered> {
     // SAFETY: plain getters.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    // The parent's maps are read before the unshare changes what
+    // `/proc/self` says.
+    let (uids, gids) = (parent_map("uid_map"), parent_map("gid_map"));
     // SAFETY: unshare with flags only.
     if unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWPID | libc::CLONE_NEWNS) } != 0 {
         return Err(last());
     }
-    // The command's own ids, and no others: nobody is root inside.
-    std::fs::write("/proc/self/uid_map", format!("{uid} {uid} 1\n"))?;
-    std::fs::write("/proc/self/setgroups", "deny")?;
-    std::fs::write("/proc/self/gid_map", format!("{gid} {gid} 1\n"))?;
+    // The command's own ids, and no others: nobody is root inside. Root
+    // keeps its rights, and may leave `setgroups` as it is.
+    std::fs::write("/proc/self/uid_map", id_map(uid, &uids))?;
+    if uid != 0 {
+        std::fs::write("/proc/self/setgroups", "deny")?;
+    }
+    std::fs::write("/proc/self/gid_map", id_map(gid, &gids))?;
     let mut ends = [0; 2];
     // SAFETY: a pipe into an array of two descriptors.
     if unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
@@ -75,6 +85,104 @@ pub fn enter() -> io::Result<Entered> {
             Ok(Entered::Ended(shim(first, read)))
         }
     }
+}
+
+/// The ids the process sees, as `/proc/self/{uid,gid}_map` says: its text,
+/// empty where it cannot be read (the namespace then maps the one id).
+fn parent_map(file: &str) -> String {
+    std::fs::read_to_string(format!("/proc/self/{file}")).unwrap_or_default()
+}
+
+/// What the new namespace maps, for the process whose id is `own` and
+/// whose namespace's map is `parent` (`inside outside count` lines, the
+/// first column being what this process sees). A process that is not root
+/// maps its own id to itself and nothing else. Root maps every id it sees
+/// to itself: there it keeps `CAP_DAC_OVERRIDE` and the like over the
+/// files of everyone else, which a map of one id would take from it (they
+/// show as `nobody`, and root's own rights stop at the files it owns).
+fn id_map(own: u32, parent: &str) -> String {
+    let all: Vec<String> = parent
+        .lines()
+        .filter_map(|l| {
+            let mut w = l.split_whitespace();
+            let (inside, _outside, count) = (w.next()?, w.next()?, w.next()?);
+            Some(format!("{inside} {inside} {count}\n"))
+        })
+        .collect();
+    if own != 0 || all.is_empty() {
+        return format!("{own} {own} 1\n");
+    }
+    all.concat()
+}
+
+/// The name of the node's AppArmor profile, which `nerve-node install` puts
+/// where AppArmor holds user namespaces back from an account (Ubuntu
+/// 24.04): it lets the node's own program, the shim, make the namespace.
+pub const APPARMOR_PROFILE: &str = "nerve-node";
+
+/// Whether `label`, what `/proc/self/attr/current` says, is the node's
+/// profile in any mode (`nerve-node (unconfined)`, `nerve-node (enforce)`,
+/// a stacked label starting with it).
+fn in_profile(label: &[u8]) -> bool {
+    label
+        .strip_prefix(APPARMOR_PROFILE.as_bytes())
+        .is_some_and(|rest| matches!(rest.first(), None | Some(b' ' | b'\n' | 0)))
+}
+
+/// Reads at most `buf.len()` bytes of the file at `path` into `buf`: how
+/// many, or `None` where it cannot be opened or read. Plain system calls
+/// only, so it may run between `fork` and `exec`.
+fn read_small(path: &std::ffi::CStr, buf: &mut [u8]) -> Option<usize> {
+    // SAFETY: open, read into a buffer of this size, close.
+    unsafe {
+        let fd = libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+        if fd < 0 {
+            return None;
+        }
+        let n = libc::read(fd, buf.as_mut_ptr().cast(), buf.len());
+        libc::close(fd);
+        usize::try_from(n).ok()
+    }
+}
+
+/// Writes `text` to the file at `path`. Plain system calls only.
+fn write_small(path: &std::ffi::CStr, text: &[u8]) -> bool {
+    // SAFETY: open, write from a buffer of this size, close.
+    unsafe {
+        let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+        if fd < 0 {
+            return false;
+        }
+        let n = libc::write(fd, text.as_ptr().cast(), text.len());
+        libc::close(fd);
+        usize::try_from(n) == Ok(text.len())
+    }
+}
+
+/// Makes the next `exec` of this process leave the node's AppArmor profile
+/// for none, where the process is in it. The profile lets the node's own
+/// program make a user namespace and is passed on through every `exec`
+/// otherwise; a command that kept it could make user namespaces with all
+/// their capabilities, which Ubuntu holds back from every other program
+/// (`kernel.apparmor_restrict_unprivileged_userns`). With none, the system
+/// treats the command as it treats any program of an account. Nothing
+/// happens where the process is not in the profile or AppArmor is not
+/// there. Before Landlock, which would refuse the write. Plain system
+/// calls only, so it may run between `fork` and `exec`.
+pub fn leave_profile() -> io::Result<()> {
+    let mut label = [0u8; 160];
+    match read_small(c"/proc/self/attr/current", &mut label) {
+        Some(n) if in_profile(&label[..n]) => {}
+        _ => return Ok(()),
+    }
+    // The AppArmor-only file first (kernels that stack security modules),
+    // then the general one.
+    for path in [c"/proc/self/attr/apparmor/exec", c"/proc/self/attr/exec"] {
+        if write_small(path, b"exec unconfined") {
+            return Ok(());
+        }
+    }
+    Err(last())
 }
 
 /// The signals the node may send a command's group that would end the shim
@@ -251,6 +359,47 @@ pub fn works(exe: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
+
+    /// Root keeps its rights in the namespace: it maps every id it sees,
+    /// as the kernel gives root's override of file permissions only over
+    /// ids the namespace maps (round 1, correctness 1). Any other account
+    /// maps itself alone.
+    #[test]
+    fn a_root_node_maps_every_id_it_sees_and_another_account_its_own() {
+        assert_eq!(super::id_map(0, "0 0 4294967295\n"), "0 0 4294967295\n");
+        // A node in a container sees what its map shows it.
+        assert_eq!(
+            super::id_map(0, "         0     100000      65536\n"),
+            "0 0 65536\n"
+        );
+        assert_eq!(super::id_map(0, "0 1000 1\n5 1005 3\n"), "0 0 1\n5 5 3\n");
+        assert_eq!(super::id_map(1000, "0 0 4294967295\n"), "1000 1000 1\n");
+        // A map that cannot be read leaves root its own id.
+        assert_eq!(super::id_map(0, ""), "0 0 1\n");
+    }
+
+    /// Only the node's own profile is left at exec, in any of its modes.
+    #[test]
+    fn the_node_leaves_its_own_profile_and_no_other() {
+        for label in [
+            "nerve-node (unconfined)\n",
+            "nerve-node (enforce)\n",
+            "nerve-node\n",
+            "nerve-node",
+            "nerve-node (unconfined)//child\n",
+        ] {
+            assert!(super::in_profile(label.as_bytes()), "{label}");
+        }
+        for label in [
+            "unconfined\n",
+            "",
+            "nerve-node-other (enforce)\n",
+            "my-nerve-node (enforce)\n",
+            "/usr/bin/bwrap (enforce)\n",
+        ] {
+            assert!(!super::in_profile(label.as_bytes()), "{label}");
+        }
+    }
 
     /// A shim that runs the command in the node's own namespace is no
     /// namespace: the probe says so by the pid the command finds, not by

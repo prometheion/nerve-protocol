@@ -1632,12 +1632,15 @@ mod tests {
         for part in [
             r#"n.platform === "windows""#,
             "in the Nerve app on that machine, Permissions, Sudo",
-            "`nerve-node rule add allow ${shellWord(command)}`",
+            "const line = sudoRuleLine(command);",
             r#"btn("Copy", "ghost", () => copy(line)"#,
         ] {
             assert!(hint.contains(part), "{part}");
         }
-        assert!(APP_JS.contains(r#"return `'${String(s).replace(/'/g, "'\\''")}'`;"#));
+        assert!(
+            !APP_JS.contains("shellWord"),
+            "no word is quoted for one shell"
+        );
         let dir = tempfile::tempdir().unwrap();
         let ui = Ui::new(&center(dir.path()), None, true);
         let (status, e) = ui
@@ -1656,6 +1659,41 @@ mod tests {
                 .contains("only the machine's owner"),
             "{e}"
         );
+    }
+
+    /// The line the Audit page offers for a sudo command is the exact rule
+    /// (a trailing ` *` stays the command's own, not a wildcard for root),
+    /// and only for a word that reads the same in POSIX shells and in fish:
+    /// none with a quote, a backslash or a line break (round 1, security 2
+    /// and 3). Runs the page's function with `node` where it is there.
+    #[test]
+    fn the_sudo_line_is_the_exact_rule_and_is_safe_to_paste() {
+        let from = APP_JS.find("function sudoRuleLine(").unwrap();
+        let func = &APP_JS[from..from + APP_JS[from..].find("\n}\n").unwrap() + 3];
+        let script = format!(
+            "{func}\nconst cases = [\"sudo apt update\", \"sudo chown -R me *\", \"it's\", \"a\\\\'b\", \"a\\nb\", \"a\\u0000b\", \"x\\\\\"];\nconsole.log(JSON.stringify(cases.map(sudoRuleLine)));"
+        );
+        let out = match std::process::Command::new("node")
+            .args(["-e", &script])
+            .output()
+        {
+            Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap(),
+            Ok(o) => panic!("{}", String::from_utf8_lossy(&o.stderr)),
+            Err(_) => {
+                eprintln!("skipped: no node here");
+                return;
+            }
+        };
+        let lines: Vec<Option<String>> = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(
+            lines[0].as_deref(),
+            Some("nerve-node rule add allow --action exec.run --exact 'sudo apt update'")
+        );
+        assert_eq!(
+            lines[1].as_deref(),
+            Some("nerve-node rule add allow --action exec.run --exact 'sudo chown -R me *'")
+        );
+        assert_eq!(&lines[2..], [None, None, None, None, None], "{lines:?}");
     }
 
     #[test]

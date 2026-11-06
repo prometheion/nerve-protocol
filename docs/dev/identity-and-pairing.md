@@ -26,7 +26,7 @@ node.
    the link. The code lasts 10 minutes by default (up to 24 hours), allows 10
    tries and works once.
    `nerve://pair?center=<percent-encoded URL>&code=<code>&pin=<pin>`
-2. On the node: `nerve-node center add '<link>'`. The node parses the link
+2. On the node: `nerve-node center add -` and paste the link (a link given as an argument is in the process list while the node waits for the yes). The node parses the link
    strictly and shows the center's address, plus the policy the new pairing
    starts with (mode `folder`, no folder, the guard's deny rules
    `nerve_policy::rules::GUARD`, settings grant `off`). Before it asks, it

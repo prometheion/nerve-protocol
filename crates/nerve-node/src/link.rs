@@ -3487,7 +3487,11 @@ impl Link {
             tap,
             no_network,
             // Held apart from the owner, it sees only its own processes.
-            own_proc: self.shared.own_proc && (landlock_held || separate_held),
+            own_proc: crate::daemon::exec_has_own_proc(
+                self.shared.own_proc,
+                landlock_held,
+                separate_held,
+            ),
         };
         let r = exec::run(&rc, &opts, |e| guard.started(e, no_network)).await;
         drop(open);

@@ -173,7 +173,7 @@ Through a [relay](node-link.md#a-relay-as-the-owner-sets-it-up), `status` names 
 
 | Message | Cause | Fix |
 |---|---|---|
-| `the proxy refused the tunnel to …: 400 …` | The node speaks plain HTTP to the relay, which speaks TLS only | `proxy set 'https://…' --pin=<pin>`, the line `relay add` showed |
+| `the proxy refused the tunnel to …: 400 …` | The node speaks plain HTTP to the relay, which speaks TLS only | `proxy set -` and paste the link `relay add` showed |
 | `TLS with the proxy …: its certificate does not carry the pinned key` | The pin in `proxy set` is not the relay's, or the relay made a new certificate | On the relay, `nerve-node relay` shows the pin |
 | `the proxy refused the tunnel to …: 407 …` | The relay does not know the name and token in `proxy set` | On the relay, `nerve-node relay`; give the node a new token with `relay token <name>`; a relay on Windows knows a new token only after **Restart** on its app's **Overview** |
 | `the proxy refused the tunnel to …: 403 …` | The center's address is not one the relay is paired with over https, or not one the relay's owner picked for this node | Pair with the URL the relay uses for that center; on the relay, `relay` shows the node's centers |

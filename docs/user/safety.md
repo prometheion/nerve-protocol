@@ -83,12 +83,15 @@ leads to the detail.
   name, not someone who hides the name. The mode, the rules and the account
   are the protection ([guard](../dev/policy-engine.md#the-guard)).
 - A mode change, `cap set ... off` or the end of a `--for` does not stop a
-  running command. A program handed to a service manager, or detached on a
-  node without a cgroup, outlives a stop
+  running command. A program handed to a service manager outlives a stop,
+  and a detached one where the command has neither a cgroup nor a `/proc`
+  of its own
   ([what ends a command](../dev/sandbox-linux.md#what-ends-a-command)).
 - While a command runs, its line, with the call's values, is readable by
-  every account; by other pairings' commands only where `status` warns. Put
-  no secret in a command or a capability's line
+  every account, and by other pairings' commands unless they have a `/proc`
+  of their own: Linux folder mode and `nerve-run`, where `status` warns when
+  the kernel gives none. A command that runs as you, and any on Windows, sees
+  all. Put no secret in a command or a capability's line
   ([secrets](../dev/capabilities.md#keep-secrets-out-of-the-command)).
 - The check of a program's provider tells programs apart, not users: allow
   only programs you trust

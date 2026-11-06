@@ -523,6 +523,15 @@ mod imp {
                 }
             }
         }
+        // The profile that let the shim make the namespace stays with the
+        // shim: whatever it starts leaves it (Landlock, below, forbids the
+        // write, and the shim is any account's to run).
+        if let Err(e) = super::own_proc::leave_profile() {
+            eprintln!(
+                "nerve-node: cannot take the command out of the node's AppArmor profile: {e}"
+            );
+            return SHIM_FAILED;
+        }
         if let Some(l) = &spec.landlock {
             let applied = super::landlock_rules::prepare(l)
                 .and_then(|r| super::landlock_rules::enforce(r).map_err(|e| e.to_string()));

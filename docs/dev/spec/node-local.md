@@ -950,7 +950,8 @@ turns it on, and a center reads and changes nothing of it, grant or not.
 - `nerve-node relay add <name> [--center <center>]...` makes a token for a
   relayed node: 43 characters of `a-z0-9`, shown once, with the line the
   relayed node runs,
-  `nerve-node proxy set 'https://<name>:<token>@<relay>:<port>' --pin=<pin>`.
+  `nerve-node proxy set -`, with the link on the next line (the token stays
+  out of the process list).
   `node.toml` keeps the token's SHA-256 only, and the log tells a change of
   `relay.node` without its values. `relay token <name>` gives a known node
   a new token, shown once with the same line, and keeps its centers and

@@ -1144,6 +1144,36 @@ pub fn proxy_login(url: &str, typed: &str) -> (String, Option<String>) {
     (url, password)
 }
 
+/// The arguments of `proxy set` for the dialog's values, and what goes to
+/// it on stdin. The address (a relay link holds a token) goes on stdin like
+/// the password and the header values: an argument shows in the process
+/// list of the machine. The CLI reads the address from the first line, then
+/// the password of a URL with a user name and no password, and the headers
+/// of `--header -` after it. `url` and `password` are [`proxy_login`]'s.
+pub fn proxy_set_command(
+    url: &str,
+    pin: &str,
+    headers: &str,
+    password: Option<String>,
+) -> (Vec<String>, String) {
+    let mut args: Vec<String> = vec!["proxy".into(), "set".into(), "-".into()];
+    if !pin.is_empty() {
+        args.push(format!("--pin={pin}"));
+    }
+    let mut input = vec![url.to_string()];
+    input.extend(password);
+    let headers: Vec<&str> = headers
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if !headers.is_empty() {
+        args.push("--header=-".into());
+        input.extend(headers.iter().map(|h| h.to_string()));
+    }
+    (args, input.join("\n"))
+}
+
 /// `%XX` escapes undone; a broken one stays as it is.
 fn pct_decode(s: &str) -> String {
     let b = s.as_bytes();
@@ -2729,6 +2759,25 @@ mod tests {
             login("http://alice:old@p.example:3128", "typed"),
             ("http://alice@p.example:3128".into(), Some("typed".into()))
         );
+    }
+
+    /// Nothing the owner typed into the proxy dialog is an argument of
+    /// `proxy set`, which every process of the machine can read: not a relay
+    /// link with its token either (round 1, correctness 6).
+    #[test]
+    fn the_proxy_dialog_hands_the_cli_its_address_on_stdin() {
+        let link = "nerve://relay?host=relay.example&port=7490&node=lab&token=t0ken&pin=abc";
+        let (args, input) = proxy_set_command(link, "", "", None);
+        assert_eq!(args, ["proxy", "set", "-"]);
+        assert_eq!(input, link);
+        let (args, input) = proxy_set_command(
+            "http://alice@p.example:3128",
+            "abc",
+            "X-A: 1\n\n X-B: 2 \n",
+            Some("pw".into()),
+        );
+        assert_eq!(args, ["proxy", "set", "-", "--pin=abc", "--header=-"]);
+        assert_eq!(input, "http://alice@p.example:3128\npw\nX-A: 1\nX-B: 2");
     }
 
     #[test]

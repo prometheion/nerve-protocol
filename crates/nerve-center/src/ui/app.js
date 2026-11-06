@@ -487,18 +487,28 @@ function sudoListHint(n, command, key) {
   if (n && n.platform === "windows") {
     return el("p", { class: "meta" }, "Only the machine's owner puts a command on the sudo list: in the Nerve app on that machine, Permissions, Sudo.");
   }
-  const line = `nerve-node rule add allow ${shellWord(command)}`;
+  const line = sudoRuleLine(command);
+  if (!line) {
+    return el("p", { class: "meta" }, "Only the machine's owner puts a command on the sudo list. This one has a quote, a backslash or a line break in it, so a line to copy could not be trusted in every shell: add it in the Nerve app on that machine, Permissions, Sudo, or type `nerve-node rule add allow --action exec.run --exact` and the command yourself.");
+  }
   return el("div", {},
-    el("p", { class: "meta" }, "Only the machine's owner puts a command on the sudo list. On that machine:"),
+    el("p", { class: "meta" }, "Only the machine's owner puts a command on the sudo list. On that machine (add --center <name> where it has several pairings):"),
     el("div", { class: "pair-rows" }, el("div", { class: "pair-row" },
       el("code", { class: "pair-value mono" }, line),
       btn("Copy", "ghost", () => copy(line), "copy", `${key}:sudo-copy`))));
 }
 
-// `s` as one word for a POSIX shell: in single quotes, a quote inside it
-// closed, escaped and opened again.
-function shellWord(s) {
-  return `'${String(s).replace(/'/g, "'\\''")}'`;
+// The line that puts the sudo command `command` on the list exactly as it
+// is, the rule the audit buttons made: --exact keeps a trailing * the
+// command's own, where it would be a wildcard, every command that starts
+// so, as root. Null where a line to copy could not be trusted: inside
+// single quotes a word reads the same in POSIX shells and in fish unless it
+// holds a quote or a backslash (fish reads \' and \\ there), and a line
+// break would run what is before it when pasted.
+function sudoRuleLine(command) {
+  const s = String(command);
+  if (/['\\\u0000-\u001f\u007f]/.test(s)) return null;
+  return `nerve-node rule add allow --action exec.run --exact '${s}'`;
 }
 
 // A choice of the arguments of an audit entry's call that a rule may pin

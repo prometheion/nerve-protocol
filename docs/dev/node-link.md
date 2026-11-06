@@ -439,9 +439,9 @@ nerve-node proxy set -     # then the link on the next line
 
 `-` takes the URL or the link from the first line of stdin; a password the
 URL asks for (`http://user@host:port`) comes on the line after it, and
-`--header -` headers after that. It is the same as the URL with the login
-and the pin:
-`proxy set 'https://lab-pc:<token>@relay.example:7490' --pin=<pin>`.
+`--header -` headers after that. The link is the same as the URL with the
+login (`https://lab-pc:<token>@relay.example:7490`) and the pin
+(`--pin=<pin>`, for a URL).
 
 Give the pin as `--pin=<pin>`: a pin can start with `-`, which would be read
 as an option after a space.

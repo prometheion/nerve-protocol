@@ -230,7 +230,7 @@ fn the_user_pages_keep_the_limits_a_user_needs() {
         ("docs/user/safety.md", "does not stop a running command"),
         (
             "docs/user/safety.md",
-            "is readable by every account; by other pairings' commands only where `status` warns",
+            "is readable by every account, and by other pairings' commands unless they have a `/proc` of their own",
         ),
         ("docs/user/safety.md", "tells programs apart, not users"),
         ("docs/user/safety.md", "the keyring is yours"),
@@ -339,5 +339,59 @@ fn every_doc_page_the_code_names_exists() {
     walk(&root().join("docs/dev"), &mut found);
     // A test that feeds a made-up command its own path of the docs.
     found.retain(|f| !f.contains("nerve-policy/tests/guard.rs"));
+    assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
+/// Every `.rs`, `.js`, `.md` and `.json` file below `dir`, except build
+/// output and this crate's tests.
+fn text_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if p.is_dir() {
+            if !matches!(&*name, "target" | ".git" | "node_modules" | ".reviews") {
+                text_files(&p, out);
+            }
+        } else if matches!(
+            p.extension().and_then(|e| e.to_str()),
+            Some("rs" | "js" | "md" | "json")
+        ) {
+            out.push(p);
+        }
+    }
+}
+
+/// The hints and docs teach a pairing link and a relay link on stdin
+/// (`center add -`, `proxy set -`), never as an argument, which every
+/// process of the machine reads while the command waits (#198; round 1,
+/// spec 1 and 2, security 5). A line that checks a text to be absent, as
+/// an assert does, may name the argument form.
+#[test]
+fn no_hint_teaches_a_pairing_or_relay_link_as_an_argument() {
+    // Written in parts so that this file does not match itself.
+    let forms = [
+        ["center", " add '"].concat(),
+        ["center", " add <"].concat(),
+        ["center", " add \""].concat(),
+        ["proxy", " set 'https"].concat(),
+        ["proxy", " set \"https"].concat(),
+    ];
+    let mut files = Vec::new();
+    text_files(&root().join("crates"), &mut files);
+    text_files(&root().join("docs"), &mut files);
+    files.push(root().join("README.md"));
+    let mut found = Vec::new();
+    for f in files {
+        let Ok(text) = std::fs::read_to_string(&f) else {
+            continue;
+        };
+        for (n, line) in text.lines().enumerate() {
+            let checks_absence = line.contains("contains(") && line.contains("assert");
+            if !checks_absence && forms.iter().any(|form| line.contains(form.as_str())) {
+                found.push(format!("{}:{}: {}", f.display(), n + 1, line.trim()));
+            }
+        }
+    }
     assert!(found.is_empty(), "{}", found.join("\n"));
 }

@@ -269,7 +269,10 @@ pub const APPARMOR_PROFILE: &str = "nerve-node";
 /// which Ubuntu 24.04 holds back from an account by default
 /// (`kernel.apparmor_restrict_unprivileged_userns`). The exec shim, the
 /// same program, makes one for each command held apart from the owner, to
-/// give it a `/proc` of its own (nerve_sandbox::own_proc, #199).
+/// give it a `/proc` of its own (nerve_sandbox::own_proc, #199). What the
+/// node starts leaves the profile at its `exec`
+/// (nerve_sandbox::own_proc::leave_profile): it holds the node's program
+/// alone, not a command's user namespaces.
 pub fn apparmor_profile_text(bin: &Path) -> String {
     format!(
         "# Written by `nerve-node install`; `nerve-node uninstall` removes it.
@@ -952,7 +955,7 @@ pub fn install_asking(
 }
 
 /// What `install` says to do next: the headless way to a working pairing.
-pub(crate) const NEXT: &str = "Next: `nerve-node center add '<link>'` pairs the node with a center, and `nerve-node folder add <folder> rwx` gives it a folder to read, write and run commands in.";
+pub(crate) const NEXT: &str = "Next: `nerve-node center add -` pairs the node with a center (paste the link on the next line), and `nerve-node folder add <folder> rwx` gives it a folder to read, write and run commands in.";
 
 #[allow(clippy::too_many_arguments)]
 fn install_steps(
@@ -1422,7 +1425,6 @@ fn remove_if_there(path: &Path) -> Result<bool, String> {
     }
 }
 
-/// Removes the polkit files and the service helper again.
 /// Where AppArmor holds user namespaces back, puts the node's profile
 /// ([`apparmor_profile_text`]) and loads it, so the node's commands get a
 /// `/proc` of their own; where it does not, a profile an earlier install
@@ -1462,6 +1464,7 @@ fn remove_apparmor(layout: &Layout, sys: &dyn System, steps: &mut Steps) -> Resu
     Ok(())
 }
 
+/// Removes the polkit files and the service helper again.
 fn remove_polkit(layout: &Layout, steps: &mut Steps) -> Result<(), String> {
     let helper = layout.service_helper();
     for path in [
@@ -4109,6 +4112,18 @@ pub(crate) mod tests {
     /// their own (#199); elsewhere it puts none and takes an old one away,
     /// and uninstall takes it out of the kernel and deletes it.
     #[cfg(unix)]
+    /// The shim leaves the profile by the name the install gives it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_shim_leaves_the_profile_the_install_puts() {
+        assert_eq!(APPARMOR_PROFILE, nerve_sandbox::own_proc::APPARMOR_PROFILE);
+        assert!(
+            apparmor_profile_text(Path::new("/usr/local/bin/nerve-node")).contains(&format!(
+                "profile {APPARMOR_PROFILE} /usr/local/bin/nerve-node "
+            ))
+        );
+    }
+
     #[test]
     fn install_loads_an_apparmor_profile_where_user_namespaces_are_held_back() {
         let d = tempfile::tempdir().unwrap();
