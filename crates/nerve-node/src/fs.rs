@@ -1015,8 +1015,7 @@ fn write(path: &Path, content: &[u8], if_match: Option<&str>) -> Result<Value, R
         let _ = dir.remove(&tmp);
         return Err(open_error(path, e));
     }
-    let h = ring::digest::digest(&ring::digest::SHA256, content);
-    Ok(json!({"etag": nerve_proto::msg::hex(h.as_ref()), "size": content.len()}))
+    Ok(json!({"etag": nerve_transport::keys::sha256_hex(content), "size": content.len()}))
 }
 
 /// The resolved folder `path`, opened a part at a time from `/` without

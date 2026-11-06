@@ -4268,11 +4268,7 @@ pub(crate) mod tests {
     /// did before it moved to the shared downloader, and refuses a sixth
     /// (review r3, finding 7).
     fn sha(b: &[u8]) -> String {
-        ring::digest::digest(&ring::digest::SHA256, b)
-            .as_ref()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        nerve_transport::keys::sha256_hex(b)
     }
 
     #[tokio::test]

@@ -95,14 +95,14 @@ fn trim(e: Value) -> Value {
             _ if k == "args" => continue,
             Value::Number(n) if k == "ts" => Value::Number(n),
             Value::String(s) if k == "target" => nerve_policy::audit::cut_target(&s).into(),
-            Value::String(s) if k != "ts" => util::clip(&s, FIELD_MAX).into(),
+            Value::String(s) if k != "ts" => util::clip_bytes(&s, FIELD_MAX).into(),
             // The checker marker: an object the center built, kept with its
             // `layer`, `scope` (global or node) and `detail` strings clipped.
             Value::Object(o) if k == "checker" => {
                 let mut m = Map::new();
                 for key in ["layer", "scope", "detail"] {
                     if let Some(Value::String(s)) = o.get(key) {
-                        m.insert(key.into(), util::clip(s, FIELD_MAX).into());
+                        m.insert(key.into(), util::clip_bytes(s, FIELD_MAX).into());
                     }
                 }
                 Value::Object(m)

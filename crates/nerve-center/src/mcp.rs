@@ -175,7 +175,7 @@ impl Engine {
             _ => error(
                 id,
                 -32601,
-                &format!("unknown method {}", util::clip(method, 64)),
+                &format!("unknown method {}", util::clip_bytes(method, 64)),
             ),
         })
     }
@@ -194,7 +194,7 @@ impl Engine {
             let name = info.get("name").and_then(Value::as_str).unwrap_or("");
             let ver = info.get("version").and_then(Value::as_str).unwrap_or("");
             *self.session().client.lock().unwrap() =
-                util::clip(format!("{name} {ver}").trim(), 100);
+                util::clip_bytes(format!("{name} {ver}").trim(), 100);
             self.center.changed(Change::Sessions);
         }
         result(
@@ -227,7 +227,7 @@ impl Engine {
                 -32602,
                 format!(
                     "unknown tool {}; the tools are list and execute",
-                    util::clip(name, 64)
+                    util::clip_bytes(name, 64)
                 ),
             )),
         }
@@ -321,7 +321,7 @@ impl Engine {
             Ok(Some(found)) => found,
             Ok(None) => return text_result(&unknown_node(&self.center, &node), true),
             Err((name, miss)) => {
-                let asked = util::clip(&unit, 64);
+                let asked = util::clip_bytes(&unit, 64);
                 let text = match miss {
                     Miss::Disabled => format!(
                         "error unavailable: node {name} is disabled in the center: it offers nothing, and calls to it are refused."
@@ -522,7 +522,7 @@ impl Engine {
                     ),
                     NoSignal::NotCommand(unit) => RpcError::invalid_args(format!(
                         "job {}: it is a call of {unit}, not a command; exec.signal signals exec.run jobs",
-                        util::clip(&job, 64)
+                        util::clip_bytes(&job, 64)
                     )),
                     NoSignal::NotSent => RpcError::new(
                         ErrorCode::Unavailable,
@@ -803,7 +803,7 @@ impl Engine {
 fn no_stream(node: &str, stream: &str) -> String {
     format!(
         "node {node} has no stream {:?} of this session: the id is another session's or wrong, or the stream was closed (by stream.close, when its job's result was read, or 10 minutes after it ended).",
-        util::clip(stream, 64)
+        util::clip_bytes(stream, 64)
     )
 }
 
@@ -822,7 +822,7 @@ fn no_job(node: &str, job: &str, running: bool) -> String {
     let what = if running { "running job" } else { "job" };
     format!(
         "node {node} has no {what} {:?} of this session: the id is another session's or wrong, or its result was given already or not read for 10 minutes.",
-        util::clip(job, 64)
+        util::clip_bytes(job, 64)
     )
 }
 
@@ -836,7 +836,10 @@ fn device_result(route: &Route, v: Value, cut: bool) -> Value {
         Value::String(s) => listing::guarded_clip(s, RESULT_TEXT),
         other => {
             let body = listing::json_text(other);
-            (util::clip(&body, RESULT_TEXT), body.len() <= RESULT_TEXT)
+            (
+                util::clip_bytes(&body, RESULT_TEXT),
+                body.len() <= RESULT_TEXT,
+            )
         }
     };
     let text = listing::framed(
@@ -1064,12 +1067,15 @@ fn unknown_node(center: &Center, given: &str) -> String {
     let known = if names.is_empty() {
         "no node is paired with this center yet".to_string()
     } else {
-        format!("the nodes are {}", util::clip(&names.join(", "), 2000))
+        format!(
+            "the nodes are {}",
+            util::clip_bytes(&names.join(", "), 2000)
+        )
     };
     let near = listing::near(given, names.iter().map(String::as_str));
     format!(
         "error unknown_node: there is no node {:?}{}; {known}.",
-        util::clip(given, 64),
+        util::clip_bytes(given, 64),
         meant(near)
     )
 }
@@ -1089,7 +1095,7 @@ fn invalid(what: &str) -> Value {
 /// there is one: `takes` says what it does take.
 fn unknown_argument(args: &Map<String, Value>, takes: &str, known: &[&str]) -> Option<Value> {
     let k = args.keys().find(|k| !known.contains(&k.as_str()))?;
-    Some(invalid(&format!("{:?}: {takes}", util::clip(k, 64))))
+    Some(invalid(&format!("{:?}: {takes}", util::clip_bytes(k, 64))))
 }
 
 /// Whether `v` goes in `structuredContent`: at most what a text is cut at.

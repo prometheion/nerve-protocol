@@ -213,12 +213,7 @@ fn mono_font() -> String {
         .unwrap_or_else(|| "DejaVu Sans Mono".into())
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or_default()
-}
+use nerve_proto::msg::now_ms;
 
 /// The account the app runs as, by name.
 pub fn app_user() -> String {

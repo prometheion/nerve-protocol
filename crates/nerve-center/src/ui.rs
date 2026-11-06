@@ -554,7 +554,7 @@ impl Ui {
                 )
             })),
             ("POST", "/api/tokens/create") => {
-                let label = util::clip(s("label").trim(), 60);
+                let label = util::clip_bytes(s("label").trim(), 60);
                 let token = format!("nrv_{}", nerve_transport::keys::random_token(40));
                 let rec = TokenRecord {
                     id: nerve_transport::keys::random_token(12),

@@ -75,9 +75,8 @@ impl Sources {
     /// pinned file. Only the Unix tests run a fake server from it.
     #[cfg(all(test, unix))]
     pub(crate) fn with_model(base: &str, model: &[u8]) -> Sources {
-        let sha = ring::digest::digest(&ring::digest::SHA256, model);
         Sources {
-            model: Some((model.len() as u64, nerve_proto::msg::hex(sha.as_ref()))),
+            model: Some((model.len() as u64, nerve_transport::keys::sha256_hex(model))),
             ..Sources::at(base)
         }
     }
@@ -1096,8 +1095,7 @@ mod tests {
     async fn download_file_checks_hash_and_length_body() {
         use std::io::{Read, Write};
         let body = b"hello llama".to_vec();
-        let sha =
-            nerve_proto::msg::hex(ring::digest::digest(&ring::digest::SHA256, &body).as_ref());
+        let sha = nerve_transport::keys::sha256_hex(&body);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let b = body.clone();

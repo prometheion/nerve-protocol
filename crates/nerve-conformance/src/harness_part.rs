@@ -514,9 +514,7 @@ async fn serve(
             Some(new) = changes.recv() => {
                 d = new;
                 seq += 1;
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |t| t.as_millis() as u64);
+                let ts = nerve_proto::msg::now_ms();
                 let ev = json!({"cap": "node", "name": "descriptor_changed", "seq": seq,
                                 "ts": ts, "data": {}});
                 if conn.notify(method::EVENT, ev).await.is_err() {

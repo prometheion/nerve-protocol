@@ -2187,13 +2187,13 @@ impl Center {
                     .to_string();
                 self.update(|s| {
                     if let Some(n) = s.nodes.get_mut(&node) {
-                        n.going_away = Some(util::clip(&why, 200));
+                        n.going_away = Some(util::clip_bytes(&why, 200));
                     }
                 });
                 self.note(
                     Level::Info,
                     Some(&node),
-                    format!("the node is going away: {}", util::clip(&why, 200)),
+                    format!("the node is going away: {}", util::clip_bytes(&why, 200)),
                 );
                 self.changed(Change::Nodes);
             }
@@ -2556,7 +2556,7 @@ impl Center {
                 format!(
                     "the node did not {wanted} from the web UI ({}): {}",
                     e.kind().as_str(),
-                    util::clip(&e.message, 300)
+                    util::clip_bytes(&e.message, 300)
                 ),
             ),
         }

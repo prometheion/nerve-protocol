@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
+use nerve_proto::text::clip;
 use nerve_proto::{ErrorCode, RpcError};
 use serde::{Deserialize, Serialize};
 use tracing::field::{Field, Visit};
@@ -612,14 +613,6 @@ pub fn span(d: std::time::Duration) -> String {
         60..=3599 => two(s / 60, "min", s % 60, "s"),
         3600..=172_799 => two(s / 3600, "h", s % 3600 / 60, "min"),
         _ => two(s / 86_400, "d", s % 86_400 / 3600, "h"),
-    }
-}
-
-/// `text` cut to `max` characters, with an ellipsis when something was cut.
-fn clip(text: &str, max: usize) -> String {
-    match text.char_indices().nth(max) {
-        Some((end, _)) => format!("{}…", &text[..end]),
-        None => text.to_string(),
     }
 }
 

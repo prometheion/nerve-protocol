@@ -990,14 +990,7 @@ mod unix {
     /// Whether a request carries `token`, compared in time that depends only
     /// on the lengths.
     pub fn token_ok(token: &str, given: Option<&str>) -> bool {
-        given.is_some_and(|g| {
-            token.len() == g.len()
-                && token
-                    .bytes()
-                    .zip(g.bytes())
-                    .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-                    == 0
-        })
+        given.is_some_and(|g| crate::keys::ct_eq(token.as_bytes(), g.as_bytes()))
     }
 
     /// The request a client sends on the socket `path`. The token is read

@@ -25,6 +25,7 @@ use nerve_transport::ws::WsMessage;
 
 use crate::descriptor::IMPLICIT;
 use crate::paths::{NodePaths, home_dir};
+use nerve_proto::text::clip;
 
 /// How a daemon runs.
 #[derive(Debug, Clone)]
@@ -2974,13 +2975,6 @@ fn show_value(v: &Value) -> String {
         other => other.to_string(),
     };
     clip(&text, 80)
-}
-
-fn clip(text: &str, max: usize) -> String {
-    match text.char_indices().nth(max) {
-        Some((end, _)) => format!("{}…", &text[..end]),
-        None => text.to_string(),
-    }
 }
 
 /// The entries of a list setting. A list that is empty is not in the file, so

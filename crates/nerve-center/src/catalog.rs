@@ -96,7 +96,7 @@ impl Reach {
             .iter()
             .filter(|f| f.path.starts_with('/') && plain_line(&f.path) && f.flags().is_some())
             .map(|f| FolderAccess {
-                path: util::clip(&f.path, PATH_MAX),
+                path: util::clip_bytes(&f.path, PATH_MAX),
                 access: f.access.clone(),
                 own: f.own,
                 // Shared marks one of the account's own folders only.
@@ -127,7 +127,7 @@ impl Reach {
             account: a
                 .account
                 .as_deref()
-                .map(|n| util::clip(&one_line(n), ACCOUNT_MAX))
+                .map(|n| util::clip_bytes(&one_line(n), ACCOUNT_MAX))
                 .filter(|n| !n.is_empty()),
             confined: a.confined,
             sudo: a.sudo,
@@ -970,7 +970,7 @@ pub fn center_units() -> Vec<Unit> {
 
 /// `summary` as a unit's description: one line, cut.
 pub(crate) fn described(summary: &str) -> Arc<str> {
-    util::clip(&one_line(summary), DESCRIPTION_MAX).into()
+    util::clip_bytes(&one_line(summary), DESCRIPTION_MAX).into()
 }
 
 /// Names hold letters, digits, `-` and `_`: `.` joins a unit's name, so a
@@ -982,7 +982,7 @@ fn bad_name(what: &str, name: &str) -> Option<String> {
 
 /// A name left out as the owner sees it: on one line and cut.
 fn shown_name(name: &str) -> String {
-    util::clip(&one_line(name), NAME_MAX)
+    util::clip_bytes(&one_line(name), NAME_MAX)
 }
 
 /// Why the state or an event's data of `cap` is outside the subset. Each

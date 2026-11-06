@@ -19,6 +19,7 @@ pub mod msg;
 pub mod resume;
 pub mod rpc;
 pub mod schema;
+pub mod text;
 
 pub use descriptor::{Capability, Descriptor, Detail, Effect, Exposure, UnitKind};
 pub use error::{ErrorCode, RpcError};

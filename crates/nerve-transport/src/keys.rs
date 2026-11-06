@@ -232,9 +232,31 @@ pub fn random_token(n: usize) -> String {
     out
 }
 
+/// Compares two byte strings in time that depends only on their lengths:
+/// for tokens, codes and their hashes.
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// The SHA-256 of `data` in lower-case hex.
+pub fn sha256_hex(data: &[u8]) -> String {
+    hex(ring::digest::digest(&ring::digest::SHA256, data).as_ref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn equal_bytes_compare_equal_and_no_others() {
+        assert!(ct_eq(b"abc", b"abc"));
+        assert!(!ct_eq(b"abc", b"abd"));
+        assert!(!ct_eq(b"abc", b"ab"));
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     #[test]
     fn sudo_offers_are_signed_for_one_center() {
