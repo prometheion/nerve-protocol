@@ -24,7 +24,7 @@ impl Center {
     }
 
     fn start_rotation(&self) -> Result<Value, String> {
-        let _one = nerve_transport::sync::turn(&self.rotating);
+        let _one = lock(&self.rotating);
         if self.read(|s| {
             s.key_rotation
                 .as_ref()
@@ -102,7 +102,7 @@ impl Center {
     }
 
     fn end_rotation(&self, why: &str) -> Result<Value, String> {
-        let _one = nerve_transport::sync::turn(&self.rotating);
+        let _one = lock(&self.rotating);
         let Some(r) = self
             .read(|s| s.key_rotation.clone())
             .filter(|r| r.finished_ms.is_none())
@@ -491,5 +491,58 @@ impl Center {
                         .is_some_and(|o| o.public_key == key && now < o.until_ms)
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CHILD: &str = "NERVE_TEST_ROTATION_POISON";
+
+    /// A panic during a rotation poisons `rotating`; the next rotation step
+    /// ends the center (the rotation is a change of several steps) instead
+    /// of going on with whatever state the panic left.
+    #[test]
+    fn a_poisoned_rotation_lock_ends_the_center() {
+        if let Ok(dir) = std::env::var(CHILD) {
+            nerve_transport::init_crypto();
+            let c = Arc::new(
+                Center::open(crate::center::Options {
+                    state_dir: dir.into(),
+                    name: Some("test".into()),
+                    public_url: "http://127.0.0.1:1".into(),
+                    log: None,
+                    log_level: None,
+                })
+                .unwrap(),
+            );
+            let c2 = c.clone();
+            let _ = std::thread::spawn(move || {
+                let _g = c2.rotating.lock().unwrap();
+                panic!("a panic during a rotation, on purpose");
+            })
+            .join();
+            let _ = c.start_rotation();
+            unreachable!("the center went on");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let o = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "center::rotation::tests::a_poisoned_rotation_lock_ends_the_center",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, dir.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            o.status.code(),
+            Some(nerve_transport::sync::POISONED),
+            "{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        assert!(String::from_utf8_lossy(&o.stderr).contains("is poisoned"));
     }
 }

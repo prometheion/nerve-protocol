@@ -17,6 +17,7 @@
 //! a panic could leave half changed, so its poisoning is cleared instead.
 
 use std::cell::Cell;
+use std::io::Write;
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 
 /// The exit code of a process that found a lock poisoned (`EX_SOFTWARE`).
@@ -125,7 +126,9 @@ fn poisoned<T: ?Sized>() -> ! {
     );
     let again = TELLING.with(|t| t.replace(true));
     if again || crate::log::global().is_none() {
-        eprintln!("{line}");
+        // Not `eprintln!`: it panics when stderr cannot be written, and the
+        // panic would unwind past the exit below.
+        let _ = writeln!(std::io::stderr(), "{line}");
     } else {
         tracing::error!("{line}");
     }
@@ -216,12 +219,42 @@ mod tests {
                 let _held = read(&l);
                 unreachable!("the process went on");
             }
+            Ok("rwlock_write") => {
+                child_log();
+                let l = Arc::new(RwLock::new(String::new()));
+                let l2 = l.clone();
+                let _ = std::thread::spawn(move || {
+                    let _g = l2.write().unwrap();
+                    panic!("a panic under the lock, on purpose");
+                })
+                .join();
+                let _held = write(&l);
+                unreachable!("the process went on");
+            }
+            Ok("try_lock") => {
+                child_log();
+                let m = Arc::new(Mutex::new(vec![1u8]));
+                poison(&m);
+                let _held = try_lock(&m);
+                unreachable!("the process went on");
+            }
+            Ok("into_inner") => {
+                child_log();
+                let m = Arc::new(Mutex::new(vec![1u8]));
+                poison(&m);
+                let m = Arc::try_unwrap(m).unwrap();
+                let _held = into_inner(m);
+                unreachable!("the process went on");
+            }
             Ok(_) => return,
             Err(_) => {}
         }
         for (what, holds) in [
             ("mutex", "alloc::vec::Vec<u8>"),
             ("rwlock", "alloc::string::String"),
+            ("rwlock_write", "alloc::string::String"),
+            ("try_lock", "alloc::vec::Vec<u8>"),
+            ("into_inner", "alloc::vec::Vec<u8>"),
         ] {
             let (code, stderr, log) = child(
                 "a_poisoned_lock_ends_the_process_after_one_line_that_names_it",
@@ -290,5 +323,105 @@ mod tests {
                 .join()
                 .unwrap()
         );
+    }
+
+    /// The log's own lock poisoned and stderr unwritable (a pipe whose
+    /// reader is gone): the process still ends with its code.
+    #[test]
+    #[cfg(unix)]
+    fn a_poisoned_lock_ends_the_process_when_stderr_is_closed() {
+        if std::env::var(CHILD).is_ok() {
+            use std::os::fd::AsRawFd;
+            let (r, w) = std::io::pipe().unwrap();
+            drop(r);
+            // SAFETY: dup2 onto stderr with a descriptor this child owns.
+            unsafe extern "C" {
+                fn dup2(a: i32, b: i32) -> i32;
+                fn signal(sig: i32, h: usize) -> usize;
+            }
+            unsafe {
+                signal(13, 1); // SIGPIPE ignored, as in a Rust program
+                dup2(w.as_raw_fd(), 2);
+            }
+            let m = Arc::new(Mutex::new(()));
+            poison(&m);
+            let _held = lock(&m);
+            unreachable!("the process went on");
+        }
+        let (code, stderr, _) = child(
+            "a_poisoned_lock_ends_the_process_when_stderr_is_closed",
+            "x",
+        );
+        assert_eq!(code, Some(POISONED), "{stderr}");
+    }
+
+    /// The rule stays in force: no production code of the programs takes a
+    /// std lock around [`lock`] and friends, or shrugs a poisoning off.
+    #[test]
+    fn no_lock_of_the_programs_is_taken_around_the_rule() {
+        let bad = locks_around_the_rule();
+        assert!(
+            bad.is_empty(),
+            "locks taken around nerve_transport::sync:\n{}",
+            bad.join("\n")
+        );
+    }
+
+    /// Production source of the four crates (up to each file's test
+    /// module) that calls a poisoning-aware lock method and handles the
+    /// result itself.
+    fn locks_around_the_rule() -> Vec<String> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut bad = Vec::new();
+        let mut dirs: Vec<std::path::PathBuf> = [
+            "nerve-center",
+            "nerve-node",
+            "nerve-policy",
+            "nerve-transport",
+        ]
+        .iter()
+        .map(|c| root.join(c).join("src"))
+        .collect();
+        while let Some(d) = dirs.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    dirs.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs")
+                    && !p.ends_with("nerve-transport/src/sync.rs")
+                {
+                    let text = std::fs::read_to_string(&p).unwrap();
+                    // Up to the test module: a `#[cfg(...test...)]` before a `mod`.
+                    let lines: Vec<&str> = text.lines().collect();
+                    let end = (0..lines.len().saturating_sub(1))
+                        .find(|&i| {
+                            lines[i].starts_with("#[cfg(")
+                                && lines[i].contains("test")
+                                && lines[i + 1].contains("mod ")
+                        })
+                        .unwrap_or(lines.len());
+                    let prod = lines[..end].join("\n");
+                    let flat: String = prod.split_whitespace().collect::<Vec<_>>().join("");
+                    for pat in [
+                        "PoisonError",
+                        ".lock().unwrap",
+                        ".lock().expect",
+                        ".lock().ok(",
+                        ".try_lock()",
+                        ".read().unwrap",
+                        ".read().expect",
+                        ".write().unwrap",
+                        ".write().expect",
+                        ".into_inner().unwrap",
+                        ".clear_poison(",
+                    ] {
+                        if flat.contains(pat) {
+                            bad.push(format!("{}: {pat}", p.display()));
+                        }
+                    }
+                }
+            }
+        }
+        bad
     }
 }

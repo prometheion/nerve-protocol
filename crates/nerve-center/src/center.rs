@@ -98,7 +98,9 @@ pub struct Inner {
     /// both at the end of its grace.
     identity: Mutex<Arc<ServerIdentity>>,
     server_config: Mutex<Arc<rustls::ServerConfig>>,
-    /// Held while a rotation of the center's key starts or ends.
+    /// Held while a rotation of the center's key starts or ends. It guards a
+    /// change of several steps, so its poisoning ends the center like a
+    /// data lock's.
     rotating: Mutex<()>,
     /// The end of a rotation failed and said so; it says so again once it
     /// worked.

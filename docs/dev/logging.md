@@ -85,7 +85,17 @@ abort, so no core dump holds the keys and passwords the program has in
 memory. When the log's own lock is the poisoned one, the line goes to stderr
 only. A lock that guards no data and only takes turns (`sync::turn`, such as
 the grant walk's) holds nothing a panic could leave half changed, so its
-poisoning is cleared and the program goes on.
+poisoning is cleared and the program goes on. The center's `rotating` lock
+looks like one but is not: it orders a key change of several steps, so it is
+a `lock`. A test (`sync::tests::no_lock_of_the_programs_is_taken_around_the_rule`)
+fails when production code of the center, the node, the policy or the
+transport crate takes a std lock past `sync`.
+
+The exception is the window part of `nerve-node-desktop` (`broker.rs`,
+`runner.rs`, `instance.rs`, `app/live.rs`): its locks still shrug off a
+poisoning and go on, so a panic there does not end the service. They guard
+the app's own windows and the elevated broker's pipes, not the node's rules or
+keys. Whether they take the rule too is an open owner question.
 
 ## The Windows Event Log
 
