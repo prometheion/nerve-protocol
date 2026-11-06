@@ -430,7 +430,7 @@ mod tests {
             "Warning: no owner: there is no account bob; only root changes the node and user mode runs no command",
             format!("no account for commands: the password of alice is wrong; {}", nerve_node::account::NO_ACCOUNT_INSTALL),
             "the service nerve-node.service runs as nerve and starts with the machine",
-            "Next: `nerve-node center add -` pairs the node with a center (paste the link).",
+            "Next: `nerve-node center add -` pairs the node with a center.",
         ]});
         let (did, warn) = steps(&v);
         assert_eq!(did.len(), 2);

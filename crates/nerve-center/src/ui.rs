@@ -1630,9 +1630,8 @@ mod tests {
         let hint = &APP_JS[APP_JS.find("function sudoListHint(").unwrap()..];
         let hint = &hint[..hint.find("\n}\n").unwrap()];
         for part in [
-            r#"n.platform === "windows""#,
+            r#"const line = n && n.platform === "windows" ? null : sudoRuleLine(command);"#,
             "in the Nerve app on that machine, Permissions, Sudo",
-            "const line = sudoRuleLine(command);",
             r#"btn("Copy", "ghost", () => copy(line)"#,
         ] {
             assert!(hint.contains(part), "{part}");

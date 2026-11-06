@@ -484,15 +484,14 @@ function auditRow(d, n) {
 // list from its owner only. On Linux the nerve-node command, with its own
 // Copy button; on Windows the Nerve app's place.
 function sudoListHint(n, command, key) {
-  if (n && n.platform === "windows") {
+  const line = n && n.platform === "windows" ? null : sudoRuleLine(command);
+  // Windows has no command to copy, and a command with a quote, backslash or
+  // line break no line that every shell reads the same.
+  if (!line) {
     return el("p", { class: "meta" }, "Only the machine's owner puts a command on the sudo list: in the Nerve app on that machine, Permissions, Sudo.");
   }
-  const line = sudoRuleLine(command);
-  if (!line) {
-    return el("p", { class: "meta" }, "Only the machine's owner puts a command on the sudo list. This one has a quote, a backslash or a line break in it, so a line to copy could not be trusted in every shell: add it in the Nerve app on that machine, Permissions, Sudo, or type `nerve-node rule add allow --action exec.run --exact` and the command yourself.");
-  }
   return el("div", {},
-    el("p", { class: "meta" }, "Only the machine's owner puts a command on the sudo list. On that machine (add --center <name> where it has several pairings):"),
+    el("p", { class: "meta" }, "Only the machine's owner adds a sudo command. On that machine (--center <name> for several pairings):"),
     el("div", { class: "pair-rows" }, el("div", { class: "pair-row" },
       el("code", { class: "pair-value mono" }, line),
       btn("Copy", "ghost", () => copy(line), "copy", `${key}:sudo-copy`))));

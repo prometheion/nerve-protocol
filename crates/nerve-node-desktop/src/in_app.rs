@@ -218,7 +218,7 @@ mod tests {
                 "the relay knows no node lab; the app's Relay › Add a node makes one",
             ),
             (
-                "No center is paired; `nerve-node center add -` pairs one (paste the link).",
+                "No center is paired; `nerve-node center add -` pairs one.",
                 "No center is paired; the app's Centers › Pair a center pairs one.",
             ),
             (
