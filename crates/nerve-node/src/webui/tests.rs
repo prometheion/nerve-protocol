@@ -189,6 +189,13 @@ fn a_command_says_its_data_or_its_error() {
     );
 }
 
+/// One line first (plan 4.1): every subtitle, banner and note of the page
+/// says its short part in at most 120 characters; the rest is in a fold.
+#[test]
+fn every_subtitle_is_short() {
+    assert_eq!(webui::long_subtitles(APP_JS, 120), Vec::<String>::new());
+}
+
 /// No script of the page builds HTML from text: what a center or the node
 /// wrote goes into text nodes only. The page has no inline script.
 #[test]

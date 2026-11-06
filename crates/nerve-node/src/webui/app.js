@@ -48,7 +48,8 @@ function pageOverview() {
       ? btn("Unlock", "primary", act(unlock), "ok", "unlock")
       : btn("Panic", "danger", act(panic), "ban", "panic")),
     o.locked ? banner("warn", "lock", "The node is locked: every link is closed and nothing runs until you unlock it.") : null,
-    o.owner_is_root ? banner("warn", "alert", "Root is the owner: commands of user mode, and of allowlist mode as the owner, run as root and can do everything on this machine, Nerve and its keys included.") : null,
+    o.owner_is_root ? banner("warn", "alert", "Root is the owner: user-mode commands run as root, with every right here.") : null,
+    o.owner_is_root ? more("root-owner", "More", el("p", { class: "meta" }, "Commands of user mode, and of allowlist mode as the owner, run as root and can do everything on this machine, Nerve and its keys included.")) : null,
     o.pairings_warning ? banner("warn", "alert", o.pairings_warning) : null,
     section("Centers", "The centers this machine is paired with.", null,
       o.centers.length ? el("div", { class: "stack" }, o.centers.map(centerCard)) : empty("No center is paired yet.", "server")),
@@ -92,7 +93,8 @@ function pageCenters() {
   return [
     head("server", "Centers", "Pair this machine with a center, and decide what each one may change."),
     o.pairings_warning ? banner("warn", "alert", o.pairings_warning) : null,
-    section("Pair a center", "Paste the link the center's web UI shows under Pair a machine. It goes to the node as the command's input, never in a command line.", null,
+    section("Pair a center", "Paste the link the center's web UI shows under Pair a machine.", null,
+      more("pair:why", "More", el("p", { class: "meta" }, "It goes to the node as the command's input, never in a command line.")),
       pairForm()),
     section("Paired centers", null, null,
       o.centers.length ? el("div", { class: "stack" }, o.centers.map(centerManageCard)) : empty("No center is paired yet.", "server")),
@@ -208,14 +210,17 @@ function networkForm(c, entry, o) {
   return el("div", { class: "card" },
     el("label", { class: "check" }, off, el("span", {}, "No network for its commands")),
     entry.no_network && o.network_rules === false
-      ? el("p", { class: "meta" }, "This machine cannot keep commands off the network (the node's seccomp filter cannot be used here), so the node runs none of this center's commands while this is on.")
+      ? el("p", { class: "meta" }, "While this is on, none of these commands runs: this machine cannot block their network.",
+        more(`network:${c}:seccomp`, "Why", el("p", { class: "meta" }, "The node's seccomp filter cannot be used here.")))
       : null,
     // The node says the commands run as the owner now (`network_off`),
     // which nothing keeps off the network.
     entry.network_off === "as_owner"
-      ? el("p", { class: "meta" }, o.installed
-        ? "In this mode its commands run as you, which nothing keeps off the network, so the node runs none of them while this is on. Folder mode, or allowlist mode as nerve-run, runs them."
-        : "This node runs by hand, so its commands run as you, and nothing keeps them off the network here (only folder mode does, as a user that is not root and on Linux 7.1 or later), so the node runs none of them while this is on. The installed node runs folder mode's commands as nerve-run.")
+      ? (o.installed
+        ? el("p", { class: "meta" }, "While this is on, none of these commands runs: in this mode they run as you.",
+          more(`network:${c}:owner`, "Why", el("p", { class: "meta" }, "Nothing keeps commands that run as you off the network. Folder mode, or allowlist mode as nerve-run, runs them.")))
+        : el("p", { class: "meta" }, "While this is on, none of these commands runs: here they run as you, and nothing keeps them off the network.",
+          more(`network:${c}:owner`, "Why", el("p", { class: "meta" }, "A node run by hand runs commands as you; only folder mode keeps them off the network, as a user that is not root and on Linux 7.1 or later. The installed node runs folder mode's commands as nerve-run."))))
       : null,
     entry.no_network ? el("p", { class: "meta" }, "No command on the sudo list runs while this is on.") : null,
     el("div", { class: "actions" }, btn("Save", "primary", act(() => api("POST", "/api/network", { center: c, off: off.checked })), "check", `network:${c}:set`)));
@@ -235,7 +240,8 @@ function foldersSection(c, folders) {
 
 function rulesSection(c, rules) {
   const lists = [["allow", "Allowed"], ["deny", "Forbidden"], ["sudo", "Run with sudo"]];
-  return section("Rules", "Commands and patterns a center may run, may not, or runs with sudo. The guard's rules, which keep the commands off Nerve itself, are built in.", null,
+  return section("Rules", "Commands a center may run, may not, or runs with sudo; the guard is built in.", null,
+    more("rules:guard", "More", el("p", { class: "meta" }, "The guard's rules keep a center's commands off Nerve itself. They catch mistakes, not someone who hides the name: the account the commands run as is the real protection.")),
     lists.map(([list, title]) => {
       const field = el("input", { class: "input", type: "text", placeholder: list === "sudo" ? "apt update" : "git status, git *, or fs.read:~/notes/*", autocomplete: "off", spellcheck: "false", "aria-label": `${title}: a new rule` });
       const wild = el("input", { type: "checkbox" });
@@ -461,7 +467,7 @@ function pageSettings() {
       segmented("Log level", LEVELS, Math.max(0, LEVELS.indexOf(level)), (i) => { level = LEVELS[i]; }),
       el("div", { class: "actions" }, btn("Set the log level", "ghost", act(() => set("log.level", JSON.stringify(level))), "check", "settings:level")),
       el("p", { class: "meta" }, `Keys are kept in ${v.secret_storage === "keyring" ? "the system keyring" : "files"}.`))),
-    section("Root's settings", "Which account and which programs commands run as. They are shown here and changed only as root: sudo nerve-node config set …", null,
+    section("Root's settings", "Changed only as root: sudo nerve-node config set …", null,
       el("div", { class: "card" }, v.root_only.map((k) => {
         const leaf = k.split(".")[1];
         const val = v.machine[leaf];

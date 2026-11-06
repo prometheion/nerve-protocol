@@ -3140,6 +3140,17 @@ mod tests {
         }
     }
 
+    /// One line first (plan 4.1): every subtitle, banner and note of the
+    /// page says its short part in at most 120 characters; the rest is in a
+    /// fold.
+    #[test]
+    fn every_subtitle_is_short() {
+        assert_eq!(
+            nerve_transport::webui::long_subtitles(APP_JS, 120),
+            Vec::<String>::new()
+        );
+    }
+
     #[test]
     fn the_page_builds_no_html_from_text() {
         assert_eq!(
