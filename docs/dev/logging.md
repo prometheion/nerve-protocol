@@ -89,7 +89,11 @@ poisoning is cleared and the program goes on. The center's `rotating` lock
 looks like one but is not: it orders a key change of several steps, so it is
 a `lock`. A test (`sync::tests::no_lock_of_the_programs_is_taken_around_the_rule`)
 fails when production code of the center, the node, the policy or the
-transport crate takes a std lock past `sync`.
+transport crate (test items left out) handles a std lock's poisoning itself or
+takes a lock in a form that does: `PoisonError`, `clear_poison`, the `try_`
+takes, and a `lock`, `read` or `write` that is unwrapped, turned into an
+`Option` or an error, or matched on. It goes by the names, so a plain
+`.lock().await` or an own method that returns a guard passes.
 
 The exception is the window part of `nerve-node-desktop` (`broker.rs`,
 `runner.rs`, `instance.rs`, `app/live.rs`): its locks still shrug off a

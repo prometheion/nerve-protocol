@@ -367,9 +367,23 @@ mod tests {
         );
     }
 
-    /// Production source of the four crates (up to each file's test
-    /// module) that calls a poisoning-aware lock method and handles the
-    /// result itself.
+    /// The scan sees the shrug forms and production code after an early
+    /// test module, and leaves test items out.
+    #[test]
+    fn the_scan_sees_what_it_should() {
+        let src = "#[cfg(test)]\nmod early {\n    fn t() { M.lock().unwrap(); }\n}\n\
+                   #[cfg(test)]\nmod guide_ref;\n\
+                   fn a() { if let Ok(g) = C.lock() { g.push(1) } }\n\
+                   fn b() { match C.lock() {\n Ok(g) => g,\n Err(e) => e.into_inner() } }\n\
+                   fn c() { C.read().ok(); }\n\
+                   #[cfg(not(test))]\nmod real {\n    fn d() { C.try_lock(); }\n}\n\
+                   fn e() { file.read(&mut buf); }\n";
+        let found: Vec<usize> = forms_past_the_rule(src).iter().map(|f| f.0).collect();
+        assert_eq!(found, vec![7, 8, 11, 14], "{found:?}");
+    }
+
+    /// Production source of the four crates (every `#[cfg(...test...)]`
+    /// item left out) that takes a std lock, or handles a poisoning, itself.
     fn locks_around_the_rule() -> Vec<String> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let mut bad = Vec::new();
@@ -391,37 +405,93 @@ mod tests {
                     && !p.ends_with("nerve-transport/src/sync.rs")
                 {
                     let text = std::fs::read_to_string(&p).unwrap();
-                    // Up to the test module: a `#[cfg(...test...)]` before a `mod`.
-                    let lines: Vec<&str> = text.lines().collect();
-                    let end = (0..lines.len().saturating_sub(1))
-                        .find(|&i| {
-                            lines[i].starts_with("#[cfg(")
-                                && lines[i].contains("test")
-                                && lines[i + 1].contains("mod ")
-                        })
-                        .unwrap_or(lines.len());
-                    let prod = lines[..end].join("\n");
-                    let flat: String = prod.split_whitespace().collect::<Vec<_>>().join("");
-                    for pat in [
-                        "PoisonError",
-                        ".lock().unwrap",
-                        ".lock().expect",
-                        ".lock().ok(",
-                        ".try_lock()",
-                        ".read().unwrap",
-                        ".read().expect",
-                        ".write().unwrap",
-                        ".write().expect",
-                        ".into_inner().unwrap",
-                        ".clear_poison(",
-                    ] {
-                        if flat.contains(pat) {
-                            bad.push(format!("{}: {pat}", p.display()));
-                        }
+                    for (n, pat) in forms_past_the_rule(&text) {
+                        bad.push(format!("{}:{n}: {pat}", p.display()));
                     }
                 }
             }
         }
         bad
+    }
+
+    /// The forms in `text`, with their line, that take a std lock or handle
+    /// its poisoning without `sync`: `PoisonError`, `clear_poison`, the
+    /// `try_` takes, a take (`lock`, `read`, `write`) that is unwrapped,
+    /// turned into an `Option` or an error, or matched on (`match`, `if
+    /// let`, `while let`). Items under `#[cfg(...test...)]` are left out, by
+    /// their braces. It goes by the names, so an own method of that name is
+    /// seen too; the ones that return a guard (and the async locks, which
+    /// cannot poison) are not.
+    fn forms_past_the_rule(text: &str) -> Vec<(usize, String)> {
+        // The production lines, whitespace removed, and where each begins.
+        let mut flat = String::new();
+        let mut starts = Vec::new();
+        // Where a test item ends: its first line may open a body, and a body
+        // ends at the first line that is only a `}` at the attribute's indent
+        // (the sources are rustfmt'd, which a braces count would not need but
+        // strings and chars with a brace would upset).
+        enum Test {
+            No,
+            Head(usize),
+            Body(usize),
+        }
+        let mut test = Test::No;
+        for (i, line) in text.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("").trim_end();
+            let indent = line.len() - line.trim_start().len();
+            let one: String = code.split_whitespace().collect();
+            match test {
+                Test::No => {}
+                Test::Head(k) => {
+                    if one.starts_with("#[") {
+                    } else if code.ends_with(';') || code.ends_with('}') {
+                        test = Test::No;
+                    } else if code.ends_with('{') {
+                        test = Test::Body(k);
+                    }
+                    continue;
+                }
+                Test::Body(k) => {
+                    if indent == k && code.trim_start().starts_with('}') {
+                        test = Test::No;
+                    }
+                    continue;
+                }
+            }
+            if one.starts_with("#[cfg(") && one.contains("test") && !one.contains("not(test") {
+                test = Test::Head(indent);
+                continue;
+            }
+            starts.push((flat.len(), i + 1));
+            flat.push_str(&one);
+        }
+        let mut found = Vec::new();
+        let mut note = |at: usize, what: String| {
+            let line = starts[starts.partition_point(|s| s.0 <= at) - 1].1;
+            found.push((line, what));
+        };
+        for f in [
+            "PoisonError",
+            ".clear_poison(",
+            ".try_lock()",
+            ".try_read()",
+            ".try_write()",
+        ] {
+            for (at, _) in flat.match_indices(f) {
+                note(at, f.to_string());
+            }
+        }
+        for take in [".lock()", ".read()", ".write()"] {
+            for (at, _) in flat.match_indices(take) {
+                let rest = &flat[at + take.len()..];
+                for after in [".unwrap", ".expect", ".ok(", ".map_err", "?", "{"] {
+                    if rest.starts_with(after) {
+                        note(at, format!("{take}{after}"));
+                    }
+                }
+            }
+        }
+        found.sort();
+        found
     }
 }
