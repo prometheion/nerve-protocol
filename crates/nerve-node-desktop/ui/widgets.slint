@@ -290,11 +290,14 @@ export component Fold inherits VerticalLayout {
         shown: root.shown;
         VerticalLayout {
             spacing: 6px;
-            if root.more != "": Text {
-                text: root.more;
-                color: Theme.text-muted;
-                font-size: root.font-size;
-                wrap: word-wrap;
+            Reveal {
+                shown: root.more != "";
+                Text {
+                    text: root.more;
+                    color: Theme.text-muted;
+                    font-size: root.font-size;
+                    wrap: word-wrap;
+                }
             }
             @children
         }
