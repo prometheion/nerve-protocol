@@ -945,7 +945,7 @@ fn write_keys<'a>(
             secrets::store::get(account.account()).ok().flatten()
         } else {
             secrets::store::get(account.account()).map_err(|e| {
-                let how = "start or unlock the keyring (on a Linux without a desktop, `nerve-node setup` can install one if you answer `keyring` where it asks where the keys go)";
+                let how = "start or unlock the keyring (on a Linux without a desktop, `nerve-node config set machine.secret_storage keyring` at a terminal offers to install one)";
                 format!(
                     "cannot read the proxy's header values in the system keyring (entry {account}) to check whose they are: {e}. Restore with --without-proxy and set the proxy again on this machine; or {how}; or take the proxy's header values off the node you back up (`nerve-node proxy off` there, then back it up again)"
                 )
@@ -2587,7 +2587,7 @@ mod tests {
         let err = err.err().unwrap();
         assert!(
             err.contains("to check whose they are")
-                && err.contains("nerve-node setup")
+                && err.contains("config set machine.secret_storage keyring` at a terminal")
                 && err.contains("--without-proxy"),
             "{err}"
         );

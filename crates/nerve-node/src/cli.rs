@@ -5666,11 +5666,7 @@ async fn config_cmd(paths: &NodePaths, c: ConfigCmd, out: &mut dyn Write) -> Res
     }
     // Keys into the keyring: at a terminal, where none answers, the owner
     // is offered one (as root for the node's user) before anything moves.
-    if let ConfigCmd::Set { key, value } = &c
-        && key == "machine.secret_storage"
-        && literal(value).as_str() == Some("keyring")
-        && crate::owner::at_terminal()
-    {
+    if moves_keys_to_keyring(&c) && crate::owner::at_terminal() {
         let (machine, keyring) = keyring_of(paths);
         let mut input = std::io::BufReader::new(std::io::stdin());
         offer_keyring(paths, machine, &keyring, Some(&mut input), out).await?;
@@ -6069,7 +6065,7 @@ async fn show_proxy(paths: &NodePaths, out: &mut dyn Write) -> Result<(), String
 
 /// The password of a proxy URL with a user name and no password: asked
 /// without echo at a terminal, else the first line of stdin.
-fn proxy_password(out: &mut dyn Write) -> Result<String, String> {
+pub fn proxy_password(out: &mut dyn Write) -> Result<String, String> {
     #[cfg(unix)]
     return read_password(out, "proxy password: ");
     #[cfg(not(unix))]
@@ -6893,6 +6889,14 @@ fn split_key(key: &str) -> Result<(Vec<String>, String), String> {
     let mut s = segments(key);
     let last = s.pop().filter(|l| !l.is_empty()).ok_or("empty key")?;
     Ok((s, last))
+}
+
+/// Whether `c` is `config set machine.secret_storage keyring`, which at a
+/// terminal offers to install a keyring where none answers: the owner's
+/// input goes to the installed node for it (crate::owner::reads_input).
+pub fn moves_keys_to_keyring(c: &ConfigCmd) -> bool {
+    matches!(c, ConfigCmd::Set { key, value }
+        if key == "machine.secret_storage" && literal(value).as_str() == Some("keyring"))
 }
 
 /// A value as TOML reads it (`true`, `3`, `["a"]`), else as a string.

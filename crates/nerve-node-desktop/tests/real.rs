@@ -26,8 +26,9 @@ fn said(i: &Install<'_>) -> String {
     format!("did {did:#?}\nwarned {warn:#?}\nerror {}", i.get_error())
 }
 
+/// The service's state, from `status`, as the app reads it.
 fn service(runner: &Runner) -> serde_json::Value {
-    runner.run(&["service", "status"]).unwrap()
+    runner.run(&["status"]).unwrap()["service"].clone()
 }
 
 #[test]

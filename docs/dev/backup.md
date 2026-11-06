@@ -149,8 +149,8 @@ the restored proxy as soon as it answers again. So when the replaced config
 does not vouch for the header values, a keyring that cannot be asked stops the
 restore ("cannot read the proxy's header values ... to check whose they are"),
 with nothing written. The remedies are `--without-proxy`, a keyring that
-answers (`nerve-node setup` installs one only if the owner answers `keyring`
-where it asks where the keys go) or a backup of a node whose
+answers (`nerve-node config set machine.secret_storage keyring` at a terminal
+offers to install one) or a backup of a node whose
 proxy has no header values. A backup made with `--include-keyring` is no
 remedy: writing the values into the keyring asks the same keyring.
 

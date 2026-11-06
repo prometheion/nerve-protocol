@@ -107,8 +107,8 @@ unless you give `--include-keyring`) does not keep whatever is on this machine:
   nothing written, unless the config being replaced names the same proxy, pin
   and header names. Restore with `--without-proxy` and set the proxy again
   here; or start or unlock the keyring (on a Linux without a desktop,
-  `nerve-node setup` can install one if you answer `keyring` where it asks
-  where the keys go); or take the header values off the node you back up
+  `nerve-node config set machine.secret_storage keyring` at a terminal offers
+  to install one); or take the header values off the node you back up
   (`nerve-node proxy off` there) and make a new backup. A backup made with
   `--include-keyring` does not get round this: it writes the values into the
   same keyring, and fails the same way.

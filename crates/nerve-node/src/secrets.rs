@@ -1002,10 +1002,10 @@ impl Secrets for NodeSecrets {
                     // keyring for the life of the process: a running node
                     // that met one asks no keyring installed after it.
                     SecretStorage::Keyring if !self.locks && store::failed() => {
-                        " (this running node found no keyring and does not look again until it is restarted; on a Linux without a desktop, `nerve-node setup` installs one, then restart the node: `nerve-node service restart`)"
+                        " (this running node found no keyring and does not look again until it is restarted; on a Linux without a desktop, `nerve-node config set machine.secret_storage keyring` at a terminal offers to install one; then restart the node, `nerve-node service restart`, and run it again)"
                     }
                     SecretStorage::Keyring => {
-                        " (on a Linux without a desktop, `nerve-node setup` can install a keyring)"
+                        " (on a Linux without a desktop, `nerve-node config set machine.secret_storage keyring` at a terminal offers to install a keyring)"
                     }
                     SecretStorage::File => "",
                 };
@@ -1618,11 +1618,29 @@ mod tests {
             e.contains("stay in their files, and nothing was changed"),
             "{e}"
         );
-        assert!(e.contains("nerve-node setup"), "{e}");
+        // The command that offers a keyring: setup asks none while the keys
+        // are in files.
+        assert!(
+            e.contains("`nerve-node config set machine.secret_storage keyring` at a terminal"),
+            "{e}"
+        );
         assert_eq!(s.config().machine.secret_storage, SecretStorage::File);
         assert_eq!(std::fs::read(paths.config_file()).unwrap(), before);
         assert!(paths.config_key().exists() && paths.key_file("home").exists());
         assert!(!paths.keys_moving().exists());
+        // A CLI that moves them itself, not the running node: the same
+        // command, and no restart.
+        drop(s);
+        let mut cli = cli_store(&paths);
+        store::set_unreachable(true);
+        let e = set_storage(&mut cli, SecretStorage::Keyring).unwrap_err();
+        store::set_unreachable(false);
+        assert!(
+            e.contains("`nerve-node config set machine.secret_storage keyring` at a terminal")
+                && !e.contains("restart"),
+            "{e}"
+        );
+        assert_eq!(std::fs::read(paths.config_file()).unwrap(), before);
         assert_eq!(in_keyring(&paths, Key::Config), None);
         assert!(open(&paths).is_ok());
     }

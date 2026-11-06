@@ -52,7 +52,8 @@ pub const OWNER_ENV: &str = "NERVE_OWNER";
 /// Set to `1` by the node for a command it runs for an owner whose own
 /// input is a terminal's: the input the command gets is the connection's,
 /// and only an owner at a terminal is asked what needs one (the keyring
-/// that `setup` installs as root, crate::keyring_setup).
+/// that `setup` or `config set machine.secret_storage keyring` installs as
+/// root, crate::keyring_setup).
 pub const TERMINAL_ENV: &str = "NERVE_OWNER_TERMINAL";
 
 /// Set to `web` by the node for a command it runs for an owner from the web
@@ -398,9 +399,16 @@ pub fn forward_if_needed(cli: &Cli) -> Option<i32> {
     if let Some(file) = FileJob::of(&cli.cmd, std::env::current_dir().ok()) {
         return Some(rt.block_on(forward_file(&paths, args, cwd, file, cli.json)));
     }
-    let input = input_for(&cli.cmd);
+    let stdin_is_terminal = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let input = input_for(&cli.cmd, stdin_is_terminal, || {
+        crate::cli::proxy_password(&mut std::io::stdout())
+    });
+    let input = match input {
+        Ok(i) => i,
+        Err(e) => return Some(fail(cli.json, &e)),
+    };
     // The command is told whether the input it gets is a terminal's.
-    let terminal = terminal_of(&input, std::io::IsTerminal::is_terminal(&std::io::stdin()));
+    let terminal = terminal_of(&input, stdin_is_terminal);
     Some(rt.block_on(forward(&paths, args, cwd, input, terminal, cli.json)))
 }
 
@@ -414,13 +422,30 @@ pub enum Input {
     Text(String),
 }
 
-/// The input [`forward_if_needed`] passes for `cmd`.
-pub fn input_for(cmd: &Cmd) -> Input {
-    if reads_input(cmd) {
+/// The input [`forward_if_needed`] passes for `cmd`; `stdin_is_terminal`:
+/// this process's input is a terminal's. A proxy password alone is asked
+/// here (`ask`), without echo: the node's command gets a pipe, which would
+/// read it as typed, shown on the screen.
+pub fn input_for(
+    cmd: &Cmd,
+    stdin_is_terminal: bool,
+    ask: impl FnOnce() -> Result<String, String>,
+) -> Result<Input, String> {
+    use crate::cli::ProxyCmd;
+    if let Cmd::Proxy {
+        cmd: Some(ProxyCmd::Set { url, headers, .. }),
+    } = cmd
+        && stdin_is_terminal
+        && crate::cli::proxy_wants_password(url)
+        && !headers.iter().any(|h| h == "-")
+    {
+        return Ok(Input::Text(format!("{}\n", ask()?)));
+    }
+    Ok(if reads_input(cmd) {
         Input::Stdin
     } else {
         Input::None
-    }
+    })
 }
 
 /// The backup file of an owner's `backup` or `restore`, which this
@@ -465,15 +490,17 @@ impl FileJob {
     }
 }
 
-/// Whether `cmd` reads this process's input: the questions of `setup`, the
-/// question of `center add` without `--yes`, what `proxy set` takes from
-/// stdin, and the schema `cap add` or `cap edit` takes from it. Only then is the input passed to the node; for any other
+/// Whether `cmd` reads this process's input: the questions of `setup` and
+/// of `config set machine.secret_storage keyring`, the question of `center
+/// add` without `--yes`, what `proxy set` takes from stdin, and the schema
+/// `cap add` or `cap edit` takes from it. Only then is the input passed to the node; for any other
 /// command it stays unread, as a script that pipes lines into a loop of
 /// commands expects.
 pub fn reads_input(cmd: &Cmd) -> bool {
     use crate::cli::{CapCmd, CenterCmd, ProxyCmd};
     match cmd {
         Cmd::Setup => true,
+        Cmd::Config(c) => crate::cli::moves_keys_to_keyring(c),
         Cmd::Cap {
             cmd: Some(CapCmd::Add { spec, .. } | CapCmd::Edit { spec, .. }),
             ..
@@ -2571,8 +2598,23 @@ mod tests {
         }
         // Setup asks its questions: its input goes to the node.
         assert!(reads_input(&cli(&["setup"]).cmd));
-        assert!(matches!(input_for(&cli(&["setup"]).cmd), Input::Stdin));
-        assert!(matches!(input_for(&cli(&["status"]).cmd), Input::None));
+        // So does the move of the keys into a keyring, which offers one.
+        assert!(reads_input(
+            &cli(&["config", "set", "machine.secret_storage", "keyring"]).cmd
+        ));
+        assert!(!reads_input(
+            &cli(&["config", "set", "machine.secret_storage", "file"]).cmd
+        ));
+        assert!(!reads_input(
+            &cli(&["config", "set", "log.level", "keyring"]).cmd
+        ));
+        let input = |args: &[&str], terminal| {
+            input_for(&cli(args).cmd, terminal, || Ok("pw".into())).unwrap()
+        };
+        assert!(matches!(input(&["setup"], true), Input::Stdin));
+        assert!(matches!(input(&["status"], true), Input::None));
+        let keyring = ["config", "set", "machine.secret_storage", "keyring"];
+        assert!(terminal_of(&input(&keyring, true), true));
         for args in [
             &["status"][..],
             &["rule", "add", "allow", "ls"],
@@ -2580,6 +2622,30 @@ mod tests {
         ] {
             assert!(!reads_input(&cli(args).cmd), "{args:?}");
         }
+    }
+
+    /// A proxy password typed at a terminal is asked here, hidden, and goes
+    /// to the node as text: the node's command reads a pipe, which shows
+    /// what is typed. From a pipe, or with headers after it, the input goes
+    /// on as it comes.
+    #[test]
+    fn a_proxy_password_at_a_terminal_is_asked_here() {
+        let input = |args: &[&str], terminal| {
+            input_for(&cli(args).cmd, terminal, || Ok("pw".into())).unwrap()
+        };
+        let set = ["proxy", "set", "http://u@h:1"];
+        assert!(matches!(input(&set, true), Input::Text(t) if t == "pw\n"));
+        assert!(!terminal_of(&input(&set, true), true));
+        assert!(matches!(input(&set, false), Input::Stdin));
+        let headers = ["proxy", "set", "http://u@h:1", "--header", "-"];
+        assert!(matches!(input(&headers, true), Input::Stdin));
+        assert!(matches!(
+            input(&["proxy", "set", "http://u:p@h:1"], true),
+            Input::None
+        ));
+        // A password not given ends it here.
+        let e = input_for(&cli(&set).cmd, true, || Err("no password given".into()));
+        assert!(matches!(e, Err(e) if e == "no password given"));
     }
 
     /// The owner pipe lets in SYSTEM, the administrators, the node's account,

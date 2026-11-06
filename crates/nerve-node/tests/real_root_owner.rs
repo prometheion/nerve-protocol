@@ -326,7 +326,7 @@ async fn root_is_the_owner_only_when_it_says_so() {
     assert_eq!(st["owner_is_root"], true, "{st}");
     let (_, text) = sh(Command::new(BIN).arg("status"));
     assert!(
-        text.contains("daemon: not running")
+        text.contains("node: not running")
             && text.contains("owner: root is the owner: commands of user mode"),
         "{text}"
     );

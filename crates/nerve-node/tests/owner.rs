@@ -106,7 +106,8 @@ async fn as_the_cli(
         std::iter::once("nerve-node").chain(args.iter().copied()),
     )
     .unwrap();
-    let input = match nerve_node::owner::input_for(&cli.cmd) {
+    let asked = || Ok(typed.trim_end_matches('\n').to_string());
+    let input = match nerve_node::owner::input_for(&cli.cmd, terminal, asked)? {
         Input::Stdin => Input::Text(typed.into()),
         other => other,
     };
