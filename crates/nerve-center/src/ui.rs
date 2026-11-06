@@ -37,6 +37,44 @@ const APP_JS: &str = include_str!("ui/app.js");
 
 const WRONG_TOKEN: &str = "Wrong owner token.";
 
+/// The center's own commands and options for the Help page, from its
+/// clap definition: each with its line and the rest folded; the options
+/// apart from those under Advanced.
+fn center_help() -> Value {
+    use clap::CommandFactory;
+    let cmd = crate::config::Args::command();
+    let rest = |long: Option<String>, line: &str| {
+        let long = long.unwrap_or_default();
+        long.strip_prefix(line).unwrap_or(&long).trim().to_string()
+    };
+    let commands: Vec<Value> = cmd
+        .get_subcommands()
+        .filter(|c| !c.is_hide_set() && c.get_name() != "help")
+        .map(|c| {
+            let line = c.get_about().map(|a| a.to_string()).unwrap_or_default();
+            json!({
+                "name": c.get_name(),
+                "line": line,
+                "more": rest(c.get_long_about().map(|a| a.to_string()), &line),
+            })
+        })
+        .collect();
+    let options: Vec<Value> = cmd
+        .get_arguments()
+        .filter(|a| !a.is_hide_set() && a.get_long().is_some_and(|l| l != "help" && l != "version"))
+        .map(|a| {
+            let line = a.get_help().map(|h| h.to_string()).unwrap_or_default();
+            json!({
+                "name": format!("--{}", a.get_long().unwrap_or_default()),
+                "line": line,
+                "more": rest(a.get_long_help().map(|h| h.to_string()), &line),
+                "advanced": a.get_help_heading() == Some("Advanced"),
+            })
+        })
+        .collect();
+    json!({"commands": commands, "options": options})
+}
+
 /// The command that shows the owner token of the center in `state`: with
 /// `sudo` for the installed center, whose folder is its own user's, without
 /// it for a center you started, whose folder is yours.
@@ -309,7 +347,7 @@ impl Ui {
             ("GET", "/api/log") => Ok(c.log_json(&log_query(req)?)),
             // The node's own command list, as the node of this release has
             // it ([`NODE_HELP`]).
-            ("GET", "/api/help") => Ok(json!({"node": node_help()})),
+            ("GET", "/api/help") => Ok(json!({"node": node_help(), "center": center_help()})),
             ("POST", "/api/pair") => Ok(c.new_pairing()),
             ("POST", "/api/pair/status") => Ok(c.pairing_status(&s("code"))),
             ("POST", "/api/nodes/rename") => c
@@ -830,13 +868,13 @@ mod tests {
         let body: Value = serde_json::from_slice(&r.body).unwrap();
         let mut listed: Vec<(String, String)> = Vec::new();
         for s in body["node"]["sections"].as_array().unwrap() {
-            assert!(!s["about"].as_str().unwrap().is_empty());
+            assert!(!s["line"].as_str().unwrap().is_empty());
             for c in s["cards"].as_array().unwrap() {
                 for held in c["holds"].as_array().unwrap() {
                     // Its sentence is the card's.
                     let held = held.as_str().unwrap().to_string();
                     let about = if c["name"] == held.as_str() {
-                        c["about"].as_str().unwrap().to_string()
+                        c["line"].as_str().unwrap().to_string()
                     } else {
                         String::new()
                     };
@@ -845,7 +883,7 @@ mod tests {
                 for v in c["verbs"].as_array().unwrap() {
                     listed.push((
                         v["name"].as_str().unwrap().to_string(),
-                        v["about"].as_str().unwrap().to_string(),
+                        v["line"].as_str().unwrap().to_string(),
                     ));
                 }
             }
@@ -1246,7 +1284,8 @@ mod tests {
         let help = &help[..help.find("\n}\n").unwrap()];
         for part in [
             "expander(\"Keyboard shortcuts\"",
-            "expander(\"Command reference\"",
+            "expander(\"nerve-node commands\"",
+            "more(`opts:${v.name}`",
             "[\"By topic\", \"A to Z\"]",
             "\"Filter the commands\"",
             "\"No command matches.\"",

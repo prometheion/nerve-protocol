@@ -28,11 +28,17 @@ fn only_installed() -> String {
 
 #[derive(Debug, Subcommand)]
 pub enum UiCmd {
+    /// Turn the web UI on (shows a first token once)
+    ///
     /// Turn the web UI on. With no token yet, makes one named `first` and shows it once. Beyond loopback it is served over TLS with a certificate of its own, made the first time; compare its fingerprint with the one the browser shows.
     On {
+        /// Address and port (127.0.0.1:7470); any other address opens it to the network
+        ///
         /// The address and port to listen on (127.0.0.1:7470 unless set). Any address but loopback, like 0.0.0.0:7470, makes the UI reachable from the network.
         #[arg(long, value_name = "ADDRESS")]
         listen: Option<String>,
+        /// A host name for the certificate, besides this machine's own (more than once)
+        ///
         /// A host name the certificate names besides this machine's own and the address; can be given more than once.
         #[arg(long = "host", value_name = "HOST")]
         names: Vec<String>,

@@ -26,8 +26,41 @@ let helpParts = null;
 function pageHelp() {
   const h = state.help && state.help.node;
   if (!h) return [loading()];
-  if (!helpParts) helpParts = buildHelp(h);
+  if (!helpParts) helpParts = buildHelp(h, [
+    expander("Connect a harness", "plug", true, harnessCard(state.overview && state.overview.mcp)),
+    expander("nerve-center commands", "terminal", true, centerCommands(state.help.center)),
+    el("p", { class: "meta" }, "New here? ", el("a", { href: "#overview" }, "Get started"), " on the Overview."),
+  ]);
   return helpParts;
+}
+
+// The center's own commands, one line each with the rest folded; its
+// options after them, those under Advanced folded apart.
+function centerCommands(c) {
+  if (!c) return null;
+  const line = (x) => [el("code", {}, x.name), el("span", {}, x.line, x.more ? more(`center:${x.name}`, "More", el("p", {}, x.more)) : null)];
+  const main = c.options.filter((o) => !o.advanced);
+  const adv = c.options.filter((o) => o.advanced);
+  return el("div", {},
+    el("p", { class: "lead" }, "Run them on the center's machine; with sudo for the installed center."),
+    el("div", { class: "arg-rows" }, c.commands.flatMap(line)),
+    more("center:options", `Options (${main.length})`, el("div", { class: "arg-rows" }, main.flatMap(line))),
+    more("center:advanced", `Advanced (${adv.length})`, el("div", { class: "arg-rows" }, adv.flatMap(line))));
+}
+
+// Get started: three steps for a new center, each with its button; it goes
+// once all three are done.
+function getStarted(o) {
+  const paired = o.nodes.length > 0;
+  const folder = o.nodes.some((n) => (n.folders || 0) > 0 || n.folders === null);
+  const harness = o.sessions.length > 0;
+  if (paired && folder && harness) return null;
+  const step = (done, text, action) => el("div", { class: "card-top" },
+    itile(done ? "ok" : "info", done ? "ok" : "neutral"), el("span", { class: done ? "meta" : "name" }, text), done ? null : action);
+  return section("Get started", "Three steps; this goes once they are done.", null, el("div", { class: "card stack" },
+    step(paired, "1. Pair a machine", btn("Pair a machine", "primary push", act(async () => { state.pairing = await api("POST", "/api/pair"); }), "plus", "start:pair")),
+    step(folder, "2. Give it a folder: nerve-node folder add ~/project rw", btn("Copy", "ghost push", () => copy(FOLDER_STEP), "copy", "start:folder")),
+    step(harness, "3. Connect a harness", el("a", { class: "btn ghost push", href: "#help" }, "How"))));
 }
 
 // ---- Overview ----
@@ -42,6 +75,7 @@ function pageOverview() {
       [o.sessions.length, o.sessions.length === 1 ? "session" : "sessions"],
     ]),
     o.alerts.slice(-5).map((a) => banner("warn", "alert", `${when(a.ts)}: ${a.text}`)),
+    getStarted(o),
     section("Machines", null, btn("Pair a machine", "primary", act(async () => { state.pairing = await api("POST", "/api/pair"); }), "plus", "pair"),
       state.pairing ? pairingCard(state.pairing) : null,
       state.paired ? pairedCard(state.paired) : null,

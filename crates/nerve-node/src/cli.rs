@@ -33,14 +33,20 @@ pub use ui::{UiCmd, UiTokenCmd};
     about = "Links this machine to its Nerve centers."
 )]
 pub struct Cli {
+    /// Where node.toml and the keys live
+    ///
     /// Where node.toml and the keys live [env: NERVE_NODE_CONFIG_DIR] [default: ~/.config/nerve, or /etc/nerve when installed as a service]
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     pub config_dir: Option<PathBuf>,
+    /// Where the control socket and the audit log live
+    ///
     /// Where the control socket and the audit log live [env: NERVE_NODE_STATE_DIR] [default: ~/.local/state/nerve, or /var/lib/nerve/state when installed as a service]
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     pub state_dir: Option<PathBuf>,
+    /// Print JSON instead of text
+    ///
     /// Print JSON for programs instead of text: the read commands their data, the others the lines they print, an error {"error": ...}
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     pub json: bool,
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -72,43 +78,65 @@ impl CenterName {
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
+    /// Install the node as a service (Linux: with sudo; Windows: as administrator)
+    ///
     /// Install the node as a service that starts with the machine and runs under a user of its own, make the account nerve-run for its commands and take you as the owner (Linux with sudo from your own account, Windows as administrator).
     Install {
+        /// Who owns the node: you (default), `root` (needs --accept-root-owner) or `none`
+        ///
         /// Run by root itself (Linux): `root` makes root the owner, so that user mode, and allowlist mode as the owner, run commands as root, with every right on the machine and over Nerve; needs --accept-root-owner. At a terminal install asks instead, and an owner root confirmed before stays. `none` leaves the node without an owner, root or another.
         #[arg(long, value_name = "ACCOUNT", value_parser = ["root", "none"])]
         owner: Option<String>,
+        /// Confirms --owner=root: nothing in Nerve holds those commands back
+        ///
         /// Confirms --owner=root: you accept that nothing in Nerve holds those commands back.
         #[arg(long)]
         accept_root_owner: bool,
     },
+    /// Pair a first center and give it a folder, step by step
+    ///
     /// Pair a first center and give it a folder, step by step: the link, the mode, a folder and its rights, the network.
     Setup,
+    /// Update to the latest release; config, keys and audit stay
+    ///
     /// Replace the installed program with the latest release and restart the service; config, keys and audit log stay.
     Update {
         /// Take the new program from this file instead of downloading the latest release.
         #[arg(long, value_name = "FILE")]
         from: Option<PathBuf>,
     },
+    /// Remove the service and the program; config and state stay
+    ///
     /// Stop and remove the service, nerve-run and its entries on your folders, the node's user and the program; the config and state folders stay.
     Uninstall {
+        /// Delete the config and state folders too (keys, pairings, audit)
+        ///
         /// Delete the config and state folders too: the keys, the pairings and the audit log.
         #[arg(long)]
         purge: bool,
     },
+    /// Save the config and keys to a passphrase-protected file
+    ///
     /// Write the config and the keys to a file that a passphrase protects, to keep or to move the node to another machine.
     Backup {
         /// The file to write. It is private to you (mode 0600).
         file: PathBuf,
+        /// Also take the keys that are in the system keyring into the file
+        ///
         /// Also take the keys that are in the system keyring into the file; without it they stay there and are left out.
         #[arg(long)]
         include_keyring: bool,
         /// Replace the file when it exists.
         #[arg(long)]
         overwrite: bool,
+        /// Read the passphrase from this file (`-`: from stdin) instead of asking
+        ///
         /// Read the passphrase from the first line of this file instead of asking; `-` reads it from stdin.
         #[arg(long, value_name = "FILE")]
         passphrase_file: Option<PathBuf>,
     },
+    /// Restore a backup (stop the node first)
+    ///
     /// Put the config and keys of a backup in place of this node's. The node must not run.
     Restore {
         /// The backup file.
@@ -116,19 +144,27 @@ pub enum Cmd {
         /// Replace a node here that is not the one the backup is of.
         #[arg(long)]
         replace: bool,
+        /// Keep the keys in `file` or in the `keyring` here, whatever the backup says
+        ///
         /// Keep the keys in `file` or in the system `keyring` here, whatever the backup's config says.
         #[arg(long, value_name = "file|keyring")]
         secret_storage: Option<String>,
+        /// Leave the proxy, with its secrets, out of the restored config
+        ///
         /// Leave the proxy out of the restored config, with its password and header values; set it again on this machine.
         #[arg(long)]
         without_proxy: bool,
+        /// Read the passphrase from this file (`-`: from stdin) instead of asking
+        ///
         /// Read the passphrase from the first line of this file instead of asking; `-` reads it from stdin.
         #[arg(long, value_name = "FILE")]
         passphrase_file: Option<PathBuf>,
     },
-    /// Start, stop or restart the installed service; `status` shows its state.
+    /// Start, stop or restart the installed service (`status` shows its state)
     #[command(subcommand)]
     Service(ServiceCmd),
+    /// Print the files of the service this program installs, as JSON (for `update`)
+    ///
     /// Print the files of the service this program installs besides itself, as JSON: `update` of the installed program runs the new one so, to put them in place with it.
     #[command(hide = true)]
     ServiceFiles {
@@ -139,33 +175,38 @@ pub enum Cmd {
         #[arg(long, default_value = "rules", value_parser = ["rules", "pkla", "none"])]
         polkit: String,
     },
+    /// Show the paired centers, pair another, and set what each may change
+    ///
     /// Show the paired centers, pair this machine with another, and decide what each one may change.
     #[command(args_conflicts_with_subcommands = true)]
     Center {
         #[command(subcommand)]
         cmd: Option<CenterCmd>,
     },
+    /// Choose how much a center may do: folder, allowlist or user mode
+    ///
     /// Show each center's mode, or choose how much a center may do: only what allow rules name, what each folder allows (as nerve-run, an account of its own), or all you can do (as you).
     Mode {
-        /// `allowlist` (only what an allow rule names, as nerve-run), `folder`
-        /// (what each folder's rights allow, as nerve-run, the default; on
-        /// the installed node a file call may also read what every account
-        /// may read) or `user` (anything you could do yourself, as you,
-        /// protected files aside). Without it, each center's mode is shown.
+        /// `folder` (default; reads also what every account may), `allowlist` or `user`
+        ///
+        /// `allowlist` (only what an allow rule names, as nerve-run), `folder` (what each folder's rights allow, as nerve-run, the default; on the installed node a file call may also read what every account may read) or `user` (anything you could do yourself, as you, protected files aside). Without it, each center's mode is shown.
         #[arg(value_name = "MODE")]
         mode: Option<String>,
-        /// End the mode after this many hours: user goes back to the mode
-        /// before it, folder to allowlist (without it they stay until you
-        /// change them).
+        /// End the mode after this many hours (user: back to the mode before)
+        ///
+        /// End the mode after this many hours: user goes back to the mode before it, folder to allowlist (without it they stay until you change them).
         #[arg(long = "for", value_name = "HOURS")]
         for_hours: Option<u64>,
-        /// With allowlist: run the allowed commands as you instead of as
-        /// nerve-run, outside the folders' sandbox (installed node, Linux).
+        /// With allowlist: run the allowed commands as you, outside the sandbox
+        ///
+        /// With allowlist: run the allowed commands as you instead of as nerve-run, outside the folders' sandbox (installed node, Linux).
         #[arg(long)]
         as_owner: bool,
         #[command(flatten)]
         center: CenterArg,
     },
+    /// Show a center's folders, or choose them and their rights
+    ///
     /// Show a center's folders, or choose the folders it may use and what it may do in each.
     #[command(args_conflicts_with_subcommands = true)]
     Folder {
@@ -174,10 +215,9 @@ pub enum Cmd {
         #[command(flatten)]
         center: CenterArg,
     },
-    /// Keep a center's commands off the network, or let them on it again:
-    /// `off` lets them open no socket but a unix one, in every mode, and no
-    /// sudo-list command runs; where they run as you (user mode, allowlist
-    /// --as-owner) or the machine cannot hold them, none of them runs.
+    /// Keep a center's commands off the network (`off`); in user mode nothing runs
+    ///
+    /// Keep a center's commands off the network, or let them on it again: `off` lets them open no socket but a unix one, in every mode, and no sudo-list command runs; where they run as you (user mode, allowlist --as-owner) or the machine cannot hold them, none of them runs.
     Network {
         /// `off` or `on`.
         #[arg(value_parser = ["on", "off"])]
@@ -185,6 +225,8 @@ pub enum Cmd {
         #[command(flatten)]
         center: CenterArg,
     },
+    /// Show a center's rules, or keep its lists of allowed and forbidden commands
+    ///
     /// Show a center's rules, or keep its lists of commands that are allowed, forbidden or run with sudo.
     #[command(args_conflicts_with_subcommands = true)]
     Rule {
@@ -201,7 +243,7 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: Option<SudoCmd>,
     },
-    /// Show whether the node runs and which centers it is paired with.
+    /// Show how the node is: its service, each center, and what to do next.
     Status,
     /// Show what the node allowed and refused.
     #[command(args_conflicts_with_subcommands = true)]
@@ -237,6 +279,8 @@ pub enum Cmd {
     Panic,
     /// Let the node work again after `panic`.
     Unlock,
+    /// Turn capabilities on or off, and add your own
+    ///
     /// Show every capability, turn capabilities and single actions on or off, and declare capabilities of your own in node.toml.
     #[command(args_conflicts_with_subcommands = true)]
     Cap {
@@ -258,12 +302,16 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: Option<ProxyCmd>,
     },
+    /// Let other nodes reach your centers through this node
+    ///
     /// Let nodes that cannot reach a center themselves reach this node's centers through it.
     #[command(args_conflicts_with_subcommands = true)]
     Relay {
         #[command(subcommand)]
         cmd: Option<RelayCmd>,
     },
+    /// Turn the node's web UI on or off, and manage its tokens
+    ///
     /// Turn the node's web UI on or off, and make the tokens that log in to it (the installed node on Linux; off unless turned on).
     #[command(args_conflicts_with_subcommands = true)]
     Ui {
@@ -281,6 +329,8 @@ pub enum Cmd {
 pub enum CenterCmd {
     /// Pair this machine with a center, using the pairing link it showed.
     Add {
+        /// The pairing link; `-` reads it from stdin (never in the process list)
+        ///
         /// The pairing link; `-` reads it from the first line of stdin, where it never shows in the process list.
         link: String,
         /// The name to use for the center here (the center's own name if left out).
@@ -296,6 +346,8 @@ pub enum CenterCmd {
     Pause(CenterName),
     /// Link to a paused center again.
     Resume(CenterName),
+    /// Give this machine a new key for a center (the node must run)
+    ///
     /// Give this machine a new key for a center; the center takes the old one for 7 more days. Needs the running node, linked to that center.
     RotateKey {
         #[command(flatten)]
@@ -304,6 +356,8 @@ pub enum CenterCmd {
         #[arg(long)]
         end_grace: bool,
     },
+    /// Let a center change its own rights here (`on`), up to user mode and sudo
+    ///
     /// Let a center change its own rights on this machine, up to user mode and sudo (`on`), or take that right away (`off`).
     Settings {
         /// `on` or `off`.
@@ -332,38 +386,54 @@ pub enum AddList {
 
 #[derive(Debug, Subcommand)]
 pub enum RuleCmd {
+    /// Allow or forbid a command; `sudo …` goes on the sudo list, ` *` is a wildcard
+    ///
     /// Put a command on a list; one that starts with `sudo` goes on the sudo list. A trailing ` *` covers every command that starts so (`'git status *'`).
     Add {
-        /// The list: `allow` (may run in allowlist mode; a sudo command may
-        /// run with sudo while sudo is on) or `deny` (a command line that
-        /// matches never runs, in any mode).
+        /// `allow` (in allowlist mode; a sudo command: with sudo) or `deny` (never runs)
+        ///
+        /// The list: `allow` (may run in allowlist mode; a sudo command may run with sudo while sudo is on) or `deny` (a command line that matches never runs, in any mode).
         list: AddList,
+        /// The command line; a trailing ` *` covers what starts with the words before it
+        ///
         /// The command line; a trailing ` *` covers every command that starts with the words before it.
         command: String,
+        /// Make the rule from an audit entry's action, as the audit buttons do
+        ///
         /// Make the rule of an audit entry of this action instead, as the audit buttons do: `fs.read` takes a path (`/srv/data/*` covers the folder), an action without a target takes "" (`*` covers its capability).
         #[arg(long, value_name = "CAP.ACTION")]
         action: Option<String>,
+        /// With --action: hold the rule to one argument, like room=office
+        ///
         /// With --action: hold the rule to one argument of the call, as the audit buttons do: `--arg room=office` makes `lamp.set:room=office`.
         #[arg(long, value_name = "FIELD=VALUE", requires = "action")]
         arg: Option<String>,
         #[command(flatten)]
         center: CenterArg,
     },
+    /// Take a rule off its list, as `rule` shows it
+    ///
     /// Take an entry off its list: the entry as `rule` shows it, or the command line that made it.
     #[command(override_usage = "nerve-node rule rm [OPTIONS] [LIST] <ENTRY>")]
     Rm {
+        /// The list, needed only when the entry is on two; then the entry
+        ///
         /// The list (`allow`, `deny` or `sudo`), needed only when the entry is on two; then the entry.
         #[arg(value_name = "ENTRY", required = true, num_args = 1..=2)]
         words: Vec<String>,
         #[command(flatten)]
         center: CenterArg,
     },
+    /// Change one rule in place, as one change
+    ///
     /// Change one entry of a list in place, as one change: the entry as `rule` shows it, and what it becomes.
     Edit {
         /// The list: `allow`, `deny` or `sudo`.
         list: List,
         /// The entry as `rule` shows it.
         entry: String,
+        /// The new rule, as `rule` shows it, or a plain command line
+        ///
         /// What it becomes: an entry as `rule` shows them (`exec.run:git status`, `fs.read:~/notes/*`; on the sudo list a sudo command's pattern), or a plain command line, which becomes the rule `add` makes of it.
         new: String,
         #[command(flatten)]
@@ -382,6 +452,8 @@ pub enum CapCmd {
         #[command(flatten)]
         center: CenterArg,
     },
+    /// Declare a capability that runs a fixed command (the words after `--`)
+    ///
     /// Declare a capability of your own, NAME (`cap.action`, like sensors.read), that runs a fixed command: the words after `--`, the program first. A word written `{field}` is the call's argument `field`, as one whole argument; no shell reads it. It runs as nerve-run on the installed Linux node, held to the folders; a node run by hand offers none.
     Add {
         /// `cap.action`, like sensors.read.
@@ -392,6 +464,8 @@ pub enum CapCmd {
         #[arg(last = true, required = true, value_name = "COMMAND")]
         command: Vec<String>,
     },
+    /// Change a capability you declared
+    ///
     /// Change a capability you declared: what you give replaces what it has, and a command after `--` its command.
     Edit {
         /// The capability, `cap.action`.
@@ -402,6 +476,8 @@ pub enum CapCmd {
         #[arg(last = true, value_name = "COMMAND")]
         command: Vec<String>,
     },
+    /// Remove a capability you declared (from every center at once)
+    ///
     /// Remove a capability you declared; it leaves every center at once. With --center, remove one that center added itself (settings on); `cap set NAME off --center` turns it off instead.
     Rm {
         /// The capability, `cap.action`.
@@ -417,21 +493,31 @@ pub enum CapCmd {
 /// (`-`), never from a file the node would open.
 #[derive(Debug, Args, Clone, Default)]
 pub struct CapSpec {
+    /// What it does: read, write, execute, sense or actuate
+    ///
     /// What it does: read, write, execute, sense or actuate. Sense and actuate need your `cap set NAME on` for a center.
     #[arg(long)]
     pub effect: Option<String>,
     /// One line for the agent: what it does.
     #[arg(long)]
     pub summary: Option<String>,
+    /// JSON Schema of its arguments, `none`, or `-` for stdin
+    ///
     /// The JSON Schema of its arguments, an object; `none` takes no arguments; `-` reads it from stdin. A property marked "x-nerve-path": "read" or "write" is a path the node holds to the folders.
     #[arg(long, value_name = "JSON")]
     pub params: Option<String>,
+    /// What it returns: `text` (the default), or a JSON Schema; `-` for stdin
+    ///
     /// What it returns: `text`, what the command prints (the default), or a JSON Schema the printed JSON must fit; `-` reads it from stdin.
     #[arg(long, value_name = "text|JSON")]
     pub result: Option<String>,
+    /// How long it may run, in seconds, or `default`
+    ///
     /// How long it may run, in seconds, up to limits.max_timeout_secs; `default` for the node's default.
     #[arg(long, value_name = "SECS")]
     pub timeout: Option<String>,
+    /// Where it runs: any (the default), linux or windows
+    ///
     /// Where it runs: any (the default), linux or windows. A node offers only those of its platform.
     #[arg(long)]
     pub platform: Option<String>,
@@ -451,6 +537,8 @@ impl CapSpec {
 
 #[derive(Debug, Subcommand)]
 pub enum ProviderCmd {
+    /// Allow the program EXE to add capabilities as provider NAME
+    ///
     /// Let the program EXE attach as the provider NAME; it replaces the program allowed under that name. The node checks that the program that attaches runs this very file.
     Add {
         /// The provider's name, which its capabilities carry: 1 to 32 of a-z, 0-9 and `-`.
@@ -469,6 +557,8 @@ pub enum ProviderCmd {
 pub enum ServiceCmd {
     /// Start the installed service; the owner needs no root or administrator for it.
     Start,
+    /// Stop the service: the node ends its links and runs nothing
+    ///
     /// Stop it: the node ends its links and runs nothing until it starts again, at the latest with the machine.
     Stop,
     /// Stop it and start it again, so the node takes every change in node.toml.
@@ -477,18 +567,24 @@ pub enum ServiceCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum AuditCmd {
+    /// Start the audit log afresh (the old one becomes audit.jsonl.1)
+    ///
     /// Start the audit log afresh. The entries so far become its one older file (audit.jsonl.1, in place of the one before), and the new log begins with an entry of who cleared it.
     Clear,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum LogCmd {
+    /// Empty the node's log and its older file
+    ///
     /// Empty the node's log and its older file. The new log begins with a line of who cleared it.
     Clear,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum SudoCmd {
+    /// Turn sudo on; the password stays in memory only
+    ///
     /// Turn sudo on; asks for your sudo password and keeps it in memory only (on Windows the password of the account commands run as, kept with DPAPI).
     On,
     /// Turn sudo off and forget the password.
@@ -497,6 +593,8 @@ pub enum SudoCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum FolderCmd {
+    /// Let a center use a folder: r reads, w writes, x runs commands; none closes it
+    ///
     /// Let a center use a folder, or change what it may do in one it has: `r` reads, `w` writes, `x` runs commands (`rw`, `rx`); `none` closes a folder inside one it may use.
     Add {
         /// The folder.
@@ -514,9 +612,9 @@ pub enum FolderCmd {
         #[command(flatten)]
         center: CenterArg,
     },
-    /// Give nerve-run its access to everything in the folders of every
-    /// center again, also what was moved into them (the installed node on
-    /// Linux): a pass over every granted folder.
+    /// Give nerve-run its access to every granted folder again (installed Linux node)
+    ///
+    /// Give nerve-run its access to everything in the folders of every center again, also what was moved into them (the installed node on Linux): a pass over every granted folder.
     Sync,
 }
 
@@ -553,30 +651,43 @@ pub enum ConfigCmd {
         /// The value to remove.
         value: String,
     },
-    /// Trust node.toml as it is now, after the node refused it for a change
-    /// made outside nerve-node. Read the file first.
+    /// Trust node.toml as it is now, after a change made outside nerve-node
+    ///
+    /// Trust node.toml as it is now, after the node refused it for a change made outside nerve-node. Read the file first.
     Accept,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ProxyCmd {
+    /// Reach centers through an HTTP proxy or a relay
+    ///
     /// Reach centers through an HTTP proxy. Header values and a password are kept in the system keyring, never in node.toml; the installed node on Windows takes neither.
     Set {
+        /// http://[user[:password]@]host:port, https://… or a nerve://relay link
+        ///
         /// The proxy, http://host:port, or http://user:password@host:port when it wants a login (http://user@host:port asks for the password, or reads it from the first line of stdin); https://... for another proxy reached over TLS; or the nerve://relay link a relay showed, which holds its address, pin and this node's token.
         url: String,
+        /// The pin of an https:// proxy's certificate
+        ///
         /// The pin of an https:// proxy's certificate (a relay's: `nerve-node relay` there shows it); without it the system's roots check it.
         #[arg(long)]
         pin: Option<String>,
+        /// A header for the proxy, `Name: value`, kept in the keyring; `-` for stdin
+        ///
         /// A header for the proxy, `Name: value`; can be given more than once. The value goes into the system keyring. `-` reads headers from stdin, one a line, after the password.
         #[arg(long = "header", value_name = "NAME: VALUE")]
         headers: Vec<String>,
     },
+    /// Reach centers directly again, without a proxy
+    ///
     /// Reach centers directly again, and delete the proxy's values from the system keyring.
     Off,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum RelayCmd {
+    /// Turn the relay on at ADDRESS, like 0.0.0.0:7490
+    ///
     /// Turn the relay on: listen for other nodes at ADDRESS, like 0.0.0.0:7490. A node reaches only this node's own https centers through it.
     On {
         /// The address and port to listen on, like 0.0.0.0:7490 or [::]:7490.
@@ -587,28 +698,43 @@ pub enum RelayCmd {
         /// Tunnels at once of one relayed node (4 unless set).
         #[arg(long, value_name = "N")]
         max_links_per_node: Option<u32>,
+        /// Tunnels one relayed node may open per minute (30)
+        ///
         /// Tunnels one relayed node may open a minute, every node alike (30 unless set; for a relay behind this one, use `relay set <name>`).
         #[arg(long, value_name = "N")]
         max_opens_per_minute: Option<u32>,
     },
+    /// Turn the relay off; its nodes and their tokens stay
+    ///
     /// Turn the relay off: stop listening and end every tunnel. The nodes and their tokens stay.
     Off,
+    /// Let a node use the relay (shows its link once)
+    ///
     /// Let a node use the relay: makes its token and shows it once, in a link the other node pastes. Without --to its tunnels may go to every https center of this node.
     Add {
-        /// The relayed node's name here, 1 to 32 of a-z, 0-9 and -, starting and
-        /// ending with a letter or digit.
+        /// The relayed node's name here: 1 to 32 of a-z, 0-9 and -
+        ///
+        /// The relayed node's name here, 1 to 32 of a-z, 0-9 and -, starting and ending with a letter or digit.
         name: String,
+        /// A center it may reach (more than once); without it, every one
+        ///
         /// A center of this node the relayed node may reach; can be given more than once. Without it, every one.
         #[arg(long = "to", value_name = "CENTER")]
         centers: Vec<String>,
+        /// Where the other node reaches this machine, HOST[:PORT], for its link
+        ///
         /// Where the other node reaches this machine, HOST or HOST:PORT, for its link (without it: the address the relay listens on, else this machine's host name).
         #[arg(long, value_name = "HOST[:PORT]")]
         address: Option<String>,
     },
+    /// Change the centers or the limits of one relayed node
+    ///
     /// Change what a relayed node may: the centers it may reach (its tunnels to others end), and limits of its own in place of the relay's, for a relay behind this one, which carries many nodes. What is not given stays.
     Set {
         /// The relayed node's name.
         name: String,
+        /// A center it may reach (more than once); `*` for every one
+        ///
         /// A center of this node the relayed node may reach; can be given more than once; `*` for every one.
         #[arg(long = "to", value_name = "CENTER")]
         centers: Vec<String>,
@@ -619,10 +745,14 @@ pub enum RelayCmd {
         #[arg(long, value_name = "N")]
         max_opens_per_minute: Option<String>,
     },
+    /// Give a relayed node a new token (shows its link once)
+    ///
     /// Give a relayed node a new token and end the tunnels of the old one; its centers and limits stay. Shows the token once, in a link the other node pastes.
     Token {
         /// The relayed node's name.
         name: String,
+        /// Where the other node reaches this machine, HOST[:PORT], for its link
+        ///
         /// Where the other node reaches this machine, HOST or HOST:PORT, for its link (as for `relay add`).
         #[arg(long, value_name = "HOST[:PORT]")]
         address: Option<String>,
@@ -642,10 +772,15 @@ pub enum RelayCmd {
 pub struct Help {
     /// What the node is.
     pub about: String,
+    /// The options every command takes and those that commands on several
+    /// cards take alike (`--center`), said once, at the end of the page.
+    pub options: Vec<ArgHelp>,
     /// Options every command takes.
+    #[serde(skip)]
     pub global: Vec<ArgHelp>,
     /// Arguments that cards on different places take alike (`--center`),
     /// said once here and left out of the cards.
+    #[serde(skip)]
     pub common: Vec<ArgHelp>,
     /// The cards, grouped by what a person wants to do, in reading order.
     pub sections: Vec<Section>,
@@ -659,7 +794,7 @@ pub struct Help {
 const SECTIONS: &[(&str, &str, &[&[&str]])] = &[
     (
         "Set up",
-        "Run the node as a service under a user of its own (Linux with sudo, Windows as administrator), set it up, keep it current, and back it up or move it.",
+        "Install the node as a service, set it up, keep it current, and back it up.",
         &[
             &["install", "uninstall"],
             &["setup"],
@@ -681,7 +816,7 @@ const SECTIONS: &[(&str, &str, &[&[&str]])] = &[
     ),
     (
         "More",
-        "Capabilities, the ways to reach centers, the web UI, any setting by its name, and the node in the foreground.",
+        "Capabilities, proxy and relay, the web UI, any setting, the foreground run.",
         &[
             &["cap"],
             &["provider"],
@@ -694,11 +829,86 @@ const SECTIONS: &[(&str, &str, &[&[&str]])] = &[
     ),
 ];
 
+/// The top page of `nerve-node --help`: the commands in the groups of
+/// [`SECTIONS`], one line each, then the options every command takes, which
+/// the commands' own pages leave out.
+pub const TOP_TEMPLATE: &str = "{about-with-newline}\n{usage-heading} {usage}{after-help}";
+
+/// What [`TOP_TEMPLATE`] lists, read from the [`Cli`] definition.
+pub fn top_help(program: &str) -> String {
+    let root = Cli::command();
+    let mut out = String::new();
+    let width = root
+        .get_subcommands()
+        .filter(|c| visible(c))
+        .map(|c| c.get_name().len())
+        .max()
+        .unwrap_or(8);
+    for (name, _, cards) in SECTIONS {
+        out.push_str(&format!("{name}:\n"));
+        for c in cards.iter().flat_map(|c| c.iter()) {
+            if let Some(cmd) = root.find_subcommand(c) {
+                out.push_str(&format!("  {c:width$}  {}\n", about_of(cmd)));
+            }
+        }
+        out.push('\n');
+    }
+    out.push_str("Options every command takes:\n");
+    for a in root.get_arguments().filter(|a| a.is_global_set()) {
+        let h = arg_help(a);
+        out.push_str(&format!("  {:25}  {}\n", h.name, h.about));
+    }
+    out.push_str(&format!(
+        "\n`{program} <command> --help` says more of one command; the user guide is in docs/user."
+    ));
+    out
+}
+
+/// The command as `--help` shows it: the top page of [`top_help`], and each
+/// command's long page (`<command> --help`) ending on its user guide page.
+pub fn help_pages(cmd: clap::Command, program: &'static str) -> clap::Command {
+    let names: Vec<String> = cmd
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .collect();
+    names
+        .iter()
+        .fold(cmd, |cmd, name| {
+            cmd.mut_subcommand(name, |c| {
+                c.after_long_help(format!(
+                    "More in the user guide: docs/user/{}",
+                    doc_of(name)
+                ))
+            })
+        })
+        .name(program)
+        .bin_name(program)
+        .help_template(TOP_TEMPLATE)
+        .after_help(top_help(program))
+}
+
+/// What a bare `nerve-node` prints: the commands of every day.
+pub fn everyday(program: &str) -> String {
+    format!(
+        "{program} links this machine to its Nerve centers.
+
+  sudo {program} install                 install it as a service, then pair a center
+  {program} status                       how it is, and what to do next
+  {program} center add '<link>'          pair with a center
+  {program} folder add ~/project rw      let the center use a folder
+  {program} rule add allow '<command>'   allow a command (allowlist mode)
+  {program} audit                        what was allowed and refused
+
+`{program} --help` lists every command."
+    )
+}
+
 /// A heading with its sentence, and the cards below it.
 #[derive(Debug, Clone, Serialize)]
 pub struct Section {
     pub name: String,
     /// What the section is for, said once for all its cards.
+    #[serde(rename = "line")]
     pub about: String,
     pub cards: Vec<Card>,
 }
@@ -709,8 +919,13 @@ pub struct Section {
 pub struct Card {
     /// `folder`, `panic / unlock`.
     pub name: String,
-    /// What it is for; empty when its commands say it themselves.
+    /// What it is for, one line; empty when its commands say it themselves.
+    #[serde(rename = "line")]
     pub about: String,
+    /// The rest of what it is for, folded under the line.
+    pub more: String,
+    /// The page of the user guide that says more (docs/user/<doc>).
+    pub doc: String,
     /// The commands that only hold more commands (`folder`), which the card
     /// covers without a line of their own.
     pub holds: Vec<String>,
@@ -726,8 +941,11 @@ pub struct Verb {
     pub name: String,
     /// The usage line, for example `nerve-node folder add [OPTIONS] <PATH>`.
     pub usage: String,
-    /// The explanation: the doc comment of the command.
+    /// The explanation's first line: the command's `about`.
+    #[serde(rename = "line")]
     pub about: String,
+    /// The rest of the explanation (its `long_about`), folded.
+    pub more: String,
     /// Its own arguments and flags, without the global and the shared ones.
     pub args: Vec<ArgHelp>,
     /// Every argument and flag it takes but the global ones, the shared
@@ -741,8 +959,11 @@ pub struct Verb {
 pub struct ArgHelp {
     /// How it is written: `--for <HOURS>`, `<PATH>`, `--refused`.
     pub name: String,
-    /// The explanation; empty when the argument has none.
+    /// The explanation's first line; empty when the argument has none.
+    #[serde(rename = "line")]
     pub about: String,
+    /// The rest of the explanation (its long help), folded.
+    pub more: String,
     /// Whether it can be left out.
     pub optional: bool,
 }
@@ -801,13 +1022,15 @@ pub fn help() -> Help {
         });
     }
     let common = hoist_common(&mut sections);
+    let global: Vec<ArgHelp> = root
+        .get_arguments()
+        .filter(|a| a.is_global_set())
+        .map(arg_help)
+        .collect();
     Help {
         about: about_of(&root),
-        global: root
-            .get_arguments()
-            .filter(|a| a.is_global_set())
-            .map(arg_help)
-            .collect(),
+        options: global.iter().chain(&common).cloned().collect(),
+        global,
         common,
         sections,
     }
@@ -843,6 +1066,40 @@ fn about_of(c: &clap::Command) -> String {
     c.get_about().map(ToString::to_string).unwrap_or_default()
 }
 
+/// The long text after a first `line` (clap's long help is the line, a
+/// blank line and the rest): the rest, or nothing.
+fn rest_of(long: Option<String>, line: &str) -> String {
+    let long = long.unwrap_or_default();
+    match long.strip_prefix(line) {
+        Some(rest) => rest.trim().to_string(),
+        None if long == line => String::new(),
+        None => long,
+    }
+}
+
+/// The user guide's page for a command of the top level.
+pub fn doc_of(command: &str) -> &'static str {
+    match command.split([' ', '/']).next().unwrap_or_default() {
+        "install" | "uninstall" | "setup" | "update" | "service" => "service.md",
+        "backup" | "restore" => "backup.md",
+        "center" => "pairing.md",
+        "mode" | "folder" | "network" => "modes.md",
+        "rule" => "rules.md",
+        "sudo" => "sudo.md",
+        "status" => "troubleshooting.md",
+        "audit" => "audit.md",
+        "log" => "logs.md",
+        "panic" | "unlock" => "stop.md",
+        "cap" => "config-capabilities.md",
+        "provider" => "providers.md",
+        "proxy" => "proxy.md",
+        "relay" => "relay.md",
+        "ui" => "node-web-ui.md",
+        "config" => "config.md",
+        _ => "commands.md",
+    }
+}
+
 fn cards_of(cmds: &[&clap::Command]) -> Vec<Card> {
     if let [one] = cmds
         && one.has_subcommands()
@@ -855,6 +1112,22 @@ fn cards_of(cmds: &[&clap::Command]) -> Vec<Card> {
 }
 
 fn card(name: &str, about: String, holds: Vec<String>, mut verbs: Vec<Verb>) -> Card {
+    card_with(
+        name,
+        about,
+        String::new(),
+        holds,
+        std::mem::take(&mut verbs),
+    )
+}
+
+fn card_with(
+    name: &str,
+    about: String,
+    more: String,
+    holds: Vec<String>,
+    mut verbs: Vec<Verb>,
+) -> Card {
     // An argument that two verbs take alike is said once, on the card.
     let mut shared: Vec<ArgHelp> = Vec::new();
     for a in verbs.iter().flat_map(|v| &v.args) {
@@ -868,6 +1141,8 @@ fn card(name: &str, about: String, holds: Vec<String>, mut verbs: Vec<Verb>) -> 
     Card {
         name: name.into(),
         about,
+        more,
+        doc: doc_of(name).into(),
         holds,
         shared_args: shared,
         verbs,
@@ -896,7 +1171,9 @@ fn noun_cards(noun: &clap::Command, name: &str) -> Vec<Card> {
                     .map(|c| verb(c, &format!("{name} {}", c.get_name()))),
             )
             .collect();
-        out.push(card(name, about_of(noun), holds, verbs));
+        let line = about_of(noun);
+        let more = rest_of(noun.get_long_about().map(ToString::to_string), &line);
+        out.push(card_with(name, line, more, holds, verbs));
     }
     for h in &holders {
         out.extend(noun_cards(h, &format!("{name} {}", h.get_name())));
@@ -920,10 +1197,12 @@ fn verb(sub: &clap::Command, name: &str) -> Verb {
         .filter(|a| !a.is_global_set() && !matches!(a.get_id().as_str(), "help" | "version"))
         .map(arg_help)
         .collect();
+    let line = about_of(sub);
     Verb {
         name: name.into(),
         usage: usage.strip_prefix("Usage: ").unwrap_or(usage).to_string(),
-        about: about_of(sub),
+        more: rest_of(sub.get_long_about().map(ToString::to_string), &line),
+        about: line,
         takes: args.clone(),
         args,
     }
@@ -939,9 +1218,11 @@ fn arg_help(a: &clap::Arg) -> ArgHelp {
         Some(long) => format!("--{long}"),
         None => format!("<{value}>"),
     };
+    let line = a.get_help().map(ToString::to_string).unwrap_or_default();
     ArgHelp {
         name,
-        about: a.get_help().map(ToString::to_string).unwrap_or_default(),
+        more: rest_of(a.get_long_help().map(ToString::to_string), &line),
+        about: line,
         optional: !a.is_required_set(),
     }
 }
@@ -10229,6 +10510,125 @@ mod tests {
         let n = abouts.len();
         abouts.dedup();
         assert_eq!(abouts.len(), n, "two commands say the same");
+    }
+
+    /// One line first (plan 4.1): every command's `about` and every
+    /// argument's `help` is at most 80 characters; the rest is the long
+    /// help, shown by `--help`.
+    #[test]
+    fn every_help_line_is_short() {
+        fn walk(c: &clap::Command, at: &str, long: &mut Vec<String>) {
+            if let Some(a) = c.get_about() {
+                let a = a.to_string();
+                if a.chars().count() > 80 {
+                    long.push(format!("{at}: {a}"));
+                }
+            }
+            for arg in c.get_arguments() {
+                if let Some(h) = arg.get_help() {
+                    let h = h.to_string();
+                    if h.chars().count() > 80 {
+                        long.push(format!("{at} {}: {h}", arg.get_id()));
+                    }
+                }
+            }
+            for s in c.get_subcommands() {
+                walk(s, &format!("{at} {}", s.get_name()), long);
+            }
+        }
+        let mut long = Vec::new();
+        walk(&Cli::command(), "nerve-node", &mut long);
+        assert!(long.is_empty(), "{long:#?}");
+    }
+
+    /// `--help` lists the commands in the four groups and More, one line
+    /// each, and names the options every command takes there only; a
+    /// command's long page ends on its guide page.
+    #[test]
+    fn the_top_help_is_in_groups_and_short() {
+        let mut cmd = help_pages(Cli::command(), "nerve-node");
+        let top = cmd.render_help().to_string();
+        let mut at = 0;
+        for g in [
+            "Set up:",
+            "Centers:",
+            "What a center may do:",
+            "Watch and stop:",
+            "More:",
+            "Options every command takes:",
+        ] {
+            let i = top[at..]
+                .find(g)
+                .unwrap_or_else(|| panic!("{g} missing or out of order:\n{top}"));
+            at += i + g.len();
+        }
+        for c in Cli::command().get_subcommands().filter(|c| visible(c)) {
+            let line = format!("  {:9}  {}", c.get_name(), about_of(c));
+            assert_eq!(top.matches(&line).count(), 1, "{line}\n{top}");
+        }
+        assert!(top.lines().all(|l| l.chars().count() <= 100), "{top}");
+        assert!(top.contains("--json"), "{top}");
+        let folder = cmd.find_subcommand_mut("folder").unwrap();
+        assert!(!folder.render_help().to_string().contains("--json"));
+        let long = folder.render_long_help().to_string();
+        assert!(
+            long.ends_with("More in the user guide: docs/user/modes.md\n"),
+            "{long}"
+        );
+        // Bare, it names the commands of every day, each one that exists.
+        let day = everyday("nerve-node");
+        for l in day.lines().filter(|l| l.starts_with("  ")) {
+            let word = l
+                .split_whitespace()
+                .find(|w| *w != "sudo" && *w != "nerve-node")
+                .unwrap();
+            assert!(Cli::command().find_subcommand(word).is_some(), "{l}");
+        }
+        assert_eq!(
+            day.lines().filter(|l| l.starts_with("  ")).count(),
+            6,
+            "{day}"
+        );
+    }
+
+    /// The help data has a line and its rest for each item, and a guide
+    /// page for each card, from the same split as `--help`.
+    #[test]
+    fn the_help_data_folds_the_rest() {
+        let h = help();
+        let mode = h.verbs().find(|v| v.name == "mode").unwrap();
+        assert_eq!(
+            mode.about,
+            "Choose how much a center may do: folder, allowlist or user mode"
+        );
+        assert!(
+            mode.more.starts_with("Show each center's mode"),
+            "{}",
+            mode.more
+        );
+        let arg = mode.args.iter().find(|a| a.name == "<MODE>").unwrap();
+        assert!(
+            arg.about.contains("reads also what every account may"),
+            "{}",
+            arg.about
+        );
+        assert!(arg.more.contains("protected files aside"), "{}", arg.more);
+        for s in &h.sections {
+            for c in &s.cards {
+                assert!(c.doc.ends_with(".md"), "{}", c.name);
+                let file = format!("{}/../../docs/user/{}", env!("CARGO_MANIFEST_DIR"), c.doc);
+                assert!(
+                    std::path::Path::new(&file).exists(),
+                    "{} names {}",
+                    c.name,
+                    c.doc
+                );
+            }
+        }
+        assert!(h.options.iter().any(|o| o.name == "--json"));
+        assert!(h.options.iter().any(|o| o.name.starts_with("--center")));
+        let json = serde_json::to_value(&h).unwrap();
+        assert!(json.get("global").is_none() && json["sections"][0].get("line").is_some());
     }
 
     /// The help page calls no command not done.

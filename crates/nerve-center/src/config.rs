@@ -99,13 +99,23 @@ pub fn refuse_old_names(
 #[command(
     name = "nerve-center",
     version,
+    // `--help` gives one line each here; `help <command>` the whole text.
+    disable_help_flag = true,
     about = "The Nerve center as an MCP server. Start it from a harness's MCP configuration."
 )]
 pub struct Args {
-    /// The state folder (identity, paired nodes, statistics); the installed
-    /// center's for `owner-token`, `status`, `backup` and `restore` where
-    /// it is installed.
-    #[arg(long, env = "NERVE_CENTER_STATE_DIR", global = true)]
+    /// Print help (`nerve-center help <command>` for one command's whole text)
+    #[arg(short = 'h', long = "help", action = clap::ArgAction::HelpShort)]
+    help: Option<bool>,
+    /// The state folder (identity, paired machines, statistics)
+    ///
+    /// The state folder (identity, paired nodes, statistics); the installed center's for `owner-token`, `status`, `backup` and `restore` where it is installed.
+    #[arg(
+        long,
+        env = "NERVE_CENTER_STATE_DIR",
+        global = true,
+        help_heading = "Advanced"
+    )]
     pub state_dir: Option<PathBuf>,
     /// The center name shown to nodes and in the web UI.
     #[arg(long, env = "NERVE_CENTER_NAME")]
@@ -116,16 +126,19 @@ pub struct Args {
     /// The URL put into pairing links; https://<host name>:<port> by default.
     #[arg(long, env = "NERVE_CENTER_PUBLIC_URL")]
     pub public_url: Option<String>,
-    /// Serve nodes over plain HTTP; only on a loopback `--listen`, for tests
-    /// and nodes on the same machine.
-    #[arg(long, env = "NERVE_CENTER_PLAIN_LOOPBACK")]
+    /// Serve nodes over plain HTTP, on a loopback --listen only
+    ///
+    /// Serve nodes over plain HTTP; only on a loopback `--listen`, for tests and nodes on the same machine.
+    #[arg(long, env = "NERVE_CENTER_PLAIN_LOOPBACK", help_heading = "Advanced")]
     pub plain_loopback: bool,
-    /// The web UI address, or `off`. It always asks for the owner token
-    /// (`nerve-center owner-token`).
+    /// The web UI address, or `off`; it asks for the owner token
+    ///
+    /// The web UI address, or `off`. It always asks for the owner token (`nerve-center owner-token`).
     #[arg(long, env = "NERVE_CENTER_UI", default_value = "127.0.0.1:7480")]
     pub ui: String,
-    /// How harnesses reach the center: `stdio`, `off`, `http`
-    /// (127.0.0.1:7481) or an address and port for HTTP MCP.
+    /// How harnesses reach the center: stdio, off, http or an address
+    ///
+    /// How harnesses reach the center: `stdio`, `off`, `http` (127.0.0.1:7481) or an address and port for HTTP MCP.
     #[arg(
         long,
         env = "NERVE_CENTER_MCP",
@@ -133,19 +146,25 @@ pub struct Args {
         default_value = "stdio"
     )]
     pub mcp: McpMode,
-    /// A harness token: a bearer token of the HTTP MCP endpoint, besides the
-    /// tokens made in the web UI. It does not log in to the web UI.
-    #[arg(long, env = "NERVE_CENTER_HARNESS_TOKEN", hide_env_values = true)]
+    /// A harness token for the HTTP MCP endpoint (not a web UI login)
+    ///
+    /// A harness token: a bearer token of the HTTP MCP endpoint, besides the tokens made in the web UI. It does not log in to the web UI.
+    #[arg(
+        long,
+        env = "NERVE_CENTER_HARNESS_TOKEN",
+        hide_env_values = true,
+        help_heading = "Advanced"
+    )]
     pub harness_token: Option<String>,
-    /// How long `execute` waits for a call's result: a call still running
-    /// then becomes a job, whose id `execute` answers at once (`20`, `20s`
-    /// or `500ms`; 10 ms to 600 s). Keep it below your harness's own timeout
-    /// for a tool call.
-    #[arg(long, env = "NERVE_CENTER_CALL_WAIT", default_value = "20s", value_parser = crate::jobs::parse_wait)]
+    /// How long `execute` waits before a call becomes a job (20s)
+    ///
+    /// How long `execute` waits for a call's result: a call still running then becomes a job, whose id `execute` answers at once (`20`, `20s` or `500ms`; 10 ms to 600 s). Keep it below your harness's own timeout for a tool call.
+    #[arg(long, env = "NERVE_CENTER_CALL_WAIT", default_value = "20s", value_parser = crate::jobs::parse_wait, help_heading = "Advanced")]
     pub call_wait: std::time::Duration,
-    /// The log level (error, warn, info, debug). Without it the level set in
-    /// the web UI holds, info at first; with it this level holds for this run.
-    #[arg(long, env = "NERVE_CENTER_LOG")]
+    /// The log level for this run (error, warn, info, debug)
+    ///
+    /// The log level (error, warn, info, debug). Without it the level set in the web UI holds, info at first; with it this level holds for this run.
+    #[arg(long, env = "NERVE_CENTER_LOG", help_heading = "Advanced")]
     pub log: Option<Level>,
     #[command(subcommand)]
     pub cmd: Option<Cmd>,
@@ -155,6 +174,44 @@ pub struct Args {
 /// `nerve-center` runs the center.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum Cmd {
+    /// Run the center as a service (as root)
+    ///
+    /// Install the center as a service that starts with the machine and runs under a user of its own, with MCP over HTTP (Linux with systemd, as root). --name, --public-url and --listen go into its settings.
+    Install,
+    /// Show whether the center runs, its URLs and its machines
+    ///
+    /// Show whether the center runs, its URLs, where its owner token is, and its machines; the installed center's where it is installed.
+    Status,
+    /// Show the token that logs in to the web UI
+    ///
+    /// Say the owner token, the secret that logs in to the web UI, and where it is kept; with --new, make a new one first. Run it as the center's user, or as root for the installed center.
+    OwnerToken {
+        /// Make a new token in place of the old one, which stops at once
+        ///
+        /// Make a new token in place of the old one: the old one stops at once, also on a running center.
+        #[arg(long)]
+        new: bool,
+    },
+    /// Update to the latest release; the state and the settings stay
+    ///
+    /// Replace the installed program with the latest release and restart the service; the state and the settings stay.
+    Update {
+        /// Take the new program from this file instead of downloading the latest release.
+        #[arg(long, value_name = "FILE")]
+        from: Option<PathBuf>,
+    },
+    /// Remove the service and the program; state and settings stay
+    ///
+    /// Stop and remove the service, its user and the program; the state and settings folders stay.
+    Uninstall {
+        /// Delete the state and settings folders too
+        ///
+        /// Delete the state and settings folders too: the center's key, its pairings and its log.
+        #[arg(long)]
+        purge: bool,
+    },
+    /// Save the center's identity and pairings to a passphrase-protected file
+    ///
     /// Write the center's identity and state (its certificate and key, the paired nodes, the harness tokens' hashes and the statistics) to a file that a passphrase protects, to keep or to move the center to another machine.
     Backup {
         /// The file to write. It is private to you (mode 0600).
@@ -166,6 +223,8 @@ pub enum Cmd {
         #[arg(long, value_name = "FILE")]
         passphrase_file: Option<PathBuf>,
     },
+    /// Restore a backup (the center must not run)
+    ///
     /// Put the identity and state of a backup in place of this center's. No center may run on the state folder.
     Restore {
         /// The backup file.
@@ -177,28 +236,8 @@ pub enum Cmd {
         #[arg(long, value_name = "FILE")]
         passphrase_file: Option<PathBuf>,
     },
-    /// Say the owner token, the secret that logs in to the web UI, and where it is kept; with --new, make a new one first. Run it as the center's user, or as root for the installed center.
-    OwnerToken {
-        /// Make a new token in place of the old one: the old one stops at once, also on a running center.
-        #[arg(long)]
-        new: bool,
-    },
-    /// Show whether the center runs, its URLs, where its owner token is, and its machines; the installed center's where it is installed.
-    Status,
-    /// Install the center as a service that starts with the machine and runs under a user of its own, with MCP over HTTP (Linux with systemd, as root). --name, --public-url and --listen go into its settings.
-    Install,
-    /// Replace the installed program with the latest release and restart the service; the state and the settings stay.
-    Update {
-        /// Take the new program from this file instead of downloading the latest release.
-        #[arg(long, value_name = "FILE")]
-        from: Option<PathBuf>,
-    },
-    /// Stop and remove the service, its user and the program; the state and settings folders stay.
-    Uninstall {
-        /// Delete the state and settings folders too: the center's key, its pairings and its log.
-        #[arg(long)]
-        purge: bool,
-    },
+    /// Print the files of the service this program installs, as JSON (for `update`)
+    ///
     /// Print the files of the service this program installs besides itself, as JSON: `update` of the installed program runs the new one so, to put them in place with it.
     #[command(hide = true)]
     ServiceFiles,
@@ -325,6 +364,30 @@ pub fn is_loopback(addr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One line first (plan 4.1): every command's `about` and every flag's
+    /// `help` is at most 80 characters; the rest is the long help.
+    #[test]
+    fn every_help_line_is_short() {
+        use clap::CommandFactory;
+        let cmd = Args::command();
+        let mut long = Vec::new();
+        for c in std::iter::once(&cmd).chain(cmd.get_subcommands()) {
+            if let Some(a) = c.get_about().map(|a| a.to_string())
+                && a.chars().count() > 80
+            {
+                long.push(format!("{}: {a}", c.get_name()));
+            }
+            for arg in c.get_arguments() {
+                if let Some(h) = arg.get_help().map(|h| h.to_string())
+                    && h.chars().count() > 80
+                {
+                    long.push(format!("{} {}: {h}", c.get_name(), arg.get_id()));
+                }
+            }
+        }
+        assert!(long.is_empty(), "{long:#?}");
+    }
 
     /// The owner's commands take the installed center's folder where there
     /// is one and none is given; the center a harness starts its own.
