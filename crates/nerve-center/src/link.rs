@@ -1156,37 +1156,8 @@ pub async fn run(
 
     // A link the node names, with a count that fits, is carried on (§4.9);
     // any other link the node had ends here.
-    let (tx, mut rx) = mpsc::channel::<Out>(nerve_proto::limits::SEND_QUEUE);
-    let mut carried = None;
-    if let Some(old) = &before
-        && old.resume_id.as_deref() == Some(hello.resume.link.as_str())
-    {
-        match old.resume(tx.clone(), hello.resume.got) {
-            Ok((conn, again)) => carried = Some((old.clone(), conn, again)),
-            Err(e) => center.note(
-                Level::Info,
-                Some(&node_id),
-                format!("the node asked to resume its link, which cannot be: {e}"),
-            ),
-        }
-    }
-    if carried.is_none()
-        && let Some(old) = &before
-        && !old.is_closed()
-    {
-        let n = old.waiting();
-        old.fail_all();
-        if n > 0 {
-            center.note(
-                Level::Info,
-                Some(&node_id),
-                format!(
-                    "the node's new link does not carry on its old one; {} on the old one failed with connection_lost",
-                    crate::center::plural(n as u32, "call")
-                ),
-            );
-        }
-    }
+    let (tx, rx) = mpsc::channel::<Out>(nerve_proto::limits::SEND_QUEUE);
+    let carried = carry(&center, &node_id, &before, &hello, &tx);
 
     // The features of the hello this center speaks too (§1.1).
     let features: Vec<&str> = nerve_proto::FEATURES
@@ -1246,30 +1217,8 @@ pub async fn run(
             )
         }
     };
-    let (mut sink, mut stream) = ws.split();
-    let writer = tokio::spawn(async move {
-        // What the node did not read of the link goes first, in order.
-        for t in again {
-            if sink.send(WsMessage::text(t)).await.is_err() {
-                return;
-            }
-        }
-        while let Some(o) = rx.recv().await {
-            match o {
-                Out::Frame(f) => {
-                    if sink.send(f).await.is_err() {
-                        break;
-                    }
-                }
-                Out::Bye(reason) => {
-                    let bye = Message::notification(method::BYE, json!({ "reason": reason }));
-                    let _ = sink.send(WsMessage::text(bye.encode())).await;
-                    let _ = sink.close().await;
-                    break;
-                }
-            }
-        }
-    });
+    let (sink, mut stream) = ws.split();
+    let writer = tokio::spawn(write(sink, again, rx));
     center.link_up(link.clone(), &hello, resumed);
     let up = Instant::now();
     // The key this hello was signed with may have stopped counting while the
@@ -1436,6 +1385,79 @@ pub async fn run(
     center.link_down(&link, clean, &why, silent, conn, up.elapsed());
 }
 
+/// The link a resume carries on (§4.9), with its connection and the frames
+/// to send again: the held or parked link `before`, when the hello names it
+/// with a count that fits. Any other link the node had ends here.
+fn carry(
+    center: &Center,
+    node_id: &str,
+    before: &Option<Arc<Link>>,
+    hello: &Hello,
+    tx: &mpsc::Sender<Out>,
+) -> Option<(Arc<Link>, u64, Vec<String>)> {
+    let mut carried = None;
+    if let Some(old) = &before
+        && old.resume_id.as_deref() == Some(hello.resume.link.as_str())
+    {
+        match old.resume(tx.clone(), hello.resume.got) {
+            Ok((conn, again)) => carried = Some((old.clone(), conn, again)),
+            Err(e) => center.note(
+                Level::Info,
+                Some(node_id),
+                format!("the node asked to resume its link, which cannot be: {e}"),
+            ),
+        }
+    }
+    if carried.is_none()
+        && let Some(old) = &before
+        && !old.is_closed()
+    {
+        let n = old.waiting();
+        old.fail_all();
+        if n > 0 {
+            center.note(
+                Level::Info,
+                Some(node_id),
+                format!(
+                    "the node's new link does not carry on its old one; {} on the old one failed with connection_lost",
+                    crate::center::plural(n as u32, "call")
+                ),
+            );
+        }
+    }
+    carried
+}
+
+/// The link's writer, the one owner of the sink: what the node did not read
+/// of the link first, then what the link sends, until its bye.
+async fn write(
+    mut sink: futures_util::stream::SplitSink<WebSocketStream<BoxIo>, WsMessage>,
+    again: Vec<String>,
+    mut rx: mpsc::Receiver<Out>,
+) {
+    // What the node did not read of the link goes first, in order.
+    for t in again {
+        if sink.send(WsMessage::text(t)).await.is_err() {
+            return;
+        }
+    }
+    while let Some(o) = rx.recv().await {
+        match o {
+            Out::Frame(f) => {
+                if sink.send(f).await.is_err() {
+                    break;
+                }
+            }
+            Out::Bye(reason) => {
+                let bye = Message::notification(method::BYE, json!({ "reason": reason }));
+                let _ = sink.send(WsMessage::text(bye.encode())).await;
+                let _ = sink.close().await;
+                break;
+            }
+        }
+    }
+}
+
 /// Handles one message from the node. Returns the bye reason when the node
 /// ended the link.
 async fn handle(center: &Center, link: &Arc<Link>, m: Message) -> Option<ByeReason> {
@@ -1457,21 +1479,7 @@ async fn handle(center: &Center, link: &Arc<Link>, m: Message) -> Option<ByeReas
             id,
             method: m,
             params,
-        } if m == method::STREAM_CLOSE => {
-            let sid = params
-                .get("sid")
-                .and_then(Value::as_u64)
-                .and_then(|s| u32::try_from(s).ok());
-            let reason = params.get("reason").and_then(Value::as_str).unwrap_or("");
-            let reply = match sid {
-                Some(sid) if link.stream_closed(sid, reason) => Message::result(id, json!({})),
-                _ => Message::error(
-                    Some(id),
-                    RpcError::new(ErrorCode::UnknownMember, "no such stream"),
-                ),
-            };
-            link.send_text(reply.encode()).await;
-        }
+        } if m == method::STREAM_CLOSE => on_stream_close(link, id, params).await,
         Message::Request { id, method: m, .. } => {
             let e = RpcError::new(
                 ErrorCode::Other("method_not_found".into()),
@@ -1496,24 +1504,8 @@ async fn handle(center: &Center, link: &Arc<Link>, m: Message) -> Option<ByeReas
                     center.changed(crate::center::Change::Nodes);
                 }
             }
-            method::KEY_ROTATE => {
-                let (r, dropped) = center.rotate_node_key(link, &params);
-                link.notify(method::KEY_ROTATED, json!(r)).await;
-                // A rotation in the grace of another ends the older key's
-                // grace, and a link opened with it ends too.
-                if let Some(key) = dropped {
-                    center.end_link_of_key(&link.node_id, &key);
-                }
-            }
-            method::KEY_RETIRE => {
-                let (r, opened_with_it) = center.retire_node_key(link, &params);
-                link.notify(method::KEY_RETIRED, json!(r)).await;
-                // The key this link was opened with is refused from now on,
-                // so the link ends; the node dials again with its key.
-                if opened_with_it {
-                    link.end(ByeReason::Replaced);
-                }
-            }
+            method::KEY_ROTATE => on_key_rotate(center, link, params).await,
+            method::KEY_RETIRE => on_key_retire(center, link, params).await,
             method::BYE => {
                 let reason = nerve_proto::rpc::params::<msg::Bye>(&params)
                     .map(|b| b.reason)
@@ -1524,6 +1516,45 @@ async fn handle(center: &Center, link: &Arc<Link>, m: Message) -> Option<ByeReas
         },
     }
     None
+}
+
+/// `stream.close` from the node: it ends a stream whose command ended.
+async fn on_stream_close(link: &Arc<Link>, id: Id, params: serde_json::Map<String, Value>) {
+    let sid = params
+        .get("sid")
+        .and_then(Value::as_u64)
+        .and_then(|s| u32::try_from(s).ok());
+    let reason = params.get("reason").and_then(Value::as_str).unwrap_or("");
+    let reply = match sid {
+        Some(sid) if link.stream_closed(sid, reason) => Message::result(id, json!({})),
+        _ => Message::error(
+            Some(id),
+            RpcError::new(ErrorCode::UnknownMember, "no such stream"),
+        ),
+    };
+    link.send_text(reply.encode()).await;
+}
+
+/// `key.rotate` from the node: a rotation of its key, answered.
+async fn on_key_rotate(center: &Center, link: &Arc<Link>, params: serde_json::Map<String, Value>) {
+    let (r, dropped) = center.rotate_node_key(link, &params);
+    link.notify(method::KEY_ROTATED, json!(r)).await;
+    // A rotation in the grace of another ends the older key's
+    // grace, and a link opened with it ends too.
+    if let Some(key) = dropped {
+        center.end_link_of_key(&link.node_id, &key);
+    }
+}
+
+/// `key.retire` from the node: the end of its old key's grace, answered.
+async fn on_key_retire(center: &Center, link: &Arc<Link>, params: serde_json::Map<String, Value>) {
+    let (r, opened_with_it) = center.retire_node_key(link, &params);
+    link.notify(method::KEY_RETIRED, json!(r)).await;
+    // The key this link was opened with is refused from now on,
+    // so the link ends; the node dials again with its key.
+    if opened_with_it {
+        link.end(ByeReason::Replaced);
+    }
 }
 
 #[cfg(test)]

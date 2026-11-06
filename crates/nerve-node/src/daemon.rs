@@ -2562,63 +2562,72 @@ pub(crate) async fn pipe_control(
             shared.config_caps,
         )),
         "center.rotate-key" => rotate_key(shared, &params).await,
-        "folder.add" | "folder.rm" => {
-            let (center, change) =
-                match crate::folder_change::FolderChange::from_request(method, params) {
-                    Ok(r) => r,
-                    Err(e) => return Reply::Err(e),
-                };
-            let mut applied = None;
-            let r = {
-                let mut store = lock(&shared.store);
-                // On Windows the CLI writes every other change to the file
-                // for the next start. The node saves its whole config, so a
-                // file newer than it would lose that change: it is refused
-                // instead.
-                match store.version_on_disk() {
-                    Ok(on_disk) if on_disk > store.version() => {
-                        return Reply::Err(file_ahead(on_disk, store.version()));
-                    }
-                    Ok(_) => {}
-                    Err(e) => return Reply::Err(format!("cannot read node.toml: {e}")),
-                }
-                store.update(|cfg| {
-                    applied = Some(crate::folder_change::apply_to(
-                        cfg,
-                        center.as_deref(),
-                        &change,
-                    )?);
-                    Ok(())
-                })
-            };
-            let version = match r {
-                Ok(v) => v,
-                Err(e) => return Reply::Err(e.to_string()),
-            };
-            shared.bump();
-            if shared.confinement.appcontainer {
-                let s = shared.clone();
-                let synced = tokio::task::spawn_blocking(move || {
-                    let cfg = s.config();
-                    crate::grants::apply(&s.paths, &cfg, &s.rules_home(&cfg), &mut |m| {
-                        tracing::info!("folder grants: {m}")
-                    })
-                })
-                .await
-                .map_err(|e| e.to_string())
-                .and_then(|s| s.errors.into_iter().next().map_or(Ok(()), Err));
-                if let Err(e) = synced {
-                    return Reply::Err(format!(
-                        "the config is saved, but the folder grants do not follow it: {e}"
-                    ));
-                }
-            }
-            let mut answer = serde_json::to_value(applied).unwrap_or_default();
-            answer["version"] = json!(version);
-            Reply::Ok(answer)
-        }
+        "folder.add" | "folder.rm" => pipe_folder_change(shared, method, params).await,
         other => Reply::Err(format!("unknown method {other}")),
     }
+}
+
+/// `folder.add` and `folder.rm` on the control pipe: the change made to the
+/// config, then the folder grants brought in line with it.
+#[cfg_attr(not(windows), allow(dead_code))]
+async fn pipe_folder_change(
+    shared: &Arc<Shared>,
+    method: &str,
+    params: Value,
+) -> nerve_transport::ctl::Reply {
+    use nerve_transport::ctl::Reply;
+    let (center, change) = match crate::folder_change::FolderChange::from_request(method, params) {
+        Ok(r) => r,
+        Err(e) => return Reply::Err(e),
+    };
+    let mut applied = None;
+    let r = {
+        let mut store = lock(&shared.store);
+        // On Windows the CLI writes every other change to the file
+        // for the next start. The node saves its whole config, so a
+        // file newer than it would lose that change: it is refused
+        // instead.
+        match store.version_on_disk() {
+            Ok(on_disk) if on_disk > store.version() => {
+                return Reply::Err(file_ahead(on_disk, store.version()));
+            }
+            Ok(_) => {}
+            Err(e) => return Reply::Err(format!("cannot read node.toml: {e}")),
+        }
+        store.update(|cfg| {
+            applied = Some(crate::folder_change::apply_to(
+                cfg,
+                center.as_deref(),
+                &change,
+            )?);
+            Ok(())
+        })
+    };
+    let version = match r {
+        Ok(v) => v,
+        Err(e) => return Reply::Err(e.to_string()),
+    };
+    shared.bump();
+    if shared.confinement.appcontainer {
+        let s = shared.clone();
+        let synced = tokio::task::spawn_blocking(move || {
+            let cfg = s.config();
+            crate::grants::apply(&s.paths, &cfg, &s.rules_home(&cfg), &mut |m| {
+                tracing::info!("folder grants: {m}")
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|s| s.errors.into_iter().next().map_or(Ok(()), Err));
+        if let Err(e) = synced {
+            return Reply::Err(format!(
+                "the config is saved, but the folder grants do not follow it: {e}"
+            ));
+        }
+    }
+    let mut answer = serde_json::to_value(applied).unwrap_or_default();
+    answer["version"] = json!(version);
+    Reply::Ok(answer)
 }
 
 /// `center.rotate-key {center, end_grace}`: the owner rotates the node's key
@@ -2675,55 +2684,72 @@ async fn answer(
         // owner after a change of the folders (crate::acl). With `every`
         // (`folder add` of a listed folder, `folder sync`) every grant is walked, also what was
         // moved into a granted folder.
-        "folder.grants" => {
-            if shared.below_command(peer.pid) {
-                return nerve_transport::ctl::Reply::Err(FROM_A_COMMAND.into());
-            }
-            let s = shared.clone();
-            #[cfg(target_os = "linux")]
-            let walk = grants_walk(&req.params);
-            let r = tokio::task::spawn_blocking(move || {
-                #[cfg(target_os = "linux")]
-                s.sync_acls(&s.config(), walk);
-                let mut v = s.folder_grants();
-                if let Some(m) = v.as_object_mut() {
-                    m.insert("service".into(), json!(s.service));
-                }
-                v
-            })
-            .await;
-            match r {
-                Ok(v) => nerve_transport::ctl::Reply::Ok(v),
-                Err(e) => nerve_transport::ctl::Reply::Err(e.to_string()),
-            }
-        }
+        "folder.grants" => answer_folder_grants(shared, &req, peer).await,
         // A capability provider attaches; its connection stays
         // (crate::provider).
-        "hello" => {
-            // Here the command check reads as the node and no pidfd holds
-            // the caller, which the installed node's provider socket does
-            // with the caller's rights; root, who may connect here too,
-            // goes there as well.
-            #[cfg(target_os = "linux")]
-            if let Some(at) = &shared.provider_socket {
-                return nerve_transport::ctl::Reply::Err(format!(
-                    "refused: the installed node takes a provider's hello on {} only",
-                    at.display()
-                ));
-            }
-            if shared.below_command(peer.pid) {
-                return nerve_transport::ctl::Reply::Err(FROM_A_COMMAND.into());
-            }
-            let caller = crate::provider::Caller {
-                uid: peer.uid,
-                pid: peer.pid,
-                pidfd: None,
-                refuse_commands: false,
-            };
-            crate::provider::attach(shared, req.params, caller).await
-        }
+        "hello" => answer_hello(shared, req, peer).await,
         m => control(shared, m, req.params, peer.pid),
     }
+}
+
+/// `folder.grants {every}`: the folder grants brought in line with the config,
+/// and what that left.
+#[cfg(unix)]
+async fn answer_folder_grants(
+    shared: &Arc<Shared>,
+    req: &nerve_transport::ctl::CtlRequest,
+    peer: nerve_transport::ctl::Peer,
+) -> nerve_transport::ctl::Reply {
+    if shared.below_command(peer.pid) {
+        return nerve_transport::ctl::Reply::Err(FROM_A_COMMAND.into());
+    }
+    let s = shared.clone();
+    #[cfg(target_os = "linux")]
+    let walk = grants_walk(&req.params);
+    let r = tokio::task::spawn_blocking(move || {
+        #[cfg(target_os = "linux")]
+        s.sync_acls(&s.config(), walk);
+        let mut v = s.folder_grants();
+        if let Some(m) = v.as_object_mut() {
+            m.insert("service".into(), json!(s.service));
+        }
+        v
+    })
+    .await;
+    match r {
+        Ok(v) => nerve_transport::ctl::Reply::Ok(v),
+        Err(e) => nerve_transport::ctl::Reply::Err(e.to_string()),
+    }
+}
+
+/// `hello`: a capability provider attaches on the control socket.
+#[cfg(unix)]
+async fn answer_hello(
+    shared: &Arc<Shared>,
+    req: nerve_transport::ctl::CtlRequest,
+    peer: nerve_transport::ctl::Peer,
+) -> nerve_transport::ctl::Reply {
+    // Here the command check reads as the node and no pidfd holds
+    // the caller, which the installed node's provider socket does
+    // with the caller's rights; root, who may connect here too,
+    // goes there as well.
+    #[cfg(target_os = "linux")]
+    if let Some(at) = &shared.provider_socket {
+        return nerve_transport::ctl::Reply::Err(format!(
+            "refused: the installed node takes a provider's hello on {} only",
+            at.display()
+        ));
+    }
+    if shared.below_command(peer.pid) {
+        return nerve_transport::ctl::Reply::Err(FROM_A_COMMAND.into());
+    }
+    let caller = crate::provider::Caller {
+        uid: peer.uid,
+        pid: peer.pid,
+        pidfd: None,
+        refuse_commands: false,
+    };
+    crate::provider::attach(shared, req.params, caller).await
 }
 
 /// `sudo.on {password}`: the CLI on this machine turns the switch on. The
@@ -2767,7 +2793,6 @@ pub(crate) fn control(
     if shared.below_command(pid) {
         return Reply::Err(FROM_A_COMMAND.into());
     }
-    let str_of = |k: &str| params.get(k).and_then(Value::as_str).map(str::to_string);
     match method {
         "status" => Reply::Ok(shared.status()),
         // Every capability with its effect and settings, the programs'
@@ -2787,162 +2812,180 @@ pub(crate) fn control(
             let s = lock(&shared.store);
             Reply::Ok(json!({"config": s.config().to_toml(), "version": s.version()}))
         }
-        "config.write" => {
-            let Some(text) = str_of("config") else {
-                return Reply::Err("config is missing".into());
-            };
-            let mut new = match NodeConfig::parse(&text) {
-                Ok(c) => c,
-                Err(e) => return Reply::Err(e),
-            };
-            let if_version = params.get("if_version").and_then(Value::as_u64);
-            // The programs before the store's lock, as a center's write
-            // reads them (crate::link).
-            let taken = shared.taken();
-            let mut store = lock(&shared.store);
-            // A command of the web UI whose request began before the node
-            // was locked writes nothing after it. Checked under the store's
-            // lock, where a lock is counted ([`crate::webui::WebUi::settle`]
-            // below), so no write falls between.
-            #[cfg(target_os = "linux")]
-            if let Some(n) = params.get("web_locks").and_then(Value::as_u64)
-                && n != shared.webui.lock_count()
-            {
-                return Reply::Err(WEB_LOCKED.into());
-            }
-            if new.machine.sudo != store.config().machine.sudo {
-                return Reply::Err(
-                    "machine.sudo changes only through nerve-node sudo on|off".into(),
-                );
-            }
-            // A center's own that the write removes (`config unset`, say,
-            // not only `cap rm --center`) takes its switches along.
-            let dropped = crate::config_cap::drop_removed(store.config(), &mut new);
-            // An action that comes to sense waits for the owner's `on`,
-            // whichever program of the owner's wrote the change.
-            let held = crate::config_cap::hold_new(store.config(), &mut new);
-            // An `on` for a center's own that senses, while a program's of
-            // its name keeps it out, would turn on the center's command
-            // once the program goes: the owner turns it on once it is
-            // offered.
-            if let Some((center, name)) =
-                crate::config_cap::hold_shadowed(store.config(), &mut new, &taken).first()
-            {
-                let cap = name.split_once('.').map_or(&name[..], |(c, _)| c);
-                return Reply::Err(format!(
-                    "center {center} keeps its own {name}, which senses or actuates and is left out while a program offers {cap}: an on or allow rule for it now would turn on that center's command once the program goes; turn it on once the center is offered it, or remove it (cap rm {name} --center {center})"
-                ));
-            }
-            // An `on` set now for a program's capability that a center's own
-            // keeps from it would go with the center's own once it removes
-            // it (crate::config_cap::remove_added), unseen.
-            if let Some((center, name)) =
-                crate::config_cap::hold_with_own(store.config(), &mut new, &taken).first()
-            {
-                let cap = name.split_once('.').map_or(&name[..], |(c, _)| c);
-                return Reply::Err(format!(
-                    "center {center} keeps a capability of its own under {cap}, so it is offered neither that one nor a program's {cap}: an on or allow rule for {name} now would go with the center's own when it is removed; remove the center's first (cap --center {center} lists them, cap rm NAME --center {center} removes one), then turn on the program's"
-                ));
-            }
-            // Who made it, as the CLI names its user (crate::cli::invoker):
-            // only the owner's programs hold the token.
-            store.set_user(str_of("user"));
-            let r = store.set_local(new, if_version);
-            store.set_user(None);
-            // A lock ends the web UI's sessions and counts, before another
-            // write can be checked against the count.
-            #[cfg(target_os = "linux")]
-            if r.is_ok() {
-                // A panic counts also when the node is locked already: the
-                // owner's way to end a session that started in the lock.
-                if params.get("panic").and_then(Value::as_bool) == Some(true) {
-                    shared.webui.settle_panic(store.config());
-                } else {
-                    shared.webui.settle(store.config());
-                }
-            }
-            drop(store);
-            match r {
-                Ok(v) => {
-                    shared.bump();
-                    Reply::Ok(json!({"version": v, "held": held, "dropped": dropped}))
-                }
-                Err(SetError::Conflict { current }) => {
-                    Reply::Err(format!("conflict: the config changed (version {current})"))
-                }
-                Err(e) => Reply::Err(e.to_string()),
-            }
-        }
-        "folder.add" => {
-            let (Some(center), Some(path), Some(access)) =
-                (str_of("center"), str_of("path"), str_of("access"))
-            else {
-                return Reply::Err("center, path and access are needed".into());
-            };
-            let access = match nerve_policy::config::Access::parse(&access) {
-                Ok(a) => a,
-                Err(e) => return Reply::Err(e),
-            };
-            let web_locks = params.get("web_locks").and_then(Value::as_u64);
-            match shared.add_folder(&center, &path, access, web_locks) {
-                Ok(a) => Reply::Ok(json!({
-                    "stored": a.stored,
-                    "recorded": a.recorded,
-                    "mode": a.mode.as_str(),
-                    "counts": a.counts,
-                })),
-                Err(e) => Reply::Err(e),
-            }
-        }
-        "config.accept" => {
-            let taken = shared.taken();
-            let r = {
-                let mut store = lock(&shared.store);
-                store.set_user(str_of("user"));
-                // The file as the owner wrote it, with an action that came to
-                // sense in it switched off where an earlier switch covered it
-                // (crate::config_cap::hold_new), and a center's own that
-                // senses where a program keeps it out (hold_shadowed), and an
-                // `on` for that program's that would go with the center's own
-                // (hold_with_own), in the one write that puts it in force.
-                // Each apart, since the owner is told what to do for each.
-                // First a center's own the file no longer holds takes its
-                // switches along (crate::config_cap::drop_removed).
-                let r = store.accept_with(|before, after| {
-                    let dropped = crate::config_cap::drop_removed(before, after);
-                    let held = crate::config_cap::hold_new(before, after);
-                    let shadowed = crate::config_cap::hold_shadowed(before, after, &taken);
-                    let mut with_own = crate::config_cap::hold_with_own(before, after, &taken);
-                    // hold_shadowed switches off the center's own action, and
-                    // leaves a new allow rule for it, which hold_with_own then
-                    // counts again. The owner gets one note for it, the one
-                    // that fits the center's own.
-                    with_own.retain(|w| !shadowed.contains(w));
-                    (held, shadowed, with_own, dropped)
-                });
-                store.set_user(None);
-                r
-            };
-            match r {
-                Ok((v, (held, shadowed, with_own, dropped))) => {
-                    shared.settle_sudo();
-                    shared.bump();
-                    Reply::Ok(json!({
-                        "version": v,
-                        "held": held,
-                        "shadowed": shadowed,
-                        "with_own": with_own,
-                        "dropped": dropped,
-                    }))
-                }
-                Err(e) => Reply::Err(e.to_string()),
-            }
-        }
+        "config.write" => control_config_write(shared, &params),
+        "folder.add" => control_folder_add(shared, &params),
+        "config.accept" => control_config_accept(shared, &params),
         "reload" => match shared.reload() {
             Ok(changed) => Reply::Ok(json!({"changed": changed})),
             Err(e) => Reply::Err(e),
         },
         other => Reply::Err(format!("unknown method {other}")),
+    }
+}
+
+/// `config.write {config, if_version, user, web_locks, panic}`: the CLI writes
+/// node.toml through the running node.
+#[cfg(unix)]
+fn control_config_write(shared: &Arc<Shared>, params: &Value) -> nerve_transport::ctl::Reply {
+    use nerve_transport::ctl::Reply;
+    let str_of = |k: &str| params.get(k).and_then(Value::as_str).map(str::to_string);
+    let Some(text) = str_of("config") else {
+        return Reply::Err("config is missing".into());
+    };
+    let mut new = match NodeConfig::parse(&text) {
+        Ok(c) => c,
+        Err(e) => return Reply::Err(e),
+    };
+    let if_version = params.get("if_version").and_then(Value::as_u64);
+    // The programs before the store's lock, as a center's write
+    // reads them (crate::link).
+    let taken = shared.taken();
+    let mut store = lock(&shared.store);
+    // A command of the web UI whose request began before the node
+    // was locked writes nothing after it. Checked under the store's
+    // lock, where a lock is counted ([`crate::webui::WebUi::settle`]
+    // below), so no write falls between.
+    #[cfg(target_os = "linux")]
+    if let Some(n) = params.get("web_locks").and_then(Value::as_u64)
+        && n != shared.webui.lock_count()
+    {
+        return Reply::Err(WEB_LOCKED.into());
+    }
+    if new.machine.sudo != store.config().machine.sudo {
+        return Reply::Err("machine.sudo changes only through nerve-node sudo on|off".into());
+    }
+    // A center's own that the write removes (`config unset`, say,
+    // not only `cap rm --center`) takes its switches along.
+    let dropped = crate::config_cap::drop_removed(store.config(), &mut new);
+    // An action that comes to sense waits for the owner's `on`,
+    // whichever program of the owner's wrote the change.
+    let held = crate::config_cap::hold_new(store.config(), &mut new);
+    // An `on` for a center's own that senses, while a program's of
+    // its name keeps it out, would turn on the center's command
+    // once the program goes: the owner turns it on once it is
+    // offered.
+    if let Some((center, name)) =
+        crate::config_cap::hold_shadowed(store.config(), &mut new, &taken).first()
+    {
+        let cap = name.split_once('.').map_or(&name[..], |(c, _)| c);
+        return Reply::Err(format!(
+            "center {center} keeps its own {name}, which senses or actuates and is left out while a program offers {cap}: an on or allow rule for it now would turn on that center's command once the program goes; turn it on once the center is offered it, or remove it (cap rm {name} --center {center})"
+        ));
+    }
+    // An `on` set now for a program's capability that a center's own
+    // keeps from it would go with the center's own once it removes
+    // it (crate::config_cap::remove_added), unseen.
+    if let Some((center, name)) =
+        crate::config_cap::hold_with_own(store.config(), &mut new, &taken).first()
+    {
+        let cap = name.split_once('.').map_or(&name[..], |(c, _)| c);
+        return Reply::Err(format!(
+            "center {center} keeps a capability of its own under {cap}, so it is offered neither that one nor a program's {cap}: an on or allow rule for {name} now would go with the center's own when it is removed; remove the center's first (cap --center {center} lists them, cap rm NAME --center {center} removes one), then turn on the program's"
+        ));
+    }
+    // Who made it, as the CLI names its user (crate::cli::invoker):
+    // only the owner's programs hold the token.
+    store.set_user(str_of("user"));
+    let r = store.set_local(new, if_version);
+    store.set_user(None);
+    // A lock ends the web UI's sessions and counts, before another
+    // write can be checked against the count.
+    #[cfg(target_os = "linux")]
+    if r.is_ok() {
+        // A panic counts also when the node is locked already: the
+        // owner's way to end a session that started in the lock.
+        if params.get("panic").and_then(Value::as_bool) == Some(true) {
+            shared.webui.settle_panic(store.config());
+        } else {
+            shared.webui.settle(store.config());
+        }
+    }
+    drop(store);
+    match r {
+        Ok(v) => {
+            shared.bump();
+            Reply::Ok(json!({"version": v, "held": held, "dropped": dropped}))
+        }
+        Err(SetError::Conflict { current }) => {
+            Reply::Err(format!("conflict: the config changed (version {current})"))
+        }
+        Err(e) => Reply::Err(e.to_string()),
+    }
+}
+
+/// `folder.add {center, path, access, web_locks}`: a folder for a center,
+/// judged, stored and recorded by the node.
+#[cfg(unix)]
+fn control_folder_add(shared: &Arc<Shared>, params: &Value) -> nerve_transport::ctl::Reply {
+    use nerve_transport::ctl::Reply;
+    let str_of = |k: &str| params.get(k).and_then(Value::as_str).map(str::to_string);
+    let (Some(center), Some(path), Some(access)) =
+        (str_of("center"), str_of("path"), str_of("access"))
+    else {
+        return Reply::Err("center, path and access are needed".into());
+    };
+    let access = match nerve_policy::config::Access::parse(&access) {
+        Ok(a) => a,
+        Err(e) => return Reply::Err(e),
+    };
+    let web_locks = params.get("web_locks").and_then(Value::as_u64);
+    match shared.add_folder(&center, &path, access, web_locks) {
+        Ok(a) => Reply::Ok(json!({
+            "stored": a.stored,
+            "recorded": a.recorded,
+            "mode": a.mode.as_str(),
+            "counts": a.counts,
+        })),
+        Err(e) => Reply::Err(e),
+    }
+}
+
+/// `config.accept {user}`: the node takes node.toml as the owner edited it.
+#[cfg(unix)]
+fn control_config_accept(shared: &Arc<Shared>, params: &Value) -> nerve_transport::ctl::Reply {
+    use nerve_transport::ctl::Reply;
+    let str_of = |k: &str| params.get(k).and_then(Value::as_str).map(str::to_string);
+    let taken = shared.taken();
+    let r = {
+        let mut store = lock(&shared.store);
+        store.set_user(str_of("user"));
+        // The file as the owner wrote it, with an action that came to
+        // sense in it switched off where an earlier switch covered it
+        // (crate::config_cap::hold_new), and a center's own that
+        // senses where a program keeps it out (hold_shadowed), and an
+        // `on` for that program's that would go with the center's own
+        // (hold_with_own), in the one write that puts it in force.
+        // Each apart, since the owner is told what to do for each.
+        // First a center's own the file no longer holds takes its
+        // switches along (crate::config_cap::drop_removed).
+        let r = store.accept_with(|before, after| {
+            let dropped = crate::config_cap::drop_removed(before, after);
+            let held = crate::config_cap::hold_new(before, after);
+            let shadowed = crate::config_cap::hold_shadowed(before, after, &taken);
+            let mut with_own = crate::config_cap::hold_with_own(before, after, &taken);
+            // hold_shadowed switches off the center's own action, and
+            // leaves a new allow rule for it, which hold_with_own then
+            // counts again. The owner gets one note for it, the one
+            // that fits the center's own.
+            with_own.retain(|w| !shadowed.contains(w));
+            (held, shadowed, with_own, dropped)
+        });
+        store.set_user(None);
+        r
+    };
+    match r {
+        Ok((v, (held, shadowed, with_own, dropped))) => {
+            shared.settle_sudo();
+            shared.bump();
+            Reply::Ok(json!({
+                "version": v,
+                "held": held,
+                "shadowed": shadowed,
+                "with_own": with_own,
+                "dropped": dropped,
+            }))
+        }
+        Err(e) => Reply::Err(e.to_string()),
     }
 }
 

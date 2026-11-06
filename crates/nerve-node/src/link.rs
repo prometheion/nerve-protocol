@@ -701,9 +701,9 @@ async fn session(
     }
 
     // One writer owns the sink; everyone else queues (spec §5.5).
-    let (tx, mut rx) = mpsc::channel::<WsMessage>(limits::SEND_QUEUE);
+    let (tx, rx) = mpsc::channel::<WsMessage>(limits::SEND_QUEUE);
     // Stream frames wait in their own queue, sent while `rx` is empty.
-    let (ftx, mut frx) = mpsc::channel::<crate::daemon::StreamOut>(STREAM_QUEUE);
+    let (ftx, frx) = mpsc::channel::<crate::daemon::StreamOut>(STREAM_QUEUE);
     // The center carries on the parked link, or starts a new one (spec
     // §4.9).
     let carried = match (resumed, parked) {
@@ -772,53 +772,10 @@ async fn session(
     let again = again.unwrap_or_default();
     cs.set_status("connected");
 
-    let (done_tx, mut done_rx) = oneshot::channel::<()>();
+    let (done_tx, done_rx) = oneshot::channel::<()>();
     // Every frame leaves through here, so the sudo password never does.
     let scrubber = shared.clone();
-    let writer = tokio::spawn(async move {
-        // What the center did not read of the link goes first, in order.
-        for t in again {
-            if sink
-                .send(scrub(&scrubber, WsMessage::text(t)))
-                .await
-                .is_err()
-            {
-                return;
-            }
-        }
-        let mut streams = true;
-        loop {
-            tokio::select! {
-                // The link's own frames go before stream frames.
-                biased;
-                m = rx.recv() => match m {
-                    Some(m) => if sink.send(scrub(&scrubber, m)).await.is_err() { return; },
-                    None => break,
-                },
-                f = frx.recv(), if streams => match f {
-                    Some(crate::daemon::StreamOut::Frame(m)) => {
-                        if sink.send(m).await.is_err() {
-                            return;
-                        }
-                    }
-                    Some(crate::daemon::StreamOut::Flushed(done)) => {
-                        let _ = done.send(());
-                    }
-                    None => streams = false,
-                },
-                _ = &mut done_rx => {
-                    // Flush what is queued (the bye), then close.
-                    while let Ok(m) = rx.try_recv() {
-                        if sink.send(scrub(&scrubber, m)).await.is_err() {
-                            return;
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-        let _ = sink.close().await;
-    });
+    let writer = tokio::spawn(write(sink, again, rx, frx, done_rx, scrubber));
 
     drop((tx, ftx));
     *lock(&cs.link) = Some(link.handle.clone());
@@ -873,6 +830,61 @@ async fn session(
             (Outcome::Retry, true, None)
         }
     }
+}
+
+/// The link's writer, the one owner of the sink: what the center did not
+/// read of the link first, then the link's own frames before stream frames,
+/// until the link ends and what is queued is flushed.
+async fn write(
+    mut sink: futures_util::stream::SplitSink<WsStream, WsMessage>,
+    again: Vec<String>,
+    mut rx: mpsc::Receiver<WsMessage>,
+    mut frx: mpsc::Receiver<crate::daemon::StreamOut>,
+    mut done_rx: oneshot::Receiver<()>,
+    scrubber: Arc<Shared>,
+) {
+    // What the center did not read of the link goes first, in order.
+    for t in again {
+        if sink
+            .send(scrub(&scrubber, WsMessage::text(t)))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+    let mut streams = true;
+    loop {
+        tokio::select! {
+            // The link's own frames go before stream frames.
+            biased;
+            m = rx.recv() => match m {
+                Some(m) => if sink.send(scrub(&scrubber, m)).await.is_err() { return; },
+                None => break,
+            },
+            f = frx.recv(), if streams => match f {
+                Some(crate::daemon::StreamOut::Frame(m)) => {
+                    if sink.send(m).await.is_err() {
+                        return;
+                    }
+                }
+                Some(crate::daemon::StreamOut::Flushed(done)) => {
+                    let _ = done.send(());
+                }
+                None => streams = false,
+            },
+            _ = &mut done_rx => {
+                // Flush what is queued (the bye), then close.
+                while let Ok(m) = rx.try_recv() {
+                    if sink.send(scrub(&scrubber, m)).await.is_err() {
+                        return;
+                    }
+                }
+                break;
+            }
+        }
+    }
+    let _ = sink.close().await;
 }
 
 /// The params of `exec`'s `output` stream: the call whose command it is,
@@ -1321,69 +1333,10 @@ impl Link {
             // A request the center gave up while the link was down, in its
             // place in the replay (spec §4.9): nothing to do.
             method::WITHDRAWN => None,
-            method::SESSION_END => {
-                let Ok(end) = params::<SessionEnd>(&p) else {
-                    return None;
-                };
-                let ids: Vec<Id> = lock(&self.calls)
-                    .iter()
-                    .filter(|(_, c)| c.session.as_deref() == Some(end.session.as_str()))
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                for id in ids {
-                    self.cancel(id, "cancelled: the harness session ended");
-                }
-                None
-            }
-            method::BYE => {
-                let reason = params::<Bye>(&p).ok().map(|b| b.reason);
-                match reason {
-                    Some(r) if r.stops_node() => {
-                        tracing::warn!("center {} ended the pairing ({})", self.name, r.as_str());
-                        self.cs.set_status(format!(
-                            "the center said {}; dialling stopped",
-                            r.as_str()
-                        ));
-                        self.shared.mark_center(&self.name, |e| e.revoked = true);
-                        Some(Outcome::Stop)
-                    }
-                    Some(r) => {
-                        let level = match r {
-                            ByeReason::Duplicate | ByeReason::ProtocolError => Level::Warn,
-                            _ => Level::Info,
-                        };
-                        let why = format!(
-                            "center {} said bye ({}); dialling again",
-                            self.name,
-                            r.as_str()
-                        );
-                        nerve_transport::log::emit(level, None, &why);
-                        Some(Outcome::Retry)
-                    }
-                    None => {
-                        tracing::warn!("center {} sent a bye the node cannot read", self.name);
-                        Some(Outcome::Retry)
-                    }
-                }
-            }
+            method::SESSION_END => self.on_session_end(p),
+            method::BYE => self.on_bye(p),
             // Answers to a rotation of the node's key (crate::rotate).
-            method::KEY_ROTATED | method::KEY_RETIRED => {
-                if self.handle.answer(m, p.clone()) {
-                    return None;
-                }
-                // An answer that came after the owner's command gave up
-                // still settles the rotation.
-                if m == method::KEY_ROTATED {
-                    tokio::spawn(crate::rotate::late_answer(
-                        self.shared.clone(),
-                        self.name.clone(),
-                        p,
-                    ));
-                } else {
-                    tracing::debug!("center {}: {m} that nothing waits for; ignored", self.name);
-                }
-                None
-            }
+            method::KEY_ROTATED | method::KEY_RETIRED => self.on_key_answer(m, p),
             method::CENTER_ROTATE => {
                 crate::rotate::center_rotated(&self.shared, &self.name, &p);
                 None
@@ -1391,6 +1344,72 @@ impl Link {
             // Unknown notifications are ignored (spec §3).
             _ => None,
         }
+    }
+
+    /// `session.end`: the calls of a harness session that ended.
+    fn on_session_end(&self, p: Map<String, Value>) -> Option<Outcome> {
+        let Ok(end) = params::<SessionEnd>(&p) else {
+            return None;
+        };
+        let ids: Vec<Id> = lock(&self.calls)
+            .iter()
+            .filter(|(_, c)| c.session.as_deref() == Some(end.session.as_str()))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.cancel(id, "cancelled: the harness session ended");
+        }
+        None
+    }
+
+    /// A bye of the center: the pairing stops, or the node dials again.
+    fn on_bye(&self, p: Map<String, Value>) -> Option<Outcome> {
+        let reason = params::<Bye>(&p).ok().map(|b| b.reason);
+        match reason {
+            Some(r) if r.stops_node() => {
+                tracing::warn!("center {} ended the pairing ({})", self.name, r.as_str());
+                self.cs
+                    .set_status(format!("the center said {}; dialling stopped", r.as_str()));
+                self.shared.mark_center(&self.name, |e| e.revoked = true);
+                Some(Outcome::Stop)
+            }
+            Some(r) => {
+                let level = match r {
+                    ByeReason::Duplicate | ByeReason::ProtocolError => Level::Warn,
+                    _ => Level::Info,
+                };
+                let why = format!(
+                    "center {} said bye ({}); dialling again",
+                    self.name,
+                    r.as_str()
+                );
+                nerve_transport::log::emit(level, None, &why);
+                Some(Outcome::Retry)
+            }
+            None => {
+                tracing::warn!("center {} sent a bye the node cannot read", self.name);
+                Some(Outcome::Retry)
+            }
+        }
+    }
+
+    /// The center's answer to a rotation of the node's key.
+    fn on_key_answer(&self, m: &str, p: Map<String, Value>) -> Option<Outcome> {
+        if self.handle.answer(m, p.clone()) {
+            return None;
+        }
+        // An answer that came after the owner's command gave up
+        // still settles the rotation.
+        if m == method::KEY_ROTATED {
+            tokio::spawn(crate::rotate::late_answer(
+                self.shared.clone(),
+                self.name.clone(),
+                p,
+            ));
+        } else {
+            tracing::debug!("center {}: {m} that nothing waits for; ignored", self.name);
+        }
+        None
     }
 
     /// Stops call `id` and answers it `cancelled`. Aborting its task drops
@@ -2349,156 +2368,177 @@ impl Link {
             ("settings", "cap-add" | "cap-edit" | "cap-rm") => {
                 self.settings_cap(&inv.action, &inv.args)
             }
-            ("exec", "signal") => {
-                // Decided and audited like any other action; its rule target
-                // is the action itself.
-                let target = format!("{}.{}", inv.cap, inv.action);
-                let unconfined = self.shared.unconfined(&cfg);
-                self.gate(
-                    &entry,
-                    &inv,
-                    effect,
-                    &[],
-                    None,
-                    None,
-                    target,
-                    None,
-                    None,
-                    unconfined,
-                    None,
-                )
-                .await?;
-                self.signal(&inv.args)
-            }
+            ("exec", "signal") => self.exec_signal(cfg, entry, effect, inv).await,
             ("exec", "run") => self.exec_run(id, &cfg, &entry, effect, &inv).await,
-            ("fs", a) => {
-                // On the installed node the node reads and writes as the
-                // account the pairing's commands run as (crate::account::FsAs),
-                // from the paths of the call to the files it makes. A missing
-                // account stops the call once it is decided and audited.
-                let account = self.shared.command_account(&cfg, &entry.policy);
-                let known = account.as_ref().ok().cloned().flatten();
-                // `nerve-run` sees the folders once their ACLs are on.
-                if self.shared.separate(&entry.policy) {
-                    self.acls_ready(&cfg).await?;
-                }
-                // The pairing's own home and temporary folder are the ones the
-                // node made for it: those an earlier pairing under its name
-                // left are deleted first, and while that cannot be done the
-                // call does not run (it would read them).
-                let own_ready = match known
-                    .as_ref()
-                    .filter(|_| self.shared.separate(&entry.policy))
-                {
-                    Some(a) => self.own_ready(a, &entry).await.map(drop),
-                    None => Ok(()),
-                };
-                // A path that does not resolve is in the audit once the
-                // switch is over, as for a provider's.
-                let parsed = {
-                    let _as = act_as(known.as_ref())?;
-                    FsCall::parse(a, &inv.args)
-                };
-                let call = parsed.inspect_err(|e| {
-                    if let Some(Value::String(given)) = inv.args.get("path") {
-                        self.audit_bad_path(&inv, given, e);
-                    }
-                })?;
-                // Taken before the gate: whenever the gate judged by the
-                // folders, the walk below does too, even if `until` passes
-                // in between. Where the node reads as the command account,
-                // that account's access holds the reads in no folder
-                // (nerve_policy::decide::Reads), as in the gate.
-                let by_folders = entry.policy.mode_at(crate::now_ms()) == Mode::Folder;
-                let by_account = (by_folders && self.reads_by_account(&entry, known.as_ref()))
-                    .then(|| known.clone())
-                    .flatten();
-                let unconfined = self.shared.unconfined_as(&cfg, || known.clone());
-                // Its refusal names the path as given, as a program's does.
-                let named = match inv.args.get("path") {
-                    Some(Value::String(given)) => vec![(call.target_text(), given.clone())],
-                    _ => Vec::new(),
-                };
-                self.gate(
-                    &entry,
-                    &inv,
-                    effect,
-                    &call.targets(),
-                    None,
-                    None,
-                    call.target_text(),
-                    None,
-                    known.as_ref(),
-                    unconfined,
-                    None,
-                )
-                .await
-                .map_err(|e| as_given(e, &named))?;
-                account.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
-                own_ready.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
-                let protected = self.protected(&entry);
-                let deny = RuleSet::new(&entry.policy.deny, &self.home());
-                let folders = entry.policy.folders.clone();
-                let action = inv.action.clone();
-                // The account's home, where every pairing's own folders lie,
-                // is walked only as far as this pairing's own.
-                let name = entry.name.clone();
-                let run_home = known
-                    .clone()
-                    .filter(|_| self.shared.separate(&entry.policy))
-                    .map(|a| a.home);
-                tokio::task::spawn_blocking(move || {
-                    let _as = act_as(known.as_ref())?;
-                    // An entry the direct read would refuse stays out of the
-                    // walk, so a folder without `r` inside one with `r` is
-                    // sealed to grep, find and list too. A walk still passes
-                    // through such a folder to a folder with `r` inside it,
-                    // and finds only the files there. In no folder, where
-                    // the account holds the reads, the walk keeps to what is
-                    // open to every account and out of the node's own
-                    // process as the gate does; what that account may not
-                    // open the walk cannot read anyway.
-                    // Nor does it go into what the account owns there: another
-                    // pairing's (crate::fs::accounts_own).
-                    let open = |p: &std::path::Path| match &by_account {
-                        Some(a)
-                            if crate::fs::open_to_all(p)
-                                && !crate::fs::own_process(p)
-                                && !crate::fs::accounts_own(p, a) =>
-                        {
-                            Ok(())
-                        }
-                        _ => Err(String::new()),
-                    };
-                    let reads = if by_account.is_some() {
-                        Reads::Account(&open)
-                    } else {
-                        Reads::Folders
-                    };
-                    let pairings = run_home
-                        .as_ref()
-                        .map(|h| crate::account::pairing_view(h, &name));
-                    let skip = |p: &std::path::Path, through: bool| {
-                        pairings.as_ref().is_some_and(|(h, mine)| {
-                            crate::account::in_other_pairings(p, h, mine, true)
-                        }) || protected.check(p, false, &folders).is_some()
-                            || deny
-                                .find("fs", &action, &nerve_policy::paths::to_wire(p))
-                                .is_some()
-                            || by_folders
-                                && !nerve_policy::read_reach(&folders, p, reads)
-                                && !(through && nerve_policy::readable_below(&folders, p))
-                    };
-                    call.run(&skip)
-                })
-                .await
-                .map_err(|e| RpcError::internal(e.to_string()))?
-            }
+            ("fs", a) => self.fs_call(cfg, entry, effect, &inv, a).await,
             _ => Err(RpcError::new(
                 ErrorCode::UnknownMember,
                 format!("{}.{} is not served", inv.cap, inv.action),
             )),
         }
+    }
+
+    /// `exec.signal`: a signal to a running command of this link.
+    async fn exec_signal(
+        self: &Arc<Self>,
+        cfg: NodeConfig,
+        entry: CenterEntry,
+        effect: Effect,
+        inv: Invoke,
+    ) -> Result<Value, RpcError> {
+        // Decided and audited like any other action; its rule target
+        // is the action itself.
+        let target = format!("{}.{}", inv.cap, inv.action);
+        let unconfined = self.shared.unconfined(&cfg);
+        self.gate(
+            &entry,
+            &inv,
+            effect,
+            &[],
+            None,
+            None,
+            target,
+            None,
+            None,
+            unconfined,
+            None,
+        )
+        .await?;
+        self.signal(&inv.args)
+    }
+
+    /// An `fs` call: decided by the gate, then run as the account the
+    /// pairing's commands run as, within what its folders allow.
+    async fn fs_call(
+        self: &Arc<Self>,
+        cfg: NodeConfig,
+        entry: CenterEntry,
+        effect: Effect,
+        inv: &Invoke,
+        a: &str,
+    ) -> Result<Value, RpcError> {
+        // On the installed node the node reads and writes as the
+        // account the pairing's commands run as (crate::account::FsAs),
+        // from the paths of the call to the files it makes. A missing
+        // account stops the call once it is decided and audited.
+        let account = self.shared.command_account(&cfg, &entry.policy);
+        let known = account.as_ref().ok().cloned().flatten();
+        // `nerve-run` sees the folders once their ACLs are on.
+        if self.shared.separate(&entry.policy) {
+            self.acls_ready(&cfg).await?;
+        }
+        // The pairing's own home and temporary folder are the ones the
+        // node made for it: those an earlier pairing under its name
+        // left are deleted first, and while that cannot be done the
+        // call does not run (it would read them).
+        let own_ready = match known
+            .as_ref()
+            .filter(|_| self.shared.separate(&entry.policy))
+        {
+            Some(a) => self.own_ready(a, &entry).await.map(drop),
+            None => Ok(()),
+        };
+        // A path that does not resolve is in the audit once the
+        // switch is over, as for a provider's.
+        let parsed = {
+            let _as = act_as(known.as_ref())?;
+            FsCall::parse(a, &inv.args)
+        };
+        let call = parsed.inspect_err(|e| {
+            if let Some(Value::String(given)) = inv.args.get("path") {
+                self.audit_bad_path(inv, given, e);
+            }
+        })?;
+        // Taken before the gate: whenever the gate judged by the
+        // folders, the walk below does too, even if `until` passes
+        // in between. Where the node reads as the command account,
+        // that account's access holds the reads in no folder
+        // (nerve_policy::decide::Reads), as in the gate.
+        let by_folders = entry.policy.mode_at(crate::now_ms()) == Mode::Folder;
+        let by_account = (by_folders && self.reads_by_account(&entry, known.as_ref()))
+            .then(|| known.clone())
+            .flatten();
+        let unconfined = self.shared.unconfined_as(&cfg, || known.clone());
+        // Its refusal names the path as given, as a program's does.
+        let named = match inv.args.get("path") {
+            Some(Value::String(given)) => vec![(call.target_text(), given.clone())],
+            _ => Vec::new(),
+        };
+        self.gate(
+            &entry,
+            inv,
+            effect,
+            &call.targets(),
+            None,
+            None,
+            call.target_text(),
+            None,
+            known.as_ref(),
+            unconfined,
+            None,
+        )
+        .await
+        .map_err(|e| as_given(e, &named))?;
+        account.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
+        own_ready.map_err(|e| RpcError::new(ErrorCode::Unavailable, e))?;
+        let protected = self.protected(&entry);
+        let deny = RuleSet::new(&entry.policy.deny, &self.home());
+        let folders = entry.policy.folders.clone();
+        let action = inv.action.clone();
+        // The account's home, where every pairing's own folders lie,
+        // is walked only as far as this pairing's own.
+        let name = entry.name.clone();
+        let run_home = known
+            .clone()
+            .filter(|_| self.shared.separate(&entry.policy))
+            .map(|a| a.home);
+        tokio::task::spawn_blocking(move || {
+            let _as = act_as(known.as_ref())?;
+            // An entry the direct read would refuse stays out of the
+            // walk, so a folder without `r` inside one with `r` is
+            // sealed to grep, find and list too. A walk still passes
+            // through such a folder to a folder with `r` inside it,
+            // and finds only the files there. In no folder, where
+            // the account holds the reads, the walk keeps to what is
+            // open to every account and out of the node's own
+            // process as the gate does; what that account may not
+            // open the walk cannot read anyway.
+            // Nor does it go into what the account owns there: another
+            // pairing's (crate::fs::accounts_own).
+            let open = |p: &std::path::Path| match &by_account {
+                Some(a)
+                    if crate::fs::open_to_all(p)
+                        && !crate::fs::own_process(p)
+                        && !crate::fs::accounts_own(p, a) =>
+                {
+                    Ok(())
+                }
+                _ => Err(String::new()),
+            };
+            let reads = if by_account.is_some() {
+                Reads::Account(&open)
+            } else {
+                Reads::Folders
+            };
+            let pairings = run_home
+                .as_ref()
+                .map(|h| crate::account::pairing_view(h, &name));
+            let skip = |p: &std::path::Path, through: bool| {
+                pairings
+                    .as_ref()
+                    .is_some_and(|(h, mine)| crate::account::in_other_pairings(p, h, mine, true))
+                    || protected.check(p, false, &folders).is_some()
+                    || deny
+                        .find("fs", &action, &nerve_policy::paths::to_wire(p))
+                        .is_some()
+                    || by_folders
+                        && !nerve_policy::read_reach(&folders, p, reads)
+                        && !(through && nerve_policy::readable_below(&folders, p))
+            };
+            call.run(&skip)
+        })
+        .await
+        .map_err(|e| RpcError::internal(e.to_string()))?
     }
 
     /// The paths of a call to a program or a config capability: each
