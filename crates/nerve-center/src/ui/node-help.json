@@ -30,7 +30,7 @@
     {
       "cards": [
         {
-          "doc": "service.md",
+          "doc": "install.md",
           "holds": [],
           "line": "",
           "more": "",
@@ -74,7 +74,7 @@
           ]
         },
         {
-          "doc": "service.md",
+          "doc": "install.md",
           "holds": [],
           "line": "",
           "more": "",
@@ -91,7 +91,7 @@
           ]
         },
         {
-          "doc": "service.md",
+          "doc": "install.md",
           "holds": [],
           "line": "",
           "more": "",
@@ -190,7 +190,7 @@
           ]
         },
         {
-          "doc": "service.md",
+          "doc": "install.md",
           "holds": [
             "service"
           ],
@@ -229,7 +229,7 @@
     {
       "cards": [
         {
-          "doc": "pairing.md",
+          "doc": "pair.md",
           "holds": [],
           "line": "Show the paired centers, pair another, and set what each may change",
           "more": "Show the paired centers, pair this machine with another, and decide what each one may change.",
@@ -334,7 +334,7 @@
     {
       "cards": [
         {
-          "doc": "modes.md",
+          "doc": "folders-and-modes.md",
           "holds": [],
           "line": "",
           "more": "",
@@ -370,7 +370,7 @@
           ]
         },
         {
-          "doc": "modes.md",
+          "doc": "folders-and-modes.md",
           "holds": [],
           "line": "Show a center's folders, or choose them and their rights",
           "more": "Show a center's folders, or choose the folders it may use and what it may do in each.",
@@ -422,7 +422,7 @@
           ]
         },
         {
-          "doc": "modes.md",
+          "doc": "network.md",
           "holds": [],
           "line": "",
           "more": "",
@@ -548,7 +548,7 @@
           ]
         },
         {
-          "doc": "sudo.md",
+          "doc": "rules.md",
           "holds": [],
           "line": "Show whether sudo is on, or use sudo for the commands on the sudo list",
           "more": "",
@@ -585,7 +585,7 @@
     {
       "cards": [
         {
-          "doc": "troubleshooting.md",
+          "doc": "watch-and-stop.md",
           "holds": [],
           "line": "",
           "more": "",
@@ -602,7 +602,7 @@
           ]
         },
         {
-          "doc": "audit.md",
+          "doc": "watch-and-stop.md",
           "holds": [],
           "line": "Show what the node allowed and refused",
           "more": "",
@@ -645,7 +645,7 @@
           ]
         },
         {
-          "doc": "logs.md",
+          "doc": "watch-and-stop.md",
           "holds": [],
           "line": "Show the node's log: its starts and stops, its links, and what went wrong",
           "more": "",
@@ -688,7 +688,7 @@
           ]
         },
         {
-          "doc": "stop.md",
+          "doc": "watch-and-stop.md",
           "holds": [],
           "line": "",
           "more": "",
@@ -718,7 +718,7 @@
     {
       "cards": [
         {
-          "doc": "config-capabilities.md",
+          "doc": "capabilities.md",
           "holds": [],
           "line": "Turn capabilities on or off, and add your own",
           "more": "Show every capability, turn capabilities and single actions on or off, and declare capabilities of your own in node.toml.",
@@ -853,7 +853,7 @@
           ]
         },
         {
-          "doc": "providers.md",
+          "doc": "capabilities.md",
           "holds": [],
           "line": "Show the programs that may add capabilities (providers), allow one, or remove it",
           "more": "",
@@ -904,7 +904,7 @@
           ]
         },
         {
-          "doc": "proxy.md",
+          "doc": "pair.md",
           "holds": [],
           "line": "Show or choose the proxy the node uses to reach centers",
           "more": "",
@@ -954,7 +954,7 @@
           ]
         },
         {
-          "doc": "relay.md",
+          "doc": "pair.md",
           "holds": [],
           "line": "Let other nodes reach your centers through this node",
           "more": "Let nodes that cannot reach a center themselves reach this node's centers through it.",
@@ -1090,7 +1090,7 @@
           ]
         },
         {
-          "doc": "node-web-ui.md",
+          "doc": "web-uis.md",
           "holds": [],
           "line": "Turn the node's web UI on or off, and manage its tokens",
           "more": "Turn the node's web UI on or off, and make the tokens that log in to it (the installed node on Linux; off unless turned on).",
@@ -1140,7 +1140,7 @@
           ]
         },
         {
-          "doc": "node-web-ui.md",
+          "doc": "web-uis.md",
           "holds": [],
           "line": "List the tokens that log in to the web UI by label, make one, or revoke one",
           "more": "",
@@ -1185,7 +1185,7 @@
           ]
         },
         {
-          "doc": "config.md",
+          "doc": "settings.md",
           "holds": [
             "config"
           ],
@@ -1273,7 +1273,7 @@
           ]
         },
         {
-          "doc": "commands.md",
+          "doc": "install.md",
           "holds": [],
           "line": "",
           "more": "",

@@ -86,19 +86,6 @@ fn the_docs_send_nobody_to_a_terminal_on_windows() {
     assert!(found.is_empty(), "{}", found.join("\n"));
 }
 
-/// The commands page says that `run` is refused on Windows (#176): the table
-/// row of a command Windows refuses carries the note, since the scan above
-/// can only look for words.
-#[test]
-fn the_run_row_says_windows_refuses_it() {
-    let page = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/user/commands.md"),
-    )
-    .unwrap();
-    let row = page.lines().find(|l| l.starts_with("| `run` |")).unwrap();
-    assert!(row.contains("Windows") && row.contains("refused"), "{row}");
-}
-
 /// The released app keeps what Slint's Royalty-free license 2.0, under which
 /// it uses Slint, asks of it (LICENSE.md): the AboutSlint widget in the About
 /// dialog, which an item of the main window's sidebar opens. The crate's
@@ -136,7 +123,7 @@ fn the_app_shows_slints_notice_as_its_licence_asks() {
 
 /// The release publishes no Linux program before the install test passed on
 /// the very files it publishes (`installed.yml`), CI runs the same test, and
-/// the machines it runs on are the ones the platforms page calls tested.
+/// the machines it runs on are the ones the install page calls tested.
 #[test]
 fn the_release_installs_its_linux_programs_where_the_docs_say_they_are_tested() {
     let publish = job("publish");
@@ -176,13 +163,35 @@ fn the_release_installs_its_linux_programs_where_the_docs_say_they_are_tested() 
             "Debian 12 x86_64"
         ]
     );
-    let platforms = include_str!("../../../docs/user/platforms.md");
-    let tested = platforms
+    let install = include_str!("../../../docs/user/install.md");
+    let tested = install
         .lines()
         .find(|l| l.starts_with("| Tested |"))
         .unwrap();
     for name in ["Ubuntu 22.04 and 24.04, Debian 12", "aarch64"] {
         assert!(tested.contains(name), "{name}: {tested}");
+    }
+}
+
+/// The app's links to the user guide open the docs of the release the app
+/// is, at its tag, not `main`, which may have moved on.
+#[test]
+fn the_app_opens_the_guide_of_its_release() {
+    for (name, ui) in [
+        ("help.slint", include_str!("../ui/help.slint")),
+        ("overview.slint", include_str!("../ui/overview.slint")),
+    ] {
+        let links: Vec<&str> = ui
+            .lines()
+            .filter(|l| l.contains("nerve-protocol/") && l.contains("/docs/user"))
+            .collect();
+        assert!(!links.is_empty(), "{name}");
+        for l in links {
+            assert!(
+                l.contains("/v\" + Store.version + \"/docs/user"),
+                "{name}: {l}"
+            );
+        }
     }
 }
 

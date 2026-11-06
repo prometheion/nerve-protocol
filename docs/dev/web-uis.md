@@ -463,7 +463,7 @@ nerve-node ui on --listen 0.0.0.0:7470
   says so, and how to keep it on loopback with the SSH tunnel instead.
 - The UI is then served over HTTPS with a certificate of its own, made the
   first time. It names the address (when it is a specific one), this
-  machine's name, `localhost`, and each `--name HOST`. Giving `--name` makes a
+  machine's name, `localhost`, and each `--host HOST`. Giving `--host` makes a
   new one.
 - `ui on` and `ui` print its SHA-256 fingerprint. Your browser warns
   about the certificate the first time: compare the fingerprint it shows with

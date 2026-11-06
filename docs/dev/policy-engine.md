@@ -2,7 +2,7 @@
 
 The node decides every call. The engine is `crates/nerve-policy/src/decide.rs`.
 The exact rules are in [spec/node-local.md](spec/node-local.md) §2 to §4.
-For how it looks to an owner, see the user guide ([modes](../user/modes.md),
+For how it looks to an owner, see the user guide ([modes](#modes-and-folders-as-the-owner-sets-them),
 [rules](../user/rules.md)).
 
 ## Three layers
@@ -100,7 +100,7 @@ checker parses and matches the same conditions (`checker::blocklist`), with
 ## The guard
 
 A new pairing's deny list starts with the guard (`nerve_policy::rules::GUARD`,
-[rules](../user/rules.md#the-guard-against-changing-the-node)): three rules
+[rules](#the-guard-against-changing-the-node)): three rules
 `guard:node-programs`, `guard:node-paths` and `guard:node-service`
 (`nerve_policy::guard::Guard`), and five `fs.write` globs for the node's
 folders. A `guard:` rule covers `exec.run` and looks at commands, not at the
@@ -544,7 +544,7 @@ center's local name):
 
 What the container does not stop, in short (the user docs list each point with
 how it was checked on Windows 11 Pro 26H2, build 10.0.26300, and what was not:
-[modes](../user/modes.md#what-the-appcontainer-does-not-stop)):
+[modes](windows.md#what-the-appcontainer-does-not-stop)):
 
 - The network: out to the internet and the local network, no filter by
   address or port; not the machine itself (its loopback address, its own
@@ -891,8 +891,9 @@ sandbox. (The guard's own rules read each command of a line; see below.)
 
 ### The guard against changing the node
 
-Every new pairing starts with deny rules that keep its commands off this
-node itself. `rule deny` shows them; remove any you do not want.
+Every pairing has built-in deny rules that keep its commands off this node
+itself. `rule` shows them as one line, `guard: 8 rules, built in`; they
+cannot be removed or edited, and the node keeps them current.
 
 | Rule | Refuses |
 |---|---|
@@ -1023,7 +1024,7 @@ nerve-node rule rm 'git status *'
 entry as `rule` prints it, then what it becomes. That is an entry in the
 same form (`'exec.run:git *'`, `'fs.read:~/notes/*'`), or a plain command
 line, which becomes the rule `rule add` makes of it. It works on every list,
-and on the rules of the guard too. The desktop app's Permissions page edits a
+but not on the rules of the guard. The desktop app's Permissions page edits a
 rule the same way (the pencil beside it).
 
 `rule rm` takes the command line `rule add` was given, or an entry as `rule`
@@ -1361,7 +1362,7 @@ for it.
    nerve-node sudo off
    ```
 
-`rule add allow 'sudo …'` is refused. A sudo command goes on the sudo list.
+`rule add allow 'sudo …'` puts the command on the sudo list.
 
 ### What the node does
 

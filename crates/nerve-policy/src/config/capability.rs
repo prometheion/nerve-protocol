@@ -559,7 +559,7 @@ pub fn refuse_account(doc: &toml::Table) -> Result<(), String> {
                 None => "[[capability]]".into(),
             };
             return Err(format!(
-                "{name}: account is no setting any more: a capability of node.toml always runs as nerve-run, held to the folders; remove the line. An action with your own rights comes from a program you allow as a provider (docs/user/providers.md)"
+                "{name}: account is no setting any more: a capability of node.toml always runs as nerve-run, held to the folders; remove the line. An action with your own rights comes from a program you allow as a provider (docs/user/capabilities.md)"
             ));
         }
     }
@@ -587,7 +587,7 @@ pub fn refuse_units(doc: &toml::Table) -> Result<(), String> {
                 None => "[[capability]]".into(),
             };
             return Err(format!(
-                "{name}: {key} is no setting: a capability of node.toml offers actions only, so a state it reads is an action with effect read or sense; events and streams come from a program you allow as a provider (docs/user/providers.md)"
+                "{name}: {key} is no setting: a capability of node.toml offers actions only, so a state it reads is an action with effect read or sense; events and streams come from a program you allow as a provider (docs/user/capabilities.md)"
             ));
         }
     }

@@ -52,7 +52,7 @@ every call to them by the calling center's policy.
    in `folder` mode without a folder (on the installed Linux node its commands
    have only `nerve-run`'s home, `/tmp` and `/var/tmp`, and its file calls
    may still read what every account on the machine may read: see
-   [modes](../user/modes.md#reading-in-folder-mode)). A decision is
+   [modes](sandbox-linux.md#reading-in-folder-mode)). A decision is
    allowed or forbidden. Nothing waits for a person to answer.
 5. **MCP is the only harness interface.** No harness names, tool names,
    session formats or hooks appear in the protocol, the center or the node.

@@ -1,362 +1,163 @@
 # Rules
 
-Rules say which calls are allowed and which are refused. Each pairing has
-three lists.
+Rules say which calls a center may make and which are refused. Each pairing
+has three lists:
 
 | List | Counts in | Does |
 |---|---|---|
 | `allow` | `allowlist` mode only | A matching call may run |
-| `deny` | every mode | A matching call is refused. A deny rule beats every other rule and mode |
-| `sudo` | every mode, while [sudo](sudo.md) is on | A matching `sudo` command may run |
+| `deny` | every mode | A matching call is refused; it beats every other rule and mode |
+| `sudo` | every mode, while [sudo](#sudo) is on | A matching `sudo` command may run |
 
-In `folder` and `user` mode, allow rules do nothing. The mode decides.
+In `folder` and `user` mode, allow rules do nothing; `rule add allow` says
+so there. With several centers, add `--center <name>`.
 
-The commands below are the CLI's, on Linux. On Windows the
-[desktop app](desktop.md)'s **Permissions** page adds, edits and removes the
-rules (**Allowed commands**, **Forbidden commands**, the sudo list); the
-guard is built in.
-
-## Allow a command
+## Allow and deny a command
 
 ```sh
 nerve-node rule add allow 'git status'
 nerve-node rule add allow 'git status *'
-```
-
-The first allows that exact command line. The second allows `git status` with
-anything after it: a trailing ` *` is the wildcard, and `rule add` says what it
-covers. A rule applies to one command line, so `git status` does not allow
-`git status --short`. `'rm *'` allows every `rm` command, not the files of a
-folder.
-
-## Deny a command
-
-```sh
-nerve-node rule add deny 'rm *'
 nerve-node rule add deny 'git push origin main'
-```
-
-A deny rule matches the whole command line. It does not see `rm` inside
-`x; rm …`, in `/bin/rm`, in a script, or in another program that deletes
-files. In `folder` and `user` mode it guards against mistakes. It is not a
-sandbox. (The guard's own rules read each command of a line; see below.)
-
-## The guard against changing the node
-
-Every new pairing starts with deny rules that keep its commands off this
-node itself. `rule deny` shows them; remove any you do not want.
-
-| Rule | Refuses |
-|---|---|
-| `guard:node-programs` | A command that runs `nerve-node` or `nerve-node-desktop`, by its name or a path, `.exe` too; and one that copies, moves, links, deletes or overwrites their files (`cp`, `mv`, `rm`, `install`, `ln`, `Remove-Item`, `del`, a redirection onto the file, `tee`, `dd`, `sed`, `chmod`, `curl -o`, `wget -O`, `Invoke-WebRequest -OutFile`, `Start-BitsTransfer`, `certutil`, `Set-Content`, `Clear-Content`, `Out-File`, `gzip`, `upx`, `objcopy` …), since replacing the program changes the node. The path may stand in a brace group in `sh` and fish (`mv nerve-node{,.bak}`), and may come through a pipe into the tools that take paths (`echo /usr/local/bin/nerve-node \| xargs rm`, `Get-Item …\nerve-node.exe \| Remove-Item`, `(Get-Item …\nerve-node.exe) \| Remove-Item`, `… \| Clear-Content`; not into a writer such as `tee`). Only the listed programs count, so another program or a .NET call that writes the file is not seen |
-| `guard:node-paths` | A command that names the node's socket or pipes or its config and state folders (`/run/nerve-node`, `/etc/nerve`, `/var/lib/nerve`, `~/.config/nerve`, `~/.local/state/nerve`, `%ProgramData%\Nerve`) |
-| `guard:node-service` | A command that stops, restarts, disables or kills the node's service or process, as the node's own `service stop` would |
-| `fs.write:…` (five rules) | A write into those folders |
-
-`nerve-node ui …` is such a command too, so a center's command cannot turn
-on the [web UI](node-web-ui.md) or make a token for it. Its port is not a
-rule's matter: the node closes a connection from a command's account itself
-([who can reach it](node-web-ui.md#who-can-reach-it)).
-
-The three `guard:` rules read the command line as the node's shell does
-(`/bin/sh` or `machine.shell` on Linux, PowerShell or cmd on Windows) and
-look at each command in it. The whole line is refused when any one of them
-is a guarded command:
-
-- in a list or a pipe: after `;`, `&&`, `||`, `&`, `|` or a line break, with
-  any indent;
-- in a group or block: `{ … }`, `( … )`, `(( … ))`, `if`, `for`, `while`,
-  `case` (also inside another block), a function, PowerShell's `{ … }` and
-  `( … )`. The words of an array (`a=(x y)`) or of a regular expression in
-  `[[ … ]]` are data; a substitution in them runs;
-- in a substitution: `$( … )` and backticks, also inside double quotes;
-- in the text a shell runs: `sh -c`, `bash -c`, `su -c`, `runuser -c`, `eval`,
-  `powershell -Command`, `cmd /c`, `Invoke-Expression`, and a here-document
-  or here-string fed to a shell (`bash`, also with `-s` and arguments, `su`,
-  `sudo -s`, `sudo -i`);
-- behind a program that runs another: `sudo` (with its options), `env`,
-  `runuser -u`,
-  `timeout`, `nohup`, `nice`, `ionice`, `time`, `stdbuf`, `xargs`, `exec`, a
-  path to the program, and on Windows `&`, `Start-Process` and cmd's `start`,
-  `@`, `if`, `for … do` and the command in `for /f … in ('…')`. A file name or a string in the brackets of `for /f` is read as words, so a path to the node's folders in it is still refused.
-
-fish is read as a shell of its own: its `( … )` is a command substitution
-(`echo (nerve-node status)` is refused) and `and`, `or` and `not` start a
-command, in a `fish -c` text and when `machine.shell` is fish. In PowerShell
-a quoted string that starts a statement is a value
-(`'nerve-node' | Set-Content x.txt` runs), unless `&`, `.` or
-`Start-Process` runs it.
-
-The text a shell runs is read by that shell's rules, not the line's: the
-`& nerve-node` in `powershell -Command "& nerve-node"` is PowerShell's call
-operator even in a line for `sh`, and `start /b nerve-node` in a `cmd /c` text
-is cmd's.
-
-So `env X=1 sudo systemctl stop nerve-node`, `timeout 30 sudo systemctl
-restart nerve-node`, `bash -c 'pkill nerve-node'` and
-`powershell -Command "Stop-Service nerve-node"` (or `/c`, as PowerShell
-takes `/` before its switches too) are refused. cmd's `/c` text is read as cmd reads it from the line, also in the form with doubled quotes that a program path with a blank needs
-(`cmd /s /c ""C:\Program Files\Nerve\nerve-node-desktop.exe" status"`), and the argument string of `Start-Process cmd`. A word of
-another program is data, so a line that only mentions the node runs:
-`git commit -m "refuse systemctl stop nerve-node"`, `echo`, `grep`, a
-here-document written to a file. The name alone is not refused either:
-`cargo build -p nerve-node`, `journalctl -u nerve-node`,
-`ls -l /usr/local/bin/nerve-node`. A path in a sentence (a blank before it in
-the same word) is data too. For the same reason a script text handed to
-another program is seen only when no blank comes before the path in its word
-(`python3 -c "print(open('/etc/nerve/node.toml').read())"` is refused,
-`python3 -c "import os; print(open('/etc/nerve/node.toml').read())"` runs),
-and a folder name with a blank in it (`"/home/john smith/.config/nerve"`) is
-not seen: both are a program that another program runs, listed below.
-
-| | Refused | Still runs |
-|---|---|---|
-| Linux | `systemctl stop`, `restart`, `try-restart`, `reload-or-restart`, `try-reload-or-restart` (and `force-reload`, `condrestart`, `condstop`, `condreload`, `reload-or-try-restart`), `freeze`, `disable`, `kill` or `mask` on `nerve-node` (or `nerve-node.service`); `service nerve-node stop`, `restart`, `try-restart`, `force-reload` or `condrestart`; `pkill` or `killall` on `nerve-node` or `nerve-node-desktop`, with flags such as `-9`, `-f` or `-x`, also as one alternative of the pattern (`pkill -f 'nerve-node\|nerve-center'`, `pkill -f 'target/debug/(nerve-node\|nerve-center)'`); `kill` with what `pidof` or `pgrep` finds in a substitution, or a pipe that goes straight into `kill` or `xargs kill` (`kill $(pidof nerve-node)`, `pgrep nerve-node \| xargs kill`) | `systemctl status`, `is-active`, `show`, `cat` on it, `service nerve-node status`, `journalctl -u nerve-node`, `pgrep`, `ps`, `pkill -f "cargo run -p nerve-node"` (another program) |
-| Windows | `sc stop`, `config` or `delete`; `net stop`; `Stop-Service`, `Restart-Service`, `Set-Service` or `Remove-Service`; `Stop-Process` and `taskkill` with `nerve-node.exe` or `nerve-node-desktop.exe`, or with what `Get-Process` finds (`Stop-Process -Id (Get-Process nerve-node).Id`); `Get-Service` or `Get-Process` on the node piped into one of the cmdlets (also with the `\|` at the start of the next line); `reg add`, `delete`, `copy` or `restore` on the service's key or a key below it (`…\Services\nerve-node`, `…\nerve-node\Parameters`, which holds the node's owners), and PowerShell's `Set-ItemProperty`, `New-ItemProperty`, `Remove-ItemProperty`, `Remove-Item` (`rm`, `del`), `Clear-Item`, `Rename-Item`, `Move-Item` and their kin on them (a folder `C:\Services\nerve-node` is a folder, not that key); the service by its display name too (`net stop "Nerve node"`, `Stop-Service -DisplayName 'Nerve node'`) | `sc query`, `sc qc`, `Get-Service nerve-node`, `Get-Process nerve-node` |
-
-The Windows commands and program names match in any case (`STOP-SERVICE`,
-`NET STOP`, `sc stop Nerve-Node`, `taskkill /IM NERVE-NODE.EXE`), as Windows
-reads them, and `\` separates a path there.
-
-A line the guard cannot read with confidence (a quote or bracket left open,
-a line nested deeper than 16 levels, a command wrapped in more than 256
-wrappers, a shell that reads its script from a pipe such as `curl … | sh`,
-PowerShell's `-EncodedCommand`, a substitution inside `${ … }`) is checked
-twice: the commands read before the place that gave out are checked like any
-others (so `env X=1 sudo systemctl stop nerve-node; curl … | sh` is refused),
-and the whole line is checked with the guard's text patterns from before it
-read commands, which look for the commands where a command starts in the
-text. Such a line is refused wherever either refuses it. What stands after the
-place that gave out is only seen by the text patterns.
-
-What the guard does not see: a name built at run time
-(`n=nerve-node; systemctl stop $n`), a program that another program runs
-(`cargo run -p nerve-node`, `find … -exec`, `ssh`, a script file, or a
-launcher outside the list above such as `systemd-run`, `taskset` or `watch`,
-also with the program's path), a name
-that reaches `kill` or `systemctl` through a loop or another way than a
-straight pipe (`pgrep -f nerve-node | while read p; do kill $p; done`,
-`echo nerve-node | xargs systemctl stop`), and `pkill` or `killall` with a
-part of the name (`pkill nerve`, which matches the node too), and `reg import` or `regedit` of a file that holds the service's key.
-
-A rule of the guard is written `guard:<name>`, and only these three exist.
-The guard is built in: every pairing has its rules on top of its own deny
-rules, the node keeps them current, and none can be removed. `rule` shows it
-as one line (`guard: 8 rules, built in`). A pairing made before the guard
-read commands may still hold its rules as text patterns: they are deny rules
-of its own now, beside the guard, and `rule rm` takes them off. Those older
-patterns hold tabs and
-line breaks: `rule` and the app's rule lists write them as `\t`, `\r` and
-`\n`, so a rule stays one line, and `rule rm` and `rule edit` take the entry
-as it is listed there (the new entry of `rule edit` too). `config add` and
-the app's add field take the character itself: the listed text of such a
-rule, or of a rule already on that list, is refused there, since pasted so
-its `\n` would be the letter, not the line break. Any other text is a rule as
-it stands, a Windows path such as `C:\tools\x.exe` too.
-
-The guard catches an agent's mistakes, such as an agent that tries to give
-itself more rights. It does not stop a command written to get around it (a
-name built at run time, a copy of the program). The real protection is that
-commands run as an account of their own, which may not change the node
-([service](service.md)), and the node's own folders, which no rule or mode
-opens ([protected paths](protected-paths.md)).
-
-## List, change and remove rules
-
-```sh
-nerve-node rule            # all three lists
-nerve-node rule allow
+nerve-node rule                        # all three lists
+nerve-node rule rm 'git status *'      # the entry as `rule` shows it
 nerve-node rule edit allow 'exec.run:git status' 'git status --short'
-nerve-node rule rm allow 'git status'
-nerve-node rule rm 'git status *'
 ```
 
-`rule edit` changes one entry in its place, as one change in the audit: the
-entry as `rule` prints it, then what it becomes. That is an entry in the
-same form (`'exec.run:git *'`, `'fs.read:~/notes/*'`), or a plain command
-line, which becomes the rule `rule add` makes of it. It works on every list,
-and on the rules of the guard too. The desktop app's Permissions page edits a
-rule the same way (the pencil beside it).
+A rule applies to one command line. An allow rule covers a line only when
+every command in it matches. `rule rm` needs the list only when the entry is
+on two lists.
 
-`rule rm` takes the command line `rule add` was given, or an entry as `rule`
-prints it, such as `'exec.run:git *'`. The list is needed only when the entry
-is on two lists. When the text could mean two entries on the list, `rule rm`
-removes none and tells you the two commands that remove them one after the
-other.
+A deny rule matches the whole command line. It does not see `rm` inside a
+script, in `/bin/rm` or in another program that deletes files. In `folder`
+and `user` mode it guards against mistakes; it is not a sandbox.
 
-## Rules for files and other actions
+## Wildcards
 
-`rule add` writes command rules and rules on an action's arguments
-(`lamp.set:room=office`, see above). It refuses an entry in the other pattern
-forms (`fs.read:...`, `fs:...`, and also `exec.run:...` and `exec:...`, the
-form `rule` prints), which would never match as a command. Give `rule add` the
-bare command (`'git *'`), not that form. (`rule rm` does take it.) For files and
-other actions, add the rule to the policy by name. `lab` is the center's name on this machine (see
-`nerve-node center`).
-
-```sh
-nerve-node config add center.lab.policy.allow 'fs.read:~/notes/*'
-nerve-node config add center.lab.policy.deny  'fs:~/private/*'
-```
-
-The web UI's [Audit](web-ui.md#audit) page writes the same rules with four
-buttons. That needs the [settings grant](settings-grant.md).
-
-`--action` makes the rule such a button makes for an audit entry of that
-action: the entry's path, or a folder and all below it as `/srv/data/*`. An
-action without a path takes `''`, and covers its capability as `'*'`.
-`--arg FIELD=VALUE` holds such a rule to one argument of the call, as the
-audit buttons that pin one do (see below). `--exact` takes the entry's text as
-it is, a `*` at its end too, as the **Allow** and **Deny** buttons do: an
-agent's `rm -rf *` stays that one command.
-
-```sh
-nerve-node rule add allow /srv/data/report.txt --action fs.read
-nerve-node rule add deny '/srv/data/*' --action fs.write                 # fs.write:/srv/data/*
-nerve-node rule add deny '' --action lamp.set --arg room=bedroom          # lamp.set:room=bedroom
-```
-
-## Rules on an action's arguments
-
-A rule for any action but the `fs` ones and `exec.run` may name values of
-the call's arguments, and a rule for a program's stream the values of its
-parameters. Its pattern is one or more conditions, joined by `,`. The rule
-covers a call that meets all of them; the other arguments are free.
-
-```sh
-nerve-node rule add allow 'lamp.set:room=office,brightness<=50'
-nerve-node rule add deny  'lamp.set:room=bedroom'
-nerve-node rule add deny  'notes.save:path~~/private/*'
-```
-
-| Condition | Meets a call whose argument |
-|---|---|
-| `room=office` | is `office` (a string, number or boolean: `level=3`, `on=true`) |
-| `room!=office` | is not `office` |
-| `brightness<=50` | is a number up to 50; also `<`, `>`, `>=` |
-| `label~desk*` | is a string the glob matches |
-
-- A field is a top-level argument of the action, as its schema in
-  `cap --json` names it. A value is read as that argument's type.
-- A `,` in a value is written `\,`, a `\` before it `\\`. The `,` inside a
-  glob's `{a,b}` or `[...]` needs none. In the value of `=` and `!=` a `[` or
-  `{` is a character like any other.
-- An argument the schema marks as a path (`x-nerve-path`) is matched as a
-  path, as an `fs` rule matches one: as the node resolved it, `~/` is your
-  home, and on Windows case does not count. `path=/srv/a` names that path,
-  `path~/srv/*` a folder and below. As a deny rule it also refuses a call
-  handed a folder above that place, such as `~`, since the program works
-  below it. A path condition starts with `/` or `~` (a `~` glob also with a
-  wildcard, such as `path~**/.env`), as the paths the node resolves do. A
-  plain string has no home: a `~` glob that starts at the home (`~/…`) on
-  one is flagged (see below), since the rule was written for a path argument
-  that is a plain string now. An exact string, such as an audit pins, may
-  start with `~/` like any text.
-- Conditions name the arguments of one action: `lamp.set:…`, not `lamp:…`.
-  A rule without a pattern (`lamp.set`, `lamp`) still covers every call.
-
-The node checks the conditions against the action's schema when the rule is
-written, by `rule add`, `rule edit`, `config add`, the desktop app or a center
-with the [settings grant](settings-grant.md). An argument the action does not
-take, a value not of its type (`brightness=high`), an operator its type does
-not take (`room<3`), a value its schema does not list, and an action nothing
-offers now are refused. So a rule for a [program's](providers.md) action goes
-on once the program is attached.
-
-A call that gives such an argument a value of another type, or leaves it
-out, cannot be told by the rule. Then a deny rule refuses it and an allow rule
-does not cover it: `lamp.set:brightness>50` on the deny list also refuses a
-`lamp.set` call without `brightness`.
-
-When a capability changes and its schema no longer fits a rule (an argument
-the rule names is gone or has another type, or a value it names is no longer
-one the schema lists), the rule stays and decides as written, which is no
-longer what you meant. Where its argument is gone it fails closed: as a deny
-rule it refuses every call of that action, as an allow rule it covers none.
-Where its value is no longer listed, `room=bedroom` holds for no call. `rule
-ls` says so after the rules, `rule --json` lists them under `stale`, and the
-desktop app marks the row:
-
-```text
-warning: the deny rule "lamp.set:room=bedroom" no longer fits: lamp.set has no argument room; it takes level; as a deny rule it may refuse calls of lamp.set it was not meant for until you change it
-```
-
-The audit keeps the arguments a rule may pin (top-level strings of up to 200
-characters, numbers and booleans, at most 16) on each entry of such an
-action. The audit pages of the desktop app and the web UI offer each of them:
-pick one, then **Allow with this value** or **Deny with this value**. A path
-argument is kept as the node resolved it, so the rule names the place the call
-reached, however the agent spelt it; a call refused before its path was
-resolved (an action that is off, a path that does not resolve) keeps none, and
-neither does one for an argument the schema does not name. A value is compared
-as written, so a deny on a free string covers that exact value only
-(`mail.send:to=boss@example.com` does not refuse `Boss@Example.com`, which a
-program may read as the same person). Where a program reads values more
-loosely, let its schema list the allowed ones (`enum`), or use the allow list.
-
-## Rule syntax
-
-A rule is `<scope>` or `<scope>:<pattern>`.
-
-- The scope is a capability (`fs`, `exec`) or one action (`fs.read`,
-  `exec.run`).
-- The pattern of `exec.run` and of an `fs` scope is a glob over the call's
-  target. `*` matches across `/` and spaces. Any other action's pattern is
-  conditions on its arguments (see above).
-- Without a pattern the rule covers every call of its scope.
-- A pattern ending in ` *` also matches the bare program. One ending in `/*`
-  also matches the folder itself.
-
-| Pattern of | Is |
-|---|---|
-| `exec.run` | A glob over the whole command line |
-| every `fs` action | A glob over the resolved path. `~/` is your home. On Windows the form is `/c/Users/x`, and case does not count |
-| any other action | Conditions on its arguments, a path argument (`x-nerve-path`) read as an `fs` path is |
+A trailing ` *` is the wildcard. `rule add` prints what a wildcard rule
+covers.
 
 | Rule | Covers |
 |---|---|
-| `exec.run:git status` | That command line, exactly |
-| `exec.run:git *` | `git` and anything after it |
-| `fs.read:/home/u/notes/*` | Reading the folder and below (not `list` or `grep`) |
-| `fs:~/private/*` | Every `fs` action on the folder and below |
-| `notes.open:path~~/private/*` | The program's `notes.open` with its path there; as a deny rule also one handed a folder above it, such as `~` |
-| `lamp.set:room=office,brightness<=50` | `lamp.set` in the office, up to half bright |
-| `exec` | Every `exec` action, so every command |
+| `git status` | that exact line, not `git status --short` |
+| `git status *` | `git status` with anything after it |
+| `rm *` | every `rm` command, not the files of a folder |
+| `/srv/data/*` with `--action fs.read` | that folder and all below it |
+| `lamp.set:room=office` | a call of `lamp.set` with that argument |
 
-Commands and paths never mix: `fs:/tmp/*` is not a command rule. A path rule
-covers the capability it names only: `fs:~/private/*` does not keep a
-[program's capability](providers.md#paths-it-takes) that takes paths out of
-that folder. Deny each such action too (`notes.open:path~~/private/*`), or
-make the place a [protected path](protected-paths.md), which every capability
-respects. A
-program handed a folder works below it, so a deny rule of its capability that
-may cover a place below that folder refuses the folder as well (and a new
-path it would write to, where it may make a folder; a file it is handed holds
-nothing below it); an `fs` walk
-(`grep`, `find`, `list`) skips the denied place instead. A path rule covers
-only the paths a program marks as such. An unknown rule shape is refused
-when you add it, and so is an `fs` rule written as conditions
-(`fs.read:path~~/private/*`): an `fs` rule names the path itself
-(`fs.read:~/private/*`).
+A wildcard covers plain commands only. A line with shell characters
+(`; & | $ ( ) < > { } ' "`), or one that starts another shell (`sh`,
+`bash`, `eval`), needs a rule that names the whole line. So `git *` does not
+allow `git x; rm -rf ~` ([what a wildcard covers](../dev/policy-engine.md#what-a-wildcard-covers)).
 
-## What a wildcard covers
+## Rules for files and other actions
 
-A wildcard allow rule covers plain commands only. A command is plain when it
-has none of these:
+`--action` makes a rule for one action, as the audit page's buttons do. An
+action without a path takes `''`. `--arg FIELD=VALUE` holds the rule to one
+argument of the call.
 
-- shell characters: `; & | $ ` ( ) < > @ { } % ' " # , \`
-- a line break or another control character
-- a word that starts another shell or runs text as code, such as `powershell`,
-  `pwsh`, `cmd`, `sh`, `bash`, `eval`, `iex`, `Invoke-Expression`,
-  `Start-Process`, `-Command`, `-EncodedCommand`, `-File`, `/c`, `/k`
+```sh
+nerve-node rule add allow /srv/data/report.txt --action fs.read
+nerve-node rule add deny '/srv/data/*' --action fs.write
+nerve-node rule add deny '' --action lamp.set --arg room=bedroom
+```
 
-Only an allow rule that names the whole line covers such a command. This keeps
-`git *` from allowing `git x; rm -rf ~`. A Windows path with `\` needs an exact
-rule, or `/` in the path.
+`--exact` takes the text as it is, a `*` at its end too. Rules on an
+action's arguments (`room=office`, `brightness<=50`) are in
+[rule syntax](../dev/policy-engine.md#rules-on-an-actions-arguments).
+
+## The guard
+
+The guard is built in: deny rules that keep a center's commands off Nerve
+itself. They refuse a command that runs, replaces or deletes `nerve-node`,
+names the node's socket or its folders, or stops its service. `rule` shows
+`guard: 8 rules, built in`. They cannot be removed, and the node keeps them
+current.
+
+- The action checker's blocklist and the node's guard catch mistakes by
+  name, not someone who hides the name. The mode, the rules and the account
+  are the protection ([guard](../dev/policy-engine.md#the-guard)).
+
+## Protected paths
+
+Some places hold secrets or start programs later. File calls that touch
+them are refused in every mode, `user` mode too, whatever a rule says.
+
+| Group | Examples |
+|---|---|
+| Keys and credentials | `~/.ssh`, `~/.gnupg`, keyrings, `~/.git-credentials`, `~/.aws`, `~/.kube` |
+| Browser and mail profiles | `~/.mozilla`, `~/.thunderbird`, `~/.config/google-chrome` |
+| Shell start-up | `~/.bashrc`, `~/.profile`, `~/.zshrc`, `~/.config/fish` |
+| Autostart and services | `~/.config/autostart`, `~/.config/systemd` |
+| System files | `/etc/shadow`, `/etc/sudoers`, `/etc/ssh`, `/etc/pam.d`, `/etc/systemd` |
+
+`~/.gitconfig`, `~/.config/git` and `~/.local/bin` are protected against
+writes only. The node's own folders are closed harder: nothing opens them.
+
+```sh
+nerve-node folder add ~/.ssh r                                    # releases reads there
+nerve-node config add center.lab.policy.protected.allow '~/.ssh/config'
+nerve-node config add center.lab.policy.protected.extra '~/secrets'
+```
+
+Only you can release a protected path. A center with the settings grant can
+add one, never remove one. `lab` is the center's name here.
+
+- Protection covers file calls and a command's working folder. A `user`
+  mode command runs as you and reaches them
+  ([protection](../dev/policy-engine.md#what-protection-covers)).
+- A command that asks another program for something, such as the keyring
+  over D-Bus, names no protected path.
+
+## Sudo
+
+Sudo is a switch on the machine, off by default. While it is on, a `sudo`
+command runs only if the sudo list names it.
+
+```sh
+nerve-node rule add allow 'sudo apt update'   # goes on the sudo list
+nerve-node rule add allow 'sudo apt *'
+sudo nerve-node sudo on                       # asks for your sudo password
+nerve-node sudo                               # on or off
+nerve-node sudo off
+```
+
+`sudo on` asks your password to show that you may run commands as root here.
+On the installed node it needs `sudo` in front. The password stays in
+memory only, so a restart turns sudo off.
+
+- Commands on the sudo list run as root, outside the folders. Put on the
+  list only what you would run as root yourself
+  ([sudo](../dev/policy-engine.md#sudo-as-the-owner-uses-it)).
+- With the network off, no sudo-list command runs ([network](network.md)).
+
+## The settings grant
+
+A center cannot change anything on a machine at first. The grant lets it.
+
+```sh
+nerve-node center settings on lab
+nerve-node center settings off lab
+nerve-node center                      # shows the grant
+```
+
+With the grant a center may change its own pairing's mode (up to `user`),
+folders, rules and capability switches, and turn sudo on and off. It may add
+rules with the audit page's buttons, and capabilities of its own that wait
+for your `on`.
+
+No grant lets it pair or unpair, touch the keys, the grant itself, `panic`
+or another center's pairing, or change the proxy or a machine setting (the
+shell, `allow_root`, the sudo path, where the keys are, the log level). Nor
+may it turn its network on or release a protected path
+([the grant](../dev/settings-and-config.md#the-settings-grant)).
+
+- A center with the grant can widen its rights up to `user` mode. Give it
+  only to a center you would also give a shell.
+- With root as the owner, a center with the settings grant can switch
+  itself to `user` mode and so run commands as root
+  ([root as the owner](../dev/service.md#root-as-the-owner)).
 
 ## Switch a capability off
-
-`cap set` turns a capability or one action on, off or hidden for a center.
 
 ```sh
 nerve-node cap set exec.run off
@@ -364,15 +165,11 @@ nerve-node cap set fs hidden
 nerve-node cap
 ```
 
-`cap` lists every capability, each action with its effect and, per
-center, whether it may use it now and the switch you set
-([providers](providers.md#see-what-is-there)).
-
 | Setting | Effect |
 |---|---|
-| `on` | Normal. Rules and mode decide |
-| `off` | Calls are refused with `disabled`. The center lists it as off |
-| `hidden` | The node leaves it out of what it tells the center, and refuses it |
+| `on` | Normal: the rules and the mode decide |
+| `off` | Calls are refused with `disabled`; the center sees it as off |
+| `hidden` | The center is not told of it, and calls are refused |
 
-A capability is `fs` or `exec`. An action is `fs.write` or `exec.run`. A
-switch applies in every mode.
+A switch applies in every mode, to a capability (`fs`) or one action
+(`exec.run`).

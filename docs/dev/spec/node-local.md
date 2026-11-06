@@ -20,7 +20,7 @@ format and that a newer version wrote it, and a file with a field it does not
 know ([settings and config](../settings-and-config.md#the-format-of-stored-files)).
 
 A node that `nerve-node install` put on a Linux machine
-([service](../../user/service.md)) runs as the system user `nerve` with
+([service](../service.md)) runs as the system user `nerve` with
 `/etc/nerve` and `/var/lib/nerve/state`; without `--config-dir`,
 `--state-dir` and their variables the CLI uses those two folders, and a
 command root runs on them runs as their owner, so that what it writes stays

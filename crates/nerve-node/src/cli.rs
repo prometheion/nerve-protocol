@@ -881,8 +881,8 @@ pub fn help_pages(cmd: clap::Command, program: &'static str) -> clap::Command {
         .fold(cmd, |cmd, name| {
             cmd.mut_subcommand(name, |c| {
                 c.after_long_help(format!(
-                    "More in the user guide: docs/user/{}",
-                    doc_of(name)
+                    "More in the user guide: {}",
+                    guide_url(doc_of(name))
                 ))
             })
         })
@@ -1085,24 +1085,27 @@ fn rest_of(long: Option<String>, line: &str) -> String {
 /// The user guide's page for a command of the top level.
 pub fn doc_of(command: &str) -> &'static str {
     match command.split([' ', '/']).next().unwrap_or_default() {
-        "install" | "uninstall" | "setup" | "update" | "service" => "service.md",
+        "install" | "uninstall" | "setup" | "update" | "service" | "run" => "install.md",
         "backup" | "restore" => "backup.md",
-        "center" => "pairing.md",
-        "mode" | "folder" | "network" => "modes.md",
-        "rule" => "rules.md",
-        "sudo" => "sudo.md",
-        "status" => "troubleshooting.md",
-        "audit" => "audit.md",
-        "log" => "logs.md",
-        "panic" | "unlock" => "stop.md",
-        "cap" => "config-capabilities.md",
-        "provider" => "providers.md",
-        "proxy" => "proxy.md",
-        "relay" => "relay.md",
-        "ui" => "node-web-ui.md",
-        "config" => "config.md",
+        "center" | "proxy" | "relay" => "pair.md",
+        "mode" | "folder" => "folders-and-modes.md",
+        "network" => "network.md",
+        "rule" | "sudo" => "rules.md",
+        "status" | "audit" | "log" | "panic" | "unlock" => "watch-and-stop.md",
+        "cap" | "provider" => "capabilities.md",
+        "ui" => "web-uis.md",
+        "config" => "settings.md",
         _ => "commands.md",
     }
+}
+
+/// The user guide's page `doc` as this release has it: the docs at the
+/// release's tag, not at `main`, which may have moved on.
+pub fn guide_url(doc: &str) -> String {
+    format!(
+        "https://github.com/prometheion/nerve-protocol/blob/v{}/docs/user/{doc}",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 fn cards_of(cmds: &[&clap::Command]) -> Vec<Card> {
@@ -2599,7 +2602,7 @@ async fn command(paths: NodePaths, cmd: Cmd, out: &mut dyn Write) -> Result<(), 
                     w(
                         out,
                         format!(
-                            "the AppContainer profile {} stays, since {why}: once the node stopped, remove it by hand (docs/user/modes.md)",
+                            "the AppContainer profile {} stays, since {why}: once the node stopped, remove it by hand (docs/dev/windows.md)",
                             of(n)
                         ),
                     );
@@ -6879,7 +6882,7 @@ fn setting(cfg: &NodeConfig, key: &str) -> Result<toml::Value, String> {
             Err(no_center_named(cfg, name))
         }
         [first, ..] if SETTING_TABLES.contains(&first.as_str()) => Err(format!(
-            "{key} is not set, so its default applies (docs/user/config.md lists the defaults)"
+            "{key} is not set, so its default applies (docs/dev/settings-and-config.md lists the defaults)"
         )),
         _ => Err(format!(
             "{key} is no setting of node.toml; its tables are {}",
@@ -10822,7 +10825,10 @@ mod tests {
         assert!(!folder.render_help().to_string().contains("--json"));
         let long = folder.render_long_help().to_string();
         assert!(
-            long.ends_with("More in the user guide: docs/user/modes.md\n"),
+            long.ends_with(&format!(
+                "More in the user guide: https://github.com/prometheion/nerve-protocol/blob/v{}/docs/user/folders-and-modes.md\n",
+                env!("CARGO_PKG_VERSION")
+            )),
             "{long}"
         );
         // Bare, it names the commands of every day, each one that exists.

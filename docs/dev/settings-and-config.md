@@ -157,8 +157,8 @@ over a socket (the user's systemd session, a tmux or screen server) runs them
 outside it, and reads the token too. The installed Linux node keeps that out
 by its accounts: no command runs as `nerve`, which owns the socket and the
 token, but as `nerve-run` or the owner ([the accounts commands run
-as](../user/service.md#the-accounts-commands-run-as)). A
-[sudo](../user/sudo.md) command is root and is not kept out.
+as](sandbox-linux.md#the-accounts-commands-run-as)). A
+[sudo](policy-engine.md) command is root and is not kept out.
 It is the node's
 only way in besides its center links. The client sends one JSON object per line,
 `{"method", "params", "token"}`, and gets `{"ok": value}` or
@@ -251,7 +251,7 @@ owner's file system ids (`account::FsAs`), so only the owner's files change.
 What it gave is in `acl.json` in the state folder; it syncs at the start, on
 each config version, and before each `nerve-run` call, walking only grants
 that are new, changed or gone. The user guide has the rules
-([modes](../user/modes.md#the-account-nerve-run-linux)).
+([modes](sandbox-linux.md#the-account-nerve-run)).
 
 ## The log level
 
@@ -264,7 +264,7 @@ daemon applies it within a second of any change ([logging](logging.md)).
 `audit.jsonl` in the state folder holds one JSON line per event: settings
 changes, calls allowed or forbidden, and what happened to the config file. It
 holds targets, never file contents or output. See
-[the user guide](../user/audit.md) for sizes and rotation. It is not the log: [logging](logging.md).
+[the user guide](logging.md) for sizes and rotation. It is not the log: [logging](logging.md).
 
 ## Settings, as the owner changes them
 

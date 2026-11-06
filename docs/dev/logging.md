@@ -1,7 +1,7 @@
 # Logging
 
 The center and the node each keep a log of what they do, apart from the audit
-log. What a user sees is in [logs](../user/logs.md); this page is how it is
+log. What a user sees is in [logs](#the-log-as-the-owner-reads-it); this page is how it is
 built.
 
 ## One module

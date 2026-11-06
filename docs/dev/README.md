@@ -4,6 +4,28 @@ How Nerve is built, and why. Start with [architecture](architecture.md). The
 wire format and the exact rules are in the [spec](spec/README.md); these
 pages explain the design and link to the spec for detail.
 
+## Writing user docs
+
+The user guide (`docs/user/`) and `README.md` are short; the depth lives
+here. A user page keeps to these rules:
+
+1. A page is one subject; each task on it is one heading, and the title
+   names the subject.
+2. Start with the shortest path: one command block, one sentence.
+3. One idea per sentence; split a sentence over 25 words.
+4. A table cell is one line (about 15 words); more is a link.
+5. A limit is one line: what it is, what to do, a link here. Shorten a
+   limit, never cut it. Every limit is in `safety.md` and again on its task
+   page.
+6. Say what the user does and sees. How the node does it goes here.
+7. No history. A break is one CHANGELOG line.
+8. Linux only until 0.1.0. Over budget means it belongs here.
+9. `<details>` folds reference lists and long examples, never a limit: a
+   limit stays visible.
+
+`crates/nerve-node/tests/doc_budgets.rs` keeps the budgets: a page over its
+budget by 20 %, or a table cell over 40 words, fails it.
+
 ## Design
 
 | Page | Covers |

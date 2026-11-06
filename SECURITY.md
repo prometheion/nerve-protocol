@@ -50,8 +50,8 @@ keep up before 0.1.0.
 
 - What the owner allowed: a command run in `user` mode, by an allow rule or
   with sudo can do what the owner can. That is what those settings are for
-  ([modes](docs/user/modes.md)).
-- The known limits below, unless you get past what they say.
+  ([folders and modes](docs/user/folders-and-modes.md)).
+- The known limits below, and those in [safety](docs/user/safety.md), unless you get past what they say.
 - A wrong answer of the action checker's model. The checker is an extra gate
   in front of the machine's own policy and can only refuse
   ([action checker](docs/user/action-checker.md)).
@@ -80,28 +80,29 @@ from a tagged commit of `main`, and tested there before they are published
 
 These are by design or not solved yet. The pages named say more.
 
-- **The guard against changing the node catches mistakes.** The deny rules
-  every pairing starts with keep an agent's command from changing the node
+- **The guard against changing the node catches mistakes.** The built-in
+  deny rules of every pairing keep an agent's command from changing the node
   by mistake. They read the command line; a command that hides what it does
   gets past them. The boundary is the mode, the folders and the account a
-  command runs as ([rules](docs/user/rules.md)).
+  command runs as ([rules](docs/user/rules.md#the-guard)).
 - **Folder mode limits files, not the network.** By default a `folder` mode
   command may connect out, to other machines and to services on the same
-  machine (loopback) ([modes](docs/user/modes.md)).
+  machine (loopback). `nerve-node network off` closes it for one center
+  ([network](docs/user/network.md)).
 - **Landlock decides how much folder mode holds on Linux.** Without Landlock
   (some containers and LXC guests), the installed node runs folder mode
   commands as `nerve-run` with its account alone: they reach what any account
   may reach, and the folders of every pairing of that node, not only their
   own. `nerve-node status` says which Landlock version the kernel has, and
   the docs say what each version holds
-  ([modes](docs/user/modes.md#the-account-nerve-run-linux)).
+  ([modes](docs/dev/sandbox-linux.md#the-account-nerve-run)).
 - **A node you run yourself runs commands as you.** Only the installed node
   has `nerve-run`. Landlock holds a command's own processes, not the other
   programs of your account that run things on request
-  ([modes](docs/user/modes.md#what-a-command-can-reach-in-folder-mode-linux)).
+  ([modes](docs/dev/sandbox-linux.md#what-a-command-can-reach-in-folder-mode)).
 - **Root and the owner are trusted.** Whoever is root on the machine, or the
   node's owner, controls the node. The node keeps its keys from the commands
   it runs, not from root.
-- **Windows is not finished.** 0.0.7 is the finished Linux version. On
-  Windows the desktop app is the node, and
-  [platforms](docs/user/platforms.md) lists what differs there.
+- **Windows is not finished.** 0.0.7 is the finished Linux version, and
+  publishes no Windows program. Windows comes with 0.1.0
+  ([Windows](docs/dev/windows.md)).

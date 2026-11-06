@@ -544,9 +544,9 @@ that user put in the folder, and what a restore writes stays the center's.
   `/var/lib/nerve-center/center.bak`, and copy it from there as root.
   Typing the passphrase needs no file.
 - `restore` reads the backup and the passphrase as root, so they may be
-  anywhere, and then restores as `nerve-center`. It needs the service
-  stopped: `sudo systemctl stop nerve-center` before, `sudo systemctl start
-  nerve-center` after.
+  anywhere, and then restores as `nerve-center`. Where the service runs, it
+  stops it first and starts it again after, whether the restore worked or
+  not (`service::with_service_stopped`).
 
 ### Messages
 

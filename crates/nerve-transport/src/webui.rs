@@ -24,7 +24,14 @@ use crate::http::{Request, Response};
 pub const APP_CSS: &str = include_str!("webui/app.css");
 pub const THEME_JS: &str = include_str!("webui/theme-init.js");
 pub const ICON: &str = include_str!("webui/icon.svg");
-pub const KIT_JS: &str = include_str!("webui/kit.js");
+/// The kit, after the version of this release: its help links to the user
+/// guide at the release's tag (`GUIDE` in kit.js), which matches the program.
+pub const KIT_JS: &str = concat!(
+    "const NERVE_VERSION = \"",
+    env!("CARGO_PKG_VERSION"),
+    "\";\n",
+    include_str!("webui/kit.js")
+);
 pub const LOGIN: &str = include_str!("webui/login.html");
 pub const LOGIN_JS: &str = include_str!("webui/login.js");
 
@@ -530,6 +537,29 @@ mod tests {
             vec!["  s.innerHTML = ICONS[name] || \"\";"]
         );
         assert_eq!(html_sinks(LOGIN_JS), Vec::<&str>::new());
+    }
+
+    /// The help's guide links name the docs of this release, at its tag,
+    /// not `main`, which may have moved on.
+    #[test]
+    fn the_guide_is_the_one_of_this_release() {
+        assert!(
+            KIT_JS.starts_with(&format!(
+                "const NERVE_VERSION = \"{}\";\n",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "{}",
+            &KIT_JS[..80]
+        );
+        let guide = KIT_JS
+            .lines()
+            .find(|l| l.starts_with("const GUIDE = "))
+            .unwrap();
+        assert!(
+            guide.contains("/tree/v${NERVE_VERSION}/docs/user`"),
+            "{guide}"
+        );
+        assert!(!KIT_JS.contains("/main/docs"));
     }
 
     /// The scanner of short texts finds a long subtitle, a long banner and a

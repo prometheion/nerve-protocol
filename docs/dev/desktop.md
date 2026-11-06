@@ -64,9 +64,8 @@ administrator. If your password was mistyped, enter it again under
 `allowlist` mode run them as `nerve-run`, an account of their own that
 install makes, and `user` mode as you ([modes](sandbox-linux.md#the-account-nerve-run)).
 
-When it is done, **Open Nerve** opens the app. Its first-run steps name the
-machine, choose where the keys live, pair the first center and choose its
-mode; **Back** goes to the step before, **Skip** past one. The downloaded
+When it is done, **Open Nerve** opens the app. Its first-run steps pair the
+first center and choose its mode; **Back** goes to the step before, **Skip** past one. The downloaded
 file is no longer needed.
 
 | What | Linux | Windows |
