@@ -37,7 +37,8 @@
 #    crates/nerve-node/tests/real_root_owner.rs: root as the owner, and a
 #    program of root as a provider; each installs and uninstalls.
 # 2. The keyring path as an owner takes it: install the node (with the
-#    owner's sudo), run `setup` in a terminal and answer yes to the keyring,
+#    owner's sudo), run `config set machine.secret_storage keyring` in a terminal
+#    and answer yes to the keyring,
 #    which installs GNOME Keyring, a session for `nerve` and a login keyring
 #    (crates/nerve-node/src/keyring_setup.rs); check that the keys moved out of
 #    their files; crates/nerve-node/tests/keyring.rs as nerve, against
@@ -244,17 +245,14 @@ if ! command -v secret-tool >/dev/null; then
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libsecret-tools >/dev/null
 fi
 
-step "3. setup at a terminal, yes to the keyring"
-# The questions: the node's name (Enter), where the keys go (keyring), the
-# offer to install a keyring (y), a pairing link (Enter).
+step "3. config set machine.secret_storage keyring at a terminal, yes to the keyring"
+# The one question: the offer to install a keyring (y). The keys move once
+# one answers.
 python3 "$HERE/pty-answers.py" \
-  'Name of this node=' \
-  'Where the node keeps its keys=keyring' \
   'Install it now=y' \
-  'Pairing link=' \
-  -- runuser -u "$OWNER" -- "$BIN" setup | tee "$OUT/setup"
-grep -q 'the system keyring answers for nerve' "$OUT/setup" || fail "setup did not install a keyring that answers"
-grep -q "the node's keys are in the system keyring now" "$OUT/setup" || fail "setup did not move the keys"
+  -- runuser -u "$OWNER" -- "$BIN" config set machine.secret_storage keyring | tee "$OUT/setup"
+grep -q 'the system keyring answers for nerve' "$OUT/setup" || fail "the command did not install a keyring that answers"
+grep -q '^saved' "$OUT/setup" || fail "the command did not move the keys"
 
 step "4. The keys are in the keyring"
 as_owner --json config get machine.secret_storage | tee "$OUT/storage"

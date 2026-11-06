@@ -366,6 +366,14 @@ pub fn is_loopback(addr: &str) -> bool {
     }
 }
 
+/// What `nerve-center` says when it is started by hand at a terminal with
+/// MCP on stdin: it would seem to hang, waiting for a harness.
+pub fn terminal_notice(mcp: &McpMode, stdin_is_terminal: bool) -> Option<&'static str> {
+    (*mcp == McpMode::Stdio && stdin_is_terminal).then_some(
+        "nerve-center: waiting for MCP on stdin, as a harness starts it. `sudo nerve-center install` runs it as a service; `nerve-center --help` lists the commands.",
+    )
+}
+
 /// The URL a person or a harness reaches the address `a` at: http on
 /// loopback, https beyond it, and this machine's name for an address that
 /// listens on all of them (`0.0.0.0`, `[::]`), which no client connects to.
@@ -383,6 +391,17 @@ pub fn address_url(a: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// By hand at a terminal the center says what it waits for (round 2,
+    /// spec 3); under a harness, with a pipe on stdin, it says nothing.
+    #[test]
+    fn a_center_at_a_terminal_says_it_waits_for_mcp() {
+        let say = terminal_notice(&McpMode::Stdio, true).unwrap();
+        assert!(say.contains("waiting for MCP on stdin"), "{say}");
+        assert!(say.contains("sudo nerve-center install"), "{say}");
+        assert_eq!(terminal_notice(&McpMode::Stdio, false), None);
+        assert_eq!(terminal_notice(&McpMode::Off, true), None);
+    }
+
     use super::*;
 
     /// An address that listens on all of them is named by the machine's

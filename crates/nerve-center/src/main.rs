@@ -6,7 +6,7 @@
 use clap::{CommandFactory, FromArgMatches};
 
 fn main() -> std::process::ExitCode {
-    use nerve_center::config::{Cmd, McpMode};
+    use nerve_center::config::Cmd;
     let layout = nerve_center::service::Layout::system();
     // A setting given by an old name would be dropped without a word.
     if let Err(e) =
@@ -92,10 +92,10 @@ fn main() -> std::process::ExitCode {
     // harness on stdin.
     {
         use std::io::IsTerminal;
-        if args.mcp == McpMode::Stdio && std::io::stdin().is_terminal() {
-            eprintln!(
-                "nerve-center: waiting for MCP on stdin, as a harness starts it. `sudo nerve-center install` runs it as a service; `nerve-center --help` lists the commands."
-            );
+        if let Some(say) =
+            nerve_center::config::terminal_notice(&args.mcp, std::io::stdin().is_terminal())
+        {
+            eprintln!("{say}");
         }
     }
     match rt.block_on(nerve_center::server::run(args)) {

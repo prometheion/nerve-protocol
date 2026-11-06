@@ -417,7 +417,11 @@ fn status_lines(layout: &Layout, state: &Path, installed: bool, file: Option<&st
             format!("machines: {} paired: {}", names.len(), names.join(", "))
         }
         Ok(None) => "machines: none paired yet".into(),
-        Err(_) => format!("machines: {sudo}nerve-center status names them"),
+        // Root's `status` names them where the account's cannot.
+        Err(_) if crate::owner::not_yours(state) => {
+            "machines: `sudo nerve-center status` names them".into()
+        }
+        Err(e) => format!("machines: not shown ({e})"),
     });
     lines.push(match installed {
         true => format!(
@@ -456,6 +460,10 @@ fn run_line(state: &Path, runs: Option<bool>, unix: bool) -> String {
 /// read, not through a link, and only a plain file, so it never waits on
 /// one. `Ok(None)` when no center saved one.
 fn read_store(state: &Path) -> Result<Option<crate::store::Store>, String> {
+    // No center has run here yet: nothing to read, and nothing to fail on.
+    if matches!(state.symlink_metadata(), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+        return Ok(None);
+    }
     let _owner = as_owner_of(state)?;
     let path = state.join(crate::store::FILE);
     let mut open = std::fs::OpenOptions::new();
@@ -1592,6 +1600,9 @@ mod tests {
             lines[0],
             format!("center: none has run in {} yet", state.display())
         );
+        // The first thing a new person sees: no folder, no machines, and
+        // no command to run for them (round 2).
+        assert_eq!(lines[lines.len() - 2], "machines: none paired yet");
         std::fs::create_dir_all(&state).unwrap();
         let mut store = crate::store::Store::new("c1".into(), "lab".into());
         store.nodes.insert(

@@ -183,11 +183,11 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: Option<CenterCmd>,
     },
-    /// Choose how much a center may do: folder, allowlist or user mode
+    /// Choose how much a center may do: folder, allowlist or user mode (as you)
     ///
     /// Show each center's mode, or choose how much a center may do: only what allow rules name, what each folder allows (as nerve-run, an account of its own), or all you can do (as you).
     Mode {
-        /// `folder` (default; reads also what every account may), `allowlist` or `user`
+        /// `folder` (default; reads what all accounts may), `allowlist`, `user` (as you)
         ///
         /// `allowlist` (only what an allow rule names, as nerve-run), `folder` (what each folder's rights allow, as nerve-run, the default; on the installed node a file call may also read what every account may read) or `user` (anything you could do yourself, as you, protected files aside). Without it, each center's mode is shown.
         #[arg(value_name = "MODE")]
@@ -10752,7 +10752,7 @@ mod tests {
         let service =
             json!({"installed": true, "state": "stopped", "enabled": true, "version": "0.0.7"});
         let unread = Err("cannot read /etc/nerve/node.toml: permission denied".to_string());
-        let v = json::with_service(unread, service.clone()).unwrap();
+        let v = json::with_service(unread, service.clone(), true).unwrap();
         assert_eq!(v["service"], service);
         let lines = status_lines(&v);
         assert!(
@@ -10771,10 +10771,13 @@ mod tests {
             !lines.iter().any(|l| l.contains("pair a center")),
             "{lines:#?}"
         );
-        // A running service, or none: the error is the answer.
+        // A running service, or none: the error is the answer. So it is
+        // where this account may open the folders (a `node.toml` that does
+        // not parse): a stopped service does not hide it (round 2).
         let running = json!({"installed": true, "state": "running"});
-        assert!(json::with_service(Err("x".into()), running).is_err());
-        assert!(json::with_service(Err("x".into()), Value::Null).is_err());
+        assert!(json::with_service(Err("x".into()), running, true).is_err());
+        assert!(json::with_service(Err("x".into()), Value::Null, true).is_err());
+        assert!(json::with_service(Err("cannot parse".into()), service, false).is_err());
     }
 
     /// `--help` lists the commands in the four groups and More, one line
@@ -10835,7 +10838,7 @@ mod tests {
         let mode = h.verbs().find(|v| v.name == "mode").unwrap();
         assert_eq!(
             mode.about,
-            "Choose how much a center may do: folder, allowlist or user mode"
+            "Choose how much a center may do: folder, allowlist or user mode (as you)"
         );
         assert!(
             mode.more.starts_with("Show each center's mode"),
@@ -10844,10 +10847,13 @@ mod tests {
         );
         let arg = mode.args.iter().find(|a| a.name == "<MODE>").unwrap();
         assert!(
-            arg.about.contains("reads also what every account may"),
+            arg.about.contains("reads what all accounts may"),
             "{}",
             arg.about
         );
+        // The widest mode says in the first line that it runs as you (round
+        // 2, security 1).
+        assert!(arg.about.contains("`user` (as you)"), "{}", arg.about);
         assert!(arg.more.contains("protected files aside"), "{}", arg.more);
         for s in &h.sections {
             for c in &s.cards {

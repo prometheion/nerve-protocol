@@ -77,13 +77,16 @@ fn center_help() -> Value {
 
 /// The command that shows the owner token of the center in `state`: with
 /// `sudo` for the installed center, whose folder is its own user's, without
-/// it for a center you started, whose folder is yours.
-fn token_command(state: &std::path::Path) -> String {
+/// it for a center you started, whose folder is yours. A UI beyond loopback
+/// shows its page to anyone who reaches it, so it does not name a folder
+/// (`local` is false): the person who runs the command knows it.
+fn token_command(state: &std::path::Path, local: bool) -> String {
     let installed = crate::service::Layout::system();
     token_command_of(
         state,
         installed.installed().then_some(installed.state.as_path()),
         &crate::config::default_state_dir(),
+        local,
     )
 }
 
@@ -91,17 +94,21 @@ fn token_command(state: &std::path::Path) -> String {
 /// one is installed, and `default` the folder of a harness-started center.
 /// `owner-token` alone goes to the installed center's folder, else to
 /// `default` (crate::config::Args::owner_state_dir): any other folder is
-/// named with `--state-dir`.
+/// named with `--state-dir`, which `local` shows (else a placeholder).
 fn token_command_of(
     state: &std::path::Path,
     installed: Option<&std::path::Path>,
     default: &std::path::Path,
+    local: bool,
 ) -> String {
     if installed == Some(state) {
         return "sudo nerve-center owner-token".into();
     }
     if installed.is_none() && state == default {
         return "nerve-center owner-token".into();
+    }
+    if !local {
+        return "nerve-center owner-token --state-dir <this center's folder>".into();
     }
     let dir = state.display().to_string();
     let plain = dir
@@ -296,7 +303,7 @@ impl Ui {
     fn login_page(&self) -> Response {
         let tagline = format!(
             "One center for all your machines. <code>{}</code> shows its owner token.",
-            html_text(&token_command(self.center.dir()))
+            html_text(&token_command(self.center.dir(), self.loopback))
         );
         webui::login_page("Owner token", &tagline)
     }
@@ -311,7 +318,7 @@ impl Ui {
         // the way into this UI (review round 7 of the center's sign-in).
         let wrong = format!(
             "{WRONG_TOKEN} `{}` shows it.",
-            token_command(self.center.dir())
+            token_command(self.center.dir(), self.loopback)
         );
         let why = if given.is_empty() || !self.owner.ok(&given) {
             Some(("wrong owner token", wrong.as_str()))
@@ -2097,9 +2104,13 @@ mod tests {
 
     /// A UI beyond loopback whose center's owner token is [`TOKEN`].
     fn locked(dir: &std::path::Path) -> Arc<Ui> {
+        locked_on(dir, false)
+    }
+
+    fn locked_on(dir: &std::path::Path, loopback: bool) -> Arc<Ui> {
         let c = center(dir);
         std::fs::write(crate::owner::path(dir), TOKEN).unwrap();
-        Ui::new(&c, None, false)
+        Ui::new(&c, None, loopback)
     }
 
     fn header<'a>(r: &'a Response, name: &str) -> Option<&'a str> {
@@ -2119,10 +2130,14 @@ mod tests {
 
     /// Posts the token as the login page does, and returns the answer.
     async fn sign_in(ui: &Ui, token: &str) -> Response {
+        sign_in_at(ui, HOST, token).await
+    }
+
+    async fn sign_in_at(ui: &Ui, host: (&str, &str), token: &str) -> Response {
         ui.request(req(
             "POST",
             "/login",
-            &[HOST, ("Content-Type", "application/json")],
+            &[host, ("Content-Type", "application/json")],
             &json!({ "token": token }).to_string(),
         ))
         .await
@@ -2182,8 +2197,9 @@ mod tests {
     #[tokio::test]
     async fn wrong_token_is_refused_without_echoing_it() {
         let d = tempfile::tempdir().unwrap();
-        let ui = locked(d.path());
-        let r = sign_in(&ui, "not-the-secret").await;
+        let local = ("Host", "127.0.0.1:7480");
+        let ui = locked_on(d.path(), true);
+        let r = sign_in_at(&ui, local, "not-the-secret").await;
         assert_eq!(r.status, 401);
         assert!(json(&r).get("session").is_none());
         // The command names this center's own folder, which `owner-token`
@@ -2198,7 +2214,7 @@ mod tests {
         );
         // The login page names the command for this center, which runs from
         // a folder of its own here: no sudo.
-        let page = body(&ui.request(req("GET", "/login", &[HOST], "")).await);
+        let page = body(&ui.request(req("GET", "/login", &[local], "")).await);
         assert!(
             page.contains(&format!("<code>{command}</code> shows its owner token")),
             "{page}"
@@ -2209,7 +2225,7 @@ mod tests {
             Path::new("/home/o/.local/state/nerve-center"),
         );
         let of = |state: &str, installed: Option<&Path>| {
-            token_command_of(Path::new(state), installed, default)
+            token_command_of(Path::new(state), installed, default, true)
         };
         assert_eq!(
             of("/var/lib/nerve-center", Some(installed)),
@@ -2228,13 +2244,22 @@ mod tests {
             of("/home/o/my centers/a", None),
             "nerve-center owner-token --state-dir '/home/o/my centers/a'"
         );
+        // Beyond loopback the page and the answer reach anyone: they name
+        // no folder (round 2, security 2).
+        let open = locked(d.path());
+        let folder = d.path().display().to_string();
+        let page = body(&open.request(req("GET", "/login", &[HOST], "")).await);
+        assert!(!page.contains(&folder), "{page}");
+        assert!(page.contains("--state-dir &lt;this center"), "{page}");
+        let r = sign_in(&open, "not-the-secret").await;
+        assert!(!body(&r).contains(&folder), "{}", body(&r));
         assert!(!body(&r).contains("not-the-secret"));
         // An empty post is no better.
-        assert_eq!(sign_in(&ui, "").await.status, 401);
-        let r = ui.request(req("POST", "/login", &[HOST], "")).await;
+        assert_eq!(sign_in_at(&ui, local, "").await.status, 401);
+        let r = ui.request(req("POST", "/login", &[local], "")).await;
         assert_eq!(r.status, 401);
         // The token is not accepted in a URL.
-        let mut q = req("POST", "/login", &[HOST], "");
+        let mut q = req("POST", "/login", &[local], "");
         q.query = format!("token={TOKEN}");
         assert_eq!(ui.request(q).await.status, 401);
     }

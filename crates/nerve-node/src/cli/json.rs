@@ -279,17 +279,23 @@ pub(super) async fn status(paths: &NodePaths) -> Result<Value, String> {
     // The installed service: whether it is there, runs, starts with the
     // machine, and its program's version.
     let service = service_status(&Layout::system()).unwrap_or(Value::Null);
-    with_service(node_status(paths).await, service)
+    let closed = crate::service::check_access(paths).is_err();
+    with_service(node_status(paths).await, service, closed)
 }
 
 /// The node's status with the installed `service` in it. A stopped
-/// installed node whose folders this account may not open still says its
-/// service, which needs no rights on them (the app shows Stopped and its
-/// Start button from it), and why the rest is not shown (`unread`).
-pub(crate) fn with_service(node: Result<Value, String>, service: Value) -> Result<Value, String> {
+/// installed node whose folders this account may not open (`closed`) still
+/// says its service, which needs no rights on them (the app shows Stopped
+/// and its Start button from it), and why the rest is not shown (`unread`).
+/// Any other failure, a `node.toml` that does not parse too, is the answer.
+pub(crate) fn with_service(
+    node: Result<Value, String>,
+    service: Value,
+    closed: bool,
+) -> Result<Value, String> {
     let mut v = match node {
         Ok(v) => v,
-        Err(why) if service["installed"] == true && service["state"] != "running" => {
+        Err(why) if closed && service["installed"] == true && service["state"] != "running" => {
             json!({ "daemon": "not running", "unread": why })
         }
         Err(e) => return Err(e),

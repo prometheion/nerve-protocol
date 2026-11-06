@@ -25,8 +25,8 @@
 //! the installed node with its keys in the system keyring pairs a center,
 //! starts again with the key it keeps there, and still runs a folder mode
 //! command as `nerve-run`, which reaches neither the node's session bus nor
-//! its keyring folder. It expects the node installed and `setup` done with the
-//! keyring (`.github/scripts/keyring-end-to-end.sh` does both): `NERVE_REAL_KEYRING=1 NERVE_REAL_OWNER=<the owner>
+//! its keyring folder. It expects the node installed and its keys moved into the
+//! keyring (`config set machine.secret_storage keyring`) (`.github/scripts/keyring-end-to-end.sh` does both): `NERVE_REAL_KEYRING=1 NERVE_REAL_OWNER=<the owner>
 //! ... --ignored --exact the_installed_node_with_its_keys_in_the_keyring_runs_folder_commands_as_nerve_run`.
 
 #![cfg(target_os = "linux")]
@@ -208,9 +208,11 @@ async fn folder_mode_runs_as_nerve_run_on_this_machine() {
     let (_, st) = as_owner(&owner, &["status"]);
     assert!(!st.contains(told), "{st}");
     // The owner's setup, without sudo, gets the answers typed into it.
-    let (ok, said) = as_owner_typing(&owner, &["setup"], "real-142\n\n\n");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "\n");
     assert!(ok, "{said}");
     assert!(said.contains("No center is paired"), "{said}");
+    let (ok, said) = as_owner(&owner, &["config", "set", "node.name", "real-142"]);
+    assert!(ok, "{said}");
     let (_, name) = as_owner(&owner, &["config", "get", "node.name"]);
     assert!(name.contains("real-142"), "{name}");
     let (ok, id) = sh(Command::new("id").arg("nerve-run"));
@@ -1161,7 +1163,7 @@ async fn the_owners_program_attaches_and_is_held_to_the_folders() {
     let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
     assert!(ok, "{said}");
     chmod(&home, "750");
-    let (ok, said) = as_owner_typing(&owner, &["setup"], "real-b4\n\n\n");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "\n");
     assert!(ok, "{said}");
 
     // The owner's files: a folder to give, with a subfolder only the owner
@@ -1479,7 +1481,7 @@ async fn a_config_capability_runs_as_nerve_run_in_a_folder_pairing() {
     let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
     assert!(ok, "{said}");
     chmod(&home, "750");
-    let (ok, said) = as_owner_typing(&owner, &["setup"], "real-b5\n\n\n");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "\n");
     assert!(ok, "{said}");
 
     // The owner's files: a folder to give, a file only the owner may read
@@ -1839,7 +1841,7 @@ async fn argument_rules_decide_a_config_capability_on_the_installed_node() {
     assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
     let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
     assert!(ok, "{said}");
-    let (ok, said) = as_owner_typing(&owner, &["setup"], "real-c1\n\n\n");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "\n");
     assert!(ok, "{said}");
     let mut center = FakeCenter::start(false).await.unwrap();
     let link = center.link().render();
@@ -2038,7 +2040,7 @@ async fn a_command_is_held_to_its_limits_on_the_installed_node() {
     assert_eq!(nerve_transport::net::euid(), 0, "run it as root");
     let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
     assert!(ok, "{said}");
-    let (ok, said) = as_owner_typing(&owner, &["setup"], "real-limits\n\n\n");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "\n");
     assert!(ok, "{said}");
     // `status` says the service's cgroup holds all three.
     let (_, st) = as_owner(&owner, &["--json", "status"]);
@@ -2210,7 +2212,7 @@ async fn each_pairing_has_a_home_and_temporary_folder_of_its_own_on_this_machine
     assert!(sh(Command::new("usermod").args(["-aG", "sudo", &owner])).0);
     let (ok, said) = sh(Command::new(&exe).arg("install").env("SUDO_USER", &owner));
     assert!(ok, "{said}");
-    let (ok, said) = as_owner_typing(&owner, &["setup"], "real-167\n\n\n");
+    let (ok, said) = as_owner_typing(&owner, &["setup"], "\n");
     assert!(ok, "{said}");
     let run_home = Path::new("/var/lib/nerve-run");
     // What an earlier version's command left under a center's name: never

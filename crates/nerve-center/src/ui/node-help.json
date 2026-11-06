@@ -344,7 +344,7 @@
             {
               "args": [
                 {
-                  "line": "`folder` (default; reads also what every account may), `allowlist` or `user`",
+                  "line": "`folder` (default; reads what all accounts may), `allowlist`, `user` (as you)",
                   "more": "`allowlist` (only what an allow rule names, as nerve-run), `folder` (what each folder's rights allow, as nerve-run, the default; on the installed node a file call may also read what every account may read) or `user` (anything you could do yourself, as you, protected files aside). Without it, each center's mode is shown.",
                   "name": "<MODE>",
                   "optional": true
@@ -362,7 +362,7 @@
                   "optional": true
                 }
               ],
-              "line": "Choose how much a center may do: folder, allowlist or user mode",
+              "line": "Choose how much a center may do: folder, allowlist or user mode (as you)",
               "more": "Show each center's mode, or choose how much a center may do: only what allow rules name, what each folder allows (as nerve-run, an account of its own), or all you can do (as you).",
               "name": "mode",
               "usage": "nerve-node mode [OPTIONS] [MODE]"

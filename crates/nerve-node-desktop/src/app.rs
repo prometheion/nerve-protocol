@@ -820,6 +820,17 @@ impl Ctl {
     /// Shows the node's answer to `status`: the pages that follow it too
     /// (Permissions' mode and account).
     pub fn show_status(self: &Rc<Self>, answer: Result<Value, String>) {
+        // A stopped installed node whose folders this account may not open
+        // answers with its service and why the rest is not shown, no
+        // centers: they are not known, not none (so no first-run steps, and
+        // the pages keep the centers they have).
+        let answer = match answer {
+            Ok(v) if v["unread"].is_string() => Err(format!(
+                "The node is stopped, and its folders need administrator rights to read ({}). Start it on the Overview.",
+                v["unread"].as_str().unwrap_or_default()
+            )),
+            other => other,
+        };
         match answer {
             Ok(v) => {
                 let (status, centers) = view::status(&v, now_ms());
