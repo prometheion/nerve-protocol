@@ -525,6 +525,14 @@ the log stays below about 20 MiB. A center that makes many refused calls cannot
 push out what the node allowed or changed: refusals take at most half of a full
 file, and the oldest refusals go first.
 
+The node keeps the file open and writes each entry under a lock of the log's
+own, so an entry never waits for the config, nor a call for the file. It
+counts the bytes of refused calls as it writes them, and reads the full file
+only to drop the oldest refusals, or once to count them where it did not see
+the file from its start. A line another program wrote, or a move of the file
+(`audit clear`), is noticed by the file's length, and the node opens the file
+at its place again.
+
 ### Clear it
 
 ```sh

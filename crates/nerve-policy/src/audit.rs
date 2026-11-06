@@ -7,8 +7,7 @@
 use std::borrow::Cow;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -178,16 +177,34 @@ pub struct RelayTunnel {
 #[derive(Debug, Clone)]
 pub struct AuditLog {
     path: PathBuf,
-    /// Whether the log could not be kept within its bound and said so; it
-    /// says so once until it can again.
-    unbounded: Arc<AtomicBool>,
+    /// The file as this process appends to it, under a lock of its own: an
+    /// entry waits for no other lock of the node, the settings store's
+    /// included. Clones share it.
+    sink: Arc<Mutex<Sink>>,
+}
+
+/// The open log file and what this process knows of it.
+#[derive(Debug, Default)]
+struct Sink {
+    file: Option<std::fs::File>,
+    /// The file's length as this process left it. Another writer (the
+    /// CLI, an install, a second handle) makes the length on disk differ,
+    /// and the file is opened again.
+    len: u64,
+    /// The bytes of refused calls in the file, when known: counted from an
+    /// empty file on, so a full file is not read to count them; read from
+    /// the file once otherwise.
+    refused: Option<u64>,
+    /// The log could not be kept within its bound and said so; it says so
+    /// once until it can again.
+    unbounded: bool,
 }
 
 impl AuditLog {
     pub fn new(path: impl Into<PathBuf>) -> AuditLog {
         AuditLog {
             path: path.into(),
-            unbounded: Arc::default(),
+            sink: Arc::default(),
         }
     }
 
@@ -203,23 +220,63 @@ impl AuditLog {
     }
 
     fn append(&self, v: &Value) -> std::io::Result<()> {
-        if let Some(dir) = self.path.parent() {
-            nerve_transport::files::create_private_dir(dir)?;
-        }
+        let mut sink = nerve_transport::sync::lock(&self.sink);
+        self.append_locked(&mut sink, v)
+    }
+
+    fn append_locked(&self, sink: &mut Sink, v: &Value) -> std::io::Result<()> {
         let mut line = v.to_string();
         line.push('\n');
+        let refusal = is_refusal(v);
+        // The file this process holds is the log's only while nobody else
+        // wrote or moved it: then its length on disk is the one counted.
+        if sink.file.is_none()
+            || std::fs::metadata(&self.path).ok().map(|m| m.len()) != Some(sink.len)
+        {
+            self.open(sink)?;
+        }
         // A center can make refused calls as fast as the link allows, and
         // each is logged; so the log is bounded. When it cannot be (a rename
         // that fails), the entry is written all the same.
         let mut unbounded = None;
-        if let Ok(m) = std::fs::metadata(&self.path)
-            && m.len() > 0
-            && m.len() + line.len() as u64 > AUDIT_MAX_BYTES
-        {
-            match self.make_room(line.len() as u64) {
-                Ok(()) => self.unbounded.store(false, Ordering::SeqCst),
+        if sink.len > 0 && sink.len + line.len() as u64 > AUDIT_MAX_BYTES {
+            match self.make_room(sink, line.len() as u64) {
+                Ok(()) => sink.unbounded = false,
                 Err(e) => unbounded = Some(e),
             }
+            if sink.file.is_none() {
+                self.open(sink)?;
+            }
+        }
+        let f = sink.file.as_mut().expect("opened above");
+        // One write per line, so concurrent appends do not interleave.
+        if let Err(e) = f.write_all(line.as_bytes()) {
+            sink.file = None;
+            return Err(e);
+        }
+        sink.len += line.len() as u64;
+        if refusal && let Some(n) = &mut sink.refused {
+            *n += line.len() as u64;
+        }
+        match unbounded {
+            Some(e) if !std::mem::replace(&mut sink.unbounded, true) => Err(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "the audit log could not be rotated ({e}); the entry was written, past the \
+                         log's {} MiB bound, and so is every next one until it can be",
+                    AUDIT_MAX_BYTES / (1024 * 1024)
+                ),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// Opens the file to append, making it (and its folder) when it is not
+    /// there. Its refused bytes are known only for an empty file.
+    fn open(&self, sink: &mut Sink) -> std::io::Result<()> {
+        sink.file = None;
+        if let Some(dir) = self.path.parent() {
+            nerve_transport::files::create_private_dir(dir)?;
         }
         let mut o = std::fs::OpenOptions::new();
         o.create(true).append(true);
@@ -228,52 +285,62 @@ impl AuditLog {
             use std::os::unix::fs::OpenOptionsExt;
             o.mode(0o600);
         }
-        let mut f = o.open(&self.path)?;
-        // One write per line, so concurrent appends do not interleave.
-        f.write_all(line.as_bytes())?;
-        match unbounded {
-            Some(e) if !self.unbounded.swap(true, Ordering::SeqCst) => Err(std::io::Error::new(
-                e.kind(),
-                format!(
-                    "the audit log could not be rotated ({e}); the entry was written, past the \
-                     log's {} MiB bound, and so is every next one until it can be",
-                    AUDIT_MAX_BYTES / (1024 * 1024)
-                ),
-            )),
-            _ => Ok(()),
-        }
+        let f = o.open(&self.path)?;
+        sink.len = f.metadata()?.len();
+        sink.refused = (sink.len == 0).then_some(0);
+        sink.file = Some(f);
+        Ok(())
     }
 
     /// Makes room in the full current file for a line of `len` bytes. When
     /// refused calls take more than [`REFUSED_MAX_BYTES`] of it, its oldest
     /// refusals are dropped, so they cannot push the older file out;
     /// otherwise, or when that is not room enough, the file is moved aside.
-    fn make_room(&self, len: u64) -> std::io::Result<()> {
-        let text = std::fs::read(&self.path)?;
-        let refusal = |l: &[u8]| {
-            serde_json::from_slice::<Value>(l)
-                .is_ok_and(|v| v["decision"].as_str() == Some("forbidden"))
+    /// The file is read only to drop refusals, or once to count them when
+    /// this process did not see the file from its start.
+    fn make_room(&self, sink: &mut Sink, len: u64) -> std::io::Result<()> {
+        let mut text = None;
+        let refused = match sink.refused {
+            Some(n) => n,
+            None => {
+                #[cfg(test)]
+                COUNTED.with(|c| c.set(c.get() + 1));
+                let t = std::fs::read(&self.path)?;
+                let n = t
+                    .split_inclusive(|b| *b == b'\n')
+                    .filter(|l| line_is_refusal(l))
+                    .map(|l| l.len() as u64)
+                    .sum();
+                text = Some(t);
+                sink.refused = Some(n);
+                n
+            }
         };
-        let refused: u64 = text
-            .split_inclusive(|b| *b == b'\n')
-            .filter(|l| refusal(l))
-            .map(|l| l.len() as u64)
-            .sum();
         if refused > REFUSED_MAX_BYTES {
+            let text = match text {
+                Some(t) => t,
+                None => std::fs::read(&self.path)?,
+            };
             let mut extra = refused - REFUSED_KEEP_BYTES;
+            let mut dropped = 0;
             let mut kept = Vec::with_capacity(text.len());
             for l in text.split_inclusive(|b| *b == b'\n') {
-                if extra > 0 && refusal(l) {
+                if extra > 0 && line_is_refusal(l) {
                     extra = extra.saturating_sub(l.len() as u64);
+                    dropped += l.len() as u64;
                 } else {
                     kept.extend_from_slice(l);
                 }
             }
+            sink.file = None;
             nerve_transport::files::write_private(&self.path, &kept)?;
+            self.open(sink)?;
+            sink.refused = Some(refused - dropped);
             if kept.len() as u64 + len <= AUDIT_MAX_BYTES {
                 return Ok(());
             }
         }
+        sink.file = None;
         std::fs::rename(&self.path, self.old_path())
     }
 
@@ -389,16 +456,23 @@ impl AuditLog {
     /// the older file until the log moves aside again, and the readers
     /// ([`AuditLog::lines`]) show only what came after the clearing.
     pub fn clear(&self, user: &str) -> std::io::Result<()> {
+        // Under the log's lock, so the entry of the clearing is the new
+        // file's first.
+        let mut sink = nerve_transport::sync::lock(&self.sink);
+        sink.file = None;
         match std::fs::rename(&self.path, self.old_path()) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
             _ => {}
         }
-        self.append(&json!({
-            "ts": nerve_proto::msg::now_ms(),
-            "kind": "audit",
-            "event": "cleared",
-            "user": user,
-        }))
+        self.append_locked(
+            &mut sink,
+            &json!({
+                "ts": nerve_proto::msg::now_ms(),
+                "kind": "audit",
+                "event": "cleared",
+                "user": user,
+            }),
+        )
     }
 
     /// Every line, oldest first, the older file's included; lines that do
@@ -466,6 +540,22 @@ impl AuditLog {
             "the audit log kept moving while it was read",
         ))
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How often this thread read a full file to count its refusals.
+    static COUNTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether an entry is a refused call's.
+fn is_refusal(v: &Value) -> bool {
+    v["decision"].as_str() == Some("forbidden")
+}
+
+/// [`is_refusal`] for a line of the file.
+fn line_is_refusal(l: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(l).is_ok_and(|v| is_refusal(&v))
 }
 
 /// Whether a log file begins with the entry of a clearing.
@@ -849,6 +939,80 @@ mod tests {
             .filter_map(|l| l["ts"].as_u64())
             .collect();
         assert!(ts.windows(2).all(|w| w[0] < w[1]), "out of order");
+    }
+
+    /// A full log is moved aside by the refusals it counted as it wrote
+    /// them: it reads the file to count them only once, where it did not
+    /// see the file from its start.
+    #[test]
+    fn a_full_log_counts_its_refusals_as_it_writes() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("audit.jsonl");
+        let big = json!("x".repeat(1024 * 1024));
+        // A megabyte and a refusal: the tenth one does not fit any more.
+        let write = |log: &AuditLog, v: u64| {
+            let change = Change {
+                key: "k".into(),
+                old: Value::Null,
+                new: big.clone(),
+            };
+            log.settings("center home", v, &[change]).unwrap();
+            log.decision(&refusal(v, format!("refused {v}"))).unwrap();
+        };
+        let counted = || COUNTED.with(std::cell::Cell::get);
+        let before = counted();
+        let log = AuditLog::new(&path);
+        for v in 0..9 {
+            write(&log, v);
+        }
+        assert!(!log.old_path().exists());
+        // Another handle finds the file nearly full: it counts once, when
+        // the file is full.
+        let other = AuditLog::new(&path);
+        write(&other, 9);
+        assert!(other.old_path().exists(), "the log did not move aside");
+        assert_eq!(counted(), before + 1);
+        // From the empty file on it counts as it writes.
+        for v in 10..20 {
+            write(&other, v);
+        }
+        assert_eq!(
+            std::fs::read(other.old_path()).unwrap().len() as u64 / (1024 * 1024),
+            9
+        );
+        assert_eq!(counted(), before + 1);
+        let read = other.read().unwrap();
+        assert!(read.iter().any(|l| l["decision"] == "forbidden"));
+    }
+
+    /// Another writer of the file (the CLI, a second handle) and a move of
+    /// it are followed: each entry goes to the end of the file at the
+    /// log's path, none into a file moved away.
+    #[test]
+    fn another_writer_and_a_move_are_followed() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("audit.jsonl");
+        let (a, b) = (AuditLog::new(&path), AuditLog::new(&path));
+        a.settings("local", 1, &[]).unwrap();
+        b.settings("local", 2, &[]).unwrap();
+        a.settings("local", 3, &[]).unwrap();
+        let moved = d.path().join("moved.jsonl");
+        std::fs::rename(&path, &moved).unwrap();
+        a.settings("local", 4, &[]).unwrap();
+        b.settings("local", 5, &[]).unwrap();
+        let versions = |p: &Path| -> Vec<u64> {
+            std::fs::read_to_string(p)
+                .unwrap()
+                .lines()
+                .map(|l| {
+                    serde_json::from_str::<Value>(l).unwrap()["version"]
+                        .as_u64()
+                        .unwrap()
+                })
+                .collect()
+        };
+        assert_eq!(versions(&moved), [1, 2, 3]);
+        assert_eq!(versions(&path), [4, 5]);
     }
 
     /// A rotation that fails (here `audit.jsonl.1` is a directory, so the

@@ -1015,7 +1015,7 @@ async fn connection(
         up,
         down,
     };
-    if let Err(e) = lock(&shared.store).audit().relay(&entry) {
+    if let Err(e) = shared.audit.relay(&entry) {
         tracing::warn!("relay: the audit log did not take the tunnel's entry: {e}");
     }
 }

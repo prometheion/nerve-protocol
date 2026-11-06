@@ -659,6 +659,9 @@ pub(crate) struct Shared {
     /// why there is none.
     pub cgroups: crate::cgroup::Found,
     pub store: Mutex<SettingsStore>,
+    /// The store's audit log, written without the store's lock: an entry
+    /// waits only for the log's own.
+    pub audit: AuditLog,
     /// Ticks whenever the config may have changed; links re-check their
     /// center, the supervisor its link tasks.
     pub changed: watch::Sender<u64>,
@@ -1587,7 +1590,7 @@ impl Shared {
 
     /// Records a rotation of a key in the audit log (crate::rotate).
     pub fn audit_key(&self, center: &str, event: &str, detail: &str) {
-        if let Err(err) = lock(&self.store).audit().key(center, event, detail) {
+        if let Err(err) = self.audit.key(center, event, detail) {
             tracing::error!("the audit log cannot be written: {err}");
         }
     }
@@ -1606,7 +1609,7 @@ impl Shared {
             }
         }
         let e = &e;
-        if let Err(err) = lock(&self.store).audit().decision(e) {
+        if let Err(err) = self.audit.decision(e) {
             tracing::error!("the audit log cannot be written: {err}");
         }
         self.emit(&e.center, "audit", "decision", e.event_data());
@@ -2088,6 +2091,7 @@ impl Daemon {
             hold: opts.hold,
             full_rights,
             cgroups,
+            audit: store.audit().clone(),
             store: Mutex::new(store),
             changed,
             centers: Mutex::default(),
@@ -3474,6 +3478,41 @@ mod tests {
         opts.ctl = false;
         opts.log = Some(log.clone());
         opts
+    }
+
+    /// A decision goes to the audit log while the settings store is held:
+    /// an entry waits only for the log's own lock.
+    #[tokio::test]
+    async fn an_audit_entry_does_not_wait_for_the_store() {
+        let log = Log::new(Level::Info);
+        let d = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(options(&d, &log)).await.unwrap();
+        let s = daemon.shared.clone();
+        let held = lock(&s.store);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = s.clone();
+        std::thread::spawn(move || {
+            writer.audit(&Entry {
+                ts: 1,
+                center: "lab".into(),
+                cap: "fs".into(),
+                action: "read".into(),
+                target: "/w/a".into(),
+                decision: "allowed".into(),
+                code: None,
+                session: None,
+                reason: None,
+                command: None,
+                args: None,
+            });
+            let _ = tx.send(());
+        });
+        let written = rx.recv_timeout(Duration::from_secs(10)).is_ok();
+        drop(held);
+        assert!(written, "the entry waited for the store");
+        let read = s.audit.read().unwrap();
+        assert!(read.iter().any(|e| e["target"] == "/w/a"), "{read:?}");
+        daemon.stop().await;
     }
 
     /// A call reads the config the store holds, not a copy of it: every
