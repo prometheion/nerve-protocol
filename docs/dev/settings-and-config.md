@@ -134,8 +134,10 @@ center reads, or the node refuses the whole change and names the field.
     could add one would have root and the node's keys. A center may take an
     entry off (`policy.sudo_allow <glob>: only the owner puts a command on the
     sudo list`). The center's Audit page has no sudo button: for a sudo
-    command it shows `nerve-node rule add allow '<command>'` (Linux) or the
-    app's Permissions, Sudo (Windows).
+    command it shows `nerve-node rule add allow --action exec.run --exact
+    '<command>'` (Linux; `--exact` keeps a trailing `*` the command's own,
+    and a command with a quote, a backslash or a line break gets no line to
+    copy, the row names the form to type instead) or the app's Permissions, Sudo (Windows).
 14. The node's web UI, `[ui]`: its address, its certificate's pin and its
     tokens. It is in no center's document, and a command the web UI runs for
     the owner may not change it either, only revoke a token

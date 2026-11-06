@@ -1630,8 +1630,12 @@ mod tests {
         let hint = &APP_JS[APP_JS.find("function sudoListHint(").unwrap()..];
         let hint = &hint[..hint.find("\n}\n").unwrap()];
         for part in [
-            r#"const line = n && n.platform === "windows" ? null : sudoRuleLine(command);"#,
+            r#"if (n && n.platform === "windows") {"#,
+            "const line = sudoRuleLine(command);",
             "in the Nerve app on that machine, Permissions, Sudo",
+            // A Linux command with no line to copy still names the CLI: a
+            // headless server has no app (round 2, correctness 2).
+            "nerve-node rule add allow --action exec.run --exact 'COMMAND'",
             r#"btn("Copy", "ghost", () => copy(line)"#,
         ] {
             assert!(hint.contains(part), "{part}");

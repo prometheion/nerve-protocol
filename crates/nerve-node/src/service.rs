@@ -192,7 +192,10 @@ impl Layout {
     /// already). systemd makes the node's runtime folder, where its owner
     /// reaches it (crate::owner); every account may enter it. The owner is
     /// named here, where only root writes and everyone reads
-    /// ([`owner_in_unit`]).
+    /// ([`owner_in_unit`]). On Ubuntu 24.04 the service runs in the node's
+    /// AppArmor profile ([`apparmor_profile_text`]); the `-` lets it start
+    /// where the profile is not loaded, and `After=apparmor.service` loads
+    /// it first at boot.
     pub fn unit_text(&self, owner: Option<&str>) -> String {
         let owner = owner.map_or_else(String::new, |o| {
             format!("Environment={}={o}\n", crate::owner::OWNER_VAR)
@@ -203,7 +206,7 @@ impl Layout {
 Description=Nerve node
 Documentation={repo}
 Wants=network-online.target
-After=network-online.target
+After=network-online.target apparmor.service
 
 [Service]
 Type=simple
@@ -220,6 +223,7 @@ RuntimeDirectoryMode=0755
 Restart=on-failure
 RestartSec=5
 UMask=0077
+AppArmorProfile=-{APPARMOR_PROFILE}
 
 [Install]
 WantedBy=multi-user.target
@@ -264,28 +268,30 @@ pub const POLKIT_RULE: &str = "50-nerve-node.rules";
 /// ([`Layout::apparmor_profile`]).
 pub const APPARMOR_PROFILE: &str = "nerve-node";
 
-/// The node's AppArmor profile, for the program at `bin`: it confines
-/// nothing (`unconfined`) and lets the program make a user namespace,
-/// which Ubuntu 24.04 holds back from an account by default
-/// (`kernel.apparmor_restrict_unprivileged_userns`). The exec shim, the
-/// same program, makes one for each command held apart from the owner, to
-/// give it a `/proc` of its own (nerve_sandbox::own_proc, #199). What the
-/// node starts leaves the profile at its `exec`
-/// (nerve_sandbox::own_proc::leave_profile): it holds the node's program
-/// alone, not a command's user namespaces.
-pub fn apparmor_profile_text(bin: &Path) -> String {
+/// The node's AppArmor profile: it confines nothing (`unconfined`) and lets
+/// the process in it make a user namespace, which Ubuntu 24.04 holds back
+/// from an account by default (`kernel.apparmor_restrict_unprivileged_userns`).
+/// The exec shim, the same program, makes one for each command held apart
+/// from the owner, to give it a `/proc` of its own (nerve_sandbox::own_proc,
+/// #199). The profile has no program path to attach to: the unit puts the
+/// service in it (`AppArmorProfile=`, [`Layout::unit_text`]), so only the
+/// service and what it starts are in it. A program anyone runs by hand,
+/// the node's own file included, is not; it would make the exemption
+/// everybody's. What the node starts leaves the profile at its `exec`
+/// (nerve_sandbox::own_proc::leave_profile): it holds the node and its
+/// shim, not a command's user namespaces.
+pub fn apparmor_profile_text() -> String {
     format!(
         "# Written by `nerve-node install`; `nerve-node uninstall` removes it.
 abi <abi/4.0>,
 include <tunables/global>
 
-profile {APPARMOR_PROFILE} {} flags=(unconfined) {{
+profile {APPARMOR_PROFILE} flags=(unconfined) {{
   userns,
 
   include if exists <local/{APPARMOR_PROFILE}>
 }}
-",
-        bin.display()
+"
     )
 }
 
@@ -1435,7 +1441,7 @@ fn put_apparmor(layout: &Layout, sys: &dyn System, steps: &mut Steps) -> Result<
     if !sys.restricts_userns() {
         return remove_apparmor(layout, sys, steps);
     }
-    let text = apparmor_profile_text(&layout.bin);
+    let text = apparmor_profile_text();
     if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
         write_file(&path, text.as_bytes(), 0o644)?;
     }
@@ -4107,23 +4113,48 @@ pub(crate) mod tests {
         assert!(!helper.parent().unwrap().exists());
     }
 
-    /// Where AppArmor holds user namespaces back (Ubuntu 24.04), install
-    /// puts and loads the node's profile, so its commands get a /proc of
-    /// their own (#199); elsewhere it puts none and takes an old one away,
-    /// and uninstall takes it out of the kernel and deletes it.
-    #[cfg(unix)]
     /// The shim leaves the profile by the name the install gives it.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_shim_leaves_the_profile_the_install_puts() {
         assert_eq!(APPARMOR_PROFILE, nerve_sandbox::own_proc::APPARMOR_PROFILE);
+    }
+
+    /// The profile belongs to the service, not to the program's file: it
+    /// names no path to attach to (so an account that runs the program
+    /// itself, or a command that starts it again, is not in it), and the
+    /// unit puts the service in it (round 2, correctness 1 and security 1).
+    #[test]
+    fn the_service_is_put_in_the_profile_and_the_profile_has_no_program() {
+        let d = tempfile::tempdir().unwrap();
+        let l = layout(d.path());
+        let text = apparmor_profile_text();
+        let head: Vec<&str> = text.lines().filter(|t| t.starts_with("profile ")).collect();
+        assert_eq!(
+            head,
+            [format!("profile {APPARMOR_PROFILE} flags=(unconfined) {{")]
+        );
         assert!(
-            apparmor_profile_text(Path::new("/usr/local/bin/nerve-node")).contains(&format!(
-                "profile {APPARMOR_PROFILE} /usr/local/bin/nerve-node "
-            ))
+            !text.contains(&l.bin.display().to_string()) && !text.contains(" /"),
+            "{text}"
+        );
+        let unit = l.unit_text(None);
+        assert!(
+            unit.lines()
+                .any(|t| t == format!("AppArmorProfile=-{APPARMOR_PROFILE}")),
+            "{unit}"
+        );
+        assert!(
+            unit.lines()
+                .any(|t| t.starts_with("After=") && t.contains("apparmor.service")),
+            "{unit}"
         );
     }
 
+    /// Where AppArmor holds user namespaces back (Ubuntu 24.04), install
+    /// puts and loads the node's profile, so its commands get a /proc of
+    /// their own (#199); elsewhere it puts none and takes an old one away,
+    /// and uninstall takes it out of the kernel and deletes it.
     #[test]
     fn install_loads_an_apparmor_profile_where_user_namespaces_are_held_back() {
         let d = tempfile::tempdir().unwrap();
@@ -4139,12 +4170,9 @@ pub(crate) mod tests {
         let mut out = Vec::new();
         install(&l, &sys, &bin, "alice", &mut out).unwrap();
         let text = std::fs::read_to_string(&profile).unwrap();
-        assert_eq!(text, apparmor_profile_text(&l.bin));
+        assert_eq!(text, apparmor_profile_text());
         for line in [
-            format!(
-                "profile nerve-node {} flags=(unconfined) {{",
-                l.bin.display()
-            ),
+            "profile nerve-node flags=(unconfined) {".to_string(),
             "  userns,".into(),
         ] {
             assert!(text.lines().any(|t| t == line), "{line}: {text}");

@@ -697,7 +697,10 @@ target, a command, a path or another action: Allow, Allow as wildcard, Deny
 and Deny as wildcard, only with the node's settings grant; each only adds a
 rule to the node's `policy.allow` or `policy.deny`; a sudo command has no
 Allow buttons, as the sudo list is the owner's: the row shows
-`nerve-node rule add allow '<command>'` with a Copy button, or for a Windows
+`nerve-node rule add allow --action exec.run --exact '<command>'` with a Copy
+button (`--exact`, so a trailing `*` stays the command's own and not a
+wildcard for root; no line for a command with a quote, a backslash or a
+control character, where the row names the form to type), or for a Windows
 node the app's Permissions, Sudo; `POST /api/audit/rule` takes `node_id`,
 `list` (`allow` or `deny`; `sudo` is refused), the entry's `cap`, `action` and
 `target`, and `wildcard`),

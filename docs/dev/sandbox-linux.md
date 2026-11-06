@@ -259,19 +259,27 @@ and see every process.
 
 Ubuntu 24.04 holds user namespaces back with AppArmor
 (`kernel.apparmor_restrict_unprivileged_userns`): there `install` puts the
-profile `/etc/apparmor.d/nerve-node`, which confines nothing and allows the
-node's program, the shim, to make a user namespace, and loads it;
-`uninstall` removes it. A profile in unconfined mode is passed on through
+profile `/etc/apparmor.d/nerve-node`, which confines nothing and allows its
+process to make a user namespace, and loads it; `uninstall` removes it. The
+profile names no program to attach to. The unit puts the service in it
+(`AppArmorProfile=-nerve-node`, after `apparmor.service`; the `-` lets the
+node start where the profile is not loaded), so the node and the shim it
+starts make the namespace, and a program an account runs by hand is not in
+it, the node's own file included: an exemption bound to the file would be
+everybody's (any account could run the shim and `setns` into its namespace
+with every capability, or start the program again under a preloaded library
+or as a traced child). A profile in unconfined mode is passed on through
 every `exec`, and the user namespaces of a program in it keep all their
 capabilities, which the system holds back from every other program. So the
 shim, before it starts the command (`own_proc::leave_profile`), and the
 node, before it starts a command without the shim (`user` mode, sudo), have
 the next `exec` leave the profile (`exec unconfined` on
 `/proc/self/attr/exec`, before Landlock, which forbids the write). The
-command is treated as on a machine without the profile, and so is a program
-that runs the shim by hand as another account. The profile holds only the
-node's own program and what it starts itself (`systemctl`, the keyring
-tools).
+command is treated as on a machine without the profile. The profile holds
+only the service and what it starts itself (`systemctl`, the keyring
+tools). A node run by hand is not in it: where the
+system holds user namespaces back, its commands see each other's processes
+and `status` says so.
 
 Windows: the pairings' commands run as one account without a namespace, so
 they see each other's command lines until W2 (#149) adds a container for

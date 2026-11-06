@@ -2760,8 +2760,10 @@ async fn the_installed_nodes_pairings_see_only_their_own_processes() {
 /// its start: in folder mode through the shim, in `user` mode without it
 /// (round 1, security 1). Without that the label of the command stays
 /// `nerve-node (unconfined)`, and its user namespaces keep all their
-/// capabilities. This machine need not hold user namespaces back: the label
-/// is what is read.
+/// capabilities. A program that runs the node's file by hand is not in the
+/// profile at all, so its shim's user namespace is the system's to refuse
+/// (round 2, correctness 1 and security 1). This machine need not hold user
+/// namespaces back: the label is what is read.
 ///
 /// `NERVE_NODE_REAL=<the nerve-node to install> NERVE_REAL_OWNER=<an
 /// account with a home> cargo test -p nerve-node --test real_account --
@@ -2809,11 +2811,7 @@ async fn the_nodes_commands_leave_its_apparmor_profile() {
     // The profile `install` writes where AppArmor holds user namespaces
     // back, loaded by hand here, and the service started again in it.
     let profile = Path::new("/etc/apparmor.d/nerve-node");
-    std::fs::write(
-        profile,
-        nerve_node::service::apparmor_profile_text(Path::new(BIN)),
-    )
-    .unwrap();
+    std::fs::write(profile, nerve_node::service::apparmor_profile_text()).unwrap();
     let (ok, said) = sh(Command::new("apparmor_parser").arg("-r").arg(profile));
     assert!(ok, "{said}");
     let (ok, said) = sh(Command::new("systemctl").args(["restart", "nerve-node"]));
@@ -2853,6 +2851,23 @@ async fn the_nodes_commands_leave_its_apparmor_profile() {
         .unwrap();
     eprintln!("user mode, without the shim: {}", out(&r).trim());
     assert_eq!(out(&r), "unconfined\n", "{r}");
+    // The owner's own run of the shim: its init is the first process of the
+    // namespace, and its label is the shim's. The profile attaches to no
+    // file, so a program of an account, not started by the service, is not
+    // in it.
+    let (ok, said) = sh(Command::new("runuser").args([
+        "-u",
+        &owner,
+        "--",
+        "sh",
+        "-c",
+        &format!(
+            r#"printf '{{"program":"/bin/cat","args":["/proc/1/attr/current"],"parent":%s,"own_proc":true}}' $$ | {BIN} __exec-shim"#
+        ),
+    ]));
+    eprintln!("an account's own shim, its init: {}", said.trim());
+    assert!(ok, "{said}");
+    assert_eq!(said, "unconfined\n", "outside the profile");
 
     let _ = sh(Command::new("apparmor_parser").arg("-R").arg(profile));
     let _ = std::fs::remove_file(profile);
